@@ -6,6 +6,7 @@ import {
   useEffect,
   useLayoutEffect,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
@@ -16,6 +17,16 @@ import { uploadImportFiles } from "@/lib/import-upload";
 
 type FileDropAction = "replace" | "insert" | "new";
 const FILE_DROP_ACTIONS: readonly FileDropAction[] = ["replace", "insert", "new"];
+const FILE_DROP_NAVIGATION_KEYS = [
+  "ArrowDown",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowLeft",
+  "Home",
+  "End",
+] as const;
+type FileDropNavigationKey = (typeof FILE_DROP_NAVIGATION_KEYS)[number];
+const FILE_DROP_PREVENT_SCROLL = Object.freeze({ preventScroll: true });
 const OPTION_CLASS_NAME =
   "flex w-full items-center gap-3 rounded-xl border border-line bg-surface p-3 text-left transition hover:border-accent disabled:cursor-default disabled:opacity-50";
 const OPTION_ICON_CLASS_NAME =
@@ -117,7 +128,13 @@ interface FileDropPublication {
   readonly identity: symbol;
   readonly authority: FileDropAuthority;
   readonly content: HTMLDivElement;
+  readonly root: HTMLDivElement;
+  readonly options: readonly FileDropPublishedOption[];
+  readonly enabledOptions: readonly FileDropPublishedOption[];
   readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly keyboard: FileDropKeyboardAuthority;
+  readonly keyListener: FileDropKeyListener;
   readonly dom: DomSnapshot;
   readonly placement: Placement;
   readonly retire: () => boolean;
@@ -147,6 +164,170 @@ interface PublicationRuntime {
   readonly isExactLayoutReplay: () => boolean;
   readonly replay: () => PublicationReplay | null;
 }
+
+interface FileDropPublishedOption {
+  readonly authority: FileDropOptionAuthority;
+  readonly owner: ElementOwnerView;
+  readonly button: HTMLButtonElement;
+  readonly index: number;
+}
+
+interface FileDropMovement {
+  readonly identity: symbol;
+  readonly key: FileDropNavigationKey;
+  readonly source: FileDropOptionAuthority;
+  readonly destination: FileDropOptionAuthority | null;
+}
+
+interface FileDropTrustedAuthority {
+  readonly matches: (event: object) => boolean;
+  readonly read: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface FileDropWindowMethod<Method> {
+  readonly value: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface FileDropKeyboardAuthority {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly listenerTarget: Window & typeof globalThis;
+  readonly KeyboardEvent: typeof globalThis.KeyboardEvent;
+  readonly Node: typeof globalThis.Node;
+  readonly HTMLButtonElement: typeof globalThis.HTMLButtonElement;
+  readonly keyboardPrototype: object;
+  readonly capturingPhase: number;
+  readonly bubblingPhase: number;
+  readonly standardLocation: number;
+  readonly apply: typeof Reflect.apply;
+  readonly getPrototypeOf: typeof Object.getPrototypeOf;
+  readonly trusted: FileDropTrustedAuthority;
+  readonly event: Readonly<{
+    type: (this: Event) => string;
+    target: (this: Event) => EventTarget | null;
+    currentTarget: (this: Event) => EventTarget | null;
+    eventPhase: (this: Event) => number;
+    bubbles: (this: Event) => boolean;
+    cancelable: (this: Event) => boolean;
+    defaultPrevented: (this: Event) => boolean;
+    cancelBubble: (this: Event) => boolean;
+    composedPath: (this: Event) => EventTarget[];
+    preventDefault: (this: Event) => void;
+  }>;
+  readonly keyboard: Readonly<{
+    key: (this: globalThis.KeyboardEvent) => string;
+    code: (this: globalThis.KeyboardEvent) => string;
+    location: (this: globalThis.KeyboardEvent) => number;
+    altKey: (this: globalThis.KeyboardEvent) => boolean;
+    ctrlKey: (this: globalThis.KeyboardEvent) => boolean;
+    metaKey: (this: globalThis.KeyboardEvent) => boolean;
+    shiftKey: (this: globalThis.KeyboardEvent) => boolean;
+    repeat: (this: globalThis.KeyboardEvent) => boolean;
+    isComposing: (this: globalThis.KeyboardEvent) => boolean;
+  }>;
+  readonly view: (this: UIEvent) => Window | null;
+  readonly activeElement: (this: Document) => Element | null;
+  readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
+  readonly addEventListener: FileDropWindowMethod<Window["addEventListener"]>;
+  readonly removeEventListener: FileDropWindowMethod<
+    Window["removeEventListener"]
+  >;
+  readonly isCurrent: () => boolean;
+}
+
+interface FileDropNativeSnapshot {
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly phase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly isTrusted: boolean;
+  readonly view: Window | null;
+}
+
+interface FileDropWindowProof {
+  readonly identity: symbol;
+  readonly registration: FileDropKeyListener;
+  readonly publication: FileDropPublication;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly source: HTMLButtonElement;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly snapshot: FileDropNativeSnapshot;
+}
+
+interface FileDropKeyListener {
+  readonly identity: symbol;
+  readonly listener: EventListener;
+  readonly activate: (publication: FileDropPublication) => boolean;
+  readonly proofFor: (
+    event: globalThis.KeyboardEvent,
+    publication: FileDropPublication,
+    source: HTMLButtonElement,
+  ) => FileDropWindowProof | null;
+  readonly claim: (
+    proof: FileDropWindowProof,
+    publication: FileDropPublication,
+  ) => boolean;
+  readonly retains: (
+    proof: FileDropWindowProof,
+    publication: FileDropPublication,
+  ) => boolean;
+  readonly release: (publication: FileDropPublication) => void;
+}
+
+interface FileDropReactMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
+  readonly isDefaultPrevented: (...args: never[]) => unknown;
+  readonly isPropagationStopped: (...args: never[]) => unknown;
+}
+
+interface FileDropKeyDelivery {
+  readonly publication: FileDropPublication;
+  readonly wrapper: ReactKeyboardEvent<HTMLElement>;
+  readonly methods: FileDropReactMethods;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly listener: FileDropWindowProof;
+  readonly currentTarget: HTMLElement;
+  readonly dispatchTarget: EventTarget;
+  readonly source: HTMLButtonElement;
+  readonly sourceIndex: number;
+  readonly key: FileDropNavigationKey;
+  readonly snapshot: FileDropNativeSnapshot;
+}
+
+interface FileDropNavigationClaim {
+  readonly publication: FileDropPublication;
+  readonly movement: FileDropMovement;
+  readonly captureWrapper: object;
+  readonly bubbleWrapper: object;
+  readonly nativeEvent: Event;
+  readonly listener: FileDropWindowProof;
+  readonly source: ElementOwnerView;
+  readonly destination: ElementOwnerView;
+}
+
+const claimedFileDropMovements = new WeakSet<FileDropMovement>();
+const claimedFileDropReactEvents = new WeakSet<object>();
+const claimedFileDropNativeEvents = new WeakSet<Event>();
+const claimedFileDropListenerProofs = new WeakSet<FileDropWindowProof>();
+const claimedFileDropSources = new WeakSet<ElementOwnerView>();
+const claimedFileDropDestinations = new WeakSet<ElementOwnerView>();
 
 class ElementOwner<T extends Element> implements ElementOwnerView {
   private current: T | null = null;
@@ -181,6 +362,9 @@ class PublicationCoordinator {
   #claimedPublications = new WeakSet<FileDropPublication>();
   #claimedActions = new WeakSet<object>();
   #claimedEvents = new WeakSet<object>();
+  #claimedWindowProofs = new WeakSet<FileDropWindowProof>();
+  #claimedSources = new WeakSet<ElementOwnerView>();
+  #claimedDestinations = new WeakSet<ElementOwnerView>();
 
   constructor(mount: symbol) {
     this.#mount = mount;
@@ -274,6 +458,77 @@ class PublicationCoordinator {
     this.#claimedEvents.add(event);
     this.#claimedEvents.add(nativeEvent);
     return true;
+  }
+
+  claimNavigation(claim: FileDropNavigationClaim) {
+    const {
+      publication,
+      movement,
+      captureWrapper,
+      bubbleWrapper,
+      nativeEvent,
+      listener,
+      source,
+      destination,
+    } = claim;
+    if (
+      captureWrapper === bubbleWrapper ||
+      !this.isCurrent(publication) ||
+      this.#claimedPublications.has(publication) ||
+      this.#claimedActions.has(movement) ||
+      this.#claimedEvents.has(captureWrapper) ||
+      this.#claimedEvents.has(bubbleWrapper) ||
+      this.#claimedEvents.has(nativeEvent) ||
+      this.#claimedWindowProofs.has(listener) ||
+      this.#claimedSources.has(source) ||
+      this.#claimedDestinations.has(destination) ||
+      claimedFileDropMovements.has(movement) ||
+      claimedFileDropReactEvents.has(captureWrapper) ||
+      claimedFileDropReactEvents.has(bubbleWrapper) ||
+      claimedFileDropNativeEvents.has(nativeEvent) ||
+      claimedFileDropListenerProofs.has(listener) ||
+      claimedFileDropSources.has(source) ||
+      claimedFileDropDestinations.has(destination)
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedActions.add(movement);
+    this.#claimedEvents.add(captureWrapper);
+    this.#claimedEvents.add(bubbleWrapper);
+    this.#claimedEvents.add(nativeEvent);
+    this.#claimedWindowProofs.add(listener);
+    this.#claimedSources.add(source);
+    this.#claimedDestinations.add(destination);
+    claimedFileDropMovements.add(movement);
+    claimedFileDropReactEvents.add(captureWrapper);
+    claimedFileDropReactEvents.add(bubbleWrapper);
+    claimedFileDropNativeEvents.add(nativeEvent);
+    claimedFileDropListenerProofs.add(listener);
+    claimedFileDropSources.add(source);
+    claimedFileDropDestinations.add(destination);
+    return true;
+  }
+
+  retainsNavigation(claim: FileDropNavigationClaim) {
+    return (
+      this.isCurrent(claim.publication) &&
+      this.#claimedPublications.has(claim.publication) &&
+      this.#claimedActions.has(claim.movement) &&
+      this.#claimedEvents.has(claim.captureWrapper) &&
+      this.#claimedEvents.has(claim.bubbleWrapper) &&
+      this.#claimedEvents.has(claim.nativeEvent) &&
+      this.#claimedWindowProofs.has(claim.listener) &&
+      this.#claimedSources.has(claim.source) &&
+      this.#claimedDestinations.has(claim.destination) &&
+      claimedFileDropMovements.has(claim.movement) &&
+      claimedFileDropReactEvents.has(claim.captureWrapper) &&
+      claimedFileDropReactEvents.has(claim.bubbleWrapper) &&
+      claimedFileDropNativeEvents.has(claim.nativeEvent) &&
+      claimedFileDropListenerProofs.has(claim.listener) &&
+      claimedFileDropSources.has(claim.source) &&
+      claimedFileDropDestinations.has(claim.destination)
+    );
   }
 }
 
@@ -495,13 +750,940 @@ function createDomGuard(
   });
 }
 
+function fileDropDescriptorMatches(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return Boolean(
+    current &&
+      current.configurable === expected.configurable &&
+      current.enumerable === expected.enumerable &&
+      current.get === expected.get &&
+      current.set === expected.set &&
+      current.value === expected.value &&
+      current.writable === expected.writable
+  );
+}
+
+function captureFileDropWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): FileDropWindowMethod<Window[Property]> | null {
+  const getOwnPropertyDescriptor =
+    ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(
+      Object.freeze({
+        target,
+        descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+        prototype,
+      }),
+    );
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(
+    ownerWindow,
+    property,
+    ownerWindow,
+  ) as Window[Property];
+  if (!found || typeof value !== "function") return null;
+  let historyIsClean = true;
+  const isCurrent = () => {
+    if (!historyIsClean) return false;
+    historyIsClean =
+      ownerWindow.Object.getOwnPropertyDescriptor ===
+        getOwnPropertyDescriptor &&
+      ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+      ownerWindow.Reflect.get === reflectGet &&
+      path.every(
+        ({ target: entry, descriptor, prototype }) =>
+          getPrototypeOf(entry) === prototype &&
+          (descriptor
+            ? fileDropDescriptorMatches(
+                getOwnPropertyDescriptor(entry, property),
+                descriptor,
+              )
+            : getOwnPropertyDescriptor(entry, property) === undefined),
+      ) &&
+      reflectGet(ownerWindow, property, ownerWindow) === value;
+    return historyIsClean;
+  };
+  return isCurrent() ? Object.freeze({ value, isCurrent }) : null;
+}
+
+function captureFileDropTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+): FileDropTrustedAuthority | null {
+  let probe: globalThis.KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("file-drop-keyboard-trust-probe");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor =
+    ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    fileDropDescriptorMatches(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  let historyIsClean = true;
+  const isCurrent = () => {
+    if (!historyIsClean) return false;
+    historyIsClean =
+      ownerWindow.Object.getOwnPropertyDescriptor ===
+        getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe);
+    return historyIsClean;
+  };
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent,
+  });
+}
+
+function captureFileDropKeyboardAuthority(
+  ownerWindow: Window & typeof globalThis,
+): FileDropKeyboardAuthority | null {
+  const objectConstructor = ownerWindow.Object;
+  const reflect = ownerWindow.Reflect;
+  const eventConstructor = ownerWindow.Event;
+  const keyboardConstructor = ownerWindow.KeyboardEvent;
+  const uiEventConstructor = ownerWindow.UIEvent;
+  const documentConstructor = ownerWindow.Document;
+  const htmlElementConstructor = ownerWindow.HTMLElement;
+  const nodeConstructor = ownerWindow.Node;
+  const htmlButtonElementConstructor = ownerWindow.HTMLButtonElement;
+  const eventPrototype = eventConstructor.prototype;
+  const keyboardPrototype = keyboardConstructor.prototype;
+  const uiEventPrototype = uiEventConstructor.prototype;
+  const documentPrototype = documentConstructor.prototype;
+  const htmlElementPrototype = htmlElementConstructor.prototype;
+  const getOwnPropertyDescriptor =
+    objectConstructor.getOwnPropertyDescriptor;
+  const getPrototypeOf = objectConstructor.getPrototypeOf;
+  const apply = reflect.apply;
+  const descriptors: {
+    readonly target: object;
+    readonly property: PropertyKey;
+    readonly descriptor: Readonly<PropertyDescriptor>;
+  }[] = [];
+  const getter = <This extends object, Value>(
+    target: object,
+    property: PropertyKey,
+  ): ((this: This) => Value) | null => {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    if (!descriptor || typeof descriptor.get !== "function") return null;
+    descriptors.push(
+      Object.freeze({
+        target,
+        property,
+        descriptor: Object.freeze({ ...descriptor }),
+      }),
+    );
+    return descriptor.get as (this: This) => Value;
+  };
+  const method = <This extends object, Args extends readonly unknown[], Result>(
+    target: object,
+    property: PropertyKey,
+  ): ((this: This, ...args: Args) => Result) | null => {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    if (!descriptor || typeof descriptor.value !== "function") return null;
+    descriptors.push(
+      Object.freeze({
+        target,
+        property,
+        descriptor: Object.freeze({ ...descriptor }),
+      }),
+    );
+    return descriptor.value as (this: This, ...args: Args) => Result;
+  };
+  const trusted = captureFileDropTrustedAuthority(ownerWindow);
+  const type = getter<Event, string>(eventPrototype, "type");
+  const target = getter<Event, EventTarget | null>(eventPrototype, "target");
+  const currentTarget = getter<Event, EventTarget | null>(
+    eventPrototype,
+    "currentTarget",
+  );
+  const eventPhase = getter<Event, number>(eventPrototype, "eventPhase");
+  const bubbles = getter<Event, boolean>(eventPrototype, "bubbles");
+  const cancelable = getter<Event, boolean>(eventPrototype, "cancelable");
+  const defaultPrevented = getter<Event, boolean>(
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const cancelBubble = getter<Event, boolean>(
+    eventPrototype,
+    "cancelBubble",
+  );
+  const composedPath = method<Event, readonly [], EventTarget[]>(
+    eventPrototype,
+    "composedPath",
+  );
+  const preventDefault = method<Event, readonly [], void>(
+    eventPrototype,
+    "preventDefault",
+  );
+  const key = getter<globalThis.KeyboardEvent, string>(
+    keyboardPrototype,
+    "key",
+  );
+  const code = getter<globalThis.KeyboardEvent, string>(
+    keyboardPrototype,
+    "code",
+  );
+  const location = getter<globalThis.KeyboardEvent, number>(
+    keyboardPrototype,
+    "location",
+  );
+  const altKey = getter<globalThis.KeyboardEvent, boolean>(
+    keyboardPrototype,
+    "altKey",
+  );
+  const ctrlKey = getter<globalThis.KeyboardEvent, boolean>(
+    keyboardPrototype,
+    "ctrlKey",
+  );
+  const metaKey = getter<globalThis.KeyboardEvent, boolean>(
+    keyboardPrototype,
+    "metaKey",
+  );
+  const shiftKey = getter<globalThis.KeyboardEvent, boolean>(
+    keyboardPrototype,
+    "shiftKey",
+  );
+  const repeat = getter<globalThis.KeyboardEvent, boolean>(
+    keyboardPrototype,
+    "repeat",
+  );
+  const isComposing = getter<globalThis.KeyboardEvent, boolean>(
+    keyboardPrototype,
+    "isComposing",
+  );
+  const view = getter<UIEvent, Window | null>(uiEventPrototype, "view");
+  const activeElement = getter<Document, Element | null>(
+    documentPrototype,
+    "activeElement",
+  );
+  const focus = method<HTMLElement, readonly [FocusOptions?], void>(
+    htmlElementPrototype,
+    "focus",
+  );
+  const addEventListener = captureFileDropWindowMethod(
+    ownerWindow,
+    "addEventListener",
+  );
+  const removeEventListener = captureFileDropWindowMethod(
+    ownerWindow,
+    "removeEventListener",
+  );
+  if (
+    !trusted ||
+    !type ||
+    !target ||
+    !currentTarget ||
+    !eventPhase ||
+    !bubbles ||
+    !cancelable ||
+    !defaultPrevented ||
+    !cancelBubble ||
+    !composedPath ||
+    !preventDefault ||
+    !key ||
+    !code ||
+    !location ||
+    !altKey ||
+    !ctrlKey ||
+    !metaKey ||
+    !shiftKey ||
+    !repeat ||
+    !isComposing ||
+    !view ||
+    !activeElement ||
+    !focus ||
+    !addEventListener ||
+    !removeEventListener
+  ) {
+    return null;
+  }
+  let historyIsClean = true;
+  const isCurrent = () => {
+    if (!historyIsClean) return false;
+    historyIsClean =
+      ownerWindow.Object === objectConstructor &&
+      ownerWindow.Reflect === reflect &&
+      ownerWindow.Event === eventConstructor &&
+      ownerWindow.KeyboardEvent === keyboardConstructor &&
+      ownerWindow.UIEvent === uiEventConstructor &&
+      ownerWindow.Document === documentConstructor &&
+      ownerWindow.HTMLElement === htmlElementConstructor &&
+      ownerWindow.Node === nodeConstructor &&
+      ownerWindow.HTMLButtonElement === htmlButtonElementConstructor &&
+      eventConstructor.prototype === eventPrototype &&
+      keyboardConstructor.prototype === keyboardPrototype &&
+      uiEventConstructor.prototype === uiEventPrototype &&
+      documentConstructor.prototype === documentPrototype &&
+      htmlElementConstructor.prototype === htmlElementPrototype &&
+      ownerWindow.Object.getOwnPropertyDescriptor ===
+        getOwnPropertyDescriptor &&
+      ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+      ownerWindow.Reflect.apply === apply &&
+      descriptors.every(({ target, property, descriptor }) =>
+        fileDropDescriptorMatches(
+          getOwnPropertyDescriptor(target, property),
+          descriptor,
+        ),
+      ) &&
+      addEventListener.isCurrent() &&
+      removeEventListener.isCurrent() &&
+      trusted.isCurrent();
+    return historyIsClean;
+  };
+  const authority: FileDropKeyboardAuthority = {
+    ownerWindow,
+    listenerTarget: ownerWindow,
+    KeyboardEvent: keyboardConstructor,
+    Node: nodeConstructor,
+    HTMLButtonElement: htmlButtonElementConstructor,
+    keyboardPrototype,
+    capturingPhase: eventConstructor.CAPTURING_PHASE,
+    bubblingPhase: eventConstructor.BUBBLING_PHASE,
+    standardLocation: keyboardConstructor.DOM_KEY_LOCATION_STANDARD,
+    apply,
+    getPrototypeOf,
+    trusted,
+    event: Object.freeze({
+      type,
+      target,
+      currentTarget,
+      eventPhase,
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composedPath,
+      preventDefault,
+    }),
+    keyboard: Object.freeze({
+      key,
+      code,
+      location,
+      altKey,
+      ctrlKey,
+      metaKey,
+      shiftKey,
+      repeat,
+      isComposing,
+    }),
+    view,
+    activeElement,
+    focus,
+    addEventListener,
+    removeEventListener,
+    isCurrent,
+  };
+  return isCurrent() ? Object.freeze(authority) : null;
+}
+
+function readFileDropNativeSnapshot(
+  event: globalThis.KeyboardEvent,
+  keyboard: FileDropKeyboardAuthority,
+): FileDropNativeSnapshot | null {
+  try {
+    if (
+      keyboard.getPrototypeOf(event) !== keyboard.keyboardPrototype ||
+      !keyboard.isCurrent() ||
+      !keyboard.trusted.matches(event)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      type: keyboard.apply(keyboard.event.type, event, []),
+      target: keyboard.apply(keyboard.event.target, event, []),
+      currentTarget: keyboard.apply(
+        keyboard.event.currentTarget,
+        event,
+        [],
+      ),
+      phase: keyboard.apply(keyboard.event.eventPhase, event, []),
+      bubbles: keyboard.apply(keyboard.event.bubbles, event, []),
+      cancelable: keyboard.apply(keyboard.event.cancelable, event, []),
+      defaultPrevented: keyboard.apply(
+        keyboard.event.defaultPrevented,
+        event,
+        [],
+      ),
+      cancelBubble: keyboard.apply(
+        keyboard.event.cancelBubble,
+        event,
+        [],
+      ),
+      path: Object.freeze(
+        keyboard.apply(keyboard.event.composedPath, event, []),
+      ),
+      key: keyboard.apply(keyboard.keyboard.key, event, []),
+      code: keyboard.apply(keyboard.keyboard.code, event, []),
+      location: keyboard.apply(keyboard.keyboard.location, event, []),
+      altKey: keyboard.apply(keyboard.keyboard.altKey, event, []),
+      ctrlKey: keyboard.apply(keyboard.keyboard.ctrlKey, event, []),
+      metaKey: keyboard.apply(keyboard.keyboard.metaKey, event, []),
+      shiftKey: keyboard.apply(keyboard.keyboard.shiftKey, event, []),
+      repeat: keyboard.apply(keyboard.keyboard.repeat, event, []),
+      isComposing: keyboard.apply(
+        keyboard.keyboard.isComposing,
+        event,
+        [],
+      ),
+      isTrusted: keyboard.trusted.read(event),
+      view: keyboard.apply(keyboard.view, event, []),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function fileDropNativeStableFactsMatch(
+  left: FileDropNativeSnapshot,
+  right: FileDropNativeSnapshot,
+) {
+  return (
+    left.type === right.type &&
+    left.target === right.target &&
+    left.bubbles === right.bubbles &&
+    left.cancelable === right.cancelable &&
+    left.defaultPrevented === right.defaultPrevented &&
+    left.cancelBubble === right.cancelBubble &&
+    left.key === right.key &&
+    left.code === right.code &&
+    left.location === right.location &&
+    left.altKey === right.altKey &&
+    left.ctrlKey === right.ctrlKey &&
+    left.metaKey === right.metaKey &&
+    left.shiftKey === right.shiftKey &&
+    left.repeat === right.repeat &&
+    left.isComposing === right.isComposing &&
+    left.isTrusted === right.isTrusted &&
+    left.view === right.view &&
+    left.path.length === right.path.length &&
+    left.path.every((entry, index) => right.path[index] === entry)
+  );
+}
+
+function fileDropNativeFactsMatch(
+  left: FileDropNativeSnapshot,
+  right: FileDropNativeSnapshot,
+) {
+  return (
+    left.currentTarget === right.currentTarget &&
+    left.phase === right.phase &&
+    fileDropNativeStableFactsMatch(left, right)
+  );
+}
+
+function fileDropPathMatches(
+  path: readonly EventTarget[],
+  source: HTMLButtonElement,
+  ownerDocument: Document,
+  terminal: EventTarget,
+) {
+  const expected: EventTarget[] = [];
+  let current: Node | null = source;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  return (
+    expected.at(-1) === ownerDocument &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    path.at(-1) === terminal
+  );
+}
+
+function createFileDropKeyListener(
+  keyboard: FileDropKeyboardAuthority,
+): FileDropKeyListener {
+  const proofs = new WeakMap<
+    globalThis.KeyboardEvent,
+    FileDropWindowProof
+  >();
+  const invalidEvents = new WeakSet<Event>();
+  const claimedProofs = new WeakSet<FileDropWindowProof>();
+  let publication: FileDropPublication | null = null;
+  let active = false;
+  let released = false;
+
+  const listener: EventListener = function (
+    this: EventTarget,
+    event: Event,
+  ) {
+    const current = publication;
+    if (
+      !current ||
+      !active ||
+      released ||
+      current.keyListener !== registration ||
+      current.isRetired() ||
+      invalidEvents.has(event) ||
+      keyboard.getPrototypeOf(event) !== keyboard.keyboardPrototype ||
+      !keyboard.isCurrent()
+    ) {
+      return;
+    }
+    const nativeEvent = event as globalThis.KeyboardEvent;
+    if (proofs.has(nativeEvent)) {
+      invalidEvents.add(nativeEvent);
+      return;
+    }
+    const snapshot = readFileDropNativeSnapshot(nativeEvent, keyboard);
+    const source =
+      snapshot?.target instanceof keyboard.HTMLButtonElement &&
+      current.options.some(
+        (option) => option.button === snapshot.target,
+      )
+        ? snapshot.target
+        : null;
+    const terminal = snapshot?.path.at(-1);
+    if (
+      !snapshot ||
+      !source ||
+      !terminal ||
+      snapshot.currentTarget !== this ||
+      terminal !== this ||
+      snapshot.phase !== keyboard.capturingPhase ||
+      !fileDropPathMatches(
+        snapshot.path,
+        source,
+        current.ownerDocument,
+        this,
+      )
+    ) {
+      return;
+    }
+    proofs.set(
+      nativeEvent,
+      Object.freeze({
+        identity: Symbol("file-drop-window-key-proof"),
+        registration,
+        publication: current,
+        nativeEvent,
+        source,
+        receiver: this,
+        currentTarget: this,
+        terminal,
+        snapshot,
+      }),
+    );
+  };
+
+  const proofFor = (
+    event: globalThis.KeyboardEvent,
+    current: FileDropPublication,
+    source: HTMLButtonElement,
+  ) => {
+    const proof = proofs.get(event);
+    if (
+      !proof ||
+      !active ||
+      released ||
+      publication !== current ||
+      current.keyListener !== registration ||
+      current.isRetired() ||
+      proof.registration !== registration ||
+      proof.publication !== current ||
+      proof.nativeEvent !== event ||
+      proof.source !== source ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      invalidEvents.has(event) ||
+      !keyboard.isCurrent()
+    ) {
+      return null;
+    }
+    const snapshot = readFileDropNativeSnapshot(event, keyboard);
+    return snapshot &&
+      fileDropNativeStableFactsMatch(proof.snapshot, snapshot) &&
+      fileDropPathMatches(
+        snapshot.path,
+        source,
+        current.ownerDocument,
+        proof.receiver,
+      )
+      ? proof
+      : null;
+  };
+
+  const registration: FileDropKeyListener = Object.freeze({
+    identity: Symbol("file-drop-window-key-listener"),
+    listener,
+    activate: (current: FileDropPublication) => {
+      if (
+        publication ||
+        active ||
+        released ||
+        current.keyListener !== registration ||
+        current.keyboard !== keyboard ||
+        current.ownerWindow !== keyboard.ownerWindow ||
+        current.ownerDocument.defaultView !== keyboard.ownerWindow ||
+        !keyboard.isCurrent()
+      ) {
+        return false;
+      }
+      publication = current;
+      active = true;
+      try {
+        keyboard.apply(
+          keyboard.addEventListener.value,
+          keyboard.listenerTarget,
+          ["keydown", listener, true],
+        );
+      } catch {
+        active = false;
+        publication = null;
+        return false;
+      }
+      if (keyboard.isCurrent()) return true;
+      active = false;
+      publication = null;
+      keyboard.apply(
+        keyboard.removeEventListener.value,
+        keyboard.listenerTarget,
+        ["keydown", listener, true],
+      );
+      return false;
+    },
+    proofFor,
+    claim: (
+      proof: FileDropWindowProof,
+      current: FileDropPublication,
+    ) => {
+      if (
+        claimedProofs.has(proof) ||
+        proofFor(proof.nativeEvent, current, proof.source) !== proof
+      ) {
+        return false;
+      }
+      claimedProofs.add(proof);
+      return true;
+    },
+    retains: (
+      proof: FileDropWindowProof,
+      current: FileDropPublication,
+    ) =>
+      publication === current &&
+      current.keyListener === registration &&
+      claimedProofs.has(proof) &&
+      proofs.get(proof.nativeEvent) === proof &&
+      proof.registration === registration &&
+      proof.publication === current &&
+      proof.receiver === proof.currentTarget &&
+      proof.receiver === proof.terminal &&
+      !invalidEvents.has(proof.nativeEvent) &&
+      active &&
+      !released &&
+      keyboard.isCurrent(),
+    release: (current: FileDropPublication) => {
+      if (publication !== current || released) return;
+      released = true;
+      const wasActive = active;
+      active = false;
+      if (wasActive) {
+        keyboard.apply(
+          keyboard.removeEventListener.value,
+          keyboard.listenerTarget,
+          ["keydown", listener, true],
+        );
+      }
+    },
+  });
+  return registration;
+}
+
+function isFileDropNavigationKey(
+  key: string,
+): key is FileDropNavigationKey {
+  return FILE_DROP_NAVIGATION_KEYS.some((candidate) => candidate === key);
+}
+
+function exactFileDropKeyDelivery(
+  event: ReactKeyboardEvent<HTMLElement>,
+  publication: FileDropPublication,
+  currentTarget: HTMLElement,
+  expectedPhase: number,
+): FileDropKeyDelivery | null {
+  if (!event || typeof event !== "object") return null;
+  const keyboard = publication.keyboard;
+  const nativeEvent = event.nativeEvent;
+  if (
+    !(nativeEvent instanceof keyboard.KeyboardEvent) ||
+    keyboard.getPrototypeOf(nativeEvent) !== keyboard.keyboardPrototype ||
+    !keyboard.isCurrent() ||
+    !keyboard.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const snapshot = readFileDropNativeSnapshot(nativeEvent, keyboard);
+    if (!snapshot || !isFileDropNavigationKey(snapshot.key)) return null;
+    const key = snapshot.key;
+    const sourceIndex = publication.options.findIndex(
+      ({ button }) => button === snapshot.target,
+    );
+    const publishedSource = publication.options[sourceIndex];
+    if (
+      !publishedSource ||
+      !publication.enabledOptions.includes(publishedSource)
+    ) {
+      return null;
+    }
+    const source = publishedSource.button;
+    const listener = publication.keyListener.proofFor(
+      nativeEvent,
+      publication,
+      source,
+    );
+    if (
+      !listener ||
+      !fileDropNativeStableFactsMatch(listener.snapshot, snapshot)
+    ) {
+      return null;
+    }
+    const reactEvent = event as ReactKeyboardEvent<HTMLElement> & {
+      preventDefault?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+    };
+    const methods = Object.freeze({
+      preventDefault:
+        reactEvent.preventDefault as (...args: never[]) => unknown,
+      isDefaultPrevented:
+        reactEvent.isDefaultPrevented as (...args: never[]) => unknown,
+      isPropagationStopped:
+        reactEvent.isPropagationStopped as (...args: never[]) => unknown,
+    });
+    const dispatchTarget = snapshot.currentTarget;
+    return typeof methods.preventDefault === "function" &&
+      typeof methods.isDefaultPrevented === "function" &&
+      typeof methods.isPropagationStopped === "function" &&
+      keyboard.apply(methods.isDefaultPrevented, event, []) === false &&
+      keyboard.apply(methods.isPropagationStopped, event, []) === false &&
+      snapshot.type === "keydown" &&
+      snapshot.phase === expectedPhase &&
+      snapshot.bubbles &&
+      snapshot.cancelable &&
+      !snapshot.defaultPrevented &&
+      !snapshot.cancelBubble &&
+      snapshot.isTrusted &&
+      (snapshot.view === null ||
+        (snapshot.view === listener.receiver &&
+          snapshot.view === snapshot.path.at(-1))) &&
+      !snapshot.repeat &&
+      !snapshot.isComposing &&
+      !snapshot.altKey &&
+      !snapshot.ctrlKey &&
+      !snapshot.metaKey &&
+      !snapshot.shiftKey &&
+      snapshot.target === source &&
+      fileDropPathMatches(
+        snapshot.path,
+        source,
+        publication.ownerDocument,
+        listener.receiver,
+      ) &&
+      dispatchTarget !== null &&
+      dispatchTarget instanceof keyboard.Node &&
+      dispatchTarget.ownerDocument === publication.ownerDocument &&
+      snapshot.path.filter((entry) => entry === dispatchTarget).length ===
+        1 &&
+      keyboard.apply(
+        keyboard.activeElement,
+        publication.ownerDocument,
+        [],
+      ) === source &&
+      event !== (nativeEvent as unknown) &&
+      event.type === snapshot.type &&
+      event.nativeEvent === nativeEvent &&
+      event.currentTarget === currentTarget &&
+      event.target === source &&
+      event.eventPhase === snapshot.phase &&
+      event.bubbles === snapshot.bubbles &&
+      event.cancelable === snapshot.cancelable &&
+      event.defaultPrevented === snapshot.defaultPrevented &&
+      event.isTrusted === snapshot.isTrusted &&
+      event.key === snapshot.key &&
+      event.code === snapshot.code &&
+      event.location === snapshot.location &&
+      event.altKey === snapshot.altKey &&
+      event.ctrlKey === snapshot.ctrlKey &&
+      event.metaKey === snapshot.metaKey &&
+      event.shiftKey === snapshot.shiftKey &&
+      event.repeat === snapshot.repeat &&
+      Object.is(event.view, snapshot.view) &&
+      reactEvent.preventDefault === methods.preventDefault &&
+      reactEvent.isDefaultPrevented === methods.isDefaultPrevented &&
+      reactEvent.isPropagationStopped ===
+        methods.isPropagationStopped
+      ? Object.freeze({
+          publication,
+          wrapper: event,
+          methods,
+          nativeEvent,
+          listener,
+          currentTarget,
+          dispatchTarget,
+          source,
+          sourceIndex,
+          key,
+          snapshot,
+        })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function fileDropSameWrapperDeliveriesMatch(
+  left: FileDropKeyDelivery,
+  right: FileDropKeyDelivery,
+) {
+  return (
+    left.publication === right.publication &&
+    left.wrapper === right.wrapper &&
+    left.methods.preventDefault === right.methods.preventDefault &&
+    left.methods.isDefaultPrevented ===
+      right.methods.isDefaultPrevented &&
+    left.methods.isPropagationStopped ===
+      right.methods.isPropagationStopped &&
+    left.nativeEvent === right.nativeEvent &&
+    left.listener === right.listener &&
+    left.dispatchTarget === right.dispatchTarget &&
+    left.source === right.source &&
+    left.sourceIndex === right.sourceIndex &&
+    left.key === right.key &&
+    fileDropNativeFactsMatch(left.snapshot, right.snapshot)
+  );
+}
+
+function fileDropDistinctWrapperDeliveriesMatch(
+  capture: FileDropKeyDelivery,
+  bubble: FileDropKeyDelivery,
+) {
+  return (
+    capture.publication === bubble.publication &&
+    capture.wrapper !== bubble.wrapper &&
+    capture.nativeEvent === bubble.nativeEvent &&
+    capture.listener === bubble.listener &&
+    capture.dispatchTarget === bubble.dispatchTarget &&
+    capture.source === bubble.source &&
+    capture.sourceIndex === bubble.sourceIndex &&
+    capture.key === bubble.key &&
+    fileDropNativeStableFactsMatch(capture.snapshot, bubble.snapshot)
+  );
+}
+
+function fileDropReactMethodsRemainFalse(
+  delivery: FileDropKeyDelivery,
+) {
+  const event = delivery.wrapper as ReactKeyboardEvent<HTMLElement> & {
+    preventDefault?: unknown;
+    isDefaultPrevented?: unknown;
+    isPropagationStopped?: unknown;
+  };
+  const { keyboard } = delivery.publication;
+  try {
+    return (
+      event.preventDefault === delivery.methods.preventDefault &&
+      event.isDefaultPrevented ===
+        delivery.methods.isDefaultPrevented &&
+      event.isPropagationStopped ===
+        delivery.methods.isPropagationStopped &&
+      keyboard.apply(
+        delivery.methods.isDefaultPrevented,
+        delivery.wrapper,
+        [],
+      ) === false &&
+      keyboard.apply(
+        delivery.methods.isPropagationStopped,
+        delivery.wrapper,
+        [],
+      ) === false
+    );
+  } catch {
+    return false;
+  }
+}
+
+function fileDropReactPreventionMatches(
+  delivery: FileDropKeyDelivery,
+) {
+  const event = delivery.wrapper as ReactKeyboardEvent<HTMLElement> & {
+    preventDefault?: unknown;
+    isDefaultPrevented?: unknown;
+    isPropagationStopped?: unknown;
+  };
+  const { keyboard } = delivery.publication;
+  const isDefaultPrevented = event.isDefaultPrevented;
+  try {
+    return (
+      event.preventDefault === delivery.methods.preventDefault &&
+      event.isPropagationStopped ===
+        delivery.methods.isPropagationStopped &&
+      typeof isDefaultPrevented === "function" &&
+      event.defaultPrevented === true &&
+      keyboard.apply(isDefaultPrevented, delivery.wrapper, []) === true &&
+      keyboard.apply(
+        delivery.methods.isPropagationStopped,
+        delivery.wrapper,
+        [],
+      ) === false
+    );
+  } catch {
+    return false;
+  }
+}
+
 function createPublicationRuntime(
   authority: FileDropAuthority,
   coordinator: PublicationCoordinator,
   content: HTMLDivElement,
+  root: HTMLDivElement,
+  optionOwners: readonly ElementOwnerView[],
+  buttons: readonly HTMLButtonElement[],
   owners: readonly ElementOwnerView[],
   onRetire: () => void,
-): PublicationRuntime {
+): PublicationRuntime | null {
   type Retirement = "element" | "layout" | "other";
   const placement = capturePlacement(content);
   if (!placement) {
@@ -509,6 +1691,43 @@ function createPublicationRuntime(
       "Cannot publish dropped-file controls without a committed portal",
     );
   }
+  const ownerWindow = content.ownerDocument.defaultView;
+  if (
+    !ownerWindow ||
+    root.ownerDocument !== content.ownerDocument ||
+    root.parentElement !== content ||
+    buttons.length !== authority.options.length ||
+    optionOwners.length !== authority.options.length
+  ) {
+    return null;
+  }
+  const keyboard = captureFileDropKeyboardAuthority(ownerWindow);
+  if (!keyboard) return null;
+  const keyListener = createFileDropKeyListener(keyboard);
+  const options = buttons.map((button, index) => {
+    const optionAuthority = authority.options[index];
+    const owner = optionOwners[index];
+    if (!optionAuthority || !owner || owner.element() !== button) return null;
+    return Object.freeze({
+      authority: optionAuthority,
+      owner,
+      button,
+      index,
+    });
+  });
+  if (options.some((option) => option === null)) return null;
+  const publishedOptions = Object.freeze(
+    options as FileDropPublishedOption[],
+  );
+  const enabledOptions = Object.freeze(
+    publishedOptions.filter(
+      ({ authority: optionAuthority, button }) =>
+        authority.busyAction === null &&
+        optionAuthority.eligible &&
+        !button.disabled &&
+        !button.matches(":disabled"),
+    ),
+  );
   const dom = snapshotDom(content);
   let retired = false;
   let retirement: Retirement | null = null;
@@ -522,6 +1741,21 @@ function createPublicationRuntime(
         domGuard.isClean() &&
         content === dom.node &&
         content.isConnected &&
+        content.ownerDocument.defaultView === ownerWindow &&
+        root.parentElement === content &&
+        publishedOptions.every(
+          ({ authority: optionAuthority, owner, button, index }) =>
+            authority.options[index] === optionAuthority &&
+            owner.element() === button &&
+            root.children.item(index) === button &&
+            root.childNodes.item(index) === button &&
+            button.parentElement === root &&
+            enabledOptions.includes(publishedOptions[index]!) ===
+              (authority.busyAction === null &&
+                optionAuthority.eligible &&
+                !button.disabled &&
+                !button.matches(":disabled")),
+        ) &&
         placementMatches(content, placement) &&
         domMatches(dom),
     );
@@ -530,6 +1764,7 @@ function createPublicationRuntime(
     retired = true;
     retirement = reason;
     onRetire();
+    keyListener.release(publication);
     coordinator.retire(publication);
     queueMicrotask(() => {
       if (coordinator.replay()?.source !== publication) domGuard?.release();
@@ -540,7 +1775,13 @@ function createPublicationRuntime(
     identity: Symbol("file-drop-publication"),
     authority,
     content,
+    root,
+    options: publishedOptions,
+    enabledOptions,
     ownerDocument: content.ownerDocument,
+    ownerWindow,
+    keyboard,
+    keyListener,
     dom,
     placement,
     retire: () => retire("other"),
@@ -581,6 +1822,10 @@ function createPublicationRuntime(
       domGuard = createDomGuard(content, placement);
       if (!domGuard || !coordinator.publish(publication)) {
         domGuard?.release();
+        return false;
+      }
+      if (!keyListener.activate(publication) || !publishedDomMatches()) {
+        retire("other");
         return false;
       }
       return true;
@@ -843,6 +2088,12 @@ interface FileDropOptionPresentation {
   readonly authority: FileDropOptionAuthority;
   readonly captureButton: (element: HTMLButtonElement | null) => void;
   readonly onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  readonly onKeyDownCapture: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly onKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
 }
 
 interface FileDropPresentation {
@@ -850,6 +2101,12 @@ interface FileDropPresentation {
   readonly captureBridge: (element: HTMLDivElement | null) => void;
   readonly captureRoot: (element: HTMLDivElement | null) => void;
   readonly options: Readonly<Record<FileDropAction, FileDropOptionPresentation>>;
+  readonly onRootKeyDownCapture: (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => void;
+  readonly onRootKeyDown: (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => void;
   readonly establish: () => void | (() => void);
   readonly settlePortal: () => void | (() => void);
   readonly onOpenChange: (open: boolean) => void;
@@ -902,6 +2159,31 @@ function operationMatchesAuthority(
   );
 }
 
+function fileDropMovementDestination(
+  key: FileDropNavigationKey,
+  source: FileDropOptionAuthority,
+  authority: FileDropAuthority,
+): FileDropOptionAuthority | null {
+  const enabled =
+    authority.busyAction === null
+      ? authority.options.filter((option) => option.eligible)
+      : [];
+  const sourceIndex = enabled.indexOf(source);
+  if (sourceIndex < 0) return null;
+  let destinationIndex = sourceIndex;
+  if (key === "ArrowDown" || key === "ArrowRight") {
+    destinationIndex++;
+  } else if (key === "ArrowUp" || key === "ArrowLeft") {
+    destinationIndex--;
+  } else if (key === "Home") {
+    destinationIndex = 0;
+  } else {
+    destinationIndex = enabled.length - 1;
+  }
+  const destination = enabled[destinationIndex] ?? null;
+  return destination === source ? null : destination;
+}
+
 function createFileDropPresentation(
   authority: FileDropAuthority,
   coordinator: PublicationCoordinator,
@@ -940,6 +2222,18 @@ function createFileDropPresentation(
     dismissal = null;
     outsidePointer = null;
   };
+  let capturedRoot: FileDropKeyDelivery | null = null;
+  let capturedOption: FileDropKeyDelivery | null = null;
+  let bubbledOption: FileDropKeyDelivery | null = null;
+  const clearKeyboardAuthority = () => {
+    capturedRoot = null;
+    capturedOption = null;
+    bubbledOption = null;
+  };
+  const clearPublicationAuthority = () => {
+    clearDismissalAuthority();
+    clearKeyboardAuthority();
+  };
   const onElementChange = (
     owner: ElementOwnerView,
     element: Element | null,
@@ -952,6 +2246,7 @@ function createFileDropPresentation(
       currentRuntime?.retireForElement();
       currentRuntime = null;
       clearDismissalAuthority();
+      clearKeyboardAuthority();
     }
     if (
       runtime?.isExactElementReplay() &&
@@ -1006,11 +2301,98 @@ function createFileDropPresentation(
       }
       startOperation(publication, authority, optionAuthority.action);
     };
+    const movements = Object.freeze(
+      Object.fromEntries(
+        FILE_DROP_NAVIGATION_KEYS.map((key) => [
+          key,
+          Object.freeze({
+            identity: Symbol(
+              `file-drop-${optionAuthority.action}-${key}-movement`,
+            ),
+            key,
+            source: optionAuthority,
+            destination: fileDropMovementDestination(
+              key,
+              optionAuthority,
+              authority,
+            ),
+          } satisfies FileDropMovement),
+        ]),
+      ) as Record<FileDropNavigationKey, FileDropMovement>,
+    );
+    const onKeyDownCapture = (
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      const publication = currentKeyboardPublication();
+      const source = buttonOwner.element();
+      const current =
+        publication && source
+          ? exactFileDropKeyDelivery(
+              event,
+              publication,
+              source,
+              publication.keyboard.capturingPhase,
+            )
+          : null;
+      if (
+        !capturedRoot ||
+        capturedOption ||
+        bubbledOption ||
+        !current ||
+        !source ||
+        capturedRoot.source !== source ||
+        capturedRoot.sourceIndex !== optionAuthority.index ||
+        !fileDropSameWrapperDeliveriesMatch(capturedRoot, current)
+      ) {
+        clearKeyboardAuthority();
+        return;
+      }
+      capturedOption = current;
+    };
+    const onKeyDown = (
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      const publication = currentKeyboardPublication();
+      const source = buttonOwner.element();
+      const current =
+        publication && source
+          ? exactFileDropKeyDelivery(
+              event,
+              publication,
+              source,
+              publication.keyboard.bubblingPhase,
+            )
+          : null;
+      if (
+        !capturedRoot ||
+        !capturedOption ||
+        bubbledOption ||
+        !current ||
+        !source ||
+        capturedRoot.source !== source ||
+        capturedRoot.sourceIndex !== optionAuthority.index ||
+        !fileDropSameWrapperDeliveriesMatch(
+          capturedRoot,
+          capturedOption,
+        ) ||
+        !fileDropDistinctWrapperDeliveriesMatch(
+          capturedOption,
+          current,
+        )
+      ) {
+        clearKeyboardAuthority();
+        return;
+      }
+      bubbledOption = current;
+    };
     return Object.freeze({
       authority: optionAuthority,
       captureButton: buttonOwner.capture,
       buttonOwner,
       onClick,
+      onKeyDownCapture,
+      onKeyDown,
+      movements,
     });
   });
   const presentationFor = (action: FileDropAction) => {
@@ -1064,6 +2446,9 @@ function createFileDropPresentation(
       'button[aria-label="Close"]',
     );
     const overlay = content?.previousElementSibling;
+    const buttons = optionPresentations.map(
+      (presentation) => presentation.buttonOwner.element(),
+    );
     const valid = bridge &&
       root &&
       view &&
@@ -1110,7 +2495,7 @@ function createFileDropPresentation(
       root.childNodes.length === FILE_DROP_ACTIONS.length &&
       optionPresentations.every((presentation, index) => {
         const option = presentation.authority;
-        const button = presentation.buttonOwner.element();
+        const button = buttons[index];
         const icon = button?.children.item(0);
         const copy = button?.children.item(1);
         const title = copy?.children.item(0);
@@ -1152,7 +2537,15 @@ function createFileDropPresentation(
             description.textContent === option.description,
         );
       })
-    return valid ? { bridge, root, content, close } : null;
+    return valid
+      ? {
+          bridge,
+          root,
+          content,
+          close,
+          buttons: Object.freeze(buttons as HTMLButtonElement[]),
+        }
+      : null;
   };
   const owns = (publication: FileDropPublication) => {
     const dom = exactDom();
@@ -1161,10 +2554,224 @@ function createFileDropPresentation(
         factsAreCurrent() &&
         publication.authority === authority &&
         publication.content === dom.content &&
+        publication.root === dom.root &&
+        publication.ownerDocument === dom.root.ownerDocument &&
+        publication.ownerWindow === dom.root.ownerDocument.defaultView &&
+        publication.keyboard.isCurrent() &&
+        publication.options.every(
+          (option, index) =>
+            option.authority === authority.options[index] &&
+            option.owner ===
+              optionPresentations[index]?.buttonOwner &&
+            option.button === dom.buttons[index],
+        ) &&
         coordinator.isCurrent(publication) &&
         !publication.isRetired() &&
         publication.publishedDomMatches(),
     );
+  };
+  function currentKeyboardPublication() {
+    const publication = coordinator.active();
+    if (
+      !publication ||
+      publication.authority !== authority ||
+      latestAuthority() !== authority ||
+      !owns(publication)
+    ) {
+      return null;
+    }
+    return publication;
+  }
+  const onRootKeyDownCapture = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    clearKeyboardAuthority();
+    const publication = currentKeyboardPublication();
+    if (!publication) return;
+    const current = exactFileDropKeyDelivery(
+      event,
+      publication,
+      publication.root,
+      publication.keyboard.capturingPhase,
+    );
+    if (
+      !current ||
+      claimedFileDropNativeEvents.has(current.nativeEvent)
+    ) {
+      return;
+    }
+    capturedRoot = current;
+    queueMicrotask(() => {
+      if (capturedRoot === current) clearKeyboardAuthority();
+    });
+  };
+  const onRootKeyDown = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    const rootCapture = capturedRoot;
+    const optionCapture = capturedOption;
+    const optionBubble = bubbledOption;
+    const publication = currentKeyboardPublication();
+    const rootBubble = publication
+      ? exactFileDropKeyDelivery(
+          event,
+          publication,
+          publication.root,
+          publication.keyboard.bubblingPhase,
+        )
+      : null;
+    clearKeyboardAuthority();
+    if (
+      !publication ||
+      !rootCapture ||
+      !optionCapture ||
+      !optionBubble ||
+      !rootBubble ||
+      !fileDropSameWrapperDeliveriesMatch(
+        rootCapture,
+        optionCapture,
+      ) ||
+      !fileDropSameWrapperDeliveriesMatch(
+        optionBubble,
+        rootBubble,
+      ) ||
+      !fileDropDistinctWrapperDeliveriesMatch(
+        optionCapture,
+        optionBubble,
+      ) ||
+      rootCapture.snapshot.phase !==
+        publication.keyboard.capturingPhase ||
+      optionCapture.snapshot.phase !==
+        publication.keyboard.capturingPhase ||
+      optionBubble.snapshot.phase !==
+        publication.keyboard.bubblingPhase ||
+      rootBubble.snapshot.phase !== publication.keyboard.bubblingPhase ||
+      rootCapture.currentTarget !== publication.root ||
+      optionCapture.currentTarget !== optionCapture.source ||
+      optionBubble.currentTarget !== optionBubble.source ||
+      rootBubble.currentTarget !== publication.root ||
+      !fileDropReactMethodsRemainFalse(rootCapture) ||
+      !fileDropReactMethodsRemainFalse(optionCapture) ||
+      !fileDropReactMethodsRemainFalse(optionBubble) ||
+      !fileDropReactMethodsRemainFalse(rootBubble)
+    ) {
+      return;
+    }
+    const source = publication.options[rootCapture.sourceIndex];
+    const sourcePresentation =
+      optionPresentations[rootCapture.sourceIndex];
+    const movement =
+      sourcePresentation?.movements[rootCapture.key] ?? null;
+    const destinationAuthority = movement?.destination ?? null;
+    const destinationIndex = destinationAuthority?.index ?? -1;
+    const destination = publication.options[destinationIndex];
+    const destinationPresentation = optionPresentations[destinationIndex];
+    const listener = rootBubble.listener;
+    if (
+      !source ||
+      !sourcePresentation ||
+      source.authority !== sourcePresentation.authority ||
+      source.authority !== authority.options[rootCapture.sourceIndex] ||
+      source.owner !== sourcePresentation.buttonOwner ||
+      source.button !== rootCapture.source ||
+      !publication.enabledOptions.includes(source) ||
+      !movement ||
+      movement.source !== source.authority ||
+      movement.key !== rootCapture.key ||
+      !destinationAuthority ||
+      !destination ||
+      !destinationPresentation ||
+      destination.authority !== destinationAuthority ||
+      destination.authority !== destinationPresentation.authority ||
+      destination.owner !== destinationPresentation.buttonOwner ||
+      destination.button === source.button ||
+      destination.button.parentElement !== publication.root ||
+      publication.root.children.item(destinationIndex) !==
+        destination.button ||
+      publication.root.childNodes.item(destinationIndex) !==
+        destination.button ||
+      !publication.enabledOptions.includes(destination) ||
+      destination.button.disabled ||
+      destination.button.matches(":disabled") ||
+      publication.keyListener.proofFor(
+        rootBubble.nativeEvent,
+        publication,
+        source.button,
+      ) !== listener ||
+      !publication.keyListener.claim(listener, publication)
+    ) {
+      return;
+    }
+    const claim: FileDropNavigationClaim = Object.freeze({
+      publication,
+      movement,
+      captureWrapper: rootCapture.wrapper,
+      bubbleWrapper: rootBubble.wrapper,
+      nativeEvent: rootBubble.nativeEvent,
+      listener,
+      source: source.owner,
+      destination: destination.owner,
+    });
+    if (
+      !coordinator.claimNavigation(claim) ||
+      !publication.keyListener.retains(listener, publication) ||
+      !coordinator.retainsNavigation(claim) ||
+      !owns(publication) ||
+      source.owner.element() !== source.button ||
+      destination.owner.element() !== destination.button ||
+      !fileDropReactMethodsRemainFalse(rootCapture) ||
+      !fileDropReactMethodsRemainFalse(rootBubble) ||
+      publication.keyboard.apply(
+        publication.keyboard.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== source.button
+    ) {
+      return;
+    }
+    publication.keyboard.apply(
+      rootBubble.methods.preventDefault,
+      rootBubble.wrapper,
+      [],
+    );
+    if (
+      publication.keyboard.apply(
+        publication.keyboard.event.defaultPrevented,
+        rootBubble.nativeEvent,
+        [],
+      ) !== true ||
+      !fileDropReactPreventionMatches(rootBubble) ||
+      !publication.keyListener.retains(listener, publication) ||
+      !coordinator.retainsNavigation(claim) ||
+      !owns(publication) ||
+      source.owner.element() !== source.button ||
+      destination.owner.element() !== destination.button ||
+      destination.button.disabled ||
+      destination.button.matches(":disabled") ||
+      publication.keyboard.apply(
+        publication.keyboard.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== source.button
+    ) {
+      return;
+    }
+    publication.keyboard.apply(
+      publication.keyboard.focus,
+      destination.button,
+      [FILE_DROP_PREVENT_SCROLL],
+    );
+    if (
+      publication.keyboard.apply(
+        publication.keyboard.activeElement,
+        publication.ownerDocument,
+        [],
+      ) === destination.button &&
+      publication.keyListener.retains(listener, publication) &&
+      coordinator.retainsNavigation(claim)
+    ) {
+      requestSuccessor();
+    }
   };
   const requestReplaySuccessor = (runtime: PublicationRuntime) => {
     const replay = runtime.replay();
@@ -1206,9 +2813,13 @@ function createFileDropPresentation(
       authority,
       coordinator,
       dom.content,
+      dom.root,
+      optionPresentations.map(({ buttonOwner }) => buttonOwner),
+      dom.buttons,
       expectedOwners(),
-      clearDismissalAuthority,
+      clearPublicationAuthority,
     );
+    if (!runtime) return undefined;
     currentRuntime = runtime;
     lastRuntime = runtime;
     if (!runtime.publish()) {
@@ -1347,6 +2958,8 @@ function createFileDropPresentation(
     captureBridge: bridgeOwner.capture,
     captureRoot: rootOwner.capture,
     options,
+    onRootKeyDownCapture,
+    onRootKeyDown,
     establish,
     settlePortal,
     onOpenChange,
@@ -1593,6 +3206,8 @@ export const FileDropDialog = memo(function FileDropDialog({
   const captureBridge = presentation?.captureBridge;
   const captureRoot = presentation?.captureRoot;
   const onClickCapture = presentation?.onClickCapture;
+  const onRootKeyDownCapture = presentation?.onRootKeyDownCapture;
+  const onRootKeyDown = presentation?.onRootKeyDown;
   const onOpenChange = presentation?.onOpenChange;
   const establish = presentation?.establish;
   const settlePortal = presentation?.settlePortal;
@@ -1609,6 +3224,8 @@ export const FileDropDialog = memo(function FileDropDialog({
       ref={control.captureButton}
       type="button"
       onClick={control.onClick}
+      onKeyDownCapture={control.onKeyDownCapture}
+      onKeyDown={control.onKeyDown}
       disabled={
         control.authority.action === busyPresentationAction ||
         busyPresentationAction !== null ||
@@ -1665,6 +3282,8 @@ export const FileDropDialog = memo(function FileDropDialog({
                 className={OPTIONS_CLASS_NAME}
                 data-testid="file-drop-dialog"
                 data-focus-skip
+                onKeyDownCapture={onRootKeyDownCapture}
+                onKeyDown={onRootKeyDown}
               >
                 {option(
                   replaceOption,
