@@ -6,6 +6,7 @@ import {
   useRef,
   type ChangeEvent as ReactChangeEvent,
   type FormEvent as ReactFormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   type RefCallback,
 } from "react";
@@ -301,6 +302,187 @@ function commitForm() {
   return submitter.form;
 }
 
+type CommitNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+function markCommitKeyTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) => (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set the jsdom keyboard trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom keyboard trust slot did not update");
+  }
+}
+
+function createCommitKey(
+  target: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The commit action has no owner Window");
+  const implementationSymbol = Object.getOwnPropertySymbols(
+    target.ownerDocument,
+  ).find((symbol) => String(symbol) === "Symbol(impl)");
+  const eventView = implementationSymbol
+    ? (
+        target.ownerDocument as unknown as Record<
+          symbol,
+          { _globalObject: Window }
+        >
+      )[implementationSymbol]._globalObject
+    : ownerWindow;
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    code: key === " " ? "Space" : key,
+    key,
+    view: eventView,
+    ...init,
+  });
+  if (trusted) markCommitKeyTrusted(event);
+  return event;
+}
+
+function dispatchCommitKey(
+  target: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const event = createCommitKey(target, key, init, trusted);
+  fireEvent(target, event);
+  return event;
+}
+
+function commitBridge(host: HTMLDivElement) {
+  const bridge = host.firstElementChild;
+  if (!(bridge instanceof HTMLDivElement)) {
+    throw new Error("The Commit dialog bridge was not rendered");
+  }
+  return bridge;
+}
+
+type CommitBridgeKeyHandler = (
+  event: ReactKeyboardEvent<HTMLDivElement>,
+) => void;
+
+function dispatchCommitKeyWithBoundaryProbe(
+  host: HTMLDivElement,
+  target: HTMLButtonElement,
+  key: CommitNavigationKey,
+  mutate?: (
+    phase: "capture-before" | "capture-after" | "bubble-before",
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => void,
+) {
+  const bridge = commitBridge(host);
+  const capture = reactProp<CommitBridgeKeyHandler>(
+    bridge,
+    "onKeyDownCapture",
+  );
+  const bubble = reactProp<CommitBridgeKeyHandler>(bridge, "onKeyDown");
+  let captureEvent: ReactKeyboardEvent<HTMLDivElement> | null = null;
+  let bubbleEvent: ReactKeyboardEvent<HTMLDivElement> | null = null;
+  setReactProp(
+    bridge,
+    "onKeyDownCapture",
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      captureEvent = event;
+      mutate?.("capture-before", event);
+      capture(event);
+      mutate?.("capture-after", event);
+    },
+  );
+  setReactProp(
+    bridge,
+    "onKeyDown",
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      bubbleEvent = event;
+      mutate?.("bubble-before", event);
+      bubble(event);
+    },
+  );
+  let nativeEvent: KeyboardEvent | null = null;
+  try {
+    nativeEvent = dispatchCommitKey(target, key);
+  } finally {
+    setReactProp(bridge, "onKeyDownCapture", capture);
+    setReactProp(bridge, "onKeyDown", bubble);
+  }
+  if (!captureEvent || !bubbleEvent) {
+    throw new Error("React did not deliver both Commit keyboard boundaries");
+  }
+  if (!nativeEvent) {
+    throw new Error("The Commit keyboard event was not dispatched");
+  }
+  return { nativeEvent, captureEvent, bubbleEvent };
+}
+
+function trackCommitNavigationEffects(ownerWindow: Window & typeof globalThis) {
+  const nativeFocus = ownerWindow.HTMLElement.prototype.focus;
+  const focusCalls: Array<{
+    target: HTMLElement;
+    options: FocusOptions | undefined;
+  }> = [];
+  const preventDefault = vi.spyOn(
+    ownerWindow.Event.prototype,
+    "preventDefault",
+  );
+  const focus = vi
+    .spyOn(ownerWindow.HTMLElement.prototype, "focus")
+    .mockImplementation(function (
+      this: HTMLElement,
+      options?: FocusOptions,
+    ) {
+      focusCalls.push({ target: this, options });
+      Reflect.apply(
+        nativeFocus,
+        this,
+        options === undefined ? [] : [options],
+      );
+    });
+  const scrollTo = vi
+    .spyOn(ownerWindow, "scrollTo")
+    .mockImplementation(() => undefined);
+  const scrollBy = vi
+    .spyOn(ownerWindow, "scrollBy")
+    .mockImplementation(() => undefined);
+  return {
+    preventDefault,
+    focus,
+    focusCalls,
+    scrollTo,
+    scrollBy,
+  };
+}
+
 function commitRefBindings(host: HTMLDivElement) {
   const bridge = host.firstElementChild;
   const form = commitForm();
@@ -388,6 +570,578 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("CommitDialog action keyboard navigation", () => {
+  it.each([
+    ["Cancel", "Commit", "ArrowRight"],
+    ["Cancel", "Commit", "ArrowDown"],
+    ["Cancel", "Commit", "End"],
+    ["Commit", "Cancel", "ArrowLeft"],
+    ["Commit", "Cancel", "ArrowUp"],
+    ["Commit", "Cancel", "Home"],
+  ] as const)(
+    "moves from %s to %s with %s exactly once without action work",
+    async (sourceName, destinationName, key) => {
+      const effects = trackCommitNavigationEffects(window);
+      const timeout = vi.spyOn(globalThis, "setTimeout");
+      const current = actions();
+      const doc = repoDocument(
+        `doc-keyboard-${key}`,
+        `docs/keyboard-${key}.md`,
+      );
+      const { host, root } = createHost();
+
+      try {
+        await render(root, { visit: key, doc, actions: current });
+        await flushPublication();
+        const cancel = screen.getByRole(
+          "button",
+          { name: "Cancel" },
+        ) as HTMLButtonElement;
+        const commit = screen.getByTestId(
+          "commit-submit",
+        ) as HTMLButtonElement;
+        const source = sourceName === "Cancel" ? cancel : commit;
+        const destination =
+          destinationName === "Cancel" ? cancel : commit;
+        const messageBefore = message().value;
+        const timersBefore = timeout.mock.calls.length;
+        const scrollBefore = {
+          left: document.documentElement.scrollLeft,
+          top: document.documentElement.scrollTop,
+        };
+        source.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+        effects.scrollTo.mockClear();
+        effects.scrollBy.mockClear();
+
+        const event = dispatchCommitKey(source, key);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focus).toHaveBeenCalledTimes(1);
+        expect(effects.focusCalls).toEqual([
+          { target: destination, options: { preventScroll: true } },
+        ]);
+        expect(destination).toHaveFocus();
+        expect(current.onCommit).not.toHaveBeenCalled();
+        expect(current.onOpenChange).not.toHaveBeenCalled();
+        expect(message()).toHaveValue(messageBefore);
+        expect(timeout).toHaveBeenCalledTimes(timersBefore);
+        expect(effects.scrollTo).not.toHaveBeenCalled();
+        expect(effects.scrollBy).not.toHaveBeenCalled();
+        expect(document.documentElement.scrollLeft).toBe(scrollBefore.left);
+        expect(document.documentElement.scrollTop).toBe(scrollBefore.top);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("authenticates distinct wrapper boundaries without private React fields or shared prototypes", async () => {
+    const effects = trackCommitNavigationEffects(window);
+    const current = actions();
+    const doc = repoDocument("doc-wrapper-pair", "docs/wrapper-pair.md");
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "wrapper-pair", doc, actions: current });
+      await flushPublication();
+      const cancel = screen.getByRole(
+        "button",
+        { name: "Cancel" },
+      ) as HTMLButtonElement;
+      const commit = screen.getByTestId(
+        "commit-submit",
+      ) as HTMLButtonElement;
+      cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+
+      const delivery = dispatchCommitKeyWithBoundaryProbe(
+        host,
+        cancel,
+        "ArrowRight",
+        (phase, event) => {
+          if (phase === "capture-before" || phase === "bubble-before") {
+            Object.setPrototypeOf(
+              event,
+              Object.create(Object.getPrototypeOf(event)),
+            );
+            Reflect.deleteProperty(event, "_reactName");
+          }
+        },
+      );
+
+      expect(delivery.captureEvent).not.toBe(delivery.bubbleEvent);
+      expect(Object.getPrototypeOf(delivery.captureEvent)).not.toBe(
+        Object.getPrototypeOf(delivery.bubbleEvent),
+      );
+      expect(delivery.captureEvent.nativeEvent).toBe(delivery.nativeEvent);
+      expect(delivery.bubbleEvent.nativeEvent).toBe(delivery.nativeEvent);
+      expect(delivery.captureEvent.currentTarget).toBeNull();
+      expect(delivery.bubbleEvent.currentTarget).toBeNull();
+      expect(delivery.captureEvent.isDefaultPrevented).toBe(
+        delivery.bubbleEvent.isDefaultPrevented,
+      );
+      expect(delivery.captureEvent.isPropagationStopped).toBe(
+        delivery.bubbleEvent.isPropagationStopped,
+      );
+      expect(delivery.captureEvent.isDefaultPrevented()).toBe(false);
+      expect(delivery.captureEvent.isPropagationStopped()).toBe(false);
+      expect(delivery.bubbleEvent.isDefaultPrevented()).toBe(false);
+      expect(delivery.bubbleEvent.isPropagationStopped()).toBe(false);
+      expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([
+        { target: commit, options: { preventScroll: true } },
+      ]);
+      expect(current.onCommit).not.toHaveBeenCalled();
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["capture", "isDefaultPrevented"],
+    ["bubble", "isPropagationStopped"],
+  ] as const)(
+    "rejects %s wrapper %s drift and admits a clean successor",
+    async (boundary, property) => {
+      const effects = trackCommitNavigationEffects(window);
+      const current = actions();
+      const doc = repoDocument(
+        `doc-${boundary}-${property}`,
+        "docs/wrapper-drift.md",
+      );
+      const { host, root } = createHost();
+
+      try {
+        await render(root, {
+          visit: `${boundary}-${property}`,
+          doc,
+          actions: current,
+        });
+        await flushPublication();
+        const cancel = screen.getByRole(
+          "button",
+          { name: "Cancel" },
+        ) as HTMLButtonElement;
+        const commit = screen.getByTestId(
+          "commit-submit",
+        ) as HTMLButtonElement;
+        cancel.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+        const rejected = dispatchCommitKeyWithBoundaryProbe(
+          host,
+          cancel,
+          "ArrowRight",
+          (phase, event) => {
+            if (
+              (boundary === "capture" && phase === "capture-after") ||
+              (boundary === "bubble" && phase === "bubble-before")
+            ) {
+              Object.defineProperty(event, property, {
+                configurable: true,
+                value: vi.fn(() => false),
+              });
+            }
+          },
+        );
+        expect(rejected.nativeEvent.defaultPrevented).toBe(false);
+        expect(effects.preventDefault).not.toHaveBeenCalled();
+        expect(effects.focus).not.toHaveBeenCalled();
+        expect(cancel).toHaveFocus();
+
+        const accepted = dispatchCommitKey(cancel, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focus).toHaveBeenCalledTimes(1);
+        expect(commit).toHaveFocus();
+        expect(current.onCommit).not.toHaveBeenCalled();
+        expect(current.onOpenChange).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("binds navigation to the listener's backing receiver, intrinsic currentTarget, and path terminal", async () => {
+    const currentTargetDescriptor = Object.getOwnPropertyDescriptor(
+      window.Event.prototype,
+      "currentTarget",
+    );
+    const composedPath = window.Event.prototype.composedPath;
+    if (typeof currentTargetDescriptor?.get !== "function") {
+      throw new Error("Event.currentTarget has no intrinsic getter");
+    }
+    const observations: Array<{
+      receiver: EventTarget;
+      currentTarget: EventTarget | null;
+      terminal: EventTarget | undefined;
+    }> = [];
+    const observe = function (this: EventTarget, event: Event) {
+      observations.push({
+        receiver: this,
+        currentTarget: Reflect.apply(
+          currentTargetDescriptor.get!,
+          event,
+          [],
+        ) as EventTarget | null,
+        terminal: (
+          Reflect.apply(composedPath, event, []) as EventTarget[]
+        ).at(-1),
+      });
+    };
+    window.addEventListener("keydown", observe, true);
+    const effects = trackCommitNavigationEffects(window);
+    const current = actions();
+    const doc = repoDocument("doc-window-proof", "docs/window-proof.md");
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "window-proof", doc, actions: current });
+      await flushPublication();
+      const cancel = screen.getByRole(
+        "button",
+        { name: "Cancel" },
+      ) as HTMLButtonElement;
+      const commit = screen.getByTestId(
+        "commit-submit",
+      ) as HTMLButtonElement;
+      cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      observations.length = 0;
+
+      const event = dispatchCommitKey(cancel, "ArrowRight");
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(observations).toHaveLength(1);
+      expect(observations[0]!.receiver).toBe(
+        observations[0]!.currentTarget,
+      );
+      expect(observations[0]!.receiver).toBe(observations[0]!.terminal);
+      expect(commit).toHaveFocus();
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("keydown", observe, true);
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["same-prototype", "structural"] as const)(
+    "rejects a %s Window-shaped path terminal and accepts the exact successor",
+    async (kind) => {
+      const nativePath = window.Event.prototype.composedPath;
+      const lookalike = Object.create(
+        kind === "same-prototype" ? window.Window.prototype : null,
+      ) as Window & Record<string, unknown>;
+      Object.defineProperties(lookalike, {
+        document: { configurable: true, value: document },
+        window: { configurable: true, value: lookalike },
+        self: { configurable: true, value: lookalike },
+        Window: { configurable: true, value: window.Window },
+        Event: { configurable: true, value: window.Event },
+        KeyboardEvent: {
+          configurable: true,
+          value: window.KeyboardEvent,
+        },
+        Node: { configurable: true, value: window.Node },
+        Object: { configurable: true, value: window.Object },
+        Reflect: { configurable: true, value: window.Reflect },
+      });
+      let spoofTerminal = true;
+      vi.spyOn(
+        window.Event.prototype,
+        "composedPath",
+      ).mockImplementation(function (this: Event) {
+        const actual = Reflect.apply(nativePath, this, []) as EventTarget[];
+        return spoofTerminal && actual.length > 0
+          ? [...actual.slice(0, -1), lookalike]
+          : actual;
+      });
+      const effects = trackCommitNavigationEffects(window);
+      const current = actions();
+      const doc = repoDocument(
+        `doc-window-lookalike-${kind}`,
+        "docs/window-lookalike.md",
+      );
+      const { host, root } = createHost();
+
+      try {
+        await render(root, {
+          visit: `window-lookalike-${kind}`,
+          doc,
+          actions: current,
+        });
+        await flushPublication();
+        const cancel = screen.getByRole(
+          "button",
+          { name: "Cancel" },
+        ) as HTMLButtonElement;
+        const commit = screen.getByTestId(
+          "commit-submit",
+        ) as HTMLButtonElement;
+        cancel.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+
+        const rejected = dispatchCommitKey(cancel, "ArrowRight");
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(effects.preventDefault).not.toHaveBeenCalled();
+        expect(effects.focus).not.toHaveBeenCalled();
+        expect(cancel).toHaveFocus();
+
+        spoofTerminal = false;
+        const accepted = dispatchCommitKey(cancel, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focus).toHaveBeenCalledTimes(1);
+        expect(commit).toHaveFocus();
+        expect(current.onCommit).not.toHaveBeenCalled();
+        expect(current.onOpenChange).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("leaves boundaries, disabled destinations, unrelated keys, and invalid native facts inert", async () => {
+    const effects = trackCommitNavigationEffects(window);
+    const pending = deferred<void>();
+    const current = actions(pending.promise);
+    const doc = repoDocument("doc-inert-keys", "docs/inert-keys.md");
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "inert", doc, actions: current });
+      await flushPublication();
+      const cancel = screen.getByRole(
+        "button",
+        { name: "Cancel" },
+      ) as HTMLButtonElement;
+      const commit = screen.getByTestId(
+        "commit-submit",
+      ) as HTMLButtonElement;
+      const cases: Array<{
+        source: HTMLButtonElement;
+        key: string;
+        init?: KeyboardEventInit;
+        trusted?: boolean;
+      }> = [
+        { source: cancel, key: "ArrowLeft" },
+        { source: cancel, key: "ArrowUp" },
+        { source: cancel, key: "Home" },
+        { source: commit, key: "ArrowRight" },
+        { source: commit, key: "ArrowDown" },
+        { source: commit, key: "End" },
+        { source: cancel, key: "Tab" },
+        { source: commit, key: "Enter" },
+        { source: cancel, key: " " },
+        { source: cancel, key: "ArrowRight", init: { altKey: true } },
+        { source: cancel, key: "ArrowRight", init: { ctrlKey: true } },
+        { source: cancel, key: "ArrowRight", init: { metaKey: true } },
+        { source: cancel, key: "ArrowRight", init: { shiftKey: true } },
+        { source: cancel, key: "ArrowRight", init: { repeat: true } },
+        {
+          source: cancel,
+          key: "ArrowRight",
+          init: { isComposing: true },
+        },
+        {
+          source: cancel,
+          key: "ArrowRight",
+          init: { code: "ArrowLeft" },
+        },
+        { source: cancel, key: "ArrowRight", trusted: false },
+      ];
+      for (const { source, key, init, trusted } of cases) {
+        source.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+        const event = dispatchCommitKey(
+          source,
+          key,
+          init,
+          trusted ?? true,
+        );
+        expect(event.defaultPrevented, key).toBe(false);
+        expect(effects.preventDefault, key).not.toHaveBeenCalled();
+        expect(effects.focus, key).not.toHaveBeenCalled();
+        expect(source, key).toHaveFocus();
+      }
+
+      await submit();
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith(
+        "Update docs/inert-keys.md",
+      );
+      expect(commit).toBeDisabled();
+      cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      for (const key of [
+        "ArrowLeft",
+        "ArrowUp",
+        "ArrowRight",
+        "ArrowDown",
+        "Home",
+        "End",
+      ] as const) {
+        const event = dispatchCommitKey(cancel, key);
+        expect(event.defaultPrevented, key).toBe(false);
+      }
+      expect(effects.preventDefault).not.toHaveBeenCalled();
+      expect(effects.focus).not.toHaveBeenCalled();
+      expect(cancel).toHaveFocus();
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+      await resolve(pending);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("navigates the gist actions and preserves click activation", async () => {
+    const effects = trackCommitNavigationEffects(window);
+    const current = actions();
+    const doc = {
+      ...repoDocument("doc-gist-navigation", "unused.md"),
+      storage: "gist" as const,
+      gistId: "gist-navigation",
+      gistFile: "navigation.md",
+      repoOwner: null,
+      repoName: null,
+      repoBranch: null,
+      repoPath: null,
+      githubUrl: "https://gist.github.com/gist-navigation",
+    };
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "gist-navigation", doc, actions: current });
+      await flushPublication();
+      const cancel = screen.getByRole(
+        "button",
+        { name: "Cancel" },
+      ) as HTMLButtonElement;
+      const update = screen.getByRole(
+        "button",
+        { name: "Update gist" },
+      ) as HTMLButtonElement;
+      cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      const event = dispatchCommitKey(cancel, "End");
+      expect(event.defaultPrevented).toBe(true);
+      expect(effects.focusCalls).toEqual([
+        { target: update, options: { preventScroll: true } },
+      ]);
+      expect(current.onCommit).not.toHaveBeenCalled();
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+
+      fireEvent.click(cancel);
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      expect(current.onCommit).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects restored action order, replay, and cleanup while a fresh root recovers", async () => {
+    const effects = trackCommitNavigationEffects(window);
+    const stale = actions();
+    const doc = repoDocument("doc-history", "docs/history.md");
+    const first = createHost();
+    try {
+      await render(first.root, { visit: "history", doc, actions: stale });
+      await flushPublication();
+      const cancel = screen.getByRole(
+        "button",
+        { name: "Cancel" },
+      ) as HTMLButtonElement;
+      const commit = screen.getByTestId(
+        "commit-submit",
+      ) as HTMLButtonElement;
+      const staleHandler = reactProp<CommitBridgeKeyHandler>(
+        commitBridge(first.host),
+        "onKeyDown",
+      );
+      const actionParent = cancel.parentElement;
+      if (!actionParent) throw new Error("Commit actions have no parent");
+      actionParent.append(cancel);
+      actionParent.insertBefore(cancel, commit);
+      cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      const restored = dispatchCommitKey(cancel, "ArrowRight");
+      expect(restored.defaultPrevented).toBe(false);
+      expect(effects.preventDefault).not.toHaveBeenCalled();
+      expect(effects.focus).not.toHaveBeenCalled();
+
+      await act(async () => first.root.unmount());
+      const fabricated = {
+        nativeEvent: createCommitKey(cancel, "ArrowRight"),
+      } as ReactKeyboardEvent<HTMLDivElement>;
+      expect(() => staleHandler(fabricated)).not.toThrow();
+      expect(effects.preventDefault).not.toHaveBeenCalled();
+      expect(effects.focus).not.toHaveBeenCalled();
+    } finally {
+      first.host.remove();
+    }
+
+    const fresh = actions();
+    const second = createHost();
+    try {
+      await render(second.root, {
+        visit: "fresh-history",
+        doc: { ...doc },
+        actions: fresh,
+      });
+      await flushPublication();
+      const cancel = screen.getByRole(
+        "button",
+        { name: "Cancel" },
+      ) as HTMLButtonElement;
+      const commit = screen.getByTestId(
+        "commit-submit",
+      ) as HTMLButtonElement;
+      cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      const accepted = dispatchCommitKey(cancel, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(commit).toHaveFocus();
+      cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      fireEvent(cancel, accepted);
+      expect(effects.preventDefault).not.toHaveBeenCalled();
+      expect(effects.focus).not.toHaveBeenCalled();
+      expect(cancel).toHaveFocus();
+      expect(stale.onCommit).not.toHaveBeenCalled();
+      expect(fresh.onCommit).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => second.root.unmount());
+      second.host.remove();
+    }
+  });
 });
 
 describe("CommitDialog visit authority", () => {
