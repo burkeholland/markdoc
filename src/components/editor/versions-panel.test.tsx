@@ -9,6 +9,7 @@ import {
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { CollabSession } from "@/editor/collab/session";
 import type { VersionSummary } from "@/lib/api";
 
@@ -283,6 +284,13 @@ function expectMutationControlsToBeDisabled(disabled: boolean) {
 type VersionDiffKeyHandler = (
   event: ReactKeyboardEvent<HTMLDivElement>,
 ) => void;
+type VersionDiffActionKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
 
 interface VersionDiffReactProps {
   onKeyDown?: VersionDiffKeyHandler;
@@ -448,6 +456,135 @@ function dispatchVersionDiffKey(
     allowed = target.dispatchEvent(event);
   });
   return { event, allowed };
+}
+
+function versionDiffComparePreview() {
+  const preview = versionDiffPreview(VERSION_DIFF_CURRENT, "version-diff-new");
+  return {
+    ...preview,
+    base: {
+      version: {
+        ...named,
+        id: "version-diff-old",
+        number: 4,
+        title: "Older fixture",
+      },
+      content: VERSION_DIFF_OLD,
+    },
+    range: [preview.version],
+  };
+}
+
+function versionDiffActions(host: HTMLElement) {
+  const controls = within(host);
+  return {
+    swap: controls.queryByTestId("diff-swap") as HTMLButtonElement | null,
+    previous: controls.getByTestId("diff-prev") as HTMLButtonElement,
+    next: controls.getByTestId("diff-next") as HTMLButtonElement,
+  };
+}
+
+function createVersionDiffActionKey(
+  target: HTMLButtonElement,
+  key: VersionDiffActionKey,
+  init: KeyboardEventInit = {},
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("Version diff owner window was unavailable");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    code: key,
+    ...init,
+  });
+  trustKeyboardEvent(event, ownerWindow);
+  return event;
+}
+
+function dispatchVersionDiffActionKey(
+  target: HTMLButtonElement,
+  key: VersionDiffActionKey,
+  init: KeyboardEventInit = {},
+  focus = true,
+) {
+  const event = createVersionDiffActionKey(target, key, init);
+  let allowed = true;
+  act(() => {
+    if (focus) target.focus();
+    allowed = target.dispatchEvent(event);
+  });
+  return { event, allowed };
+}
+
+type DeliveredVersionDiffActionKey = ReactKeyboardEvent<HTMLElement> & {
+  readonly isComposing?: boolean;
+};
+
+function versionDiffReactHandler<T>(
+  element: HTMLElement,
+  name: "onKeyDownCapture" | "onKeyDown",
+) {
+  const { props } = versionDiffProps(element);
+  const handler = (props as unknown as Record<string, unknown>)[name];
+  if (typeof handler !== "function") {
+    throw new Error(`Version diff ${name} handler was not attached`);
+  }
+  return handler as T;
+}
+
+function replaceVersionDiffReactHandlers(
+  element: HTMLElement,
+  replacements: Partial<
+    Record<
+      "onKeyDownCapture" | "onKeyDown",
+      (event: DeliveredVersionDiffActionKey) => void
+    >
+  >,
+) {
+  const { propsKey, record, props } = versionDiffProps(element);
+  const replacement = {
+    ...props,
+    ...replacements,
+  } as VersionDiffReactProps;
+  record[propsKey] = replacement;
+  return () => {
+    if (record[propsKey] === replacement) record[propsKey] = props;
+  };
+}
+
+function distinctVersionDiffReactKey(
+  event: DeliveredVersionDiffActionKey,
+  prototype: object,
+) {
+  const wrapper = Object.create(prototype) as DeliveredVersionDiffActionKey;
+  for (const property of [
+    "type",
+    "currentTarget",
+    "target",
+    "nativeEvent",
+    "eventPhase",
+    "bubbles",
+    "cancelable",
+    "defaultPrevented",
+    "isTrusted",
+    "key",
+    "code",
+    "location",
+    "altKey",
+    "ctrlKey",
+    "metaKey",
+    "shiftKey",
+    "repeat",
+    "isComposing",
+    "view",
+  ] as const) {
+    Object.defineProperty(wrapper, property, {
+      configurable: true,
+      get: () => event[property],
+    });
+  }
+  return wrapper;
 }
 
 type VersionsToolbarKey =
@@ -703,6 +840,1017 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+describe("VersionDiffView · header action keyboard navigation", () => {
+  let originalScrollIntoView: PropertyDescriptor | undefined;
+  let scrollIntoView: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    originalScrollIntoView = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "scrollIntoView",
+    );
+    scrollIntoView = vi.fn();
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value: scrollIntoView,
+    });
+  });
+
+  afterEach(async () => {
+    while (versionDiffViews.length > 0) {
+      const fixture = versionDiffViews.pop()!;
+      await act(async () => fixture.root.unmount());
+      fixture.host.remove();
+    }
+    if (originalScrollIntoView) {
+      Object.defineProperty(
+        Element.prototype,
+        "scrollIntoView",
+        originalScrollIntoView,
+      );
+    } else {
+      delete (Element.prototype as { scrollIntoView?: unknown })
+        .scrollIntoView;
+    }
+  });
+
+  it.each([
+    ["ArrowLeft", "previous", "swap"],
+    ["ArrowLeft", "next", "previous"],
+    ["ArrowUp", "previous", "swap"],
+    ["ArrowUp", "next", "previous"],
+    ["ArrowRight", "swap", "previous"],
+    ["ArrowRight", "previous", "next"],
+    ["ArrowDown", "swap", "previous"],
+    ["ArrowDown", "previous", "next"],
+    ["Home", "previous", "swap"],
+    ["Home", "next", "swap"],
+    ["End", "swap", "next"],
+    ["End", "previous", "next"],
+  ] as const)(
+    "moves once with %s from %s to %s without activating or scrolling",
+    (key, sourceKind, destinationKind) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const fixture = createVersionDiffView(
+        versionDiffComparePreview(),
+        "unused live text",
+      );
+      fireEvent.click(versionDiffActions(fixture.host).next);
+      const actions = versionDiffActions(fixture.host);
+      const source = actions[sourceKind];
+      const destination = actions[destinationKind];
+      if (!source || !destination) throw new Error("Expected comparison action");
+      const activations = {
+        swap: vi.fn(),
+        previous: vi.fn(),
+        next: vi.fn(),
+      };
+      actions.swap?.addEventListener("click", activations.swap);
+      actions.previous.addEventListener("click", activations.previous);
+      actions.next.addEventListener("click", activations.next);
+      const beforeHeader = within(fixture.host)
+        .getByTestId("diff-header")
+        .textContent;
+      const beforeCounter = within(fixture.host)
+        .getByTestId("diff-counter")
+        .textContent;
+      const root = versionDiffRoot(fixture.host);
+      const nav = actions.previous.parentElement!;
+      document.documentElement.scrollTop = 9;
+      fixture.host.scrollTop = 11;
+      root.scrollTop = 13;
+      nav.scrollTop = 15;
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      scrollIntoView.mockClear();
+
+      const result = dispatchVersionDiffActionKey(source, key, {}, false);
+
+      expect(result.allowed).toBe(false);
+      expect(result.event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(focus.mock.contexts[0]).toBe(destination);
+      expect(destination).toHaveFocus();
+      expect(activations.swap).not.toHaveBeenCalled();
+      expect(activations.previous).not.toHaveBeenCalled();
+      expect(activations.next).not.toHaveBeenCalled();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(within(fixture.host).getByTestId("diff-header")).toHaveTextContent(
+        beforeHeader ?? "",
+      );
+      expect(
+        within(fixture.host).getByTestId("diff-counter"),
+      ).toHaveTextContent(beforeCounter ?? "");
+      expect(document.documentElement.scrollTop).toBe(9);
+      expect(fixture.host.scrollTop).toBe(11);
+      expect(root.scrollTop).toBe(13);
+      expect(nav.scrollTop).toBe(15);
+      expectNoVersionDiffExternalWork();
+    },
+  );
+
+  it.each([
+    ["ArrowLeft", "Numpad4", "previous", "swap"],
+    ["ArrowUp", "Numpad8", "next", "previous"],
+    ["ArrowRight", "Numpad6", "swap", "previous"],
+    ["ArrowDown", "Numpad2", "previous", "next"],
+    ["Home", "Numpad7", "next", "swap"],
+    ["End", "Numpad1", "swap", "next"],
+  ] as const)(
+    "uses semantic %s with unrestricted %s and NUMPAD location",
+    (key, code, sourceKind, destinationKind) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const fixture = createVersionDiffView(
+        versionDiffComparePreview(),
+        "unused live text",
+      );
+      fireEvent.click(versionDiffActions(fixture.host).next);
+      const actions = versionDiffActions(fixture.host);
+      const source = actions[sourceKind];
+      const destination = actions[destinationKind];
+      if (!source || !destination) throw new Error("Expected comparison action");
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      scrollIntoView.mockClear();
+
+      const result = dispatchVersionDiffActionKey(
+        source,
+        key,
+        {
+          code,
+          location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+        },
+        false,
+      );
+
+      expect(result.event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(destination).toHaveFocus();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(
+        within(fixture.host).getByTestId("diff-counter"),
+      ).toHaveTextContent("2 of 3 changes");
+      expectNoVersionDiffExternalWork();
+    },
+  );
+
+  it("uses enabled DOM order in base and no-base layouts while skipping disabled boundaries", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const baseFixture = createVersionDiffView(
+      versionDiffComparePreview(),
+      "unused live text",
+    );
+    let actions = versionDiffActions(baseFixture.host);
+    expect(actions.previous).toBeDisabled();
+    expect(actions.next).toBeEnabled();
+    actions.swap!.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+    const first = dispatchVersionDiffActionKey(
+      actions.swap!,
+      "End",
+      {},
+      false,
+    );
+    expect(first.event.defaultPrevented).toBe(true);
+    expect(actions.next).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    fireEvent.click(actions.next);
+    actions = versionDiffActions(baseFixture.host);
+    fireEvent.click(actions.next);
+    actions = versionDiffActions(baseFixture.host);
+    expect(actions.next).toBeDisabled();
+    expect(actions.previous).toBeEnabled();
+    actions.swap!.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+    scrollIntoView.mockClear();
+    const last = dispatchVersionDiffActionKey(
+      actions.swap!,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(last.event.defaultPrevented).toBe(true);
+    expect(actions.previous).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    const noBaseFixture = createVersionDiffView(
+      versionDiffPreview(),
+      VERSION_DIFF_CURRENT,
+      "no-base",
+    );
+    actions = versionDiffActions(noBaseFixture.host);
+    expect(actions.swap).toBeNull();
+    expect(actions.previous).toBeDisabled();
+    expect(actions.next).toBeEnabled();
+    actions.next.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+    const boundary = dispatchVersionDiffActionKey(
+      actions.next,
+      "Home",
+      {},
+      false,
+    );
+    expect(boundary.allowed).toBe(true);
+    expect(boundary.event.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(actions.next).toHaveFocus();
+
+    fireEvent.click(actions.next);
+    actions = versionDiffActions(noBaseFixture.host);
+    actions.previous.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+    scrollIntoView.mockClear();
+    const middle = dispatchVersionDiffActionKey(
+      actions.previous,
+      "End",
+      {},
+      false,
+    );
+    expect(middle.event.defaultPrevented).toBe(true);
+    expect(actions.next).toHaveFocus();
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expectNoVersionDiffExternalWork();
+  });
+
+  it.each([
+    ["ArrowLeft", "swap"],
+    ["ArrowUp", "swap"],
+    ["Home", "swap"],
+    ["ArrowRight", "next"],
+    ["ArrowDown", "next"],
+    ["End", "next"],
+  ] as const)(
+    "leaves the exact %s %s boundary unprevented and inert",
+    (key, sourceKind) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const fixture = createVersionDiffView(
+        versionDiffComparePreview(),
+        "unused live text",
+      );
+      fireEvent.click(versionDiffActions(fixture.host).next);
+      const actions = versionDiffActions(fixture.host);
+      const source = actions[sourceKind];
+      if (!source) throw new Error("Expected boundary action");
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      scrollIntoView.mockClear();
+
+      const result = dispatchVersionDiffActionKey(source, key, {}, false);
+
+      expect(result.allowed).toBe(true);
+      expect(result.event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      expect(
+        within(fixture.host).getByTestId("diff-counter"),
+      ).toHaveTextContent("2 of 3 changes");
+      expectNoVersionDiffExternalWork();
+    },
+  );
+
+  it.each([
+    ["Control", { ctrlKey: true }],
+    ["Alt", { altKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Shift", { shiftKey: true }],
+    ["repeat", { repeat: true }],
+    ["composition", { isComposing: true }],
+    ["non-bubbling", { bubbles: false }],
+    ["non-cancelable", { cancelable: false }],
+  ] as const)("rejects %s and leaves the publication available", (_name, init) => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fixture = createVersionDiffView(
+      versionDiffComparePreview(),
+      "unused live text",
+    );
+    fireEvent.click(versionDiffActions(fixture.host).next);
+    const actions = versionDiffActions(fixture.host);
+    actions.previous.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+
+    const rejected = dispatchVersionDiffActionKey(
+      actions.previous,
+      "ArrowRight",
+      init,
+      false,
+    );
+    expect(rejected.event.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(actions.previous).toHaveFocus();
+
+    const accepted = dispatchVersionDiffActionKey(
+      actions.previous,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(accepted.event.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(actions.next).toHaveFocus();
+  });
+
+  it("rejects untrusted, prior-canceled, stopped, and fabricated deliveries", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fixture = createVersionDiffView(
+      versionDiffComparePreview(),
+      "unused live text",
+    );
+    fireEvent.click(versionDiffActions(fixture.host).next);
+    const actions = versionDiffActions(fixture.host);
+    const source = actions.previous;
+    const ownerWindow = source.ownerDocument.defaultView!;
+    source.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+
+    const untrusted = new ownerWindow.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "ArrowRight",
+      code: "ArrowRight",
+    });
+    act(() => source.dispatchEvent(untrusted));
+    expect(untrusted.isTrusted).toBe(false);
+    expect(untrusted.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(source).toHaveFocus();
+    expectNoVersionDiffExternalWork();
+
+    const canceled = createVersionDiffActionKey(source, "ArrowRight");
+    canceled.preventDefault();
+    preventDefault.mockClear();
+    act(() => source.dispatchEvent(canceled));
+    const stop = (event: Event) => event.stopPropagation();
+    versionDiffRoot(fixture.host).addEventListener("keydown", stop, {
+      capture: true,
+      once: true,
+    });
+    dispatchVersionDiffActionKey(source, "ArrowRight", {}, false);
+    const actionBubble = versionDiffReactHandler<
+      (event: DeliveredVersionDiffActionKey) => void
+    >(source, "onKeyDown");
+    expect(() =>
+      actionBubble(
+        Object.create(KeyboardEvent.prototype) as DeliveredVersionDiffActionKey,
+      ),
+    ).not.toThrow();
+
+    expect(untrusted.defaultPrevented).toBe(false);
+    expect(canceled.defaultPrevented).toBe(true);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(source).toHaveFocus();
+    expectNoVersionDiffExternalWork();
+  });
+
+  it("accepts distinct exact capture and bubble wrappers across group and action boundaries", () => {
+    const nativePreventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fixture = createVersionDiffView(
+      versionDiffComparePreview(),
+      "unused live text",
+    );
+    fireEvent.click(versionDiffActions(fixture.host).next);
+    const actions = versionDiffActions(fixture.host);
+    const source = actions.previous;
+    const destination = actions.next;
+    const header = versionDiffRoot(fixture.host)
+      .firstElementChild as HTMLDivElement;
+    const groupCapture = versionDiffReactHandler<
+      (event: DeliveredVersionDiffActionKey) => void
+    >(header, "onKeyDownCapture");
+    const actionCapture = versionDiffReactHandler<
+      (event: DeliveredVersionDiffActionKey) => void
+    >(source, "onKeyDownCapture");
+    const actionBubble = versionDiffReactHandler<
+      (event: DeliveredVersionDiffActionKey) => void
+    >(source, "onKeyDown");
+    const groupBubble = versionDiffReactHandler<
+      (event: DeliveredVersionDiffActionKey) => void
+    >(header, "onKeyDown");
+    const capturePrevent = vi.fn();
+    const captureStop = vi.fn();
+    const captureDefault = vi.fn(() => false);
+    const captureStopped = vi.fn(() => false);
+    const capturePersist = vi.fn();
+    const bubbleStop = vi.fn();
+    const bubbleStopped = vi.fn(() => false);
+    const bubblePersist = vi.fn();
+    let activeBubble: DeliveredVersionDiffActionKey | null = null;
+    const bubbleDefault = vi.fn(() =>
+      activeBubble?.isDefaultPrevented() ?? false,
+    );
+    const bubblePrevent = vi.fn(function (this: object) {
+      expect(this).toBe(bubbleWrapper);
+      if (!activeBubble) throw new Error("Missing active bubble wrapper");
+      Reflect.apply(activeBubble.preventDefault, activeBubble, []);
+    });
+    const capturePrototype = Object.create(null) as object;
+    const bubblePrototype = Object.create(null) as object;
+    Object.defineProperties(capturePrototype, {
+      preventDefault: { configurable: true, value: capturePrevent },
+      stopPropagation: { configurable: true, value: captureStop },
+      isDefaultPrevented: { configurable: true, value: captureDefault },
+      isPropagationStopped: { configurable: true, value: captureStopped },
+      persist: { configurable: true, value: capturePersist },
+    });
+    Object.defineProperties(bubblePrototype, {
+      preventDefault: { configurable: true, value: bubblePrevent },
+      stopPropagation: { configurable: true, value: bubbleStop },
+      isDefaultPrevented: { configurable: true, value: bubbleDefault },
+      isPropagationStopped: { configurable: true, value: bubbleStopped },
+      persist: { configurable: true, value: bubblePersist },
+    });
+    let captureWrapper: DeliveredVersionDiffActionKey | null = null;
+    let bubbleWrapper: DeliveredVersionDiffActionKey | null = null;
+    const restoreHeader = replaceVersionDiffReactHandlers(header, {
+      onKeyDownCapture: (event) => {
+        captureWrapper = distinctVersionDiffReactKey(
+          event,
+          capturePrototype,
+        );
+        groupCapture(captureWrapper);
+      },
+      onKeyDown: (event) => {
+        if (!bubbleWrapper) throw new Error("Missing bubble wrapper");
+        activeBubble = event;
+        try {
+          groupBubble(bubbleWrapper);
+        } finally {
+          activeBubble = null;
+        }
+      },
+    });
+    const restoreAction = replaceVersionDiffReactHandlers(source, {
+      onKeyDownCapture: () => {
+        if (!captureWrapper) throw new Error("Missing capture wrapper");
+        actionCapture(captureWrapper);
+      },
+      onKeyDown: (event) => {
+        bubbleWrapper = distinctVersionDiffReactKey(event, bubblePrototype);
+        activeBubble = event;
+        try {
+          actionBubble(bubbleWrapper);
+        } finally {
+          activeBubble = null;
+        }
+      },
+    });
+    source.focus();
+    nativePreventDefault.mockClear();
+    focus.mockClear();
+
+    try {
+      const result = dispatchVersionDiffActionKey(
+        source,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      expect(result.event.defaultPrevented).toBe(true);
+      expect(captureWrapper).not.toBe(bubbleWrapper);
+      expect(Object.getPrototypeOf(captureWrapper!)).toBe(capturePrototype);
+      expect(Object.getPrototypeOf(bubbleWrapper!)).toBe(bubblePrototype);
+      expect(capturePrevent).not.toHaveBeenCalled();
+      expect(captureStop).not.toHaveBeenCalled();
+      expect(capturePersist).not.toHaveBeenCalled();
+      expect(bubblePrevent).toHaveBeenCalledOnce();
+      expect(bubbleStop).not.toHaveBeenCalled();
+      expect(bubblePersist).not.toHaveBeenCalled();
+      expect(captureDefault).not.toBe(bubbleDefault);
+      expect(captureStopped).not.toBe(bubbleStopped);
+      expect(nativePreventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(destination).toHaveFocus();
+    } finally {
+      restoreAction();
+      restoreHeader();
+    }
+  });
+
+  it.each([
+    "preventDefault",
+    "stopPropagation",
+    "isDefaultPrevented",
+    "isPropagationStopped",
+    "persist",
+  ] as const)(
+    "rejects retained capture %s drift and admits a clean event",
+    (property) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const fixture = createVersionDiffView(
+        versionDiffComparePreview(),
+        "unused live text",
+      );
+      fireEvent.click(versionDiffActions(fixture.host).next);
+      const actions = versionDiffActions(fixture.host);
+      const source = actions.previous;
+      const destination = actions.next;
+      const header = versionDiffRoot(fixture.host)
+        .firstElementChild as HTMLDivElement;
+      const originalCapture = versionDiffReactHandler<
+        (event: DeliveredVersionDiffActionKey) => void
+      >(source, "onKeyDownCapture");
+      const originalBubble = versionDiffReactHandler<
+        (event: DeliveredVersionDiffActionKey) => void
+      >(source, "onKeyDown");
+      let captured: DeliveredVersionDiffActionKey | null = null;
+      const restore = replaceVersionDiffReactHandlers(source, {
+        onKeyDownCapture: (event) => {
+          captured = event;
+          originalCapture(event);
+        },
+        onKeyDown: (event) => {
+          if (captured) {
+            Object.defineProperty(captured, property, {
+              configurable: true,
+              value:
+                property === "preventDefault" ||
+                  property === "stopPropagation" ||
+                  property === "persist"
+                  ? vi.fn()
+                  : vi.fn(() => false),
+            });
+          }
+          originalBubble(event);
+        },
+      });
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+
+      const rejected = dispatchVersionDiffActionKey(
+        source,
+        "ArrowRight",
+        {},
+        false,
+      );
+      restore();
+
+      expect(rejected.event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      expect(header).toContainElement(source);
+
+      const accepted = dispatchVersionDiffActionKey(
+        source,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(destination).toHaveFocus();
+    },
+  );
+
+  it("publishes prevention to a same-root ancestor after an exact delegated native delivery", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const ancestorAction = vi.fn();
+    const ancestorDelivery = vi.fn(
+      (event: ReactKeyboardEvent<HTMLDivElement>) => {
+        if (!event.defaultPrevented || !event.isDefaultPrevented()) {
+          ancestorAction();
+        }
+      },
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const fixture = { root: createRoot(host), host };
+    versionDiffViews.push(fixture);
+    act(() => {
+      fixture.root.render(
+        <StrictMode>
+          <div onKeyDown={ancestorDelivery}>
+            <VersionDiffView
+              session={versionDiffSession("unused live text")}
+              preview={versionDiffComparePreview()}
+            />
+          </div>
+        </StrictMode>,
+      );
+    });
+    fireEvent.click(versionDiffActions(host).next);
+    const actions = versionDiffActions(host);
+    const source = actions.previous;
+    const destination = actions.next;
+    const header = versionDiffRoot(host).firstElementChild as HTMLDivElement;
+    const groupCapture = versionDiffReactHandler<
+      (event: DeliveredVersionDiffActionKey) => void
+    >(header, "onKeyDownCapture");
+    const currentTarget = Object.getOwnPropertyDescriptor(
+      Event.prototype,
+      "currentTarget",
+    )?.get;
+    if (!currentTarget) throw new Error("Missing currentTarget getter");
+    const delegatedTargets: EventTarget[] = [];
+    const restore = replaceVersionDiffReactHandlers(header, {
+      onKeyDownCapture: (event) => {
+        const delegated = Reflect.apply(
+          currentTarget,
+          event.nativeEvent,
+          [],
+        ) as EventTarget | null;
+        if (delegated) delegatedTargets.push(delegated);
+        groupCapture(event);
+      },
+    });
+    source.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+    scrollIntoView.mockClear();
+
+    try {
+      const result = dispatchVersionDiffActionKey(
+        source,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      expect(result.event.defaultPrevented).toBe(true);
+      expect(delegatedTargets).toEqual([host]);
+      expect(ancestorDelivery).toHaveBeenCalledOnce();
+      expect(ancestorAction).not.toHaveBeenCalled();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(destination).toHaveFocus();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expectNoVersionDiffExternalWork();
+    } finally {
+      restore();
+    }
+  });
+
+  it("requires the native listener's exact backing receiver and rejects a Window lookalike", () => {
+    const originalAdd = window.addEventListener.bind(window);
+    const originalRemove = window.removeEventListener.bind(window);
+    const bridges = new WeakMap<EventListener, EventListener>();
+    const lookalike = Object.create(
+      Object.getPrototypeOf(window),
+    ) as Window;
+    Object.defineProperty(lookalike, "document", {
+      configurable: true,
+      value: document,
+    });
+    let useLookalike = true;
+    vi.spyOn(window, "addEventListener").mockImplementation(
+      (type, listener, options) => {
+        if (type === "keydown" && typeof listener === "function") {
+          const bridge: EventListener = function (this: Window, event) {
+            Reflect.apply(
+              listener,
+              useLookalike ? lookalike : this,
+              [event],
+            );
+          };
+          bridges.set(listener, bridge);
+          originalAdd(type, bridge, options);
+          return;
+        }
+        originalAdd(type, listener, options);
+      },
+    );
+    vi.spyOn(window, "removeEventListener").mockImplementation(
+      (type, listener, options) => {
+        const exact =
+          type === "keydown" && typeof listener === "function"
+            ? bridges.get(listener)
+            : undefined;
+        originalRemove(type, exact ?? listener, options);
+      },
+    );
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fixture = createVersionDiffView(
+      versionDiffComparePreview(),
+      "unused live text",
+    );
+    fireEvent.click(versionDiffActions(fixture.host).next);
+    const actions = versionDiffActions(fixture.host);
+    const source = actions.previous;
+    const destination = actions.next;
+    source.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+
+    const rejected = dispatchVersionDiffActionKey(
+      source,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(rejected.event.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(source).toHaveFocus();
+    expect(lookalike.document).toBe(document);
+
+    useLookalike = false;
+    const accepted = dispatchVersionDiffActionKey(
+      source,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(accepted.event.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(destination).toHaveFocus();
+  });
+
+  it("accepts an owner defaultView facade with its exact proven backing Window", () => {
+    const defaultView = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(document),
+      "defaultView",
+    )?.get;
+    if (!defaultView) throw new Error("Missing defaultView getter");
+    const backingWindow = Reflect.apply(defaultView, document, []) as Window &
+      typeof globalThis;
+    const originalAdd = backingWindow.addEventListener.bind(backingWindow);
+    const originalRemove = backingWindow.removeEventListener.bind(backingWindow);
+    const bridges = new WeakMap<EventListener, EventListener>();
+    const bridgeReceivers: EventTarget[] = [];
+    const facadeAdd: Window["addEventListener"] = function (
+      this: Window,
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | AddEventListenerOptions,
+    ) {
+      if (type === "keydown" && typeof listener === "function") {
+        const bridge: EventListener = function (this: Window, event) {
+          bridgeReceivers.push(this);
+          Reflect.apply(listener, this, [event]);
+        };
+        bridges.set(listener, bridge);
+        originalAdd(type, bridge, options);
+        return;
+      }
+      if (listener) originalAdd(type, listener, options);
+    } as Window["addEventListener"];
+    const facadeRemove: Window["removeEventListener"] = function (
+      this: Window,
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | EventListenerOptions,
+    ) {
+      const bridge =
+        type === "keydown" && typeof listener === "function"
+          ? bridges.get(listener)
+          : undefined;
+      if (listener) originalRemove(type, bridge ?? listener, options);
+    } as Window["removeEventListener"];
+    const facade = new Proxy(backingWindow as Window & typeof globalThis, {
+      get(target, property) {
+        if (property === "addEventListener") return facadeAdd;
+        if (property === "removeEventListener") return facadeRemove;
+        if (property === "window" || property === "self") return facade;
+        return Reflect.get(target, property, target);
+      },
+    });
+    vi.spyOn(document, "defaultView", "get").mockReturnValue(facade);
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fixture = createVersionDiffView(
+      versionDiffComparePreview(),
+      "unused live text",
+    );
+    expect(document.defaultView).toBe(facade);
+    expect(document.defaultView).not.toBe(backingWindow);
+    fireEvent.click(versionDiffActions(fixture.host).next);
+    const actions = versionDiffActions(fixture.host);
+    actions.previous.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+
+    const accepted = new backingWindow.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "ArrowRight",
+      code: "ArrowRight",
+      view: backingWindow,
+    });
+    expect(accepted.view).toBe(backingWindow);
+    trustKeyboardEvent(accepted, backingWindow);
+    let allowed = true;
+    act(() => {
+      allowed = actions.previous.dispatchEvent(accepted);
+    });
+
+    expect(allowed).toBe(false);
+    expect(accepted.view).toBe(backingWindow);
+    expect(bridgeReceivers).toEqual([backingWindow]);
+    expect(bridgeReceivers[0]).toBe(accepted.view);
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(actions.next).toHaveFocus();
+  });
+
+  it("rejects restored action DOM history and recovers through a fresh comparison", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preview = versionDiffComparePreview();
+    const fixture = createVersionDiffView(preview, "unused live text");
+    fireEvent.click(versionDiffActions(fixture.host).next);
+    let actions = versionDiffActions(fixture.host);
+    const parent = actions.previous.parentNode!;
+    const nextSibling = actions.previous.nextSibling;
+    parent.append(actions.previous);
+    parent.insertBefore(actions.previous, nextSibling);
+    actions.previous.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+
+    const rejected = dispatchVersionDiffActionKey(
+      actions.previous,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(rejected.event.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    renderVersionDiffView(
+      fixture,
+      preview,
+      "unused live text",
+      "fresh-actions",
+    );
+    fireEvent.click(versionDiffActions(fixture.host).next);
+    actions = versionDiffActions(fixture.host);
+    actions.previous.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+    const accepted = dispatchVersionDiffActionKey(
+      actions.previous,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(accepted.event.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(actions.next).toHaveFocus();
+  });
+
+  it("rejects partial action-ref replay, stale handlers, and cleaned-up publications", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preview = versionDiffComparePreview();
+    const fixture = createVersionDiffView(preview, "unused live text");
+    fireEvent.click(versionDiffActions(fixture.host).next);
+    let actions = versionDiffActions(fixture.host);
+    const source = actions.previous;
+    const ref = versionDiffRef(source);
+    const staleCapture = versionDiffReactHandler<
+      (event: DeliveredVersionDiffActionKey) => void
+    >(source, "onKeyDownCapture");
+    const staleBubble = versionDiffReactHandler<
+      (event: DeliveredVersionDiffActionKey) => void
+    >(source, "onKeyDown");
+    act(() => {
+      ref(null);
+      ref(source);
+    });
+    source.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+    const replayed = dispatchVersionDiffActionKey(
+      source,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(replayed.event.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    renderVersionDiffView(
+      fixture,
+      preview,
+      "unused live text",
+      "fresh-ref",
+    );
+    fireEvent.click(versionDiffActions(fixture.host).next);
+    actions = versionDiffActions(fixture.host);
+    actions.previous.focus();
+    preventDefault.mockClear();
+    focus.mockClear();
+    const fresh = dispatchVersionDiffActionKey(
+      actions.previous,
+      "ArrowRight",
+      {},
+      false,
+    );
+    expect(fresh.event.defaultPrevented).toBe(true);
+    expect(focus).toHaveBeenCalledOnce();
+
+    await act(async () => fixture.root.unmount());
+    const fixtureIndex = versionDiffViews.indexOf(fixture);
+    if (fixtureIndex >= 0) versionDiffViews.splice(fixtureIndex, 1);
+    const fabricated = {
+      nativeEvent: createVersionDiffActionKey(source, "ArrowRight"),
+    } as unknown as DeliveredVersionDiffActionKey;
+    expect(() => {
+      staleCapture(fabricated);
+      staleBubble(fabricated);
+    }).not.toThrow();
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledOnce();
+    fixture.host.remove();
+  });
+
+  it("preserves Tab, pointer, Enter, Space, and bracket activation behavior", async () => {
+    const user = userEvent.setup();
+    const fixture = createVersionDiffView(
+      versionDiffComparePreview(),
+      "unused live text",
+    );
+    let actions = versionDiffActions(fixture.host);
+    const header = within(fixture.host).getByTestId("diff-header");
+    const initialHeader = header.textContent;
+
+    await user.click(actions.swap!);
+    expect(header.textContent).not.toBe(initialHeader);
+    await user.keyboard("{Enter}");
+    expect(header.textContent).toBe(initialHeader);
+    await user.keyboard(" ");
+    expect(header.textContent).not.toBe(initialHeader);
+
+    actions = versionDiffActions(fixture.host);
+    await user.click(actions.next);
+    actions = versionDiffActions(fixture.host);
+    actions.swap!.focus();
+    const tab = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "Tab",
+      code: "Tab",
+    });
+    trustKeyboardEvent(tab, window);
+    let tabAllowed = false;
+    act(() => {
+      tabAllowed = actions.swap!.dispatchEvent(tab);
+    });
+    expect(tabAllowed).toBe(true);
+    expect(tab.defaultPrevented).toBe(false);
+
+    fireEvent.keyDown(actions.previous, { key: "]" });
+    expect(within(fixture.host).getByTestId("diff-counter")).toHaveTextContent(
+      "3 of 3 changes",
+    );
+    actions = versionDiffActions(fixture.host);
+    fireEvent.keyDown(actions.next, { key: "[" });
+    expect(within(fixture.host).getByTestId("diff-counter")).toHaveTextContent(
+      "2 of 3 changes",
+    );
+    expectNoVersionDiffExternalWork();
+  });
 });
 
 describe("VersionDiffView · direct-root Strict Mode Home/End authority", () => {
