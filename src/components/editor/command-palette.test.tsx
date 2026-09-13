@@ -3,6 +3,7 @@ import { StrictMode, useCallback, useEffect, useLayoutEffect, useState, type Cha
 import { createRoot } from "react-dom/client";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { compile } from "tailwindcss";
 import { CommandPalette } from "./command-palette";
 import type { Command } from "./commands";
 
@@ -1004,6 +1005,212 @@ describe("CommandPalette child loading", () => {
       await act(async () => root.unmount());
       host.remove();
     }
+  });
+});
+
+describe("CommandPalette child error wrapping", () => {
+  const longMessage = "unavailable".repeat(32);
+  const literalMessage = '  <strong title="literal">Unavailable</strong>\n\t<img src="literal"> & retry  ';
+
+  function expectChildError(message: string, retrying = false) {
+    const alert = screen.getByRole("alert");
+    const span = alert.querySelector<HTMLSpanElement>(":scope > span");
+    if (!span) throw new Error("Child error message span was not rendered");
+    const retry = within(alert).getByRole("button", { name: retrying ? "Retrying…" : "Retry" });
+    expect(alert.tagName).toBe("DIV");
+    expect(alert.className).toBe("mx-1.5 mt-1.5 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40");
+    expect(alert.getAttributeNames().sort()).toEqual(["aria-atomic", "class", "role"]);
+    expect(alert).toHaveAttribute("aria-atomic", "true");
+    expect([...alert.childNodes]).toEqual([span, retry]);
+    expect(span.tagName).toBe("SPAN");
+    expect(span.className).toBe("min-w-0 flex-1 wrap-anywhere");
+    expect(span.getAttributeNames()).toEqual(["class"]);
+    expect(span.textContent).toBe(message);
+    expect(span.childElementCount).toBe(0);
+    expect(span.childNodes).toHaveLength(1);
+    expect(span.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(retry.tagName).toBe("BUTTON");
+    expect(retry.className).toBe("btn btn-sm btn-outline shrink-0");
+    expect(retry.getAttributeNames().sort()).toEqual(
+      retrying ? ["aria-busy", "class", "disabled", "type"] : ["class", "type"],
+    );
+    expect(retry).toHaveAttribute("type", "button");
+    expect(retry.textContent).toBe(retrying ? "Retrying…" : "Retry");
+    expect(retry.childElementCount).toBe(0);
+    expect(retry.childNodes).toHaveLength(1);
+    if (retrying) {
+      expect(retry).toBeDisabled();
+      expect(retry).toHaveAttribute("aria-busy", "true");
+    } else {
+      expect(retry).toBeEnabled();
+    }
+    return { alert, span, retry };
+  }
+
+  it.each([
+    { kind: "unbroken", message: longMessage },
+    { kind: "ordinary", message: "Recent documents are unavailable." },
+    { kind: "literal HTML and whitespace", message: literalMessage },
+    { kind: "whitespace-only", message: "  \n\t  " },
+  ])("keeps the exact $kind message in the existing span beside Retry", async ({ kind, message }) => {
+    const pending = deferred<Command[]>();
+    const children = vi.fn(() => pending.promise);
+    render(<Harness items={[childCommand("parent", "Parent…", children)]} />);
+    const input = await screen.findByTestId("palette-input");
+    dispatchPaletteKey(input, "Enter");
+    await settle(pending, "reject", new Error(message));
+
+    if (kind === "unbroken") {
+      expect(message.length).toBeGreaterThanOrEqual(240);
+      expect(message).not.toMatch(/\s/);
+    }
+    expectChildError(message);
+    expect(screen.getByTestId("palette-item-parent")).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("listbox")).not.toHaveAttribute("aria-busy");
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(children).toHaveBeenCalledOnce();
+    expect(input).toHaveFocus();
+  });
+
+  it("replaces a failed retry message and clears it on success without reviving the old Retry", async () => {
+    const first = deferred<Command[]>();
+    const failedRetry = deferred<Command[]>();
+    const successfulRetry = deferred<Command[]>();
+    const children = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(failedRetry.promise)
+      .mockReturnValueOnce(successfulRetry.promise);
+    const run = vi.fn();
+    const mounted = await renderStrictRoot(
+      <Harness items={[childCommand("parent", "Parent…", children)]} />,
+    );
+
+    try {
+      fireEvent.click(screen.getByTestId("palette-item-parent"));
+      await settle(first, "reject", new Error(longMessage));
+      const { retry: oldRetry } = expectChildError(longMessage);
+      const oldClick = reactProps<ButtonHandlerProps>(oldRetry).onClick;
+      const oldEvent = exactEvent(oldRetry);
+      await act(async () => {
+        oldClick(oldEvent as unknown as React.MouseEvent<HTMLButtonElement>);
+        oldClick(oldEvent as unknown as React.MouseEvent<HTMLButtonElement>);
+        oldClick(exactEvent(oldRetry) as unknown as React.MouseEvent<HTMLButtonElement>);
+      });
+      expect(children).toHaveBeenCalledTimes(2);
+      expectChildError(longMessage, true);
+      expect(screen.getByRole("listbox")).toHaveAttribute("aria-busy", "true");
+
+      await settle(failedRetry, "reject", new Error(literalMessage));
+      const { retry } = expectChildError(literalMessage);
+      expect(screen.getByRole("alert").textContent).not.toContain(longMessage);
+      act(() => {
+        oldClick(oldEvent as unknown as React.MouseEvent<HTMLButtonElement>);
+        oldClick(exactEvent(retry) as unknown as React.MouseEvent<HTMLButtonElement>);
+      });
+      expect(children).toHaveBeenCalledTimes(2);
+      expectChildError(literalMessage);
+
+      fireEvent.click(retry);
+      fireEvent.click(retry);
+      expect(children).toHaveBeenCalledTimes(3);
+      expectChildError(literalMessage, true);
+      await settle(successfulRetry, "resolve", [command("result", "Result", run)]);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByRole("dialog").textContent).not.toContain(literalMessage);
+      expect(screen.getByRole("dialog").textContent).not.toContain(longMessage);
+      expect(screen.getByRole("listbox")).not.toHaveAttribute("aria-busy");
+      const input = screen.getByTestId("palette-input");
+      expect(input).toHaveFocus();
+      expect(selectedCommand(input)).toBe("palette-item-result");
+      dispatchPaletteKey(input, "Enter");
+      await waitFor(() => expect(run).toHaveBeenCalledOnce());
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(children).toHaveBeenCalledTimes(3);
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it.each(["command", "query", "closed-reopened visit"] as const)(
+    "does not publish an old retry failure after a superseding %s",
+    async (transition) => {
+      const stale = deferred<Command[]>();
+      const current = deferred<Command[]>();
+      const currentRetry = deferred<Command[]>();
+      const firstChildren = vi.fn()
+        .mockRejectedValueOnce(new Error(longMessage))
+        .mockReturnValueOnce(stale.promise);
+      const secondChildren = vi.fn()
+        .mockReturnValueOnce(current.promise)
+        .mockReturnValueOnce(currentRetry.promise);
+      const run = vi.fn();
+      const commands = commandProvider(
+        childCommand("first", "First child…", firstChildren),
+        childCommand("second", "Second child…", secondChildren),
+      );
+      const onOpenChange = vi.fn((open: boolean) => {
+        rendered.rerender(<CommandPalette open={open} onOpenChange={onOpenChange} commands={commands} />);
+      });
+      const rendered = render(<CommandPalette open onOpenChange={onOpenChange} commands={commands} />);
+      fireEvent.click(await screen.findByTestId("palette-item-first"));
+      await screen.findByRole("alert");
+      const { retry: oldRetry } = expectChildError(longMessage);
+      const oldClick = reactProps<ButtonHandlerProps>(oldRetry).onClick;
+      fireEvent.click(oldRetry);
+      fireEvent.click(oldRetry);
+      expect(firstChildren).toHaveBeenCalledTimes(2);
+      expectChildError(longMessage, true);
+
+      if (transition === "query") {
+        fireEvent.change(screen.getByTestId("palette-input"), { target: { value: "Second" } });
+      } else if (transition === "closed-reopened visit") {
+        rendered.rerender(<CommandPalette open={false} onOpenChange={onOpenChange} commands={commands} />);
+        expect(screen.queryByRole("dialog")).toBeNull();
+        rendered.rerender(<CommandPalette open onOpenChange={onOpenChange} commands={commands} />);
+      }
+      fireEvent.click(screen.getByTestId("palette-item-second"));
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByRole("dialog").textContent).not.toContain(longMessage);
+      expect(secondChildren).toHaveBeenCalledOnce();
+      await settle(current, "reject", new Error(literalMessage));
+      const { retry } = expectChildError(literalMessage);
+
+      act(() => {
+        oldClick(exactEvent(oldRetry) as unknown as React.MouseEvent<HTMLButtonElement>);
+        oldClick(exactEvent(retry) as unknown as React.MouseEvent<HTMLButtonElement>);
+      });
+      expect(firstChildren).toHaveBeenCalledTimes(2);
+      expect(secondChildren).toHaveBeenCalledOnce();
+      fireEvent.click(retry);
+      fireEvent.click(retry);
+      expect(secondChildren).toHaveBeenCalledTimes(2);
+      expectChildError(literalMessage, true);
+      await settle(stale, "reject", new Error(`Stale${longMessage}`));
+      expectChildError(literalMessage, true);
+      expect(screen.getByRole("dialog").textContent).not.toContain(longMessage);
+      expect(screen.getByTestId("palette-input")).toHaveFocus();
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      await settle(currentRetry, "resolve", [command("result", "Result", run)]);
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByRole("dialog").textContent).not.toContain(literalMessage);
+      expect(screen.getByRole("listbox")).not.toHaveAttribute("aria-busy");
+      fireEvent.click(screen.getByTestId("palette-item-result"));
+      await waitFor(() => expect(run).toHaveBeenCalledOnce());
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      expect(firstChildren).toHaveBeenCalledTimes(2);
+      expect(secondChildren).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("emits overflow-wrap anywhere rather than break-all from installed Tailwind", async () => {
+    const { build } = await compile("@tailwind utilities;");
+    const css = build(["wrap-anywhere", "flex-1", "shrink-0"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).toMatch(/\.flex-1\s*\{\s*flex:\s*1;\s*\}/);
+    expect(css).toMatch(/\.shrink-0\s*\{\s*flex-shrink:\s*0;\s*\}/);
+    expect(css).not.toMatch(/word-break:|text-overflow:|overflow:\s*(hidden|auto|scroll)/);
   });
 });
 
