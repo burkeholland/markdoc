@@ -88,6 +88,9 @@ import type { DocumentDto } from "@/server/dto";
 import type { AgentRequestMirror } from "./agent-requests";
 import { EditorShell } from "./editor-shell";
 
+// Compile the real lazy module once; each open still publishes it through EditorShell's lazyOnFirstUse boundary.
+const commentsPanelReady = import("./comments-panel");
+
 let session: CollabSession;
 let rich: PMView | null = null;
 let code: CMView | null = null;
@@ -169,6 +172,8 @@ function expectClosed() {
 }
 async function expectPanel(width: number) {
   await screen.findByTestId("comments-panel");
+  expect(screen.getAllByTestId("comments-panel")).toHaveLength(1);
+  expect(screen.queryByTestId("side-panel-loading")).toBeNull();
   const kind = width < PHONE_MAX ? "sheet" : width < TABLET_MAX ? "panel-overlay" : "side-panel";
   expect(screen.getByTestId(kind)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Close comments" })).toBeInTheDocument();
@@ -177,6 +182,7 @@ async function expectPanel(width: number) {
 }
 
 beforeEach(async () => {
+  await commentsPanelReady;
   localStorage.clear();
   window.history.replaceState(null, "", "/");
   media.clear();
