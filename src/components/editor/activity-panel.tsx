@@ -165,6 +165,7 @@ interface ActivityKeyboardAuthority {
   readonly eventView: ActivityCapturedGetter<Window | null>;
   readonly key: ActivityCapturedGetter<string>;
   readonly code: ActivityCapturedGetter<string>;
+  readonly location: ActivityCapturedGetter<number>;
   readonly repeat: ActivityCapturedGetter<boolean>;
   readonly composing: ActivityCapturedGetter<boolean>;
   readonly altKey: ActivityCapturedGetter<boolean>;
@@ -226,6 +227,7 @@ interface ActivityNativeKeySnapshot {
   readonly control: ActivityHeaderControl;
   readonly key: ActivityHeaderNavigationKey;
   readonly code: string;
+  readonly location: number;
   readonly target: EventTarget | null;
   readonly path: readonly EventTarget[];
   readonly bubbles: boolean;
@@ -247,10 +249,11 @@ interface ActivityNativeKeyDelivery {
   captureInvalid: boolean;
   captureRootCount: number;
   captureRootEvent: ReactKeyboardEvent<HTMLElement> | null;
-  reactMethods: ActivityReactKeyMethods | null;
+  captureMethods: ActivityReactKeyMethods | null;
   captureCount: number;
   captureEvent: ReactKeyboardEvent<HTMLButtonElement> | null;
   bubbleInvalid: boolean;
+  bubbleMethods: ActivityReactKeyMethods | null;
   bubbleCount: number;
   bubbleEvent: ReactKeyboardEvent<HTMLButtonElement> | null;
   bubbleRootCount: number;
@@ -1330,6 +1333,7 @@ function captureActivityKeyboardAuthority(
   const eventView = captureActivityGetter<Window | null>(ownerWindow, uiEventPrototype, "view");
   const key = captureActivityGetter<string>(ownerWindow, keyboardPrototype, "key");
   const code = captureActivityGetter<string>(ownerWindow, keyboardPrototype, "code");
+  const location = captureActivityGetter<number>(ownerWindow, keyboardPrototype, "location");
   const repeat = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "repeat");
   const composing = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "isComposing");
   const altKey = captureActivityGetter<boolean>(ownerWindow, keyboardPrototype, "altKey");
@@ -1368,6 +1372,7 @@ function captureActivityKeyboardAuthority(
     !eventView ||
     !key ||
     !code ||
+    !location ||
     !repeat ||
     !composing ||
     !altKey ||
@@ -1400,6 +1405,7 @@ function captureActivityKeyboardAuthority(
     eventView,
     key,
     code,
+    location,
     repeat,
     composing,
     altKey,
@@ -1476,6 +1482,7 @@ function captureActivityKeyboardAuthority(
     eventView,
     key,
     code,
+    location,
     repeat,
     composing,
     altKey,
@@ -1591,11 +1598,14 @@ function activityNativeKeySnapshotMatches(
       keyboard.eventType.read(event) === "keydown" &&
       keyboard.key.read(event) === snapshot.key &&
       keyboard.code.read(event) === snapshot.code &&
+      keyboard.location.read(event) === snapshot.location &&
       keyboard.eventTarget.read(event) === snapshot.target &&
       keyboard.eventBubbles.read(event) === snapshot.bubbles &&
       keyboard.eventCancelable.read(event) === snapshot.cancelable &&
       Object.is(view, snapshot.view) &&
-      (view === null || view === keyboard.ownerWindow) &&
+      (view === null ||
+        view === snapshot.publication.ownerWindow ||
+        view === snapshot.receiver) &&
       !keyboard.eventDefaultPrevented.read(event) &&
       !keyboard.eventCancelBubble.read(event) &&
       !keyboard.repeat.read(event) &&
@@ -1716,6 +1726,7 @@ function exactActivityHeaderKey<Element extends HTMLElement>(
     const key = keyboard.key.read(nativeEvent);
     if (!isActivityHeaderNavigationKey(key)) return null;
     const code = keyboard.code.read(nativeEvent);
+    const location = keyboard.location.read(nativeEvent);
     const target = keyboard.eventTarget.read(nativeEvent);
     const currentTarget = keyboard.eventCurrentTarget.read(nativeEvent);
     const path = keyboard.eventPath.invoke(nativeEvent);
@@ -1753,7 +1764,9 @@ function exactActivityHeaderKey<Element extends HTMLElement>(
       !ctrlKey &&
       !metaKey &&
       !shiftKey &&
-      (nativeView === null || nativeView === keyboard.ownerWindow) &&
+      (nativeView === null ||
+        nativeView === publication.ownerWindow ||
+        nativeView === windowReceiver) &&
       target === source &&
       target instanceof keyboard.Node &&
       target.ownerDocument === publication.ownerDocument &&
@@ -1774,6 +1787,7 @@ function exactActivityHeaderKey<Element extends HTMLElement>(
       event.nativeEvent === nativeEvent &&
       event.key === key &&
       event.code === code &&
+      event.location === location &&
       event.repeat === repeat &&
       event.altKey === altKey &&
       event.ctrlKey === ctrlKey &&
@@ -2368,8 +2382,18 @@ function createActivityPublication({
         const key = keyboard.key.read(nativeEvent);
         const target = keyboard.eventTarget.read(nativeEvent);
         const control =
-          headerControls.find((entry) => entry.element === target) ?? null;
-        if (!isActivityHeaderNavigationKey(key) || !control) return;
+          publication.headerControls.find((entry) => entry.element === target) ??
+          null;
+        const view = keyboard.eventView.read(nativeEvent);
+        if (
+          !isActivityHeaderNavigationKey(key) ||
+          !control ||
+          (view !== null &&
+            view !== publication.ownerWindow &&
+            view !== this)
+        ) {
+          return;
+        }
         const delivery: ActivityNativeKeyDelivery = {
           snapshot: Object.freeze({
             event: nativeEvent,
@@ -2377,11 +2401,12 @@ function createActivityPublication({
             control,
             key,
             code: keyboard.code.read(nativeEvent),
+            location: keyboard.location.read(nativeEvent),
             target,
             path: Object.freeze([...path]),
             bubbles: keyboard.eventBubbles.read(nativeEvent),
             cancelable: keyboard.eventCancelable.read(nativeEvent),
-            view: keyboard.eventView.read(nativeEvent),
+            view,
             receiver: this,
           }),
           delegationTarget: null,
@@ -2389,10 +2414,11 @@ function createActivityPublication({
           captureInvalid: false,
           captureRootCount: 0,
           captureRootEvent: null,
-          reactMethods: null,
+          captureMethods: null,
           captureCount: 0,
           captureEvent: null,
           bubbleInvalid: false,
+          bubbleMethods: null,
           bubbleCount: 0,
           bubbleEvent: null,
           bubbleRootCount: 0,
@@ -2472,6 +2498,10 @@ function createActivityPublication({
             ? "navigate-refresh"
             : "navigate-close"
         ];
+      const expectedMethods =
+        phase === "capture"
+          ? delivery.captureMethods
+          : delivery.bubbleMethods;
       const facts =
         source && liveHeader
           ? exactActivityHeaderKey(
@@ -2481,7 +2511,7 @@ function createActivityPublication({
               liveHeader,
               phase,
               staged.receiver,
-              delivery.reactMethods ?? undefined,
+              expectedMethods ?? undefined,
             )
           : null;
       if (
@@ -2528,7 +2558,7 @@ function createActivityPublication({
         }
         delivery.captureRootCount += 1;
         delivery.captureRootEvent = event;
-        delivery.reactMethods = facts.methods;
+        delivery.captureMethods = facts.methods;
         delivery.delegationTarget = facts.delegationTarget;
         return;
       }
@@ -2561,6 +2591,7 @@ function createActivityPublication({
       }
       delivery.bubbleRootCount += 1;
       delivery.bubbleRootEvent = event;
+      finalizeNative(facts.nativeEvent);
     };
 
     /**
@@ -2609,7 +2640,9 @@ function createActivityPublication({
         source.element,
         phase,
         delivery.snapshot.receiver,
-        delivery.reactMethods ?? undefined,
+        (phase === "capture"
+          ? delivery.captureMethods
+          : delivery.bubbleMethods) ?? undefined,
       );
       if (!facts) {
         if (phase === "capture") delivery.captureInvalid = true;
@@ -2691,13 +2724,13 @@ function createActivityPublication({
         return;
       }
       delivery.bubbleEvent = event;
+      delivery.bubbleMethods = facts.methods;
     };
 
     /**
-     * The publication's own bubble listener on the delegation root, registered while React was
-     * dispatching the capture pass and therefore invoked after React's own delivery. Nothing is
-     * prevented or focused until the publication, the movement, both exact wrapper identities, the
-     * native event, the source and the destination have all been claimed together.
+     * Finalizes while React's authenticated header bubble wrapper is still current, after the native
+     * event crossed the panel. The registered delegation-root listener remains a terminal backstop,
+     * but a successful delivery is deleted here so synthetic ancestors observe the prevention.
      */
     function finalizeNative(nativeEvent: Event) {
       const delivery = nativeDeliveries.get(nativeEvent);
@@ -2726,7 +2759,9 @@ function createActivityPublication({
           delivery.captureInvalid ||
           delivery.bubbleInvalid ||
           delivery.captureRootCount !== 1 ||
+          !delivery.captureMethods ||
           delivery.captureCount !== 1 ||
+          !delivery.bubbleMethods ||
           delivery.bubbleCount !== 1 ||
           delivery.bubbleRootCount !== 1 ||
           !delivery.captureRootEvent ||
@@ -2786,10 +2821,36 @@ function createActivityPublication({
         delivery.captureInvalid = true;
         delivery.bubbleInvalid = true;
         nativeDeliveries.delete(nativeEvent);
-        keyboard.eventPreventDefault.invoke(nativeEvent);
-        if (keyboard.eventDefaultPrevented.read(nativeEvent)) {
-          keyboard.focus.invoke(destination.element, { preventScroll: true });
+        const bubbleMethods = activityReactKeyMethods(
+          bubbleEvent,
+          keyboard,
+          delivery.bubbleMethods,
+        );
+        if (
+          !bubbleMethods ||
+          bubbleEvent.nativeEvent !== nativeEvent ||
+          bubbleEvent.defaultPrevented !== false
+        ) {
+          return;
         }
+        keyboard.apply(bubbleMethods.preventDefault, bubbleEvent, []);
+        const currentIsDefaultPrevented = bubbleEvent.isDefaultPrevented as (
+          ...args: never[]
+        ) => unknown;
+        if (
+          !keyboard.isCurrent() ||
+          !keyboard.eventDefaultPrevented.read(nativeEvent) ||
+          bubbleEvent.defaultPrevented !== true ||
+          !keyboard.reactMethodMatches(
+            bubbleEvent,
+            "isDefaultPrevented",
+            currentIsDefaultPrevented,
+          ) ||
+          keyboard.apply(currentIsDefaultPrevented, bubbleEvent, []) !== true
+        ) {
+          return;
+        }
+        keyboard.focus.invoke(destination.element, { preventScroll: true });
       } catch {
         delivery.captureInvalid = true;
         delivery.bubbleInvalid = true;
