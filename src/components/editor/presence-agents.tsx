@@ -780,15 +780,12 @@ interface PresenceKeyboardEventSnapshot {
 
 interface PresenceKeyboardReactMethods {
   readonly preventDefault: ReactKeyboardEvent<HTMLElement>["preventDefault"];
-  readonly stopPropagation: ReactKeyboardEvent<HTMLElement>["stopPropagation"];
   readonly isDefaultPrevented: () => boolean;
   readonly isPropagationStopped: () => boolean;
-  readonly persist: () => void;
 }
 
 interface PresenceKeyboardReactSnapshot {
   readonly event: ReactKeyboardEvent<HTMLElement>;
-  readonly prototype: object | null;
   readonly nativeEvent: KeyboardEvent;
   readonly target: HTMLButtonElement;
   readonly currentTarget: HTMLElement;
@@ -1856,30 +1853,21 @@ function capturePresenceKeyboardReactEvent(
   try {
     const reactEvent = event as ReactKeyboardEvent<HTMLElement> & {
       preventDefault?: unknown;
-      stopPropagation?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
-      persist?: unknown;
     };
     const preventDefault = reactEvent.preventDefault;
-    const stopPropagation = reactEvent.stopPropagation;
     const isDefaultPrevented = reactEvent.isDefaultPrevented;
     const isPropagationStopped = reactEvent.isPropagationStopped;
-    const persist = reactEvent.persist;
-    const prototype = authority.prototypeOf(event);
     if (
       typeof preventDefault !== "function" ||
-      typeof stopPropagation !== "function" ||
       typeof isDefaultPrevented !== "function" ||
       typeof isPropagationStopped !== "function" ||
-      typeof persist !== "function" ||
       authority.apply(isDefaultPrevented, event, []) !== false ||
       authority.apply(isPropagationStopped, event, []) !== false ||
       reactEvent.preventDefault !== preventDefault ||
-      reactEvent.stopPropagation !== stopPropagation ||
       reactEvent.isDefaultPrevented !== isDefaultPrevented ||
       reactEvent.isPropagationStopped !== isPropagationStopped ||
-      reactEvent.persist !== persist ||
       event.nativeEvent !== native.event ||
       event.type !== native.type ||
       event.target !== native.target ||
@@ -1912,7 +1900,6 @@ function capturePresenceKeyboardReactEvent(
     }
     return Object.freeze({
       event,
-      prototype,
       nativeEvent: native.event,
       target: native.target,
       currentTarget,
@@ -1920,10 +1907,8 @@ function capturePresenceKeyboardReactEvent(
       view: event.view,
       methods: Object.freeze({
         preventDefault,
-        stopPropagation,
         isDefaultPrevented,
         isPropagationStopped,
-        persist,
       }),
     });
   } catch {
@@ -1940,13 +1925,10 @@ function presenceKeyboardReactSnapshotMatches(
   try {
     const event = snapshot.event as ReactKeyboardEvent<HTMLElement> & {
       preventDefault?: unknown;
-      stopPropagation?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
-      persist?: unknown;
     };
     return (
-      authority.prototypeOf(event) === snapshot.prototype &&
       event.nativeEvent === snapshot.nativeEvent &&
       event.nativeEvent === native.event &&
       event.type === native.type &&
@@ -1979,12 +1961,10 @@ function presenceKeyboardReactSnapshotMatches(
         )) &&
       event.detail === native.detail &&
       event.preventDefault === snapshot.methods.preventDefault &&
-      event.stopPropagation === snapshot.methods.stopPropagation &&
       event.isDefaultPrevented ===
         snapshot.methods.isDefaultPrevented &&
       event.isPropagationStopped ===
         snapshot.methods.isPropagationStopped &&
-      event.persist === snapshot.methods.persist &&
       authority.apply(
         snapshot.methods.isDefaultPrevented,
         snapshot.event,
@@ -2137,7 +2117,7 @@ function createPresenceRequestsPublication(
   let currentRuntime: PresencePublicationRuntime<PresenceRequestsPublication> | null = null;
   let lastRuntime: PresencePublicationRuntime<PresenceRequestsPublication> | null = null;
   let keyboardAuthority: PresenceKeyboardAuthority | null = null;
-  let keyboardPair: PresenceKeyboardPair | null = null;
+  let keyboardPairs = new WeakMap<KeyboardEvent, PresenceKeyboardPair>();
   let successorRequested = false;
   const onElementChange = (
     owner: PresenceElementOwnerView,
@@ -2465,7 +2445,7 @@ function createPresenceRequestsPublication(
     if (
       !nativeEvent ||
       typeof nativeEvent !== "object" ||
-      keyboardPair ||
+      keyboardPairs.has(nativeEvent as KeyboardEvent) ||
       cells.keyboardDelivery.current ||
       cells.attemptedKeyboardReactEvents.has(event) ||
       cells.attemptedKeyboardNativeEvents.has(nativeEvent)
@@ -2555,23 +2535,24 @@ function createPresenceRequestsPublication(
       sourceClaim: Object.freeze({ source }),
       destinationClaim: Object.freeze({ destination }),
     });
-    keyboardPair = pair;
-    queueMicrotask(() => {
-      if (keyboardPair === pair) keyboardPair = null;
-    });
+    keyboardPairs.set(native.event, pair);
   };
 
   const completeKeyboardNavigation = (
     index: number,
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
-    const pair = keyboardPair;
     let nativeEvent: unknown;
     try {
       nativeEvent = event.nativeEvent;
     } catch {
       return;
     }
+    const pair =
+      nativeEvent &&
+      typeof nativeEvent === "object"
+        ? keyboardPairs.get(nativeEvent as KeyboardEvent)
+        : undefined;
     if (
       !pair ||
       !nativeEvent ||
@@ -2583,8 +2564,6 @@ function createPresenceRequestsPublication(
     ) {
       return;
     }
-    cells.attemptedKeyboardReactEvents.add(event);
-    keyboardPair = null;
     const {
       authority: keyboard,
       publication,
@@ -2654,6 +2633,8 @@ function createPresenceRequestsPublication(
         return;
       }
 
+      keyboardPairs.delete(pair.native.event);
+      cells.attemptedKeyboardReactEvents.add(event);
       delivery = Object.freeze({ pair, bubble });
       if (
         cells.claimedKeyboardDeliveries.has(delivery) ||
@@ -2727,11 +2708,10 @@ function createPresenceRequestsPublication(
       if (
         bubble.event.preventDefault !==
           bubble.methods.preventDefault ||
-        bubble.event.stopPropagation !==
-          bubble.methods.stopPropagation ||
-        bubble.event.persist !== bubble.methods.persist ||
         typeof currentDefaultQuery !== "function" ||
         typeof currentPropagationQuery !== "function" ||
+        currentPropagationQuery !==
+          bubble.methods.isPropagationStopped ||
         presenceKeyboardValue<boolean>(
           keyboard,
           keyboard.event.defaultPrevented,
@@ -2902,7 +2882,10 @@ function createPresenceRequestsPublication(
         if (currentRuntime?.publication === publication) currentRuntime = null;
       },
       onRetire: () => {
-        keyboardPair = null;
+        keyboardPairs = new WeakMap<
+          KeyboardEvent,
+          PresenceKeyboardPair
+        >();
         keyboardAuthority?.terminal.release();
         keyboardAuthority = null;
       },

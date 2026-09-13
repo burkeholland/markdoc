@@ -297,6 +297,21 @@ function interceptKeyDown(
   };
 }
 
+function installKeyDownCapture(
+  element: HTMLElement,
+  handler: CapturedKeyDown,
+): () => void {
+  const { key, record, props } = reactPropsEntry(element);
+  const intercepted = {
+    ...props,
+    onKeyDownCapture: handler,
+  };
+  record[key] = intercepted;
+  return () => {
+    if (record[key] === intercepted) record[key] = props;
+  };
+}
+
 function captureRef<T extends HTMLElement>(element: T): (node: T | null) => void {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   const props = propsKey
@@ -886,10 +901,12 @@ describe("PresenceStack", () => {
     const makeIndependentMethods = (
       event: ReactKeyboardEvent<HTMLElement>,
       trackReceiver: boolean,
+      prototype: object | null,
     ) => {
       const originalPrevent = event.preventDefault;
       const originalDefault = event.isDefaultPrevented;
       const originalPropagation = event.isPropagationStopped;
+      Object.setPrototypeOf(event, prototype);
       const replacementPrevent = function (
         this: ReactKeyboardEvent<HTMLElement>,
       ) {
@@ -919,6 +936,18 @@ describe("PresenceStack", () => {
         isPropagationStopped: {
           configurable: true,
           value: replacementPropagation,
+          writable: true,
+        },
+        persist: {
+          configurable: true,
+          value: trackReceiver ? { incompatible: true } : undefined,
+          writable: true,
+        },
+        stopPropagation: {
+          configurable: true,
+          value: trackReceiver
+            ? vi.fn()
+            : { incompatible: true },
           writable: true,
         },
       });
@@ -965,12 +994,12 @@ describe("PresenceStack", () => {
         "onKeyDownCapture",
         (active, event) => {
           captureWrapper = event;
-          Object.setPrototypeOf(
+          capturePrevent = makeIndependentMethods(
             event,
-            Object.create(Object.getPrototypeOf(event)),
+            false,
+            Object.create(null),
           );
           capturePrototype = Object.getPrototypeOf(event);
-          capturePrevent = makeIndependentMethods(event, false);
           active(event);
         },
       );
@@ -979,12 +1008,12 @@ describe("PresenceStack", () => {
         "onKeyDown",
         (active, event) => {
           bubbleWrapper = event;
-          Object.setPrototypeOf(
+          bubblePrevent = makeIndependentMethods(
             event,
-            Object.create(Object.getPrototypeOf(event)),
+            true,
+            Object.freeze({ wrapper: "bubble" }),
           );
           bubblePrototype = Object.getPrototypeOf(event);
-          bubblePrevent = makeIndependentMethods(event, true);
           active(event);
         },
       );
@@ -1005,6 +1034,14 @@ describe("PresenceStack", () => {
       expect(captureWrapper).not.toBe(bubbleWrapper);
       expect(capturePrototype).not.toBe(bubblePrototype);
       expect(capturePrevent).not.toBe(bubblePrevent);
+      expect(captureWrapper!.persist).toBeUndefined();
+      expect(typeof bubbleWrapper!.persist).not.toBe("function");
+      expect(typeof captureWrapper!.stopPropagation).not.toBe(
+        "function",
+      );
+      expect(bubbleWrapper!.stopPropagation).toEqual(
+        expect.any(Function),
+      );
       expect(captureWrapper!.nativeEvent).toBe(event);
       expect(bubbleWrapper!.nativeEvent).toBe(event);
       expect(captureWrapper!.eventPhase).toBe(
@@ -1057,6 +1094,406 @@ describe("PresenceStack", () => {
       frame.remove();
     }
   });
+
+  it.each([
+    ["persist", "absent"],
+    ["persist", "replacement"],
+    ["persist", "non-function"],
+    ["stopPropagation", "absent"],
+    ["stopPropagation", "replacement"],
+    ["stopPropagation", "non-function"],
+  ] as const)(
+    "ignores %s when it is %s on both legitimate React wrappers",
+    (property, variant) => {
+      const local = person(
+        `auxiliary-${property}-${variant}`,
+        `Auxiliary ${property} ${variant}`,
+        { isLocal: true, role: "owner" },
+      );
+      const session = new PresenceSession({
+        localId: local.id,
+        localName: local.name,
+        users: [local],
+        role: "owner",
+      });
+      const onCancel = vi.fn<(requestId: string) => void>();
+      const ownerWindow = document.defaultView;
+      if (!ownerWindow) {
+        throw new Error("The test document has no Window");
+      }
+      const preventDefault = vi.spyOn(
+        ownerWindow.Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(
+        ownerWindow.HTMLElement.prototype,
+        "focus",
+      );
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let restoreCapture: () => void = () => undefined;
+      let restoreBubble: () => void = () => undefined;
+      const observed: unknown[] = [];
+
+      const alterAuxiliary = (
+        event: ReactKeyboardEvent<HTMLElement>,
+      ) => {
+        if (variant === "absent") {
+          const prevent = event.preventDefault;
+          const defaultQuery = event.isDefaultPrevented;
+          const propagationQuery = event.isPropagationStopped;
+          Object.setPrototypeOf(event, null);
+          Object.defineProperties(event, {
+            preventDefault: {
+              configurable: true,
+              value: prevent,
+            },
+            isDefaultPrevented: {
+              configurable: true,
+              value: defaultQuery,
+              writable: true,
+            },
+            isPropagationStopped: {
+              configurable: true,
+              value: propagationQuery,
+              writable: true,
+            },
+          });
+          Reflect.deleteProperty(event, property);
+          observed.push(property in event);
+          return;
+        }
+        const value =
+          variant === "replacement"
+            ? vi.fn()
+            : Object.freeze({ incompatible: true });
+        Object.defineProperty(event, property, {
+          configurable: true,
+          value,
+          writable: true,
+        });
+        observed.push(event[property]);
+      };
+
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <PresenceRequests
+                session={session.asCollabSession()}
+                pending={[
+                  request("auxiliary-a", local.id),
+                  request("auxiliary-b", local.id),
+                ]}
+                nameOf={(id) => id}
+                onCancel={onCancel}
+              />
+            </StrictMode>,
+          );
+        });
+        const list = within(host).getByRole("list");
+        const cancels = within(host).getAllByTestId(
+          "presence-request-cancel",
+        ) as HTMLButtonElement[];
+        const source = cancels[0]!;
+        const destination = cancels[1]!;
+        restoreCapture = interceptKeyDown(
+          list,
+          "onKeyDownCapture",
+          (active, event) => {
+            alterAuxiliary(event);
+            active(event);
+          },
+        );
+        restoreBubble = interceptKeyDown(
+          source,
+          "onKeyDown",
+          (active, event) => {
+            alterAuxiliary(event);
+            active(event);
+          },
+        );
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const event = presenceKeyDown(source, {
+          key: "ArrowRight",
+          code: `${property}-${variant}`,
+        });
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(destination).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(onCancel).not.toHaveBeenCalled();
+        if (variant === "absent") {
+          expect(observed).toEqual([false, false]);
+        } else if (variant === "replacement") {
+          expect(observed).toEqual([
+            expect.any(Function),
+            expect.any(Function),
+          ]);
+        } else {
+          expect(observed).toEqual([
+            { incompatible: true },
+            { incompatible: true },
+          ]);
+        }
+      } finally {
+        restoreCapture();
+        restoreBubble();
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("retains each exact-native pair until its exact button bubble across ineligible delivery and microtask checkpoints", () => {
+    const local = person("checkpoint-local", "Checkpoint local", {
+      isLocal: true,
+      role: "owner",
+    });
+    const session = new PresenceSession({
+      localId: local.id,
+      localName: local.name,
+      users: [local],
+      role: "owner",
+    });
+    const onCancel = vi.fn<(requestId: string) => void>();
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("The test document has no Window");
+    const preventDefault = vi.spyOn(
+      ownerWindow.Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(
+      ownerWindow.HTMLElement.prototype,
+      "focus",
+    );
+    const checkpoints: number[] = [];
+    let checkpointDepth = 1;
+    vi.spyOn(ownerWindow, "queueMicrotask").mockImplementation(
+      (callback: VoidFunction) => {
+        checkpoints.push(checkpoints.length + 1);
+        callback();
+      },
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let restoreCapture: () => void = () => undefined;
+    let restoreBubble: () => void = () => undefined;
+
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <PresenceRequests
+              session={session.asCollabSession()}
+              pending={[
+                request("checkpoint-a", local.id),
+                request("checkpoint-b", local.id),
+              ]}
+              nameOf={(id) => id}
+              onCancel={onCancel}
+            />
+          </StrictMode>,
+        );
+      });
+      const cancels = within(host).getAllByTestId(
+        "presence-request-cancel",
+      ) as HTMLButtonElement[];
+      const source = cancels[0]!;
+      const destination = cancels[1]!;
+      const ineligibleBubble =
+        reactPropsEntry(destination).props.onKeyDown;
+      if (!ineligibleBubble) {
+        throw new Error("The ineligible Cancel handler was not published");
+      }
+      restoreCapture = installKeyDownCapture(source, () => {
+        const checkpoint = (remaining: number) => {
+          if (remaining < 1) return;
+          ownerWindow.queueMicrotask(() =>
+            checkpoint(remaining - 1),
+          );
+        };
+        checkpoint(checkpointDepth);
+      });
+      restoreBubble = interceptKeyDown(
+        source,
+        "onKeyDown",
+        (active, event) => {
+          ineligibleBubble(event);
+          active(event);
+        },
+      );
+
+      for (const depth of [1, 2]) {
+        checkpointDepth = depth;
+        checkpoints.length = 0;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const event = presenceKeyDown(source, {
+          key: "ArrowRight",
+          code: depth === 1 ? "CheckpointOne" : "CheckpointNested",
+        });
+        expect(checkpoints).toHaveLength(depth);
+        expect(event.defaultPrevented).toBe(true);
+        expect(destination).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(onCancel).not.toHaveBeenCalled();
+      }
+    } finally {
+      restoreCapture();
+      restoreBubble();
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["capture", "preventDefault"],
+    ["capture", "isDefaultPrevented"],
+    ["capture", "isPropagationStopped"],
+    ["bubble", "preventDefault"],
+    ["bubble", "isDefaultPrevented"],
+    ["bubble", "isPropagationStopped"],
+  ] as const)(
+    "rejects %s-wrapper %s drift and admits a distinct clean successor",
+    (phase, method) => {
+      const local = person(
+        `drift-${phase}-${method}`,
+        `Drift ${phase} ${method}`,
+        { isLocal: true, role: "owner" },
+      );
+      const session = new PresenceSession({
+        localId: local.id,
+        localName: local.name,
+        users: [local],
+        role: "owner",
+      });
+      const onCancel = vi.fn<(requestId: string) => void>();
+      const ownerWindow = document.defaultView;
+      if (!ownerWindow) {
+        throw new Error("The test document has no Window");
+      }
+      const preventDefault = vi.spyOn(
+        ownerWindow.Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(
+        ownerWindow.HTMLElement.prototype,
+        "focus",
+      );
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      let restore: () => void = () => undefined;
+
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <PresenceRequests
+                session={session.asCollabSession()}
+                pending={[
+                  request("drift-a", local.id),
+                  request("drift-b", local.id),
+                ]}
+                nameOf={(id) => id}
+                onCancel={onCancel}
+              />
+            </StrictMode>,
+          );
+        });
+        const list = within(host).getByRole("list");
+        const cancels = within(host).getAllByTestId(
+          "presence-request-cancel",
+        ) as HTMLButtonElement[];
+        const source = cancels[0]!;
+        const destination = cancels[1]!;
+        const replacement = vi.fn(() =>
+          method === "preventDefault" ? undefined : false,
+        );
+        const drift = (
+          event: ReactKeyboardEvent<HTMLElement>,
+        ) => {
+          Object.defineProperty(event, method, {
+            configurable: true,
+            value: replacement,
+          });
+        };
+        if (phase === "capture") {
+          restore = interceptKeyDown(
+            list,
+            "onKeyDownCapture",
+            (active, event) => {
+              active(event);
+              drift(event);
+            },
+          );
+        } else {
+          restore = interceptKeyDown(
+            source,
+            "onKeyDown",
+            (active, event) => {
+              const original = event[method];
+              let reads = 0;
+              Object.defineProperty(event, method, {
+                configurable: true,
+                get: () => {
+                  reads += 1;
+                  return reads === 1 ? original : replacement;
+                },
+              });
+              active(event);
+            },
+          );
+        }
+
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const rejected = presenceKeyDown(source, {
+          key: "ArrowRight",
+          code: `${phase}-${method}-drift`,
+        });
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expect(onCancel).not.toHaveBeenCalled();
+
+        restore();
+        restore = () => undefined;
+        preventDefault.mockClear();
+        focus.mockClear();
+        const accepted = presenceKeyDown(source, {
+          key: "ArrowRight",
+          code: `${phase}-${method}-successor`,
+        });
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(destination).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(onCancel).not.toHaveBeenCalled();
+      } finally {
+        restore();
+        act(() => root.unmount());
+        host.remove();
+      }
+    },
+  );
 
   it("rejects modified, stale, replayed, and restored input before a clean successor event recovers", () => {
     const localA = person("reject-local-a", "Reject local A", {
