@@ -1425,11 +1425,12 @@ describe("Settings → Agents: token rename Escape authority", () => {
   it.each(["null", "owner", "backing"] as const)("accepts the %s public Window view", async (view) => {
     const rename = await showStrictRename();
     const native = createEscape(rename.input);
-    let backing: EventTarget | null = null;
+    const observation: { receiver?: EventTarget } = {};
     window.addEventListener("escape-window-probe", function (this: EventTarget) {
-      backing = this;
+      observation.receiver = this;
     }, { once: true });
     window.dispatchEvent(new Event("escape-window-probe"));
+    const backing = observation.receiver;
     if (!backing) throw new Error("Missing backing Window receiver");
     if (view !== "null") setJsdomEventView(native, view === "owner" ? window : backing as Window);
     const pair = dispatchEscapePair(rename, {}, native);
