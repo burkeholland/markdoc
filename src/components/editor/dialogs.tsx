@@ -701,6 +701,7 @@ interface ImageDraft {
   readonly altRevision: number;
   readonly previewFailed: boolean;
   readonly upload: ImageUploadOwner | null;
+  readonly uploadAdmission: ImageUploadOwner | null;
 }
 
 interface ImageAuthority {
@@ -718,7 +719,9 @@ interface ImageAuthority {
   readonly altRevision: number;
   readonly previewFailed: boolean;
   readonly upload: ImageUploadOwner | null;
+  readonly uploadAdmission: ImageUploadOwner | null;
   readonly uploading: boolean;
+  readonly uploadDisabled: boolean;
   readonly uploadAvailable: boolean;
   readonly normalizedSrc: string;
   readonly normalizedAlt: string;
@@ -824,6 +827,7 @@ interface ImagePublication {
   readonly fileControl: object | null;
   readonly authorizeDismissal: (event: Event) => void;
   readonly retire: () => boolean;
+  readonly releaseTerminal: () => boolean;
   readonly isRetired: () => boolean;
   readonly publishedDomMatches: (
     changing?: "url" | "alt" | "file" | null,
@@ -1118,6 +1122,7 @@ function imageDraft(visit: ImageVisit, open: boolean): ImageDraft {
     altRevision: 0,
     previewFailed: false,
     upload: null,
+    uploadAdmission: null,
   });
 }
 
@@ -1178,6 +1183,8 @@ class ImageElementOwner<T extends Element> implements ImageElementOwnerView {
 class ImagePublicationCoordinator {
   readonly #mount: symbol;
   #active: ImagePublication | null = null;
+  #committed: ImagePublication | null = null;
+  #committedDraft: ImageDraft | null = null;
   #successorOf: ImagePublication | null = null;
   #replay: ImagePublicationReplay | null = null;
   #rejectedReplayAuthority: ImageAuthority | null = null;
@@ -1195,6 +1202,10 @@ class ImagePublicationCoordinator {
 
   active() {
     return this.#active;
+  }
+
+  authoritative() {
+    return this.#active ?? this.#committed;
   }
 
   replay() {
@@ -1228,6 +1239,11 @@ class ImagePublicationCoordinator {
 
   releaseTerminal(publication: ImagePublication) {
     if (this.#active === publication) this.#active = null;
+    if (this.#committed === publication) {
+      this.#committed = null;
+      this.#committedDraft = null;
+      publication.releaseTerminal();
+    }
     this.abandonReplay(publication);
     if (this.#rejectedReplayAuthority === publication.authority) {
       this.#rejectedReplayAuthority = null;
@@ -1251,7 +1267,11 @@ class ImagePublicationCoordinator {
     }
     const previous = this.#active;
     if (previous && previous !== publication) previous.retire();
+    const committed = this.#committed;
+    if (committed && committed !== publication) committed.releaseTerminal();
     this.#active = publication;
+    this.#committed = null;
+    this.#committedDraft = null;
     this.#successorOf = null;
     this.#replay = null;
     return true;
@@ -1269,6 +1289,49 @@ class ImagePublicationCoordinator {
 
   isCurrent(publication: ImagePublication) {
     return this.#active === publication && !this.#retired.has(publication);
+  }
+
+  isAuthoritative(publication: ImagePublication) {
+    return (
+      this.isCurrent(publication) ||
+      (this.#committed === publication && this.#retired.has(publication))
+    );
+  }
+
+  isRetained(publication: ImagePublication) {
+    return this.#committed === publication && this.#retired.has(publication);
+  }
+
+  retainCommitted(publication: ImagePublication, draft: ImageDraft) {
+    if (
+      this.#active !== null ||
+      (this.#committed !== null && this.#committed !== publication) ||
+      this.#successorOf !== publication ||
+      !this.#retired.has(publication) ||
+      draft === publication.authority.draft ||
+      draft.visit !== publication.authority.visit ||
+      draft.open !== publication.authority.open ||
+      draft.upload !== null ||
+      draft.uploadAdmission === null
+    ) {
+      return false;
+    }
+    this.#committed = publication;
+    this.#committedDraft = draft;
+    IMAGE_APPLY(IMAGE_WEAK_SET_DELETE, this.#claimedPublications, [publication]);
+    this.abandonReplay(publication);
+    return true;
+  }
+
+  updateRetainedDraft(
+    publication: ImagePublication,
+    update: (current: ImageDraft) => ImageDraft,
+  ) {
+    const current = this.#committedDraft;
+    if (!current || !this.isRetained(publication)) return null;
+    const next = update(current);
+    this.#committedDraft = next;
+    return next;
   }
 
   wasClaimed(publication: ImagePublication) {
@@ -1299,7 +1362,7 @@ class ImagePublicationCoordinator {
     nativeEvent: Event,
   ) {
     if (
-      !this.isCurrent(publication) ||
+      !this.isAuthoritative(publication) ||
       this.hasClaimed(
         publication,
         control,
@@ -1379,11 +1442,11 @@ class ImageDismissalListener {
     this.release();
     this.#bridge = bridge;
     const listener = (event: Event) => {
-      const publication = this.coordinator.active();
+      const publication = this.coordinator.authoritative();
       const ownerWindow = ownerDocument.defaultView;
       if (
         !publication ||
-        publication.isRetired() ||
+        !this.coordinator.isAuthoritative(publication) ||
         publication.ownerDocument !== ownerDocument ||
         !ownerWindow ||
         (!(event instanceof ownerWindow.KeyboardEvent) &&
@@ -1745,7 +1808,9 @@ function imageAuthoritiesMatch(
     Object.is(previous.altRevision, current.altRevision) &&
     previous.previewFailed === current.previewFailed &&
     previous.upload === current.upload &&
+    previous.uploadAdmission === current.uploadAdmission &&
     previous.uploading === current.uploading &&
+    previous.uploadDisabled === current.uploadDisabled &&
     previous.uploadAvailable === current.uploadAvailable &&
     previous.normalizedSrc === current.normalizedSrc &&
     previous.normalizedAlt === current.normalizedAlt &&
@@ -2225,6 +2290,7 @@ function resolveImageDom(
   controls: ImageControls,
   changing: ImageChangingControl = null,
   fileFacts: ImageFileFacts | null = null,
+  settledFileReset = false,
 ): ImageDom | null {
   const bridge = controls.bridge.owner.element();
   const form = controls.form.owner.element();
@@ -2430,18 +2496,20 @@ function resolveImageDom(
       urlRow.children.item(2) !== file ||
       upload.type !== "button" ||
       upload.form !== form ||
-      upload.disabled !== authority.uploading ||
-      upload.matches(":disabled") !== authority.uploading ||
+      upload.disabled !== authority.uploadDisabled ||
+      upload.matches(":disabled") !== authority.uploadDisabled ||
       upload.className !== IMAGE_UPLOAD_CLASS ||
       upload.dataset.testid !== "image-upload" ||
       upload.textContent !== (authority.uploading ? "Uploading…" : "Upload…") ||
       file.type !== "file" ||
       file.form !== form ||
-      file.disabled ||
+      file.disabled !== authority.uploadDisabled ||
+      file.matches(":disabled") !== authority.uploadDisabled ||
       file.accept !== IMAGE_FILE_ACCEPT ||
       file.className !== "hidden" ||
       file.dataset.testid !== "image-file" ||
       (changing !== "file" &&
+        !settledFileReset &&
         fileFacts !== null &&
         !imageFileFactsMatch(file, fileFacts))
     ) {
@@ -3725,7 +3793,8 @@ function createImagePublicationRuntime(
       currentShapeMatches(changing) &&
       authorityIsCurrent() &&
       (retired
-        ? coordinator.acceptsSuccessorOf(publication)
+        ? coordinator.acceptsSuccessorOf(publication) ||
+          coordinator.isRetained(publication)
         : coordinator.isCurrent(publication))
     );
   };
@@ -3739,7 +3808,15 @@ function createImagePublicationRuntime(
     imageDomMatches(bridgeTree) &&
     imageDomMatches(contentTree) &&
     imageDomMatches(overlayTree) &&
-    Boolean(resolveImageDom(authority, controls, changing, fileFacts));
+    Boolean(
+      resolveImageDom(
+        authority,
+        controls,
+        changing,
+        fileFacts,
+        retired && coordinator.isRetained(publication),
+      ),
+    );
   const retire = (reason: Retirement) => {
     if (retired) return false;
     retired = true;
@@ -3747,7 +3824,10 @@ function createImagePublicationRuntime(
     onRetire();
     coordinator.retire(publication);
     queueMicrotask(() => {
-      if (coordinator.replay()?.source !== publication) {
+      if (
+        coordinator.replay()?.source !== publication &&
+        !coordinator.isRetained(publication)
+      ) {
         replayProofReleased = true;
         guard?.release();
       }
@@ -3768,10 +3848,19 @@ function createImagePublicationRuntime(
     authorizeDismissal: (event: Event) =>
       authorizeDismissal(publication, event),
     retire: () => retire("other"),
+    releaseTerminal: () => {
+      replayProofReleased = true;
+      return guard?.release() ?? true;
+    },
     isRetired: () => retired,
     publishedDomMatches: (changing: ImageChangingControl = null) => {
       const exact = currentDomMatches(changing);
-      if (!exact) retire("element");
+      if (!exact) {
+        retire("element");
+        if (coordinator.isRetained(publication)) {
+          coordinator.releaseTerminal(publication);
+        }
+      }
       return exact;
     },
   });
@@ -4019,6 +4108,10 @@ function createImagePresentation(
     input: HTMLInputElement,
     fallbackAlt: string,
   ) => void,
+  releaseUploadAdmission: (
+    publication: ImagePublication,
+    authority: ImageAuthority,
+  ) => void,
   resumeUploadSettlement: () => void,
   abandonDeferredUpload: () => boolean,
   releaseTerminalResources: (publication: ImagePublication) => void,
@@ -4217,10 +4310,13 @@ function createImagePresentation(
       Object.is(draft.altRevision, authority.altRevision) &&
       draft.previewFailed === authority.previewFailed &&
       draft.upload === authority.upload &&
+      draft.uploadAdmission === authority.uploadAdmission &&
       authority.visit.onOpenChange === authority.onOpenChange &&
       authority.visit.onSubmit === authority.onSubmit &&
       authority.visit.onUpload === authority.onUpload &&
       authority.uploading === (authority.upload !== null) &&
+      authority.uploadDisabled ===
+        (authority.uploading || authority.draft.uploadAdmission !== null) &&
       authority.uploadAvailable === (authority.onUpload !== undefined) &&
       authority.normalizedSrc === authority.src.trim() &&
       authority.normalizedAlt === authority.alt.trim() &&
@@ -4239,8 +4335,7 @@ function createImagePresentation(
     if (
       !factsAreCurrent() ||
       publication.authority !== authority ||
-      !coordinator.isCurrent(publication) ||
-      publication.isRetired() ||
+      !coordinator.isAuthoritative(publication) ||
       !publication.publishedDomMatches(changing)
     ) {
       return false;
@@ -4248,9 +4343,15 @@ function createImagePresentation(
     return (
       factsAreCurrent() &&
       publication.authority === authority &&
-      coordinator.isCurrent(publication) &&
-      !publication.isRetired()
+      coordinator.isAuthoritative(publication)
     );
+  };
+  const updateOwnedDraft = (
+    publication: ImagePublication,
+    update: (current: ImageDraft) => ImageDraft,
+  ) => {
+    const retained = coordinator.updateRetainedDraft(publication, update);
+    setDraft(retained ?? update(authority.draft));
   };
   const requestReplaySuccessor = (runtime: ImagePublicationRuntime) => {
     const replay = runtime.replay();
@@ -4464,13 +4565,14 @@ function createImagePresentation(
     }
     currentRuntime = runtime;
     lastRuntime = runtime;
+    releaseUploadAdmission(runtime.publication, authority);
     resumeUploadSettlement();
     return runtime.retireForLayout;
   };
   const currentPublication = (
     changing: "url" | "alt" | "file" | null = null,
   ) => {
-    const publication = coordinator.active();
+    const publication = coordinator.authoritative();
     return publication && owns(publication, changing) ? publication : null;
   };
   const submitSuppressionIsCurrent = (
@@ -4550,8 +4652,8 @@ function createImagePresentation(
       requestSuccessor();
       return;
     }
-    setDraft(
-      nextImageDraft(authority.draft, {
+    updateOwnedDraft(publication, (current) =>
+      nextImageDraft(current, {
         src: value,
         previewFailed: false,
       }),
@@ -4589,10 +4691,10 @@ function createImagePresentation(
       requestSuccessor();
       return;
     }
-    setDraft(
-      nextImageDraft(authority.draft, {
+    updateOwnedDraft(publication, (current) =>
+      nextImageDraft(current, {
         alt: value,
-        altRevision: authority.altRevision + 1,
+        altRevision: current.altRevision + 1,
       }),
     );
   };
@@ -4605,7 +4707,7 @@ function createImagePresentation(
       !button ||
       !input ||
       !authority.uploadAvailable ||
-      authority.uploading ||
+      authority.uploadDisabled ||
       activeUpload() !== null ||
       publication.dom.upload !== button ||
       publication.dom.file !== input ||
@@ -4624,7 +4726,7 @@ function createImagePresentation(
       !owns(publication) ||
       publication.dom.upload !== upload.owner.element() ||
       publication.dom.file !== file.owner.element() ||
-      authority.uploading ||
+      authority.uploadDisabled ||
       activeUpload() !== null ||
       !claim(
         publication,
@@ -4721,8 +4823,8 @@ function createImagePresentation(
     ) {
       return;
     }
-    setDraft(
-      nextImageDraft(authority.draft, { previewFailed: true }),
+    updateOwnedDraft(publication, (current) =>
+      nextImageDraft(current, { previewFailed: true }),
     );
   };
   const closeCurrent = (
@@ -5187,9 +5289,11 @@ export const ImageDialog = memo(function ImageDialog({
   );
   const abandonSettledUpload = useCallback(
     (lease: ImageUploadLease) => {
-      abandonUploadOwner(lease.owner, lease.publication);
+      const abandoned = abandonUploadOwner(lease.owner, lease.publication);
+      coordinator.releaseTerminal(lease.publication);
+      return abandoned;
     },
-    [abandonUploadOwner],
+    [abandonUploadOwner, coordinator],
   );
   const settleUpload = useCallback(
     (
@@ -5305,8 +5409,7 @@ export const ImageDialog = memo(function ImageDialog({
           return;
         }
       }
-      activeUpload.set(null);
-      setDraft((current) => {
+      const applyOutcome = (current: ImageDraft) => {
         if (
           current.visit !== owner.visit ||
           current.upload !== owner ||
@@ -5317,6 +5420,7 @@ export const ImageDialog = memo(function ImageDialog({
         if (!succeeded) {
           return nextImageDraft(current, {
             upload: null,
+            uploadAdmission: owner,
             error: message ?? "Upload failed",
           });
         }
@@ -5330,8 +5434,24 @@ export const ImageDialog = memo(function ImageDialog({
           error: null,
           previewFailed: false,
           upload: null,
+          uploadAdmission: owner,
         });
-      });
+      };
+      const successorDraft = applyOutcome(publication.authority.draft);
+      if (
+        successorDraft === publication.authority.draft ||
+        !publication.retire() ||
+        !coordinator.retainCommitted(publication, successorDraft)
+      ) {
+        abandonSettledUpload(lease);
+        return;
+      }
+      activeUpload.set(null);
+      setDraft((current) =>
+        current === publication.authority.draft
+          ? successorDraft
+          : applyOutcome(current),
+      );
     },
     [
       activeUpload,
@@ -5367,6 +5487,27 @@ export const ImageDialog = memo(function ImageDialog({
     deferredUploadOutcome,
     settleUpload,
   ]);
+  const releaseUploadAdmission = useCallback(
+    (publication: ImagePublication, authority: ImageAuthority) => {
+      const owner = authority.uploadAdmission;
+      if (
+        !owner ||
+        coordinator.active() !== publication ||
+        latestAuthority.get() !== authority ||
+        !coordinator.isCurrent(publication)
+      ) {
+        return;
+      }
+      setDraft((current) =>
+        current === authority.draft &&
+        current.upload === null &&
+        current.uploadAdmission === owner
+          ? nextImageDraft(current, { uploadAdmission: null })
+          : current,
+      );
+    },
+    [coordinator, latestAuthority],
+  );
   const startUpload = useCallback(
     (
       publication: ImagePublication,
@@ -5462,7 +5603,10 @@ export const ImageDialog = memo(function ImageDialog({
         altRevision: draft.altRevision,
         previewFailed: draft.previewFailed,
         upload: draft.upload,
+        uploadAdmission: draft.uploadAdmission,
         uploading: draft.upload !== null,
+        uploadDisabled:
+          draft.upload !== null || draft.uploadAdmission !== null,
         uploadAvailable: onUpload !== undefined,
         normalizedSrc: draft.src.trim(),
         normalizedAlt: draft.alt.trim(),
@@ -5491,6 +5635,7 @@ export const ImageDialog = memo(function ImageDialog({
         () => activeUpload.get(),
         setDraft,
         startUpload,
+        releaseUploadAdmission,
         resumeUploadSettlement,
         abandonDeferredUpload,
         releaseTerminalResources,
@@ -5508,6 +5653,7 @@ export const ImageDialog = memo(function ImageDialog({
       latestAuthority,
       requestSuccessor,
       releaseTerminalResources,
+      releaseUploadAdmission,
       resumeUploadSettlement,
       startUpload,
     ],
@@ -5614,7 +5760,7 @@ export const ImageDialog = memo(function ImageDialog({
                         type="button"
                         className={IMAGE_UPLOAD_CLASS}
                         onClick={onUploadClick}
-                        disabled={current.uploading}
+                        disabled={current.uploadDisabled}
                         data-testid="image-upload"
                       >
                         {current.uploading ? "Uploading…" : "Upload…"}
@@ -5624,6 +5770,7 @@ export const ImageDialog = memo(function ImageDialog({
                         type="file"
                         accept={IMAGE_FILE_ACCEPT}
                         className="hidden"
+                        disabled={current.uploadDisabled}
                         onChange={onFileChange}
                         data-testid="image-file"
                       />

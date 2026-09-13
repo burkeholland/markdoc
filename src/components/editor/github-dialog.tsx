@@ -1837,26 +1837,18 @@ interface PickerSourceMovement {
 
 interface PickerSourceReactMethods {
   readonly preventDefault: (...args: never[]) => unknown;
-  readonly stopPropagation: (...args: never[]) => unknown;
   readonly isDefaultPrevented: (...args: never[]) => unknown;
   readonly isPropagationStopped: (...args: never[]) => unknown;
 }
 
 interface PickerSourceReactDelivery {
+  readonly stage: PickerSourceNavigationStage;
   readonly publication: GitHubPickerPublication;
   readonly wrapper: ReactKeyboardEvent<HTMLElement>;
   readonly methods: PickerSourceReactMethods;
   readonly native: CommitActionKeyboardEventSnapshot;
   readonly currentTarget: HTMLElement;
   readonly source: PickerPublishedSource;
-}
-
-interface PickerSourceNavigationProof {
-  readonly publication: GitHubPickerPublication;
-  readonly movement: PickerSourceMovement;
-  readonly groupCapture: PickerSourceReactDelivery;
-  readonly sourceCapture: PickerSourceReactDelivery | null;
-  readonly sourceBubble: PickerSourceReactDelivery | null;
 }
 
 interface PickerSourceNavigationPair {
@@ -1875,10 +1867,14 @@ interface PickerSourceNavigationPair {
 }
 
 interface PickerSourceNavigationStages {
-  readonly groupCapture: object;
-  sourceCapture: object | null;
-  sourceBubble: object | null;
-  groupBubble: object | null;
+  readonly nativeEvent: Event;
+  publication: GitHubPickerPublication | null;
+  movement: PickerSourceMovement | null;
+  groupCapture: PickerSourceReactDelivery | null;
+  sourceCapture: PickerSourceReactDelivery | null;
+  sourceBubble: PickerSourceReactDelivery | null;
+  groupBubble: PickerSourceReactDelivery | null;
+  pending: PickerSourceNavigationStage | null;
   invalid: boolean;
 }
 
@@ -1923,6 +1919,7 @@ class GitHubPickerPublicationCoordinator {
   #claimedSourceNavigationDestinations = new WeakSet<object>();
   #claimedSourceNavigationEvents = new WeakSet<object>();
   #sourceNavigationDelivery: PickerSourceNavigationPair | null = null;
+  #sourceNavigationCallback: object | null = null;
 
   active() {
     return this.#active;
@@ -1982,65 +1979,138 @@ class GitHubPickerPublicationCoordinator {
     this.#claimedEvents.add(event);
   }
 
-  prepareSourceNavigationStage(
+  beginSourceNavigationStage(
     stage: PickerSourceNavigationStage,
-    event: object,
-    nativeEvent: object,
-  ) {
-    if (this.#sourceNavigationDelivery) return false;
+    nativeEvent: Event,
+  ): PickerSourceNavigationStages | null {
+    if (this.#sourceNavigationDelivery || this.#sourceNavigationCallback) {
+      return null;
+    }
     let stages = this.#sourceNavigationStages.get(nativeEvent);
     if (stage === "group-capture") {
       if (stages) {
         stages.invalid = true;
-        return false;
+        return null;
       }
       stages = {
-        groupCapture: event,
+        nativeEvent,
+        publication: null,
+        movement: null,
+        groupCapture: null,
         sourceCapture: null,
         sourceBubble: null,
         groupBubble: null,
+        pending: stage,
         invalid: false,
       };
       this.#sourceNavigationStages.set(nativeEvent, stages);
-      return true;
+      return stages;
     }
-    if (!stages || stages.invalid) return false;
+    if (!stages || stages.invalid || stages.pending) return null;
     if (stage === "source-capture") {
       if (
-        stages.groupCapture !== event ||
+        !stages.groupCapture ||
         stages.sourceCapture ||
         stages.sourceBubble ||
         stages.groupBubble
       ) {
         stages.invalid = true;
-        return false;
+        return null;
       }
-      stages.sourceCapture = event;
-      return true;
+      stages.pending = stage;
+      return stages;
     }
     if (stage === "source-bubble") {
       if (
-        stages.sourceCapture !== stages.groupCapture ||
-        event === stages.groupCapture ||
+        !stages.sourceCapture ||
         stages.sourceBubble ||
         stages.groupBubble
       ) {
         stages.invalid = true;
-        return false;
+        return null;
       }
-      stages.sourceBubble = event;
-      return true;
+      stages.pending = stage;
+      return stages;
     }
     if (
-      stages.sourceBubble !== event ||
-      event === stages.groupCapture ||
+      !stages.sourceBubble ||
       stages.groupBubble
     ) {
       stages.invalid = true;
+      return null;
+    }
+    stages.pending = stage;
+    return stages;
+  }
+
+  sourceNavigationStageIsCurrent(
+    stages: PickerSourceNavigationStages,
+    stage: PickerSourceNavigationStage,
+  ) {
+    return (
+      !this.#sourceNavigationDelivery &&
+      !this.#sourceNavigationCallback &&
+      !stages.invalid &&
+      stages.pending === stage &&
+      this.#sourceNavigationStages.get(stages.nativeEvent) === stages
+    );
+  }
+
+  completeSourceNavigationStage(
+    stages: PickerSourceNavigationStages,
+    stage: PickerSourceNavigationStage,
+    delivery: PickerSourceReactDelivery,
+    movement: PickerSourceMovement,
+  ) {
+    if (
+      !this.sourceNavigationStageIsCurrent(stages, stage) ||
+      delivery.stage !== stage ||
+      delivery.native.event !== stages.nativeEvent ||
+      (stages.publication !== null &&
+        stages.publication !== delivery.publication) ||
+      (stages.movement !== null && stages.movement !== movement)
+    ) {
+      stages.invalid = true;
+      stages.pending = null;
       return false;
     }
-    stages.groupBubble = event;
+    if (stage === "group-capture") {
+      stages.publication = delivery.publication;
+      stages.movement = movement;
+      stages.groupCapture = delivery;
+    } else if (stage === "source-capture") {
+      stages.sourceCapture = delivery;
+    } else if (stage === "source-bubble") {
+      stages.sourceBubble = delivery;
+    } else {
+      stages.groupBubble = delivery;
+    }
+    stages.pending = null;
     return true;
+  }
+
+  rejectSourceNavigationStage(stages: PickerSourceNavigationStages) {
+    stages.invalid = true;
+    stages.pending = null;
+  }
+
+  invokeSourceNavigationStageCallback(
+    stages: PickerSourceNavigationStages,
+    stage: PickerSourceNavigationStage,
+    invoke: () => unknown,
+  ): Readonly<{ value: unknown }> | null {
+    if (!this.sourceNavigationStageIsCurrent(stages, stage)) return null;
+    const claim = Object.freeze({});
+    this.#sourceNavigationCallback = claim;
+    try {
+      return Object.freeze({ value: invoke() });
+    } catch {
+      return null;
+    } finally {
+      if (this.#sourceNavigationCallback === claim) {
+        this.#sourceNavigationCallback = null;
+      }
+    }
   }
 
   claimSourceNavigation(pair: PickerSourceNavigationPair) {
@@ -2050,19 +2120,25 @@ class GitHubPickerPublicationCoordinator {
     if (
       !destination ||
       this.#sourceNavigationDelivery ||
+      this.#sourceNavigationCallback ||
       this.#active !== pair.publication ||
       pair.publication.keyboard !== pair.authority ||
+      stages?.pending !== null ||
       stages?.invalid ||
-      stages?.groupCapture !== pair.groupCapture.wrapper ||
-      stages.sourceCapture !== pair.sourceCapture.wrapper ||
-      stages.sourceBubble !== pair.sourceBubble.wrapper ||
-      stages.groupBubble !== pair.groupBubble.wrapper ||
+      stages?.publication !== pair.publication ||
+      stages.movement !== pair.movement ||
+      stages.groupCapture !== pair.groupCapture ||
+      stages.sourceCapture !== pair.sourceCapture ||
+      stages.sourceBubble !== pair.sourceBubble ||
+      stages.groupBubble !== pair.groupBubble ||
       this.#claimedSourceNavigationPairs.has(pair) ||
       this.#claimedSourceNavigationPublications.has(pair.publicationClaim) ||
       this.#claimedSourceNavigationMovements.has(pair.movementClaim) ||
       this.#claimedSourceNavigationSources.has(pair.sourceClaim) ||
       this.#claimedSourceNavigationDestinations.has(pair.destinationClaim) ||
       this.#claimedSourceNavigationEvents.has(pair.groupCapture.wrapper) ||
+      this.#claimedSourceNavigationEvents.has(pair.sourceCapture.wrapper) ||
+      this.#claimedSourceNavigationEvents.has(pair.sourceBubble.wrapper) ||
       this.#claimedSourceNavigationEvents.has(pair.groupBubble.wrapper) ||
       this.#claimedSourceNavigationEvents.has(nativeEvent) ||
       !pair.authority.terminal.claim(pair.terminal)
@@ -2075,6 +2151,8 @@ class GitHubPickerPublicationCoordinator {
     this.#claimedSourceNavigationSources.add(pair.sourceClaim);
     this.#claimedSourceNavigationDestinations.add(pair.destinationClaim);
     this.#claimedSourceNavigationEvents.add(pair.groupCapture.wrapper);
+    this.#claimedSourceNavigationEvents.add(pair.sourceCapture.wrapper);
+    this.#claimedSourceNavigationEvents.add(pair.sourceBubble.wrapper);
     this.#claimedSourceNavigationEvents.add(pair.groupBubble.wrapper);
     this.#claimedSourceNavigationEvents.add(nativeEvent);
     this.#sourceNavigationDelivery = pair;
@@ -2085,19 +2163,41 @@ class GitHubPickerPublicationCoordinator {
   sourceNavigationIsDelivering(pair: PickerSourceNavigationPair) {
     return (
       this.#sourceNavigationDelivery === pair &&
+      !this.#sourceNavigationCallback &&
       this.#claimedSourceNavigationPairs.has(pair) &&
       this.#claimedSourceNavigationPublications.has(pair.publicationClaim) &&
       this.#claimedSourceNavigationMovements.has(pair.movementClaim) &&
       this.#claimedSourceNavigationSources.has(pair.sourceClaim) &&
       this.#claimedSourceNavigationDestinations.has(pair.destinationClaim) &&
       this.#claimedSourceNavigationEvents.has(pair.groupCapture.wrapper) &&
+      this.#claimedSourceNavigationEvents.has(pair.sourceCapture.wrapper) &&
+      this.#claimedSourceNavigationEvents.has(pair.sourceBubble.wrapper) &&
       this.#claimedSourceNavigationEvents.has(pair.groupBubble.wrapper) &&
       this.#claimedSourceNavigationEvents.has(pair.groupBubble.native.event) &&
       pair.authority.terminal.retains(pair.terminal)
     );
   }
 
+  invokeSourceNavigationPairCallback(
+    pair: PickerSourceNavigationPair,
+    invoke: () => unknown,
+  ): Readonly<{ value: unknown }> | null {
+    if (!this.sourceNavigationIsDelivering(pair)) return null;
+    const claim = Object.freeze({});
+    this.#sourceNavigationCallback = claim;
+    try {
+      return Object.freeze({ value: invoke() });
+    } catch {
+      return null;
+    } finally {
+      if (this.#sourceNavigationCallback === claim) {
+        this.#sourceNavigationCallback = null;
+      }
+    }
+  }
+
   finishSourceNavigation(pair: PickerSourceNavigationPair) {
+    this.#sourceNavigationCallback = null;
     if (this.#sourceNavigationDelivery === pair) {
       this.#sourceNavigationDelivery = null;
     }
@@ -3388,8 +3488,6 @@ function GitHubPickerVisit({
   const onImportedRef = useRef(onImported);
   const [publicationCoordinator] = useState(() => new GitHubPickerPublicationCoordinator());
   const [publicationRuntimes] = useState(() => new GitHubPickerRuntimeRegistry());
-  const sourceNavigationProofRef =
-    useRef<PickerSourceNavigationProof | null>(null);
   const [publicationRevision, setPublicationRevision] = useState(0);
   const requestPublicationSuccessor = useCallback(() => {
     setPublicationRevision((revision) => revision + 1);
@@ -4362,50 +4460,6 @@ function GitHubPickerVisit({
     run(candidate, Object.freeze({ kind: "repo-link" as const, payload }));
   };
 
-  const sourceNavigationDelivery = (
-    stage: PickerSourceNavigationStage,
-    event: ReactKeyboardEvent<HTMLElement>,
-    currentTarget: HTMLElement,
-  ) => {
-    const publication = currentPresentation(presentation);
-    const authority = publication?.keyboard;
-    if (!publication || !authority || !pickerPublishedSourcesAreCurrent(publication)) {
-      return null;
-    }
-    let nativeEvent: Event;
-    try {
-      nativeEvent = event.nativeEvent;
-    } catch {
-      return null;
-    }
-    if (
-      !publicationCoordinator.prepareSourceNavigationStage(
-        stage,
-        event,
-        nativeEvent,
-      )
-    ) {
-      return null;
-    }
-    const phase =
-      stage === "group-capture" || stage === "source-capture"
-        ? authority.Event.CAPTURING_PHASE
-        : authority.Event.BUBBLING_PHASE;
-    const native = captureCommitActionKeyboardEvent(
-      authority,
-      nativeEvent,
-      phase,
-    );
-    const delivery = native
-      ? capturePickerSourceReactDelivery(
-          event,
-          publication,
-          native,
-          currentTarget,
-        )
-      : null;
-    return delivery;
-  };
   const sourceNavigationIsCurrent = (
     publication: GitHubPickerPublication,
     movement: PickerSourceMovement,
@@ -4447,146 +4501,100 @@ function GitHubPickerVisit({
       return false;
     }
   };
-  const sourceGroupCapture = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    sourceNavigationProofRef.current = null;
-    const delivery = sourceNavigationDelivery(
-      "group-capture",
-      event,
-      event.currentTarget,
-    );
-    if (!delivery) return;
-    const movement = delivery.publication.movements.find(
-      (entry) =>
-        entry.source === delivery.source && entry.key === delivery.native.key,
-    );
-    if (
-      !movement?.destination ||
-      !sourceNavigationIsCurrent(
-        delivery.publication,
-        movement,
-        delivery.source.element,
-      )
-    ) {
-      return;
-    }
-    sourceNavigationProofRef.current = {
-      publication: delivery.publication,
-      movement,
-      groupCapture: delivery,
-      sourceCapture: null,
-      sourceBubble: null,
-    };
-  };
-  const sourceButtonCapture = (
-    event: ReactKeyboardEvent<HTMLButtonElement>,
+  const sourceNavigationDeliveriesMatch = (
+    authority: CommitActionKeyboardAuthority,
+    deliveries: readonly PickerSourceReactDelivery[],
   ) => {
-    const proof = sourceNavigationProofRef.current;
-    const delivery = sourceNavigationDelivery(
-      "source-capture",
-      event,
-      event.currentTarget,
+    const [groupCapture, sourceCapture, sourceBubble, groupBubble] = deliveries;
+    return (
+      (!sourceCapture ||
+        (!!groupCapture &&
+          pickerSourceKeyboardEventsMatch(
+            groupCapture.native,
+            sourceCapture.native,
+          ))) &&
+      (!sourceBubble ||
+        (!!sourceCapture &&
+          sourceCapture.native.currentTarget ===
+            sourceBubble.native.currentTarget &&
+          commitActionKeyboardEventsMatch(
+            sourceCapture.native,
+            sourceBubble.native,
+            authority,
+          ))) &&
+      (!groupBubble ||
+        (!!sourceBubble &&
+          pickerSourceKeyboardEventsMatch(
+            sourceBubble.native,
+            groupBubble.native,
+          )))
     );
-    if (
-      !proof ||
-      !delivery ||
-      delivery.publication !== proof.publication ||
-      delivery.source !== proof.movement.source ||
-      delivery.wrapper !== proof.groupCapture.wrapper ||
-      delivery.currentTarget !== proof.movement.source.element ||
-      !pickerSourceKeyboardEventsMatch(
-        proof.groupCapture.native,
-        delivery.native,
-      ) ||
-      proof.sourceCapture
-    ) {
-      sourceNavigationProofRef.current = null;
-      return;
-    }
-    sourceNavigationProofRef.current = {
-      ...proof,
-      sourceCapture: delivery,
-    };
   };
-  const sourceButtonBubble = (
-    event: ReactKeyboardEvent<HTMLButtonElement>,
+  const sourceNavigationStageIsCurrent = (
+    stages: PickerSourceNavigationStages,
+    stage: PickerSourceNavigationStage,
+    delivery: PickerSourceReactDelivery,
+    movement: PickerSourceMovement,
   ) => {
-    const proof = sourceNavigationProofRef.current;
-    const delivery = sourceNavigationDelivery(
-      "source-bubble",
-      event,
-      event.currentTarget,
-    );
-    if (
-      !proof?.sourceCapture ||
-      !delivery ||
-      delivery.publication !== proof.publication ||
-      delivery.source !== proof.movement.source ||
-      delivery.wrapper === proof.groupCapture.wrapper ||
-      delivery.currentTarget !== proof.movement.source.element ||
-      delivery.native.currentTarget !== proof.sourceCapture.native.currentTarget ||
-      !commitActionKeyboardEventsMatch(
-        proof.sourceCapture.native,
-        delivery.native,
-        delivery.publication.keyboard!,
-      ) ||
-      proof.sourceBubble
-    ) {
-      sourceNavigationProofRef.current = null;
-      return;
-    }
-    sourceNavigationProofRef.current = {
-      ...proof,
-      sourceBubble: delivery,
-    };
-  };
-  const sourceGroupBubble = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const proof = sourceNavigationProofRef.current;
-    sourceNavigationProofRef.current = null;
-    const delivery = sourceNavigationDelivery(
-      "group-bubble",
-      event,
-      event.currentTarget,
-    );
-    if (
-      !proof?.sourceCapture ||
-      !proof.sourceBubble ||
-      !delivery ||
-      delivery.publication !== proof.publication ||
-      delivery.source !== proof.movement.source ||
-      delivery.wrapper !== proof.sourceBubble.wrapper ||
-      delivery.currentTarget !== proof.publication.sourceGroup ||
-      !pickerSourceKeyboardEventsMatch(
-        proof.sourceBubble.native,
-        delivery.native,
-      )
-    ) {
-      return;
-    }
-    const { publication, movement, groupCapture, sourceCapture, sourceBubble } =
-      proof;
+    const publication = delivery.publication;
     const authority = publication.keyboard;
-    const destination = movement.destination;
+    const completed = [
+      stages.groupCapture,
+      stages.sourceCapture,
+      stages.sourceBubble,
+      stages.groupBubble,
+    ].filter(
+      (entry): entry is PickerSourceReactDelivery => entry !== null,
+    );
+    const expectedCompleted =
+      stage === "group-capture"
+        ? 0
+        : stage === "source-capture"
+          ? 1
+          : stage === "source-bubble"
+            ? 2
+            : 3;
+    const deliveries = [...completed, delivery];
+    const expectedCurrentTarget =
+      stage === "group-capture" || stage === "group-bubble"
+        ? publication.sourceGroup
+        : movement.source.element;
     if (
       !authority ||
-      !destination ||
-      groupCapture.wrapper === sourceBubble.wrapper ||
-      groupCapture.source !== movement.source ||
-      sourceCapture.source !== movement.source ||
-      sourceBubble.source !== movement.source ||
+      completed.length !== expectedCompleted ||
+      !publicationCoordinator.sourceNavigationStageIsCurrent(stages, stage) ||
+      stages.nativeEvent !== delivery.native.event ||
+      (stages.publication !== null &&
+        stages.publication !== publication) ||
+      (stages.movement !== null && stages.movement !== movement) ||
+      delivery.stage !== stage ||
       delivery.source !== movement.source ||
-      groupCapture.publication !== publication ||
-      sourceCapture.publication !== publication ||
-      sourceBubble.publication !== publication ||
-      delivery.native.currentTarget !== groupCapture.native.currentTarget ||
-      !commitActionKeyboardEventsMatch(
-        groupCapture.native,
-        delivery.native,
-        authority,
+      delivery.currentTarget !== expectedCurrentTarget ||
+      !movement.destination ||
+      deliveries.some(
+        (entry) =>
+          entry.publication !== publication ||
+          entry.source !== movement.source ||
+          entry.native.event !== stages.nativeEvent,
       ) ||
-      !pickerSourceReactDeliveryRemains(groupCapture, false) ||
-      !pickerSourceReactDeliveryRemains(sourceCapture, false) ||
-      !pickerSourceReactDeliveryRemains(sourceBubble, false) ||
-      !pickerSourceReactDeliveryRemains(delivery, false) ||
+      !sourceNavigationDeliveriesMatch(authority, deliveries) ||
+      completed.some(
+        (entry) =>
+          !pickerSourceReactDeliveryRemains(
+            entry,
+            false,
+            false,
+            false,
+            false,
+          ),
+      ) ||
+      !pickerSourceReactDeliveryRemains(
+        delivery,
+        false,
+        false,
+        true,
+        true,
+      ) ||
       authority.terminal.proofFor(delivery.native.event) !==
         delivery.native.terminal ||
       !sourceNavigationIsCurrent(
@@ -4594,6 +4602,213 @@ function GitHubPickerVisit({
         movement,
         movement.source.element,
       )
+    ) {
+      return false;
+    }
+    return true;
+  };
+  const sourceNavigationDelivery = (
+    stage: PickerSourceNavigationStage,
+    event: ReactKeyboardEvent<HTMLElement>,
+    currentTarget: HTMLElement,
+  ) => {
+    const publication = currentPresentation(presentation);
+    const authority = publication?.keyboard;
+    if (
+      !publication ||
+      !authority ||
+      !pickerPublishedSourcesAreCurrent(publication)
+    ) {
+      return null;
+    }
+    let nativeEvent: Event;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return null;
+    }
+    const stages = publicationCoordinator.beginSourceNavigationStage(
+      stage,
+      nativeEvent,
+    );
+    if (!stages) return null;
+    const reject = () => {
+      publicationCoordinator.rejectSourceNavigationStage(stages);
+      return null;
+    };
+    const phase =
+      stage === "group-capture" || stage === "source-capture"
+        ? authority.Event.CAPTURING_PHASE
+        : authority.Event.BUBBLING_PHASE;
+    const native = captureCommitActionKeyboardEvent(
+      authority,
+      nativeEvent,
+      phase,
+    );
+    const delivery = native
+      ? capturePickerSourceReactDelivery(
+          stage,
+          event,
+          publication,
+          native,
+          currentTarget,
+        )
+      : null;
+    const movement =
+      stage === "group-capture"
+        ? delivery?.publication.movements.find(
+            (entry) =>
+              entry.source === delivery.source &&
+              entry.key === delivery.native.key,
+          ) ?? null
+        : stages.movement;
+    if (
+      !delivery ||
+      !movement?.destination ||
+      !sourceNavigationStageIsCurrent(stages, stage, delivery, movement)
+    ) {
+      return reject();
+    }
+    const defaultState =
+      publicationCoordinator.invokeSourceNavigationStageCallback(
+        stages,
+        stage,
+        () =>
+          authority.apply(
+            delivery.methods.isDefaultPrevented,
+            delivery.wrapper,
+            [],
+          ),
+      );
+    if (
+      defaultState?.value !== false ||
+      !sourceNavigationStageIsCurrent(stages, stage, delivery, movement)
+    ) {
+      return reject();
+    }
+    const propagationState =
+      publicationCoordinator.invokeSourceNavigationStageCallback(
+        stages,
+        stage,
+        () =>
+          authority.apply(
+            delivery.methods.isPropagationStopped,
+            delivery.wrapper,
+            [],
+          ),
+      );
+    if (
+      propagationState?.value !== false ||
+      !sourceNavigationStageIsCurrent(stages, stage, delivery, movement) ||
+      !publicationCoordinator.completeSourceNavigationStage(
+        stages,
+        stage,
+        delivery,
+        movement,
+      )
+    ) {
+      return reject();
+    }
+    return { stages, delivery, movement };
+  };
+  const sourceNavigationPairIsCurrent = (
+    pair: PickerSourceNavigationPair,
+    nativeDefaultPrevented: boolean,
+    finalIsDefaultPrevented: (...args: never[]) => unknown =
+      pair.groupBubble.methods.isDefaultPrevented,
+  ) => {
+    const {
+      publication,
+      authority,
+      movement,
+      groupCapture,
+      sourceCapture,
+      sourceBubble,
+      groupBubble,
+    } = pair;
+    const deliveries = [
+      groupCapture,
+      sourceCapture,
+      sourceBubble,
+      groupBubble,
+    ] as const;
+    return (
+      publicationCoordinator.sourceNavigationIsDelivering(pair) &&
+      publication.keyboard === authority &&
+      movement.destination !== null &&
+      sourceNavigationDeliveriesMatch(authority, deliveries) &&
+      deliveries.every((entry) => {
+        const finalWrapper =
+          entry.wrapper === groupBubble.wrapper &&
+          nativeDefaultPrevented;
+        return pickerSourceReactDeliveryRemains(
+          entry,
+          finalWrapper,
+          nativeDefaultPrevented,
+          entry === groupBubble,
+          entry === groupBubble,
+          finalWrapper
+            ? finalIsDefaultPrevented
+            : entry.methods.isDefaultPrevented,
+          pair.terminal,
+        );
+      }) &&
+      sourceNavigationIsCurrent(
+        publication,
+        movement,
+        movement.source.element,
+      )
+    );
+  };
+  const sourceGroupCapture = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    sourceNavigationDelivery(
+      "group-capture",
+      event,
+      event.currentTarget,
+    );
+  };
+  const sourceButtonCapture = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    sourceNavigationDelivery(
+      "source-capture",
+      event,
+      event.currentTarget,
+    );
+  };
+  const sourceButtonBubble = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    sourceNavigationDelivery(
+      "source-bubble",
+      event,
+      event.currentTarget,
+    );
+  };
+  const sourceGroupBubble = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const result = sourceNavigationDelivery(
+      "group-bubble",
+      event,
+      event.currentTarget,
+    );
+    const { stages, delivery, movement } = result ?? {};
+    const publication = delivery?.publication;
+    const authority = publication?.keyboard;
+    const destination = movement?.destination;
+    const groupCapture = stages?.groupCapture;
+    const sourceCapture = stages?.sourceCapture;
+    const sourceBubble = stages?.sourceBubble;
+    if (
+      !stages ||
+      !delivery ||
+      !publication ||
+      !authority ||
+      !movement ||
+      !destination ||
+      !groupCapture ||
+      !sourceCapture ||
+      !sourceBubble ||
+      stages.groupBubble !== delivery
     ) {
       return;
     }
@@ -4613,41 +4828,70 @@ function GitHubPickerVisit({
     });
     if (!publicationCoordinator.claimSourceNavigation(pair)) return;
     try {
+      if (!sourceNavigationPairIsCurrent(pair, false)) return;
+      const prevention =
+        publicationCoordinator.invokeSourceNavigationPairCallback(
+          pair,
+          () =>
+            authority.apply(
+              delivery.methods.preventDefault,
+              delivery.wrapper,
+              [],
+            ),
+        );
+      if (!prevention) return;
+      let finalIsDefaultPrevented: (...args: never[]) => unknown;
+      try {
+        finalIsDefaultPrevented = delivery.wrapper.isDefaultPrevented;
+      } catch {
+        return;
+      }
       if (
-        !publicationCoordinator.sourceNavigationIsDelivering(pair) ||
-        !pickerSourceReactDeliveryRemains(groupCapture, false) ||
-        !pickerSourceReactDeliveryRemains(sourceCapture, false) ||
-        !pickerSourceReactDeliveryRemains(sourceBubble, false) ||
-        !pickerSourceReactDeliveryRemains(delivery, false) ||
-        !sourceNavigationIsCurrent(
-          publication,
-          movement,
-          movement.source.element,
+        typeof finalIsDefaultPrevented !== "function" ||
+        !sourceNavigationPairIsCurrent(
+          pair,
+          true,
+          finalIsDefaultPrevented,
         )
       ) {
         return;
       }
-      authority.apply(delivery.methods.preventDefault, delivery.wrapper, []);
+      const defaultState =
+        publicationCoordinator.invokeSourceNavigationPairCallback(
+          pair,
+          () =>
+            authority.apply(
+              finalIsDefaultPrevented,
+              delivery.wrapper,
+              [],
+            ),
+        );
       if (
-        !publicationCoordinator.sourceNavigationIsDelivering(pair) ||
-        !pickerSourceReactDeliveryRemains(groupCapture, false) ||
-        !pickerSourceReactDeliveryRemains(sourceCapture, false) ||
-        !pickerSourceReactDeliveryRemains(sourceBubble, true) ||
-        !pickerSourceReactDeliveryRemains(delivery, true) ||
-        commitActionKeyboardValue<boolean>(
-          authority,
-          authority.event.defaultPrevented,
-          delivery.native.event,
-        ) !== true ||
-        commitActionKeyboardValue<boolean>(
-          authority,
-          authority.event.cancelBubble,
-          delivery.native.event,
-        ) !== false ||
-        !sourceNavigationIsCurrent(
-          publication,
-          movement,
-          movement.source.element,
+        defaultState?.value !== true ||
+        !sourceNavigationPairIsCurrent(
+          pair,
+          true,
+          finalIsDefaultPrevented,
+        )
+      ) {
+        return;
+      }
+      const propagationState =
+        publicationCoordinator.invokeSourceNavigationPairCallback(
+          pair,
+          () =>
+            authority.apply(
+              delivery.methods.isPropagationStopped,
+              delivery.wrapper,
+              [],
+            ),
+        );
+      if (
+        propagationState?.value !== false ||
+        !sourceNavigationPairIsCurrent(
+          pair,
+          true,
+          finalIsDefaultPrevented,
         )
       ) {
         return;
@@ -4655,7 +4899,11 @@ function GitHubPickerVisit({
       authority.apply(authority.focus, destination.element, [
         PICKER_PREVENT_SCROLL,
       ]);
-      sourceNavigationIsCurrent(publication, movement, destination.element);
+      sourceNavigationIsCurrent(
+        publication,
+        movement,
+        destination.element,
+      );
     } catch {
       return;
     } finally {
@@ -6397,6 +6645,8 @@ function captureCommitActionKeyboardEvent(
   authority: CommitActionKeyboardAuthority,
   nativeEvent: Event,
   expectedPhase: number,
+  expectedDefaultPrevented = false,
+  retainedTerminal: CommitActionKeyboardTerminalProof | null = null,
 ): CommitActionKeyboardEventSnapshot | null {
   if (
     !authority.isCurrent() ||
@@ -6519,9 +6769,11 @@ function captureCommitActionKeyboardEvent(
       [],
     ) as EventTarget[];
     const trusted = authority.trusted.read(nativeEvent);
-    const terminal = authority.terminal.proofFor(
-      nativeEvent as KeyboardEvent,
-    );
+    const terminal =
+      retainedTerminal?.nativeEvent === nativeEvent &&
+      authority.terminal.retains(retainedTerminal)
+        ? retainedTerminal
+        : authority.terminal.proofFor(nativeEvent as KeyboardEvent);
     if (!view) return null;
     if (
       type !== "keydown" ||
@@ -6532,7 +6784,7 @@ function captureCommitActionKeyboardEvent(
       phase !== expectedPhase ||
       !bubbles ||
       !cancelable ||
-      defaultPrevented ||
+      defaultPrevented !== expectedDefaultPrevented ||
       cancelBubble ||
       !isCommitActionNavigationKey(key) ||
       repeat ||
@@ -6669,6 +6921,7 @@ function pickerSourceKeyboardEventsMatch(
 }
 
 function capturePickerSourceReactDelivery(
+  stage: PickerSourceNavigationStage,
   event: ReactKeyboardEvent<HTMLElement>,
   publication: GitHubPickerPublication,
   native: CommitActionKeyboardEventSnapshot,
@@ -6684,13 +6937,11 @@ function capturePickerSourceReactDelivery(
       Partial<PickerSourceReactMethods>;
     const methods = {
       preventDefault: candidate.preventDefault,
-      stopPropagation: candidate.stopPropagation,
       isDefaultPrevented: candidate.isDefaultPrevented,
       isPropagationStopped: candidate.isPropagationStopped,
     };
     if (
       typeof methods.preventDefault !== "function" ||
-      typeof methods.stopPropagation !== "function" ||
       typeof methods.isDefaultPrevented !== "function" ||
       typeof methods.isPropagationStopped !== "function"
     ) {
@@ -6698,25 +6949,10 @@ function capturePickerSourceReactDelivery(
     }
     const captured = Object.freeze<PickerSourceReactMethods>({
       preventDefault: methods.preventDefault,
-      stopPropagation: methods.stopPropagation,
       isDefaultPrevented: methods.isDefaultPrevented,
       isPropagationStopped: methods.isPropagationStopped,
     });
     if (
-      !authority.reactMethodMatches(event, "preventDefault", captured.preventDefault) ||
-      !authority.reactMethodMatches(event, "stopPropagation", captured.stopPropagation) ||
-      !authority.reactMethodMatches(
-        event,
-        "isDefaultPrevented",
-        captured.isDefaultPrevented,
-      ) ||
-      !authority.reactMethodMatches(
-        event,
-        "isPropagationStopped",
-        captured.isPropagationStopped,
-      ) ||
-      authority.apply(captured.isDefaultPrevented, event, []) !== false ||
-      authority.apply(captured.isPropagationStopped, event, []) !== false ||
       event.nativeEvent !== native.event ||
       event.type !== native.type ||
       event.target !== native.target ||
@@ -6735,12 +6971,14 @@ function capturePickerSourceReactDelivery(
       event.metaKey !== native.metaKey ||
       event.shiftKey !== native.shiftKey ||
       event.view !== native.view ||
+      event.detail !== native.detail ||
       native.path[0] !== source.element ||
       !native.path.includes(currentTarget)
     ) {
       return null;
     }
     return Object.freeze({
+      stage,
       publication,
       wrapper: event,
       methods: captured,
@@ -6755,19 +6993,66 @@ function capturePickerSourceReactDelivery(
 
 function pickerSourceReactDeliveryRemains(
   delivery: PickerSourceReactDelivery,
-  defaultPrevented: boolean,
+  publicDefaultPrevented: boolean,
+  nativeDefaultPrevented: boolean,
+  requireCurrentTarget: boolean,
+  revalidateNative: boolean,
+  isDefaultPrevented: (...args: never[]) => unknown =
+    delivery.methods.isDefaultPrevented,
+  retainedTerminal: CommitActionKeyboardTerminalProof | null = null,
 ) {
   const { publication, wrapper, methods, native } = delivery;
   const authority = publication.keyboard;
   if (!authority) return false;
   try {
-    const isDefaultPrevented = wrapper.isDefaultPrevented;
+    const currentNative = revalidateNative
+      ? captureCommitActionKeyboardEvent(
+          authority,
+          native.event,
+          native.phase,
+          nativeDefaultPrevented,
+          retainedTerminal,
+        )
+      : null;
     return (
+      (!revalidateNative || !!currentNative) &&
       authority.isCurrent() &&
       typeof isDefaultPrevented === "function" &&
+      (!revalidateNative ||
+        (!!currentNative &&
+          currentNative.event === native.event &&
+          currentNative.type === native.type &&
+          currentNative.target === native.target &&
+          currentNative.currentTarget === native.currentTarget &&
+          currentNative.phase === native.phase &&
+          currentNative.path.length === native.path.length &&
+          currentNative.path.every(
+            (entry, index) => entry === native.path[index],
+          ) &&
+          currentNative.bubbles === native.bubbles &&
+          currentNative.cancelable === native.cancelable &&
+          currentNative.defaultPrevented === nativeDefaultPrevented &&
+          currentNative.cancelBubble === native.cancelBubble &&
+          currentNative.composed === native.composed &&
+          currentNative.key === native.key &&
+          currentNative.code === native.code &&
+          currentNative.location === native.location &&
+          currentNative.repeat === native.repeat &&
+          currentNative.composing === native.composing &&
+          currentNative.ctrlKey === native.ctrlKey &&
+          currentNative.altKey === native.altKey &&
+          currentNative.metaKey === native.metaKey &&
+          currentNative.shiftKey === native.shiftKey &&
+          currentNative.view === native.view &&
+          currentNative.detail === native.detail &&
+          currentNative.trusted === native.trusted &&
+          currentNative.terminal === native.terminal)) &&
       wrapper.nativeEvent === native.event &&
       wrapper.target === native.target &&
+      (!requireCurrentTarget ||
+        wrapper.currentTarget === delivery.currentTarget) &&
       wrapper.type === native.type &&
+      (!requireCurrentTarget || wrapper.eventPhase === native.phase) &&
       wrapper.bubbles === native.bubbles &&
       wrapper.cancelable === native.cancelable &&
       wrapper.isTrusted === native.trusted &&
@@ -6780,27 +7065,11 @@ function pickerSourceReactDeliveryRemains(
       wrapper.metaKey === native.metaKey &&
       wrapper.shiftKey === native.shiftKey &&
       wrapper.view === native.view &&
+      wrapper.detail === native.detail &&
       wrapper.preventDefault === methods.preventDefault &&
-      wrapper.stopPropagation === methods.stopPropagation &&
-      (defaultPrevented ||
-        wrapper.isDefaultPrevented === methods.isDefaultPrevented) &&
+      wrapper.isDefaultPrevented === isDefaultPrevented &&
       wrapper.isPropagationStopped === methods.isPropagationStopped &&
-      authority.reactMethodMatches(wrapper, "preventDefault", methods.preventDefault) &&
-      authority.reactMethodMatches(wrapper, "stopPropagation", methods.stopPropagation) &&
-      authority.reactMethodMatches(
-        wrapper,
-        "isDefaultPrevented",
-        isDefaultPrevented,
-      ) &&
-      authority.reactMethodMatches(
-        wrapper,
-        "isPropagationStopped",
-        methods.isPropagationStopped,
-      ) &&
-      authority.apply(isDefaultPrevented, wrapper, []) ===
-        defaultPrevented &&
-      authority.apply(methods.isPropagationStopped, wrapper, []) === false &&
-      wrapper.defaultPrevented === defaultPrevented
+      wrapper.defaultPrevented === publicDefaultPrevented
     );
   } catch {
     return false;
