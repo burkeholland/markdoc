@@ -385,6 +385,89 @@ function dispatchTabKeyWithHandler(
   }
 }
 
+interface PublicTabWrapperMethods {
+  preventDefault: () => void;
+  stopPropagation: () => void;
+  isDefaultPrevented: () => boolean;
+  isPropagationStopped: () => boolean;
+}
+
+function publicTabWrapper<T extends HTMLElement>(
+  event: ReactKeyboardEvent<T>,
+  prototype: object,
+  methods: PublicTabWrapperMethods,
+): ReactKeyboardEvent<T> {
+  return Object.assign(Object.create(prototype) as object, {
+    type: event.type,
+    target: event.target,
+    currentTarget: event.currentTarget,
+    eventPhase: event.eventPhase,
+    bubbles: event.bubbles,
+    cancelable: event.cancelable,
+    defaultPrevented: event.defaultPrevented,
+    isTrusted: event.isTrusted,
+    nativeEvent: event.nativeEvent,
+    key: event.key,
+    code: event.code,
+    location: event.location,
+    altKey: event.altKey,
+    ctrlKey: event.ctrlKey,
+    metaKey: event.metaKey,
+    shiftKey: event.shiftKey,
+    repeat: event.repeat,
+    isComposing: event.isComposing,
+    view: event.view,
+    ...methods,
+  }) as ReactKeyboardEvent<T>;
+}
+
+function dispatchTabKeyWithPublicWrappers(
+  element: HTMLButtonElement,
+  event: KeyboardEvent,
+  wrapCapture: (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => ReactKeyboardEvent<HTMLDivElement>,
+  wrapBubble: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => ReactKeyboardEvent<HTMLButtonElement>,
+) {
+  const list = element.closest('[role="tablist"]');
+  if (!(list instanceof HTMLDivElement)) throw new Error("The tab has no tablist");
+  const capture = reactHandler<
+    (event: ReactKeyboardEvent<HTMLDivElement>) => void
+  >(list, "onKeyDownCapture");
+  const bubble = reactHandler<
+    (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+  >(element, "onKeyDown");
+  const listKey = Object.keys(list).find((key) => key.startsWith("__reactProps$"));
+  const tabKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!listKey || !tabKey) throw new Error("React props were not attached to the tab boundary");
+  const listRecord = list as unknown as Record<string, Record<string, unknown>>;
+  const tabRecord = element as unknown as Record<string, Record<string, unknown>>;
+  const listProps = listRecord[listKey]!;
+  const tabProps = tabRecord[tabKey]!;
+  const captureReplacement = {
+    ...listProps,
+    onKeyDownCapture: (current: ReactKeyboardEvent<HTMLDivElement>) =>
+      capture(wrapCapture(current)),
+  };
+  const bubbleReplacement = {
+    ...tabProps,
+    onKeyDown: (current: ReactKeyboardEvent<HTMLButtonElement>) =>
+      bubble(wrapBubble(current)),
+  };
+  listRecord[listKey] = captureReplacement;
+  tabRecord[tabKey] = bubbleReplacement;
+  try {
+    act(() => {
+      element.dispatchEvent(event);
+    });
+  } finally {
+    if (listRecord[listKey] === captureReplacement) listRecord[listKey] = listProps;
+    if (tabRecord[tabKey] === bubbleReplacement) tabRecord[tabKey] = tabProps;
+  }
+}
+
 function dispatchTabKey(
   element: HTMLButtonElement,
   keyOrEvent: string | KeyboardEvent,
@@ -1993,7 +2076,17 @@ describe("AgentConnectCard automatic tab navigation", () => {
       to: labels[(index + 1) % labels.length]!,
     },
     {
+      key: "ArrowRight",
+      from,
+      to: labels[(index + 1) % labels.length]!,
+    },
+    {
       key: "ArrowUp",
+      from,
+      to: labels[(index - 1 + labels.length) % labels.length]!,
+    },
+    {
+      key: "ArrowLeft",
       from,
       to: labels[(index - 1 + labels.length) % labels.length]!,
     },
@@ -2089,9 +2182,292 @@ describe("AgentConnectCard automatic tab navigation", () => {
     }
     expect(copyText).not.toHaveBeenCalled();
   });
+
+  it("leaves Tab, Enter, Space, click, and setup controls on their native paths", () => {
+    const create = vi.fn();
+    const dismiss = vi.fn();
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard
+          origin="https://markdoc.test"
+          onCreateToken={create}
+          onDismiss={dismiss}
+        />
+      </StrictMode>,
+    );
+    const source = tab("Copilot CLI");
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    for (const key of ["Tab", "Enter", " "]) {
+      const event = dispatchTabKey(source, key);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelected("Copilot CLI");
+
+    fireEvent.click(tab("VS Code"));
+    fireEvent.click(screen.getByTestId("agent-connect-create-token"));
+    fireEvent.click(screen.getByTestId("agent-connect-dismiss"));
+    expectSelected("VS Code");
+    expect(create).toHaveBeenCalledOnce();
+    expect(dismiss).toHaveBeenCalledOnce();
+    expect(copyText).not.toHaveBeenCalled();
+  });
 });
 
 describe("AgentConnectCard exact keyboard publication", () => {
+  it("accepts distinct public capture and bubble wrappers with unrelated prototypes and methods", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    const source = tab("Copilot CLI");
+    const destination = tab("VS Code");
+    const capturePrototype = Object.freeze({ boundary: "capture" });
+    const bubblePrototype = Object.freeze({ boundary: "bubble" });
+    const captureMethods = {
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+      isDefaultPrevented: vi.fn(() => false),
+      isPropagationStopped: vi.fn(() => false),
+    };
+    const bubbleMethods = {
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+      isDefaultPrevented: vi.fn(() => false),
+      isPropagationStopped: vi.fn(() => false),
+    };
+    let captureWrapper: ReactKeyboardEvent<HTMLDivElement> | null = null;
+    let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const event = tabKeyEvent(source, "ArrowRight");
+
+    dispatchTabKeyWithPublicWrappers(
+      source,
+      event,
+      (current) => {
+        captureWrapper = publicTabWrapper(
+          current,
+          capturePrototype,
+          captureMethods,
+        );
+        return captureWrapper;
+      },
+      (current) => {
+        bubbleWrapper = publicTabWrapper(
+          current,
+          bubblePrototype,
+          bubbleMethods,
+        );
+        return bubbleWrapper;
+      },
+    );
+
+    expect(captureWrapper).not.toBe(bubbleWrapper);
+    expect(Object.getPrototypeOf(captureWrapper)).toBe(capturePrototype);
+    expect(Object.getPrototypeOf(bubbleWrapper)).toBe(bubblePrototype);
+    expect(captureMethods.isDefaultPrevented).toHaveBeenCalled();
+    expect(captureMethods.isPropagationStopped).toHaveBeenCalled();
+    expect(bubbleMethods.isDefaultPrevented).toHaveBeenCalled();
+    expect(bubbleMethods.isPropagationStopped).toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(focus.mock.contexts[0]).toBe(destination);
+    expectSelected("VS Code");
+    expect(destination).toHaveFocus();
+  });
+
+  it.each([
+    ["capture", "isDefaultPrevented"],
+    ["capture", "isPropagationStopped"],
+    ["bubble", "isDefaultPrevented"],
+    ["bubble", "isPropagationStopped"],
+  ] as const)(
+    "rejects %s wrapper %s identity drift and accepts a clean successor",
+    (phase, methodName) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      renderDirect(
+        <StrictMode>
+          <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+        </StrictMode>,
+      );
+      const source = tab("Copilot CLI");
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const event = tabKeyEvent(source, "ArrowDown");
+      const methods = (wrapper: ReactKeyboardEvent<HTMLElement>) => {
+        const stable = {
+          preventDefault: vi.fn(),
+          stopPropagation: vi.fn(),
+          isDefaultPrevented: vi.fn(() => false),
+          isPropagationStopped: vi.fn(() => false),
+        };
+        const original = vi.fn(() => {
+          Object.defineProperty(wrapper, methodName, {
+            configurable: true,
+            value: vi.fn(() => false),
+          });
+          return false;
+        });
+        stable[methodName] = original;
+        return stable;
+      };
+      const wrap = <T extends HTMLElement>(
+        current: ReactKeyboardEvent<T>,
+        currentPhase: "capture" | "bubble",
+      ) => {
+        const wrapper = publicTabWrapper(
+          current,
+          Object.freeze({ currentPhase }),
+          {
+            preventDefault: vi.fn(),
+            stopPropagation: vi.fn(),
+            isDefaultPrevented: vi.fn(() => false),
+            isPropagationStopped: vi.fn(() => false),
+          },
+        );
+        if (phase === currentPhase) {
+          const drifting = methods(wrapper);
+          Object.assign(wrapper, drifting);
+        }
+        return wrapper;
+      };
+
+      dispatchTabKeyWithPublicWrappers(
+        source,
+        event,
+        (current) => wrap(current, "capture"),
+        (current) => wrap(current, "bubble"),
+      );
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expectSelected("Copilot CLI");
+      expect(source).toHaveFocus();
+      expect(copyText).not.toHaveBeenCalled();
+
+      const accepted = dispatchTabKey(source, "ArrowDown");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expectSelected("VS Code");
+      expect(tab("VS Code")).toHaveFocus();
+    },
+  );
+
+  it("binds exact facade listener methods to the backing Window and rejects drift and lookalikes", async () => {
+    const realAdd = window.addEventListener;
+    const realRemove = window.removeEventListener;
+    const add = vi.fn(function (
+      this: Window,
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | AddEventListenerOptions,
+    ) {
+      Reflect.apply(realAdd, window, [type, listener, options]);
+    });
+    const remove = vi.fn(function (
+      this: Window,
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | EventListenerOptions,
+    ) {
+      Reflect.apply(realRemove, window, [type, listener, options]);
+    });
+    let currentAdd: Window["addEventListener"] = add;
+    let currentRemove: Window["removeEventListener"] = remove;
+    const facade = new Proxy(window, {
+      get(target, property) {
+        if (property === "addEventListener") return currentAdd;
+        if (property === "removeEventListener") return currentRemove;
+        if (property === "setTimeout") return target.setTimeout.bind(target);
+        if (property === "clearTimeout") return target.clearTimeout.bind(target);
+        return Reflect.get(target, property, target);
+      },
+    });
+    vi.spyOn(Document.prototype, "defaultView", "get").mockReturnValue(facade);
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      <StrictMode>
+        <AgentConnectCard origin="https://markdoc.test" hideTokenStep />
+      </StrictMode>,
+    );
+    const source = tab("Copilot CLI");
+    const listenerCall = add.mock.calls.find(
+      ([type, , options]) => type === "keydown" && options === true,
+    );
+    const listener = listenerCall?.[1];
+    if (typeof listener !== "function") {
+      throw new Error("The exact Window key listener was not published");
+    }
+    const structuralWindow = {
+      document,
+      window: null as object | null,
+      addEventListener: add,
+      removeEventListener: remove,
+    };
+    structuralWindow.window = structuralWindow;
+    const lookalikeEvent = tabKeyEvent(source, "ArrowDown");
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    Reflect.apply(listener, structuralWindow, [lookalikeEvent]);
+    expect(lookalikeEvent.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelected("Copilot CLI");
+
+    currentAdd = vi.fn();
+    const drifted = dispatchTabKey(source, "ArrowDown");
+    expect(drifted.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelected("Copilot CLI");
+
+    currentAdd = add;
+    currentRemove = vi.fn();
+    const removeDrifted = dispatchTabKey(source, "ArrowDown");
+    expect(removeDrifted.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expectSelected("Copilot CLI");
+
+    currentRemove = remove;
+    const accepted = dispatchTabKey(source, "ArrowDown");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expectSelected("VS Code");
+    expect(tab("VS Code")).toHaveFocus();
+
+    const exactListeners = add.mock.calls
+      .filter(([type, , options]) => type === "keydown" && options === true)
+      .map(([, callback]) => callback);
+    await act(() => {
+      view.root.render(<StrictMode><div /></StrictMode>);
+    });
+    const removedListeners = remove.mock.calls
+      .filter(([type, , options]) => type === "keydown" && options === true)
+      .map(([, callback]) => callback);
+    expect(removedListeners).toEqual(expect.arrayContaining(exactListeners));
+  });
+
   it.each([
     ["Control", { ctrlKey: true }],
     ["Alt", { altKey: true }],
