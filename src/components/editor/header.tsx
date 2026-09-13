@@ -13542,8 +13542,14 @@ function PublishMenuTriggerButton({
     <button
       {...props}
       onKeyDownCapture={(event) => {
-        onDirectionalKeyDownCapture(event);
-        onKeyDownCapture?.(event);
+        if (handlingKey.current) return;
+        handlingKey.current = true;
+        try {
+          onDirectionalKeyDownCapture(event);
+          onKeyDownCapture?.(event);
+        } finally {
+          handlingKey.current = false;
+        }
       }}
       onKeyDown={(event) => {
         if (handlingKey.current) return;
@@ -13562,7 +13568,6 @@ function PublishMenuTriggerButton({
             onDirectionalTriggerKeyDown(event);
             onDirectionalKeyDown(event);
           } else {
-            handlingKey.current = false;
             onKeyDown?.(event);
           }
         } finally {

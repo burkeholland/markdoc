@@ -1641,6 +1641,166 @@ describe("editor header More menu authority", () => {
 });
 
 describe("editor header Publish options directional focus", () => {
+  describe("rendered capture reentry", () => {
+    it.each(
+      (["nativeEvent", "cancellation query"] as const).flatMap((boundary) =>
+        [false, true].flatMap((republish) =>
+          [false, true].map((throwing) => ({ boundary, republish, throwing })))),
+    )("excludes nested arrows at $boundary with republish=$republish and throwing=$throwing", async ({
+      boundary, republish, throwing,
+    }) => {
+      const measurements = publishKeyMeasurements();
+      const props = headerProps(createSession(), createActions());
+      const successor = { ...props, onPublish: vi.fn() };
+      const view = await renderStrict(header(props));
+      const button = publishTrigger();
+      const initialHandlers = publishKeyHandlers(button);
+      const nestedPhases: Array<{
+        phase: PublishPhase;
+        event: KeyboardEvent;
+        target: EventTarget;
+        currentTarget: EventTarget;
+        insideCapture: boolean;
+      }> = [];
+      const openChanges: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => openChanges.push(...records));
+      observer.observe(button, {
+        attributes: true, attributeOldValue: true, attributeFilter: ["aria-expanded"],
+      });
+      let nested: KeyboardEvent | null = null;
+      let currentButton: HTMLButtonElement | null = null;
+      let currentHandlers: ReturnType<typeof publishKeyHandlers> | null = null;
+      let entered = false;
+      let insideCapture = false;
+      let nestedOutcome: {
+        prevented: boolean;
+        preventions: number;
+        menu: HTMLElement | null;
+        expanded: string | null;
+        autofocus: number;
+        focus: number;
+      } | null = null;
+      const reenter = vi.fn(() => {
+        if (entered) return;
+        entered = true;
+        if (republish) {
+          flushSync(() => view.root.render(<StrictMode>{header(successor)}</StrictMode>));
+        }
+        currentButton = publishTrigger();
+        currentHandlers = publishKeyHandlers(currentButton);
+        nested = new KeyboardEvent("keydown", {
+          bubbles: true, cancelable: true, composed: true, key: "ArrowUp",
+        });
+        markJsdomEventTrusted(nested);
+        const restoreNested = interceptPublishKeys((event, phase, original) => {
+          if (event.nativeEvent === nested) {
+            nestedPhases.push({
+              phase, event: event.nativeEvent, target: event.target,
+              currentTarget: event.currentTarget, insideCapture,
+            });
+          }
+          original(event);
+        }, currentButton);
+        try {
+          currentButton.dispatchEvent(nested);
+          nestedOutcome = {
+            prevented: nested.defaultPrevented,
+            preventions: measurements.preventDefault.mock.contexts
+              .filter((receiver) => receiver === nested).length,
+            menu: screen.queryByRole("menu"),
+            expanded: currentButton.getAttribute("aria-expanded"),
+            autofocus: measurements.dispatchEvent.mock.calls
+              .filter(([event]) => event.type === "focusScope.autoFocusOnMount").length,
+            focus: measurements.focus.mock.calls.length,
+          };
+        } finally {
+          restoreNested();
+        }
+        if (throwing) throw new Error("Throwing capture callback after nested dispatch");
+      });
+      const restore = interceptPublishKeys((source, phase, original) => {
+        if (phase !== "capture" || source.nativeEvent === nested) {
+          original(source);
+          return;
+        }
+        const wrapper = publicPublishWrapper(source, "getters");
+        if (boundary === "nativeEvent") {
+          Object.defineProperty(wrapper.event, "nativeEvent", {
+            get: () => {
+              reenter();
+              return source.nativeEvent;
+            },
+          });
+        } else {
+          wrapper.methods.isDefaultPrevented.mockImplementation(() => {
+            reenter();
+            return false;
+          });
+        }
+        insideCapture = true;
+        try {
+          original(wrapper.event);
+        } finally {
+          insideCapture = false;
+        }
+      }, button);
+      button.focus();
+      measurements.focus.mockClear();
+      try {
+        const outer = publishArrow("ArrowDown");
+        restore();
+        expect(reenter).toHaveBeenCalled();
+        expect(nested).not.toBeNull();
+        expect(nested).not.toBe(outer);
+        expect(nested!.isTrusted).toBe(true);
+        expect(currentButton).toBe(button);
+        expect(currentHandlers).not.toBeNull();
+        if (republish) {
+          expect(currentHandlers!.captureTrigger).not.toBe(initialHandlers.captureTrigger);
+        } else {
+          expect(currentHandlers!.captureTrigger).toBe(initialHandlers.captureTrigger);
+        }
+        expect(nestedPhases).toEqual(["capture", "bubble"].map((phase) => ({
+          phase, event: nested, target: button, currentTarget: button, insideCapture: true,
+        })));
+        expect(measurements.dispatchEvent.mock.calls.flatMap(([event], index) =>
+          event === nested ? [measurements.dispatchEvent.mock.contexts[index]] : []))
+          .toEqual([button]);
+        expect(nestedOutcome).toEqual({
+          prevented: false, preventions: 0, menu: null, expanded: "false", autofocus: 0, focus: 0,
+        });
+        expect(nested!.defaultPrevented).toBe(false);
+        expectNoPublishActions(props);
+        expectNoPublishActions(successor);
+        if (republish || throwing) {
+          expectPublishRejected(props, measurements, outer);
+          expect(measurements.dispatchEvent.mock.calls
+            .filter(([event]) => event.type === "focusScope.autoFocusOnMount")).toHaveLength(0);
+        } else {
+          await expectPublishAccepted(props, measurements, outer);
+          fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+          await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+          await waitFor(() => expect(button).toHaveFocus());
+          measurements.focus.mockClear();
+          measurements.dispatchEvent.mockClear();
+        }
+        openChanges.push(...observer.takeRecords());
+        expect(openChanges.filter((record) => record.oldValue === "false"))
+          .toHaveLength(republish || throwing ? 0 : 1);
+        openChanges.length = 0;
+        const clean = publishArrow("ArrowUp");
+        await expectPublishAccepted(republish ? successor : props, measurements, clean, "Share link…");
+        openChanges.push(...observer.takeRecords());
+        expect(openChanges.filter((record) => record.oldValue === "false")).toHaveLength(1);
+        expectNoPublishActions(props);
+        expectNoPublishActions(successor);
+      } finally {
+        restore();
+        observer.disconnect();
+      }
+    });
+  });
+
   describe("public React authority", () => {
     it.each(
       (["plain", "null", "unrelated", "getters", "proxy"] as const).flatMap((shape) =>
