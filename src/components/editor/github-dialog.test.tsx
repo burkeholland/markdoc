@@ -1846,20 +1846,22 @@ describe("GitHubPicker exact control publication", () => {
 
     try {
       await selectStrictRepository(view.host);
-      const path = (await view.picker.findByTestId("repo-path")) as HTMLInputElement;
-      const form = path.form;
-      if (!form) throw new Error("The Strict Mode repository path has no form");
+      await view.picker.findByTestId("repo-path");
+      await act(async () => {});
+      const path = view.picker.getByTestId("repo-path") as HTMLInputElement;
       fireEvent.change(path, { target: { value: "docs/strict.md" } });
-      fireEvent.keyDown(path, { key: "Enter", code: "Enter" });
-      const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
-      if (!SubmitEventConstructor) throw new Error("The Strict Mode form has no owner-document SubmitEvent");
-      form.dispatchEvent(
-        new SubmitEventConstructor("submit", {
-          bubbles: true,
-          cancelable: true,
-          submitter: null,
-        }),
-      );
+      await act(async () => {});
+
+      const currentPath = view.picker.getByTestId("repo-path") as HTMLInputElement;
+      const currentForm = currentPath.form;
+      const currentSubmit = view.picker.getByTestId("repo-link") as HTMLButtonElement;
+      if (!currentForm) throw new Error("The Strict Mode repository path has no form");
+      expect(currentPath).toHaveValue("docs/strict.md");
+      expect(currentSubmit.form).toBe(currentForm);
+      expect(currentSubmit).toBeEnabled();
+      expect(linkDocument).not.toHaveBeenCalled();
+
+      act(() => currentForm.requestSubmit());
 
       expect(linkDocument).toHaveBeenCalledExactlyOnceWith(doc.id, {
         storage: "repo",
