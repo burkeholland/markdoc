@@ -1192,7 +1192,9 @@ interface AgentTabDomSnapshot {
 
 interface AgentTabEventIntrinsics {
   readonly keyboardPrototype: object;
+  readonly capturingPhase: number;
   readonly bubblingPhase: number;
+  readonly apply: typeof Reflect.apply;
   readonly isPrototypeOf: typeof Object.prototype.isPrototypeOf;
   readonly trusted: AgentTabTrustedAuthority;
   readonly event: Readonly<{
@@ -1256,6 +1258,8 @@ interface AgentTabPublication {
   readonly dom: AgentTabDomSnapshot;
   readonly intrinsics: AgentTabEventIntrinsics;
   readonly actions: Readonly<Record<ConnectTarget, AgentTabAction>>;
+  readonly windowListener: AgentTabWindowListener;
+  pendingRoute: AgentTabEventRoute | null;
   retired: boolean;
   mutated: boolean;
   observer: MutationObserver | null;
@@ -1309,10 +1313,65 @@ interface AgentTabNativeSnapshot {
   readonly view: Window | null;
 }
 
-type AgentTabReactEvent = ReactKeyboardEvent<HTMLButtonElement> & {
-  readonly _reactName?: unknown;
-  readonly isPersistent?: unknown;
-};
+interface AgentTabReactSnapshot {
+  readonly event: ReactKeyboardEvent<HTMLElement>;
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly eventPhase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly isTrusted: boolean;
+  readonly nativeEvent: KeyboardEvent;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly view: ReactKeyboardEvent<HTMLElement>["view"];
+  readonly preventDefault: () => void;
+  readonly stopPropagation: () => void;
+  readonly isDefaultPrevented: () => boolean;
+  readonly isPropagationStopped: () => boolean;
+}
+
+interface AgentTabWindowListener {
+  readonly identity: symbol;
+  readonly target: Window & typeof globalThis;
+  readonly add: Window["addEventListener"];
+  readonly remove: Window["removeEventListener"];
+  readonly callback: EventListener;
+  active: boolean;
+}
+
+interface AgentTabWindowProof {
+  readonly identity: symbol;
+  readonly listener: AgentTabWindowListener;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly pathTerminal: EventTarget;
+}
+
+interface AgentTabEventRoute {
+  readonly identity: symbol;
+  readonly publication: AgentTabPublication;
+  readonly generation: AgentTabGeneration;
+  readonly action: AgentTabAction;
+  readonly sourceId: ConnectTarget;
+  readonly source: HTMLButtonElement;
+  readonly destinationId: ConnectTarget;
+  readonly destination: HTMLButtonElement;
+  readonly nativeEvent: KeyboardEvent;
+  readonly windowSnapshot: AgentTabNativeSnapshot;
+  readonly windowProof: AgentTabWindowProof;
+  captureSnapshot: AgentTabReactSnapshot | null;
+  captureNativeSnapshot: AgentTabNativeSnapshot | null;
+  invalid: boolean;
+}
 
 function emptyAgentTabElements(): AgentTabElements {
   return {
@@ -1535,6 +1594,7 @@ function captureAgentTabIntrinsics(
   const focus = htmlElementPrototype.focus;
   const setTimeout = ownerWindow.setTimeout;
   const clearTimeout = ownerWindow.clearTimeout;
+  const apply = ownerWindow.Reflect.apply;
   const isPrototypeOf = Object.prototype.isPrototypeOf;
   if (
     !trusted ||
@@ -1562,13 +1622,16 @@ function captureAgentTabIntrinsics(
     typeof focus !== "function" ||
     typeof setTimeout !== "function" ||
     typeof clearTimeout !== "function" ||
+    typeof apply !== "function" ||
     typeof isPrototypeOf !== "function"
   ) {
     return null;
   }
   return Object.freeze({
     keyboardPrototype,
+    capturingPhase: ownerWindow.Event.CAPTURING_PHASE,
     bubblingPhase: ownerWindow.Event.BUBBLING_PHASE,
+    apply,
     isPrototypeOf,
     trusted,
     event: Object.freeze({
@@ -1649,7 +1712,7 @@ function agentTabPathMatches(
   path: readonly EventTarget[],
   source: HTMLButtonElement,
   ownerDocument: Document,
-  ownerWindow: Window & typeof globalThis,
+  terminal: EventTarget,
 ): boolean {
   const expected: EventTarget[] = [];
   let current: Node | null = source;
@@ -1658,19 +1721,121 @@ function agentTabPathMatches(
     if (current === ownerDocument) break;
     current = current.parentNode;
   }
-  const terminal = path.at(-1);
   return expected.at(-1) === ownerDocument &&
     path.length === expected.length + 1 &&
     expected.every((entry, index) => path[index] === entry) &&
-    (
-      terminal === ownerWindow ||
+    path.at(-1) === terminal;
+}
+
+function agentTabNativeSnapshotsMatch(
+  first: AgentTabNativeSnapshot,
+  second: AgentTabNativeSnapshot,
+  includeDispatchState: boolean,
+): boolean {
+  return first.type === second.type &&
+    first.target === second.target &&
+    (!includeDispatchState || first.currentTarget === second.currentTarget) &&
+    (!includeDispatchState || first.eventPhase === second.eventPhase) &&
+    first.bubbles === second.bubbles &&
+    first.cancelable === second.cancelable &&
+    first.defaultPrevented === second.defaultPrevented &&
+    first.cancelBubble === second.cancelBubble &&
+    first.path.length === second.path.length &&
+    first.path.every((entry, index) => second.path[index] === entry) &&
+    first.key === second.key &&
+    first.code === second.code &&
+    first.location === second.location &&
+    first.altKey === second.altKey &&
+    first.ctrlKey === second.ctrlKey &&
+    first.metaKey === second.metaKey &&
+    first.shiftKey === second.shiftKey &&
+    first.repeat === second.repeat &&
+    first.isComposing === second.isComposing &&
+    first.isTrusted === second.isTrusted &&
+    first.view === second.view;
+}
+
+function readAgentTabReactEvent(
+  event: ReactKeyboardEvent<HTMLElement>,
+  nativeEvent: KeyboardEvent,
+  intrinsics: AgentTabEventIntrinsics,
+): AgentTabReactSnapshot | null {
+  try {
+    const snapshot: AgentTabReactSnapshot = Object.freeze({
+      event,
+      type: event.type,
+      target: event.target,
+      currentTarget: event.currentTarget,
+      eventPhase: event.eventPhase,
+      bubbles: event.bubbles,
+      cancelable: event.cancelable,
+      defaultPrevented: event.defaultPrevented,
+      isTrusted: event.isTrusted,
+      nativeEvent: event.nativeEvent,
+      key: event.key,
+      code: event.code,
+      location: event.location,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+      repeat: event.repeat,
+      view: event.view,
+      preventDefault: event.preventDefault,
+      stopPropagation: event.stopPropagation,
+      isDefaultPrevented: event.isDefaultPrevented,
+      isPropagationStopped: event.isPropagationStopped,
+    });
+    return snapshot.nativeEvent === nativeEvent &&
+      agentTabReactSnapshotMatches(snapshot, intrinsics)
+        ? snapshot
+        : null;
+  } catch {
+    return null;
+  }
+}
+
+function agentTabReactSnapshotMatches(
+  snapshot: AgentTabReactSnapshot,
+  intrinsics: AgentTabEventIntrinsics,
+  releasedCurrentTarget = false,
+): boolean {
+  const { event } = snapshot;
+  try {
+    return event.type === snapshot.type &&
+      event.target === snapshot.target &&
       (
-        typeof terminal === "object" &&
-        terminal !== null &&
-        "document" in terminal &&
-        terminal.document === ownerDocument
-      )
-    );
+        event.currentTarget === snapshot.currentTarget ||
+        (releasedCurrentTarget && event.currentTarget === null)
+      ) &&
+      event.eventPhase === snapshot.eventPhase &&
+      event.bubbles === snapshot.bubbles &&
+      event.cancelable === snapshot.cancelable &&
+      event.defaultPrevented === snapshot.defaultPrevented &&
+      event.isTrusted === snapshot.isTrusted &&
+      event.nativeEvent === snapshot.nativeEvent &&
+      event.key === snapshot.key &&
+      event.code === snapshot.code &&
+      event.location === snapshot.location &&
+      event.altKey === snapshot.altKey &&
+      event.ctrlKey === snapshot.ctrlKey &&
+      event.metaKey === snapshot.metaKey &&
+      event.shiftKey === snapshot.shiftKey &&
+      event.repeat === snapshot.repeat &&
+      event.view === snapshot.view &&
+      event.preventDefault === snapshot.preventDefault &&
+      event.stopPropagation === snapshot.stopPropagation &&
+      event.isDefaultPrevented === snapshot.isDefaultPrevented &&
+      event.isPropagationStopped === snapshot.isPropagationStopped &&
+      typeof snapshot.preventDefault === "function" &&
+      typeof snapshot.stopPropagation === "function" &&
+      typeof snapshot.isDefaultPrevented === "function" &&
+      typeof snapshot.isPropagationStopped === "function" &&
+      intrinsics.apply(snapshot.isDefaultPrevented, event, []) === false &&
+      intrinsics.apply(snapshot.isPropagationStopped, event, []) === false;
+  } catch {
+    return false;
+  }
 }
 
 function agentTabDestination(key: string, sourceIndex: number): number {
@@ -1822,27 +1987,39 @@ class AgentTabCoordinator {
     const action = publication?.actions[sourceId];
     const source = action?.source;
     const nativeEvent = event?.nativeEvent;
+    const route = publication?.pendingRoute;
     const snapshot = publication && nativeEvent
       ? readAgentTabNativeEvent(nativeEvent, publication.intrinsics)
       : null;
-    const destinationIndex = snapshot && action
-      ? agentTabDestination(snapshot.key, action.sourceIndex)
-      : -1;
-    const destinationId = destinationIndex >= 0
-      ? publication?.render.order[destinationIndex]
-      : undefined;
-    const destination = destinationId ? publication?.tabs[destinationId] : undefined;
-    const proof = event as AgentTabReactEvent;
-    const reactPrototype = event && typeof event === "object"
-      ? Object.getPrototypeOf(event)
+    const bubble = publication && nativeEvent instanceof publication.ownerWindow.KeyboardEvent
+      ? readAgentTabReactEvent(
+          event as ReactKeyboardEvent<HTMLElement>,
+          nativeEvent,
+          publication.intrinsics,
+        )
       : null;
+    if (route && route.nativeEvent === nativeEvent) {
+      publication.pendingRoute = null;
+    }
     if (
       !publication ||
       !action ||
       !source ||
+      !route ||
       !snapshot ||
-      !destinationId ||
-      !destination ||
+      !bubble ||
+      route.invalid ||
+      route.publication !== publication ||
+      route.generation !== generation ||
+      route.action !== action ||
+      route.sourceId !== sourceId ||
+      route.source !== source ||
+      route.destinationId === sourceId ||
+      route.destination !== publication.tabs[route.destinationId] ||
+      route.nativeEvent !== nativeEvent ||
+      !route.captureSnapshot ||
+      !route.captureNativeSnapshot ||
+      route.captureSnapshot.event === bubble.event ||
       publication.generation !== generation ||
       publication.draft !== generation.authority ||
       publication.retired ||
@@ -1856,38 +2033,24 @@ class AgentTabCoordinator {
       action.source !== source ||
       action.ownerDocument !== publication.ownerDocument ||
       action.order !== publication.render.order ||
-      destinationId === sourceId ||
       !Object.isFrozen(action) ||
-      !reactPrototype ||
-      reactPrototype === Object.prototype ||
-      event.type !== snapshot.type ||
-      event.type !== "keydown" ||
-      event.nativeEvent !== nativeEvent ||
-      event.currentTarget !== source ||
-      event.target !== source ||
-      event.eventPhase !== snapshot.eventPhase ||
-      event.bubbles !== snapshot.bubbles ||
-      event.cancelable !== snapshot.cancelable ||
-      event.defaultPrevented ||
-      event.isTrusted !== snapshot.isTrusted ||
-      event.key !== snapshot.key ||
-      event.code !== snapshot.code ||
-      event.location !== snapshot.location ||
-      event.altKey !== snapshot.altKey ||
-      event.ctrlKey !== snapshot.ctrlKey ||
-      event.metaKey !== snapshot.metaKey ||
-      event.shiftKey !== snapshot.shiftKey ||
-      event.repeat !== snapshot.repeat ||
-      proof._reactName !== "onKeyDown" ||
-      typeof event.isDefaultPrevented !== "function" ||
-      event.isDefaultPrevented() ||
-      typeof event.isPropagationStopped !== "function" ||
-      event.isPropagationStopped() ||
-      typeof proof.isPersistent !== "function" ||
-      !proof.isPersistent() ||
-      typeof event.persist !== "function" ||
-      typeof event.preventDefault !== "function" ||
-      typeof event.stopPropagation !== "function" ||
+      bubble.type !== "keydown" ||
+      bubble.currentTarget !== source ||
+      bubble.target !== source ||
+      bubble.eventPhase !== publication.intrinsics.bubblingPhase ||
+      bubble.bubbles !== snapshot.bubbles ||
+      bubble.cancelable !== snapshot.cancelable ||
+      bubble.defaultPrevented ||
+      bubble.isTrusted !== snapshot.isTrusted ||
+      bubble.key !== snapshot.key ||
+      bubble.code !== snapshot.code ||
+      bubble.location !== snapshot.location ||
+      bubble.altKey !== snapshot.altKey ||
+      bubble.ctrlKey !== snapshot.ctrlKey ||
+      bubble.metaKey !== snapshot.metaKey ||
+      bubble.shiftKey !== snapshot.shiftKey ||
+      bubble.repeat !== snapshot.repeat ||
+      !Object.is(bubble.view, snapshot.view) ||
       snapshot.type !== "keydown" ||
       snapshot.target !== source ||
       snapshot.currentTarget === null ||
@@ -1903,14 +2066,26 @@ class AgentTabCoordinator {
       snapshot.shiftKey ||
       snapshot.repeat ||
       snapshot.isComposing ||
-      (snapshot.view !== null && snapshot.view !== publication.ownerWindow) ||
+      (snapshot.view !== null &&
+        snapshot.view !== publication.ownerWindow &&
+        snapshot.view !== route.windowProof.receiver) ||
       !snapshot.path.includes(snapshot.currentTarget) ||
-      !agentTabPathMatches(
-        snapshot.path,
-        source,
-        publication.ownerDocument,
-        publication.ownerWindow,
+      !agentTabNativeSnapshotsMatch(route.windowSnapshot, snapshot, false) ||
+      !agentTabNativeSnapshotsMatch(
+        route.captureNativeSnapshot,
+        snapshot,
+        false,
       ) ||
+      route.captureNativeSnapshot.currentTarget !== snapshot.currentTarget ||
+      route.captureNativeSnapshot.eventPhase !==
+        publication.intrinsics.capturingPhase ||
+      !this.#windowProofIsCurrent(publication, route) ||
+      !agentTabReactSnapshotMatches(
+        route.captureSnapshot,
+        publication.intrinsics,
+        true,
+      ) ||
+      !agentTabReactSnapshotMatches(bubble, publication.intrinsics) ||
       Reflect.apply(
         publication.intrinsics.activeElement,
         publication.ownerDocument,
@@ -1918,6 +2093,7 @@ class AgentTabCoordinator {
       ) !== source ||
       this.#claimedPublications.has(publication) ||
       this.#claimedActions.has(action) ||
+      this.#claimedReactEvents.has(route.captureSnapshot.event) ||
       this.#claimedReactEvents.has(event) ||
       this.#claimedNativeEvents.has(nativeEvent) ||
       !this.#actionIsCurrent(publication, action) ||
@@ -1926,25 +2102,283 @@ class AgentTabCoordinator {
       return;
     }
 
+    const claim = Object.freeze({
+      identity: Symbol("agent-tab-claim"),
+      authority: publication.render.authority,
+      render: publication.render,
+      publication,
+      action,
+      source,
+      destination: route.destination,
+      sourceId,
+      destinationId: route.destinationId,
+      capture: route.captureSnapshot,
+      bubble,
+      nativeEvent,
+      windowProof: route.windowProof,
+      cancellation: Object.freeze({
+        capturePreventDefault: route.captureSnapshot.preventDefault,
+        captureStopPropagation: route.captureSnapshot.stopPropagation,
+        captureIsDefaultPrevented: route.captureSnapshot.isDefaultPrevented,
+        captureIsPropagationStopped:
+          route.captureSnapshot.isPropagationStopped,
+        bubblePreventDefault: bubble.preventDefault,
+        bubbleStopPropagation: bubble.stopPropagation,
+        bubbleIsDefaultPrevented: bubble.isDefaultPrevented,
+        bubbleIsPropagationStopped: bubble.isPropagationStopped,
+      }),
+      preventDefault: publication.intrinsics.event.preventDefault,
+      setTarget: publication.render.setTarget,
+      focus: publication.intrinsics.focus,
+    });
     this.#claimedPublications.add(publication);
     this.#claimedActions.add(action);
+    this.#claimedReactEvents.add(route.captureSnapshot.event);
     this.#claimedReactEvents.add(event);
     this.#claimedNativeEvents.add(nativeEvent);
-    Reflect.apply(publication.intrinsics.event.preventDefault, nativeEvent, []);
+    const immediateSnapshot = readAgentTabNativeEvent(
+      claim.nativeEvent,
+      claim.publication.intrinsics,
+    );
+    if (
+      !immediateSnapshot ||
+      !agentTabNativeSnapshotsMatch(snapshot, immediateSnapshot, true) ||
+      !this.#windowProofIsCurrent(claim.publication, route) ||
+      !agentTabReactSnapshotMatches(
+        claim.capture,
+        claim.publication.intrinsics,
+        true,
+      ) ||
+      !agentTabReactSnapshotMatches(
+        claim.bubble,
+        claim.publication.intrinsics,
+      ) ||
+      !this.#publicationIsCurrent(claim.publication) ||
+      Reflect.apply(
+        claim.publication.intrinsics.activeElement,
+        claim.publication.ownerDocument,
+        [],
+      ) !== claim.source
+    ) {
+      return;
+    }
+
+    Reflect.apply(claim.preventDefault, claim.nativeEvent, []);
     if (
       !Reflect.apply(
-        publication.intrinsics.event.defaultPrevented,
-        nativeEvent,
+        claim.publication.intrinsics.event.defaultPrevented,
+        claim.nativeEvent,
         [],
       )
     ) {
       return;
     }
-    publication.render.selectedRef.current = destinationId;
-    publication.render.setTarget(destinationId);
-    Reflect.apply(publication.intrinsics.focus, destination, [
+    claim.render.selectedRef.current = claim.destinationId;
+    claim.setTarget(claim.destinationId);
+    Reflect.apply(claim.focus, claim.destination, [
       { preventScroll: true },
     ]);
+  }
+
+  capture(
+    generation: AgentTabGeneration,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) {
+    const publication = this.#current;
+    const nativeEvent = event?.nativeEvent;
+    const route = publication?.pendingRoute;
+    if (
+      !publication ||
+      !route ||
+      route.nativeEvent !== nativeEvent ||
+      route.invalid
+    ) {
+      return;
+    }
+    const nativeSnapshot = readAgentTabNativeEvent(
+      nativeEvent,
+      publication.intrinsics,
+    );
+    const capture = nativeEvent instanceof publication.ownerWindow.KeyboardEvent
+      ? readAgentTabReactEvent(
+          event as ReactKeyboardEvent<HTMLElement>,
+          nativeEvent,
+          publication.intrinsics,
+        )
+      : null;
+    if (
+      !nativeSnapshot ||
+      !capture ||
+      route.captureSnapshot ||
+      route.captureNativeSnapshot ||
+      route.publication !== publication ||
+      route.generation !== generation ||
+      publication.generation !== generation ||
+      capture.type !== "keydown" ||
+      capture.currentTarget !== publication.list ||
+      capture.target !== route.source ||
+      capture.eventPhase !== publication.intrinsics.capturingPhase ||
+      capture.bubbles !== nativeSnapshot.bubbles ||
+      capture.cancelable !== nativeSnapshot.cancelable ||
+      capture.defaultPrevented ||
+      capture.isTrusted !== nativeSnapshot.isTrusted ||
+      capture.key !== nativeSnapshot.key ||
+      capture.code !== nativeSnapshot.code ||
+      capture.location !== nativeSnapshot.location ||
+      capture.altKey !== nativeSnapshot.altKey ||
+      capture.ctrlKey !== nativeSnapshot.ctrlKey ||
+      capture.metaKey !== nativeSnapshot.metaKey ||
+      capture.shiftKey !== nativeSnapshot.shiftKey ||
+      capture.repeat !== nativeSnapshot.repeat ||
+      !Object.is(capture.view, nativeSnapshot.view) ||
+      nativeSnapshot.currentTarget === null ||
+      nativeSnapshot.eventPhase !== publication.intrinsics.capturingPhase ||
+      !nativeSnapshot.path.includes(nativeSnapshot.currentTarget) ||
+      !agentTabNativeSnapshotsMatch(
+        route.windowSnapshot,
+        nativeSnapshot,
+        false,
+      ) ||
+      !this.#windowProofIsCurrent(publication, route) ||
+      !this.#actionIsCurrent(publication, route.action) ||
+      !this.#publicationIsCurrent(publication)
+    ) {
+      route.invalid = true;
+      return;
+    }
+    route.captureSnapshot = capture;
+    route.captureNativeSnapshot = nativeSnapshot;
+  }
+
+  #recordWindowEvent(
+    publication: AgentTabPublication,
+    listener: AgentTabWindowListener,
+    receiver: EventTarget,
+    nativeEvent: Event,
+  ) {
+    const previous = publication.pendingRoute;
+    if (previous) {
+      previous.invalid = true;
+      publication.pendingRoute = null;
+    }
+    const snapshot = readAgentTabNativeEvent(
+      nativeEvent,
+      publication.intrinsics,
+    );
+    if (
+      !snapshot ||
+      !(nativeEvent instanceof publication.ownerWindow.KeyboardEvent) ||
+      !listener.active ||
+      listener !== publication.windowListener ||
+      snapshot.type !== "keydown" ||
+      snapshot.target === null ||
+      snapshot.currentTarget !== receiver ||
+      snapshot.eventPhase !== publication.intrinsics.capturingPhase ||
+      !snapshot.bubbles ||
+      !snapshot.cancelable ||
+      snapshot.defaultPrevented ||
+      snapshot.cancelBubble ||
+      !snapshot.isTrusted ||
+      snapshot.altKey ||
+      snapshot.ctrlKey ||
+      snapshot.metaKey ||
+      snapshot.shiftKey ||
+      snapshot.repeat ||
+      snapshot.isComposing ||
+      (snapshot.view !== null &&
+        snapshot.view !== publication.ownerWindow &&
+        snapshot.view !== receiver) ||
+      snapshot.path.at(-1) !== receiver ||
+      !this.#windowListenerIsCurrent(publication) ||
+      !this.#publicationIsCurrent(publication)
+    ) {
+      return;
+    }
+    const sourceId = CONNECT_TARGET_IDS.find(
+      (id) => publication.tabs[id] === snapshot.target,
+    );
+    const action = sourceId ? publication.actions[sourceId] : undefined;
+    const destinationIndex = action
+      ? agentTabDestination(snapshot.key, action.sourceIndex)
+      : -1;
+    const destinationId = destinationIndex >= 0
+      ? publication.render.order[destinationIndex]
+      : undefined;
+    const destination = destinationId
+      ? publication.tabs[destinationId]
+      : undefined;
+    if (
+      !sourceId ||
+      !action ||
+      !destinationId ||
+      !destination ||
+      destinationId === sourceId ||
+      publication.render.selected !== sourceId ||
+      publication.render.selectedRef.current !== sourceId ||
+      !agentTabPathMatches(
+        snapshot.path,
+        action.source,
+        publication.ownerDocument,
+        receiver,
+      ) ||
+      Reflect.apply(
+        publication.intrinsics.activeElement,
+        publication.ownerDocument,
+        [],
+      ) !== action.source ||
+      !this.#actionIsCurrent(publication, action)
+    ) {
+      return;
+    }
+    const windowProof: AgentTabWindowProof = Object.freeze({
+      identity: Symbol("agent-tab-window-proof"),
+      listener,
+      receiver,
+      currentTarget: snapshot.currentTarget,
+      pathTerminal: snapshot.path.at(-1)!,
+    });
+    publication.pendingRoute = {
+      identity: Symbol("agent-tab-event-route"),
+      publication,
+      generation: publication.generation,
+      action,
+      sourceId,
+      source: action.source,
+      destinationId,
+      destination,
+      nativeEvent,
+      windowSnapshot: snapshot,
+      windowProof,
+      captureSnapshot: null,
+      captureNativeSnapshot: null,
+      invalid: false,
+    };
+  }
+
+  #windowListenerIsCurrent(publication: AgentTabPublication): boolean {
+    const listener = publication.windowListener;
+    try {
+      return listener.active &&
+        listener.target === publication.ownerWindow &&
+        publication.ownerWindow.addEventListener === listener.add &&
+        publication.ownerWindow.removeEventListener === listener.remove;
+    } catch {
+      return false;
+    }
+  }
+
+  #windowProofIsCurrent(
+    publication: AgentTabPublication,
+    route: AgentTabEventRoute,
+  ): boolean {
+    const { windowProof } = route;
+    return route.publication === publication &&
+      windowProof.listener === publication.windowListener &&
+      windowProof.receiver === windowProof.currentTarget &&
+      windowProof.receiver === windowProof.pathTerminal &&
+      route.windowSnapshot.currentTarget === windowProof.currentTarget &&
+      route.windowSnapshot.path.at(-1) === windowProof.pathTerminal &&
+      this.#windowListenerIsCurrent(publication);
   }
 
   #bind(
@@ -2258,6 +2692,9 @@ class AgentTabCoordinator {
     const intrinsics = expectedIntrinsics ??
       (ownerWindow ? captureAgentTabIntrinsics(ownerWindow) : null);
     if (!ownerWindow || !placement || !intrinsics) return null;
+    const add = ownerWindow.addEventListener;
+    const remove = ownerWindow.removeEventListener;
+    if (typeof add !== "function" || typeof remove !== "function") return null;
     const actions = Object.freeze(Object.fromEntries(
       CONNECT_TARGETS.map(({ id }, sourceIndex) => [
         id,
@@ -2273,7 +2710,19 @@ class AgentTabCoordinator {
         } satisfies AgentTabAction),
       ]),
     ) as Record<ConnectTarget, AgentTabAction>);
-    return {
+    const recordWindowEvent = this.#recordWindowEvent.bind(this);
+    const callback: EventListener = function (this: EventTarget, event: Event) {
+      recordWindowEvent(publication, windowListener, this, event);
+    };
+    const windowListener: AgentTabWindowListener = {
+      identity: Symbol("agent-tab-window-listener"),
+      target: ownerWindow,
+      add,
+      remove,
+      callback,
+      active: false,
+    };
+    const publication: AgentTabPublication = {
       identity: Symbol("agent-tab-publication"),
       draft,
       generation,
@@ -2287,10 +2736,13 @@ class AgentTabCoordinator {
       dom: expectedDom ?? snapshotAgentTabDom(list),
       intrinsics,
       actions,
+      windowListener,
+      pendingRoute: null,
       retired: false,
       mutated: false,
       observer: null,
     };
+    return publication;
   }
 
   #publish(publication: AgentTabPublication): boolean {
@@ -2305,6 +2757,12 @@ class AgentTabCoordinator {
     const MutationObserverConstructor =
       publication.ownerWindow.MutationObserver;
     if (!MutationObserverConstructor) return false;
+    Reflect.apply(
+      publication.windowListener.add,
+      publication.windowListener.target,
+      ["keydown", publication.windowListener.callback, true],
+    );
+    publication.windowListener.active = true;
     const observer = new MutationObserverConstructor((records) => {
       this.#recordMutations(publication, records);
     });
@@ -2405,6 +2863,16 @@ class AgentTabCoordinator {
   }
 
   #disconnect(publication: AgentTabPublication) {
+    publication.pendingRoute = null;
+    const listener = publication.windowListener;
+    if (listener.active) {
+      listener.active = false;
+      Reflect.apply(listener.remove, listener.target, [
+        "keydown",
+        listener.callback,
+        true,
+      ]);
+    }
     publication.observer?.disconnect();
     publication.observer = null;
   }
@@ -2554,6 +3022,7 @@ class AgentTabCoordinator {
       !publication.draft.retired &&
       publication.generation.authority === publication.draft &&
       publication.render === publication.generation.render &&
+      this.#windowListenerIsCurrent(publication) &&
       publication.bindings.list === publication.generation.bindings.list &&
       CONNECT_TARGET_IDS.every((id) =>
         publication.bindings[id] === publication.generation.bindings[id] &&
@@ -2727,6 +3196,8 @@ export function AgentConnectCard({ origin, scope, onCreateToken, onDismiss, hide
         className={AGENT_TABLIST_CLASS}
         role="tablist"
         aria-label="Agent client"
+        onKeyDownCapture={(event) =>
+          tabCoordinator.capture(tabDraft.generation, event)}
       >
         {CONNECT_TARGETS.map((item) => (
           <button
