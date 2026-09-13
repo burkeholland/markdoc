@@ -5,6 +5,7 @@ import {
   useEffect,
   useLayoutEffect,
   type ComponentProps,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -56,6 +57,8 @@ interface CapturedClick {
 }
 
 type ClickHandler = (event: CapturedClick) => void;
+type SetupKeyHandler = (event: ReactKeyboardEvent<HTMLAnchorElement>) => void;
+type SetupCaptureHandler = (event: ReactKeyboardEvent<HTMLElement>) => void;
 
 interface CapturedControl {
   element: HTMLButtonElement;
@@ -178,6 +181,197 @@ function capturedClick(
 
 function invoke(control: CapturedControl, currentTarget: EventTarget | null = control.element, target: EventTarget | null = currentTarget) {
   control.click(capturedClick(control, currentTarget, target));
+}
+
+interface CapturedSetupNavigation {
+  nav: HTMLElement;
+  tokens: HTMLAnchorElement;
+  connect: HTMLAnchorElement;
+  capture: SetupCaptureHandler;
+  tokensKey: SetupKeyHandler;
+  connectKey: SetupKeyHandler;
+  navRef: ElementRef<HTMLElement>;
+  tokensRef: ElementRef<HTMLAnchorElement>;
+  connectRef: ElementRef<HTMLAnchorElement>;
+}
+
+function captureSetupNavigation(host: HTMLElement = document.body): CapturedSetupNavigation {
+  const scope = within(host);
+  const nav = scope.getByRole("navigation", { name: "Agent setup" });
+  const tokens = scope.getByRole("link", { name: "Tokens" });
+  const connect = scope.getByRole("link", { name: "Connect an MCP client" });
+  if (
+    !(nav instanceof HTMLElement) ||
+    !(tokens instanceof HTMLAnchorElement) ||
+    !(connect instanceof HTMLAnchorElement)
+  ) {
+    throw new Error("Expected the Agent setup navigation and links");
+  }
+  return {
+    nav,
+    tokens,
+    connect,
+    capture: reactHandler<SetupCaptureHandler>(nav, "onKeyDownCapture"),
+    tokensKey: reactHandler<SetupKeyHandler>(tokens, "onKeyDown"),
+    connectKey: reactHandler<SetupKeyHandler>(connect, "onKeyDown"),
+    navRef: reactRef<HTMLElement>(nav),
+    tokensRef: reactRef<HTMLAnchorElement>(tokens),
+    connectRef: reactRef<HTMLAnchorElement>(connect),
+  };
+}
+
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function setupKeyEvent(
+  element: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+): KeyboardEvent {
+  const KeyboardEventConstructor = element.ownerDocument.defaultView?.KeyboardEvent;
+  if (!KeyboardEventConstructor) throw new Error("The setup link has no owner-realm KeyboardEvent");
+  const event = new KeyboardEventConstructor("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function dispatchSetupKey(
+  element: HTMLAnchorElement,
+  keyOrEvent: string | KeyboardEvent,
+  init: KeyboardEventInit = {},
+): KeyboardEvent {
+  const event = typeof keyOrEvent === "string"
+    ? setupKeyEvent(element, keyOrEvent, init)
+    : keyOrEvent;
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
+}
+
+function dispatchSetupKeyWithHandler(
+  element: HTMLAnchorElement,
+  event: KeyboardEvent,
+  onKeyDown: SetupKeyHandler,
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the setup link");
+  const properties = element as unknown as Record<string, Record<string, unknown>>;
+  const props = properties[propsKey]!;
+  const replacement = { ...props, onKeyDown };
+  properties[propsKey] = replacement;
+  try {
+    act(() => {
+      element.dispatchEvent(event);
+    });
+  } finally {
+    if (properties[propsKey] === replacement) properties[propsKey] = props;
+  }
+}
+
+interface PublicSetupWrapperMethods {
+  preventDefault: (this: ReactKeyboardEvent<HTMLElement>) => void;
+  isDefaultPrevented: (this: ReactKeyboardEvent<HTMLElement>) => boolean;
+  isPropagationStopped: (this: ReactKeyboardEvent<HTMLElement>) => boolean;
+}
+
+function publicSetupWrapper<T extends HTMLElement>(
+  event: ReactKeyboardEvent<T>,
+  prototype: object,
+  methods: PublicSetupWrapperMethods,
+): ReactKeyboardEvent<T> {
+  return Object.assign(Object.create(prototype) as object, {
+    type: event.type,
+    target: event.target,
+    currentTarget: event.currentTarget,
+    eventPhase: event.eventPhase,
+    bubbles: event.bubbles,
+    cancelable: event.cancelable,
+    defaultPrevented: event.defaultPrevented,
+    isTrusted: event.isTrusted,
+    nativeEvent: event.nativeEvent,
+    key: event.key,
+    code: event.code,
+    location: event.location,
+    altKey: event.altKey,
+    ctrlKey: event.ctrlKey,
+    metaKey: event.metaKey,
+    shiftKey: event.shiftKey,
+    repeat: event.repeat,
+    view: event.view,
+    ...methods,
+  }) as unknown as ReactKeyboardEvent<T>;
+}
+
+function dispatchSetupKeyWithPublicWrappers(
+  source: HTMLAnchorElement,
+  event: KeyboardEvent,
+  wrapCapture: (
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => ReactKeyboardEvent<HTMLElement>,
+  wrapBubble: (
+    event: ReactKeyboardEvent<HTMLAnchorElement>,
+  ) => ReactKeyboardEvent<HTMLAnchorElement>,
+) {
+  const nav = source.closest('nav[aria-label="Agent setup"]');
+  if (!(nav instanceof HTMLElement)) throw new Error("The setup link has no navigation");
+  const capture = reactHandler<SetupCaptureHandler>(nav, "onKeyDownCapture");
+  const bubble = reactHandler<SetupKeyHandler>(source, "onKeyDown");
+  const navKey = Object.keys(nav).find((key) => key.startsWith("__reactProps$"));
+  const sourceKey = Object.keys(source).find((key) => key.startsWith("__reactProps$"));
+  if (!navKey || !sourceKey) throw new Error("React props were not attached to the setup boundaries");
+  const navRecord = nav as unknown as Record<string, Record<string, unknown>>;
+  const sourceRecord = source as unknown as Record<string, Record<string, unknown>>;
+  const navProps = navRecord[navKey]!;
+  const sourceProps = sourceRecord[sourceKey]!;
+  const captureReplacement = {
+    ...navProps,
+    onKeyDownCapture: (current: ReactKeyboardEvent<HTMLElement>) =>
+      capture(wrapCapture(current)),
+  };
+  const bubbleReplacement = {
+    ...sourceProps,
+    onKeyDown: (current: ReactKeyboardEvent<HTMLAnchorElement>) =>
+      bubble(wrapBubble(current)),
+  };
+  navRecord[navKey] = captureReplacement;
+  sourceRecord[sourceKey] = bubbleReplacement;
+  try {
+    act(() => {
+      source.dispatchEvent(event);
+    });
+  } finally {
+    if (navRecord[navKey] === captureReplacement) navRecord[navKey] = navProps;
+    if (sourceRecord[sourceKey] === bubbleReplacement) sourceRecord[sourceKey] = sourceProps;
+  }
 }
 
 function renderDirect(node: ReactNode, parent: HTMLElement = document.body): DirectView {
@@ -337,6 +531,749 @@ describe("agent documentation links", () => {
     expect(keepAgentDocs).toHaveClass("inline-flex", "min-h-6");
     expect(keepAgentDocs).toHaveAttribute("href", `${AGENT_DOCS_URL}#sit-in-a-document`);
     expect(keepAgentDocs).toHaveAttribute("target", "_blank");
+  });
+});
+
+describe("KeepAgentHerePanel Agent setup keyboard navigation", () => {
+  const movementCases = [
+    ["Tokens", "ArrowLeft", null],
+    ["Tokens", "ArrowUp", null],
+    ["Tokens", "ArrowRight", "Connect an MCP client"],
+    ["Tokens", "ArrowDown", "Connect an MCP client"],
+    ["Tokens", "Home", null],
+    ["Tokens", "End", "Connect an MCP client"],
+    ["Connect an MCP client", "ArrowLeft", "Tokens"],
+    ["Connect an MCP client", "ArrowUp", "Tokens"],
+    ["Connect an MCP client", "ArrowRight", null],
+    ["Connect an MCP client", "ArrowDown", null],
+    ["Connect an MCP client", "Home", "Tokens"],
+    ["Connect an MCP client", "End", null],
+  ] as const;
+
+  it.each(movementCases)(
+    "keeps bounded %s %s movement exact and action-free",
+    async (from, key, to) => {
+      const onBack = vi.fn();
+      const onCreateToken = vi.fn();
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const scrollTo = vi.spyOn(window, "scrollTo");
+      const location = window.location.href;
+      const view = renderDirect(
+        createElement(
+          StrictMode,
+          null,
+          createElement(KeepAgentHerePanel, {
+            doc: DOC,
+            onBack,
+            onCreateToken,
+          }),
+        ),
+      );
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      const navigation = captureSetupNavigation(view.host);
+      expect([...navigation.nav.children]).toEqual([
+        navigation.tokens,
+        navigation.connect,
+      ]);
+      const source = from === "Tokens" ? navigation.tokens : navigation.connect;
+      const destination = to === "Tokens"
+        ? navigation.tokens
+        : to === "Connect an MCP client"
+          ? navigation.connect
+          : null;
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const event = dispatchSetupKey(source, key);
+
+      expect(event.defaultPrevented).toBe(Boolean(destination));
+      expect(preventDefault).toHaveBeenCalledTimes(destination ? 1 : 0);
+      expect(focus).toHaveBeenCalledTimes(destination ? 1 : 0);
+      if (destination) {
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(focus.mock.contexts[0]).toBe(destination);
+        expect(destination).toHaveFocus();
+      } else {
+        expect(source).toHaveFocus();
+      }
+      expect(onBack).not.toHaveBeenCalled();
+      expect(onCreateToken).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+      expect(listTokens).toHaveBeenCalledOnce();
+      expect(scrollTo).not.toHaveBeenCalled();
+      expect(window.location.href).toBe(location);
+    },
+  );
+
+  it.each([
+    ["ArrowLeft", "Numpad4", 3, "Connect an MCP client", "Tokens"],
+    ["ArrowUp", "Numpad8", 3, "Connect an MCP client", "Tokens"],
+    ["ArrowRight", "Numpad6", 3, "Tokens", "Connect an MCP client"],
+    ["ArrowDown", "Numpad2", 3, "Tokens", "Connect an MCP client"],
+    ["Home", "Numpad7", 3, "Connect an MCP client", "Tokens"],
+    ["End", "Numpad1", 3, "Tokens", "Connect an MCP client"],
+  ] as const)(
+    "classifies semantic %s while retaining exact %s code and location",
+    async (key, code, location, from, to) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const view = renderDirect(
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+      );
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      const navigation = captureSetupNavigation(view.host);
+      const source = from === "Tokens" ? navigation.tokens : navigation.connect;
+      const destination = to === "Tokens" ? navigation.tokens : navigation.connect;
+      source.focus();
+      focus.mockClear();
+
+      const event = dispatchSetupKey(source, key, { code, location });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(focus.mock.contexts[0]).toBe(destination);
+      expect(destination).toHaveFocus();
+    },
+  );
+
+  it("uses one exact retained bubble wrapper for prevention and the owner-realm destination for focus", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+    );
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const { tokens, connect } = captureSetupNavigation(view.host);
+    const capturePrototype = Object.freeze({ phase: "capture" });
+    const bubblePrototype = Object.freeze({ phase: "bubble" });
+    let captureWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
+    let bubbleWrapper: ReactKeyboardEvent<HTMLAnchorElement> | null = null;
+    const captureMethods: PublicSetupWrapperMethods = {
+      preventDefault: vi.fn(),
+      isDefaultPrevented: vi.fn(function (this: ReactKeyboardEvent<HTMLElement>) {
+        return this.defaultPrevented;
+      }),
+      isPropagationStopped: vi.fn(() => false),
+    };
+    const bubblePreventDefault = vi.fn(function (this: ReactKeyboardEvent<HTMLElement>) {
+      expect(this).toBe(bubbleWrapper);
+      this.nativeEvent.preventDefault();
+      this.defaultPrevented = true;
+    });
+    const bubbleMethods: PublicSetupWrapperMethods = {
+      preventDefault: bubblePreventDefault,
+      isDefaultPrevented: vi.fn(function (this: ReactKeyboardEvent<HTMLElement>) {
+        return this.defaultPrevented;
+      }),
+      isPropagationStopped: vi.fn(() => false),
+    };
+    tokens.focus();
+    focus.mockClear();
+    nativePreventDefault.mockClear();
+    const event = setupKeyEvent(tokens, "ArrowRight");
+
+    dispatchSetupKeyWithPublicWrappers(
+      tokens,
+      event,
+      (current) => {
+        captureWrapper = publicSetupWrapper(
+          current,
+          capturePrototype,
+          captureMethods,
+        );
+        return captureWrapper;
+      },
+      (current) => {
+        bubbleWrapper = publicSetupWrapper(
+          current,
+          bubblePrototype,
+          bubbleMethods,
+        );
+        return bubbleWrapper;
+      },
+    );
+
+    expect(captureWrapper).not.toBe(bubbleWrapper);
+    expect(Object.getPrototypeOf(captureWrapper)).toBe(capturePrototype);
+    expect(Object.getPrototypeOf(bubbleWrapper)).toBe(bubblePrototype);
+    expect(captureMethods.preventDefault).not.toHaveBeenCalled();
+    expect(bubblePreventDefault).toHaveBeenCalledOnce();
+    expect(bubblePreventDefault.mock.contexts[0]).toBe(bubbleWrapper);
+    expect(nativePreventDefault).toHaveBeenCalledOnce();
+    expect(event.defaultPrevented).toBe(true);
+    expect(bubbleMethods.isDefaultPrevented).toHaveReturnedWith(true);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(focus.mock.contexts[0]).toBe(connect);
+    expect(connect).toHaveFocus();
+  });
+
+  it.each([
+    ["Control", { ctrlKey: true }],
+    ["Alt", { altKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Shift", { shiftKey: true }],
+    ["composition", { isComposing: true }],
+    ["repeat", { repeat: true }],
+    ["non-bubbling", { bubbles: false }],
+    ["non-cancelable", { cancelable: false }],
+  ] as const)("rejects %s input without prevention or focus work", async (_label, init) => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+    );
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const { tokens } = captureSetupNavigation(view.host);
+    tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const event = dispatchSetupKey(tokens, "ArrowRight", init);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(tokens).toHaveFocus();
+    expect(copyText).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported, previously prevented, stopped, untrusted, and replayed events before a clean movement", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+    );
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const { tokens, connect } = captureSetupNavigation(view.host);
+    tokens.focus();
+    focus.mockClear();
+
+    const unsupported = dispatchSetupKey(tokens, "PageDown");
+    const prevented = setupKeyEvent(tokens, "ArrowRight");
+    prevented.preventDefault();
+    preventDefault.mockClear();
+    dispatchSetupKey(tokens, prevented);
+    const stopped = setupKeyEvent(tokens, "ArrowRight");
+    stopped.stopPropagation();
+    dispatchSetupKey(tokens, stopped);
+    const untrusted = setupKeyEvent(tokens, "ArrowRight", {}, false);
+    dispatchSetupKey(tokens, untrusted);
+
+    expect(unsupported.defaultPrevented).toBe(false);
+    expect(prevented.defaultPrevented).toBe(true);
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(untrusted.isTrusted).toBe(false);
+    expect(untrusted.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(tokens).toHaveFocus();
+
+    const accepted = dispatchSetupKey(tokens, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(connect).toHaveFocus();
+    preventDefault.mockClear();
+    focus.mockClear();
+    tokens.focus();
+    focus.mockClear();
+    dispatchSetupKey(tokens, accepted);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["capture", "preventDefault"],
+    ["capture", "isDefaultPrevented"],
+    ["capture", "isPropagationStopped"],
+    ["bubble", "preventDefault"],
+    ["bubble", "isDefaultPrevented"],
+    ["bubble", "isPropagationStopped"],
+  ] as const)(
+    "rejects %s public %s identity drift and accepts a clean successor event",
+    async (driftPhase, methodName) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const view = renderDirect(
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+      );
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      const { tokens, connect } = captureSetupNavigation(view.host);
+      tokens.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const event = setupKeyEvent(tokens, "ArrowRight");
+      const wrap = <T extends HTMLElement>(
+        current: ReactKeyboardEvent<T>,
+        phase: "capture" | "bubble",
+      ) => {
+        const methods: PublicSetupWrapperMethods = {
+          preventDefault: vi.fn(),
+          isDefaultPrevented: vi.fn(() => false),
+          isPropagationStopped: vi.fn(() => false),
+        };
+        if (phase === driftPhase) {
+          methods.isDefaultPrevented = vi.fn(function () {
+            Object.defineProperty(wrapper, methodName, {
+              configurable: true,
+              value: vi.fn(() => false),
+            });
+            return false;
+          });
+        }
+        const wrapper = publicSetupWrapper(
+          current,
+          Object.freeze({ phase }),
+          methods,
+        );
+        return wrapper;
+      };
+
+      dispatchSetupKeyWithPublicWrappers(
+        tokens,
+        event,
+        (current) => wrap(current, "capture"),
+        (current) => wrap(current, "bubble"),
+      );
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(tokens).toHaveFocus();
+
+      const accepted = dispatchSetupKey(tokens, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(connect).toHaveFocus();
+    },
+  );
+
+  it("binds exact facade registration methods to the backing Window and rejects lookalikes and drift", async () => {
+    const realAdd = window.addEventListener;
+    const realRemove = window.removeEventListener;
+    const add = vi.fn(function (
+      this: Window,
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | AddEventListenerOptions,
+    ) {
+      Reflect.apply(realAdd, window, [type, listener, options]);
+    });
+    const remove = vi.fn(function (
+      this: Window,
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | EventListenerOptions,
+    ) {
+      Reflect.apply(realRemove, window, [type, listener, options]);
+    });
+    let currentAdd: Window["addEventListener"] = add;
+    let currentRemove: Window["removeEventListener"] = remove;
+    const facade = new Proxy(window, {
+      get(target, property) {
+        if (property === "addEventListener") return currentAdd;
+        if (property === "removeEventListener") return currentRemove;
+        return Reflect.get(target, property, target);
+      },
+    });
+    vi.spyOn(document, "defaultView", "get").mockReturnValue(facade);
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+    );
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const { tokens, connect } = captureSetupNavigation(view.host);
+    const listenerCall = add.mock.calls.find(
+      ([type, , options]) => type === "keydown" && options === true,
+    );
+    const listener = listenerCall?.[1];
+    if (typeof listener !== "function") {
+      throw new Error("The exact setup Window listener was not published");
+    }
+    const structuralWindow = {
+      document,
+      window: null as object | null,
+      addEventListener: add,
+      removeEventListener: remove,
+    };
+    structuralWindow.window = structuralWindow;
+    tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const lookalike = setupKeyEvent(tokens, "ArrowRight");
+    Reflect.apply(listener, structuralWindow, [lookalike]);
+    expect(lookalike.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+
+    currentAdd = vi.fn();
+    expect(dispatchSetupKey(tokens, "ArrowRight").defaultPrevented).toBe(false);
+    currentAdd = add;
+    currentRemove = vi.fn();
+    expect(dispatchSetupKey(tokens, "ArrowRight").defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    currentRemove = remove;
+    const accepted = dispatchSetupKey(tokens, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(connect).toHaveFocus();
+
+    const added = add.mock.calls
+      .filter(([type, , options]) => type === "keydown" && options === true)
+      .map(([, callback]) => callback);
+    act(() => view.root.render(createElement("div")));
+    const removed = remove.mock.calls
+      .filter(([type, , options]) => type === "keydown" && options === true)
+      .map(([, callback]) => callback);
+    expect(removed).toEqual(expect.arrayContaining(added));
+  });
+
+  it("ignores every panel control outside the exact setup links and leaves nested tab navigation isolated", async () => {
+    listTokens.mockReset().mockResolvedValue(tokenResponse(0));
+    const onBack = vi.fn();
+    const onCreateToken = vi.fn();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      createElement(
+        StrictMode,
+        null,
+        createElement(KeepAgentHerePanel, { doc: DOC, onBack, onCreateToken }),
+      ),
+    );
+    await waitFor(() =>
+      expect(within(view.host).getByTestId("agent-connect-card")).toBeInTheDocument());
+    const navigation = captureSetupNavigation(view.host);
+    const outside = [
+      within(view.host).getByTestId("keep-agent-back"),
+      within(view.host).getByTestId("keep-agent-copy"),
+      within(view.host).getByTestId("keep-agent-docs-link"),
+      within(view.host).getByTestId("agent-connect-create-token"),
+      within(view.host).getByTestId("agent-connect-dismiss"),
+    ];
+
+    for (const control of outside) {
+      if (!(control instanceof HTMLElement)) throw new Error("Expected an outside control");
+      control.focus();
+      focus.mockClear();
+      const event = setupKeyEvent(control, "ArrowRight");
+      act(() => control.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(control).toHaveFocus();
+    }
+    const nestedTab = within(view.host).getByRole("tab", { name: "Copilot CLI" });
+    if (!(nestedTab instanceof HTMLElement)) throw new Error("Expected the nested Agent Connect tab");
+    nestedTab.focus();
+    focus.mockClear();
+    const nestedEvent = setupKeyEvent(nestedTab, "ArrowRight");
+    act(() => nestedTab.dispatchEvent(nestedEvent));
+    expect(nestedEvent.defaultPrevented).toBe(true);
+    expect(focus.mock.contexts).not.toContain(navigation.tokens);
+    expect(focus.mock.contexts).not.toContain(navigation.connect);
+    expect(onBack).not.toHaveBeenCalled();
+    expect(onCreateToken).not.toHaveBeenCalled();
+    expect(copyText).not.toHaveBeenCalled();
+  });
+
+  it("retains Tab, Enter, and click activation paths without setup-key side effects", async () => {
+    const onBack = vi.fn();
+    listTokens
+      .mockReset()
+      .mockRejectedValueOnce(new ApiError(503, "Token service unavailable."));
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC, onBack })),
+    );
+    await waitFor(() => expect(within(view.host).getByRole("alert")).toBeInTheDocument());
+    const navigation = captureSetupNavigation(view.host);
+    const clicked = vi.fn((event: MouseEvent) => event.preventDefault());
+    navigation.tokens.addEventListener("click", clicked);
+
+    for (const source of [navigation.tokens, navigation.connect]) {
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      for (const key of ["Tab", "Enter"]) {
+        const event = dispatchSetupKey(source, key);
+        expect(event.defaultPrevented).toBe(false);
+      }
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+    }
+    fireEvent.click(navigation.tokens);
+    expect(clicked).toHaveBeenCalledOnce();
+    expect(onBack).not.toHaveBeenCalled();
+    expect(copyText).not.toHaveBeenCalled();
+    expect(listTokens).toHaveBeenCalledOnce();
+  });
+
+  it("rejects stale active, setup, and token-check generations before clean recovery", async () => {
+    const initial = deferred<TokenListResponse>();
+    listTokens.mockReset().mockReturnValueOnce(initial.promise).mockResolvedValue(tokenResponse(1));
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC, active: true })),
+    );
+    const pending = captureSetupNavigation(view.host);
+    await resolve(initial, tokenResponse(0));
+    await waitFor(() =>
+      expect(within(view.host).getByTestId("agent-connect-card")).toBeInTheDocument());
+    const setup = captureSetupNavigation(view.host);
+    setup.tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const staleTokenEvent = setupKeyEvent(setup.tokens, "ArrowRight");
+    dispatchSetupKeyWithHandler(setup.tokens, staleTokenEvent, pending.tokensKey);
+    expect(staleTokenEvent.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+
+    act(() => {
+      view.root.render(
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC, active: false })),
+      );
+    });
+    const inactive = captureSetupNavigation(view.host);
+    inactive.tokens.focus();
+    focus.mockClear();
+    const staleActiveEvent = setupKeyEvent(inactive.tokens, "ArrowRight");
+    dispatchSetupKeyWithHandler(inactive.tokens, staleActiveEvent, setup.tokensKey);
+    expect(staleActiveEvent.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+
+    act(() => {
+      view.root.render(
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC, active: true })),
+      );
+    });
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const recovered = captureSetupNavigation(view.host);
+    recovered.tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = dispatchSetupKey(recovered.tokens, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(recovered.connect).toHaveFocus();
+  });
+
+  it.each([
+    "href restoration",
+    "link detach and restoration",
+    "navigation detach and restoration",
+    "link reorder and restoration",
+  ] as const)(
+    "permanently retires restored setup DOM after %s and gives a clean successor movement",
+    async (scenario) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const view = renderDirect(
+        createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+      );
+      await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+      const stale = captureSetupNavigation(view.host);
+      if (scenario === "href restoration") {
+        const href = stale.tokens.getAttribute("href");
+        stale.tokens.setAttribute("href", "/changed");
+        if (href === null) throw new Error("The Tokens link has no href");
+        stale.tokens.setAttribute("href", href);
+      } else if (scenario === "link detach and restoration") {
+        const next = stale.tokens.nextSibling;
+        stale.nav.removeChild(stale.tokens);
+        stale.nav.insertBefore(stale.tokens, next);
+      } else if (scenario === "navigation detach and restoration") {
+        const parent = stale.nav.parentNode;
+        const next = stale.nav.nextSibling;
+        if (!parent) throw new Error("The setup navigation has no parent");
+        parent.removeChild(stale.nav);
+        parent.insertBefore(stale.nav, next);
+      } else {
+        stale.nav.append(stale.tokens);
+        stale.nav.insertBefore(stale.tokens, stale.connect);
+      }
+      stale.tokens.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const rejected = dispatchSetupKey(stale.tokens, "ArrowRight");
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const docB = { id: "doc-2", title: "Recovered" };
+      act(() => {
+        view.root.render(
+          createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: docB })),
+        );
+      });
+      const recovered = captureSetupNavigation(view.host);
+      recovered.tokens.focus();
+      focus.mockClear();
+      const accepted = dispatchSetupKey(recovered.tokens, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(recovered.connect).toHaveFocus();
+    },
+  );
+
+  it("rejects crossed and foreign wrappers without consuming a clean setup movement", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const view = renderDirect(
+      createElement(
+        StrictMode,
+        null,
+        createElement(
+          "div",
+          null,
+          createElement("section", { "data-testid": "nav-a" }, createElement(KeepAgentHerePanel, { doc: DOC })),
+          createElement("section", { "data-testid": "nav-b" }, createElement(KeepAgentHerePanel, {
+            doc: { id: "doc-2", title: "Other" },
+          })),
+        ),
+      ),
+    );
+    await waitFor(() =>
+      expect(within(view.host).queryAllByRole("status")).toHaveLength(0));
+    const navA = captureSetupNavigation(within(view.host).getByTestId("nav-a"));
+    const navB = captureSetupNavigation(within(view.host).getByTestId("nav-b"));
+    const foreign = iframe.contentDocument?.createEvent("KeyboardEvent");
+    if (!foreign) throw new Error("The iframe has no KeyboardEvent");
+    foreign.initKeyboardEvent("keydown", true, true, iframe.contentWindow, "ArrowRight");
+    navA.tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    act(() => {
+      navA.tokensKey({
+        key: "ArrowRight",
+        currentTarget: navB.tokens,
+        nativeEvent: foreign,
+        preventDefault: vi.fn(),
+      } as unknown as ReactKeyboardEvent<HTMLAnchorElement>);
+    });
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const accepted = dispatchSetupKey(navA.tokens, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(navA.connect).toHaveFocus();
+    iframe.remove();
+  });
+
+  it("claims before public prevention reentrancy, rejects replay, and permits the next clean event", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+    );
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const navigation = captureSetupNavigation(view.host);
+    let bubbleWrapper!: ReactKeyboardEvent<HTMLAnchorElement>;
+    const bubblePreventDefault = vi.fn(function (this: ReactKeyboardEvent<HTMLElement>) {
+      navigation.tokensKey(
+        bubbleWrapper as ReactKeyboardEvent<HTMLAnchorElement>,
+      );
+      this.nativeEvent.preventDefault();
+      this.defaultPrevented = true;
+    });
+    const methods = (preventDefault: PublicSetupWrapperMethods["preventDefault"]): PublicSetupWrapperMethods => ({
+      preventDefault,
+      isDefaultPrevented: vi.fn(function (this: ReactKeyboardEvent<HTMLElement>) {
+        return this.defaultPrevented;
+      }),
+      isPropagationStopped: vi.fn(() => false),
+    });
+    navigation.tokens.focus();
+    focus.mockClear();
+    nativePreventDefault.mockClear();
+    const event = setupKeyEvent(navigation.tokens, "ArrowRight");
+
+    dispatchSetupKeyWithPublicWrappers(
+      navigation.tokens,
+      event,
+      (current) => publicSetupWrapper(
+        current,
+        Object.freeze({ phase: "capture" }),
+        methods(vi.fn()),
+      ),
+      (current) => {
+        bubbleWrapper = publicSetupWrapper(
+          current,
+          Object.freeze({ phase: "bubble" }),
+          methods(bubblePreventDefault),
+        );
+        return bubbleWrapper;
+      },
+    );
+
+    expect(bubblePreventDefault).toHaveBeenCalledOnce();
+    expect(nativePreventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(navigation.connect).toHaveFocus();
+    navigation.tokens.focus();
+    focus.mockClear();
+    nativePreventDefault.mockClear();
+    dispatchSetupKey(navigation.tokens, event);
+    expect(nativePreventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const clean = dispatchSetupKey(navigation.tokens, "ArrowRight");
+    expect(clean.defaultPrevented).toBe(true);
+    expect(nativePreventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it("rejects partial ref replay and removes every exact listener and retained handler on cleanup", async () => {
+    const add = vi.spyOn(window, "addEventListener");
+    const remove = vi.spyOn(window, "removeEventListener");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const view = renderDirect(
+      createElement(StrictMode, null, createElement(KeepAgentHerePanel, { doc: DOC })),
+    );
+    await waitFor(() => expect(within(view.host).queryByRole("status")).toBeNull());
+    const stale = captureSetupNavigation(view.host);
+    const added = add.mock.calls
+      .filter(([type, , options]) => type === "keydown" && options === true)
+      .map(([, callback]) => callback);
+    stale.tokens.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    act(() => stale.navRef(null));
+    const partial = dispatchSetupKey(stale.tokens, "ArrowRight");
+    expect(partial.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    await act(async () => {
+      view.root.render(createElement("div"));
+      await Promise.resolve();
+    });
+    const retainedPreventDefault = vi.fn();
+    act(() => {
+      stale.tokensKey({
+        key: "ArrowRight",
+        currentTarget: stale.tokens,
+        preventDefault: retainedPreventDefault,
+      } as unknown as ReactKeyboardEvent<HTMLAnchorElement>);
+    });
+    expect(retainedPreventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    const removed = remove.mock.calls
+      .filter(([type, , options]) => type === "keydown" && options === true)
+      .map(([, callback]) => callback);
+    expect(removed).toEqual(expect.arrayContaining(added));
   });
 });
 
