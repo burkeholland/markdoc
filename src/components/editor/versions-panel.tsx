@@ -6148,7 +6148,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
       <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
         {listError && (
           <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
-            <div>{listError}</div>
+            <div className="wrap-anywhere">{listError}</div>
             <button
               ref={captureRetry}
               type="button"
@@ -6161,7 +6161,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
             </button>
           </div>
         )}
-        {error && <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger">{error}</div>}
+        {error && <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger wrap-anywhere">{error}</div>}
         {compareHint && (
           <div className="mb-3 flex items-center justify-between rounded-lg bg-accent-soft px-3 py-1.5 text-xs text-ink-2" data-testid="compare-hint">
             <span>{compareHint}</span>
