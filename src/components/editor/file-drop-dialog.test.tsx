@@ -1285,6 +1285,60 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
       );
 
       it.each([
+        ["replace", "ArrowDown", "Numpad2", "insert"],
+        ["replace", "ArrowRight", "Numpad6", "insert"],
+        ["new", "ArrowUp", "Numpad8", "insert"],
+        ["new", "ArrowLeft", "Numpad4", "insert"],
+        ["new", "Home", "Numpad7", "replace"],
+        ["replace", "End", "Numpad1", "new"],
+      ] as const)(
+        "moves from %s with numpad %s (%s) to %s without activating anything",
+        (from, key, code, to) => {
+          const preventDefault = vi.spyOn(
+            Event.prototype,
+            "preventDefault",
+          );
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const handlers = callbacks();
+          renderStrict(propsFor(dropped(`numpad-${key}.md`, 13), handlers));
+          const options = fileDropOptions();
+          const source = options[from];
+          const destination = options[to];
+          const root = screen.getByTestId("file-drop-dialog");
+          const markup = root.outerHTML;
+          const order = [...root.querySelectorAll("button")];
+          const scroll = { x: window.scrollX, y: window.scrollY };
+          source.focus();
+          preventDefault.mockClear();
+          focus.mockClear();
+
+          const event = dispatchFileDropKey(source, key, {
+            code,
+            location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+          });
+
+          expect(event.isTrusted).toBe(true);
+          expect(event.key).toBe(key);
+          expect(event.code).toBe(code);
+          expect(event.location).toBe(
+            KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+          );
+          expect(event.defaultPrevented).toBe(true);
+          expect(preventDefault).toHaveBeenCalledOnce();
+          expect(focus).toHaveBeenCalledExactlyOnceWith({
+            preventScroll: true,
+          });
+          expect(focus.mock.contexts[0]).toBe(destination);
+          expect(destination).toHaveFocus();
+          expect([...root.querySelectorAll("button")]).toEqual(order);
+          expect(root.outerHTML).toBe(markup);
+          expect(order.map((button) => button.tabIndex)).toEqual([0, 0, 0]);
+          expect({ x: window.scrollX, y: window.scrollY }).toEqual(scroll);
+          expectNoFileDropAction(handlers);
+        },
+      );
+
+      it.each([
         ["replace", "ArrowUp"],
         ["replace", "ArrowLeft"],
         ["replace", "Home"],
@@ -1708,7 +1762,6 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
           fileDropKeyEvent(source, "ArrowRight", { bubbles: false }),
           fileDropKeyEvent(source, "ArrowRight", { cancelable: false }),
           fileDropKeyEvent(source, "ArrowRight", {}, false),
-          fileDropKeyEvent(source, "ArrowRight", { code: "ArrowLeft" }),
         ];
         for (const event of rejected) {
           source.focus();

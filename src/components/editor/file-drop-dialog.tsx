@@ -1495,8 +1495,6 @@ function exactFileDropKeyDelivery(
       keyboard.apply(methods.isDefaultPrevented, event, []) === false &&
       keyboard.apply(methods.isPropagationStopped, event, []) === false &&
       snapshot.type === "keydown" &&
-      snapshot.code === key &&
-      snapshot.location === keyboard.standardLocation &&
       snapshot.phase === expectedPhase &&
       snapshot.bubbles &&
       snapshot.cancelable &&
