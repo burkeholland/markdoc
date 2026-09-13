@@ -8527,6 +8527,7 @@ describe("CommentsPanel", () => {
             phase: MentionPhase,
             driftPropagation: () => void,
             wrapper: Record<string, unknown>,
+            wrappers: MentionPhaseWrappers,
           ) => void;
           replaceTextareaDefaultQuery?: boolean;
           driftTextareaPostDefaultQuery?: boolean;
@@ -8642,6 +8643,7 @@ describe("CommentsPanel", () => {
                   });
                 },
                 wrapper,
+                phaseWrappers,
               );
               return event.isDefaultPrevented();
             },
@@ -9015,6 +9017,116 @@ describe("CommentsPanel", () => {
           wrappers.restore();
         }
       });
+
+      it.each([
+        ["scalar", "root-capture", "textarea-capture"],
+        ["scalar", "root-capture", "root-bubble"],
+        ["query-before", "root-capture", "root-capture"],
+        ["query-before", "root-capture", "textarea-bubble"],
+        ["query-before", "textarea-capture", "root-capture"],
+        ["query-after", "root-capture", "root-capture"],
+        ["query-after", "root-capture", "textarea-bubble"],
+        ["query-after", "textarea-capture", "root-capture"],
+        ["query-after", "textarea-bubble", "root-capture"],
+      ] as const)(
+        "rejects %s mutation from %s to %s with no highlight or unrelated effects",
+        async (kind, source, destination) => {
+          const prevention = vi.spyOn(window.Event.prototype, "preventDefault");
+          const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+          const selection = vi.spyOn(window.HTMLTextAreaElement.prototype, "setSelectionRange");
+          const { box, options } = await mountDirectMentions();
+          const root = box.parentElement;
+          if (!root) throw new Error("The mention composer had no root");
+          fireEvent.mouseEnter(options()[1]);
+          await waitFor(() =>
+            expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+          );
+          const beforeSelection = [box.selectionStart, box.selectionEnd];
+          const scroll = vi.mocked(Element.prototype.scrollIntoView);
+          const changes: MutationRecord[] = [];
+          const observer = new MutationObserver((records) => changes.push(...records));
+          observer.observe(box, {
+            attributes: true,
+            attributeFilter: ["aria-activedescendant"],
+          });
+          let prevented = false;
+          let mutations = 0;
+          const replacedQuery = vi.fn(() => destination === "textarea-bubble");
+          const mutate = (phases: MentionPhaseWrappers) => {
+            if (mutations || phases.size !== 4) return;
+            const target = phases.get(destination);
+            if (!target) throw new Error(`Missing ${destination} wrapper`);
+            mutations += 1;
+            Object.defineProperty(target, "isDefaultPrevented", {
+              configurable: true,
+              value: replacedQuery,
+            });
+          };
+          const wrappers = replaceMentionPhaseWrappers(root, box, {
+            replaceTextareaDefaultQuery: true,
+            onPreventDefault: (phases) => {
+              prevented = true;
+              if (kind === "query-after" && source === "textarea-bubble") {
+                const textareaBubble = phases.get("textarea-bubble");
+                if (!textareaBubble) throw new Error("Missing textarea-bubble wrapper");
+                Object.defineProperty(textareaBubble, "isDefaultPrevented", {
+                  configurable: true,
+                  value: () => {
+                    mutate(phases);
+                    return true;
+                  },
+                });
+              }
+            },
+            onDefaultQuery: (phase, _drift, _wrapper, phases) => {
+              if (
+                phase === source &&
+                (kind === "query-before" && !prevented ||
+                  kind === "query-after" && prevented)
+              ) {
+                mutate(phases);
+              }
+            },
+            onPostDefaultPreventedRead: (phase, phases) => {
+              if (kind === "scalar" && phase === source) mutate(phases);
+            },
+          });
+          prevention.mockClear();
+          focus.mockClear();
+          selection.mockClear();
+          scroll.mockClear();
+          try {
+            const rejected = mentionKey(box, "End");
+            changes.push(...observer.takeRecords());
+            expect(mutations).toBe(1);
+            expect(rejected.defaultPrevented).toBe(kind !== "query-before");
+            expect(prevention).toHaveBeenCalledTimes(kind === "query-before" ? 0 : 1);
+            expect(replacedQuery).not.toHaveBeenCalled();
+            expect(changes).toHaveLength(0);
+            expect(options()[1]).toHaveAttribute("aria-selected", "true");
+            expect(box).toHaveFocus();
+            expect(box).toHaveValue("@");
+            expect([box.selectionStart, box.selectionEnd]).toEqual(beforeSelection);
+            expect(focus).not.toHaveBeenCalled();
+            expect(selection).not.toHaveBeenCalled();
+            expect(scroll).not.toHaveBeenCalled();
+            expect(api.documents.comment).not.toHaveBeenCalled();
+            expect(api.documents.createRequest).not.toHaveBeenCalled();
+            expect(session!.comments.list()).toHaveLength(0);
+            wrappers.restore();
+            prevention.mockClear();
+            const clean = mentionKey(box, "End");
+            changes.push(...observer.takeRecords());
+            expect(clean.defaultPrevented).toBe(true);
+            expect(prevention).toHaveBeenCalledOnce();
+            expect(changes).toHaveLength(1);
+            expect(options()[2]).toHaveAttribute("aria-selected", "true");
+          } finally {
+            observer.disconnect();
+            wrappers.restore();
+          }
+        },
+      );
 
       it("keeps the rightful native pair through crossed and nested genuine keys", async () => {
         const preventDefault = vi.spyOn(
