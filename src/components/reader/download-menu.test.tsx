@@ -2,6 +2,7 @@
 import {
   StrictMode,
   useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -121,6 +122,7 @@ type DeliveredKey = {
   shiftKey: boolean;
   repeat: boolean;
   view: Window | null;
+  preventDefault: () => void;
   isDefaultPrevented: () => boolean;
   isPropagationStopped: () => boolean;
 };
@@ -793,11 +795,24 @@ describe("DownloadMenu trusted toggle directions", () => {
     const props = properties[propsKey];
     const captureDefault = () => false;
     const captureStopped = () => false;
-    const bubbleDefault = () => false;
+    const capturePrevent = vi.fn();
+    let activeBubble: DeliveredKey | null = null;
+    const bubbleDefault = () =>
+      activeBubble?.isDefaultPrevented() ?? false;
     const bubbleStopped = () => false;
+    const bubblePrevent = vi.fn(() => {
+      if (!activeBubble) {
+        throw new Error("No active bubble wrapper");
+      }
+      Reflect.apply(activeBubble.preventDefault, activeBubble, []);
+    });
     const capturePrototype = Object.create(null) as object;
     const bubblePrototype = Object.create(null) as object;
     Object.defineProperties(capturePrototype, {
+      preventDefault: {
+        configurable: true,
+        value: capturePrevent,
+      },
       isDefaultPrevented: {
         configurable: true,
         value: captureDefault,
@@ -808,6 +823,10 @@ describe("DownloadMenu trusted toggle directions", () => {
       },
     });
     Object.defineProperties(bubblePrototype, {
+      preventDefault: {
+        configurable: true,
+        value: bubblePrevent,
+      },
       isDefaultPrevented: {
         configurable: true,
         value: bubbleDefault,
@@ -834,7 +853,12 @@ describe("DownloadMenu trusted toggle directions", () => {
             },
           );
         }
-        bubble(distinctReactKey(event, bubblePrototype));
+        activeBubble = event;
+        try {
+          bubble(distinctReactKey(event, bubblePrototype));
+        } finally {
+          activeBubble = null;
+        }
       },
     };
     properties[propsKey] = replacement;
@@ -865,6 +889,92 @@ describe("DownloadMenu trusted toggle directions", () => {
     expect(Object.getPrototypeOf(bubblePrototype)).toBeNull();
     expect(captureDefault).not.toBe(bubbleDefault);
     expect(captureStopped).not.toBe(bubbleStopped);
+    expect(capturePrevent).not.toHaveBeenCalled();
+    expect(bubblePrevent).toHaveBeenCalledOnce();
+  });
+
+  it("marks an accepted movement prevented for a same-root React ancestor", () => {
+    const nativePreventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const ancestorAction = vi.fn();
+    const ancestorStates: {
+      defaultPrevented: boolean;
+      isDefaultPrevented: boolean;
+    }[] = [];
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    act(() => {
+      root.render(
+        <StrictMode>
+          <div
+            onKeyDown={(
+              event: ReactKeyboardEvent<HTMLDivElement>,
+            ) => {
+              const state = {
+                defaultPrevented: event.defaultPrevented,
+                isDefaultPrevented: event.isDefaultPrevented(),
+              };
+              ancestorStates.push(state);
+              if (
+                !state.defaultPrevented ||
+                !state.isDefaultPrevented
+              ) {
+                ancestorAction();
+              }
+            }}
+          >
+            <DownloadMenu docId={DOC_ID} />
+          </div>
+        </StrictMode>,
+      );
+    });
+    fireEvent.click(menuElements().toggle);
+    const menu = menuElements();
+    const activations = Object.fromEntries(
+      FORMATS.map((format) => {
+        const listener = vi.fn();
+        menu.links[format].addEventListener("click", listener);
+        return [format, listener];
+      }),
+    ) as Record<Format, ReturnType<typeof vi.fn>>;
+    document.documentElement.scrollTop = 21;
+    host.scrollTop = 22;
+    menu.root.scrollTop = 23;
+    menu.list.scrollTop = 24;
+    focus.mockClear();
+    nativePreventDefault.mockClear();
+
+    const event = dispatchToggleKey(menu.links.md, "ArrowDown");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(ancestorStates).toEqual([
+      {
+        defaultPrevented: true,
+        isDefaultPrevented: true,
+      },
+    ]);
+    expect(ancestorAction).not.toHaveBeenCalled();
+    expect(nativePreventDefault).toHaveBeenCalledOnce();
+    expect(menu.links.html).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+    expect(document.documentElement.scrollTop).toBe(21);
+    expect(host.scrollTop).toBe(22);
+    expect(menu.root.scrollTop).toBe(23);
+    expect(menu.list.scrollTop).toBe(24);
+    expect(
+      Object.values(activations).every(
+        (listener) => listener.mock.calls.length === 0,
+      ),
+    ).toBe(true);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("permanently rejects restored Window listener drift and publishes a clean successor", () => {

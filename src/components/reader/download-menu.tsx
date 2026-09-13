@@ -274,6 +274,7 @@ interface DownloadKeyListener {
 }
 
 interface DownloadReactCancellation {
+  readonly preventDefault: () => void;
   readonly isDefaultPrevented: () => boolean;
   readonly isPropagationStopped: () => boolean;
 }
@@ -997,10 +998,12 @@ function readDownloadReactCancellation(
   keyboard: DownloadKeyboardIntrinsics,
 ): DownloadReactCancellation | null {
   try {
+    const preventDefault = event.preventDefault;
     const isDefaultPrevented = event.isDefaultPrevented;
     const isPropagationStopped = event.isPropagationStopped;
     if (
       !keyboard.isCurrent() ||
+      !keyboard.methodMatches(event, "preventDefault", preventDefault) ||
       !keyboard.methodMatches(
         event,
         "isDefaultPrevented",
@@ -1017,6 +1020,7 @@ function readDownloadReactCancellation(
       return null;
     }
     return Object.freeze({
+      preventDefault,
       isDefaultPrevented,
       isPropagationStopped,
     });
@@ -1029,14 +1033,35 @@ function downloadReactCancellationMatches(
   event: ReactKeyboardEvent<HTMLElement>,
   expected: DownloadReactCancellation,
   keyboard: DownloadKeyboardIntrinsics,
+  defaultPrevented = false,
 ): boolean {
-  const current = readDownloadReactCancellation(event, keyboard);
-  return Boolean(
-    current &&
-      current.isDefaultPrevented === expected.isDefaultPrevented &&
-      current.isPropagationStopped ===
-        expected.isPropagationStopped,
-  );
+  try {
+    const preventDefault = event.preventDefault;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
+    return (
+      keyboard.isCurrent() &&
+      preventDefault === expected.preventDefault &&
+      isDefaultPrevented === expected.isDefaultPrevented &&
+      isPropagationStopped === expected.isPropagationStopped &&
+      keyboard.methodMatches(event, "preventDefault", preventDefault) &&
+      keyboard.methodMatches(
+        event,
+        "isDefaultPrevented",
+        isDefaultPrevented,
+      ) &&
+      keyboard.methodMatches(
+        event,
+        "isPropagationStopped",
+        isPropagationStopped,
+      ) &&
+      keyboard.apply(isDefaultPrevented, event, []) ===
+        defaultPrevented &&
+      keyboard.apply(isPropagationStopped, event, []) === false
+    );
+  } catch {
+    return false;
+  }
 }
 
 function readDownloadReactKey(
@@ -2185,12 +2210,23 @@ function createDownloadPublication({
       ) {
         return;
       }
-      keyboard.apply(keyboard.event.preventDefault, nativeEvent, []);
+      keyboard.apply(
+        bubble.cancellation.preventDefault,
+        bubble.event,
+        [],
+      );
       if (
         !keyboard.apply(
           keyboard.event.defaultPrevented,
           nativeEvent,
           [],
+        ) ||
+        bubble.event.defaultPrevented !== true ||
+        !downloadReactCancellationMatches(
+          bubble.event,
+          bubble.cancellation,
+          keyboard,
+          true,
         ) ||
         !publication.keyListener.retains(
           bubble.listenerProof,
