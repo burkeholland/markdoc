@@ -1096,6 +1096,7 @@ const OutlineList = memo(function OutlineList({
             data-outline-item
             aria-current={row.index === presentation.active ? "location" : undefined}
             tabIndex={row.index === presentation.tabStop ? 0 : -1}
+            title={row.text || "Untitled"}
           >
             {row.index === presentation.active && <span className="absolute left-0 top-1.5 h-7 w-[3px] rounded-r bg-accent" aria-hidden />}
             <span className="truncate">{row.text || "Untitled"}</span>
