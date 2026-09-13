@@ -14,6 +14,7 @@ interface SubscriberRegistration {
 interface TickerGeneration {
   readonly identity: symbol;
   readonly callback: () => void;
+  readonly visibilityCallback: () => void;
   readonly registrations: Set<SubscriberRegistration>;
   interval: ReturnType<typeof setInterval> | null;
   active: boolean;
@@ -42,6 +43,9 @@ function createGeneration(): TickerGeneration {
     identity: Symbol("relative-time-ticker"),
     interval: null,
     callback: () => tick(generation),
+    visibilityCallback: () => {
+      if (document.visibilityState === "visible") tick(generation);
+    },
     active: true,
     registrations: new Set(),
   };
@@ -60,6 +64,7 @@ function subscribe(listener: Listener): () => void {
   if (generation.interval === null) {
     currentSnapshot = Date.now();
     generation.interval = setInterval(generation.callback, 60_000);
+    document.addEventListener("visibilitychange", generation.visibilityCallback);
   }
 
   return () => {
@@ -71,6 +76,7 @@ function subscribe(listener: Listener): () => void {
 
     generation.active = false;
     if (currentGeneration?.identity === generation.identity) currentGeneration = null;
+    document.removeEventListener("visibilitychange", generation.visibilityCallback);
     if (generation.interval !== null) clearInterval(generation.interval);
   };
 }
@@ -101,7 +107,7 @@ export interface RelativeTimeProps {
 /**
  * "Edited 3 minutes ago" that stays in sync with the clock and never causes a hydration
  * mismatch: the server renders the absolute date ("Aug 22"), the client switches to relative
- * text right after mount and refreshes it every minute.
+ * text right after mount and refreshes it every minute and when the tab becomes visible.
  */
 export function RelativeTime({ date, prefix = "", className }: RelativeTimeProps) {
   const d = date instanceof Date ? date : new Date(date);
