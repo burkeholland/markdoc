@@ -4767,9 +4767,12 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     target: HTMLButtonElement;
     currentTarget: HTMLElement;
     phase: number;
-    view: unknown;
+    view: Window | null;
     methods: RowNavigationReactMethods;
   }>;
+  interface RowNavigationPublication {
+    current: WeakMap<KeyboardEvent, PendingRowNavigation> | null;
+  }
   interface RowNavigationAuthority {
     readonly identity: symbol;
     readonly mount: symbol;
@@ -4783,6 +4786,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     readonly ownerDocument: Document;
     readonly keyboard: TokenRenameKeyboardAuthority;
     readonly terminal: TokenRowKeyboardTerminalRegistration;
+    readonly publication: RowNavigationPublication;
     readonly dom: SecretNoticeDomSnapshot;
     readonly placement: readonly SecretNoticePlacement[];
     readonly history: TokenRenameMutationHistory;
@@ -4790,6 +4794,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   }
   type PendingRowNavigation = Readonly<{
     authority: RowNavigationAuthority;
+    publication: WeakMap<KeyboardEvent, PendingRowNavigation>;
     native: RowNavigationNativeSnapshot;
     capture: RowNavigationReactSnapshot;
     terminal: TokenRowKeyboardTerminalProof;
@@ -4911,7 +4916,6 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   const activeMount = useRef<symbol | null>(null);
   const activeCommit = useRef<RowCommit | null>(null);
   const activeRowNavigation = useRef<RowNavigationAuthority | null>(null);
-  const pendingRowNavigation = useRef<PendingRowNavigation | null>(null);
   const rowNavigationDelivery = useRef<RowNavigationDelivery | null>(null);
   const attemptedRowReactEvents = useRef(new WeakSet<object>());
   const attemptedRowNativeEvents = useRef(new WeakSet<object>());
@@ -5032,6 +5036,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   });
 
   const retireRowNavigation = (authority: RowNavigationAuthority) => {
+    authority.publication.current = null;
     if (!authority.retired) {
       authority.retired = true;
       authority.terminal.release();
@@ -5039,9 +5044,6 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     }
     if (activeRowNavigation.current === authority) {
       activeRowNavigation.current = null;
-    }
-    if (pendingRowNavigation.current?.authority === authority) {
-      pendingRowNavigation.current = null;
     }
     if (rowNavigationDelivery.current?.pair.authority === authority) {
       rowNavigationDelivery.current = null;
@@ -5819,6 +5821,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       || authority.ownerDocument.defaultView !== authority.keyboard.ownerWindow
       || !Object.isFrozen(authority.controls)
       || authority.controls.length === 0
+      || !authority.publication.current
       || !authority.keyboard.isCurrent()
       || !authority.terminal.isCurrent()
       || !authority.history.isPristine()
@@ -6229,7 +6232,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       const preventDefault = reactEvent.preventDefault;
       const isDefaultPrevented = reactEvent.isDefaultPrevented;
       const isPropagationStopped = reactEvent.isPropagationStopped;
-      const view: unknown = event.view;
+      const view: Window | null = event.nativeEvent.view;
       if (
         typeof preventDefault !== "function"
         || typeof isDefaultPrevented !== "function"
@@ -6256,6 +6259,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         || event.altKey !== native.altKey
         || event.metaKey !== native.metaKey
         || event.shiftKey !== native.shiftKey
+        || event.view !== view
         || (view !== null
           && view !== authority.keyboard.ownerWindow
           && view !== native.terminal.receiver)
@@ -6292,7 +6296,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         isDefaultPrevented?: unknown;
         isPropagationStopped?: unknown;
       };
-      const view: unknown = event.view;
+      const view: Window | null = event.nativeEvent.view;
       return event.nativeEvent === snapshot.nativeEvent
         && event.nativeEvent === native.event
         && event.type === native.type
@@ -6313,6 +6317,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         && event.altKey === native.altKey
         && event.metaKey === native.metaKey
         && event.shiftKey === native.shiftKey
+        && event.view === view
         && view === snapshot.view
         && (view === null
           || view === authority.keyboard.ownerWindow
@@ -6387,16 +6392,20 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     return true;
   };
   const stageRowNavigation = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    let nativeEvent: unknown;
+    let nativeEvent: KeyboardEvent;
     try {
       nativeEvent = event.nativeEvent;
     } catch {
       return;
     }
+    const authority = activeRowNavigation.current;
+    const publication = authority?.publication.current;
     if (
-      !nativeEvent
+      !authority
+      || !publication
+      || !nativeEvent
       || typeof nativeEvent !== "object"
-      || pendingRowNavigation.current
+      || publication.has(nativeEvent)
       || rowNavigationDelivery.current
       || attemptedRowReactEvents.current.has(event)
       || attemptedRowNativeEvents.current.has(nativeEvent)
@@ -6405,11 +6414,10 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     }
     attemptedRowReactEvents.current.add(event);
     attemptedRowNativeEvents.current.add(nativeEvent);
-    const authority = activeRowNavigation.current;
-    if (!authority || event.currentTarget !== authority.group) return;
+    if (event.currentTarget !== authority.group) return;
     const native = captureRowNavigationNative(
       authority,
-      nativeEvent as Event,
+      nativeEvent,
       authority.keyboard.Event.CAPTURING_PHASE,
     );
     const capture = native
@@ -6439,6 +6447,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     }
     const pair = Object.freeze<PendingRowNavigation>({
       authority,
+      publication,
       native,
       capture,
       terminal: native.terminal,
@@ -6470,28 +6479,34 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       sourceClaim: Object.freeze({ source }),
       destinationClaim: Object.freeze({ destination }),
     });
-    pendingRowNavigation.current = pair;
-    queueMicrotask(() => {
-      if (pendingRowNavigation.current === pair) {
-        pendingRowNavigation.current = null;
-      }
-    });
+    if (
+      activeRowNavigation.current === authority
+      && authority.publication.current === publication
+    ) {
+      publication.set(native.event, pair);
+    }
   };
   const deliverRowNavigation = (
     role: RowNavigationRole,
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
-    const pair = pendingRowNavigation.current;
-    let nativeEvent: unknown;
+    let nativeEvent: KeyboardEvent;
     try {
       nativeEvent = event.nativeEvent;
     } catch {
       return;
     }
+    const authority = activeRowNavigation.current;
+    const publication = authority?.publication.current;
+    const pair = publication?.get(nativeEvent);
     if (
-      !pair
+      !authority
+      || !publication
+      || !pair
       || !nativeEvent
       || typeof nativeEvent !== "object"
+      || pair.authority !== authority
+      || pair.publication !== publication
       || pair.native.event !== nativeEvent
       || pair.source.role !== role
       || rowNavigationDelivery.current
@@ -6501,13 +6516,12 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       return;
     }
     attemptedRowReactEvents.current.add(event);
-    pendingRowNavigation.current = null;
-    const { authority, source, destination, key } = pair;
+    const { source, destination, key } = pair;
     let delivery: RowNavigationDelivery | null = null;
     try {
       const native = captureRowNavigationNative(
         authority,
-        nativeEvent as Event,
+        nativeEvent,
         authority.keyboard.Event.BUBBLING_PHASE,
       );
       const bubble = native
@@ -6542,11 +6556,22 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
           destination,
           key,
         )
+        || activeRowNavigation.current !== authority
+        || authority.publication.current !== publication
+        || publication.get(nativeEvent) !== pair
       ) {
         return;
       }
       delivery = Object.freeze({ pair, bubble });
       if (!claimRowNavigation(delivery)) return;
+      if (
+        activeRowNavigation.current !== authority
+        || authority.publication.current !== publication
+        || publication.get(nativeEvent) !== pair
+        || !publication.delete(nativeEvent)
+      ) {
+        return;
+      }
       if (
         rowNavigationDelivery.current !== delivery
         || !rowNavigationReactSnapshotIsCurrent(
@@ -6577,10 +6602,13 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         bubble.event,
         [],
       );
-      const currentDefaultQuery = bubble.event.isDefaultPrevented;
+      const currentPreventDefault = bubble.event.preventDefault;
       const currentPropagationQuery = bubble.event.isPropagationStopped;
+      const currentDefaultQuery = bubble.event.isDefaultPrevented;
       if (
-        tokenRenameNativeValue<boolean>(
+        currentPreventDefault !== bubble.methods.preventDefault
+        || currentPropagationQuery !== bubble.methods.isPropagationStopped
+        || tokenRenameNativeValue<boolean>(
           authority.keyboard,
           authority.keyboard.event.defaultPrevented,
           native.event,
@@ -6649,6 +6677,10 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     if (!placement || !keyboard) return;
     const terminal = createTokenRowKeyboardTerminalRegistration(keyboard);
     if (!terminal) return;
+    const publication: RowNavigationPublication = {
+      current: new WeakMap<KeyboardEvent, PendingRowNavigation>(),
+    };
+    Object.seal(publication);
     const entries = ([
       ["rename", 0],
       ["replace", 1],
@@ -6692,6 +6724,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       ownerDocument: commit.ownerDocument,
       keyboard,
       terminal,
+      publication,
       dom: snapshotSecretNoticeDom(commit.row),
       placement,
       history,

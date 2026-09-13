@@ -1544,6 +1544,87 @@ describe("Settings → Agents: token row action navigation", () => {
     },
   );
 
+  it.each([1, 3])(
+    "retains the exact native pair through %i capture microtask checkpoint(s)",
+    async (checkpoints) => {
+      const effects = trackRowNavigationEffects(window);
+      const view = await showStrictTokenRows();
+      const group = within(view.rows[0]!).getByRole("group", {
+        name: `${token.name} token actions`,
+      });
+      const rename = within(group).getByRole("button", {
+        name: `Rename ${token.name}`,
+      }) as HTMLButtonElement;
+      const replace = within(group).getByRole("button", {
+        name: `Replace ${token.name}`,
+      }) as HTMLButtonElement;
+      rename.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+      let observed = 0;
+      rename.addEventListener("keydown", () => {
+        const checkpoint = () => {
+          observed += 1;
+          if (observed < checkpoints) queueMicrotask(checkpoint);
+        };
+        queueMicrotask(checkpoint);
+        vi.runAllTicks();
+      }, { capture: true, once: true });
+
+      try {
+        const event = dispatchRenameNavigationKey(rename, "ArrowRight");
+        expect(observed).toBe(checkpoints);
+        expect(event.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focusCalls).toEqual([{
+          target: replace,
+          options: { preventScroll: true },
+        }]);
+      } finally {
+        vi.runAllTicks();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("does not let an ineligible crossed bubble consume the rightful native pair", async () => {
+    const effects = trackRowNavigationEffects(window);
+    const view = await showStrictTokenRows();
+    const group = within(view.rows[0]!).getByRole("group", {
+      name: `${token.name} token actions`,
+    });
+    const rename = within(group).getByRole("button", {
+      name: `Rename ${token.name}`,
+    }) as HTMLButtonElement;
+    const replace = within(group).getByRole("button", {
+      name: `Replace ${token.name}`,
+    }) as HTMLButtonElement;
+    const renameBubble = reactProp<
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => void
+    >(rename, "onKeyDown");
+    rename.addEventListener("keydown", (event) => {
+      if (!(event instanceof window.KeyboardEvent)) {
+        throw new Error("The crossed row action did not receive a keyboard event");
+      }
+      renameBubble(renameNavigationReactWrapper(event, replace, rename));
+    }, { capture: true, once: true });
+    rename.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    effects.focusCalls.length = 0;
+
+    const event = dispatchRenameNavigationKey(rename, "ArrowRight");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+    expect(effects.focusCalls).toEqual([{
+      target: replace,
+      options: { preventScroll: true },
+    }]);
+  });
+
   it("authenticates distinct group-capture and action-bubble wrappers with independent methods and prototypes", async () => {
     const effects = trackRowNavigationEffects(window);
     const view = await showStrictTokenRows();
@@ -1714,6 +1795,70 @@ describe("Settings → Agents: token row action navigation", () => {
     }]);
   });
 
+  it.each(["preventDefault", "isPropagationStopped"] as const)(
+    "rejects bubble %s drift caused during prevention and admits a clean successor",
+    async (method) => {
+      const effects = trackRowNavigationEffects(window);
+      const view = await showStrictTokenRows();
+      const group = within(view.rows[0]!).getByRole("group", {
+        name: `${token.name} token actions`,
+      }) as HTMLDivElement;
+      const rename = within(group).getByRole("button", {
+        name: `Rename ${token.name}`,
+      }) as HTMLButtonElement;
+      const replace = within(group).getByRole("button", {
+        name: `Replace ${token.name}`,
+      }) as HTMLButtonElement;
+      rename.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+
+      const rejected = dispatchTokenRowKeyboardWithReactPairMutation(
+        group,
+        rename,
+        {
+          bubbleBefore: (event) => {
+            const preventDefault = event.preventDefault;
+            const replacement = method === "preventDefault"
+              ? vi.fn(() => undefined)
+              : vi.fn(() => false);
+            Object.defineProperty(event, "preventDefault", {
+              configurable: true,
+              writable: true,
+              value: function (this: ReactKeyboardEvent<HTMLButtonElement>) {
+                Reflect.apply(preventDefault, this, []);
+                Object.defineProperty(this, method, {
+                  configurable: true,
+                  writable: true,
+                  value: replacement,
+                });
+              },
+            });
+          },
+        },
+        { key: "ArrowRight", code: "ArrowRight" },
+      ).nativeEvent;
+
+      expect(rejected.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).not.toHaveBeenCalled();
+      expect(rename).toHaveFocus();
+
+      rename.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      const accepted = dispatchRenameNavigationKey(rename, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: replace,
+        options: { preventScroll: true },
+      }]);
+    },
+  );
+
   it("rejects modifiers, cancellation, replay, reentrancy, wrong focus, and cross-row movement", async () => {
     const other = { ...token, id: "tok-2", name: "Second CLI" };
     const nativePreventDefault = window.Event.prototype.preventDefault;
@@ -1819,6 +1964,18 @@ describe("Settings → Agents: token row action navigation", () => {
     const staleBubble = reactProp<
       (event: ReactKeyboardEvent<HTMLButtonElement>) => void
     >(rename, "onKeyDown");
+    rename.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    const staged = createRenameNavigationKey(rename, "ArrowRight");
+    rename.addEventListener("keydown", (event) => {
+      event.stopImmediatePropagation();
+    }, { capture: true, once: true });
+    act(() => rename.dispatchEvent(staged));
+    expect(staged.defaultPrevented).toBe(false);
+    expect(effects.preventDefault).not.toHaveBeenCalled();
+    expect(effects.focus).not.toHaveBeenCalled();
+
     group.setAttribute("data-transient", "true");
     group.removeAttribute("data-transient");
     rename.focus();
@@ -1842,6 +1999,7 @@ describe("Settings → Agents: token row action navigation", () => {
       rename,
     );
     act(() => {
+      staleBubble(renameNavigationReactWrapper(staged, rename, rename));
       staleCapture(fabricatedCapture as unknown as ReactKeyboardEvent<HTMLDivElement>);
       staleBubble(fabricatedBubble);
     });
