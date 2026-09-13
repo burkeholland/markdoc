@@ -8512,31 +8512,52 @@ describe("CommentsPanel", () => {
     });
 
     describe("mention-suggestion keyboard authority", () => {
+      type MentionPhase =
+        | "root-capture"
+        | "textarea-capture"
+        | "textarea-bubble"
+        | "root-bubble";
+      type MentionPhaseWrappers = ReadonlyMap<MentionPhase, Record<string, unknown>>;
+
       const replaceMentionPhaseWrappers = (
         root: HTMLElement,
         box: HTMLTextAreaElement,
         options: {
           onDefaultQuery?: (
-            phase: "root-capture" | "textarea-capture" | "textarea-bubble" | "root-bubble",
+            phase: MentionPhase,
             driftPropagation: () => void,
             wrapper: Record<string, unknown>,
           ) => void;
           replaceTextareaDefaultQuery?: boolean;
           driftTextareaPostDefaultQuery?: boolean;
           poisonPrivateMembers?: boolean;
+          shareBubbleWrapper?: boolean;
+          onPreventDefault?: (wrappers: MentionPhaseWrappers) => void;
+          onPostDefaultPreventedRead?: (
+            phase: MentionPhase,
+            wrappers: MentionPhaseWrappers,
+          ) => void;
         } = {},
       ) => {
-        type Phase =
-          | "root-capture"
-          | "textarea-capture"
-          | "textarea-bubble"
-          | "root-bubble";
-        const preventions = new Map<Phase, ReturnType<typeof vi.fn>>();
+        const preventions = new Map<MentionPhase, ReturnType<typeof vi.fn>>();
+        const phaseWrappers = new Map<MentionPhase, Record<string, unknown>>();
+        let prevented = false;
         const wrap = (
           event: ReactKeyboardEvent<HTMLElement>,
-          phase: Phase,
+          phase: MentionPhase,
         ) => {
+          if (phase === "root-bubble" && options.shareBubbleWrapper) {
+            const shared = phaseWrappers.get("textarea-bubble");
+            if (!shared) throw new Error("Missing textarea-bubble wrapper");
+            Object.defineProperty(shared, "currentTarget", {
+              configurable: true,
+              get: () => event.currentTarget,
+            });
+            phaseWrappers.set(phase, shared);
+            return shared as unknown as ReactKeyboardEvent<HTMLElement>;
+          }
           const wrapper = Object.create({ phase }) as Record<string, unknown>;
+          phaseWrappers.set(phase, wrapper);
           const names = [
             "nativeEvent",
             "type",
@@ -8573,14 +8594,20 @@ describe("CommentsPanel", () => {
             Object.defineProperty(wrapper, name, {
               configurable: true,
               enumerable: true,
-              get: () =>
-                name === "defaultPrevented"
-                  ? event.defaultPrevented
-                  : scalars[name],
+              get: () => {
+                if (name === "defaultPrevented") {
+                  if (prevented) {
+                    options.onPostDefaultPreventedRead?.(phase, phaseWrappers);
+                  }
+                  return event.defaultPrevented;
+                }
+                return scalars[name];
+              },
             });
           }
           const preventDefault = vi.fn(() => {
             event.preventDefault();
+            prevented = true;
             if (
               phase === "textarea-bubble" &&
               options.replaceTextareaDefaultQuery
@@ -8599,6 +8626,7 @@ describe("CommentsPanel", () => {
                 value: replacement,
               });
             }
+            options.onPreventDefault?.(phaseWrappers);
           });
           preventions.set(phase, preventDefault);
           const isPropagationStopped = () => event.isPropagationStopped();
@@ -8662,6 +8690,7 @@ describe("CommentsPanel", () => {
         });
         return {
           preventions,
+          phaseWrappers,
           restore: () => {
             restoreTextarea();
             restoreRoot();
@@ -8830,6 +8859,161 @@ describe("CommentsPanel", () => {
         const clean = mentionKey(box, "End");
         expect(clean.defaultPrevented).toBe(true);
         expect(options()[2]).toHaveAttribute("aria-selected", "true");
+      });
+
+      it.each(["root-capture", "textarea-capture", "root-bubble"] as const)(
+        "rejects a post-prevention query replacement on independent %s",
+        async (phase) => {
+          const { box, options } = await mountDirectMentions();
+          const root = box.parentElement;
+          if (!root) throw new Error("The mention composer had no root");
+          fireEvent.mouseEnter(options()[1]);
+          await waitFor(() =>
+            expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+          );
+          const replacement = vi.fn(() => phase === "root-bubble");
+          const wrappers = replaceMentionPhaseWrappers(root, box, {
+            replaceTextareaDefaultQuery: true,
+            onPreventDefault: (phases) => {
+              const other = phases.get(phase);
+              if (!other) throw new Error(`Missing ${phase} wrapper`);
+              expect(other).not.toBe(phases.get("textarea-bubble"));
+              Object.defineProperty(other, "isDefaultPrevented", {
+                configurable: true,
+                value: replacement,
+              });
+            },
+          });
+          try {
+            const event = mentionKey(box, "End");
+            expect(event.defaultPrevented).toBe(true);
+            expect(wrappers.preventions.get("textarea-bubble")).toHaveBeenCalledOnce();
+            expect(replacement).not.toHaveBeenCalled();
+            expect(options()[1]).toHaveAttribute("aria-selected", "true");
+            expect(box).toHaveFocus();
+            expect(box).toHaveValue("@");
+            expect(api.documents.comment).not.toHaveBeenCalled();
+            expect(api.documents.createRequest).not.toHaveBeenCalled();
+          } finally {
+            wrappers.restore();
+          }
+          const clean = mentionKey(box, "End");
+          expect(clean.defaultPrevented).toBe(true);
+          expect(options()[2]).toHaveAttribute("aria-selected", "true");
+        },
+      );
+
+      it.each(["root-capture", "textarea-bubble"] as const)(
+        "pins the prevention query before the %s defaultPrevented getter can replace it",
+        async (phase) => {
+          const { box, options } = await mountDirectMentions();
+          const root = box.parentElement;
+          if (!root) throw new Error("The mention composer had no root");
+          fireEvent.mouseEnter(options()[1]);
+          await waitFor(() =>
+            expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+          );
+          const replacement = vi.fn(() => true);
+          let getterRan = false;
+          const wrappers = replaceMentionPhaseWrappers(root, box, {
+            replaceTextareaDefaultQuery: true,
+            onPostDefaultPreventedRead: (current, phases) => {
+              if (current !== phase || getterRan) return;
+              getterRan = true;
+              const textareaBubble = phases.get("textarea-bubble");
+              if (!textareaBubble) throw new Error("Missing textarea-bubble wrapper");
+              Object.defineProperty(textareaBubble, "isDefaultPrevented", {
+                configurable: true,
+                value: replacement,
+              });
+            },
+          });
+          try {
+            const event = mentionKey(box, "End");
+            expect(event.defaultPrevented).toBe(true);
+            expect(getterRan).toBe(true);
+            expect(wrappers.preventions.get("textarea-bubble")).toHaveBeenCalledOnce();
+            expect(replacement).not.toHaveBeenCalled();
+            expect(options()[1]).toHaveAttribute("aria-selected", "true");
+          } finally {
+            wrappers.restore();
+          }
+          const clean = mentionKey(box, "End");
+          expect(clean.defaultPrevented).toBe(true);
+          expect(options()[2]).toHaveAttribute("aria-selected", "true");
+        },
+      );
+
+      it("rejects drift inside the first post-prevention query getter", async () => {
+        const { box, options } = await mountDirectMentions();
+        const root = box.parentElement;
+        if (!root) throw new Error("The mention composer had no root");
+        fireEvent.mouseEnter(options()[1]);
+        await waitFor(() =>
+          expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+        );
+        const replacement = vi.fn(() => true);
+        const changed = vi.fn(() => true);
+        const stateChanges = vi.fn();
+        mentionHighlightReentry.callback = stateChanges;
+        const wrappers = replaceMentionPhaseWrappers(root, box, {
+          onPreventDefault: (phases) => {
+            const textareaBubble = phases.get("textarea-bubble");
+            if (!textareaBubble) throw new Error("Missing textarea-bubble wrapper");
+            Object.defineProperty(textareaBubble, "isDefaultPrevented", {
+              configurable: true,
+              get: () => {
+                Object.defineProperty(textareaBubble, "isDefaultPrevented", {
+                  configurable: true,
+                  value: changed,
+                });
+                return replacement;
+              },
+            });
+          },
+        });
+        try {
+          const event = mentionKey(box, "End");
+          expect(event.defaultPrevented).toBe(true);
+          expect(wrappers.preventions.get("textarea-bubble")).toHaveBeenCalledOnce();
+          expect(replacement).not.toHaveBeenCalled();
+          expect(changed).not.toHaveBeenCalled();
+          expect(stateChanges).not.toHaveBeenCalled();
+          expect(options()[1]).toHaveAttribute("aria-selected", "true");
+        } finally {
+          mentionHighlightReentry.callback = null;
+          wrappers.restore();
+        }
+        const clean = mentionKey(box, "End");
+        expect(clean.defaultPrevented).toBe(true);
+        expect(options()[2]).toHaveAttribute("aria-selected", "true");
+      });
+
+      it("accepts the replacement on an exact textarea-bubble alias at root-bubble", async () => {
+        const { box, options } = await mountDirectMentions();
+        const root = box.parentElement;
+        if (!root) throw new Error("The mention composer had no root");
+        fireEvent.mouseEnter(options()[1]);
+        await waitFor(() =>
+          expect(options()[1]).toHaveAttribute("aria-selected", "true"),
+        );
+        const wrappers = replaceMentionPhaseWrappers(root, box, {
+          replaceTextareaDefaultQuery: true,
+          shareBubbleWrapper: true,
+        });
+        try {
+          const event = mentionKey(box, "End");
+          expect(event.defaultPrevented).toBe(true);
+          expect(wrappers.phaseWrappers.get("root-bubble")).toBe(
+            wrappers.phaseWrappers.get("textarea-bubble"),
+          );
+          expect(wrappers.preventions.get("textarea-bubble")).toHaveBeenCalledOnce();
+          expect(options()[2]).toHaveAttribute("aria-selected", "true");
+          expect(box).toHaveFocus();
+          expect(box).toHaveValue("@");
+        } finally {
+          wrappers.restore();
+        }
       });
 
       it("keeps the rightful native pair through crossed and nested genuine keys", async () => {

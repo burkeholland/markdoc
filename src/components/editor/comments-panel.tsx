@@ -10144,6 +10144,7 @@ function createMentionPublication(
     defaultPrevented: boolean,
   ) =>
     defaultPrevented &&
+    proof.event === pair.textareaBubble?.event &&
     pair.postDefaultQueries.get(proof.event)
       ? pair.postDefaultQueries.get(proof.event)!
       : proof.methods.isDefaultPrevented;
@@ -10775,43 +10776,48 @@ function createMentionPublication(
             [],
           ),
         );
+        if (!prevented) return;
+        // Only prevention's receiver (including exact-object aliases) may get
+        // React's replacement query. Capture it before any other public getter.
+        const currentDefault = callPublic(
+          () =>
+            (textareaBubble.event as Record<PropertyKey, unknown>)
+              .isDefaultPrevented,
+        );
         if (
-          !prevented ||
+          !currentDefault ||
+          typeof currentDefault.value !== "function" ||
           !pairIsCurrent(pair, true)
         ) {
           return;
         }
+        pair.postDefaultQueries.set(
+          textareaBubble.event,
+          currentDefault.value as MentionReactMethods["isDefaultPrevented"],
+        );
+        if (!proofs.every((proof) => reactMethodsAreCurrent(pair, proof, true))) {
+          return;
+        }
         for (const proof of proofs) {
-          if (pair.postDefaultQueries.has(proof.event)) continue;
+          if (pair.postDefaultPrevented.has(proof.event)) continue;
           const currentDefaultPrevented = callPublic(
             () =>
               (proof.event as Record<PropertyKey, unknown>)
                 .defaultPrevented,
           );
-          const currentDefault = callPublic(
-            () =>
-              (proof.event as Record<PropertyKey, unknown>)
-                .isDefaultPrevented,
-          );
           if (
             !currentDefaultPrevented ||
             typeof currentDefaultPrevented.value !== "boolean" ||
-            !currentDefault ||
-            typeof currentDefault.value !== "function" ||
-            !pairIsCurrent(pair, true)
+            !pairIsCurrent(pair, true) ||
+            !proofs.every((current) => reactMethodsAreCurrent(pair, current, true))
           ) {
             return;
           }
-          pair.postDefaultQueries.set(
-            proof.event,
-            currentDefault.value as MentionReactMethods["isDefaultPrevented"],
-          );
           pair.postDefaultPrevented.set(
             proof.event,
             currentDefaultPrevented.value,
           );
         }
-        const currentDefault = defaultQueryFor(pair, textareaBubble, true);
         const currentDefaultPrevented = pair.postDefaultPrevented.get(
           textareaBubble.event,
         );
@@ -10821,7 +10827,7 @@ function createMentionPublication(
           !queryTerminal(
             pair,
             textareaBubble,
-            currentDefault,
+            defaultQueryFor(pair, textareaBubble, true),
             currentDefaultPrevented,
             true,
             true,
