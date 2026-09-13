@@ -166,8 +166,9 @@ async function chooseFromCommittedSuccessor(
   expect(settledInput).toBeEnabled();
   expect(settledInput).toHaveValue("");
   expect(upload).toBeEnabled();
-  fireEvent.click(upload);
-  await act(async () => {});
+  await act(async () => {
+    fireEvent.click(upload);
+  });
   const currentInput = screen.getByTestId("image-file") as HTMLInputElement;
   expect(currentInput).toBe(settledInput);
   expect(currentInput).toBeEnabled();
