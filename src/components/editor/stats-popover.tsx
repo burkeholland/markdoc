@@ -38,10 +38,14 @@ function resolve(session: CollabSession, rel: unknown): number | null {
 }
 
 function isStatsFocusGuard(node: Node | null) {
+  if (!node || node.nodeType !== 1) return false;
+  const element = node as Element;
+  const ElementConstructor = element.ownerDocument.defaultView?.Element;
   return (
-    node instanceof Element &&
-    node.tagName === "SPAN" &&
-    node.hasAttribute("data-radix-focus-guard")
+    typeof ElementConstructor === "function" &&
+    element instanceof ElementConstructor &&
+    element.tagName === "SPAN" &&
+    element.hasAttribute("data-radix-focus-guard")
   );
 }
 
@@ -257,6 +261,14 @@ interface GoalPublication {
   retired: boolean;
 }
 
+type StatsGoalActionNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
 type StatsGoalControlKey =
   | "mode"
   | "value"
@@ -451,6 +463,8 @@ interface StatsWindowKeyRegistration {
   readonly target: StatsOwnerWindow;
   readonly keyboardAuthority: StatsKeyboardAuthority;
   readonly listener: StatsWindowKeyListener;
+  readonly addEventListener: Window["addEventListener"];
+  readonly removeEventListener: Window["removeEventListener"];
   active: boolean;
   removed: boolean;
 }
@@ -508,6 +522,11 @@ interface StatsIntrinsicMethod<Args extends readonly unknown[], Result> {
   isCurrent: () => boolean;
 }
 
+interface StatsWindowMethodAuthority<Method> {
+  readonly value: Method;
+  readonly isCurrent: () => boolean;
+}
+
 interface StatsTrustAuthority {
   matches: (event: object) => boolean;
   read: (event: object) => boolean;
@@ -541,6 +560,7 @@ interface StatsKeyboardAuthority {
   eventView: StatsIntrinsicGetter<Window | null>;
   keyboardKey: StatsIntrinsicGetter<string>;
   keyboardCode: StatsIntrinsicGetter<string>;
+  keyboardLocation: StatsIntrinsicGetter<number>;
   keyboardCtrl: StatsIntrinsicGetter<boolean>;
   keyboardMeta: StatsIntrinsicGetter<boolean>;
   keyboardAlt: StatsIntrinsicGetter<boolean>;
@@ -549,6 +569,10 @@ interface StatsKeyboardAuthority {
   keyboardComposing: StatsIntrinsicGetter<boolean>;
   activeElement: StatsIntrinsicGetter<Element | null>;
   focus: StatsIntrinsicMethod<readonly [FocusOptions?], void>;
+  addEventListener: StatsWindowMethodAuthority<Window["addEventListener"]>;
+  removeEventListener: StatsWindowMethodAuthority<
+    Window["removeEventListener"]
+  >;
   isTrusted: StatsTrustAuthority;
   isCurrent: () => boolean;
 }
@@ -577,6 +601,7 @@ interface StatsDirectionalNativeEvent {
   readonly intrinsicView: Window | null;
   readonly key: string;
   readonly code: string;
+  readonly location: number;
   readonly ctrlKey: boolean;
   readonly metaKey: boolean;
   readonly altKey: boolean;
@@ -658,6 +683,60 @@ interface StatsDirectionalFocusIntent {
   readonly ownerDocument: Document;
   readonly ownerWindow: StatsOwnerWindow;
   claimed: boolean;
+}
+
+interface StatsGoalActionReactMethods {
+  readonly preventDefault: ReactKeyboardEvent<HTMLElement>["preventDefault"];
+  readonly isDefaultPrevented: ReactKeyboardEvent<HTMLElement>["isDefaultPrevented"];
+  readonly isPropagationStopped: ReactKeyboardEvent<HTMLElement>["isPropagationStopped"];
+}
+
+interface StatsGoalActionDelivery {
+  readonly disclosure: StatsDisclosurePublication;
+  readonly goal: GoalPublication;
+  readonly wrapper: ReactKeyboardEvent<HTMLElement>;
+  readonly methods: StatsGoalActionReactMethods;
+  readonly native: StatsDirectionalNativeEvent;
+  readonly currentTarget: HTMLElement;
+  readonly dispatchTarget: EventTarget;
+  readonly source: HTMLButtonElement;
+  readonly sourceIdentity: StatsGoalControlIdentity;
+  readonly key: StatsGoalActionNavigationKey;
+  readonly type: string;
+  readonly phase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly trusted: boolean;
+  readonly view: ReactKeyboardEvent<HTMLElement>["view"];
+  readonly code: string;
+  readonly location: number;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly altKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly composing: boolean | undefined;
+}
+
+interface StatsGoalActionMovement {
+  readonly identity: symbol;
+  readonly disclosure: StatsDisclosurePublication;
+  readonly goal: GoalPublication;
+  readonly key: StatsGoalActionNavigationKey;
+  readonly source: StatsGoalControlIdentity;
+  readonly destination: StatsGoalControlIdentity;
+}
+
+interface StatsGoalActionClaim {
+  readonly movement: StatsGoalActionMovement;
+  readonly native: StatsDirectionalNativeEvent;
+  readonly groupCapture: StatsGoalActionDelivery;
+  readonly actionCapture: StatsGoalActionDelivery;
+  readonly actionBubble: StatsGoalActionDelivery;
+  readonly groupBubble: StatsGoalActionDelivery;
+  readonly source: StatsGoalControlConnection;
+  readonly destination: StatsGoalControlConnection;
 }
 
 const STATS_RESPONSIVE_TRIGGER_ATTRIBUTES = new Set([
@@ -783,6 +862,25 @@ function captureStatsKeyboardAuthority(
     }
     return null;
   };
+  const captureWindowMethod = <
+    Property extends "addEventListener" | "removeEventListener",
+  >(
+    property: Property,
+  ): StatsWindowMethodAuthority<Window[Property]> | null => {
+    const value = ownerWindow[property];
+    if (typeof value !== "function") return null;
+    let current = true;
+    const isCurrent = () => {
+      if (!current) return false;
+      try {
+        current = ownerWindow[property] === value;
+      } catch {
+        current = false;
+      }
+      return current;
+    };
+    return isCurrent() ? Object.freeze({ value, isCurrent }) : null;
+  };
 
   const eventType = captureGetter<string>(eventPrototype, "type");
   const eventTarget = captureGetter<EventTarget | null>(
@@ -834,6 +932,10 @@ function captureStatsKeyboardAuthority(
   );
   const keyboardKey = captureGetter<string>(keyboardPrototype, "key");
   const keyboardCode = captureGetter<string>(keyboardPrototype, "code");
+  const keyboardLocation = captureGetter<number>(
+    keyboardPrototype,
+    "location",
+  );
   const keyboardCtrl = captureGetter<boolean>(
     keyboardPrototype,
     "ctrlKey",
@@ -863,6 +965,8 @@ function captureStatsKeyboardAuthority(
     htmlElementPrototype,
     "focus",
   );
+  const addEventListener = captureWindowMethod("addEventListener");
+  const removeEventListener = captureWindowMethod("removeEventListener");
 
   const trustProbe = new ownerWindow.KeyboardEvent(
     "stats-keyboard-intrinsic",
@@ -919,6 +1023,7 @@ function captureStatsKeyboardAuthority(
     !eventView ||
     !keyboardKey ||
     !keyboardCode ||
+    !keyboardLocation ||
     !keyboardCtrl ||
     !keyboardMeta ||
     !keyboardAlt ||
@@ -926,7 +1031,9 @@ function captureStatsKeyboardAuthority(
     !keyboardRepeat ||
     !keyboardComposing ||
     !activeElement ||
-    !focus
+    !focus ||
+    !addEventListener ||
+    !removeEventListener
   ) {
     return null;
   }
@@ -946,6 +1053,8 @@ function captureStatsKeyboardAuthority(
         prototypeLinks.every(
           ([prototype, parent]) => getPrototypeOf(prototype) === parent,
         ) &&
+        addEventListener.isCurrent() &&
+        removeEventListener.isCurrent() &&
         isTrusted.isCurrent() &&
         authorities.every((authority) => authority.isCurrent()),
     );
@@ -978,6 +1087,7 @@ function captureStatsKeyboardAuthority(
     eventView,
     keyboardKey,
     keyboardCode,
+    keyboardLocation,
     keyboardCtrl,
     keyboardMeta,
     keyboardAlt,
@@ -986,6 +1096,8 @@ function captureStatsKeyboardAuthority(
     keyboardComposing,
     activeElement,
     focus,
+    addEventListener,
+    removeEventListener,
     isTrusted,
     isCurrent,
   });
@@ -1605,6 +1717,184 @@ function statsElementIsEnabled(element: HTMLElement) {
   return true;
 }
 
+function statsGoalActionNavigationKey(
+  key: string,
+): key is StatsGoalActionNavigationKey {
+  return (
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "Home" ||
+    key === "End"
+  );
+}
+
+function statsGoalActionDestination(
+  actions: readonly StatsGoalControlIdentity[],
+  source: StatsGoalControlIdentity,
+  key: StatsGoalActionNavigationKey,
+) {
+  const sourceIndex = actions.indexOf(source);
+  if (sourceIndex < 0) return null;
+  let destinationIndex: number | null = null;
+  if (
+    (key === "ArrowLeft" || key === "ArrowUp") &&
+    sourceIndex > 0
+  ) {
+    destinationIndex = sourceIndex - 1;
+  } else if (
+    (key === "ArrowRight" || key === "ArrowDown") &&
+    sourceIndex + 1 < actions.length
+  ) {
+    destinationIndex = sourceIndex + 1;
+  } else if (key === "Home" && sourceIndex !== 0) {
+    destinationIndex = 0;
+  } else if (key === "End" && sourceIndex !== actions.length - 1) {
+    destinationIndex = actions.length - 1;
+  }
+  const destination =
+    destinationIndex === null ? null : actions[destinationIndex];
+  return destination && destination !== source ? destination : null;
+}
+
+function statsReactPublicMethodMatches(
+  event: object,
+  property: keyof StatsGoalActionReactMethods,
+  method: unknown,
+  keyboardAuthority: StatsKeyboardAuthority,
+) {
+  if (!keyboardAuthority.isCurrent() || typeof method !== "function") {
+    return false;
+  }
+  let owner: object | null = event;
+  while (owner) {
+    const descriptor = keyboardAuthority.getOwnPropertyDescriptor(
+      owner,
+      property,
+    );
+    if (descriptor) {
+      return (
+        "value" in descriptor &&
+        descriptor.value === method &&
+        descriptor.get === undefined &&
+        descriptor.set === undefined
+      );
+    }
+    owner = keyboardAuthority.getPrototypeOf(owner) as object | null;
+  }
+  return false;
+}
+
+function statsGoalActionMethodsRemainFalse(
+  delivery: StatsGoalActionDelivery,
+) {
+  const { keyboardAuthority } = delivery.native;
+  const { wrapper, methods } = delivery;
+  try {
+    return (
+      wrapper.preventDefault === methods.preventDefault &&
+      wrapper.isDefaultPrevented === methods.isDefaultPrevented &&
+      wrapper.isPropagationStopped === methods.isPropagationStopped &&
+      statsReactPublicMethodMatches(
+        wrapper,
+        "preventDefault",
+        methods.preventDefault,
+        keyboardAuthority,
+      ) &&
+      statsReactPublicMethodMatches(
+        wrapper,
+        "isDefaultPrevented",
+        methods.isDefaultPrevented,
+        keyboardAuthority,
+      ) &&
+      statsReactPublicMethodMatches(
+        wrapper,
+        "isPropagationStopped",
+        methods.isPropagationStopped,
+        keyboardAuthority,
+      ) &&
+      keyboardAuthority.apply(
+        methods.isDefaultPrevented,
+        wrapper,
+        [],
+      ) === false &&
+      keyboardAuthority.apply(
+        methods.isPropagationStopped,
+        wrapper,
+        [],
+      ) === false
+    );
+  } catch {
+    return false;
+  }
+}
+
+function statsGoalActionDeliveriesMatchWithinPhase(
+  left: StatsGoalActionDelivery,
+  right: StatsGoalActionDelivery,
+) {
+  return (
+    left.disclosure === right.disclosure &&
+    left.goal === right.goal &&
+    left.wrapper === right.wrapper &&
+    left.methods.preventDefault === right.methods.preventDefault &&
+    left.methods.isDefaultPrevented === right.methods.isDefaultPrevented &&
+    left.methods.isPropagationStopped ===
+      right.methods.isPropagationStopped &&
+    left.native === right.native &&
+    left.dispatchTarget === right.dispatchTarget &&
+    left.source === right.source &&
+    left.sourceIdentity === right.sourceIdentity &&
+    left.key === right.key &&
+    left.type === right.type &&
+    left.phase === right.phase &&
+    left.bubbles === right.bubbles &&
+    left.cancelable === right.cancelable &&
+    left.defaultPrevented === right.defaultPrevented &&
+    left.trusted === right.trusted &&
+    Object.is(left.view, right.view) &&
+    left.code === right.code &&
+    left.location === right.location &&
+    left.ctrlKey === right.ctrlKey &&
+    left.metaKey === right.metaKey &&
+    left.altKey === right.altKey &&
+    left.shiftKey === right.shiftKey &&
+    left.repeat === right.repeat &&
+    left.composing === right.composing
+  );
+}
+
+function statsGoalActionDeliveriesMatchAcrossPhases(
+  capture: StatsGoalActionDelivery,
+  bubble: StatsGoalActionDelivery,
+) {
+  return (
+    capture.disclosure === bubble.disclosure &&
+    capture.goal === bubble.goal &&
+    capture.wrapper !== bubble.wrapper &&
+    capture.native === bubble.native &&
+    capture.dispatchTarget === bubble.dispatchTarget &&
+    capture.source === bubble.source &&
+    capture.sourceIdentity === bubble.sourceIdentity &&
+    capture.key === bubble.key &&
+    capture.type === bubble.type &&
+    capture.bubbles === bubble.bubbles &&
+    capture.cancelable === bubble.cancelable &&
+    capture.defaultPrevented === bubble.defaultPrevented &&
+    capture.trusted === bubble.trusted &&
+    Object.is(capture.view, bubble.view) &&
+    capture.code === bubble.code &&
+    capture.location === bubble.location &&
+    capture.ctrlKey === bubble.ctrlKey &&
+    capture.metaKey === bubble.metaKey &&
+    capture.altKey === bubble.altKey &&
+    capture.shiftKey === bubble.shiftKey &&
+    capture.repeat === bubble.repeat &&
+    capture.composing === bubble.composing
+  );
+}
+
 function statsSnapshotEqual(left: StatsSnapshot, right: StatsSnapshot) {
   return (
     left.stats === right.stats &&
@@ -1858,6 +2148,10 @@ class StatsDisclosureCoordinator {
     StatsDirectionalReactEvent
   >();
   #directionalReactEvents = new WeakSet<object>();
+  #claimedGoalPublications = new WeakSet<GoalPublication>();
+  #claimedGoalGenerations = new WeakSet<GoalGeneration>();
+  #claimedGoalMovements = new WeakSet<StatsGoalActionMovement>();
+  #claimedGoalConnections = new WeakSet<StatsGoalControlConnection>();
   #nativeProvenance = new WeakMap<Event, StatsNativeProvenance>();
   #provenanceRecords = new Set<StatsNativeProvenance>();
   #pointerProvenance: StatsPointerProvenance | null = null;
@@ -2214,7 +2508,7 @@ class StatsDisclosureCoordinator {
       return;
     }
     const key = keyboardAuthority.keyboardKey.read(event);
-    if (key !== "ArrowDown" && key !== "ArrowUp") return;
+    if (!statsGoalActionNavigationKey(key)) return;
     const target = keyboardAuthority.eventTarget.read(event);
     const path = keyboardAuthority.eventPath.call(event);
     const intrinsicView = keyboardAuthority.eventView.read(event);
@@ -2246,6 +2540,7 @@ class StatsDisclosureCoordinator {
       intrinsicView,
       key,
       code: keyboardAuthority.keyboardCode.read(event),
+      location: keyboardAuthority.keyboardLocation.read(event),
       ctrlKey: keyboardAuthority.keyboardCtrl.read(event),
       metaKey: keyboardAuthority.keyboardMeta.read(event),
       altKey: keyboardAuthority.keyboardAlt.read(event),
@@ -2515,6 +2810,12 @@ class StatsDisclosureCoordinator {
         windowKeyRegistration.target !== ownerWindow ||
         windowKeyRegistration.document !== document ||
         windowKeyRegistration.keyboardAuthority !== keyboardAuthority ||
+        windowKeyRegistration.addEventListener !==
+          keyboardAuthority.addEventListener.value ||
+        windowKeyRegistration.removeEventListener !==
+          keyboardAuthority.removeEventListener.value ||
+        !keyboardAuthority.addEventListener.isCurrent() ||
+        !keyboardAuthority.removeEventListener.isCurrent() ||
         !publication
       ) {
         return;
@@ -2560,6 +2861,8 @@ class StatsDisclosureCoordinator {
       target: ownerWindow,
       keyboardAuthority,
       listener: onWindowKey,
+      addEventListener: keyboardAuthority.addEventListener.value,
+      removeEventListener: keyboardAuthority.removeEventListener.value,
       active: true,
       removed: false,
     };
@@ -2570,12 +2873,16 @@ class StatsDisclosureCoordinator {
     document.addEventListener("pointerup", remember, true);
     document.addEventListener("pointercancel", remember, true);
     document.addEventListener("focusin", remember, true);
-    ownerWindow.addEventListener(
-      "keydown",
-      onWindowKey,
-      true,
+    keyboardAuthority.apply(
+      keyboardAuthority.addEventListener.value,
+      ownerWindow,
+      ["keydown", onWindowKey, true],
     );
-    ownerWindow.addEventListener("keydown", onWindowKey);
+    keyboardAuthority.apply(
+      keyboardAuthority.addEventListener.value,
+      ownerWindow,
+      ["keydown", onWindowKey],
+    );
     this.#capture = {
       document,
       ownerWindow,
@@ -2592,12 +2899,16 @@ class StatsDisclosureCoordinator {
         document.removeEventListener("pointerup", remember, true);
         document.removeEventListener("pointercancel", remember, true);
         document.removeEventListener("focusin", remember, true);
-        ownerWindow.removeEventListener(
-          "keydown",
-          onWindowKey,
-          true,
+        keyboardAuthority.apply(
+          keyboardAuthority.removeEventListener.value,
+          ownerWindow,
+          ["keydown", onWindowKey, true],
         );
-        ownerWindow.removeEventListener("keydown", onWindowKey);
+        keyboardAuthority.apply(
+          keyboardAuthority.removeEventListener.value,
+          ownerWindow,
+          ["keydown", onWindowKey],
+        );
       },
     };
     return true;
@@ -3529,6 +3840,12 @@ class StatsDisclosureCoordinator {
         registration.target === native.ownerWindow &&
         registration.keyboardAuthority === native.keyboardAuthority &&
         registration.listener === listener.listener &&
+        registration.addEventListener ===
+          native.keyboardAuthority.addEventListener.value &&
+        registration.removeEventListener ===
+          native.keyboardAuthority.removeEventListener.value &&
+        native.keyboardAuthority.addEventListener.isCurrent() &&
+        native.keyboardAuthority.removeEventListener.isCurrent() &&
         listener.publication === native.publication &&
         listener.event === native.event &&
         listener.receiver === listener.currentTarget &&
@@ -3939,6 +4256,547 @@ class StatsDisclosureCoordinator {
       this.#directionalIntent = null;
       this.requestSuccessor(publication);
     }
+  }
+
+  goalActionNativeIsExact(
+    disclosure: StatsDisclosurePublication,
+    goal: GoalPublication,
+    native: StatsDirectionalNativeEvent,
+    sourceIdentity: StatsGoalControlIdentity,
+    allowClaimed = false,
+  ) {
+    const source =
+      sourceIdentity.key === "set"
+        ? goal.setButton
+        : sourceIdentity.key === "clear"
+          ? goal.clearButton
+          : null;
+    const connection = disclosure.goalControls.get(sourceIdentity);
+    const content = disclosure.elements.content;
+    const event = native.event;
+    const { keyboardAuthority, ownerDocument, ownerWindow } = native;
+    return Boolean(
+      source &&
+        connection &&
+        content &&
+        disclosure.render.open &&
+        disclosure.render.authority &&
+        disclosure.current.ownsAuthority(disclosure.render.authority) &&
+        goal.presentation === disclosure.render.goalPresentation &&
+        goal.generation.presentation === goal.presentation &&
+        sourceIdentity.enabled &&
+        disclosure.render.goalControls.includes(sourceIdentity) &&
+        connection.controlIdentity === sourceIdentity &&
+        connection.element === source &&
+        this.ownsGoalControl(disclosure, connection) &&
+        statsElementIsEnabled(source) &&
+        goal.actions.contains(source) &&
+        content.contains(goal.actions) &&
+        this.#current === disclosure &&
+        native.publication === disclosure &&
+        this.directionalListenerIsCurrent(native) &&
+        (allowClaimed
+          ? native.listener.claimed &&
+            this.#claimedEvents.has(native.listener)
+          : !native.listener.claimed) &&
+        native.ownerDocument === source.ownerDocument &&
+        native.ownerDocument === content.ownerDocument &&
+        native.ownerWindow === source.ownerDocument.defaultView &&
+        native.ownerWindow === keyboardAuthority.ownerWindow &&
+        keyboardAuthority.ownerWindow === ownerWindow &&
+        keyboardAuthority.isCurrent() &&
+        keyboardAuthority.getPrototypeOf(event) ===
+          keyboardAuthority.keyboardPrototype &&
+        keyboardAuthority.isTrusted.matches(event) &&
+        keyboardAuthority.isTrusted.read(event) &&
+        !keyboardAuthority.getOwnPropertyDescriptor(
+          event,
+          "preventDefault",
+        ) &&
+        !keyboardAuthority.getOwnPropertyDescriptor(
+          event,
+          "stopPropagation",
+        ) &&
+        !keyboardAuthority.getOwnPropertyDescriptor(
+          event,
+          "stopImmediatePropagation",
+        ) &&
+        (allowClaimed ? native.claimed : !native.claimed) &&
+        native.trusted &&
+        native.type === "keydown" &&
+        native.target === source &&
+        native.currentTarget === native.listener.receiver &&
+        native.intrinsicCurrentTarget === native.listener.receiver &&
+        native.path.at(-1) === native.listener.receiver &&
+        native.phase === ownerWindow.Event.CAPTURING_PHASE &&
+        native.bubbles &&
+        native.cancelable &&
+        native.composed &&
+        !native.defaultPrevented &&
+        !native.cancelBubble &&
+        statsGoalActionNavigationKey(native.key) &&
+        native.ctrlKey === false &&
+        native.metaKey === false &&
+        native.altKey === false &&
+        native.shiftKey === false &&
+        native.repeat === false &&
+        native.composing === false &&
+        (native.view === null ||
+          native.view === ownerWindow ||
+          native.view === native.listener.receiver) &&
+        (native.intrinsicView === null ||
+          native.intrinsicView === ownerWindow ||
+          native.intrinsicView === native.listener.receiver) &&
+        Object.is(native.view, native.intrinsicView) &&
+        statsEventPathIsExact(
+          source,
+          native.path,
+          ownerDocument,
+          native.listener.receiver,
+        ) &&
+        keyboardAuthority.eventType.read(event) === native.type &&
+        keyboardAuthority.eventTarget.read(event) === native.target &&
+        keyboardAuthority.eventBubbles.read(event) === native.bubbles &&
+        keyboardAuthority.eventCancelable.read(event) ===
+          native.cancelable &&
+        keyboardAuthority.eventComposed.read(event) === native.composed &&
+        keyboardAuthority.eventDefaultPrevented.read(event) ===
+          native.defaultPrevented &&
+        keyboardAuthority.eventCancelBubble.read(event) ===
+          native.cancelBubble &&
+        keyboardAuthority.eventTimeStamp.read(event) === native.timeStamp &&
+        keyboardAuthority
+          .eventPath
+          .call(event)
+          .every(
+            (value, index, path) =>
+              path.length === native.path.length &&
+              value === native.path[index],
+          ) &&
+        Object.is(
+          keyboardAuthority.eventView.read(event),
+          native.intrinsicView,
+        ) &&
+        keyboardAuthority.keyboardKey.read(event) === native.key &&
+        keyboardAuthority.keyboardCode.read(event) === native.code &&
+        keyboardAuthority.keyboardLocation.read(event) ===
+          native.location &&
+        keyboardAuthority.keyboardCtrl.read(event) === native.ctrlKey &&
+        keyboardAuthority.keyboardMeta.read(event) === native.metaKey &&
+        keyboardAuthority.keyboardAlt.read(event) === native.altKey &&
+        keyboardAuthority.keyboardShift.read(event) === native.shiftKey &&
+        keyboardAuthority.keyboardRepeat.read(event) === native.repeat &&
+        keyboardAuthority.keyboardComposing.read(event) ===
+          native.composing &&
+        keyboardAuthority.activeElement.read(ownerDocument) === source &&
+        goalPublicationDomIsExact(goal, null) &&
+        this.matches(disclosure, allowClaimed),
+    );
+  }
+
+  readGoalActionDelivery<T extends HTMLElement>(
+    disclosure: StatsDisclosurePublication,
+    goal: GoalPublication,
+    event: ReactKeyboardEvent<T>,
+    currentTarget: HTMLElement,
+    expectedPhase: number,
+  ): StatsGoalActionDelivery | null {
+    const native = this.#directionalNativeEvents.get(event.nativeEvent);
+    const keyboardAuthority =
+      native?.keyboardAuthority ?? this.#capture?.keyboardAuthority;
+    if (!native || !keyboardAuthority) return null;
+    const sourceIdentity = disclosure.render.goalControls.find(
+      (identity) =>
+        (identity.key === "set" || identity.key === "clear") &&
+        disclosure.goalControls.get(identity)?.element === native.target,
+    );
+    const source = sourceIdentity
+      ? disclosure.goalControls.get(sourceIdentity)?.element
+      : null;
+    const dispatchTarget =
+      keyboardAuthority.eventCurrentTarget.read(native.event);
+    const nativePhase = keyboardAuthority.eventPhase.read(native.event);
+    const wrapper = event as ReactKeyboardEvent<HTMLElement>;
+    const composing =
+      "isComposing" in wrapper &&
+      typeof wrapper.isComposing === "boolean"
+        ? wrapper.isComposing
+        : undefined;
+    let methods: StatsGoalActionReactMethods;
+    try {
+      methods = Object.freeze({
+        preventDefault: wrapper.preventDefault,
+        isDefaultPrevented: wrapper.isDefaultPrevented,
+        isPropagationStopped: wrapper.isPropagationStopped,
+      });
+    } catch {
+      return null;
+    }
+    if (
+      !sourceIdentity ||
+      !(source instanceof keyboardAuthority.ownerWindow.HTMLButtonElement) ||
+      !dispatchTarget ||
+      !statsGoalActionNavigationKey(native.key) ||
+      nativePhase !== expectedPhase ||
+      !native.path.includes(dispatchTarget) ||
+      native.path.filter((value) => value === dispatchTarget).length !== 1 ||
+      !this.goalActionNativeIsExact(
+        disclosure,
+        goal,
+        native,
+        sourceIdentity,
+      ) ||
+      wrapper === (native.event as unknown) ||
+      wrapper.nativeEvent !== native.event ||
+      wrapper.currentTarget !== currentTarget ||
+      wrapper.target !== source ||
+      wrapper.type !== native.type ||
+      wrapper.eventPhase !== expectedPhase ||
+      wrapper.bubbles !== native.bubbles ||
+      wrapper.cancelable !== native.cancelable ||
+      wrapper.defaultPrevented !== native.defaultPrevented ||
+      wrapper.isTrusted !== native.trusted ||
+      wrapper.key !== native.key ||
+      wrapper.code !== native.code ||
+      wrapper.location !== native.location ||
+      wrapper.ctrlKey !== native.ctrlKey ||
+      wrapper.metaKey !== native.metaKey ||
+      wrapper.altKey !== native.altKey ||
+      wrapper.shiftKey !== native.shiftKey ||
+      wrapper.repeat !== native.repeat ||
+      (composing !== undefined && composing !== native.composing) ||
+      !Object.is(wrapper.view, native.intrinsicView) ||
+      !statsReactPublicMethodMatches(
+        wrapper,
+        "preventDefault",
+        methods.preventDefault,
+        keyboardAuthority,
+      ) ||
+      !statsReactPublicMethodMatches(
+        wrapper,
+        "isDefaultPrevented",
+        methods.isDefaultPrevented,
+        keyboardAuthority,
+      ) ||
+      !statsReactPublicMethodMatches(
+        wrapper,
+        "isPropagationStopped",
+        methods.isPropagationStopped,
+        keyboardAuthority,
+      )
+    ) {
+      return null;
+    }
+    try {
+      if (
+        keyboardAuthority.apply(
+          methods.isDefaultPrevented,
+          wrapper,
+          [],
+        ) !== false ||
+        keyboardAuthority.apply(
+          methods.isPropagationStopped,
+          wrapper,
+          [],
+        ) !== false
+      ) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    return Object.freeze({
+      disclosure,
+      goal,
+      wrapper,
+      methods,
+      native,
+      currentTarget,
+      dispatchTarget,
+      source,
+      sourceIdentity,
+      key: native.key,
+      type: wrapper.type,
+      phase: wrapper.eventPhase,
+      bubbles: wrapper.bubbles,
+      cancelable: wrapper.cancelable,
+      defaultPrevented: wrapper.defaultPrevented,
+      trusted: wrapper.isTrusted,
+      view: wrapper.view,
+      code: wrapper.code,
+      location: wrapper.location,
+      ctrlKey: wrapper.ctrlKey,
+      metaKey: wrapper.metaKey,
+      altKey: wrapper.altKey,
+      shiftKey: wrapper.shiftKey,
+      repeat: wrapper.repeat,
+      composing,
+    });
+  }
+
+  claimGoalActionMovement(
+    movement: StatsGoalActionMovement,
+    groupCapture: StatsGoalActionDelivery,
+    actionCapture: StatsGoalActionDelivery,
+    actionBubble: StatsGoalActionDelivery,
+    groupBubble: StatsGoalActionDelivery,
+  ): StatsGoalActionClaim | null {
+    const { disclosure, goal, source, destination } = movement;
+    const native = groupBubble.native;
+    const sourceConnection = disclosure.goalControls.get(source);
+    const destinationConnection =
+      disclosure.goalControls.get(destination);
+    if (
+      this.#claimedGoalPublications.has(goal) ||
+      this.#claimedGoalGenerations.has(goal.generation) ||
+      this.#claimedGoalMovements.has(movement) ||
+      this.#claimedEvents.has(native.event) ||
+      this.#claimedEvents.has(native.listener) ||
+      this.#claimedEvents.has(groupCapture.wrapper) ||
+      this.#claimedEvents.has(groupBubble.wrapper) ||
+      this.#claimedDirections.has(native) ||
+      !sourceConnection ||
+      !destinationConnection ||
+      sourceConnection === destinationConnection ||
+      this.#claimedGoalConnections.has(sourceConnection) ||
+      this.#claimedGoalConnections.has(destinationConnection) ||
+      disclosure.consumed ||
+      goal.claimed ||
+      movement.key !== groupBubble.key ||
+      groupBubble.sourceIdentity !== source ||
+      !statsGoalActionDeliveriesMatchWithinPhase(
+        groupCapture,
+        actionCapture,
+      ) ||
+      !statsGoalActionDeliveriesMatchWithinPhase(
+        actionBubble,
+        groupBubble,
+      ) ||
+      !statsGoalActionDeliveriesMatchAcrossPhases(
+        actionCapture,
+        actionBubble,
+      ) ||
+      !statsGoalActionMethodsRemainFalse(groupCapture) ||
+      !statsGoalActionMethodsRemainFalse(actionCapture) ||
+      !statsGoalActionMethodsRemainFalse(actionBubble) ||
+      !statsGoalActionMethodsRemainFalse(groupBubble) ||
+      !this.goalActionNativeIsExact(
+        disclosure,
+        goal,
+        native,
+        source,
+      ) ||
+      !this.ownsGoalControl(disclosure, sourceConnection) ||
+      !this.ownsGoalControl(disclosure, destinationConnection) ||
+      !source.enabled ||
+      !destination.enabled ||
+      !statsElementIsEnabled(sourceConnection.element) ||
+      !statsElementIsEnabled(destinationConnection.element) ||
+      native.keyboardAuthority.activeElement.read(
+        native.ownerDocument,
+      ) !== sourceConnection.element
+    ) {
+      return null;
+    }
+    disclosure.consumed = true;
+    goal.claimed = true;
+    native.claimed = true;
+    native.listener.claimed = true;
+    sourceConnection.claimed = true;
+    destinationConnection.claimed = true;
+    this.#claimedGoalPublications.add(goal);
+    this.#claimedGoalGenerations.add(goal.generation);
+    this.#claimedGoalMovements.add(movement);
+    this.#claimedGoalConnections.add(sourceConnection);
+    this.#claimedGoalConnections.add(destinationConnection);
+    this.#claimedDirections.add(native);
+    for (const claimed of [
+      native.event,
+      native.listener,
+      groupCapture.wrapper,
+      groupBubble.wrapper,
+    ]) {
+      this.#claimedEvents.add(claimed);
+      disclosure.render.visit.claimedEvents.add(claimed);
+      disclosure.render.authority?.claimedEvents.add(claimed);
+    }
+    this.#directionalReactEvents.add(groupCapture.wrapper);
+    this.#directionalReactEvents.add(groupBubble.wrapper);
+    return Object.freeze({
+      movement,
+      native,
+      groupCapture,
+      actionCapture,
+      actionBubble,
+      groupBubble,
+      source: sourceConnection,
+      destination: destinationConnection,
+    });
+  }
+
+  performGoalActionMovement(
+    claim: StatsGoalActionClaim,
+    goalPublicationIsCurrent: () => boolean,
+  ) {
+    const {
+      movement,
+      native,
+      groupCapture,
+      actionCapture,
+      actionBubble,
+      groupBubble,
+      source,
+      destination,
+    } = claim;
+    const { disclosure, goal } = movement;
+    const keyboardAuthority = native.keyboardAuthority;
+    const reject = () => {
+      this.requestSuccessor(disclosure);
+      return false;
+    };
+    const enabledActions = disclosure.render.goalControls.filter(
+      (identity) =>
+        (identity.key === "set" || identity.key === "clear") &&
+        identity.enabled,
+    );
+    if (
+      !this.#claimedGoalPublications.has(goal) ||
+      !this.#claimedGoalGenerations.has(goal.generation) ||
+      !this.#claimedGoalMovements.has(movement) ||
+      !this.#claimedGoalConnections.has(source) ||
+      !this.#claimedGoalConnections.has(destination) ||
+      !this.#claimedDirections.has(native) ||
+      !this.#claimedEvents.has(native.event) ||
+      !this.#claimedEvents.has(native.listener) ||
+      !this.#claimedEvents.has(groupCapture.wrapper) ||
+      !this.#claimedEvents.has(groupBubble.wrapper) ||
+      !this.#directionalReactEvents.has(groupCapture.wrapper) ||
+      !this.#directionalReactEvents.has(groupBubble.wrapper) ||
+      !disclosure.consumed ||
+      !goal.claimed ||
+      !native.claimed ||
+      !native.listener.claimed ||
+      !source.claimed ||
+      !destination.claimed ||
+      groupCapture.wrapper === groupBubble.wrapper ||
+      movement.source !== groupBubble.sourceIdentity ||
+      statsGoalActionDestination(
+        enabledActions,
+        movement.source,
+        movement.key,
+      ) !== movement.destination ||
+      disclosure.goalControls.get(movement.source) !== source ||
+      disclosure.goalControls.get(movement.destination) !== destination ||
+      source.element !== groupBubble.source ||
+      source.element === destination.element ||
+      !this.ownsGoalControl(disclosure, source) ||
+      !this.ownsGoalControl(disclosure, destination) ||
+      !statsElementIsEnabled(source.element) ||
+      !statsElementIsEnabled(destination.element) ||
+      !statsGoalActionDeliveriesMatchWithinPhase(
+        groupCapture,
+        actionCapture,
+      ) ||
+      !statsGoalActionDeliveriesMatchWithinPhase(
+        actionBubble,
+        groupBubble,
+      ) ||
+      !statsGoalActionDeliveriesMatchAcrossPhases(
+        actionCapture,
+        actionBubble,
+      ) ||
+      !statsGoalActionMethodsRemainFalse(groupCapture) ||
+      !statsGoalActionMethodsRemainFalse(actionCapture) ||
+      !statsGoalActionMethodsRemainFalse(actionBubble) ||
+      !statsGoalActionMethodsRemainFalse(groupBubble) ||
+      !this.goalActionNativeIsExact(
+        disclosure,
+        goal,
+        native,
+        movement.source,
+        true,
+      ) ||
+      !goalPublicationIsCurrent() ||
+      keyboardAuthority.activeElement.read(native.ownerDocument) !==
+        source.element ||
+      !this.matches(disclosure, true)
+    ) {
+      return reject();
+    }
+    try {
+      keyboardAuthority.apply(
+        groupBubble.methods.preventDefault,
+        groupBubble.wrapper,
+        [],
+      );
+    } catch {
+      return reject();
+    }
+    let publicDefaultWasPrevented = false;
+    try {
+      const currentDefaultQuery =
+        groupBubble.wrapper.isDefaultPrevented;
+      publicDefaultWasPrevented =
+        statsReactPublicMethodMatches(
+          groupBubble.wrapper,
+          "isDefaultPrevented",
+          currentDefaultQuery,
+          keyboardAuthority,
+        ) &&
+        keyboardAuthority.apply(
+          currentDefaultQuery,
+          groupBubble.wrapper,
+          [],
+        ) === true;
+    } catch {
+      return reject();
+    }
+    if (
+      !keyboardAuthority.eventDefaultPrevented.read(native.event) ||
+      !groupBubble.wrapper.defaultPrevented ||
+      !publicDefaultWasPrevented ||
+      groupBubble.wrapper.preventDefault !==
+        groupBubble.methods.preventDefault ||
+      groupBubble.wrapper.isPropagationStopped !==
+        groupBubble.methods.isPropagationStopped ||
+      !statsReactPublicMethodMatches(
+        groupBubble.wrapper,
+        "preventDefault",
+        groupBubble.methods.preventDefault,
+        keyboardAuthority,
+      ) ||
+      !statsReactPublicMethodMatches(
+        groupBubble.wrapper,
+        "isPropagationStopped",
+        groupBubble.methods.isPropagationStopped,
+        keyboardAuthority,
+      ) ||
+      keyboardAuthority.apply(
+        groupBubble.methods.isPropagationStopped,
+        groupBubble.wrapper,
+        [],
+      ) !== false ||
+      !goalPublicationIsCurrent() ||
+      !this.directionalListenerIsCurrent(native) ||
+      this.#current !== disclosure ||
+      !this.matches(disclosure, true) ||
+      keyboardAuthority.activeElement.read(native.ownerDocument) !==
+        source.element ||
+      disclosure.goalControls.get(movement.destination) !== destination ||
+      !this.ownsGoalControl(disclosure, destination) ||
+      !statsElementIsEnabled(destination.element)
+    ) {
+      return reject();
+    }
+    try {
+      keyboardAuthority.focus.call(destination.element, {
+        preventScroll: true,
+      });
+    } catch {
+      return reject();
+    }
+    this.requestSuccessor(disclosure);
+    return true;
   }
 
   mintTrigger(
@@ -5151,16 +6009,21 @@ function GoalEditor({
     };
   });
 
-  function currentPublication(mutable: "modeSelect" | "valueInput" | "kindSelect" | null) {
-    const publication = activePublicationRef.current;
-    if (
-      !publication ||
+  function publicationIsCurrent(
+    publication: GoalPublication,
+    mutable: "modeSelect" | "valueInput" | "kindSelect" | null,
+    claimed = false,
+  ) {
+    return !(
+      activePublicationRef.current !== publication ||
       publication.retired ||
-      publication.claimed ||
+      (claimed ? !publication.claimed : publication.claimed) ||
       publication.generation !== generation ||
       publication.presentation !== presentation ||
       activeGenerationRef.current !== generation ||
-      claimedGenerationRef.current === generation ||
+      (claimed
+        ? claimedGenerationRef.current !== generation
+        : claimedGenerationRef.current === generation) ||
       !goalPresentationIsExact(presentation) ||
       !canEdit ||
       generation.form.connection?.element !== publication.form ||
@@ -5172,10 +6035,17 @@ function GoalEditor({
         ? generation.clearButton.connection?.element !== publication.clearButton
         : generation.clearButton.connection !== null) ||
       !goalPublicationDomIsExact(publication, mutable)
-    ) {
-      return null;
-    }
-    return publication;
+    );
+  }
+
+  function currentPublication(
+    mutable: "modeSelect" | "valueInput" | "kindSelect" | null,
+  ) {
+    const publication = activePublicationRef.current;
+    return publication &&
+      publicationIsCurrent(publication, mutable)
+      ? publication
+      : null;
   }
 
   function claimEvent(publication: GoalPublication, nativeEvent: Event) {
@@ -5328,6 +6198,212 @@ function GoalEditor({
     setGoal(presentation.session, null);
   }
 
+  let capturedActionGroup: StatsGoalActionDelivery | null = null;
+  let capturedAction: StatsGoalActionDelivery | null = null;
+  let bubbledAction: StatsGoalActionDelivery | null = null;
+  const clearActionProof = () => {
+    capturedActionGroup = null;
+    capturedAction = null;
+    bubbledAction = null;
+  };
+  const actionDelivery = <T extends HTMLElement>(
+    event: ReactKeyboardEvent<T>,
+    currentTarget: HTMLElement,
+    phase: number,
+  ) => {
+    const publication = currentPublication(null);
+    return publication
+      ? coordinator.readGoalActionDelivery(
+          disclosurePublication,
+          publication,
+          event,
+          currentTarget,
+          phase,
+        )
+      : null;
+  };
+  const actionGroupKeyDownCapture = (
+    event: ReactKeyboardEvent<HTMLSpanElement>,
+  ) => {
+    clearActionProof();
+    const publication = currentPublication(null);
+    const ownerWindow = publication?.form.ownerDocument.defaultView;
+    const delivery =
+      publication && ownerWindow
+        ? actionDelivery(
+            event,
+            publication.actions,
+            ownerWindow.Event.CAPTURING_PHASE,
+          )
+        : null;
+    if (
+      !publication ||
+      !delivery ||
+      delivery.goal !== publication ||
+      delivery.currentTarget !== publication.actions
+    ) {
+      return;
+    }
+    capturedActionGroup = delivery;
+    queueMicrotask(() => {
+      if (capturedActionGroup === delivery) clearActionProof();
+    });
+  };
+  const actionKeyDownCapture = (
+    key: "set" | "clear",
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const publication = currentPublication(null);
+    const ownerWindow = publication?.form.ownerDocument.defaultView;
+    const source =
+      key === "set" ? publication?.setButton : publication?.clearButton;
+    const delivery =
+      publication && ownerWindow && source
+        ? actionDelivery(
+            event,
+            source,
+            ownerWindow.Event.CAPTURING_PHASE,
+          )
+        : null;
+    if (
+      !capturedActionGroup ||
+      capturedAction ||
+      bubbledAction ||
+      !publication ||
+      !source ||
+      !delivery ||
+      delivery.goal !== publication ||
+      delivery.source !== source ||
+      delivery.sourceIdentity.key !== key ||
+      !statsGoalActionDeliveriesMatchWithinPhase(
+        capturedActionGroup,
+        delivery,
+      )
+    ) {
+      clearActionProof();
+      return;
+    }
+    capturedAction = delivery;
+  };
+  const actionKeyDown = (
+    key: "set" | "clear",
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const publication = currentPublication(null);
+    const ownerWindow = publication?.form.ownerDocument.defaultView;
+    const source =
+      key === "set" ? publication?.setButton : publication?.clearButton;
+    const delivery =
+      publication && ownerWindow && source
+        ? actionDelivery(
+            event,
+            source,
+            ownerWindow.Event.BUBBLING_PHASE,
+          )
+        : null;
+    if (
+      !capturedActionGroup ||
+      !capturedAction ||
+      bubbledAction ||
+      !publication ||
+      !source ||
+      !delivery ||
+      delivery.goal !== publication ||
+      delivery.source !== source ||
+      delivery.sourceIdentity.key !== key ||
+      !statsGoalActionDeliveriesMatchWithinPhase(
+        capturedActionGroup,
+        capturedAction,
+      ) ||
+      !statsGoalActionDeliveriesMatchAcrossPhases(
+        capturedAction,
+        delivery,
+      )
+    ) {
+      clearActionProof();
+      return;
+    }
+    bubbledAction = delivery;
+  };
+  const actionGroupKeyDown = (
+    event: ReactKeyboardEvent<HTMLSpanElement>,
+  ) => {
+    const groupCapture = capturedActionGroup;
+    const actionCapture = capturedAction;
+    const actionBubble = bubbledAction;
+    const publication = currentPublication(null);
+    const ownerWindow = publication?.form.ownerDocument.defaultView;
+    const groupBubble =
+      publication && ownerWindow
+        ? actionDelivery(
+            event,
+            publication.actions,
+            ownerWindow.Event.BUBBLING_PHASE,
+          )
+        : null;
+    clearActionProof();
+    if (
+      !publication ||
+      !groupCapture ||
+      !actionCapture ||
+      !actionBubble ||
+      !groupBubble ||
+      groupCapture.currentTarget !== publication.actions ||
+      actionCapture.currentTarget !== actionCapture.source ||
+      actionBubble.currentTarget !== actionBubble.source ||
+      groupBubble.currentTarget !== publication.actions ||
+      !statsGoalActionDeliveriesMatchWithinPhase(
+        groupCapture,
+        actionCapture,
+      ) ||
+      !statsGoalActionDeliveriesMatchWithinPhase(
+        actionBubble,
+        groupBubble,
+      ) ||
+      !statsGoalActionDeliveriesMatchAcrossPhases(
+        actionCapture,
+        actionBubble,
+      ) ||
+      !statsGoalActionMethodsRemainFalse(groupCapture) ||
+      !statsGoalActionMethodsRemainFalse(actionCapture) ||
+      !statsGoalActionMethodsRemainFalse(actionBubble) ||
+      !statsGoalActionMethodsRemainFalse(groupBubble)
+    ) {
+      return;
+    }
+    const enabledActions = controlIdentities.filter(
+      (identity) =>
+        (identity.key === "set" || identity.key === "clear") &&
+        identity.enabled,
+    );
+    const destination = statsGoalActionDestination(
+      enabledActions,
+      groupBubble.sourceIdentity,
+      groupBubble.key,
+    );
+    if (!destination) return;
+    const movement: StatsGoalActionMovement = Object.freeze({
+      identity: Symbol("stats-goal-action-movement"),
+      disclosure: disclosurePublication,
+      goal: publication,
+      key: groupBubble.key,
+      source: groupBubble.sourceIdentity,
+      destination,
+    });
+    const claim = coordinator.claimGoalActionMovement(
+      movement,
+      groupCapture,
+      actionCapture,
+      actionBubble,
+      groupBubble,
+    );
+    if (!claim) return;
+    claimedGenerationRef.current = generation;
+    coordinator.performGoalActionMovement(claim, () =>
+      publicationIsCurrent(publication, null, true),
+    );
+  };
+
   const summary =
     goal && progress ? (
       <div className="flex items-center gap-2 text-[13px] text-ink-2" data-testid="goal-summary" data-state={progress.state}>
@@ -5407,12 +6483,16 @@ function GoalEditor({
             <option value="words">words</option>
             <option value="minutes">min read</option>
           </select>
-          <span className="ml-auto inline-flex gap-1.5">
-            <button ref={(element) => bindGoalElement(generation, generation.setButton, "set", element)} type="submit" className="btn btn-primary btn-sm h-8" disabled={presentation.setDisabled} data-testid="goal-set">
+          <span
+            className="ml-auto inline-flex gap-1.5"
+            onKeyDownCapture={actionGroupKeyDownCapture}
+            onKeyDown={actionGroupKeyDown}
+          >
+            <button ref={(element) => bindGoalElement(generation, generation.setButton, "set", element)} type="submit" className="btn btn-primary btn-sm h-8" disabled={presentation.setDisabled} onKeyDownCapture={(event) => actionKeyDownCapture("set", event)} onKeyDown={(event) => actionKeyDown("set", event)} data-testid="goal-set">
               Set
             </button>
             {goal && (
-              <button ref={(element) => bindGoalElement(generation, generation.clearButton, "clear", element)} type="button" className="btn btn-ghost btn-sm h-8" onClick={clear} data-testid="goal-clear">
+              <button ref={(element) => bindGoalElement(generation, generation.clearButton, "clear", element)} type="button" className="btn btn-ghost btn-sm h-8" onClick={clear} onKeyDownCapture={(event) => actionKeyDownCapture("clear", event)} onKeyDown={(event) => actionKeyDown("clear", event)} data-testid="goal-clear">
                 Clear
               </button>
             )}

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { StrictMode, useEffect, useLayoutEffect, type ComponentProps, type RefCallback } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as Y from "yjs";
@@ -114,6 +114,18 @@ import { StatsPopover, useLocalSelection, type SourceSelection } from "./stats-p
 
 const sessions: CollabSession[] = [];
 const unhandledRejections: unknown[] = [];
+const manualRoots = new Set<Root>();
+
+function createTrackedRoot(host: HTMLElement) {
+  const root = createRoot(host);
+  const unmount = root.unmount.bind(root);
+  root.unmount = () => {
+    if (!manualRoots.delete(root)) return;
+    unmount();
+  };
+  manualRoots.add(root);
+  return root;
+}
 
 function recordUnhandledRejection(reason: unknown) {
   unhandledRejections.push(reason);
@@ -398,9 +410,13 @@ function reactProp<T>(element: HTMLElement, name: string): T {
 type GoalChangeHandler<T extends HTMLElement> = (event: React.ChangeEvent<T>) => void;
 type GoalSubmitHandler = (event: React.FormEvent<HTMLFormElement>) => void;
 type GoalClearHandler = (event: React.MouseEvent<HTMLButtonElement>) => void;
+type GoalKeyHandler<T extends HTMLElement> = (
+  event: React.KeyboardEvent<T>,
+) => void;
 
 interface GoalActions {
   form: HTMLFormElement;
+  actions: HTMLSpanElement;
   mode: HTMLSelectElement;
   value: HTMLInputElement;
   kind: HTMLSelectElement;
@@ -411,6 +427,12 @@ interface GoalActions {
   changeKind: GoalChangeHandler<HTMLSelectElement>;
   submit: GoalSubmitHandler;
   clearGoal: GoalClearHandler | null;
+  groupKeyDownCapture: GoalKeyHandler<HTMLSpanElement>;
+  groupKeyDown: GoalKeyHandler<HTMLSpanElement>;
+  setKeyDownCapture: GoalKeyHandler<HTMLButtonElement>;
+  setKeyDown: GoalKeyHandler<HTMLButtonElement>;
+  clearKeyDownCapture: GoalKeyHandler<HTMLButtonElement> | null;
+  clearKeyDown: GoalKeyHandler<HTMLButtonElement> | null;
   formRef: RefCallback<HTMLFormElement>;
   modeRef: RefCallback<HTMLSelectElement>;
   valueRef: RefCallback<HTMLInputElement>;
@@ -427,8 +449,13 @@ function captureGoalActions(): GoalActions {
   const form = set.form;
   if (!form) throw new Error("The Set button has no form");
   const clear = screen.queryByTestId("goal-clear") as HTMLButtonElement | null;
+  const actions = set.parentElement;
+  if (!(actions instanceof HTMLSpanElement)) {
+    throw new Error("The writing-goal actions have no group");
+  }
   return {
     form,
+    actions,
     mode,
     value,
     kind,
@@ -439,6 +466,14 @@ function captureGoalActions(): GoalActions {
     changeKind: reactProp(kind, "onChange"),
     submit: reactProp(form, "onSubmit"),
     clearGoal: clear ? reactProp(clear, "onClick") : null,
+    groupKeyDownCapture: reactProp(actions, "onKeyDownCapture"),
+    groupKeyDown: reactProp(actions, "onKeyDown"),
+    setKeyDownCapture: reactProp(set, "onKeyDownCapture"),
+    setKeyDown: reactProp(set, "onKeyDown"),
+    clearKeyDownCapture: clear
+      ? reactProp(clear, "onKeyDownCapture")
+      : null,
+    clearKeyDown: clear ? reactProp(clear, "onKeyDown") : null,
     formRef: reactProp(form, "ref"),
     modeRef: reactProp(mode, "ref"),
     valueRef: reactProp(value, "ref"),
@@ -739,6 +774,168 @@ function dispatchStatsKey(
   }
 }
 
+type GoalActionSource = "set" | "clear";
+
+interface GoalActionKeyDispatch {
+  captureWrapper: React.KeyboardEvent<HTMLSpanElement> | null;
+  bubbleWrapper: React.KeyboardEvent<HTMLButtonElement> | null;
+  publicPreventDefault: ReturnType<typeof vi.fn> | null;
+}
+
+function dispatchGoalActionKey(
+  actions: GoalActions,
+  sourceName: GoalActionSource,
+  event: KeyboardEvent,
+  {
+    handlers = actions,
+    beforeCapture,
+    afterCapture,
+    beforeActionBubble,
+    afterActionBubble,
+    beforeGroupBubble,
+    duringPublicPreventDefault,
+  }: {
+    handlers?: GoalActions;
+    beforeCapture?: (event: React.KeyboardEvent<HTMLSpanElement>) => void;
+    afterCapture?: (event: React.KeyboardEvent<HTMLSpanElement>) => void;
+    beforeActionBubble?: (
+      event: React.KeyboardEvent<HTMLButtonElement>,
+    ) => void;
+    afterActionBubble?: (
+      event: React.KeyboardEvent<HTMLButtonElement>,
+    ) => void;
+    beforeGroupBubble?: (
+      event: React.KeyboardEvent<HTMLSpanElement>,
+    ) => void;
+    duringPublicPreventDefault?: () => void;
+  } = {},
+): GoalActionKeyDispatch {
+  const source = sourceName === "set" ? actions.set : actions.clear;
+  const sourceCapture =
+    sourceName === "set"
+      ? handlers.setKeyDownCapture
+      : handlers.clearKeyDownCapture;
+  const sourceBubble =
+    sourceName === "set" ? handlers.setKeyDown : handlers.clearKeyDown;
+  if (!source || !sourceCapture || !sourceBubble) {
+    throw new Error(`${sourceName} action was not rendered`);
+  }
+
+  const groupPropsKey = Object.keys(actions.actions).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  const sourcePropsKey = Object.keys(source).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!groupPropsKey || !sourcePropsKey) {
+    throw new Error("React props were not attached to writing-goal actions");
+  }
+  const groupProperties = actions.actions as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const sourceProperties = source as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const groupProps = groupProperties[groupPropsKey];
+  const sourceProps = sourceProperties[sourcePropsKey];
+  if (!groupProps || !sourceProps) {
+    throw new Error("React props were not attached to writing-goal actions");
+  }
+
+  let captureWrapper: React.KeyboardEvent<HTMLSpanElement> | null = null;
+  let bubbleWrapper: React.KeyboardEvent<HTMLButtonElement> | null = null;
+  let publicPreventDefault: ReturnType<typeof vi.fn> | null = null;
+  const wrappedGroupProps = {
+    ...groupProps,
+    onKeyDownCapture: (reactEvent: React.KeyboardEvent<HTMLSpanElement>) => {
+      captureWrapper = reactEvent;
+      beforeCapture?.(reactEvent);
+      handlers.groupKeyDownCapture(reactEvent);
+      afterCapture?.(reactEvent);
+    },
+    onKeyDown: (reactEvent: React.KeyboardEvent<HTMLSpanElement>) => {
+      beforeGroupBubble?.(reactEvent);
+      handlers.groupKeyDown(reactEvent);
+    },
+  };
+  const wrappedSourceProps = {
+    ...sourceProps,
+    onKeyDownCapture: sourceCapture,
+    onKeyDown: (reactEvent: React.KeyboardEvent<HTMLButtonElement>) => {
+      const isOuterDelivery = bubbleWrapper === null;
+      if (isOuterDelivery) bubbleWrapper = reactEvent;
+      beforeActionBubble?.(reactEvent);
+      const retainedPreventDefault = reactEvent.preventDefault;
+      const exactPreventDefault = vi.fn(function (
+        this: React.KeyboardEvent<HTMLButtonElement>,
+      ) {
+        duringPublicPreventDefault?.();
+        return Reflect.apply(retainedPreventDefault, this, []);
+      });
+      if (isOuterDelivery) {
+        publicPreventDefault = exactPreventDefault;
+        Object.defineProperty(reactEvent, "preventDefault", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: exactPreventDefault,
+        });
+      }
+      sourceBubble(reactEvent);
+      afterActionBubble?.(reactEvent);
+    },
+  };
+
+  groupProperties[groupPropsKey] = wrappedGroupProps;
+  sourceProperties[sourcePropsKey] = wrappedSourceProps;
+  try {
+    source.dispatchEvent(event);
+  } finally {
+    if (groupProperties[groupPropsKey] === wrappedGroupProps) {
+      groupProperties[groupPropsKey] = groupProps;
+    }
+    if (sourceProperties[sourcePropsKey] === wrappedSourceProps) {
+      sourceProperties[sourcePropsKey] = sourceProps;
+    }
+  }
+  return { captureWrapper, bubbleWrapper, publicPreventDefault };
+}
+
+function giveKeyboardWrapperDistinctMethods(
+  event: React.KeyboardEvent<HTMLElement>,
+) {
+  const prototype = Object.create(Object.getPrototypeOf(event)) as object;
+  const preventDefault = event.preventDefault;
+  const isDefaultPrevented = event.isDefaultPrevented;
+  const isPropagationStopped = event.isPropagationStopped;
+  Object.setPrototypeOf(event, prototype);
+  Object.defineProperties(event, {
+    preventDefault: {
+      configurable: true,
+      writable: true,
+      value: function (this: React.KeyboardEvent<HTMLElement>) {
+        return Reflect.apply(preventDefault, this, []);
+      },
+    },
+    isDefaultPrevented: {
+      configurable: true,
+      writable: true,
+      value: function (this: React.KeyboardEvent<HTMLElement>) {
+        return Reflect.apply(isDefaultPrevented, this, []);
+      },
+    },
+    isPropagationStopped: {
+      configurable: true,
+      writable: true,
+      value: function (this: React.KeyboardEvent<HTMLElement>) {
+        return Reflect.apply(isPropagationStopped, this, []);
+      },
+    },
+  });
+}
+
 function renderStrictStats(
   session: CollabSession,
   onBoundary: () => void,
@@ -746,7 +943,7 @@ function renderStrictStats(
 ) {
   const host = document.createElement("div");
   document.body.append(host);
-  const root = createRoot(host);
+  const root = createTrackedRoot(host);
   act(() =>
     root.render(
       <StrictMode>
@@ -865,7 +1062,7 @@ function expectDraft(kind: WritingGoal["kind"], mode: WritingGoal["mode"], value
 function mountStrictGoal(session: CollabSession, source = "One two three.") {
   const host = document.createElement("div");
   document.body.append(host);
-  const root = createRoot(host);
+  const root = createTrackedRoot(host);
   act(() => root.render(<StrictMode>{view(session, source)}</StrictMode>));
   openPopover();
   return {
@@ -905,6 +1102,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  for (const root of [...manualRoots]) {
+    act(() => root.unmount());
+  }
   cleanup();
   while (sessions.length) sessions.pop()!.destroy();
   await Promise.resolve();
@@ -1842,7 +2042,7 @@ describe("StatsPopover directional disclosure authority", () => {
       const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
       const host = document.createElement("div");
       document.body.append(host);
-      const root = createRoot(host);
+      const root = createTrackedRoot(host);
       let source = "One two three.";
       let selection: SourceSelection = null;
       let mount: "initial" | "replacement" = "initial";
@@ -2028,7 +2228,7 @@ describe("StatsPopover disclosure visit authority", () => {
     const session = makeSession(`disclosure-${_label}`);
     const host = document.createElement("div");
     document.body.append(host);
-    const root = createRoot(host);
+    const root = createTrackedRoot(host);
     try {
       act(() => root.render(<StatsBoundary session={session} />));
       openPopover();
@@ -2981,6 +3181,745 @@ describe("StatsPopover disclosure visit authority", () => {
       host.remove();
       focusOwner.remove();
     }
+  });
+});
+
+describe("StatsPopover writing goal action navigation", () => {
+  function focusSpy() {
+    return vi.spyOn(window.HTMLElement.prototype, "focus");
+  }
+
+  function dispatchObserved(
+    actions: GoalActions,
+    sourceName: GoalActionSource,
+    key: string,
+    init: KeyboardEventInit = {},
+    hooks: Parameters<typeof dispatchGoalActionKey>[3] = {},
+  ) {
+    const source = sourceName === "set" ? actions.set : actions.clear;
+    if (!source) throw new Error(`${sourceName} action was not rendered`);
+    source.focus();
+    (
+      window.HTMLElement.prototype.focus as typeof window.HTMLElement.prototype.focus & {
+        mockClear?: () => void;
+      }
+    ).mockClear?.();
+    const event = statsKey(source, key, init);
+    let observation: GoalActionKeyDispatch | undefined;
+    act(() => {
+      observation = dispatchGoalActionKey(
+        actions,
+        sourceName,
+        event,
+        hooks,
+      );
+    });
+    if (!observation) throw new Error("Writing-goal key was not dispatched");
+    return { event, observation };
+  }
+
+  function expectAccepted(
+    focus: ReturnType<typeof focusSpy>,
+    destination: HTMLButtonElement,
+    result: ReturnType<typeof dispatchObserved>,
+    label = "navigation",
+  ) {
+    const { event, observation } = result;
+    expect(event.defaultPrevented, label).toBe(true);
+    expect(observation.captureWrapper).not.toBe(observation.bubbleWrapper);
+    expect(observation.bubbleWrapper?.defaultPrevented).toBe(true);
+    expect(observation.bubbleWrapper?.isDefaultPrevented()).toBe(true);
+    expect(observation.publicPreventDefault).toHaveBeenCalledTimes(1);
+    expect(observation.publicPreventDefault?.mock.contexts[0]).toBe(
+      observation.bubbleWrapper,
+    );
+    expect(focus).toHaveBeenCalledTimes(1);
+    expect(focus.mock.instances[0]).toBe(destination);
+    expect(focus.mock.calls[0]).toEqual([{ preventScroll: true }]);
+    expect(document.activeElement).toBe(destination);
+  }
+
+  function expectRejected(
+    focus: ReturnType<typeof focusSpy>,
+    result: ReturnType<typeof dispatchObserved>,
+  ) {
+    expect(result.event.defaultPrevented).toBe(false);
+    expect(result.observation.publicPreventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+  }
+
+  it("moves between enabled Set and Clear actions for arrows, Home, End, and keypad equivalents without activating or scrolling", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-navigation",
+      "owner",
+      goal("words", "min", 100),
+    );
+    mountStrictGoal(session);
+    const transaction = vi.spyOn(session.ydoc, "transact");
+    const submit = vi.fn();
+    const click = vi.fn();
+    const initialOpenChanges = publishedPopoverOpenChanges.length;
+    const initialGoal = getGoal(session);
+    const initialDraft = {
+      kind: screen.getByTestId("goal-kind").getAttribute("value"),
+      mode: screen.getByTestId("goal-mode").getAttribute("value"),
+      value: (screen.getByTestId("goal-value") as HTMLInputElement).value,
+    };
+    let actions = captureGoalActions();
+    actions.form.addEventListener("submit", submit);
+    actions.set.addEventListener("click", click);
+    actions.clear?.addEventListener("click", click);
+    actions.actions.scrollTop = 17;
+
+    const semanticCases = [
+      ["set", "ArrowLeft", false],
+      ["set", "ArrowUp", false],
+      ["set", "Home", false],
+      ["set", "ArrowRight", true],
+      ["set", "ArrowDown", true],
+      ["set", "End", true],
+      ["clear", "ArrowLeft", true],
+      ["clear", "ArrowUp", true],
+      ["clear", "Home", true],
+      ["clear", "ArrowRight", false],
+      ["clear", "ArrowDown", false],
+      ["clear", "End", false],
+    ] as const;
+    for (const [sourceName, key, moves] of semanticCases) {
+      actions = captureGoalActions();
+      const destination =
+        sourceName === "set" ? actions.clear : actions.set;
+      if (!destination) throw new Error("Clear action was not rendered");
+      const scrollIntoView = vi.fn();
+      Object.defineProperty(destination, "scrollIntoView", {
+        configurable: true,
+        value: scrollIntoView,
+      });
+      focus.mockClear();
+      const result = dispatchObserved(actions, sourceName, key);
+      if (moves) expectAccepted(focus, destination, result, `${sourceName} ${key}`);
+      else expectRejected(focus, result);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(actions.actions.scrollTop).toBe(17);
+    }
+
+    const keypadCases = [
+      ["clear", "ArrowLeft", "Numpad4"],
+      ["clear", "ArrowUp", "Numpad8"],
+      ["set", "ArrowRight", "Numpad6"],
+      ["set", "ArrowDown", "Numpad2"],
+      ["clear", "Home", "Numpad7"],
+      ["set", "End", "Numpad1"],
+    ] as const;
+    for (const [sourceName, key, code] of keypadCases) {
+      actions = captureGoalActions();
+      const destination =
+        sourceName === "set" ? actions.clear : actions.set;
+      if (!destination) throw new Error("Clear action was not rendered");
+      focus.mockClear();
+      const result = dispatchObserved(actions, sourceName, key, {
+        code,
+        location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+      expectAccepted(focus, destination, result, `${sourceName} ${key} ${code}`);
+    }
+
+    expect(getGoal(session)).toEqual(initialGoal);
+    expect((screen.getByTestId("goal-value") as HTMLInputElement).value).toBe(
+      initialDraft.value,
+    );
+    expect(screen.getByTestId("goal-kind").getAttribute("value")).toBe(
+      initialDraft.kind,
+    );
+    expect(screen.getByTestId("goal-mode").getAttribute("value")).toBe(
+      initialDraft.mode,
+    );
+    expect(transaction).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
+    expect(publishedPopoverOpenChanges).toHaveLength(initialOpenChanges);
+    expect(screen.getByTestId("stats-popover")).toBeVisible();
+  });
+
+  it("leaves disabled, missing, single, and bounded action sets unhandled", () => {
+    const focus = focusSpy();
+    const session = makeSession("goal-action-single");
+    mountStrictGoal(session);
+
+    let actions = captureGoalActions();
+    expect(actions.set).toBeDisabled();
+    expect(actions.clear).toBeNull();
+    for (const key of [
+      "ArrowLeft",
+      "ArrowUp",
+      "ArrowRight",
+      "ArrowDown",
+      "Home",
+      "End",
+    ]) {
+      const event = statsKey(actions.set, key);
+      actions.value.focus();
+      focus.mockClear();
+      act(() => {
+        actions.set.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+    }
+
+    fireEvent.input(actions.value, { target: { value: "25" } });
+    actions = captureGoalActions();
+    expect(actions.set).toBeEnabled();
+    expect(actions.clear).toBeNull();
+    for (const key of [
+      "ArrowLeft",
+      "ArrowUp",
+      "ArrowRight",
+      "ArrowDown",
+      "Home",
+      "End",
+    ]) {
+      focus.mockClear();
+      expectRejected(focus, dispatchObserved(actions, "set", key));
+    }
+  });
+
+  it("excludes a disabled Set action when Clear is the only enabled action", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-disabled-set",
+      "owner",
+      goal("words", "min", 100),
+    );
+    mountStrictGoal(session);
+    let actions = captureGoalActions();
+    fireEvent.input(actions.value, { target: { value: "" } });
+    actions = captureGoalActions();
+    expect(actions.set).toBeDisabled();
+    expect(actions.clear).toBeEnabled();
+
+    for (const key of [
+      "ArrowLeft",
+      "ArrowUp",
+      "ArrowRight",
+      "ArrowDown",
+      "Home",
+      "End",
+    ]) {
+      focus.mockClear();
+      expectRejected(focus, dispatchObserved(actions, "clear", key));
+    }
+  });
+
+  it("isolates the selects and numeric input from action navigation", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-control-isolation",
+      "owner",
+      goal("words", "min", 100),
+    );
+    mountStrictGoal(session);
+    const actions = captureGoalActions();
+
+    for (const [control, key] of [
+      [actions.mode, "ArrowDown"],
+      [actions.kind, "ArrowUp"],
+      [actions.value, "ArrowRight"],
+      [actions.value, "Home"],
+    ] as const) {
+      control.focus();
+      focus.mockClear();
+      const event = statsKey(control, key);
+      act(() => {
+        control.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(control);
+    }
+  });
+
+  it("requires unmodified, unrepeated, composing-free, uncancelled delivery through every boundary", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-event-state",
+      "owner",
+      goal("words", "min", 100),
+    );
+    mountStrictGoal(session);
+    const actions = captureGoalActions();
+
+    for (const init of [
+      { altKey: true },
+      { ctrlKey: true },
+      { metaKey: true },
+      { shiftKey: true },
+      { repeat: true },
+      { isComposing: true },
+    ]) {
+      focus.mockClear();
+      expectRejected(
+        focus,
+        dispatchObserved(actions, "set", "ArrowRight", init),
+      );
+    }
+
+    actions.set.focus();
+    focus.mockClear();
+    const cancelled = statsKey(actions.set, "ArrowRight");
+    cancelled.preventDefault();
+    let cancelledResult: GoalActionKeyDispatch | undefined;
+    act(() => {
+      cancelledResult = dispatchGoalActionKey(
+        actions,
+        "set",
+        cancelled,
+      );
+    });
+    if (!cancelledResult) throw new Error("Cancelled key was not dispatched");
+    expect(cancelled.defaultPrevented).toBe(true);
+    expect(cancelledResult.publicPreventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    focus.mockClear();
+    const stopped = dispatchObserved(
+      actions,
+      "set",
+      "ArrowRight",
+      {},
+      {
+        beforeCapture: (event) => event.stopPropagation(),
+      },
+    );
+    expect(stopped.event.defaultPrevented).toBe(false);
+    expect(stopped.observation.bubbleWrapper).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+  });
+
+  it("accepts distinct capture and bubble wrappers, prototypes, and public methods while preserving each phase", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-phase-authority",
+      "owner",
+      goal("words", "min", 100),
+    );
+    mountStrictGoal(session);
+    const actions = captureGoalActions();
+    focus.mockClear();
+
+    const result = dispatchObserved(
+      actions,
+      "set",
+      "ArrowRight",
+      {},
+      {
+        beforeCapture: (event) =>
+          giveKeyboardWrapperDistinctMethods(
+            event as React.KeyboardEvent<HTMLElement>,
+          ),
+        beforeActionBubble: (event) =>
+          giveKeyboardWrapperDistinctMethods(
+            event as React.KeyboardEvent<HTMLElement>,
+          ),
+      },
+    );
+
+    expectAccepted(focus, actions.clear!, result);
+    expect(Object.getPrototypeOf(result.observation.captureWrapper)).not.toBe(
+      Object.getPrototypeOf(result.observation.bubbleWrapper),
+    );
+    expect(result.observation.captureWrapper?.isDefaultPrevented).not.toBe(
+      result.observation.bubbleWrapper?.isDefaultPrevented,
+    );
+    expect(
+      result.observation.captureWrapper?.isPropagationStopped,
+    ).not.toBe(result.observation.bubbleWrapper?.isPropagationStopped);
+  });
+
+  it("rejects same-phase public method drift and recovers for a clean event", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-method-drift",
+      "owner",
+      goal("words", "min", 100),
+    );
+    mountStrictGoal(session);
+    let actions = captureGoalActions();
+    focus.mockClear();
+
+    const drifted = dispatchObserved(
+      actions,
+      "set",
+      "ArrowRight",
+      {},
+      {
+        afterActionBubble: (event) => {
+          const retained = event.isPropagationStopped;
+          Object.defineProperty(event, "isPropagationStopped", {
+            configurable: true,
+            value: function (
+              this: React.KeyboardEvent<HTMLButtonElement>,
+            ) {
+              return Reflect.apply(retained, this, []);
+            },
+          });
+        },
+      },
+    );
+    expectRejected(focus, drifted);
+    expect(document.activeElement).toBe(actions.set);
+
+    actions = captureGoalActions();
+    focus.mockClear();
+    expectAccepted(
+      focus,
+      actions.clear!,
+      dispatchObserved(actions, "set", "ArrowRight"),
+    );
+  });
+
+  it("rejects stale goal handlers and recovers through current handlers", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-stale-handlers",
+      "owner",
+      goal("words", "min", 100),
+    );
+    const mounted = mountStrictGoal(session);
+    const stale = captureGoalActions();
+    mounted.rerender("A changed source.");
+    let current = captureGoalActions();
+    focus.mockClear();
+
+    expectRejected(
+      focus,
+      dispatchObserved(current, "set", "ArrowRight", {}, { handlers: stale }),
+    );
+    expect(document.activeElement).toBe(current.set);
+
+    current = captureGoalActions();
+    focus.mockClear();
+    expectAccepted(
+      focus,
+      current.clear!,
+      dispatchObserved(current, "set", "ArrowRight"),
+    );
+  });
+
+  it("rejects detach-reinsert and reorder-restore histories before recovering with a fresh publication", async () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-dom-history",
+      "owner",
+      goal("words", "min", 100),
+    );
+    mountStrictGoal(session);
+    let actions = captureGoalActions();
+    const actionParent = actions.actions.parentElement;
+    if (!actionParent || !actions.clear) {
+      throw new Error("Writing-goal action DOM was unavailable");
+    }
+    focus.mockClear();
+
+    expectRejected(
+      focus,
+      dispatchObserved(
+        actions,
+        "set",
+        "ArrowRight",
+        {},
+        {
+          afterCapture: () => {
+            actions.actions.remove();
+            actionParent.append(actions.actions);
+          },
+        },
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    actions = captureGoalActions();
+    focus.mockClear();
+    expectRejected(
+      focus,
+      dispatchObserved(
+        actions,
+        "set",
+        "ArrowRight",
+        {},
+        {
+          afterCapture: () => {
+            actions.actions.insertBefore(actions.clear!, actions.set);
+            actions.actions.insertBefore(actions.set, actions.clear!);
+          },
+        },
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    actions = captureGoalActions();
+    focus.mockClear();
+    expectAccepted(
+      focus,
+      actions.clear!,
+      dispatchObserved(actions, "set", "ArrowRight"),
+    );
+  });
+
+  it("latches Window registration-method drift until a clean Strict Mode successor mounts", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-window-method-drift",
+      "owner",
+      goal("words", "min", 100),
+    );
+    const first = mountStrictGoal(session);
+    let actions = captureGoalActions();
+    const descriptor = Object.getOwnPropertyDescriptor(
+      window,
+      "addEventListener",
+    );
+    const retainedAdd = window.addEventListener;
+    Object.defineProperty(window, "addEventListener", {
+      configurable: true,
+      writable: true,
+      value: function (
+        this: Window,
+        ...args: Parameters<Window["addEventListener"]>
+      ) {
+        return Reflect.apply(retainedAdd, this, args);
+      },
+    });
+    focus.mockClear();
+    expectRejected(
+      focus,
+      dispatchObserved(actions, "set", "ArrowRight"),
+    );
+    if (descriptor) {
+      Object.defineProperty(window, "addEventListener", descriptor);
+    } else {
+      Reflect.deleteProperty(window, "addEventListener");
+    }
+
+    actions = captureGoalActions();
+    focus.mockClear();
+    expectRejected(
+      focus,
+      dispatchObserved(actions, "set", "ArrowRight"),
+    );
+    act(() => first.root.unmount());
+
+    mountStrictGoal(session);
+    actions = captureGoalActions();
+    focus.mockClear();
+    expectAccepted(
+      focus,
+      actions.clear!,
+      dispatchObserved(actions, "set", "ArrowRight"),
+    );
+  });
+
+  it("rejects an inexact Window listener receiver and permits a clean successor", () => {
+    const focus = focusSpy();
+    const receiver = new EventTarget();
+    const restoreReceiver = redirectWindowKeyCaptureReceiver(receiver);
+    const session = makeSession(
+      "goal-action-window-receiver",
+      "owner",
+      goal("words", "min", 100),
+    );
+    const first = mountStrictGoal(session);
+    let actions = captureGoalActions();
+    focus.mockClear();
+    expectRejected(
+      focus,
+      dispatchObserved(actions, "set", "ArrowRight"),
+    );
+    act(() => first.root.unmount());
+    restoreReceiver();
+
+    mountStrictGoal(session);
+    actions = captureGoalActions();
+    focus.mockClear();
+    expectAccepted(
+      focus,
+      actions.clear!,
+      dispatchObserved(actions, "set", "ArrowRight"),
+    );
+  });
+
+  it("binds action navigation to the exact backing Window receiver", () => {
+    const backing = exposeExactWindowListenerReceiver(document);
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-backing-window",
+      "owner",
+      goal("words", "min", 100),
+    );
+    const mounted = mountStrictGoal(session);
+    const actions = captureGoalActions();
+    focus.mockClear();
+
+    expectAccepted(
+      focus,
+      actions.clear!,
+      dispatchObserved(actions, "set", "ArrowRight"),
+    );
+    act(() => mounted.root.unmount());
+    backing.restore();
+  });
+
+  it("rejects a structural event view and accepts an exact-view successor", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-structural-view",
+      "owner",
+      goal("words", "min", 100),
+    );
+    mountStrictGoal(session);
+    let actions = captureGoalActions();
+    actions.set.focus();
+    focus.mockClear();
+    const event = statsKey(actions.set, "ArrowRight");
+    Object.defineProperty(event, "view", {
+      configurable: true,
+      value: Object.create(event.view as object),
+    });
+    let observation: GoalActionKeyDispatch | undefined;
+    act(() => {
+      observation = dispatchGoalActionKey(actions, "set", event);
+    });
+    if (!observation) throw new Error("Structural-view key was not dispatched");
+    expectRejected(focus, { event, observation });
+
+    actions = captureGoalActions();
+    focus.mockClear();
+    expectAccepted(
+      focus,
+      actions.clear!,
+      dispatchObserved(actions, "set", "ArrowRight"),
+    );
+  });
+
+  it("claims an accepted movement before rejecting a reentrant key", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-reentrancy",
+      "owner",
+      goal("words", "min", 100),
+    );
+    mountStrictGoal(session);
+    const actions = captureGoalActions();
+    let nested: KeyboardEvent | null = null;
+    focus.mockClear();
+
+    const result = dispatchObserved(
+      actions,
+      "set",
+      "ArrowRight",
+      {},
+      {
+        duringPublicPreventDefault: () => {
+          if (nested) return;
+          nested = statsKey(actions.set, "ArrowDown");
+          actions.set.dispatchEvent(nested);
+        },
+      },
+    );
+
+    expectAccepted(focus, actions.clear!, result);
+    expect(nested?.defaultPrevented).toBe(false);
+  });
+
+  it("rejects replay, removes its Window listener on cleanup, and accepts a clean successor event", () => {
+    const listeners = trackWindowKeydownListeners();
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-replay-cleanup",
+      "owner",
+      goal("words", "min", 100),
+    );
+    const mounted = mountStrictGoal(session);
+    let actions = captureGoalActions();
+    actions.set.focus();
+    const replayed = statsKey(actions.set, "ArrowRight");
+    focus.mockClear();
+    let first: GoalActionKeyDispatch | undefined;
+    act(() => {
+      first = dispatchGoalActionKey(actions, "set", replayed);
+    });
+    if (!first) throw new Error("Initial key was not dispatched");
+    expectAccepted(focus, actions.clear!, {
+      event: replayed,
+      observation: first,
+    });
+
+    actions = captureGoalActions();
+    actions.set.focus();
+    focus.mockClear();
+    let replay: GoalActionKeyDispatch | undefined;
+    act(() => {
+      replay = dispatchGoalActionKey(actions, "set", replayed);
+    });
+    if (!replay) throw new Error("Replayed key was not dispatched");
+    expect(replay.publicPreventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    actions = captureGoalActions();
+    focus.mockClear();
+    expectAccepted(
+      focus,
+      actions.clear!,
+      dispatchObserved(actions, "set", "ArrowRight"),
+    );
+    expect(listeners.active.size).toBe(1);
+    act(() => mounted.root.unmount());
+    expect(listeners.active.size).toBe(0);
+    expect(listeners.removed.length).toBeGreaterThan(0);
+  });
+
+  it("retains Tab, Enter, Space, click, and input-submit behavior", () => {
+    const focus = focusSpy();
+    const session = makeSession(
+      "goal-action-retained-behavior",
+      "owner",
+      goal("words", "min", 100),
+    );
+    const mounted = mountStrictGoal(session);
+    let actions = captureGoalActions();
+    const clicks = vi.fn();
+    actions.clear?.addEventListener("click", clicks);
+
+    const tab = dispatchObserved(actions, "clear", "Tab");
+    expect(tab.observation.captureWrapper).not.toBeNull();
+    expect(tab.observation.bubbleWrapper).not.toBeNull();
+    for (const key of ["Enter", " "]) {
+      focus.mockClear();
+      expectRejected(focus, dispatchObserved(actions, "clear", key));
+    }
+    expect(clicks).not.toHaveBeenCalled();
+    fireEvent.click(actions.clear!);
+    expect(clicks).toHaveBeenCalledTimes(1);
+    expect(getGoal(session)).toBeNull();
+    act(() => mounted.root.unmount());
+
+    const submitSession = makeSession("goal-action-retained-submit");
+    mountStrictGoal(submitSession);
+    actions = captureGoalActions();
+    fireEvent.input(actions.value, { target: { value: "12" } });
+    actions = captureGoalActions();
+    expect(actions.set).toBeEnabled();
+    act(() => {
+      directSubmit(actions);
+    });
+    expect(getGoal(submitSession)).toEqual(
+      expect.objectContaining({ kind: "words", mode: "min", value: 12 }),
+    );
   });
 });
 
