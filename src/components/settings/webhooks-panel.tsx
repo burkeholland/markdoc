@@ -236,9 +236,11 @@ interface RowElements {
   enable: ElementSlot<HTMLButtonElement>;
   test: ElementSlot<HTMLButtonElement>;
   delete: ElementSlot<HTMLButtonElement>;
+  publication: PublishedWebhookRow | null;
 }
 
 interface PanelPublication {
+  readonly identity: symbol;
   presentation: PanelPresentation;
   card: ElementSlot<HTMLDivElement>;
   header: ElementSlot<HTMLDivElement>;
@@ -261,6 +263,7 @@ interface PanelPublication {
   listContent: ElementSlot<HTMLElement>;
   rowsList: ElementSlot<HTMLUListElement>;
   rows: RowElements[];
+  rowPublications: readonly PublishedWebhookRow[];
   established: boolean;
   layoutRetired: boolean;
   consumed: boolean;
@@ -274,6 +277,8 @@ interface PanelPublication {
   guard: PanelDomGuard | null;
   keyboard: FormKeyboardAuthority | null;
   keyboardPair: FormKeyboardPair | null;
+  rowKeyboard: RowKeyboardAuthority | null;
+  rowKeyboardPair: RowKeyboardPair | null;
   keyboardSuspended: boolean;
   keyboardLayoutReplayAvailable: boolean;
   keyboardReplay: FormKeyboardRefReplay | null;
@@ -459,6 +464,146 @@ type FormKeyboardPair = Readonly<{
   capture: FormKeyboardReactSnapshot;
 }>;
 
+type RowNavigationKey = FormNavigationKey;
+
+type PublishedRowAction = Readonly<{
+  identity: symbol;
+  panel: PanelPublication;
+  panelIdentity: symbol;
+  rowIdentity: symbol;
+  callbackToken: symbol;
+  facts: RowActionFacts;
+  owner: ElementSlot<HTMLButtonElement>;
+  element: HTMLButtonElement;
+  kind: RowActionKind;
+  order: 0 | 1 | 2;
+}>;
+
+type PublishedWebhookRow = Readonly<{
+  identity: symbol;
+  panel: PanelPublication;
+  panelIdentity: symbol;
+  list: ListFacts;
+  facts: WebhookRowFacts;
+  elements: RowElements;
+  root: HTMLLIElement;
+  listElement: HTMLUListElement;
+  document: Document;
+  ownerWindow: Window & typeof globalThis;
+  index: number;
+  id: string;
+  url: string;
+  active: boolean;
+  failures: number;
+  operation: RowOperation | null;
+  callbackToken: symbol;
+  actions: readonly PublishedRowAction[];
+}>;
+
+type RowKeyboardEventField =
+  | FormKeyboardEventField
+  | "composed";
+type RowKeyboardKeyField =
+  | FormKeyboardKeyField
+  | "location";
+
+type RowKeyboardAuthority = Readonly<{
+  panel: PanelPublication;
+  root: HTMLDivElement;
+  list: HTMLUListElement;
+  rows: readonly PublishedWebhookRow[];
+  document: Document;
+  ownerWindow: Window & typeof globalThis;
+  Event: typeof Event;
+  UIEvent: typeof UIEvent;
+  KeyboardEvent: typeof KeyboardEvent;
+  Document: typeof Document;
+  HTMLElement: typeof HTMLElement;
+  event: FormKeyboardGetterAuthority<RowKeyboardEventField>["getters"];
+  keyboard: FormKeyboardGetterAuthority<RowKeyboardKeyField>["getters"];
+  view: FormKeyboardNativeGetter;
+  detail: FormKeyboardNativeGetter;
+  activeElement: FormKeyboardNativeGetter;
+  composedPath: Event["composedPath"];
+  focus: FormKeyboardFocus;
+  trusted: FormKeyboardTrustedAuthority;
+  terminal: FormKeyboardTerminalRegistration;
+  apply: typeof Reflect.apply;
+  prototypeOf: typeof Object.getPrototypeOf;
+  isCurrent: () => boolean;
+}>;
+
+type RowKeyboardEventSnapshot = Readonly<{
+  event: KeyboardEvent;
+  type: string;
+  target: HTMLElement;
+  currentTarget: EventTarget;
+  phase: number;
+  path: readonly EventTarget[];
+  bubbles: boolean;
+  cancelable: boolean;
+  defaultPrevented: boolean;
+  cancelBubble: boolean;
+  composed: boolean;
+  key: RowNavigationKey;
+  code: string;
+  location: number;
+  repeat: boolean;
+  composing: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  view: Window | EventTarget | null;
+  detail: number;
+  trusted: true;
+  terminal: FormKeyboardTerminalProof;
+}>;
+
+type RowKeyboardReactMethods = Readonly<{
+  preventDefault: ReactKeyboardEvent<HTMLElement>["preventDefault"];
+  stopPropagation: ReactKeyboardEvent<HTMLElement>["stopPropagation"];
+  isDefaultPrevented: () => boolean;
+  isPropagationStopped: () => boolean;
+  persist: () => void;
+}>;
+
+type RowKeyboardReactSnapshot = Readonly<{
+  event: ReactKeyboardEvent<HTMLElement>;
+  nativeEvent: KeyboardEvent;
+  target: HTMLElement;
+  currentTarget: HTMLElement;
+  phase: number;
+  view: ReactKeyboardEvent<HTMLElement>["view"];
+  methods: RowKeyboardReactMethods;
+}>;
+
+type RowKeyboardPair = Readonly<{
+  publication: PanelPublication;
+  authority: RowKeyboardAuthority;
+  row: PublishedWebhookRow;
+  native: RowKeyboardEventSnapshot;
+  capture: RowKeyboardReactSnapshot;
+  terminal: FormKeyboardTerminalProof;
+  source: PublishedRowAction;
+  destination: PublishedRowAction;
+  key: RowNavigationKey;
+  movement: object;
+  publicationClaim: object;
+  rowClaim: object;
+  movementClaim: object;
+  wrapperClaim: object;
+  nativeClaim: object;
+  windowClaim: object;
+  sourceClaim: object;
+  destinationClaim: object;
+}>;
+
+type RowKeyboardDelivery = Readonly<{
+  pair: RowKeyboardPair;
+  bubble: RowKeyboardReactSnapshot;
+}>;
+
 type PanelReplay = Readonly<{
   source: PanelPublication;
   dom: PanelDomSnapshot;
@@ -481,6 +626,22 @@ class PanelPublicationCoordinator {
   readonly #claimedReactEvents = new WeakSet<object>();
   readonly #claimedNativeEvents = new WeakSet<Event>();
   readonly #claimedKeyboardPairs = new WeakSet<FormKeyboardPair>();
+  readonly #attemptedRowKeyboardReactEvents = new WeakSet<object>();
+  readonly #attemptedRowKeyboardNativeEvents = new WeakSet<object>();
+  readonly #claimedRowKeyboardDeliveries = new WeakSet<RowKeyboardDelivery>();
+  readonly #claimedRowKeyboardPairs = new WeakSet<RowKeyboardPair>();
+  readonly #claimedRowKeyboardMovements = new WeakSet<object>();
+  readonly #claimedRowKeyboardPublications = new WeakSet<object>();
+  readonly #claimedRowKeyboardRows = new WeakSet<object>();
+  readonly #claimedRowKeyboardMovementClaims = new WeakSet<object>();
+  readonly #claimedRowKeyboardWrapperClaims = new WeakSet<object>();
+  readonly #claimedRowKeyboardNativeClaims = new WeakSet<object>();
+  readonly #claimedRowKeyboardWindowClaims = new WeakSet<object>();
+  readonly #claimedRowKeyboardSources = new WeakSet<object>();
+  readonly #claimedRowKeyboardDestinations = new WeakSet<object>();
+  readonly #claimedRowKeyboardReactEvents = new WeakSet<object>();
+  readonly #claimedRowKeyboardNativeEvents = new WeakSet<Event>();
+  #rowKeyboardDelivery: RowKeyboardDelivery | null = null;
   readonly #recentlyIntroduced = new WeakSet<HTMLElement>();
 
   constructor(mount: MountGeneration) {
@@ -510,6 +671,11 @@ class PanelPublicationCoordinator {
           publication.keyboard?.terminal.release();
           publication.keyboard = null;
           publication.keyboardPair = null;
+          publication.rowKeyboard?.terminal.release();
+          publication.rowKeyboard = null;
+          publication.rowKeyboardPair = null;
+          publication.rowPublications = [];
+          for (const row of publication.rows) row.publication = null;
           publication.keyboardReplay = null;
         }
       }
@@ -770,11 +936,25 @@ class PanelPublicationCoordinator {
       guard.release();
       return undefined;
     }
+    const rowPublications = publishWebhookRows(candidate, root);
+    if (!rowPublications) {
+      guard.release();
+      return undefined;
+    }
     const keyboard = candidate.presentation.adding
       ? captureFormKeyboardAuthority(candidate, root)
       : null;
+    const rowKeyboard = candidate.presentation.list.kind === "rows"
+      ? captureRowKeyboardAuthority(candidate, root, rowPublications)
+      : null;
     if (candidate.presentation.adding && !keyboard) {
       guard.release();
+      rowKeyboard?.terminal.release();
+      return undefined;
+    }
+    if (candidate.presentation.list.kind === "rows" && !rowKeyboard) {
+      guard.release();
+      keyboard?.terminal.release();
       return undefined;
     }
     const predecessor = this.#current ?? this.#successorOf;
@@ -825,6 +1005,7 @@ class PanelPublicationCoordinator {
     ) {
       guard.release();
       keyboard?.terminal.release();
+      rowKeyboard?.terminal.release();
       return undefined;
     }
 
@@ -840,6 +1021,9 @@ class PanelPublicationCoordinator {
     candidate.placement = placement;
     candidate.guard = guard;
     candidate.keyboard = keyboard;
+    candidate.rowPublications = rowPublications;
+    candidate.rowKeyboard = rowKeyboard;
+    for (const row of rowPublications) row.elements.publication = row;
     candidate.keyboardLayoutReplayAvailable = hasMatchingIntroducedFormLayout;
     for (const owner of panelButtonSlots(candidate)) {
       owner.mouseTargets = owner.element ? snapshotMouseTargets(owner.element) : null;
@@ -880,6 +1064,11 @@ class PanelPublicationCoordinator {
     candidate.keyboard?.terminal.release();
     candidate.keyboard = null;
     candidate.keyboardPair = null;
+    candidate.rowKeyboard?.terminal.release();
+    candidate.rowKeyboard = null;
+    candidate.rowKeyboardPair = null;
+    candidate.rowPublications = [];
+    for (const row of candidate.rows) row.publication = null;
     const wasCurrent = this.#current === candidate;
     if (wasCurrent) {
       this.#current = null;
@@ -1036,6 +1225,88 @@ class PanelPublicationCoordinator {
 
   discardKeyboardPair(candidate: PanelPublication) {
     candidate.keyboardPair = null;
+  }
+
+  prepareRowKeyboardCapture(event: object, nativeEvent: object) {
+    if (
+      this.#rowKeyboardDelivery ||
+      this.#attemptedRowKeyboardReactEvents.has(event) ||
+      this.#attemptedRowKeyboardNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    this.#attemptedRowKeyboardReactEvents.add(event);
+    this.#attemptedRowKeyboardNativeEvents.add(nativeEvent);
+    return true;
+  }
+
+  prepareRowKeyboardBubble(event: object, nativeEvent: object) {
+    if (
+      this.#rowKeyboardDelivery ||
+      this.#attemptedRowKeyboardReactEvents.has(event) ||
+      !this.#attemptedRowKeyboardNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    this.#attemptedRowKeyboardReactEvents.add(event);
+    return true;
+  }
+
+  claimRowKeyboardNavigation(delivery: RowKeyboardDelivery) {
+    const { pair, bubble } = delivery;
+    const nativeEvent = pair.native.event;
+    if (
+      this.#rowKeyboardDelivery ||
+      !this.owns(pair.publication) ||
+      pair.publication.rowKeyboard !== pair.authority ||
+      pair.row.panel !== pair.publication ||
+      this.#claimedRowKeyboardDeliveries.has(delivery) ||
+      this.#claimedRowKeyboardPairs.has(pair) ||
+      this.#claimedRowKeyboardMovements.has(pair.movement) ||
+      this.#claimedRowKeyboardPublications.has(pair.publicationClaim) ||
+      this.#claimedRowKeyboardRows.has(pair.rowClaim) ||
+      this.#claimedRowKeyboardMovementClaims.has(pair.movementClaim) ||
+      this.#claimedRowKeyboardWrapperClaims.has(pair.wrapperClaim) ||
+      this.#claimedRowKeyboardNativeClaims.has(pair.nativeClaim) ||
+      this.#claimedRowKeyboardWindowClaims.has(pair.windowClaim) ||
+      this.#claimedRowKeyboardSources.has(pair.sourceClaim) ||
+      this.#claimedRowKeyboardDestinations.has(pair.destinationClaim) ||
+      this.#claimedRowKeyboardReactEvents.has(pair.capture.event) ||
+      this.#claimedRowKeyboardReactEvents.has(bubble.event) ||
+      this.#claimedRowKeyboardNativeEvents.has(nativeEvent) ||
+      !this.#attemptedRowKeyboardReactEvents.has(pair.capture.event) ||
+      !this.#attemptedRowKeyboardReactEvents.has(bubble.event) ||
+      !this.#attemptedRowKeyboardNativeEvents.has(nativeEvent) ||
+      !pair.authority.terminal.claim(pair.terminal)
+    ) {
+      return false;
+    }
+    this.#claimedRowKeyboardDeliveries.add(delivery);
+    this.#claimedRowKeyboardPairs.add(pair);
+    this.#claimedRowKeyboardMovements.add(pair.movement);
+    this.#claimedRowKeyboardPublications.add(pair.publicationClaim);
+    this.#claimedRowKeyboardRows.add(pair.rowClaim);
+    this.#claimedRowKeyboardMovementClaims.add(pair.movementClaim);
+    this.#claimedRowKeyboardWrapperClaims.add(pair.wrapperClaim);
+    this.#claimedRowKeyboardNativeClaims.add(pair.nativeClaim);
+    this.#claimedRowKeyboardWindowClaims.add(pair.windowClaim);
+    this.#claimedRowKeyboardSources.add(pair.sourceClaim);
+    this.#claimedRowKeyboardDestinations.add(pair.destinationClaim);
+    this.#claimedRowKeyboardReactEvents.add(pair.capture.event);
+    this.#claimedRowKeyboardReactEvents.add(bubble.event);
+    this.#claimedRowKeyboardNativeEvents.add(nativeEvent);
+    this.#rowKeyboardDelivery = delivery;
+    return true;
+  }
+
+  rowKeyboardNavigationIsDelivering(delivery: RowKeyboardDelivery) {
+    return this.#rowKeyboardDelivery === delivery;
+  }
+
+  finishRowKeyboardNavigation(delivery: RowKeyboardDelivery) {
+    if (this.#rowKeyboardDelivery === delivery) {
+      this.#rowKeyboardDelivery = null;
+    }
   }
 
   #acceptInputReconciliation(candidate: PanelPublication, override?: InputDomOverride) {
@@ -1875,7 +2146,7 @@ function createFormKeyboardTerminalRegistration(
 ): FormKeyboardTerminalRegistration | null {
   const proofs = new WeakMap<KeyboardEvent, FormKeyboardTerminalProof>();
   const invalidEvents = new WeakSet<Event>();
-  let claimed: FormKeyboardTerminalProof | null = null;
+  const claimed = new WeakSet<Event>();
   let active = false;
   let released = false;
 
@@ -1930,7 +2201,7 @@ function createFormKeyboardTerminalRegistration(
       !proof ||
       !active ||
       released ||
-      claimed !== null ||
+      claimed.has(event) ||
       invalidEvents.has(event) ||
       proof.registration !== registration ||
       proof.nativeEvent !== event ||
@@ -1957,8 +2228,10 @@ function createFormKeyboardTerminalRegistration(
   const registration: FormKeyboardTerminalRegistration = Object.freeze({
     proofFor,
     claim: (proof) => {
-      if (claimed || proofFor(proof.nativeEvent) !== proof) return false;
-      claimed = proof;
+      if (claimed.has(proof.nativeEvent) || proofFor(proof.nativeEvent) !== proof) {
+        return false;
+      }
+      claimed.add(proof.nativeEvent);
       return true;
     },
     release: () => {
@@ -2632,6 +2905,945 @@ function capturePublishedFormKeyboardBubble(
   return Object.freeze({ authority, pair, native, bubble });
 }
 
+function publishWebhookRows(
+  panel: PanelPublication,
+  root: HTMLDivElement,
+): readonly PublishedWebhookRow[] | null {
+  const facts = panel.presentation;
+  if (facts.list.kind !== "rows") return Object.freeze([]);
+  const rows = facts.list.rows;
+  const list = panel.rowsList.element;
+  const ownerWindow = root.ownerDocument.defaultView;
+  if (
+    !rows ||
+    !list ||
+    !ownerWindow ||
+    list !== panel.listContent.element ||
+    list.ownerDocument !== root.ownerDocument ||
+    list.parentElement !== root ||
+    panel.rows.length !== rows.length
+  ) {
+    return null;
+  }
+  const publications: PublishedWebhookRow[] = [];
+  for (const factsRow of rows) {
+    const elements = panel.rows[factsRow.index];
+    const row = elements?.root.element;
+    const test = elements?.test.element;
+    const remove = elements?.delete.element;
+    const enable = factsRow.enable ? elements?.enable.element : null;
+    if (
+      !elements ||
+      !row ||
+      !test ||
+      !remove ||
+      row.ownerDocument !== root.ownerDocument ||
+      row.parentElement !== list ||
+      list.children.item(factsRow.index) !== row ||
+      test.parentElement !== row ||
+      remove.parentElement !== row ||
+      test.disabled !== !factsRow.test.eligible ||
+      remove.disabled !== !factsRow.delete.eligible ||
+      (factsRow.enable
+        ? !enable ||
+          enable.parentElement !== row ||
+          enable.disabled !== !factsRow.enable.eligible
+        : elements.enable.element !== null)
+    ) {
+      return null;
+    }
+    const rowIdentity = Symbol(`webhook-row:${factsRow.index}:${factsRow.id}`);
+    const entries: readonly [
+      RowActionFacts | null,
+      ElementSlot<HTMLButtonElement>,
+      HTMLButtonElement | null,
+      0 | 1 | 2,
+    ][] = [
+      [factsRow.enable, elements.enable, enable, 0],
+      [factsRow.test, elements.test, test, 1],
+      [factsRow.delete, elements.delete, remove, 2],
+    ];
+    const actions = Object.freeze(
+      entries.flatMap(([action, owner, element, order]) =>
+        action?.eligible && element
+          ? [
+              Object.freeze<PublishedRowAction>({
+                identity: Symbol(
+                  `webhook-row:${factsRow.index}:${factsRow.id}:${action.kind}`,
+                ),
+                panel,
+                panelIdentity: panel.identity,
+                rowIdentity,
+                callbackToken: facts.callbackToken,
+                facts: action,
+                owner,
+                element,
+                kind: action.kind,
+                order,
+              }),
+            ]
+          : []),
+    );
+    publications.push(
+      Object.freeze({
+        identity: rowIdentity,
+        panel,
+        panelIdentity: panel.identity,
+        list: facts.list,
+        facts: factsRow,
+        elements,
+        root: row,
+        listElement: list,
+        document: root.ownerDocument,
+        ownerWindow,
+        index: factsRow.index,
+        id: factsRow.id,
+        url: factsRow.url,
+        active: factsRow.active,
+        failures: factsRow.failures,
+        operation: factsRow.operation,
+        callbackToken: facts.callbackToken,
+        actions,
+      }),
+    );
+  }
+  return Object.freeze(publications);
+}
+
+function publishedWebhookRowIsCurrent(
+  panel: PanelPublication,
+  published: PublishedWebhookRow,
+) {
+  const rows = panel.presentation.list.rows;
+  const facts = rows?.[published.index];
+  const elements = panel.rows[published.index];
+  const list = panel.rowsList.element;
+  if (
+    !facts ||
+    !elements ||
+    panel.rowPublications[published.index] !== published ||
+    published.panel !== panel ||
+    published.panelIdentity !== panel.identity ||
+    published.list !== panel.presentation.list ||
+    published.facts !== facts ||
+    published.elements !== elements ||
+    published.root !== elements.root.element ||
+    published.listElement !== list ||
+    published.document !== published.root.ownerDocument ||
+    published.ownerWindow !== published.document.defaultView ||
+    published.index !== facts?.index ||
+    published.id !== facts?.id ||
+    published.url !== facts?.url ||
+    published.active !== facts?.active ||
+    published.failures !== facts?.failures ||
+    published.operation !== facts?.operation ||
+    published.callbackToken !== panel.presentation.callbackToken ||
+    elements.publication !== published ||
+    !list ||
+    !published.root.isConnected ||
+    published.root.parentElement !== list ||
+    list.children.item(published.index) !== published.root
+  ) {
+    return false;
+  }
+  const entries: readonly [
+    RowActionFacts | null,
+    ElementSlot<HTMLButtonElement>,
+    0 | 1 | 2,
+  ][] = [
+    [facts.enable, elements.enable, 0],
+    [facts.test, elements.test, 1],
+    [facts.delete, elements.delete, 2],
+  ];
+  const expected = entries.filter(([action]) => action?.eligible);
+  return (
+    published.actions.length === expected.length &&
+    published.actions.every((action, index) => {
+      const entry = expected[index];
+      const factsAction = entry?.[0];
+      const owner = entry?.[1];
+      const order = entry?.[2];
+      const element = owner?.element;
+      return Boolean(
+        factsAction &&
+          owner &&
+          element &&
+          action.panel === panel &&
+          action.panelIdentity === panel.identity &&
+          action.rowIdentity === published.identity &&
+          action.callbackToken === panel.presentation.callbackToken &&
+          action.facts === factsAction &&
+          action.owner === owner &&
+          action.element === element &&
+          action.kind === factsAction.kind &&
+          action.order === order &&
+          factsAction.eligible &&
+          element.isConnected &&
+          element.ownerDocument === published.root.ownerDocument &&
+          element.parentElement === published.root &&
+          !element.disabled,
+      );
+    }) &&
+    new Set(published.actions.map(({ element }) => element)).size ===
+      published.actions.length
+  );
+}
+
+function captureRowKeyboardAuthority(
+  panel: PanelPublication,
+  root: HTMLDivElement,
+  rows: readonly PublishedWebhookRow[],
+): RowKeyboardAuthority | null {
+  const list = panel.rowsList.element;
+  const document = root.ownerDocument;
+  const ownerWindow = document.defaultView;
+  if (
+    !list ||
+    !ownerWindow ||
+    list.ownerDocument !== document ||
+    list.parentElement !== root ||
+    rows.length !== panel.presentation.list.rows?.length
+  ) {
+    return null;
+  }
+  const objectConstructor = ownerWindow.Object;
+  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+  const prototypeOf = objectConstructor.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const DocumentConstructor = ownerWindow.Document;
+  const HTMLElementConstructor = ownerWindow.HTMLElement;
+  const eventPrototype = EventConstructor.prototype;
+  const uiEventPrototype = UIEventConstructor.prototype;
+  const keyboardEventPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = DocumentConstructor.prototype;
+  const eventGetters = captureFormKeyboardGetters(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    [
+      "type",
+      "target",
+      "currentTarget",
+      "eventPhase",
+      "bubbles",
+      "cancelable",
+      "defaultPrevented",
+      "cancelBubble",
+      "composed",
+    ] as const,
+  );
+  const keyboardGetters = captureFormKeyboardGetters(
+    getOwnPropertyDescriptor,
+    keyboardEventPrototype,
+    [
+      "key",
+      "code",
+      "location",
+      "repeat",
+      "isComposing",
+      "ctrlKey",
+      "altKey",
+      "metaKey",
+      "shiftKey",
+    ] as const,
+  );
+  const uiGetters = captureFormKeyboardGetters(
+    getOwnPropertyDescriptor,
+    uiEventPrototype,
+    ["view", "detail"] as const,
+  );
+  const documentGetters = captureFormKeyboardGetters(
+    getOwnPropertyDescriptor,
+    documentPrototype,
+    ["activeElement"] as const,
+  );
+  const composedPath = captureFormKeyboardMethod<Event["composedPath"]>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "composedPath",
+  );
+  const nativePreventDefault =
+    captureFormKeyboardMethod<Event["preventDefault"]>(
+      getOwnPropertyDescriptor,
+      eventPrototype,
+      "preventDefault",
+    );
+  const focus = captureFormKeyboardMethod<FormKeyboardFocus>(
+    getOwnPropertyDescriptor,
+    HTMLElementConstructor.prototype,
+    "focus",
+  );
+  const addEventListener = captureFormKeyboardWindowMethod(
+    ownerWindow,
+    "addEventListener",
+  );
+  const removeEventListener = captureFormKeyboardWindowMethod(
+    ownerWindow,
+    "removeEventListener",
+  );
+  if (
+    !eventGetters ||
+    !keyboardGetters ||
+    !uiGetters ||
+    !documentGetters ||
+    !composedPath ||
+    !nativePreventDefault ||
+    !focus ||
+    !addEventListener ||
+    !removeEventListener
+  ) {
+    return null;
+  }
+  let probe: KeyboardEvent;
+  try {
+    probe = new KeyboardEventConstructor("webhook-row-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const trusted = captureFormKeyboardTrustedAuthority(
+    getOwnPropertyDescriptor,
+    apply,
+    probe,
+  );
+  if (!trusted) return null;
+  let poisoned = false;
+  const intrinsicsAreCurrent = () => {
+    if (poisoned) return false;
+    try {
+      const current =
+        document.defaultView === ownerWindow &&
+        ownerWindow.Object === objectConstructor &&
+        ownerWindow.Object.getOwnPropertyDescriptor ===
+          getOwnPropertyDescriptor &&
+        ownerWindow.Object.getPrototypeOf === prototypeOf &&
+        ownerWindow.Reflect.apply === apply &&
+        ownerWindow.Event === EventConstructor &&
+        ownerWindow.UIEvent === UIEventConstructor &&
+        ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+        ownerWindow.Document === DocumentConstructor &&
+        ownerWindow.HTMLElement === HTMLElementConstructor &&
+        EventConstructor.prototype === eventPrototype &&
+        UIEventConstructor.prototype === uiEventPrototype &&
+        KeyboardEventConstructor.prototype === keyboardEventPrototype &&
+        DocumentConstructor.prototype === documentPrototype &&
+        prototypeOf(probe) === keyboardEventPrototype &&
+        prototypeOf(keyboardEventPrototype) === uiEventPrototype &&
+        prototypeOf(uiEventPrototype) === eventPrototype &&
+        eventGetters.isCurrent() &&
+        keyboardGetters.isCurrent() &&
+        uiGetters.isCurrent() &&
+        documentGetters.isCurrent() &&
+        composedPath.isCurrent() &&
+        nativePreventDefault.isCurrent() &&
+        focus.isCurrent() &&
+        addEventListener.isCurrent() &&
+        removeEventListener.isCurrent() &&
+        trusted.isCurrent();
+      if (!current) poisoned = true;
+      return current;
+    } catch {
+      poisoned = true;
+      return false;
+    }
+  };
+  try {
+    if (!intrinsicsAreCurrent() || trusted.read(probe) !== false) return null;
+  } catch {
+    return null;
+  }
+  const terminal = createFormKeyboardTerminalRegistration(
+    ownerWindow,
+    document,
+    KeyboardEventConstructor,
+    keyboardEventPrototype,
+    eventGetters.getters.currentTarget,
+    eventGetters.getters.eventPhase,
+    composedPath.method,
+    addEventListener,
+    removeEventListener,
+    apply,
+    prototypeOf,
+    intrinsicsAreCurrent,
+  );
+  if (!terminal) return null;
+  return Object.freeze({
+    panel,
+    root,
+    list,
+    rows,
+    document,
+    ownerWindow,
+    Event: EventConstructor,
+    UIEvent: UIEventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    Document: DocumentConstructor,
+    HTMLElement: HTMLElementConstructor,
+    event: eventGetters.getters,
+    keyboard: keyboardGetters.getters,
+    view: uiGetters.getters.view,
+    detail: uiGetters.getters.detail,
+    activeElement: documentGetters.getters.activeElement,
+    composedPath: composedPath.method,
+    focus: focus.method,
+    trusted,
+    terminal,
+    apply,
+    prototypeOf,
+    isCurrent: () => intrinsicsAreCurrent() && terminal.isCurrent(),
+  });
+}
+
+function rowKeyboardNativeValue<Value>(
+  authority: RowKeyboardAuthority,
+  getter: FormKeyboardNativeGetter,
+  target: object,
+): Value {
+  return authority.apply(getter, target, []) as Value;
+}
+
+function rowKeyboardIdentitiesMatch(left: unknown, right: unknown) {
+  return left === right;
+}
+
+function captureRowKeyboardEvent(
+  authority: RowKeyboardAuthority,
+  nativeEvent: Event,
+  expectedPhase: number,
+): RowKeyboardEventSnapshot | null {
+  if (
+    !authority.isCurrent() ||
+    authority.prototypeOf(nativeEvent) !== authority.KeyboardEvent.prototype ||
+    !authority.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const type = rowKeyboardNativeValue<string>(
+      authority,
+      authority.event.type,
+      nativeEvent,
+    );
+    const target = rowKeyboardNativeValue<EventTarget | null>(
+      authority,
+      authority.event.target,
+      nativeEvent,
+    );
+    const currentTarget = rowKeyboardNativeValue<EventTarget | null>(
+      authority,
+      authority.event.currentTarget,
+      nativeEvent,
+    );
+    const phase = rowKeyboardNativeValue<number>(
+      authority,
+      authority.event.eventPhase,
+      nativeEvent,
+    );
+    const bubbles = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.event.bubbles,
+      nativeEvent,
+    );
+    const cancelable = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.event.cancelable,
+      nativeEvent,
+    );
+    const defaultPrevented = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.event.defaultPrevented,
+      nativeEvent,
+    );
+    const cancelBubble = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.event.cancelBubble,
+      nativeEvent,
+    );
+    const composed = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.event.composed,
+      nativeEvent,
+    );
+    const key = rowKeyboardNativeValue<string>(
+      authority,
+      authority.keyboard.key,
+      nativeEvent,
+    );
+    const code = rowKeyboardNativeValue<string>(
+      authority,
+      authority.keyboard.code,
+      nativeEvent,
+    );
+    const location = rowKeyboardNativeValue<number>(
+      authority,
+      authority.keyboard.location,
+      nativeEvent,
+    );
+    const repeat = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.repeat,
+      nativeEvent,
+    );
+    const composing = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.isComposing,
+      nativeEvent,
+    );
+    const ctrlKey = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.ctrlKey,
+      nativeEvent,
+    );
+    const altKey = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.altKey,
+      nativeEvent,
+    );
+    const metaKey = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.metaKey,
+      nativeEvent,
+    );
+    const shiftKey = rowKeyboardNativeValue<boolean>(
+      authority,
+      authority.keyboard.shiftKey,
+      nativeEvent,
+    );
+    const view = rowKeyboardNativeValue<Window | EventTarget | null>(
+      authority,
+      authority.view,
+      nativeEvent,
+    );
+    const detail = rowKeyboardNativeValue<number>(
+      authority,
+      authority.detail,
+      nativeEvent,
+    );
+    const activeElement = rowKeyboardNativeValue<Element | null>(
+      authority,
+      authority.activeElement,
+      authority.document,
+    );
+    const path = authority.apply(
+      authority.composedPath,
+      nativeEvent,
+      [],
+    ) as EventTarget[];
+    const trusted = authority.trusted.read(nativeEvent);
+    const terminal = authority.terminal.proofFor(nativeEvent as KeyboardEvent);
+    if (
+      type !== "keydown" ||
+      !(target instanceof authority.HTMLElement) ||
+      target.ownerDocument !== authority.document ||
+      activeElement !== target ||
+      !currentTarget ||
+      phase !== expectedPhase ||
+      !bubbles ||
+      !cancelable ||
+      defaultPrevented ||
+      cancelBubble ||
+      !isFormNavigationKey(key) ||
+      repeat ||
+      composing ||
+      ctrlKey ||
+      altKey ||
+      metaKey ||
+      shiftKey ||
+      (view !== null &&
+        view !== authority.ownerWindow &&
+        (!terminal || view !== terminal.receiver)) ||
+      trusted !== true ||
+      !terminal
+    ) {
+      return null;
+    }
+    const expectedPath: EventTarget[] = [];
+    let node: Node | null = target;
+    while (node) {
+      expectedPath.push(node);
+      if (node === authority.document) break;
+      node = node.parentNode;
+    }
+    expectedPath.push(terminal.receiver);
+    if (
+      expectedPath.at(-2) !== authority.document ||
+      path.length !== expectedPath.length ||
+      path.some((entry, index) => entry !== expectedPath[index]) ||
+      path.length !== terminal.path.length ||
+      path.some((entry, index) => entry !== terminal.path[index]) ||
+      terminal.receiver !== terminal.currentTarget ||
+      terminal.receiver !== terminal.terminal ||
+      !path.includes(currentTarget) ||
+      !path.includes(authority.root) ||
+      !path.includes(authority.list)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event: nativeEvent as KeyboardEvent,
+      type,
+      target,
+      currentTarget,
+      phase,
+      path: Object.freeze([...path]),
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composed,
+      key,
+      code,
+      location,
+      repeat,
+      composing,
+      ctrlKey,
+      altKey,
+      metaKey,
+      shiftKey,
+      view,
+      detail,
+      trusted: true,
+      terminal,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function rowKeyboardEventsMatch(
+  capture: RowKeyboardEventSnapshot,
+  bubble: RowKeyboardEventSnapshot,
+  authority: RowKeyboardAuthority,
+) {
+  return (
+    capture.event === bubble.event &&
+    capture.type === bubble.type &&
+    capture.target === bubble.target &&
+    capture.currentTarget === bubble.currentTarget &&
+    capture.phase === authority.Event.CAPTURING_PHASE &&
+    bubble.phase === authority.Event.BUBBLING_PHASE &&
+    capture.bubbles === bubble.bubbles &&
+    capture.cancelable === bubble.cancelable &&
+    capture.defaultPrevented === bubble.defaultPrevented &&
+    capture.cancelBubble === bubble.cancelBubble &&
+    capture.composed === bubble.composed &&
+    capture.key === bubble.key &&
+    capture.code === bubble.code &&
+    capture.location === bubble.location &&
+    capture.repeat === bubble.repeat &&
+    capture.composing === bubble.composing &&
+    capture.ctrlKey === bubble.ctrlKey &&
+    capture.altKey === bubble.altKey &&
+    capture.metaKey === bubble.metaKey &&
+    capture.shiftKey === bubble.shiftKey &&
+    capture.view === bubble.view &&
+    capture.detail === bubble.detail &&
+    capture.trusted === bubble.trusted &&
+    capture.terminal === bubble.terminal &&
+    capture.path.length === bubble.path.length &&
+    capture.path.every((entry, index) => entry === bubble.path[index])
+  );
+}
+
+function rowKeyboardSnapshotRemainsExact(
+  snapshot: RowKeyboardEventSnapshot,
+  authority: RowKeyboardAuthority,
+  expectedDefaultPrevented = snapshot.defaultPrevented,
+) {
+  try {
+    const currentPath = authority.apply(
+      authority.composedPath,
+      snapshot.event,
+      [],
+    ) as EventTarget[];
+    return (
+      authority.isCurrent() &&
+      authority.prototypeOf(snapshot.event) ===
+        authority.KeyboardEvent.prototype &&
+      authority.trusted.matches(snapshot.event) &&
+      authority.trusted.read(snapshot.event) === snapshot.trusted &&
+      rowKeyboardNativeValue(authority, authority.event.type, snapshot.event) ===
+        snapshot.type &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.event.target,
+        snapshot.event,
+      ) === snapshot.target &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.event.currentTarget,
+        snapshot.event,
+      ) === snapshot.currentTarget &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.event.eventPhase,
+        snapshot.event,
+      ) === snapshot.phase &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.event.bubbles,
+        snapshot.event,
+      ) === snapshot.bubbles &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.event.cancelable,
+        snapshot.event,
+      ) === snapshot.cancelable &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.event.defaultPrevented,
+        snapshot.event,
+      ) === expectedDefaultPrevented &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.event.cancelBubble,
+        snapshot.event,
+      ) === snapshot.cancelBubble &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.event.composed,
+        snapshot.event,
+      ) === snapshot.composed &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.keyboard.key,
+        snapshot.event,
+      ) === snapshot.key &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.keyboard.code,
+        snapshot.event,
+      ) === snapshot.code &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.keyboard.location,
+        snapshot.event,
+      ) === snapshot.location &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.keyboard.repeat,
+        snapshot.event,
+      ) === snapshot.repeat &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.keyboard.isComposing,
+        snapshot.event,
+      ) === snapshot.composing &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.keyboard.ctrlKey,
+        snapshot.event,
+      ) === snapshot.ctrlKey &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.keyboard.altKey,
+        snapshot.event,
+      ) === snapshot.altKey &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.keyboard.metaKey,
+        snapshot.event,
+      ) === snapshot.metaKey &&
+      rowKeyboardNativeValue(
+        authority,
+        authority.keyboard.shiftKey,
+        snapshot.event,
+      ) === snapshot.shiftKey &&
+      rowKeyboardNativeValue(authority, authority.view, snapshot.event) ===
+        snapshot.view &&
+      rowKeyboardNativeValue(authority, authority.detail, snapshot.event) ===
+        snapshot.detail &&
+      currentPath.length === snapshot.path.length &&
+      currentPath.every((entry, index) => entry === snapshot.path[index]) &&
+      currentPath.at(-1) === snapshot.terminal.receiver
+    );
+  } catch {
+    return false;
+  }
+}
+
+function captureRowKeyboardReactEvent(
+  event: ReactKeyboardEvent<HTMLElement>,
+  authority: RowKeyboardAuthority,
+  native: RowKeyboardEventSnapshot,
+  currentTarget: HTMLElement,
+): RowKeyboardReactSnapshot | null {
+  try {
+    const reactEvent = event as ReactKeyboardEvent<HTMLElement> & {
+      preventDefault?: unknown;
+      stopPropagation?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    const preventDefault = reactEvent.preventDefault;
+    const stopPropagation = reactEvent.stopPropagation;
+    const isDefaultPrevented = reactEvent.isDefaultPrevented;
+    const isPropagationStopped = reactEvent.isPropagationStopped;
+    const persist = reactEvent.persist;
+    if (
+      typeof preventDefault !== "function" ||
+      typeof stopPropagation !== "function" ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      typeof persist !== "function" ||
+      authority.apply(isDefaultPrevented, event, []) !== false ||
+      authority.apply(isPropagationStopped, event, []) !== false ||
+      reactEvent.preventDefault !== preventDefault ||
+      reactEvent.stopPropagation !== stopPropagation ||
+      reactEvent.isDefaultPrevented !== isDefaultPrevented ||
+      reactEvent.isPropagationStopped !== isPropagationStopped ||
+      reactEvent.persist !== persist ||
+      event.nativeEvent !== native.event ||
+      event.type !== native.type ||
+      event.target !== native.target ||
+      event.currentTarget !== currentTarget ||
+      event.eventPhase !== native.phase ||
+      event.bubbles !== native.bubbles ||
+      event.cancelable !== native.cancelable ||
+      event.defaultPrevented !== native.defaultPrevented ||
+      event.isTrusted !== native.trusted ||
+      event.key !== native.key ||
+      event.code !== native.code ||
+      event.location !== native.location ||
+      event.repeat !== native.repeat ||
+      event.ctrlKey !== native.ctrlKey ||
+      event.altKey !== native.altKey ||
+      event.metaKey !== native.metaKey ||
+      event.shiftKey !== native.shiftKey ||
+      (event.view !== null &&
+        !rowKeyboardIdentitiesMatch(event.view, authority.ownerWindow) &&
+        !rowKeyboardIdentitiesMatch(
+          event.view,
+          native.terminal.receiver,
+        )) ||
+      event.detail !== native.detail
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event,
+      nativeEvent: native.event,
+      target: native.target,
+      currentTarget,
+      phase: native.phase,
+      view: event.view,
+      methods: Object.freeze({
+        preventDefault,
+        stopPropagation,
+        isDefaultPrevented,
+        isPropagationStopped,
+        persist,
+      }),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function rowKeyboardReactSnapshotMatches(
+  snapshot: RowKeyboardReactSnapshot,
+  authority: RowKeyboardAuthority,
+  native: RowKeyboardEventSnapshot,
+  currentTarget: HTMLElement | null,
+) {
+  try {
+    const event = snapshot.event as ReactKeyboardEvent<HTMLElement> & {
+      preventDefault?: unknown;
+      stopPropagation?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    if (
+      event.nativeEvent !== snapshot.nativeEvent ||
+      event.nativeEvent !== native.event ||
+      event.type !== native.type ||
+      event.target !== snapshot.target ||
+      event.target !== native.target ||
+      event.currentTarget !== currentTarget ||
+      event.eventPhase !== snapshot.phase ||
+      event.eventPhase !== native.phase ||
+      event.bubbles !== native.bubbles ||
+      event.cancelable !== native.cancelable ||
+      event.defaultPrevented !== native.defaultPrevented ||
+      event.isTrusted !== native.trusted ||
+      event.key !== native.key ||
+      event.code !== native.code ||
+      event.location !== native.location ||
+      event.repeat !== native.repeat ||
+      event.ctrlKey !== native.ctrlKey ||
+      event.altKey !== native.altKey ||
+      event.metaKey !== native.metaKey ||
+      event.shiftKey !== native.shiftKey ||
+      event.view !== snapshot.view ||
+      (event.view !== null &&
+        !rowKeyboardIdentitiesMatch(event.view, authority.ownerWindow) &&
+        !rowKeyboardIdentitiesMatch(
+          event.view,
+          native.terminal.receiver,
+        )) ||
+      event.detail !== native.detail ||
+      event.preventDefault !== snapshot.methods.preventDefault ||
+      event.stopPropagation !== snapshot.methods.stopPropagation ||
+      event.isDefaultPrevented !== snapshot.methods.isDefaultPrevented ||
+      event.isPropagationStopped !==
+        snapshot.methods.isPropagationStopped ||
+      event.persist !== snapshot.methods.persist ||
+      authority.apply(
+        snapshot.methods.isDefaultPrevented,
+        snapshot.event,
+        [],
+      ) !== false ||
+      authority.apply(
+        snapshot.methods.isPropagationStopped,
+        snapshot.event,
+        [],
+      ) !== false
+    ) {
+      return false;
+    }
+    return (
+      event.preventDefault === snapshot.methods.preventDefault &&
+      event.stopPropagation === snapshot.methods.stopPropagation &&
+      event.isDefaultPrevented === snapshot.methods.isDefaultPrevented &&
+      event.isPropagationStopped === snapshot.methods.isPropagationStopped &&
+      event.persist === snapshot.methods.persist
+    );
+  } catch {
+    return false;
+  }
+}
+
+function rowKeyboardDestination(
+  row: PublishedWebhookRow,
+  source: PublishedRowAction,
+  key: RowNavigationKey,
+) {
+  const sourceIndex = row.actions.indexOf(source);
+  if (sourceIndex < 0) return null;
+  let destinationIndex: number | null = null;
+  if (
+    (key === "ArrowLeft" || key === "ArrowUp") &&
+    sourceIndex > 0
+  ) {
+    destinationIndex = sourceIndex - 1;
+  } else if (
+    (key === "ArrowRight" || key === "ArrowDown") &&
+    sourceIndex + 1 < row.actions.length
+  ) {
+    destinationIndex = sourceIndex + 1;
+  } else if (key === "Home" && sourceIndex !== 0) {
+    destinationIndex = 0;
+  } else if (key === "End" && sourceIndex !== row.actions.length - 1) {
+    destinationIndex = row.actions.length - 1;
+  }
+  return destinationIndex === null
+    ? null
+    : row.actions[destinationIndex] ?? null;
+}
+
 function slot<T extends HTMLElement>(key: string): ElementSlot<T> {
   return {
     key,
@@ -2656,6 +3868,7 @@ function createListOperationAuthority(
 
 function createPanelPublication(presentation: PanelPresentation): PanelPublication {
   const publication: PanelPublication = {
+    identity: Symbol("webhooks-publication"),
     presentation,
     card: slot("card"),
     header: slot("header"),
@@ -2683,7 +3896,9 @@ function createPanelPublication(presentation: PanelPresentation): PanelPublicati
       enable: slot<HTMLButtonElement>(`row:${row.index}:${row.id}:enable`),
       test: slot<HTMLButtonElement>(`row:${row.index}:${row.id}:test`),
       delete: slot<HTMLButtonElement>(`row:${row.index}:${row.id}:delete`),
+      publication: null,
     })) ?? [],
+    rowPublications: [],
     established: false,
     layoutRetired: false,
     consumed: false,
@@ -2697,6 +3912,8 @@ function createPanelPublication(presentation: PanelPresentation): PanelPublicati
     guard: null,
     keyboard: null,
     keyboardPair: null,
+    rowKeyboard: null,
+    rowKeyboardPair: null,
     keyboardSuspended: false,
     keyboardLayoutReplayAvailable: false,
     keyboardReplay: null,
@@ -3983,6 +5200,353 @@ export function WebhooksPanel() {
     });
   };
 
+  const rowNavigationIsCurrent = (
+    candidate: PanelPublication,
+    authority: RowKeyboardAuthority,
+    published: PublishedWebhookRow,
+    source: PublishedRowAction,
+    destination: PublishedRowAction,
+    key: RowNavigationKey,
+  ) => {
+    const list = candidate.rowsList.element;
+    if (
+      candidate.rowKeyboard !== authority ||
+      authority.panel !== candidate ||
+      authority.root !== candidate.card.element ||
+      authority.list !== list ||
+      authority.rows !== candidate.rowPublications ||
+      authority.document !== candidate.card.element?.ownerDocument ||
+      authority.ownerWindow !== authority.document.defaultView ||
+      !authority.isCurrent() ||
+      !candidate.rowPublications.includes(published) ||
+      !publishedWebhookRowIsCurrent(candidate, published) ||
+      !published.actions.includes(source) ||
+      !published.actions.includes(destination) ||
+      source === destination ||
+      source.panel !== candidate ||
+      destination.panel !== candidate ||
+      source.rowIdentity !== published.identity ||
+      destination.rowIdentity !== published.identity ||
+      source.callbackToken !== candidate.presentation.callbackToken ||
+      destination.callbackToken !== candidate.presentation.callbackToken ||
+      source.facts !== (
+        source.kind === "enable"
+          ? published.facts.enable
+          : source.kind === "test"
+            ? published.facts.test
+            : published.facts.delete
+      ) ||
+      destination.facts !== (
+        destination.kind === "enable"
+          ? published.facts.enable
+          : destination.kind === "test"
+            ? published.facts.test
+            : published.facts.delete
+      ) ||
+      !source.facts.eligible ||
+      !destination.facts.eligible ||
+      source.owner.element !== source.element ||
+      destination.owner.element !== destination.element ||
+      source.element.disabled ||
+      destination.element.disabled ||
+      source.element.ownerDocument !== authority.document ||
+      destination.element.ownerDocument !== authority.document ||
+      source.element.parentElement !== published.root ||
+      destination.element.parentElement !== published.root ||
+      rowKeyboardDestination(published, source, key) !== destination ||
+      !ownsPanel(candidate, undefined, source.element)
+    ) {
+      return false;
+    }
+    try {
+      return (
+        rowKeyboardNativeValue<Element | null>(
+          authority,
+          authority.activeElement,
+          authority.document,
+        ) === source.element
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const capturePublishedRowNavigation = (
+    candidate: PanelPublication,
+    row: WebhookRowFacts,
+    event: ReactKeyboardEvent<HTMLLIElement>,
+  ) => {
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      candidate.rowKeyboardPair ||
+      !publicationCoordinator.prepareRowKeyboardCapture(event, nativeEvent)
+    ) {
+      return;
+    }
+    const authority = candidate.rowKeyboard;
+    const elements = candidate.rows[row.index];
+    const published = elements?.publication;
+    const root = elements?.root.element;
+    if (
+      !authority ||
+      !published ||
+      !root ||
+      published.facts !== row ||
+      candidate.rowPublications[row.index] !== published
+    ) {
+      return;
+    }
+    const native = captureRowKeyboardEvent(
+      authority,
+      nativeEvent as Event,
+      authority.Event.CAPTURING_PHASE,
+    );
+    const capture = native
+      ? captureRowKeyboardReactEvent(
+          event as ReactKeyboardEvent<HTMLElement>,
+          authority,
+          native,
+          root,
+        )
+      : null;
+    const source = native
+      ? published.actions.find(({ element }) => element === native.target)
+      : undefined;
+    const destination =
+      source && native
+        ? rowKeyboardDestination(published, source, native.key)
+        : null;
+    if (
+      !native ||
+      !capture ||
+      !source ||
+      !destination ||
+      native.terminal !== authority.terminal.proofFor(native.event) ||
+      !rowKeyboardSnapshotRemainsExact(native, authority) ||
+      !rowNavigationIsCurrent(
+        candidate,
+        authority,
+        published,
+        source,
+        destination,
+        native.key,
+      )
+    ) {
+      return;
+    }
+    const pair: RowKeyboardPair = Object.freeze({
+      publication: candidate,
+      authority,
+      row: published,
+      native,
+      capture,
+      terminal: native.terminal,
+      source,
+      destination,
+      key: native.key,
+      movement: Object.freeze({
+        panel: candidate,
+        row: published,
+        source,
+        destination,
+        key: native.key,
+      }),
+      publicationClaim: Object.freeze({ publication: candidate }),
+      rowClaim: Object.freeze({ row: published }),
+      movementClaim: Object.freeze({
+        row: published,
+        source,
+        destination,
+        key: native.key,
+      }),
+      wrapperClaim: Object.freeze({ capture: event }),
+      nativeClaim: Object.freeze({ nativeEvent }),
+      windowClaim: Object.freeze({
+        registration: authority.terminal,
+        proof: native.terminal,
+        receiver: native.terminal.receiver,
+      }),
+      sourceClaim: Object.freeze({ source }),
+      destinationClaim: Object.freeze({ destination }),
+    });
+    candidate.rowKeyboardPair = pair;
+    authority.ownerWindow.queueMicrotask(() => {
+      if (candidate.rowKeyboardPair === pair) {
+        candidate.rowKeyboardPair = null;
+      }
+    });
+  };
+
+  const completePublishedRowNavigation = (
+    candidate: PanelPublication,
+    row: WebhookRowFacts,
+    action: RowActionFacts,
+    owner: ElementSlot<HTMLButtonElement>,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const pair = candidate.rowKeyboardPair;
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !pair ||
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      pair.native.event !== nativeEvent ||
+      !publicationCoordinator.prepareRowKeyboardBubble(event, nativeEvent)
+    ) {
+      return;
+    }
+    candidate.rowKeyboardPair = null;
+    const {
+      authority,
+      row: published,
+      source,
+      destination,
+      key,
+    } = pair;
+    let delivery: RowKeyboardDelivery | null = null;
+    try {
+      const currentElement = owner.element;
+      const native = captureRowKeyboardEvent(
+        authority,
+        nativeEvent as Event,
+        authority.Event.BUBBLING_PHASE,
+      );
+      const bubble =
+        native && currentElement
+          ? captureRowKeyboardReactEvent(
+              event as ReactKeyboardEvent<HTMLElement>,
+              authority,
+              native,
+              currentElement,
+            )
+          : null;
+      if (
+        !currentElement ||
+        !native ||
+        !bubble ||
+        bubble.event === pair.capture.event ||
+        pair.publication !== candidate ||
+        published.facts !== row ||
+        source.facts !== action ||
+        source.owner !== owner ||
+        source.element !== currentElement ||
+        event.currentTarget !== currentElement ||
+        pair.capture.currentTarget !== published.root ||
+        bubble.currentTarget !== source.element ||
+        pair.capture.phase !== authority.Event.CAPTURING_PHASE ||
+        bubble.phase !== authority.Event.BUBBLING_PHASE ||
+        native.terminal !== pair.terminal ||
+        !rowKeyboardEventsMatch(pair.native, native, authority) ||
+        !rowKeyboardReactSnapshotMatches(
+          pair.capture,
+          authority,
+          pair.native,
+          null,
+        ) ||
+        !rowKeyboardReactSnapshotMatches(
+          bubble,
+          authority,
+          native,
+          currentElement,
+        ) ||
+        !rowKeyboardSnapshotRemainsExact(native, authority) ||
+        !rowNavigationIsCurrent(
+          candidate,
+          authority,
+          published,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return;
+      }
+      delivery = Object.freeze({ pair, bubble });
+      if (!publicationCoordinator.claimRowKeyboardNavigation(delivery)) {
+        return;
+      }
+      if (
+        !publicationCoordinator.rowKeyboardNavigationIsDelivering(delivery) ||
+        !rowKeyboardReactSnapshotMatches(
+          pair.capture,
+          authority,
+          pair.native,
+          null,
+        ) ||
+        !rowKeyboardReactSnapshotMatches(
+          bubble,
+          authority,
+          native,
+          currentElement,
+        ) ||
+        !rowKeyboardSnapshotRemainsExact(native, authority) ||
+        !rowNavigationIsCurrent(
+          candidate,
+          authority,
+          published,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return;
+      }
+      authority.apply(bubble.methods.preventDefault, bubble.event, []);
+      const currentDefaultQuery = bubble.event.isDefaultPrevented;
+      const currentPropagationQuery = bubble.event.isPropagationStopped;
+      if (
+        rowKeyboardNativeValue<boolean>(
+          authority,
+          authority.event.defaultPrevented,
+          native.event,
+        ) !== true ||
+        rowKeyboardNativeValue<boolean>(
+          authority,
+          authority.event.cancelBubble,
+          native.event,
+        ) !== false ||
+        bubble.event.defaultPrevented !== true ||
+        typeof currentDefaultQuery !== "function" ||
+        typeof currentPropagationQuery !== "function" ||
+        authority.apply(currentDefaultQuery, bubble.event, []) !== true ||
+        authority.apply(currentPropagationQuery, bubble.event, []) !== false ||
+        !rowKeyboardSnapshotRemainsExact(native, authority, true) ||
+        !publicationCoordinator.rowKeyboardNavigationIsDelivering(delivery) ||
+        !rowNavigationIsCurrent(
+          candidate,
+          authority,
+          published,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return;
+      }
+      authority.apply(authority.focus, destination.element, [
+        { preventScroll: true },
+      ]);
+    } catch {
+      return;
+    } finally {
+      if (delivery) {
+        publicationCoordinator.finishRowKeyboardNavigation(delivery);
+      }
+    }
+  };
+
   useLayoutEffect(() => {
     return publicationCoordinator.establish(
       publication,
@@ -4468,6 +6032,9 @@ export function WebhooksPanel() {
                 ref={bindElement(publication, rowElements.root)}
                 className="flex items-center gap-4 px-5 py-3"
                 data-testid="webhook-row"
+                onKeyDownCapture={(event) => {
+                  capturePublishedRowNavigation(publication, row, event);
+                }}
               >
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-sm text-ink">{row.url}</div>
@@ -4495,6 +6062,16 @@ export function WebhooksPanel() {
                      requestPublicationSuccessor();
                       startEnable(row);
                     }}
+                    onKeyDown={(event) => {
+                     if (!row.enable) return;
+                     completePublishedRowNavigation(
+                       publication,
+                       row,
+                       row.enable,
+                       rowElements.enable,
+                       event,
+                     );
+                    }}
                     disabled={!row.enable.eligible}
                     data-testid="webhook-enable"
                   >
@@ -4516,6 +6093,15 @@ export function WebhooksPanel() {
                    requestPublicationSuccessor();
                    startTest(row);
                   }}
+                  onKeyDown={(event) => {
+                   completePublishedRowNavigation(
+                     publication,
+                     row,
+                     row.test,
+                     rowElements.test,
+                     event,
+                   );
+                  }}
                   disabled={!row.test.eligible}
                   data-testid="webhook-test"
                 >
@@ -4536,6 +6122,15 @@ export function WebhooksPanel() {
                    requestPublicationSuccessor();
                    if (!confirm(`Delete the webhook to ${row.url}?`)) return;
                    startDelete(row);
+                  }}
+                  onKeyDown={(event) => {
+                   completePublishedRowNavigation(
+                     publication,
+                     row,
+                     row.delete,
+                     rowElements.delete,
+                     event,
+                   );
                   }}
                   disabled={!row.delete.eligible}
                   aria-label={`Delete webhook ${row.url}`}

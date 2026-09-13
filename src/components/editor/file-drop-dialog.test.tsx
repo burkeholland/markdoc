@@ -3,6 +3,7 @@ import {
   StrictMode,
   useEffect,
   useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefCallback,
@@ -132,6 +133,9 @@ interface DirectView {
 }
 
 type OptionHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+type OptionKeyHandler = (
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+) => void;
 
 interface CapturedOption {
   element: HTMLButtonElement;
@@ -262,6 +266,154 @@ function setReactProp<T>(element: HTMLElement, name: string, value: T) {
   const props = attached[propsKey];
   if (!props) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
   attached[propsKey] = { ...props, [name]: value };
+}
+
+function replaceReactProps(
+  element: HTMLElement,
+  replacements: Record<string, unknown>,
+) {
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey) {
+    throw new Error(
+      `React props were not attached to ${element.dataset.testid ?? element.tagName}`,
+    );
+  }
+  const attached = element as unknown as Record<
+    string,
+    Record<string, unknown> | undefined
+  >;
+  const props = attached[propsKey];
+  if (!props) {
+    throw new Error(
+      `React props were not attached to ${element.dataset.testid ?? element.tagName}`,
+    );
+  }
+  const replacement = { ...props, ...replacements };
+  attached[propsKey] = replacement;
+  return () => {
+    if (attached[propsKey] === replacement) attached[propsKey] = props;
+  };
+}
+
+function markFileDropEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) =>
+        (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's dropped-file event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The dropped-file event trust slot did not update");
+  }
+}
+
+function fileDropKeyEvent(
+  source: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = source.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The dropped-file option has no window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markFileDropEventTrusted(event);
+  return event;
+}
+
+function dispatchFileDropKey(
+  source: HTMLButtonElement,
+  keyOrEvent: string | KeyboardEvent,
+  init: KeyboardEventInit = {},
+) {
+  const event =
+    typeof keyOrEvent === "string"
+      ? fileDropKeyEvent(source, keyOrEvent, init)
+      : keyOrEvent;
+  act(() => source.dispatchEvent(event));
+  return event;
+}
+
+function replaceFileDropPathTerminal(
+  event: Event,
+  terminal: EventTarget,
+) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) =>
+        (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find((candidate): candidate is {
+      _path: Array<{ item: Record<symbol, unknown> }>;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return Array.isArray(
+        (candidate as { _path?: unknown })._path,
+      );
+    });
+  const entry = implementation?._path.at(-1);
+  const original = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === original,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error(
+      "Unable to replace jsdom's dropped-file path terminal",
+    );
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+  if (event.composedPath().at(-1) !== terminal) {
+    throw new Error("The dropped-file path terminal did not update");
+  }
+}
+
+function fileDropOptions() {
+  return {
+    replace: screen.getByTestId("file-drop-replace") as HTMLButtonElement,
+    insert: screen.getByTestId("file-drop-insert") as HTMLButtonElement,
+    new: screen.getByTestId("file-drop-new") as HTMLButtonElement,
+  };
+}
+
+function expectNoFileDropAction(
+  handlers: ReturnType<typeof callbacks>,
+) {
+  expect(ControlledFileReader.reads).toHaveLength(0);
+  expect(uploadImportFiles).not.toHaveBeenCalled();
+  expect(push).not.toHaveBeenCalled();
+  expect(handlers.onReplace).not.toHaveBeenCalled();
+  expect(handlers.onInsert).not.toHaveBeenCalled();
+  expect(handlers.onClose).not.toHaveBeenCalled();
+  expect(handlers.onError).not.toHaveBeenCalled();
 }
 
 function cloneSyntheticClick(
@@ -1082,6 +1234,1144 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
     expect(uploadImportFiles).not.toHaveBeenCalled();
     expect(handlers.onClose).not.toHaveBeenCalled();
   });
+
+    describe("FileDropDialog keyboard navigation", () => {
+      it.each([
+        ["replace", "ArrowDown", "insert"],
+        ["replace", "ArrowRight", "insert"],
+        ["new", "ArrowUp", "insert"],
+        ["new", "ArrowLeft", "insert"],
+        ["new", "Home", "replace"],
+        ["replace", "End", "new"],
+        ["insert", "Home", "replace"],
+        ["insert", "End", "new"],
+      ] as const)(
+        "moves from %s with %s to %s exactly once without activating anything",
+        (from, key, to) => {
+          const preventDefault = vi.spyOn(
+            Event.prototype,
+            "preventDefault",
+          );
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const handlers = callbacks();
+          renderStrict(propsFor(dropped(`navigation-${key}.md`, 13), handlers));
+          const options = fileDropOptions();
+          const source = options[from];
+          const destination = options[to];
+          const root = screen.getByTestId("file-drop-dialog");
+          const markup = root.outerHTML;
+          const order = [...root.querySelectorAll("button")];
+          const scroll = { x: window.scrollX, y: window.scrollY };
+          source.focus();
+          preventDefault.mockClear();
+          focus.mockClear();
+
+          const event = dispatchFileDropKey(source, key);
+
+          expect(event.isTrusted).toBe(true);
+          expect(event.defaultPrevented).toBe(true);
+          expect(preventDefault).toHaveBeenCalledOnce();
+          expect(focus).toHaveBeenCalledExactlyOnceWith({
+            preventScroll: true,
+          });
+          expect(focus.mock.contexts[0]).toBe(destination);
+          expect(destination).toHaveFocus();
+          expect([...root.querySelectorAll("button")]).toEqual(order);
+          expect(root.outerHTML).toBe(markup);
+          expect(order.map((button) => button.tabIndex)).toEqual([0, 0, 0]);
+          expect({ x: window.scrollX, y: window.scrollY }).toEqual(scroll);
+          expectNoFileDropAction(handlers);
+        },
+      );
+
+      it.each([
+        ["replace", "ArrowDown", "Numpad2", "insert"],
+        ["replace", "ArrowRight", "Numpad6", "insert"],
+        ["new", "ArrowUp", "Numpad8", "insert"],
+        ["new", "ArrowLeft", "Numpad4", "insert"],
+        ["new", "Home", "Numpad7", "replace"],
+        ["replace", "End", "Numpad1", "new"],
+      ] as const)(
+        "moves from %s with numpad %s (%s) to %s without activating anything",
+        (from, key, code, to) => {
+          const preventDefault = vi.spyOn(
+            Event.prototype,
+            "preventDefault",
+          );
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const handlers = callbacks();
+          renderStrict(propsFor(dropped(`numpad-${key}.md`, 13), handlers));
+          const options = fileDropOptions();
+          const source = options[from];
+          const destination = options[to];
+          const root = screen.getByTestId("file-drop-dialog");
+          const markup = root.outerHTML;
+          const order = [...root.querySelectorAll("button")];
+          const scroll = { x: window.scrollX, y: window.scrollY };
+          source.focus();
+          preventDefault.mockClear();
+          focus.mockClear();
+
+          const event = dispatchFileDropKey(source, key, {
+            code,
+            location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+          });
+
+          expect(event.isTrusted).toBe(true);
+          expect(event.key).toBe(key);
+          expect(event.code).toBe(code);
+          expect(event.location).toBe(
+            KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+          );
+          expect(event.defaultPrevented).toBe(true);
+          expect(preventDefault).toHaveBeenCalledOnce();
+          expect(focus).toHaveBeenCalledExactlyOnceWith({
+            preventScroll: true,
+          });
+          expect(focus.mock.contexts[0]).toBe(destination);
+          expect(destination).toHaveFocus();
+          expect([...root.querySelectorAll("button")]).toEqual(order);
+          expect(root.outerHTML).toBe(markup);
+          expect(order.map((button) => button.tabIndex)).toEqual([0, 0, 0]);
+          expect({ x: window.scrollX, y: window.scrollY }).toEqual(scroll);
+          expectNoFileDropAction(handlers);
+        },
+      );
+
+      it.each([
+        ["replace", "ArrowUp"],
+        ["replace", "ArrowLeft"],
+        ["replace", "Home"],
+        ["new", "ArrowDown"],
+        ["new", "ArrowRight"],
+        ["new", "End"],
+      ] as const)(
+        "leaves the %s boundary for %s unprevented and inert when no move exists",
+        (from, key) => {
+          const preventDefault = vi.spyOn(
+            Event.prototype,
+            "preventDefault",
+          );
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const handlers = callbacks();
+          renderStrict(propsFor(dropped(`boundary-${key}.md`, 0), handlers));
+          const source = fileDropOptions()[from];
+          source.focus();
+          preventDefault.mockClear();
+          focus.mockClear();
+
+          const event = dispatchFileDropKey(source, key);
+
+          expect(event.defaultPrevented).toBe(false);
+          expect(preventDefault).not.toHaveBeenCalled();
+          expect(focus).not.toHaveBeenCalled();
+          expect(source).toHaveFocus();
+          expectNoFileDropAction(handlers);
+        },
+      );
+
+      it("skips all disabled choices in readonly and busy publications", () => {
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const readonlyHandlers = callbacks();
+        const readonlyView = renderStrict(
+          propsFor(dropped("readonly-navigation.md", 4), readonlyHandlers, false),
+        );
+        let options = fileDropOptions();
+        expect(options.replace).toBeDisabled();
+        expect(options.insert).toBeDisabled();
+        expect(options.new).toBeEnabled();
+        options.new.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        for (const key of [
+          "ArrowDown",
+          "ArrowRight",
+          "ArrowUp",
+          "ArrowLeft",
+          "Home",
+          "End",
+        ]) {
+          const event = dispatchFileDropKey(options.new, key);
+          expect(event.defaultPrevented).toBe(false);
+        }
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(options.new).toHaveFocus();
+        expectNoFileDropAction(readonlyHandlers);
+
+        act(() => readonlyView.root.render(null));
+        const busyHandlers = callbacks();
+        renderStrict(propsFor(dropped("busy-navigation.md", 7), busyHandlers));
+        options = fileDropOptions();
+        options.replace.focus();
+        fireEvent.click(options.replace);
+        expect(ControlledFileReader.reads).toHaveLength(1);
+        expect(options.replace).toBeDisabled();
+        expect(options.insert).toBeDisabled();
+        expect(options.new).toBeDisabled();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const busyEvent = dispatchFileDropKey(options.replace, "ArrowDown");
+
+        expect(busyEvent.defaultPrevented).toBe(false);
+        expect(ControlledFileReader.reads).toHaveLength(1);
+        expect(uploadImportFiles).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(busyHandlers.onReplace).not.toHaveBeenCalled();
+        expect(busyHandlers.onInsert).not.toHaveBeenCalled();
+        expect(busyHandlers.onClose).not.toHaveBeenCalled();
+        expect(busyHandlers.onError).not.toHaveBeenCalled();
+      });
+
+      it("accepts distinct capture and bubble wrappers and cancels through the exact bubble wrapper", () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const handlers = callbacks();
+        renderStrict(propsFor(dropped("wrapper-delivery.md", 9), handlers));
+        const options = fileDropOptions();
+        const source = options.replace;
+        const root = screen.getByTestId("file-drop-dialog");
+        const ownerWindow = source.ownerDocument.defaultView;
+        if (!ownerWindow) throw new Error("The option has no owner window");
+        const rootCapture = reactProp<
+          (event: ReactKeyboardEvent<HTMLDivElement>) => void
+        >(root, "onKeyDownCapture");
+        const optionCapture = reactProp<OptionKeyHandler>(
+          source,
+          "onKeyDownCapture",
+        );
+        const optionBubble = reactProp<OptionKeyHandler>(
+          source,
+          "onKeyDown",
+        );
+        const rootBubble = reactProp<
+          (event: ReactKeyboardEvent<HTMLDivElement>) => void
+        >(root, "onKeyDown");
+        const nativePreventDefault =
+          ownerWindow.Event.prototype.preventDefault;
+        const capturePrototype = Object.create(null);
+        const bubblePrototype = Object.create(null);
+        const capturePreventDefault = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return undefined;
+        });
+        const captureIsDefaultPrevented = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return false;
+        });
+        const captureIsPropagationStopped = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return false;
+        });
+        const bubblePrevented = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return true;
+        });
+        const bubblePreventDefault = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          Reflect.apply(nativePreventDefault, this.nativeEvent, []);
+          Object.defineProperties(this, {
+            defaultPrevented: {
+              configurable: true,
+              enumerable: true,
+              value: true,
+              writable: true,
+            },
+            isDefaultPrevented: {
+              configurable: true,
+              enumerable: true,
+              value: bubblePrevented,
+              writable: true,
+            },
+          });
+        });
+        const bubbleIsDefaultPrevented = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return false;
+        });
+        const bubbleIsPropagationStopped = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return false;
+        });
+        const createWrapper = (
+          event: ReactKeyboardEvent<HTMLElement>,
+          prototype: object,
+          methods: {
+            preventDefault: () => void;
+            isDefaultPrevented: () => boolean;
+            isPropagationStopped: () => boolean;
+          },
+        ) =>
+          Object.assign(Object.create(prototype), event, methods) as
+            ReactKeyboardEvent<HTMLElement>;
+        const setCurrentTarget = (
+          event: ReactKeyboardEvent<HTMLElement>,
+          currentTarget: HTMLElement,
+        ) => {
+          if (!Reflect.set(event, "currentTarget", currentTarget)) {
+            throw new Error("Unable to set the test wrapper currentTarget");
+          }
+        };
+        let captureWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
+        let bubbleWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
+        const boundaries: {
+          name: string;
+          wrapper: ReactKeyboardEvent<HTMLElement>;
+          preventDefault: () => void;
+          isDefaultPrevented: () => boolean;
+          isPropagationStopped: () => boolean;
+          defaultPrevented: boolean;
+          propagationStopped: boolean;
+        }[] = [];
+        const record = (
+          name: string,
+          event: ReactKeyboardEvent<HTMLElement>,
+        ) => {
+          boundaries.push({
+            name,
+            wrapper: event,
+            preventDefault: event.preventDefault,
+            isDefaultPrevented: event.isDefaultPrevented,
+            isPropagationStopped: event.isPropagationStopped,
+            defaultPrevented: event.isDefaultPrevented(),
+            propagationStopped: event.isPropagationStopped(),
+          });
+        };
+        const restoreRoot = replaceReactProps(root, {
+          onKeyDownCapture: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+            captureWrapper = createWrapper(
+              event,
+              capturePrototype,
+              {
+                preventDefault: capturePreventDefault,
+                isDefaultPrevented: captureIsDefaultPrevented,
+                isPropagationStopped: captureIsPropagationStopped,
+              },
+            );
+            setCurrentTarget(captureWrapper, root);
+            record("root capture", captureWrapper);
+            rootCapture(
+              captureWrapper as ReactKeyboardEvent<HTMLDivElement>,
+            );
+          },
+          onKeyDown: () => {
+            if (!bubbleWrapper) {
+              throw new Error("The bubble wrapper was not created");
+            }
+            setCurrentTarget(bubbleWrapper, root);
+            record("root bubble", bubbleWrapper);
+            rootBubble(
+              bubbleWrapper as ReactKeyboardEvent<HTMLDivElement>,
+            );
+          },
+        });
+        const restoreOption = replaceReactProps(source, {
+          onKeyDownCapture: () => {
+            if (!captureWrapper) {
+              throw new Error("The capture wrapper was not created");
+            }
+            setCurrentTarget(captureWrapper, source);
+            record("option capture", captureWrapper);
+            optionCapture(
+              captureWrapper as ReactKeyboardEvent<HTMLButtonElement>,
+            );
+          },
+          onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+            bubbleWrapper = createWrapper(
+              event,
+              bubblePrototype,
+              {
+                preventDefault: bubblePreventDefault,
+                isDefaultPrevented: bubbleIsDefaultPrevented,
+                isPropagationStopped: bubbleIsPropagationStopped,
+              },
+            );
+            setCurrentTarget(bubbleWrapper, source);
+            record("option bubble", bubbleWrapper);
+            optionBubble(
+              bubbleWrapper as ReactKeyboardEvent<HTMLButtonElement>,
+            );
+          },
+        });
+        const nativeEvent = fileDropKeyEvent(source, "ArrowRight");
+        const currentTargetGetter = Object.getOwnPropertyDescriptor(
+          ownerWindow.Event.prototype,
+          "currentTarget",
+        )?.get;
+        const composedPath = ownerWindow.Event.prototype.composedPath;
+        if (!currentTargetGetter) {
+          throw new Error("Event.currentTarget has no intrinsic getter");
+        }
+        const nativeDelivery: {
+          receiver?: EventTarget;
+          currentTarget?: EventTarget | null;
+          terminal?: EventTarget;
+        } = {};
+        const observe = function (this: EventTarget, event: Event) {
+          if (event !== nativeEvent) return;
+          nativeDelivery.receiver = this;
+          nativeDelivery.currentTarget = Reflect.apply(
+            currentTargetGetter,
+            event,
+            [],
+          ) as EventTarget | null;
+          nativeDelivery.terminal = Reflect.apply(
+            composedPath,
+            event,
+            [],
+          ).at(-1);
+        };
+        ownerWindow.addEventListener("keydown", observe, true);
+        source.focus();
+        focus.mockClear();
+
+        try {
+          act(() => source.dispatchEvent(nativeEvent));
+        } finally {
+          ownerWindow.removeEventListener("keydown", observe, true);
+          restoreOption();
+          restoreRoot();
+        }
+
+        expect(boundaries.map(({ name }) => name)).toEqual([
+          "root capture",
+          "option capture",
+          "option bubble",
+          "root bubble",
+        ]);
+        expect(boundaries[0]!.wrapper).toBe(boundaries[1]!.wrapper);
+        expect(boundaries[2]!.wrapper).toBe(boundaries[3]!.wrapper);
+        expect(boundaries[0]!.wrapper).not.toBe(boundaries[2]!.wrapper);
+        expect(Object.getPrototypeOf(boundaries[0]!.wrapper)).toBe(
+          capturePrototype,
+        );
+        expect(Object.getPrototypeOf(boundaries[2]!.wrapper)).toBe(
+          bubblePrototype,
+        );
+        expect(boundaries[0]!.preventDefault).toBe(
+          boundaries[1]!.preventDefault,
+        );
+        expect(boundaries[2]!.preventDefault).toBe(
+          boundaries[3]!.preventDefault,
+        );
+        expect(boundaries[0]!.preventDefault).not.toBe(
+          boundaries[2]!.preventDefault,
+        );
+        expect(boundaries[0]!.isDefaultPrevented).toBe(
+          boundaries[1]!.isDefaultPrevented,
+        );
+        expect(boundaries[2]!.isDefaultPrevented).toBe(
+          boundaries[3]!.isDefaultPrevented,
+        );
+        expect(boundaries[0]!.isDefaultPrevented).not.toBe(
+          boundaries[2]!.isDefaultPrevented,
+        );
+        expect(boundaries[0]!.isPropagationStopped).toBe(
+          boundaries[1]!.isPropagationStopped,
+        );
+        expect(boundaries[2]!.isPropagationStopped).toBe(
+          boundaries[3]!.isPropagationStopped,
+        );
+        expect(boundaries[0]!.isPropagationStopped).not.toBe(
+          boundaries[2]!.isPropagationStopped,
+        );
+        expect(
+          boundaries.every(
+            ({ defaultPrevented, propagationStopped }) =>
+              !defaultPrevented && !propagationStopped,
+          ),
+        ).toBe(true);
+        expect(nativeDelivery.receiver).toBe(nativeDelivery.currentTarget);
+        expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
+        expect(capturePreventDefault).not.toHaveBeenCalled();
+        expect(bubblePreventDefault).toHaveBeenCalledOnce();
+        expect(bubblePreventDefault.mock.contexts[0]).toBe(
+          boundaries[3]!.wrapper,
+        );
+        expect(nativeEvent.defaultPrevented).toBe(true);
+        expect(boundaries[3]!.wrapper.defaultPrevented).toBe(true);
+        expect(
+          boundaries[3]!.wrapper.isDefaultPrevented(),
+        ).toBe(true);
+        expect(
+          boundaries[3]!.wrapper.isPropagationStopped(),
+        ).toBe(false);
+        expect(options.insert).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expectNoFileDropAction(handlers);
+      });
+
+      it("exposes public cancellation to a same-root ancestor without fallback work", () => {
+        const preventDefault = vi.spyOn(
+          Event.prototype,
+          "preventDefault",
+        );
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const fallback = vi.fn();
+        const observed: Array<{
+          defaultPrevented: boolean;
+          isDefaultPrevented: boolean;
+        }> = [];
+        const handlers = callbacks();
+        renderDirect(
+          <StrictMode>
+            <div
+              onKeyDown={(event) => {
+                const cancellation = {
+                  defaultPrevented: event.defaultPrevented,
+                  isDefaultPrevented: event.isDefaultPrevented(),
+                };
+                observed.push(cancellation);
+                if (
+                  !cancellation.defaultPrevented ||
+                  !cancellation.isDefaultPrevented
+                ) {
+                  fallback();
+                }
+              }}
+            >
+              <FileDropDialog
+                {...propsFor(
+                  dropped("same-root-cancellation.md", 12),
+                  handlers,
+                )}
+              />
+            </div>
+          </StrictMode>,
+        );
+        const options = fileDropOptions();
+        const scroll = { x: window.scrollX, y: window.scrollY };
+        options.replace.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const event = dispatchFileDropKey(
+          options.replace,
+          "ArrowRight",
+        );
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(observed).toEqual([
+          {
+            defaultPrevented: true,
+            isDefaultPrevented: true,
+          },
+        ]);
+        expect(fallback).not.toHaveBeenCalled();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(focus.mock.contexts[0]).toBe(options.insert);
+        expect(options.insert).toHaveFocus();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(
+          scroll,
+        );
+        expectNoFileDropAction(handlers);
+      });
+
+      it.each([
+        ["capture", "preventDefault"],
+        ["capture", "isDefaultPrevented"],
+        ["capture", "isPropagationStopped"],
+        ["bubble", "preventDefault"],
+        ["bubble", "isDefaultPrevented"],
+        ["bubble", "isPropagationStopped"],
+      ] as const)(
+        "rejects %s wrapper %s identity drift before clean recovery",
+        (phase, method) => {
+          const preventDefault = vi.spyOn(
+            Event.prototype,
+            "preventDefault",
+          );
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const handlers = callbacks();
+          renderStrict(propsFor(dropped(`method-${phase}-${method}.md`, 0), handlers));
+          const options = fileDropOptions();
+          const source = options.replace;
+          const root = screen.getByTestId("file-drop-dialog");
+          const element = phase === "capture" ? source : root;
+          const property =
+            phase === "capture" ? "onKeyDownCapture" : "onKeyDown";
+          const original = reactProp<
+            (event: ReactKeyboardEvent<HTMLElement>) => void
+          >(element, property);
+          const restore = replaceReactProps(element, {
+            [property]: (event: ReactKeyboardEvent<HTMLElement>) => {
+              Object.defineProperty(event, method, {
+                configurable: true,
+                value: () => false,
+              });
+              original(event);
+            },
+          });
+          source.focus();
+          preventDefault.mockClear();
+          focus.mockClear();
+
+          const rejected = dispatchFileDropKey(source, "ArrowRight");
+          restore();
+
+          expect(rejected.defaultPrevented).toBe(false);
+          expect(preventDefault).not.toHaveBeenCalled();
+          expect(focus).not.toHaveBeenCalled();
+          expect(source).toHaveFocus();
+          expectNoFileDropAction(handlers);
+
+          const accepted = dispatchFileDropKey(source, "ArrowRight");
+          expect(accepted.defaultPrevented).toBe(true);
+          expect(preventDefault).toHaveBeenCalledOnce();
+          expect(focus).toHaveBeenCalledExactlyOnceWith({
+            preventScroll: true,
+          });
+          expect(options.insert).toHaveFocus();
+          expectNoFileDropAction(handlers);
+        },
+      );
+
+      it.each(["present", "absent", "mutated"] as const)(
+        "does not use %s private React metadata for keyboard authority",
+        (state) => {
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const handlers = callbacks();
+          renderStrict(propsFor(dropped(`private-${state}.md`, 0), handlers));
+          const options = fileDropOptions();
+          const source = options.replace;
+          const root = screen.getByTestId("file-drop-dialog");
+          const original = reactProp<
+            (event: ReactKeyboardEvent<HTMLDivElement>) => void
+          >(root, "onKeyDownCapture");
+          const restore = replaceReactProps(root, {
+            onKeyDownCapture: (
+              event: ReactKeyboardEvent<HTMLDivElement>,
+            ) => {
+              const wrapper = event as ReactKeyboardEvent<HTMLDivElement> & {
+                _reactName?: unknown;
+              };
+              if (state === "absent") {
+                expect(Reflect.deleteProperty(wrapper, "_reactName")).toBe(
+                  true,
+                );
+              } else {
+                wrapper._reactName =
+                  state === "present" ? "onKeyDown" : "not-keyboard";
+              }
+              original(event);
+            },
+          });
+          source.focus();
+          focus.mockClear();
+
+          try {
+            expect(
+              dispatchFileDropKey(source, "ArrowRight").defaultPrevented,
+            ).toBe(true);
+          } finally {
+            restore();
+          }
+          expect(options.insert).toHaveFocus();
+          expect(focus).toHaveBeenCalledExactlyOnceWith({
+            preventScroll: true,
+          });
+          expectNoFileDropAction(handlers);
+        },
+      );
+
+      it("rejects a structural Window terminal and then accepts a clean delivery", () => {
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const handlers = callbacks();
+        renderStrict(propsFor(dropped("structural-window.md", 0), handlers));
+        const options = fileDropOptions();
+        const source = options.replace;
+        const ownerWindow = source.ownerDocument.defaultView;
+        if (!ownerWindow) throw new Error("The option has no owner window");
+        const structural = Object.create(
+          ownerWindow.Window.prototype,
+        ) as EventTarget;
+        Object.defineProperties(structural, {
+          document: { value: source.ownerDocument },
+          Window: { value: ownerWindow.Window },
+          Event: { value: ownerWindow.Event },
+          EventTarget: { value: ownerWindow.EventTarget },
+          KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+          Node: { value: ownerWindow.Node },
+          Object: { value: ownerWindow.Object },
+          Reflect: { value: ownerWindow.Reflect },
+          UIEvent: { value: ownerWindow.UIEvent },
+          window: { value: structural },
+          self: { value: structural },
+        });
+        const rejected = fileDropKeyEvent(source, "ArrowRight");
+        const observation: {
+          receiver?: EventTarget;
+          currentTarget?: EventTarget | null;
+          originalTerminal?: EventTarget;
+        } = {};
+        const stage = function (this: EventTarget, event: Event) {
+          if (event !== rejected) return;
+          observation.receiver = this;
+          observation.currentTarget = event.currentTarget;
+          observation.originalTerminal = event.composedPath().at(-1);
+          replaceFileDropPathTerminal(event, structural);
+        };
+        ownerWindow.addEventListener("keydown", stage, {
+          capture: true,
+          once: true,
+        });
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        act(() => source.dispatchEvent(rejected));
+
+        expect(observation.receiver).toBe(observation.currentTarget);
+        expect(observation.receiver).toBe(observation.originalTerminal);
+        expect(observation.receiver).not.toBe(structural);
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expectNoFileDropAction(handlers);
+
+        const accepted = dispatchFileDropKey(source, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(options.insert).toHaveFocus();
+      });
+
+      it("rejects modified, repeated, composing, canceled, stopped, untrusted, unsupported, and wrong-focus input", () => {
+        const nativePreventDefault = Event.prototype.preventDefault;
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const handlers = callbacks();
+        renderStrict(propsFor(dropped("rejected-input.md", 0), handlers));
+        const options = fileDropOptions();
+        const source = options.replace;
+        const rejected = [
+          fileDropKeyEvent(source, "PageDown"),
+          fileDropKeyEvent(source, "ArrowRight", { altKey: true }),
+          fileDropKeyEvent(source, "ArrowRight", { ctrlKey: true }),
+          fileDropKeyEvent(source, "ArrowRight", { metaKey: true }),
+          fileDropKeyEvent(source, "ArrowRight", { shiftKey: true }),
+          fileDropKeyEvent(source, "ArrowRight", { repeat: true }),
+          fileDropKeyEvent(source, "ArrowRight", { isComposing: true }),
+          fileDropKeyEvent(source, "ArrowRight", { bubbles: false }),
+          fileDropKeyEvent(source, "ArrowRight", { cancelable: false }),
+          fileDropKeyEvent(source, "ArrowRight", {}, false),
+        ];
+        for (const event of rejected) {
+          source.focus();
+          preventDefault.mockClear();
+          focus.mockClear();
+          dispatchFileDropKey(source, event);
+          expect(event.defaultPrevented).toBe(false);
+          expect(preventDefault).not.toHaveBeenCalled();
+          expect(focus).not.toHaveBeenCalled();
+          expect(source).toHaveFocus();
+        }
+
+        const canceled = fileDropKeyEvent(source, "ArrowRight");
+        Reflect.apply(nativePreventDefault, canceled, []);
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        dispatchFileDropKey(source, canceled);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+
+        const stopped = fileDropKeyEvent(source, "ArrowRight");
+        stopped.stopPropagation();
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        dispatchFileDropKey(source, stopped);
+        expect(stopped.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+
+        const otherFocus = closeButton();
+        otherFocus.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const unfocused = dispatchFileDropKey(source, "ArrowRight");
+        expect(unfocused.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(otherFocus).toHaveFocus();
+        expectNoFileDropAction(handlers);
+
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const accepted = dispatchFileDropKey(source, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(options.insert).toHaveFocus();
+        expectNoFileDropAction(handlers);
+      });
+
+      it("rejects fabricated, proxied, crossed, and foreign React/native deliveries before recovery", () => {
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const handlers = callbacks();
+        renderStrict(propsFor(dropped("delivery-integrity.md", 0), handlers));
+        const options = fileDropOptions();
+        const source = options.replace;
+        const handler = reactProp<OptionKeyHandler>(source, "onKeyDown");
+        const fabricatedPreventDefault = vi.fn();
+        handler({
+          type: "keydown",
+          key: "ArrowRight",
+          currentTarget: source,
+          target: source,
+          preventDefault: fabricatedPreventDefault,
+        } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+        expect(fabricatedPreventDefault).not.toHaveBeenCalled();
+
+        const proxied = fileDropKeyEvent(source, "ArrowRight");
+        const restoreProxy = replaceReactProps(source, {
+          onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+            handler(
+              new Proxy(event, {
+                get(target, property, receiver) {
+                  return Reflect.get(target, property, receiver);
+                },
+              }),
+            ),
+        });
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        dispatchFileDropKey(source, proxied);
+        restoreProxy();
+        expect(proxied.defaultPrevented).toBe(false);
+
+        const crossedNative = fileDropKeyEvent(source, "ArrowRight");
+        const crossedDelivery = fileDropKeyEvent(source, "ArrowRight");
+        const restoreCrossed = replaceReactProps(source, {
+          onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+            handler(
+              new Proxy(event, {
+                get(target, property, receiver) {
+                  return property === "nativeEvent"
+                    ? crossedNative
+                    : Reflect.get(target, property, receiver);
+                },
+              }),
+            ),
+        });
+        dispatchFileDropKey(source, crossedDelivery);
+        restoreCrossed();
+        expect(crossedDelivery.defaultPrevented).toBe(false);
+
+        const frame = document.createElement("iframe");
+        document.body.append(frame);
+        try {
+          const foreignWindow = frame.contentWindow as
+            | (Window & typeof globalThis)
+            | null;
+          if (!foreignWindow) throw new Error("The foreign window was not created");
+          const foreignEvent = new foreignWindow.KeyboardEvent("keydown", {
+            key: "ArrowRight",
+            code: "ArrowRight",
+            bubbles: true,
+            cancelable: true,
+          });
+          markFileDropEventTrusted(foreignEvent);
+          const localDelivery = fileDropKeyEvent(source, "ArrowRight");
+          const restoreForeign = replaceReactProps(source, {
+            onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+              handler(
+                new Proxy(event, {
+                  get(target, property, receiver) {
+                    return property === "nativeEvent"
+                      ? foreignEvent
+                      : Reflect.get(target, property, receiver);
+                  },
+                }),
+              ),
+          });
+          dispatchFileDropKey(source, localDelivery);
+          restoreForeign();
+          expect(localDelivery.defaultPrevented).toBe(false);
+        } finally {
+          frame.remove();
+        }
+
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expectNoFileDropAction(handlers);
+
+        const accepted = dispatchFileDropKey(source, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(options.insert).toHaveFocus();
+      });
+
+      it("permanently rejects restored DOM history and accepts a distinct clean successor", () => {
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const pending = dropped("restored-dom.md", 0);
+        const firstHandlers = callbacks();
+        const view = renderStrict(propsFor(pending, firstHandlers));
+        const stale = fileDropOptions();
+        const root = screen.getByTestId("file-drop-dialog");
+        const parent = root.parentNode;
+        if (!parent) throw new Error("The options root has no parent");
+        const className = stale.replace.className;
+        stale.replace.className = "mutated";
+        stale.replace.className = className;
+        root.remove();
+        parent.append(root);
+        root.insertBefore(stale.insert, stale.replace);
+        root.insertBefore(stale.replace, stale.insert);
+        stale.replace.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const rejected = dispatchFileDropKey(stale.replace, "ArrowRight");
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(stale.replace).toHaveFocus();
+        expectNoFileDropAction(firstHandlers);
+
+        const secondHandlers = callbacks();
+        act(() =>
+          view.root.render(
+            <StrictMode>
+              <FileDropDialog {...propsFor(pending, secondHandlers)} />
+            </StrictMode>,
+          ),
+        );
+        const current = fileDropOptions();
+        current.replace.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const accepted = dispatchFileDropKey(current.replace, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(current.insert).toHaveFocus();
+        expectNoFileDropAction(secondHandlers);
+      });
+
+      it("rejects stale facts and an already consumed native event while a clean successor remains usable", () => {
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const pending = dropped("stale-navigation.md", 18);
+        const firstHandlers = callbacks();
+        const view = renderStrict(propsFor(pending, firstHandlers));
+        const stale = fileDropOptions();
+        const staleHandler = reactProp<OptionKeyHandler>(
+          stale.replace,
+          "onKeyDown",
+        );
+        const secondHandlers = callbacks();
+        act(() =>
+          view.root.render(
+            <StrictMode>
+              <FileDropDialog {...propsFor(pending, secondHandlers)} />
+            </StrictMode>,
+          ),
+        );
+        const current = fileDropOptions();
+        const restore = replaceReactProps(current.replace, {
+          onKeyDown: staleHandler,
+        });
+        current.replace.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const staleEvent = dispatchFileDropKey(
+          current.replace,
+          "ArrowRight",
+        );
+        restore();
+        expect(staleEvent.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+
+        const accepted = fileDropKeyEvent(current.replace, "ArrowRight");
+        dispatchFileDropKey(current.replace, accepted);
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(current.insert).toHaveFocus();
+        const focusCount = focus.mock.calls.length;
+        dispatchFileDropKey(current.insert, accepted);
+        expect(focus).toHaveBeenCalledTimes(focusCount);
+        expect(current.insert).toHaveFocus();
+        expectNoFileDropAction(firstHandlers);
+        expectNoFileDropAction(secondHandlers);
+
+        const recovered = dispatchFileDropKey(current.insert, "ArrowRight");
+        expect(recovered.defaultPrevented).toBe(true);
+        expect(current.new).toHaveFocus();
+      });
+
+      it("claims navigation before focus reentrancy and removes its exact Window listener on cleanup", () => {
+        const active = new Set<EventListenerOrEventListenerObject>();
+        const add = window.addEventListener.bind(window);
+        const remove = window.removeEventListener.bind(window);
+        vi.spyOn(window, "addEventListener").mockImplementation(
+          (type, listener, options) => {
+            if (type === "keydown" && listener) active.add(listener);
+            add(type, listener, options);
+          },
+        );
+        vi.spyOn(window, "removeEventListener").mockImplementation(
+          (type, listener, options) => {
+            if (type === "keydown" && listener) active.delete(listener);
+            remove(type, listener, options);
+          },
+        );
+        const nativeFocus = HTMLElement.prototype.focus;
+        const focus = vi
+          .spyOn(HTMLElement.prototype, "focus")
+          .mockImplementation(function (
+            this: HTMLElement,
+            options?: FocusOptions,
+          ) {
+            Reflect.apply(nativeFocus, this, [options]);
+            if (
+              this instanceof HTMLButtonElement &&
+              this.dataset.testid === "file-drop-insert"
+            ) {
+              this.dispatchEvent(
+                fileDropKeyEvent(this, "ArrowRight"),
+              );
+            }
+          });
+        const handlers = callbacks();
+        const view = renderStrict(propsFor(dropped("reentrant.md", 0), handlers));
+        const options = fileDropOptions();
+        expect(active.size).toBe(1);
+        options.replace.focus();
+        focus.mockClear();
+
+        const event = dispatchFileDropKey(options.replace, "ArrowRight");
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(options.insert).toHaveFocus();
+        expectNoFileDropAction(handlers);
+
+        const staleHandler = reactProp<OptionKeyHandler>(
+          options.replace,
+          "onKeyDown",
+        );
+        act(() => view.root.render(null));
+        expect(active.size).toBe(0);
+        const fabricatedPreventDefault = vi.fn();
+        staleHandler({
+          type: "keydown",
+          key: "ArrowRight",
+          currentTarget: options.replace,
+          target: options.replace,
+          preventDefault: fabricatedPreventDefault,
+        } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+        expect(fabricatedPreventDefault).not.toHaveBeenCalled();
+        expectNoFileDropAction(handlers);
+      });
+
+      it("invalidates listener method drift until a clean publication is created", () => {
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const pending = dropped("listener-method.md", 0);
+        const firstHandlers = callbacks();
+        const view = renderStrict(propsFor(pending, firstHandlers));
+        let options = fileDropOptions();
+        const addSpy = vi.spyOn(window, "addEventListener");
+        options.replace.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const rejected = dispatchFileDropKey(options.replace, "ArrowRight");
+        addSpy.mockRestore();
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(options.replace).toHaveFocus();
+        expectNoFileDropAction(firstHandlers);
+
+        const stillRejected = dispatchFileDropKey(
+          options.replace,
+          "ArrowRight",
+        );
+        expect(stillRejected.defaultPrevented).toBe(false);
+
+        const secondHandlers = callbacks();
+        act(() =>
+          view.root.render(
+            <StrictMode>
+              <FileDropDialog {...propsFor(pending, secondHandlers)} />
+            </StrictMode>,
+          ),
+        );
+        options = fileDropOptions();
+        options.replace.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const accepted = dispatchFileDropKey(options.replace, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(options.insert).toHaveFocus();
+        expectNoFileDropAction(secondHandlers);
+      });
+
+      it("retains pointer activation and leaves Enter, Space, and Tab native until activation", async () => {
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const handlers = callbacks();
+        renderStrict(propsFor(dropped("retained-activation.md", 22), handlers));
+        const options = fileDropOptions();
+        expect([options.replace, options.insert, options.new].map(
+          (option) => option.tabIndex,
+        )).toEqual([0, 0, 0]);
+        options.insert.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        for (const key of ["Enter", " ", "Tab"]) {
+          const event = dispatchFileDropKey(options.insert, key);
+          expect(event.defaultPrevented).toBe(false);
+        }
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expectNoFileDropAction(handlers);
+
+        fireEvent.click(options.insert);
+        expect(ControlledFileReader.reads).toHaveLength(1);
+        await resolveRead(0, "Keyboard activation retained");
+        expect(handlers.onInsert).toHaveBeenCalledExactlyOnceWith(
+          "Keyboard activation retained",
+          22,
+        );
+        expect(handlers.onClose).toHaveBeenCalledOnce();
+      });
+    });
 
   it("rejects a synthetic-looking click without the exact dispatched native event", () => {
     const handlers = callbacks();
