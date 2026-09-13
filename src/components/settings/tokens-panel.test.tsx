@@ -1477,6 +1477,37 @@ describe("Settings → Agents: token rename Escape authority", () => {
     expectNoRequests();
   });
 
+  it("keeps duplicate genuine Window listener invocations inert without retiring the rightful pair", async () => {
+    const add = vi.spyOn(window, "addEventListener");
+    const rename = await showStrictRename();
+    const registration = add.mock.calls.findLast(([type, callback, capture]) =>
+      type === "keydown" && typeof callback === "function" && capture === true);
+    const listener = registration?.[1];
+    if (typeof listener !== "function") throw new Error("Missing Escape Window listener");
+    const native = createEscape(rename.input);
+    const focus = vi.spyOn(rename.rename, "focus");
+    let duplicates = 0;
+    const duplicate = function (this: EventTarget, event: Event) {
+      if (event !== native) return;
+      Reflect.apply(listener, this, [event]);
+      Reflect.apply(listener, this, [event]);
+      duplicates += 2;
+    };
+    window.addEventListener("keydown", duplicate, true);
+    try {
+      const pair = dispatchEscapePair(rename, {}, native);
+      expect(duplicates).toBe(2);
+      expect(native.defaultPrevented).toBe(true);
+      expect(pair.capturePrevent).not.toHaveBeenCalled();
+      expect(pair.bubblePrevent).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(screen.queryByLabelText("Token name")).toBeNull();
+      expectNoRequests();
+    } finally {
+      window.removeEventListener("keydown", duplicate, true);
+    }
+  });
+
   it.each(callbackSites)("excludes same-wrapper recursion and distinct-native reentry during %s", async (site) => {
     const rename = await showStrictRename();
     const capture = reactProp<EscapeHandler>(rename.input, "onKeyDownCapture");
@@ -1501,6 +1532,49 @@ describe("Settings → Agents: token rename Escape authority", () => {
     expect(pair.bubblePrevent).toHaveBeenCalledOnce();
     expect(pair.bubblePrevent.mock.contexts).toEqual([pair.delivered.bubble]);
     expect(rename.rename).toHaveFocus();
+    expectNoRequests();
+  });
+
+  it.each(callbackSites)("keeps route exclusion across a synchronous publication replacement during %s", async (site) => {
+    const { flushSync } = await import("react-dom");
+    const rename = await showStrictRename();
+    const focus = vi.spyOn(rename.rename, "focus");
+    let entered = false;
+    let nested: KeyboardEvent | null = null;
+    let currentInput = rename.input;
+    const attack = (current: CallbackSite) => {
+      if (current !== site || entered) return;
+      entered = true;
+      flushSync(() => {
+        fireEvent.change(rename.input, { target: { value: "Re-published draft" } });
+      });
+      currentInput = screen.getByLabelText("Token name") as HTMLInputElement;
+      expect(reactProp<EscapeHandler>(currentInput, "onKeyDownCapture"))
+        .not.toBe(captureHandler);
+      nested = createEscape(currentInput);
+      currentInput.dispatchEvent(nested);
+      expect(nested.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+    };
+    const captureHandler = reactProp<EscapeHandler>(rename.input, "onKeyDownCapture");
+    const pair = dispatchEscapePair(rename, {
+      captureBefore: (event) => instrumentCallbacks(event, "capture", attack),
+      bubbleBefore: (event) => instrumentCallbacks(event, "bubble", attack),
+    });
+    expect(entered).toBe(true);
+    expect(nested).not.toBeNull();
+    expect(pair.bubblePrevent).toHaveBeenCalledTimes(site === "prevention" || site.startsWith("post") ? 1 : 0);
+    expect(focus).not.toHaveBeenCalled();
+    expectOpen({ ...rename, input: currentInput });
+    expect(currentInput).toHaveValue("Re-published draft");
+    const successor = dispatchEscapePair({
+      ...rename,
+      input: currentInput,
+      form: currentInput.form as HTMLFormElement,
+    });
+    expect(successor.nativeEvent.defaultPrevented).toBe(true);
+    expect(successor.bubblePrevent).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
     expectNoRequests();
   });
 
@@ -1909,6 +1983,7 @@ describe("Settings → Agents: token rename Escape authority", () => {
     const add = vi.spyOn(window, "addEventListener");
     const remove = vi.spyOn(window, "removeEventListener");
     const set = vi.spyOn(WeakMap.prototype, "set");
+    const weakAdd = vi.spyOn(WeakSet.prototype, "add");
     const rename = await showStrictRename();
     const registration = add.mock.calls.findLast(([type, callback, capture]) =>
       type === "keydown" && typeof callback === "function" && capture === true);
@@ -1923,6 +1998,11 @@ describe("Settings → Agents: token rename Escape authority", () => {
         ? [set.mock.contexts[index]]
         : []));
     expect(stores.size).toBeGreaterThanOrEqual(2);
+    for (const [index, [key]] of weakAdd.mock.calls.entries()) {
+      if (key === pair.nativeEvent || key === pair.delivered.capture) {
+        stores.add(weakAdd.mock.contexts[index]);
+      }
+    }
     act(() => rename.root.unmount());
     expect(remove.mock.calls.some(([type, callback, capture], index) =>
       type === "keydown" && callback === listener && capture === true
@@ -1930,19 +2010,25 @@ describe("Settings → Agents: token rename Escape authority", () => {
     const get = vi.spyOn(WeakMap.prototype, "get");
     const has = vi.spyOn(WeakMap.prototype, "has");
     const erase = vi.spyOn(WeakMap.prototype, "delete");
+    const weakHas = vi.spyOn(WeakSet.prototype, "has");
+    const weakErase = vi.spyOn(WeakSet.prototype, "delete");
     set.mockClear();
+    weakAdd.mockClear();
     act(() => {
       pair.captureHandler(pair.delivered.capture as EscapeWrapper);
       pair.bubbleHandler(pair.delivered.bubble as EscapeWrapper);
       Reflect.apply(listener, window, [pair.nativeEvent]);
     });
-    for (const spy of [get, has, erase, set]) {
+    for (const spy of [get, has, erase, set, weakHas, weakErase, weakAdd]) {
       expect(spy.mock.contexts.filter((context) => stores.has(context))).toEqual([]);
     }
     get.mockRestore();
     has.mockRestore();
     erase.mockRestore();
     set.mockRestore();
+    weakHas.mockRestore();
+    weakErase.mockRestore();
+    weakAdd.mockRestore();
     expect(pair.bubblePrevent).not.toHaveBeenCalled();
     expectNoRequests();
   });
