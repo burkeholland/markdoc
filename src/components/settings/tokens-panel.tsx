@@ -5745,11 +5745,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         element: cancel,
       }),
     ]);
-    let authority: RenameEscapeAuthority;
-    function windowListener(this: EventTarget, event: Event) {
-      settleRenameNavigationAtWindow(authority, this, event);
-    }
-    authority = {
+    const authority: RenameEscapeAuthority = {
       identity: Symbol("token-rename-escape-authority"),
       mount,
       panel: commit.facts.panel,
@@ -5769,7 +5765,9 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       dom: snapshotSecretNoticeDom(commit.row),
       placement,
       history,
-      windowListener,
+      windowListener(this: EventTarget, event: Event) {
+        settleRenameNavigationAtWindow(authority, this, event);
+      },
       claimed: false,
       retired: false,
     };
@@ -5790,7 +5788,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     keyboard.apply(
       keyboard.addEventListener,
       ownerWindow,
-      ["keydown", windowListener],
+      ["keydown", authority.windowListener],
     );
   };
   const stageRenameEscape = (event: ReactKeyboardEvent<HTMLInputElement>) => {

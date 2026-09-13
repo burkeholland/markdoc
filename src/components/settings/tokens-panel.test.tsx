@@ -1568,14 +1568,16 @@ describe("Settings → Agents: token rename control navigation", () => {
     lookalike.window = lookalike;
     let attacked: KeyboardEvent | null = null;
     let navigationListener: EventListener | null = null;
-    let callbackReceiver: EventTarget | null = null;
-    let intrinsicCurrentTarget: EventTarget | null = null;
-    let originalPathTerminal: EventTarget | null = null;
+    const observation: {
+      receiver?: EventTarget;
+      currentTarget?: EventTarget | null;
+      terminal?: EventTarget | null;
+    } = {};
     nativeAddEventListener.call(ownerWindow, "keydown", function (this: EventTarget, event) {
       if (event !== attacked) return;
-      callbackReceiver = this;
-      intrinsicCurrentTarget = currentTarget.call(event) as EventTarget | null;
-      originalPathTerminal = composedPath.call(event).at(-1) ?? null;
+      observation.receiver = this;
+      observation.currentTarget = currentTarget.call(event);
+      observation.terminal = composedPath.call(event).at(-1) ?? null;
       navigationListener?.call(lookalike as unknown as EventTarget, event);
       event.stopImmediatePropagation();
     }, { once: true });
@@ -1603,9 +1605,9 @@ describe("Settings → Agents: token rename control navigation", () => {
 
     act(() => save.dispatchEvent(attacked as KeyboardEvent));
 
-    expect(callbackReceiver).not.toBeNull();
-    expect(intrinsicCurrentTarget).toBe(callbackReceiver);
-    expect(originalPathTerminal).toBe(callbackReceiver);
+    expect(observation.receiver).toBeDefined();
+    expect(observation.currentTarget).toBe(observation.receiver);
+    expect(observation.terminal).toBe(observation.receiver);
     expect(attacked.defaultPrevented).toBe(false);
     expect(preventDefault).not.toHaveBeenCalled();
     expect(focus).not.toHaveBeenCalled();
