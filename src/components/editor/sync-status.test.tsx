@@ -7,6 +7,7 @@ import {
   useEffect,
   useLayoutEffect,
   type ComponentProps,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefCallback,
@@ -203,6 +204,9 @@ function reactHandler<T>(element: Element, name: string): T {
 
 type SyncClickHandler = (event: { currentTarget: HTMLButtonElement; defaultPrevented: boolean }) => void;
 type SyncChangeHandler = (event: { currentTarget: HTMLInputElement }) => void;
+type SyncKeyHandler = (
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+) => void;
 type SyncDialogCaptureHandler = (event: {
   currentTarget: HTMLDivElement;
   target: EventTarget | null;
@@ -270,6 +274,152 @@ function captureElementRef<T extends HTMLElement>(
 ): (next: HTMLElement | null) => void {
   const ref = reactHandler<RefCallback<T>>(element, "ref");
   return (next) => ref(next as T | null);
+}
+
+function syncKeyHandlers(element: HTMLButtonElement) {
+  return {
+    capture: reactHandler<SyncKeyHandler>(
+      element,
+      "onKeyDownCapture",
+    ),
+    bubble: reactHandler<SyncKeyHandler>(element, "onKeyDown"),
+  };
+}
+
+function markSyncEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) =>
+        (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
+function syncKeyEvent(
+  element: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = element.ownerDocument.defaultView;
+  if (!ownerWindow) {
+    throw new Error("The Sync control has no owner window");
+  }
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markSyncEventTrusted(event);
+  return event;
+}
+
+function dispatchSyncKey(
+  element: HTMLButtonElement,
+  keyOrEvent: string | KeyboardEvent,
+  init: KeyboardEventInit = {},
+) {
+  const event = typeof keyOrEvent === "string"
+    ? syncKeyEvent(element, keyOrEvent, init)
+    : keyOrEvent;
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
+}
+
+function withSyncKeyHandlers(
+  element: HTMLButtonElement,
+  event: KeyboardEvent,
+  handlers: {
+    capture: SyncKeyHandler;
+    bubble: SyncKeyHandler;
+  },
+) {
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"));
+  if (!propsKey) {
+    throw new Error("React props were not attached to the Sync control");
+  }
+  const properties = element as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const props = properties[propsKey];
+  const replacement = {
+    ...props,
+    onKeyDownCapture: handlers.capture,
+    onKeyDown: handlers.bubble,
+  };
+  properties[propsKey] = replacement;
+  try {
+    act(() => {
+      element.dispatchEvent(event);
+    });
+  } finally {
+    if (properties[propsKey] === replacement) {
+      properties[propsKey] = props;
+    }
+  }
+}
+
+function replaceSyncPathTerminal(
+  event: Event,
+  terminal: EventTarget,
+) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) =>
+        (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find((candidate): candidate is {
+      _path: Array<{ item: Record<symbol, unknown> }>;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return Array.isArray(
+        (candidate as { _path?: unknown })._path,
+      );
+    });
+  const entry = implementation?._path.at(-1);
+  const currentTerminal = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === currentTerminal,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error("Unable to replace jsdom's Sync key terminal");
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+}
+
+function syncChoice(testId: string) {
+  return screen.getByTestId(testId) as HTMLButtonElement;
 }
 
 function captureSyncFrame(host: HTMLElement): CapturedSyncFrame {
@@ -1103,6 +1253,947 @@ describe("remote-unreadable sync status", () => {
     expect(screen.queryByTestId("sync-take-remote")).toBeNull();
     expect(screen.queryByTestId("sync-compare")).toBeNull();
   });
+});
+
+describe("Sync dialog keyboard navigation", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  function mountStrictSync({
+    actions = syncActions(),
+    onOpenChange = vi.fn(),
+    sync = DIVERGED,
+  }: {
+    actions?: SyncActions;
+    onOpenChange?: (open: boolean) => void;
+    sync?: SyncStatusDto;
+  } = {}) {
+    const view = renderDirect(
+      <StrictMode>
+        <SyncBoundary
+          actions={actions}
+          onOpenChange={onOpenChange}
+          sync={sync}
+        />
+      </StrictMode>,
+    );
+    return { view, actions, onOpenChange };
+  }
+
+  it.each([
+    ["sync-merge", "ArrowDown", "sync-keep-mine"],
+    ["sync-merge", "ArrowRight", "sync-keep-mine"],
+    ["sync-keep-mine", "ArrowUp", "sync-merge"],
+    ["sync-keep-mine", "ArrowLeft", "sync-merge"],
+    ["sync-take-remote", "Home", "sync-merge"],
+    ["sync-keep-mine", "End", "sync-compare"],
+  ] as const)(
+    "moves from %s with %s to %s exactly once without action or scroll work",
+    (from, key, to) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const { actions, onOpenChange } = mountStrictSync();
+      const source = syncChoice(from);
+      const destination = syncChoice(to);
+      const dialog = screen.getByTestId("sync-dialog");
+      const markup = dialog.outerHTML;
+      const scroll = { x: window.scrollX, y: window.scrollY };
+      const dialogScroll = {
+        left: dialog.scrollLeft,
+        top: dialog.scrollTop,
+      };
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const event = dispatchSyncKey(source, key);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(focus.mock.contexts[0]).toBe(destination);
+      expect(destination).toHaveFocus();
+      expect(dialog.outerHTML).toBe(markup);
+      expect(
+        [...dialog.querySelectorAll("button")].map(
+          (button) => button.dataset.testid,
+        ),
+      ).toEqual([
+        "sync-merge",
+        "sync-keep-mine",
+        "sync-take-remote",
+        "sync-compare",
+      ]);
+      expect(
+        [...dialog.querySelectorAll("button")].map(
+          (button) => button.tabIndex,
+        ),
+      ).toEqual([0, 0, 0, 0]);
+      expect(actions.merge).not.toHaveBeenCalled();
+      expect(actions.keepMine).not.toHaveBeenCalled();
+      expect(actions.takeRemote).not.toHaveBeenCalled();
+      expect(actions.compare).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect({ x: window.scrollX, y: window.scrollY }).toEqual(scroll);
+      expect({
+        left: dialog.scrollLeft,
+        top: dialog.scrollTop,
+      }).toEqual(dialogScroll);
+    },
+  );
+
+  it.each([
+    ["sync-merge", "ArrowLeft"],
+    ["sync-merge", "ArrowUp"],
+    ["sync-merge", "Home"],
+    ["sync-compare", "ArrowRight"],
+    ["sync-compare", "ArrowDown"],
+    ["sync-compare", "End"],
+  ] as const)(
+    "leaves the %s boundary for %s unprevented and inert",
+    (from, key) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const { actions, onOpenChange } = mountStrictSync();
+      const source = syncChoice(from);
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const event = dispatchSyncKey(source, key);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      expect(actions.merge).not.toHaveBeenCalled();
+      expect(actions.keepMine).not.toHaveBeenCalled();
+      expect(actions.takeRemote).not.toHaveBeenCalled();
+      expect(actions.compare).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+    },
+  );
+
+  it("skips absent choices and refuses a same destination in the remote-unreadable variant", () => {
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const { actions, onOpenChange } = mountStrictSync({
+      sync: UNREADABLE_SYNC,
+    });
+    const keep = syncChoice("sync-keep-mine");
+    keep.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    for (const key of [
+      "ArrowDown",
+      "ArrowRight",
+      "ArrowUp",
+      "ArrowLeft",
+      "Home",
+      "End",
+    ]) {
+      const event = dispatchSyncKey(keep, key);
+      expect(event.defaultPrevented).toBe(false);
+    }
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(keep).toHaveFocus();
+    expect(actions.merge).not.toHaveBeenCalled();
+    expect(actions.keepMine).not.toHaveBeenCalled();
+    expect(actions.takeRemote).not.toHaveBeenCalled();
+    expect(actions.compare).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("does no navigation work after the current choices become disabled", () => {
+    const pending = deferred<number>();
+    const actions = syncActions({
+      merge: vi.fn(() => pending.promise),
+    });
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    mountStrictSync({ actions });
+    const merge = syncChoice("sync-merge");
+    fireEvent.click(merge);
+    expect(merge).toBeDisabled();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const event = dispatchSyncKey(merge, "ArrowRight");
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(actions.merge).toHaveBeenCalledOnce();
+    expect(actions.keepMine).not.toHaveBeenCalled();
+    expect(actions.takeRemote).not.toHaveBeenCalled();
+    expect(actions.compare).not.toHaveBeenCalled();
+  });
+
+  it("authenticates distinct React wrappers with distinct prototypes and cancellation methods for one native key event", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    mountStrictSync();
+    const source = syncChoice("sync-merge");
+    const destination = syncChoice("sync-keep-mine");
+    const handlers = syncKeyHandlers(source);
+    const wrappers: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+    const prototypes: object[] = [];
+    const cancellationMethods: Array<{
+      isDefaultPrevented: () => boolean;
+      isPropagationStopped: () => boolean;
+    }> = [];
+    const authenticate = (
+      wrapper: ReactKeyboardEvent<HTMLButtonElement>,
+      handler: SyncKeyHandler,
+    ) => {
+      const prototype = Object.create(Object.getPrototypeOf(wrapper));
+      const methods = {
+        isDefaultPrevented: vi.fn(() => false),
+        isPropagationStopped: vi.fn(() => false),
+      };
+      Object.defineProperties(prototype, {
+        isDefaultPrevented: {
+          configurable: true,
+          value: methods.isDefaultPrevented,
+        },
+        isPropagationStopped: {
+          configurable: true,
+          value: methods.isPropagationStopped,
+        },
+      });
+      if (
+        !Reflect.deleteProperty(wrapper, "isDefaultPrevented") ||
+        !Reflect.deleteProperty(wrapper, "isPropagationStopped")
+      ) {
+        throw new Error(
+          "Unable to place cancellation methods on the wrapper prototype",
+        );
+      }
+      Object.setPrototypeOf(wrapper, prototype);
+      wrappers.push(wrapper);
+      prototypes.push(prototype);
+      cancellationMethods.push(methods);
+      handler(wrapper);
+    };
+    source.focus();
+    focus.mockClear();
+    const event = syncKeyEvent(source, "ArrowRight");
+
+    withSyncKeyHandlers(source, event, {
+      capture: (wrapper) => authenticate(wrapper, handlers.capture),
+      bubble: (wrapper) => authenticate(wrapper, handlers.bubble),
+    });
+
+    expect(wrappers).toHaveLength(2);
+    expect(wrappers[0]).not.toBe(wrappers[1]);
+    expect(prototypes[0]).not.toBe(prototypes[1]);
+    expect(Object.getPrototypeOf(wrappers[0]!)).toBe(prototypes[0]);
+    expect(Object.getPrototypeOf(wrappers[1]!)).toBe(prototypes[1]);
+    expect(wrappers[0]?.nativeEvent).toBe(event);
+    expect(wrappers[1]?.nativeEvent).toBe(event);
+    expect(cancellationMethods[0]?.isDefaultPrevented).not.toBe(
+      cancellationMethods[1]?.isDefaultPrevented,
+    );
+    expect(cancellationMethods[0]?.isPropagationStopped).not.toBe(
+      cancellationMethods[1]?.isPropagationStopped,
+    );
+    expect(wrappers[0]?.isDefaultPrevented).toBe(
+      cancellationMethods[0]?.isDefaultPrevented,
+    );
+    expect(wrappers[1]?.isDefaultPrevented).toBe(
+      cancellationMethods[1]?.isDefaultPrevented,
+    );
+    expect(wrappers[0]?.isPropagationStopped).toBe(
+      cancellationMethods[0]?.isPropagationStopped,
+    );
+    expect(wrappers[1]?.isPropagationStopped).toBe(
+      cancellationMethods[1]?.isPropagationStopped,
+    );
+    expect(event.defaultPrevented).toBe(true);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+    expect(destination).toHaveFocus();
+  });
+
+  it.each([
+    "isDefaultPrevented",
+    "isPropagationStopped",
+  ] as const)(
+    "rejects captured-wrapper %s identity drift between React phases and then recovers",
+    (property) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      mountStrictSync();
+      const source = syncChoice("sync-merge");
+      const destination = syncChoice("sync-keep-mine");
+      const handlers = syncKeyHandlers(source);
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const rejected = syncKeyEvent(source, "ArrowRight");
+      let captureWrapper:
+        | ReactKeyboardEvent<HTMLButtonElement>
+        | null = null;
+
+      withSyncKeyHandlers(source, rejected, {
+        capture: (wrapper) => {
+          captureWrapper = wrapper;
+          handlers.capture(wrapper);
+        },
+        bubble: (wrapper) => {
+          if (!captureWrapper) {
+            throw new Error("The capture wrapper was not observed");
+          }
+          Object.defineProperty(captureWrapper, property, {
+            configurable: true,
+            value: () => false,
+          });
+          handlers.bubble(wrapper);
+        },
+      });
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+
+      const accepted = dispatchSyncKey(source, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(destination).toHaveFocus();
+    },
+  );
+
+  it("binds the ordinary Window listener receiver to intrinsic currentTarget and the path terminal", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    mountStrictSync();
+    const source = syncChoice("sync-merge");
+    const ownerWindow = source.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Sync control has no Window");
+    let currentTarget: EventTarget | null | undefined;
+    let terminal: EventTarget | undefined;
+    const observer = vi.fn(function (
+      this: EventTarget,
+      event: Event,
+    ) {
+      currentTarget = event.currentTarget;
+      terminal = event.composedPath().at(-1);
+    });
+    ownerWindow.addEventListener("keydown", observer, {
+      capture: true,
+      once: true,
+    });
+    source.focus();
+    focus.mockClear();
+
+    const event = dispatchSyncKey(source, "ArrowRight");
+
+    if (!terminal) throw new Error("The Sync key path had no terminal");
+    expect(observer.mock.contexts).toEqual([terminal]);
+    expect(currentTarget).toBe(terminal);
+    expect(event.defaultPrevented).toBe(true);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+  });
+
+  it("rejects a structural Window lookalike terminal before clean recovery", () => {
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const structural = Object.create(
+      window.Window.prototype,
+    ) as EventTarget;
+    Object.defineProperties(structural, {
+      document: { value: document },
+      Window: { value: window.Window },
+      Event: { value: window.Event },
+      EventTarget: { value: window.EventTarget },
+      KeyboardEvent: { value: window.KeyboardEvent },
+      Object: { value: window.Object },
+      Reflect: { value: window.Reflect },
+      window: { value: structural },
+      self: { value: structural },
+    });
+    const stageTerminal = vi.fn(function (
+      this: EventTarget,
+      event: Event,
+    ) {
+      expect(event.currentTarget).toBe(this);
+      expect(event.composedPath().at(-1)).toBe(this);
+      replaceSyncPathTerminal(event, structural);
+    });
+    window.addEventListener("keydown", stageTerminal, {
+      capture: true,
+      once: true,
+    });
+    mountStrictSync();
+    const source = syncChoice("sync-merge");
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const rejected = dispatchSyncKey(source, "ArrowRight");
+
+    expect(stageTerminal).toHaveBeenCalledOnce();
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(source).toHaveFocus();
+
+    const recovered = dispatchSyncKey(source, "ArrowRight");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+  });
+
+  it("rejects modified, repeated, composing, canceled, stopped, untrusted, unsupported, and wrong-focus input", () => {
+    const nativePreventDefault = Event.prototype.preventDefault;
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    mountStrictSync();
+    const source = syncChoice("sync-merge");
+    const outside = screen.getByTestId("commit-message");
+    const rejected = [
+      syncKeyEvent(source, "PageDown"),
+      syncKeyEvent(source, "ArrowRight", { altKey: true }),
+      syncKeyEvent(source, "ArrowRight", { ctrlKey: true }),
+      syncKeyEvent(source, "ArrowRight", { metaKey: true }),
+      syncKeyEvent(source, "ArrowRight", { shiftKey: true }),
+      syncKeyEvent(source, "ArrowRight", { repeat: true }),
+      syncKeyEvent(source, "ArrowRight", { isComposing: true }),
+      syncKeyEvent(source, "ArrowRight", { bubbles: false }),
+      syncKeyEvent(source, "ArrowRight", { cancelable: false }),
+      syncKeyEvent(source, "ArrowRight", {}, false),
+    ];
+
+    for (const event of rejected) {
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      dispatchSyncKey(source, event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+    }
+
+    const canceled = syncKeyEvent(source, "ArrowRight");
+    Reflect.apply(nativePreventDefault, canceled, []);
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    dispatchSyncKey(source, canceled);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const stopped = syncKeyEvent(source, "ArrowRight");
+    stopped.stopPropagation();
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    dispatchSyncKey(source, stopped);
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    outside.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const unfocused = dispatchSyncKey(source, "ArrowRight");
+    expect(unfocused.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(outside).toHaveFocus();
+
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const accepted = dispatchSyncKey(source, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+  });
+
+  it("requires both exact React phases and rejects a fabricated or reused wrapper", () => {
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    mountStrictSync();
+    const source = syncChoice("sync-merge");
+    const handlers = syncKeyHandlers(source);
+    const fabricatedPreventDefault = vi.fn();
+    handlers.bubble({
+      type: "keydown",
+      key: "ArrowRight",
+      currentTarget: source,
+      target: source,
+      preventDefault: fabricatedPreventDefault,
+    } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+    expect(fabricatedPreventDefault).not.toHaveBeenCalled();
+
+    let reusedWrapper: ReactKeyboardEvent<HTMLButtonElement> | null =
+      null;
+    const attempts = [
+      { capture: handlers.capture, bubble: () => undefined },
+      { capture: () => undefined, bubble: handlers.bubble },
+      {
+        capture: (wrapper: ReactKeyboardEvent<HTMLButtonElement>) => {
+          handlers.capture(wrapper);
+          reusedWrapper = wrapper;
+        },
+        bubble: () => {
+          if (reusedWrapper) handlers.bubble(reusedWrapper);
+        },
+      },
+    ];
+    for (const attempt of attempts) {
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const event = syncKeyEvent(source, "ArrowRight");
+      withSyncKeyHandlers(source, event, attempt);
+      expect(event.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+    }
+
+    const recovered = dispatchSyncKey(source, "ArrowRight");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+  });
+
+  it("rejects proxied, foreign, and descendant-target deliveries before a clean owner-realm event", () => {
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    mountStrictSync();
+    const source = syncChoice("sync-merge");
+    const handlers = syncKeyHandlers(source);
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignWindow = frame.contentWindow;
+    if (!foreignWindow) throw new Error("The foreign Window was not created");
+    const foreignGlobal = foreignWindow as Window & typeof globalThis;
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const proxied = syncKeyEvent(source, "ArrowRight");
+    withSyncKeyHandlers(source, proxied, {
+      capture: (wrapper) =>
+        handlers.capture(new Proxy(wrapper, {
+          get(target, property, receiver) {
+            if (property === "isTrusted") return false;
+            return Reflect.get(target, property, receiver);
+          },
+        })),
+      bubble: handlers.bubble,
+    });
+    expect(proxied.defaultPrevented).toBe(false);
+
+    const foreignNative = new foreignGlobal.KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      code: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    markSyncEventTrusted(foreignNative);
+    const crossed = syncKeyEvent(source, "ArrowRight");
+    withSyncKeyHandlers(source, crossed, {
+      capture: (wrapper) =>
+        handlers.capture(new Proxy(wrapper, {
+          get(target, property, receiver) {
+            if (property === "nativeEvent") return foreignNative;
+            return Reflect.get(target, property, receiver);
+          },
+        })),
+      bubble: handlers.bubble,
+    });
+    expect(crossed.defaultPrevented).toBe(false);
+
+    const icon = source.querySelector("svg");
+    if (!icon) throw new Error("The Merge control has no icon");
+    const descendant = syncKeyEvent(source, "ArrowRight");
+    act(() => {
+      icon.dispatchEvent(descendant);
+    });
+    expect(descendant.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const accepted = dispatchSyncKey(source, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+    frame.remove();
+  });
+
+  it.each(["addEventListener", "removeEventListener"] as const)(
+    "rejects owner Window %s identity drift and recovers only after the exact method is restored",
+    (property) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      mountStrictSync();
+      const source = syncChoice("sync-merge");
+      const descriptor = Object.getOwnPropertyDescriptor(
+        window,
+        property,
+      );
+      const exact = window[property];
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      Object.defineProperty(window, property, {
+        configurable: true,
+        writable: true,
+        value: vi.fn(),
+      });
+      try {
+        const rejected = dispatchSyncKey(source, "ArrowRight");
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+      } finally {
+        if (descriptor) Object.defineProperty(window, property, descriptor);
+        else Reflect.deleteProperty(window, property);
+      }
+
+      expect(window[property]).toBe(exact);
+      const recovered = dispatchSyncKey(source, "ArrowRight");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    },
+  );
+
+  it("rejects stale handlers and crossed control input while the current publication remains usable", () => {
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const actionsA = syncActions();
+    const actionsB = syncActions();
+    const onOpenChange = vi.fn();
+    const { view } = mountStrictSync({
+      actions: actionsA,
+      onOpenChange,
+    });
+    const staleSource = syncChoice("sync-merge");
+    const staleHandlers = syncKeyHandlers(staleSource);
+
+    act(() => {
+      view.root.render(
+        <StrictMode>
+          <SyncBoundary
+            actions={actionsB}
+            onOpenChange={onOpenChange}
+            doc={RENAMED_DOC}
+          />
+        </StrictMode>,
+      );
+    });
+    const source = syncChoice("sync-merge");
+    const crossed = syncChoice("sync-keep-mine");
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const staleEvent = syncKeyEvent(source, "ArrowRight");
+    withSyncKeyHandlers(source, staleEvent, staleHandlers);
+    expect(staleEvent.defaultPrevented).toBe(false);
+
+    const currentHandlers = syncKeyHandlers(source);
+    const crossedEvent = syncKeyEvent(crossed, "ArrowLeft");
+    withSyncKeyHandlers(crossed, crossedEvent, currentHandlers);
+    expect(crossedEvent.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const accepted = dispatchSyncKey(source, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+    expect(actionsA.merge).not.toHaveBeenCalled();
+    expect(actionsB.merge).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "attribute mutation and restoration",
+      alter: () => {
+        const source = syncChoice("sync-merge");
+        source.dataset.transient = "true";
+        delete source.dataset.transient;
+      },
+    },
+    {
+      name: "detachment and reinsertion",
+      alter: () => {
+        const root = screen.getByTestId("sync-dialog");
+        const parent = root.parentNode;
+        if (!parent) throw new Error("The Sync root has no parent");
+        const next = root.nextSibling;
+        root.remove();
+        parent.insertBefore(root, next);
+      },
+    },
+    {
+      name: "control reordering and restoration",
+      alter: () => {
+        const merge = syncChoice("sync-merge");
+        const keep = syncChoice("sync-keep-mine");
+        const group = merge.parentElement;
+        if (!group) throw new Error("The Sync controls have no group");
+        group.insertBefore(keep, merge);
+        group.insertBefore(merge, keep);
+      },
+    },
+    {
+      name: "partial Strict callback-ref replay",
+      alter: () => {
+        const merge = syncChoice("sync-merge");
+        const ref = captureElementRef(merge);
+        ref(null);
+        ref(merge);
+      },
+    },
+  ])(
+    "rejects navigation after $name and admits a distinct clean successor",
+    ({ alter }) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const actions = syncActions();
+      const onOpenChange = vi.fn();
+      const { view } = mountStrictSync({ actions, onOpenChange });
+      const source = syncChoice("sync-merge");
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      act(alter);
+      const rejected = dispatchSyncKey(source, "ArrowRight");
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      act(() => {
+        view.root.render(
+          <StrictMode>
+            <SyncBoundary
+              actions={actions}
+              onOpenChange={onOpenChange}
+              boundary={1}
+              sync={{
+                ...DIVERGED,
+                remote: { ...DIVERGED.remote },
+                lines: { ...DIVERGED.lines },
+              }}
+            />
+          </StrictMode>,
+        );
+      });
+      const current = syncChoice("sync-merge");
+      current.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const recovered = dispatchSyncKey(current, "ArrowRight");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    },
+  );
+
+  it("claims one native event once, rejects replay and reentrancy, then accepts a clean successor", () => {
+    const nativeFocus = HTMLElement.prototype.focus;
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    mountStrictSync();
+    const source = syncChoice("sync-merge");
+    const destination = syncChoice("sync-keep-mine");
+    const event = syncKeyEvent(source, "ArrowRight");
+    source.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    dispatchSyncKey(source, event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+
+    source.focus();
+    focus.mockClear();
+    dispatchSyncKey(source, event);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).not.toHaveBeenCalled();
+
+    const nested = syncKeyEvent(source, "ArrowRight");
+    const reentrant = syncKeyEvent(source, "ArrowRight");
+    source.focus();
+    focus.mockClear();
+    focus.mockImplementationOnce(function (
+      this: HTMLElement,
+      options?: FocusOptions,
+    ) {
+      Reflect.apply(nativeFocus, this, [options]);
+      source.dispatchEvent(reentrant);
+    });
+    dispatchSyncKey(source, nested);
+    expect(nested.defaultPrevented).toBe(true);
+    expect(reentrant.defaultPrevented).toBe(false);
+    expect(preventDefault).toHaveBeenCalledTimes(2);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+    expect(destination).toHaveFocus();
+
+    source.focus();
+    focus.mockClear();
+    const successor = dispatchSyncKey(source, "ArrowRight");
+    expect(successor.defaultPrevented).toBe(true);
+    expect(preventDefault).toHaveBeenCalledTimes(3);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+  });
+
+  it("removes the exact owned Window listener on cleanup", () => {
+    const active = new Set<EventListenerOrEventListenerObject>();
+    const add = window.addEventListener.bind(window);
+    const remove = window.removeEventListener.bind(window);
+    vi.spyOn(window, "addEventListener").mockImplementation(
+      (type, listener, options) => {
+        if (type === "keydown" && listener) active.add(listener);
+        add(type, listener, options);
+      },
+    );
+    vi.spyOn(window, "removeEventListener").mockImplementation(
+      (type, listener, options) => {
+        if (type === "keydown" && listener) active.delete(listener);
+        remove(type, listener, options);
+      },
+    );
+    const { view } = mountStrictSync();
+    expect(active.size).toBe(1);
+
+    act(() => view.root.unmount());
+
+    expect(active.size).toBe(0);
+  });
+
+  it("leaves captured keyboard handlers inert after cleanup", () => {
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const { view } = mountStrictSync();
+    const source = syncChoice("sync-merge");
+    const handlers = syncKeyHandlers(source);
+    act(() => view.root.unmount());
+    focus.mockClear();
+    preventDefault.mockClear();
+    const event = syncKeyEvent(source, "ArrowRight");
+
+    const staleWrapper = {
+      nativeEvent: event,
+    } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
+    handlers.capture(staleWrapper);
+    handlers.bubble(staleWrapper);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["sync-merge", "merge"],
+    ["sync-keep-mine", "keepMine"],
+    ["sync-take-remote", "takeRemote"],
+    ["sync-compare", "compare"],
+  ] as const)(
+    "retains keyboard-style activation for %s without treating navigation keys as activation",
+    (testId, action) => {
+      const actions = syncActions();
+      const onOpenChange = vi.fn();
+      const { view } = mountStrictSync({ actions, onOpenChange });
+      const control = syncChoice(testId);
+      control.focus();
+      for (const key of ["Enter", " ", "Tab"]) {
+        const event = dispatchSyncKey(control, key);
+        expect(event.defaultPrevented).toBe(false);
+      }
+      expect(actions[action]).not.toHaveBeenCalled();
+
+      fireEvent.click(control, { detail: 0 });
+
+      expect(actions[action]).toHaveBeenCalledOnce();
+      if (action === "compare") {
+        expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      } else {
+        expect(onOpenChange).not.toHaveBeenCalled();
+      }
+      act(() => view.root.unmount());
+    },
+  );
 });
 
 describe("Sync dialog action lifecycle", () => {
