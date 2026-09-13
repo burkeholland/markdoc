@@ -2826,13 +2826,13 @@ export const SyncDialog = memo(function SyncDialog({
           </label>
 
           {error && (
-            <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert">
-              <AlertTriangle size={14} /> {error}
+            <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger wrap-anywhere dark:bg-red-950/40" role="alert">
+              <AlertTriangle size={14} className="shrink-0" /> {error}
             </div>
           )}
           {done && (
-            <div className="flex items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-sm text-ink-2" data-testid="sync-done">
-              <Check size={14} className="text-success" /> {done}
+            <div className="flex items-center gap-2 rounded-lg bg-surface-2 px-3 py-2 text-sm text-ink-2 wrap-anywhere" data-testid="sync-done">
+              <Check size={14} className="shrink-0 text-success" /> {done}
             </div>
           )}
           </div>
