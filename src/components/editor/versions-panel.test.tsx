@@ -70,6 +70,7 @@ interface CapturedProps<T extends HTMLElement> {
   onClick?: (event: CapturedEvent<T>) => void;
   onChange?: (event: CapturedEvent<T>) => void;
   onBlur?: (event: CapturedEvent<T>) => void;
+  onKeyDownCapture?: (event: CapturedEvent<T>) => void;
   onKeyDown?: (event: CapturedEvent<T>) => void;
   ref?: (element: T | null) => void;
 }
@@ -105,7 +106,12 @@ function interceptClick(
   };
 }
 
-type CapturedEventProp = "onClick" | "onChange" | "onBlur" | "onKeyDown";
+type CapturedEventProp =
+  | "onClick"
+  | "onChange"
+  | "onBlur"
+  | "onKeyDownCapture"
+  | "onKeyDown";
 
 function interceptEvent<T extends HTMLElement>(
   element: T,
@@ -149,6 +155,139 @@ function cloneSyntheticEvent<T extends HTMLElement>(
     event,
     overrides,
   );
+}
+
+const VERSIONS_TOOLBAR_PUBLIC_KEY_SCALARS = [
+  "type",
+  "nativeEvent",
+  "target",
+  "currentTarget",
+  "eventPhase",
+  "bubbles",
+  "cancelable",
+  "defaultPrevented",
+  "isTrusted",
+  "timeStamp",
+  "view",
+  "detail",
+  "key",
+  "code",
+  "location",
+  "locale",
+  "charCode",
+  "keyCode",
+  "which",
+  "repeat",
+  "isComposing",
+  "altKey",
+  "ctrlKey",
+  "metaKey",
+  "shiftKey",
+] as const;
+
+const VERSIONS_TOOLBAR_PUBLIC_KEY_METHODS = [
+  "preventDefault",
+  "isDefaultPrevented",
+  "isPropagationStopped",
+] as const;
+
+type VersionsToolbarPublicMethod = ReturnType<typeof vi.fn>;
+
+function cloneVersionsToolbarReactKey(
+  event: object,
+  prototype: object | null,
+  options: {
+    accessors?: boolean;
+    privateState?: "absent" | "replaced" | "non-function";
+  } = {},
+) {
+  const clone = Object.assign(
+    Object.create(prototype) as Record<PropertyKey, unknown>,
+    event,
+  );
+  const source = event as Record<PropertyKey, unknown>;
+  const methods = {} as Record<
+    (typeof VERSIONS_TOOLBAR_PUBLIC_KEY_METHODS)[number],
+    VersionsToolbarPublicMethod
+  >;
+  for (const property of VERSIONS_TOOLBAR_PUBLIC_KEY_METHODS) {
+    const original = source[property];
+    if (typeof original !== "function") {
+      throw new Error(`React ${property} was unavailable`);
+    }
+    const method = vi.fn(function (this: object) {
+      return Reflect.apply(original, this, []);
+    });
+    clone[property] = method;
+    methods[property] = method;
+  }
+  if (options.accessors) {
+    for (const property of VERSIONS_TOOLBAR_PUBLIC_KEY_SCALARS) {
+      let value = clone[property];
+      Object.defineProperty(clone, property, {
+        configurable: true,
+        enumerable: true,
+        get: () => value,
+        set: (next) => {
+          value = next;
+        },
+      });
+    }
+  }
+  if (options.privateState) {
+    for (const property of [
+      "_reactName",
+      "persist",
+      "isPersistent",
+      "stopPropagation",
+    ]) {
+      if (options.privateState === "absent") {
+        Reflect.deleteProperty(clone, property);
+      } else {
+        clone[property] =
+          options.privateState === "replaced" ? vi.fn() : null;
+      }
+    }
+  }
+  return { clone: clone as unknown as CapturedEvent<HTMLElement>, methods };
+}
+
+function interceptVersionsToolbarReactKey(
+  element: HTMLElement,
+  prop: "onKeyDownCapture" | "onKeyDown",
+  prototype: object | null,
+  options: {
+    accessors?: boolean;
+    privateState?: "absent" | "replaced" | "non-function";
+    after?: (event: Record<PropertyKey, unknown>) => void;
+  } = {},
+) {
+  let wrapper: Record<PropertyKey, unknown> | null = null;
+  let methods: Record<
+    (typeof VERSIONS_TOOLBAR_PUBLIC_KEY_METHODS)[number],
+    VersionsToolbarPublicMethod
+  > | null = null;
+  const restore = interceptEvent(
+    element,
+    prop,
+    (original, event) => {
+      const isolated = cloneVersionsToolbarReactKey(
+        event,
+        prototype,
+        options,
+      );
+      wrapper = isolated.clone as unknown as Record<PropertyKey, unknown>;
+      methods = isolated.methods;
+      original(isolated.clone);
+      wrapper.currentTarget = null;
+      options.after?.(wrapper);
+    },
+  );
+  return {
+    restore,
+    wrapper: () => wrapper,
+    methods: () => methods,
+  };
 }
 
 function interceptMangledEvent<T extends HTMLElement>(
@@ -4063,6 +4202,480 @@ describe("VersionsPanel · direct-root Strict Mode toolbar navigation", () => {
     }
   });
 
+  it("accepts four independent public wrappers, methods, prototypes, and scalar accessors", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-public-wrappers"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      const { toolbar, refresh } = versionsToolbarButtons(host);
+      const prototypes = Array.from({ length: 4 }, () =>
+        Object.create(null) as object,
+      );
+      const boundaries = [
+        interceptVersionsToolbarReactKey(
+          toolbar,
+          "onKeyDownCapture",
+          prototypes[0],
+          { accessors: true, privateState: "absent" },
+        ),
+        interceptVersionsToolbarReactKey(
+          refresh,
+          "onKeyDownCapture",
+          prototypes[1],
+          { accessors: true, privateState: "replaced" },
+        ),
+        interceptVersionsToolbarReactKey(
+          refresh,
+          "onKeyDown",
+          prototypes[2],
+          { accessors: true, privateState: "non-function" },
+        ),
+        interceptVersionsToolbarReactKey(
+          toolbar,
+          "onKeyDown",
+          prototypes[3],
+          { accessors: true, privateState: "absent" },
+        ),
+      ];
+      refresh.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const accepted = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      const wrappers = boundaries.map((boundary) => boundary.wrapper());
+      const methods = boundaries.map((boundary) => boundary.methods());
+      expect(new Set(wrappers).size).toBe(4);
+      expect(
+        wrappers.every(
+          (wrapper, index) =>
+            wrapper !== null &&
+            Object.getPrototypeOf(wrapper) === prototypes[index],
+        ),
+      ).toBe(true);
+      for (const wrapper of wrappers) {
+        expect(wrapper).not.toBeNull();
+        for (const property of VERSIONS_TOOLBAR_PUBLIC_KEY_SCALARS) {
+          expect(
+            Object.getOwnPropertyDescriptor(wrapper!, property)?.get,
+          ).toBeTypeOf("function");
+        }
+      }
+      expect(
+        new Set(
+          methods.flatMap((phaseMethods) =>
+            VERSIONS_TOOLBAR_PUBLIC_KEY_METHODS.map(
+              (property) => phaseMethods?.[property],
+            ),
+          ),
+        ).size,
+      ).toBe(12);
+      expect(methods[2]?.preventDefault).toHaveBeenCalledOnce();
+      expect(methods[0]?.preventDefault).not.toHaveBeenCalled();
+      expect(methods[1]?.preventDefault).not.toHaveBeenCalled();
+      expect(methods[3]?.preventDefault).not.toHaveBeenCalled();
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(onPreview).not.toHaveBeenCalled();
+      expect(versions).toHaveBeenCalledOnce();
+      expect(renameVersion).not.toHaveBeenCalled();
+      expect(restoreVersion).not.toHaveBeenCalled();
+      expect(copyVersion).not.toHaveBeenCalled();
+      boundaries.forEach((boundary) => boundary.restore());
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([1, 2] as const)(
+    "retains the exact weak pair through %s nested microtask checkpoint(s)",
+    async (checkpoints) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await renderStrictVersions(root, {
+          session: session(`toolbar-microtasks-${checkpoints}`),
+          onClose: vi.fn(),
+          onPreview: vi.fn(),
+          refreshKey: 0,
+        });
+        await screen.findByText(named.title!);
+        const refresh = versionsToolbarButtons(host).refresh;
+        refresh.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const queued: VoidFunction[] = [];
+        vi.spyOn(globalThis, "queueMicrotask").mockImplementation(
+          (callback) => {
+            queued.push(callback);
+          },
+        );
+        const queueCheckpoint = (remaining: number) => {
+          if (remaining > 1) {
+            queueMicrotask(() => queueCheckpoint(remaining - 1));
+          }
+        };
+        queueMicrotask(() => queueCheckpoint(checkpoints));
+        refresh.addEventListener(
+          "keydown",
+          () => {
+            for (
+              let checkpoint = 0;
+              checkpoint < checkpoints;
+              checkpoint++
+            ) {
+              queued.splice(0).forEach((callback) => callback());
+            }
+          },
+          { capture: true, once: true },
+        );
+        const event = createVersionsToolbarKey(refresh, "ArrowRight");
+
+        act(() => {
+          refresh.dispatchEvent(event);
+          while (queued.length > 0) {
+            queued.splice(0).forEach((callback) => callback());
+          }
+        });
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(versionsToolbarButtons(host).close).toHaveFocus();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("preserves the rightful wrapper after throwing, wrong-source, and duplicate attempts", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-rightful-wrapper"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      const { refresh, close } = versionsToolbarButtons(host);
+      const closeCapture = capturedProps(close).onKeyDownCapture;
+      const throwingQuery = vi.fn(() => {
+        throw new Error("invalid wrapper query");
+      });
+      interceptEvent(
+        refresh,
+        "onKeyDownCapture",
+        (original, event) => {
+          const invalid = cloneVersionsToolbarReactKey(
+            event,
+            Object.create(null),
+          ).clone as unknown as Record<PropertyKey, unknown>;
+          invalid.isDefaultPrevented = throwingQuery;
+          original(
+            invalid as unknown as CapturedEvent<HTMLButtonElement>,
+          );
+          invalid.currentTarget = null;
+          closeCapture?.(event);
+          original(event);
+          original(event);
+        },
+      );
+      refresh.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const accepted = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      expect(throwingQuery).toHaveBeenCalledOnce();
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("uses the current React 19 default query after reentrant public prevention", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const nestedEvents: globalThis.KeyboardEvent[] = [];
+    let postPreventionQueries = 0;
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-post-prevention-query"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      const refresh = versionsToolbarButtons(host).refresh;
+      interceptEvent(refresh, "onKeyDown", (original, event) => {
+        const isolated = cloneVersionsToolbarReactKey(
+          event,
+          Object.create(null),
+        );
+        const wrapper = isolated.clone as unknown as Record<
+          PropertyKey,
+          unknown
+        >;
+        const reactPreventDefault = wrapper.preventDefault;
+        if (typeof reactPreventDefault !== "function") {
+          throw new Error("React preventDefault was unavailable");
+        }
+        wrapper.preventDefault = vi.fn(function (this: object) {
+          const result = Reflect.apply(reactPreventDefault, this, []);
+          const currentQuery = (
+            this as Record<PropertyKey, unknown>
+          ).isDefaultPrevented;
+          if (typeof currentQuery !== "function") {
+            throw new Error("React did not install its default query");
+          }
+          (
+            this as Record<PropertyKey, unknown>
+          ).isDefaultPrevented = function (this: object) {
+            postPreventionQueries++;
+            if (nestedEvents.length === 0) {
+              const nested = createVersionsToolbarKey(
+                refresh,
+                "ArrowRight",
+              );
+              nestedEvents.push(nested);
+              refresh.dispatchEvent(nested);
+            }
+            return Reflect.apply(currentQuery, this, []);
+          };
+          return result;
+        });
+        original(
+          wrapper as unknown as CapturedEvent<HTMLButtonElement>,
+        );
+        wrapper.currentTarget = null;
+      });
+      refresh.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const accepted = await dispatchVersionsToolbarKey(
+        refresh,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      expect(postPreventionQueries).toBeGreaterThan(0);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(nestedEvents).toHaveLength(1);
+      expect(nestedEvents[0]?.defaultPrevented).toBe(false);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects public method drift before effects and accepts a clean successor", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let defaultQueries = 0;
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-method-drift"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      const initial = versionsToolbarButtons(host).refresh;
+      const staleHandler = capturedProps(initial).onKeyDown;
+      interceptEvent(initial, "onKeyDown", (original, event) => {
+        const isolated = cloneVersionsToolbarReactKey(
+          event,
+          Object.create(null),
+        );
+        const wrapper = isolated.clone as unknown as Record<
+          PropertyKey,
+          unknown
+        >;
+        const defaultQuery = wrapper.isDefaultPrevented;
+        if (typeof defaultQuery !== "function") {
+          throw new Error("React isDefaultPrevented was unavailable");
+        }
+        wrapper.isDefaultPrevented = function (this: object) {
+          const result = Reflect.apply(defaultQuery, this, []);
+          if (++defaultQueries === 2) {
+            wrapper.isPropagationStopped = vi.fn(() => false);
+          }
+          return result;
+        };
+        original(
+          wrapper as unknown as CapturedEvent<HTMLButtonElement>,
+        );
+        wrapper.currentTarget = null;
+      });
+      initial.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const rejected = await dispatchVersionsToolbarKey(
+        initial,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      expect(defaultQueries).toBe(2);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const current = versionsToolbarButtons(host).refresh;
+      expect(capturedProps(current).onKeyDown).not.toBe(staleHandler);
+      current.focus();
+      focus.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        current,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("stops after a throwing retained prevention and recovers cleanly", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const throwingPrevention = vi.fn(() => {
+      throw new Error("prevention failed");
+    });
+
+    try {
+      await renderStrictVersions(root, {
+        session: session("toolbar-throwing-prevention"),
+        onClose: vi.fn(),
+        onPreview: vi.fn(),
+        refreshKey: 0,
+      });
+      await screen.findByText(named.title!);
+      const initial = versionsToolbarButtons(host).refresh;
+      const staleHandler = capturedProps(initial).onKeyDown;
+      interceptEvent(initial, "onKeyDown", (original, event) => {
+        const isolated = cloneVersionsToolbarReactKey(
+          event,
+          Object.create(null),
+        );
+        const wrapper = isolated.clone as unknown as Record<
+          PropertyKey,
+          unknown
+        >;
+        wrapper.preventDefault = throwingPrevention;
+        original(
+          wrapper as unknown as CapturedEvent<HTMLButtonElement>,
+        );
+        wrapper.currentTarget = null;
+      });
+      initial.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+
+      const rejected = await dispatchVersionsToolbarKey(
+        initial,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      expect(throwingPrevention).toHaveBeenCalledOnce();
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const current = versionsToolbarButtons(host).refresh;
+      expect(capturedProps(current).onKeyDown).not.toBe(staleHandler);
+      current.focus();
+      focus.mockClear();
+      const accepted = await dispatchVersionsToolbarKey(
+        current,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
   it.each([
     ["ArrowRight", "refresh", "close"],
     ["ArrowDown", "refresh", "close"],
@@ -4441,7 +5054,7 @@ describe("VersionsPanel · direct-root Strict Mode toolbar navigation", () => {
     }
   });
 
-  it("rejects crossed deliveries and recovers with a clean event", async () => {
+  it("preserves the rightful event when another delivery follows synchronously", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const host = document.createElement("div");
     document.body.append(host);
@@ -4467,10 +5080,10 @@ describe("VersionsPanel · direct-root Strict Mode toolbar navigation", () => {
         await Promise.resolve();
       });
 
-      expect(first.defaultPrevented).toBe(false);
+      expect(first.defaultPrevented).toBe(true);
       expect(second.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-      expect(refresh).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(versionsToolbarButtons(host).close).toHaveFocus();
 
       const current = versionsToolbarButtons(host).refresh;
       current.focus();
