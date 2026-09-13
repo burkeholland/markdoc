@@ -192,22 +192,22 @@ interface ActivityKeyboardAuthority {
     void
   >;
   readonly trusted: ActivityTrustedGetter;
-  readonly reactMethodMatches: (
-    event: object,
-    property: PropertyKey,
-    value: unknown,
-  ) => boolean;
   readonly isCurrent: () => boolean;
 }
 
 type ActivityHeaderKeyPhase = "capture" | "bubble";
+type ActivityHeaderKeyFinalization =
+  | "idle"
+  | "validating-control"
+  | "ready"
+  | "finalizing"
+  | "poisoned"
+  | "consumed";
 
 interface ActivityReactKeyMethods {
   readonly preventDefault: (...args: never[]) => unknown;
-  readonly stopPropagation: (...args: never[]) => unknown;
   readonly isDefaultPrevented: (...args: never[]) => unknown;
   readonly isPropagationStopped: (...args: never[]) => unknown;
-  readonly persist: (...args: never[]) => unknown;
 }
 
 interface ActivityHeaderKeyFacts {
@@ -246,6 +246,7 @@ interface ActivityNativeKeyDelivery {
   readonly snapshot: ActivityNativeKeySnapshot;
   delegationTarget: Node | null;
   crossedPanel: boolean;
+  finalization: ActivityHeaderKeyFinalization;
   captureInvalid: boolean;
   captureRootCount: number;
   captureRootEvent: ReactKeyboardEvent<HTMLElement> | null;
@@ -1312,8 +1313,6 @@ function captureActivityKeyboardAuthority(
   const HTMLElementConstructor = ownerWindow.HTMLElement;
   const EventTargetConstructor = ownerWindow.EventTarget;
   const apply = ownerWindow.Reflect.apply;
-  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
-  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
   const eventPrototype = EventConstructor.prototype;
   const uiEventPrototype = UIEventConstructor.prototype;
   const keyboardPrototype = KeyboardEventConstructor.prototype;
@@ -1442,26 +1441,6 @@ function captureActivityKeyboardAuthority(
       documentView.read() === ownerWindow;
     return historyIsClean;
   };
-  const reactMethodMatches = (
-    event: object,
-    property: PropertyKey,
-    value: unknown,
-  ) => {
-    if (!isCurrent() || typeof value !== "function") return false;
-    try {
-      let owner: object | null = event;
-      while (owner) {
-        const descriptor = getOwnPropertyDescriptor(owner, property);
-        if (descriptor) {
-          return "value" in descriptor && descriptor.value === value;
-        }
-        owner = getPrototypeOf(owner) as object | null;
-      }
-    } catch {
-      historyIsClean = false;
-    }
-    return false;
-  };
   if (!isCurrent()) return null;
   return Object.freeze({
     ownerWindow,
@@ -1497,7 +1476,6 @@ function captureActivityKeyboardAuthority(
     listen,
     unlisten,
     trusted,
-    reactMethodMatches,
     isCurrent,
   });
 }
@@ -1585,6 +1563,7 @@ function activityControlIsEnabled(element: HTMLButtonElement) {
 function activityNativeKeySnapshotMatches(
   keyboard: ActivityKeyboardAuthority,
   delivery: ActivityNativeKeyDelivery,
+  defaultPrevented = false,
 ) {
   const { snapshot } = delivery;
   const { event } = snapshot;
@@ -1606,7 +1585,7 @@ function activityNativeKeySnapshotMatches(
       (view === null ||
         view === snapshot.publication.ownerWindow ||
         view === snapshot.receiver) &&
-      !keyboard.eventDefaultPrevented.read(event) &&
+      keyboard.eventDefaultPrevented.read(event) === defaultPrevented &&
       !keyboard.eventCancelBubble.read(event) &&
       !keyboard.repeat.read(event) &&
       !keyboard.composing.read(event) &&
@@ -1645,51 +1624,44 @@ function activityReactKeyMethods(
   try {
     const methods = Object.freeze({
       preventDefault: event.preventDefault as (...args: never[]) => unknown,
-      stopPropagation: event.stopPropagation as (...args: never[]) => unknown,
       isDefaultPrevented: event.isDefaultPrevented as (
         ...args: never[]
       ) => unknown,
       isPropagationStopped: event.isPropagationStopped as (
         ...args: never[]
       ) => unknown,
-      persist: event.persist as (...args: never[]) => unknown,
     });
     if (
-      !keyboard.reactMethodMatches(
-        event,
-        "preventDefault",
-        methods.preventDefault,
-      ) ||
-      !keyboard.reactMethodMatches(
-        event,
-        "stopPropagation",
-        methods.stopPropagation,
-      ) ||
-      !keyboard.reactMethodMatches(
-        event,
-        "isDefaultPrevented",
-        methods.isDefaultPrevented,
-      ) ||
-      !keyboard.reactMethodMatches(
-        event,
-        "isPropagationStopped",
-        methods.isPropagationStopped,
-      ) ||
-      !keyboard.reactMethodMatches(event, "persist", methods.persist) ||
+      typeof methods.preventDefault !== "function" ||
+      typeof methods.isDefaultPrevented !== "function" ||
+      typeof methods.isPropagationStopped !== "function" ||
       keyboard.apply(methods.isDefaultPrevented, event, []) !== false ||
       keyboard.apply(methods.isPropagationStopped, event, []) !== false ||
       (expected !== undefined &&
         (methods.preventDefault !== expected.preventDefault ||
-          methods.stopPropagation !== expected.stopPropagation ||
           methods.isDefaultPrevented !== expected.isDefaultPrevented ||
-          methods.isPropagationStopped !== expected.isPropagationStopped ||
-          methods.persist !== expected.persist))
+          methods.isPropagationStopped !== expected.isPropagationStopped))
     ) {
       return null;
     }
     return methods;
   } catch {
     return null;
+  }
+}
+
+function activityReactKeyMethodIdentitiesMatch(
+  event: ReactKeyboardEvent<HTMLElement>,
+  expected: ActivityReactKeyMethods,
+) {
+  try {
+    return (
+      event.preventDefault === expected.preventDefault &&
+      event.isDefaultPrevented === expected.isDefaultPrevented &&
+      event.isPropagationStopped === expected.isPropagationStopped
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -2269,7 +2241,11 @@ function createActivityPublication({
     let replayRefs: ActivityRefReplay[] = [];
     let domGuard: ActivityDomGuard | null = null;
     let listening = false;
-    const nativeDeliveries = new WeakMap<object, ActivityNativeKeyDelivery>();
+    let nativeDeliveries = new WeakMap<object, ActivityNativeKeyDelivery>();
+    let rootBubbleDeliveries = new WeakMap<
+      object,
+      ActivityNativeKeyDelivery
+    >();
     const seenNativeKeys = new WeakSet<object>();
     const nativeBubbleTargets = new Set<EventTarget>();
     const publishedDomMatches = () =>
@@ -2305,6 +2281,8 @@ function createActivityPublication({
       if (retired) return false;
       retired = true;
       retirement = reason;
+      nativeDeliveries = new WeakMap<object, ActivityNativeKeyDelivery>();
+      rootBubbleDeliveries = new WeakMap<object, ActivityNativeKeyDelivery>();
       removeListeners();
       coordinator.retire(publication);
       if (currentRuntime?.publication === publication) currentRuntime = null;
@@ -2346,19 +2324,33 @@ function createActivityPublication({
           entry.owner.element() === entry.element,
       );
 
+    const poisonNativeDelivery = (delivery: ActivityNativeKeyDelivery) => {
+      delivery.captureInvalid = true;
+      delivery.bubbleInvalid = true;
+      delivery.finalization = "poisoned";
+      nativeDeliveries.delete(delivery.snapshot.event);
+      if (delivery.bubbleEvent) {
+        rootBubbleDeliveries.delete(delivery.bubbleEvent);
+      }
+    };
+
     /**
      * The publication's own owner-realm capture listener on the window: the first listener that can
      * see a trusted header keydown, and the only place a delivery ledger is ever opened. One native
      * event is snapshotted at most once, so a re-dispatched event can never open a second ledger.
      */
     function captureNative(this: EventTarget, nativeEvent: Event) {
+      if (seenNativeKeys.has(nativeEvent)) {
+        const delivery = nativeDeliveries.get(nativeEvent);
+        if (delivery) poisonNativeDelivery(delivery);
+        return;
+      }
       if (
         retired ||
         !keyboard ||
         !keyboard.isCurrent() ||
         !(nativeEvent instanceof keyboard.KeyboardEvent) ||
-        Object.getPrototypeOf(nativeEvent) !== keyboard.KeyboardEvent.prototype ||
-        seenNativeKeys.has(nativeEvent)
+        Object.getPrototypeOf(nativeEvent) !== keyboard.KeyboardEvent.prototype
       ) {
         return;
       }
@@ -2411,6 +2403,7 @@ function createActivityPublication({
           }),
           delegationTarget: null,
           crossedPanel: false,
+          finalization: "idle",
           captureInvalid: false,
           captureRootCount: 0,
           captureRootEvent: null,
@@ -2425,13 +2418,6 @@ function createActivityPublication({
           bubbleRootEvent: null,
         };
         nativeDeliveries.set(nativeEvent, delivery);
-        queueMicrotask(() => {
-          queueMicrotask(() => {
-            if (nativeDeliveries.get(nativeEvent) === delivery) {
-              nativeDeliveries.delete(nativeEvent);
-            }
-          });
-        });
       } catch {
         nativeDeliveries.delete(nativeEvent);
       }
@@ -2484,8 +2470,28 @@ function createActivityPublication({
       event: ReactKeyboardEvent<HTMLDivElement>,
     ) => {
       if (retired || !keyboard || !event || typeof event !== "object") return;
-      const carried = activityWrapperNativeEvent(event);
-      const delivery = carried ? nativeDeliveries.get(carried) : undefined;
+      let delivery: ActivityNativeKeyDelivery | undefined;
+      let carried: object | null;
+      if (phase === "bubble") {
+        delivery = rootBubbleDeliveries.get(event);
+        if (!delivery || delivery.snapshot.publication !== publication) return;
+        if (delivery.finalization !== "ready") {
+          poisonNativeDelivery(delivery);
+          return;
+        }
+        delivery.finalization = "finalizing";
+        carried = activityWrapperNativeEvent(event);
+        if (
+          carried !== delivery.snapshot.event ||
+          nativeDeliveries.get(carried) !== delivery
+        ) {
+          poisonNativeDelivery(delivery);
+          return;
+        }
+      } else {
+        carried = activityWrapperNativeEvent(event);
+        delivery = carried ? nativeDeliveries.get(carried) : undefined;
+      }
       if (!delivery || delivery.snapshot.publication !== publication) return;
       const staged = delivery.snapshot;
       const controls = currentHeaderControls();
@@ -2529,7 +2535,7 @@ function createActivityPublication({
         !publication.publishedDomMatches()
       ) {
         if (phase === "capture") delivery.captureInvalid = true;
-        else delivery.bubbleInvalid = true;
+        else poisonNativeDelivery(delivery);
         return;
       }
       if (phase === "capture") {
@@ -2564,6 +2570,7 @@ function createActivityPublication({
       }
       const rootEvent: ReactKeyboardEvent<HTMLElement> = event;
       if (
+        delivery.finalization !== "finalizing" ||
         !delivery.delegationTarget ||
         delivery.delegationTarget !== facts.delegationTarget ||
         !delivery.crossedPanel ||
@@ -2586,7 +2593,7 @@ function createActivityPublication({
           [source.element],
         )
       ) {
-        delivery.bubbleInvalid = true;
+        poisonNativeDelivery(delivery);
         return;
       }
       delivery.bubbleRootCount += 1;
@@ -2633,6 +2640,18 @@ function createActivityPublication({
       const carried = activityWrapperNativeEvent(event);
       const delivery = carried ? nativeDeliveries.get(carried) : undefined;
       if (!delivery || delivery.snapshot.publication !== publication) return;
+      if (phase === "bubble") {
+        if (
+          delivery.finalization !== "idle" ||
+          delivery.bubbleEvent !== null ||
+          delivery.bubbleRootEvent !== null
+        ) {
+          poisonNativeDelivery(delivery);
+          return;
+        }
+        delivery.finalization = "validating-control";
+        rootBubbleDeliveries.set(event, delivery);
+      }
       const facts = exactActivityHeaderKey(
         event,
         publication,
@@ -2646,7 +2665,7 @@ function createActivityPublication({
       );
       if (!facts) {
         if (phase === "capture") delivery.captureInvalid = true;
-        else delivery.bubbleInvalid = true;
+        else poisonNativeDelivery(delivery);
         return;
       }
       const staged = delivery.snapshot;
@@ -2687,10 +2706,11 @@ function createActivityPublication({
         return;
       }
       if (
+        delivery.finalization !== "validating-control" ||
         !delivery.delegationTarget ||
         delivery.delegationTarget !== facts.delegationTarget
       ) {
-        delivery.bubbleInvalid = true;
+        poisonNativeDelivery(delivery);
         return;
       }
       const captureEvent = delivery.captureEvent;
@@ -2715,16 +2735,21 @@ function createActivityPublication({
           [source.element],
         )
       ) {
-        delivery.bubbleInvalid = true;
+        poisonNativeDelivery(delivery);
         return;
       }
       delivery.bubbleCount += 1;
       if (delivery.bubbleCount !== 1) {
-        delivery.bubbleInvalid = true;
+        poisonNativeDelivery(delivery);
         return;
       }
       delivery.bubbleEvent = event;
       delivery.bubbleMethods = facts.methods;
+      if (delivery.finalization !== "validating-control") {
+        poisonNativeDelivery(delivery);
+        return;
+      }
+      delivery.finalization = "ready";
     };
 
     /**
@@ -2736,6 +2761,20 @@ function createActivityPublication({
       const delivery = nativeDeliveries.get(nativeEvent);
       if (retired || !keyboard || !delivery) return;
       if (delivery.snapshot.publication !== publication) return;
+      try {
+        if (
+          keyboard.eventCurrentTarget.read(nativeEvent) !==
+            delivery.delegationTarget ||
+          keyboard.eventPhase.read(nativeEvent) !==
+            keyboard.Event.BUBBLING_PHASE
+        ) {
+          return;
+        }
+      } catch {
+        poisonNativeDelivery(delivery);
+        return;
+      }
+      nativeDeliveries.delete(nativeEvent);
       const staged = delivery.snapshot;
       const captureEvent = delivery.captureEvent;
       const bubbleEvent = delivery.bubbleEvent;
@@ -2749,12 +2788,10 @@ function createActivityPublication({
             ? "navigate-refresh"
             : "navigate-close"
         ];
+      let claimed = false;
       try {
         if (
-          keyboard.eventCurrentTarget.read(nativeEvent) !==
-            delivery.delegationTarget ||
-          keyboard.eventPhase.read(nativeEvent) !==
-            keyboard.Event.BUBBLING_PHASE ||
+          delivery.finalization !== "finalizing" ||
           !delivery.crossedPanel ||
           delivery.captureInvalid ||
           delivery.bubbleInvalid ||
@@ -2795,7 +2832,25 @@ function createActivityPublication({
         );
         const destination =
           destinationIndex === null ? null : (controls[destinationIndex] ?? null);
+        const captureMethods = delivery.captureMethods;
+        const retainedBubbleMethods = delivery.bubbleMethods;
+        const bubbleMethods = activityReactKeyMethods(
+          bubbleEvent,
+          keyboard,
+          retainedBubbleMethods,
+        );
         if (
+          !activityReactKeyMethods(
+            captureEvent,
+            keyboard,
+            captureMethods,
+          ) ||
+          !bubbleMethods ||
+          delivery.finalization !== "finalizing" ||
+          delivery.captureInvalid ||
+          delivery.bubbleInvalid ||
+          bubbleEvent.nativeEvent !== nativeEvent ||
+          bubbleEvent.defaultPrevented !== false ||
           destinationIndex === null ||
           !destination ||
           destination.element === source.element ||
@@ -2818,45 +2873,160 @@ function createActivityPublication({
         ) {
           return;
         }
-        delivery.captureInvalid = true;
-        delivery.bubbleInvalid = true;
-        nativeDeliveries.delete(nativeEvent);
-        const bubbleMethods = activityReactKeyMethods(
-          bubbleEvent,
-          keyboard,
-          delivery.bubbleMethods,
-        );
-        if (
-          !bubbleMethods ||
-          bubbleEvent.nativeEvent !== nativeEvent ||
-          bubbleEvent.defaultPrevented !== false
-        ) {
-          return;
-        }
+        claimed = true;
         keyboard.apply(bubbleMethods.preventDefault, bubbleEvent, []);
         const currentIsDefaultPrevented = bubbleEvent.isDefaultPrevented as (
           ...args: never[]
         ) => unknown;
+        const currentIsPropagationStopped =
+          bubbleEvent.isPropagationStopped as (...args: never[]) => unknown;
         if (
+          delivery.finalization !== "finalizing" ||
+          delivery.captureInvalid ||
+          delivery.bubbleInvalid ||
           !keyboard.isCurrent() ||
           !keyboard.eventDefaultPrevented.read(nativeEvent) ||
+          keyboard.eventCancelBubble.read(nativeEvent) ||
           !bubbleEvent.defaultPrevented ||
-          !keyboard.reactMethodMatches(
-            bubbleEvent,
-            "isDefaultPrevented",
-            currentIsDefaultPrevented,
-          ) ||
-          keyboard.apply(currentIsDefaultPrevented, bubbleEvent, []) !== true
+          bubbleEvent.preventDefault !== bubbleMethods.preventDefault ||
+          typeof currentIsDefaultPrevented !== "function" ||
+          typeof currentIsPropagationStopped !== "function" ||
+          currentIsPropagationStopped !== bubbleMethods.isPropagationStopped
         ) {
           return;
         }
-        keyboard.focus.invoke(destination.element, { preventScroll: true });
+        const wrapperDefaultPrevented = keyboard.apply(
+          currentIsDefaultPrevented,
+          bubbleEvent,
+          [],
+        );
+        if (
+          wrapperDefaultPrevented !== true ||
+          delivery.finalization !== "finalizing" ||
+          delivery.captureInvalid ||
+          delivery.bubbleInvalid ||
+          bubbleEvent.preventDefault !== bubbleMethods.preventDefault ||
+          bubbleEvent.isDefaultPrevented !== currentIsDefaultPrevented ||
+          bubbleEvent.isPropagationStopped !==
+            bubbleMethods.isPropagationStopped
+        ) {
+          return;
+        }
+        const wrapperPropagationStopped = keyboard.apply(
+          bubbleMethods.isPropagationStopped,
+          bubbleEvent,
+          [],
+        );
+        const finalControls = currentHeaderControls();
+        const finalSource =
+          finalControls?.find(
+            (control) => control.kind === staged.control.kind,
+          ) ?? null;
+        const finalDestinationIndex = finalSource
+          ? activityHeaderDestination(
+              staged.key,
+              finalSource.index,
+              finalControls?.length ?? 0,
+            )
+          : null;
+        const finalDestination =
+          finalDestinationIndex === null
+            ? null
+            : (finalControls?.[finalDestinationIndex] ?? null);
+        if (
+          wrapperPropagationStopped !== false ||
+          delivery.finalization !== "finalizing" ||
+          delivery.captureInvalid ||
+          delivery.bubbleInvalid ||
+          delivery.captureRootCount !== 1 ||
+          delivery.captureRootEvent !== captureEvent ||
+          delivery.captureCount !== 1 ||
+          delivery.captureEvent !== captureEvent ||
+          delivery.bubbleCount !== 1 ||
+          delivery.bubbleEvent !== bubbleEvent ||
+          delivery.bubbleRootCount !== 1 ||
+          delivery.bubbleRootEvent !== bubbleEvent ||
+          rootBubbleDeliveries.get(bubbleEvent) !== delivery ||
+          currentRuntime?.publication !== publication ||
+          !listening ||
+          !delivery.delegationTarget ||
+          !nativeBubbleTargets.has(delivery.delegationTarget) ||
+          publication.presentation !== presentation ||
+          publication.keyboard !== keyboard ||
+          publication.ownerWindow !== ownerWindow ||
+          keyboard.ownerWindow !== ownerWindow ||
+          keyboard.documentView.read() !== ownerWindow ||
+          !keyboard.isCurrent() ||
+          !coordinator.isCurrent(publication) ||
+          !coordinator.hasClaimed(
+            presentation.visit,
+            publication,
+            action,
+            [captureEvent, bubbleEvent],
+            nativeEvent,
+            [source.element, destination.element],
+          ) ||
+          !factsAreCurrent() ||
+          !exactDomIsCurrent() ||
+          !publication.publishedDomMatches() ||
+          !finalControls ||
+          !finalSource ||
+          finalSource.index !== source.index ||
+          finalSource.element !== source.element ||
+          !activityHeaderControlsMatch(
+            publication.headerControls,
+            finalControls,
+          ) ||
+          keyboard.activeElement.read(publication.ownerDocument) !==
+            finalSource.element ||
+          finalDestinationIndex !== destinationIndex ||
+          !finalDestination ||
+          finalDestination.element !== destination.element ||
+          publication.headerControls[finalDestinationIndex]?.element !==
+            finalDestination.element ||
+          finalDestination.element.ownerDocument !==
+            publication.ownerDocument ||
+          !finalDestination.element.isConnected ||
+          finalDestination.element.parentElement !== publication.header ||
+          publication.header.children.item(
+            headerDomIndex(finalDestination.kind),
+          ) !== finalDestination.element ||
+          !activityControlIsEnabled(finalDestination.element) ||
+          !activityNativeKeySnapshotMatches(keyboard, delivery, true) ||
+          keyboard.eventCurrentTarget.read(nativeEvent) !==
+            delivery.delegationTarget ||
+          keyboard.eventPhase.read(nativeEvent) !==
+            keyboard.Event.BUBBLING_PHASE ||
+          bubbleEvent.nativeEvent !== nativeEvent ||
+          bubbleEvent.defaultPrevented !== true ||
+          !activityReactKeyMethodIdentitiesMatch(
+            captureEvent,
+            captureMethods,
+          ) ||
+          !activityReactKeyMethodIdentitiesMatch(bubbleEvent, {
+            preventDefault: bubbleMethods.preventDefault,
+            isDefaultPrevented: currentIsDefaultPrevented,
+            isPropagationStopped: bubbleMethods.isPropagationStopped,
+          }) ||
+          !keyboard.eventDefaultPrevented.read(nativeEvent) ||
+          keyboard.eventCancelBubble.read(nativeEvent) ||
+          delivery.finalization !== "finalizing"
+        ) {
+          return;
+        }
+        keyboard.focus.invoke(finalDestination.element, {
+          preventScroll: true,
+        });
       } catch {
-        delivery.captureInvalid = true;
-        delivery.bubbleInvalid = true;
+        poisonNativeDelivery(delivery);
         return;
+      } finally {
+        if (bubbleEvent) rootBubbleDeliveries.delete(bubbleEvent);
+        if (delivery.finalization !== "poisoned") {
+          delivery.finalization = "consumed";
+        }
+        if (claimed) requestPublicationSuccessor();
       }
-      requestPublicationSuccessor();
     }
 
     const attachListeners = () => {
