@@ -2420,7 +2420,7 @@ function createHintPublication(
         if (phase === "bubble") {
           delivery.captureInvalid = true;
           delivery.bubbleInvalid = true;
-          if (nativeKeyDeliveries.get(carried) === delivery) {
+          if (carried && nativeKeyDeliveries.get(carried) === delivery) {
             nativeKeyDeliveries.delete(carried);
           }
         }
