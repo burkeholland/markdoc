@@ -175,7 +175,12 @@ const SUGGESTION_ACTIONS_CLASS = "mt-2 flex flex-wrap items-center gap-2";
 const SUGGESTION_ACCEPT_CLASS = "btn btn-sm btn-primary shrink-0 gap-1.5 whitespace-nowrap";
 const SUGGESTION_REJECT_CLASS = "btn btn-sm btn-outline shrink-0 gap-1.5 whitespace-nowrap";
 const seenSuggestionNativeEvents = new WeakSet<globalThis.MouseEvent>();
-const claimedSuggestionNativeEvents = new WeakSet<globalThis.MouseEvent>();
+const claimedSuggestionNativeEvents = new WeakSet<Event>();
+const attemptedSuggestionKeyboardNativeEvents = new WeakSet<Event>();
+const attemptedSuggestionKeyboardReactEvents = new WeakSet<object>();
+const claimedSuggestionKeyboardReactEvents = new WeakSet<object>();
+const claimedSuggestionKeyboardMovements = new WeakSet<SuggestionKeyboardMovement>();
+const claimedSuggestionKeyboardWindowProofs = new WeakSet<SuggestionKeyboardWindowProof>();
 const suggestionEventCurrentTargetGetter = Object.getOwnPropertyDescriptor(
   globalThis.Event.prototype,
   "currentTarget",
@@ -291,6 +296,153 @@ interface SuggestionActionDefinition {
   readonly onClick: (event: MouseEvent<HTMLButtonElement>) => void;
 }
 
+type SuggestionNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+interface SuggestionActionControlPublication {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly actionIdentity: symbol;
+  readonly kind: SuggestionActionKind;
+  readonly element: HTMLButtonElement;
+  readonly path: readonly EventTarget[];
+  readonly action: SuggestionActionDefinition;
+}
+
+interface SuggestionKeyboardPropertyAuthority<Value> {
+  readonly read: (value: object) => Value;
+  readonly isCurrent: () => boolean;
+}
+
+interface SuggestionKeyboardMethodAuthority<Args extends readonly unknown[], Result> {
+  readonly value: (...args: Args) => Result;
+  readonly call: (receiver: object, ...args: Args) => Result;
+  readonly isCurrent: () => boolean;
+}
+
+interface SuggestionKeyboardWindowMethodAuthority<Method> {
+  readonly value: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface SuggestionKeyboardTrustedAuthority {
+  readonly matches: (event: object) => boolean;
+  readonly read: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface SuggestionKeyboardActiveElementAuthority {
+  readonly read: (document: Document) => Element | null;
+  readonly isCurrent: () => boolean;
+}
+
+interface SuggestionKeyboardWindowProof {
+  readonly registration: SuggestionKeyboardWindowRegistration;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface SuggestionKeyboardWindowRegistration {
+  readonly proofFor: (
+    event: globalThis.KeyboardEvent,
+  ) => SuggestionKeyboardWindowProof | null;
+  readonly claim: (proof: SuggestionKeyboardWindowProof) => boolean;
+  readonly release: () => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface SuggestionKeyboardAuthority {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof Event;
+  readonly KeyboardEvent: typeof globalThis.KeyboardEvent;
+  readonly HTMLElement: typeof HTMLElement;
+  readonly keyboardPrototype: object;
+  readonly prototypeOf: typeof Object.getPrototypeOf;
+  readonly apply: typeof Reflect.apply;
+  readonly trusted: SuggestionKeyboardTrustedAuthority;
+  readonly activeElement: SuggestionKeyboardActiveElementAuthority;
+  readonly type: SuggestionKeyboardPropertyAuthority<string>;
+  readonly target: SuggestionKeyboardPropertyAuthority<EventTarget | null>;
+  readonly currentTarget: SuggestionKeyboardPropertyAuthority<EventTarget | null>;
+  readonly phase: SuggestionKeyboardPropertyAuthority<number>;
+  readonly bubbles: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly cancelable: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly composed: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly defaultPrevented: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly cancelBubble: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly key: SuggestionKeyboardPropertyAuthority<string>;
+  readonly code: SuggestionKeyboardPropertyAuthority<string>;
+  readonly location: SuggestionKeyboardPropertyAuthority<number>;
+  readonly ctrlKey: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly metaKey: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly altKey: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly shiftKey: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly repeat: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly composing: SuggestionKeyboardPropertyAuthority<boolean>;
+  readonly view: SuggestionKeyboardPropertyAuthority<Window | null>;
+  readonly composedPath: SuggestionKeyboardMethodAuthority<readonly [], EventTarget[]>;
+  readonly preventDefault: SuggestionKeyboardMethodAuthority<readonly [], void>;
+  readonly focus: SuggestionKeyboardMethodAuthority<readonly [options?: FocusOptions], void>;
+  readonly addWindowEventListener: SuggestionKeyboardWindowMethodAuthority<
+    Window["addEventListener"]
+  >;
+  readonly removeWindowEventListener: SuggestionKeyboardWindowMethodAuthority<
+    Window["removeEventListener"]
+  >;
+  readonly terminal: SuggestionKeyboardWindowRegistration;
+  readonly isCurrent: () => boolean;
+}
+
+interface SuggestionReactKeyProof {
+  readonly event: object;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly target: HTMLButtonElement;
+  readonly currentTarget: HTMLDivElement;
+  readonly phase: number;
+  readonly preventDefault: () => void;
+  readonly stopPropagation: () => void;
+  readonly isDefaultPrevented: () => boolean;
+  readonly isPropagationStopped: () => boolean;
+  readonly defaultPreventedResult: false;
+  readonly propagationStoppedResult: false;
+}
+
+interface SuggestionKeyboardMovement {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly sourceIdentity: symbol;
+  readonly sourceActionIdentity: symbol;
+  readonly destinationIdentity: symbol;
+  readonly destinationActionIdentity: symbol;
+  readonly key: SuggestionNavigationKey;
+  readonly source: SuggestionActionControlPublication;
+  readonly destination: SuggestionActionControlPublication;
+}
+
+interface SuggestionKeyboardNativeProof {
+  readonly event: globalThis.KeyboardEvent;
+  readonly publication: SuggestionActionPublication;
+  readonly movement: SuggestionKeyboardMovement;
+  readonly delegatedRoot: EventTarget;
+  readonly path: readonly EventTarget[];
+  readonly terminal: EventTarget;
+  readonly window: SuggestionKeyboardWindowProof;
+  readonly key: SuggestionNavigationKey;
+  readonly code: string;
+  readonly location: number;
+  readonly capture: SuggestionReactKeyProof;
+  bubble: SuggestionReactKeyProof | null;
+  crossed: boolean;
+}
+
 interface SuggestionActionRender {
   readonly identity: symbol;
   readonly authority: SuggestionActionAuthority;
@@ -299,6 +451,8 @@ interface SuggestionActionRender {
   readonly captureRoot: (element: HTMLDivElement | null) => void;
   readonly onRootClickCapture: (event: MouseEvent<HTMLDivElement>) => void;
   readonly onRootClick: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly onRootKeyDownCapture: (event: KeyboardEvent<HTMLDivElement>) => void;
+  readonly onRootKeyDown: (event: KeyboardEvent<HTMLDivElement>) => void;
   readonly captureAccept: ((element: HTMLButtonElement | null) => void) | null;
   readonly onAcceptCapture: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
   readonly onAccept: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
@@ -334,6 +488,9 @@ interface SuggestionActionPublication {
   readonly render: SuggestionActionRender;
   readonly authority: SuggestionActionAuthority;
   readonly elements: SuggestionActionElements;
+  readonly acceptControl: SuggestionActionControlPublication | null;
+  readonly rejectControl: SuggestionActionControlPublication | null;
+  readonly actions: readonly SuggestionActionControlPublication[];
   readonly ownerDocument: Document;
   readonly dom: SuggestionActionDomSnapshot;
   readonly placement: SuggestionActionPlacement;
@@ -346,7 +503,14 @@ interface SuggestionActionCells {
   readonly retired: WeakSet<SuggestionActionPublication>;
   readonly claimedPublications: WeakSet<SuggestionActionPublication>;
   readonly claimedActions: WeakSet<SuggestionActionDefinition>;
+  readonly claimedControls: WeakSet<SuggestionActionControlPublication>;
   readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+  readonly attemptedReactEvents: WeakSet<object>;
+  readonly attemptedNativeEvents: WeakSet<Event>;
+  readonly claimedMovements: WeakSet<SuggestionKeyboardMovement>;
+  readonly claimedWindowProofs: WeakSet<SuggestionKeyboardWindowProof>;
+  readonly evaluatingPublications: WeakSet<SuggestionActionPublication>;
 }
 
 interface SuggestionActionElementOwnerView {
@@ -439,6 +603,8 @@ interface SuggestionActionPublicationRuntime {
   readonly stageCaptureAction: (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => void;
   readonly stageBubbleAction: (action: SuggestionActionDefinition, event: MouseEvent<HTMLButtonElement>) => void;
   readonly stageBubbleRoot: (event: MouseEvent<HTMLDivElement>) => void;
+  readonly stageCaptureKey: (event: KeyboardEvent<HTMLDivElement>) => void;
+  readonly stageBubbleKey: (event: KeyboardEvent<HTMLDivElement>) => void;
   readonly retireForElement: () => void;
   readonly retireForLayout: () => void;
   readonly retireForAction: () => void;
@@ -621,6 +787,839 @@ function suggestionActionControlIsEnabled(control: HTMLButtonElement): boolean {
   return true;
 }
 
+function suggestionKeyboardDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return Boolean(
+    current &&
+      current.configurable === expected.configurable &&
+      current.enumerable === expected.enumerable &&
+      current.writable === expected.writable &&
+      current.value === expected.value &&
+      current.get === expected.get &&
+      current.set === expected.set,
+  );
+}
+
+function captureSuggestionKeyboardPropertyAuthority<Value>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: PropertyKey,
+): SuggestionKeyboardPropertyAuthority<Value> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const descriptorOwner = owner;
+      const expected = Object.freeze({ ...descriptor });
+      const getter = descriptor.get;
+      return Object.freeze({
+        read: (value: object) =>
+          apply(getter as (this: object) => Value, value, []),
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          suggestionKeyboardDescriptorsMatch(
+            getOwnPropertyDescriptor(descriptorOwner, property),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function captureSuggestionKeyboardMethodAuthority<
+  Args extends readonly unknown[],
+  Result,
+>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: PropertyKey,
+): SuggestionKeyboardMethodAuthority<Args, Result> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (descriptor) {
+      if (!("value" in descriptor) || typeof descriptor.value !== "function") return null;
+      const descriptorOwner = owner;
+      const expected = Object.freeze({ ...descriptor });
+      const method = descriptor.value as (...args: Args) => Result;
+      return Object.freeze({
+        value: method,
+        call: (receiver: object, ...args: Args) => apply(method, receiver, args),
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          suggestionKeyboardDescriptorsMatch(
+            getOwnPropertyDescriptor(descriptorOwner, property),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function captureSuggestionKeyboardWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): SuggestionKeyboardWindowMethodAuthority<Window[Property]> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(
+      Object.freeze({
+        target,
+        descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+        prototype,
+      }),
+    );
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(ownerWindow, property, ownerWindow) as Window[Property];
+  if (!found || typeof value !== "function") return null;
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Reflect.get === reflectGet &&
+    path.every(({ target: entry, descriptor, prototype }) => {
+      if (getPrototypeOf(entry) !== prototype) return false;
+      const current = getOwnPropertyDescriptor(entry, property);
+      return descriptor
+        ? suggestionKeyboardDescriptorsMatch(current, descriptor)
+        : current === undefined;
+    }) &&
+    reflectGet(ownerWindow, property, ownerWindow) === value;
+  return isCurrent() ? Object.freeze({ value, isCurrent }) : null;
+}
+
+function captureSuggestionKeyboardTrustedAuthority(
+  ownerWindow: Window & typeof globalThis,
+): SuggestionKeyboardTrustedAuthority | null {
+  let probe: globalThis.KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("suggestion-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    suggestionKeyboardDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function captureSuggestionKeyboardActiveElementAuthority(
+  ownerWindow: Window & typeof globalThis,
+): SuggestionKeyboardActiveElementAuthority | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  let owner: object | null = ownerWindow.Document.prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, "activeElement");
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const descriptorOwner = owner;
+      const expected = Object.freeze({ ...descriptor });
+      return Object.freeze({
+        read: (document: Document) =>
+          apply(
+            descriptor.get as (this: Document) => Element | null,
+            document,
+            [],
+          ),
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          suggestionKeyboardDescriptorsMatch(
+            getOwnPropertyDescriptor(descriptorOwner, "activeElement"),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function createSuggestionKeyboardWindowRegistration(
+  ownerWindow: Window & typeof globalThis,
+  ownerDocument: Document,
+  KeyboardEventConstructor: typeof globalThis.KeyboardEvent,
+  keyboardPrototype: object,
+  currentTarget: SuggestionKeyboardPropertyAuthority<EventTarget | null>,
+  phase: SuggestionKeyboardPropertyAuthority<number>,
+  composedPath: SuggestionKeyboardMethodAuthority<readonly [], EventTarget[]>,
+  addEventListener: SuggestionKeyboardWindowMethodAuthority<
+    Window["addEventListener"]
+  >,
+  removeEventListener: SuggestionKeyboardWindowMethodAuthority<
+    Window["removeEventListener"]
+  >,
+  apply: typeof Reflect.apply,
+  prototypeOf: typeof Object.getPrototypeOf,
+  intrinsicsAreCurrent: () => boolean,
+): SuggestionKeyboardWindowRegistration | null {
+  const proofs = new WeakMap<
+    globalThis.KeyboardEvent,
+    SuggestionKeyboardWindowProof
+  >();
+  const invalidEvents = new WeakSet<Event>();
+  let claimed: SuggestionKeyboardWindowProof | null = null;
+  let active = false;
+  let released = false;
+  const listener: EventListener = function (
+    this: EventTarget,
+    event: Event,
+  ) {
+    if (
+      !active ||
+      released ||
+      !(event instanceof KeyboardEventConstructor) ||
+      prototypeOf(event) !== keyboardPrototype ||
+      invalidEvents.has(event) ||
+      !intrinsicsAreCurrent()
+    ) {
+      return;
+    }
+    if (proofs.has(event)) {
+      invalidEvents.add(event);
+      return;
+    }
+    try {
+      const eventCurrentTarget = currentTarget.read(event);
+      const eventPhase = phase.read(event);
+      const path = composedPath.call(event);
+      const terminal = path.at(-1);
+      if (
+        !eventCurrentTarget ||
+        eventCurrentTarget !== this ||
+        terminal !== this ||
+        eventPhase !== ownerWindow.Event.CAPTURING_PHASE ||
+        path.at(-2) !== ownerDocument
+      ) {
+        invalidEvents.add(event);
+        return;
+      }
+      proofs.set(
+        event,
+        Object.freeze({
+          registration,
+          nativeEvent: event,
+          receiver: this,
+          currentTarget: eventCurrentTarget,
+          terminal,
+          path: Object.freeze([...path]),
+        }),
+      );
+    } catch {
+      invalidEvents.add(event);
+    }
+  };
+  const proofFor = (event: globalThis.KeyboardEvent) => {
+    const proof = proofs.get(event);
+    if (
+      !proof ||
+      !active ||
+      released ||
+      claimed !== null ||
+      invalidEvents.has(event) ||
+      proof.registration !== registration ||
+      proof.nativeEvent !== event ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      !intrinsicsAreCurrent()
+    ) {
+      return null;
+    }
+    try {
+      const path = composedPath.call(event);
+      return path.length === proof.path.length &&
+        path.every((entry, index) => entry === proof.path[index]) &&
+        path.at(-2) === ownerDocument &&
+        path.at(-1) === proof.receiver
+        ? proof
+        : null;
+    } catch {
+      invalidEvents.add(event);
+      return null;
+    }
+  };
+  const registration: SuggestionKeyboardWindowRegistration = Object.freeze({
+    proofFor,
+    claim: (proof: SuggestionKeyboardWindowProof) => {
+      if (claimed || proofFor(proof.nativeEvent) !== proof) return false;
+      claimed = proof;
+      return true;
+    },
+    release: () => {
+      if (released) return;
+      released = true;
+      active = false;
+      apply(removeEventListener.value, ownerWindow, [
+        "keydown",
+        listener,
+        true,
+      ]);
+    },
+    isCurrent: () =>
+      active &&
+      !released &&
+      intrinsicsAreCurrent() &&
+      addEventListener.isCurrent() &&
+      removeEventListener.isCurrent(),
+  });
+  active = true;
+  try {
+    apply(addEventListener.value, ownerWindow, [
+      "keydown",
+      listener,
+      true,
+    ]);
+    if (registration.isCurrent()) return registration;
+    registration.release();
+    return null;
+  } catch {
+    active = false;
+    released = true;
+    return null;
+  }
+}
+
+function captureSuggestionKeyboardAuthority(
+  ownerWindow: Window & typeof globalThis,
+  ownerDocument: Document,
+): SuggestionKeyboardAuthority | null {
+  try {
+    const EventConstructor = ownerWindow.Event;
+    const UIEventConstructor = ownerWindow.UIEvent;
+    const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+    const DocumentConstructor = ownerWindow.Document;
+    const HTMLElementConstructor = ownerWindow.HTMLElement;
+    const eventPrototype = EventConstructor.prototype;
+    const uiEventPrototype = UIEventConstructor.prototype;
+    const keyboardPrototype = KeyboardEventConstructor.prototype;
+    const documentPrototype = DocumentConstructor.prototype;
+    const htmlElementPrototype = HTMLElementConstructor.prototype;
+    const prototypeOf = ownerWindow.Object.getPrototypeOf;
+    const apply = ownerWindow.Reflect.apply;
+    const prototypeLinks = [
+      [keyboardPrototype, prototypeOf(keyboardPrototype)],
+      [uiEventPrototype, prototypeOf(uiEventPrototype)],
+      [eventPrototype, prototypeOf(eventPrototype)],
+      [documentPrototype, prototypeOf(documentPrototype)],
+      [htmlElementPrototype, prototypeOf(htmlElementPrototype)],
+    ] as const;
+    const trusted = captureSuggestionKeyboardTrustedAuthority(ownerWindow);
+    const activeElement =
+      captureSuggestionKeyboardActiveElementAuthority(ownerWindow);
+    const type = captureSuggestionKeyboardPropertyAuthority<string>(
+      ownerWindow,
+      eventPrototype,
+      "type",
+    );
+    const target =
+      captureSuggestionKeyboardPropertyAuthority<EventTarget | null>(
+        ownerWindow,
+        eventPrototype,
+        "target",
+      );
+    const currentTarget =
+      captureSuggestionKeyboardPropertyAuthority<EventTarget | null>(
+        ownerWindow,
+        eventPrototype,
+        "currentTarget",
+      );
+    const phase = captureSuggestionKeyboardPropertyAuthority<number>(
+      ownerWindow,
+      eventPrototype,
+      "eventPhase",
+    );
+    const bubbles = captureSuggestionKeyboardPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "bubbles",
+    );
+    const cancelable = captureSuggestionKeyboardPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "cancelable",
+    );
+    const composed = captureSuggestionKeyboardPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "composed",
+    );
+    const defaultPrevented =
+      captureSuggestionKeyboardPropertyAuthority<boolean>(
+        ownerWindow,
+        eventPrototype,
+        "defaultPrevented",
+      );
+    const cancelBubble = captureSuggestionKeyboardPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "cancelBubble",
+    );
+    const key = captureSuggestionKeyboardPropertyAuthority<string>(
+      ownerWindow,
+      keyboardPrototype,
+      "key",
+    );
+    const code = captureSuggestionKeyboardPropertyAuthority<string>(
+      ownerWindow,
+      keyboardPrototype,
+      "code",
+    );
+    const location = captureSuggestionKeyboardPropertyAuthority<number>(
+      ownerWindow,
+      keyboardPrototype,
+      "location",
+    );
+    const ctrlKey = captureSuggestionKeyboardPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "ctrlKey",
+    );
+    const metaKey = captureSuggestionKeyboardPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "metaKey",
+    );
+    const altKey = captureSuggestionKeyboardPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "altKey",
+    );
+    const shiftKey = captureSuggestionKeyboardPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "shiftKey",
+    );
+    const repeat = captureSuggestionKeyboardPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "repeat",
+    );
+    const composing = captureSuggestionKeyboardPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "isComposing",
+    );
+    const view = captureSuggestionKeyboardPropertyAuthority<Window | null>(
+      ownerWindow,
+      uiEventPrototype,
+      "view",
+    );
+    const composedPath = captureSuggestionKeyboardMethodAuthority<
+      readonly [],
+      EventTarget[]
+    >(ownerWindow, eventPrototype, "composedPath");
+    const preventDefault = captureSuggestionKeyboardMethodAuthority<
+      readonly [],
+      void
+    >(ownerWindow, eventPrototype, "preventDefault");
+    const focus = captureSuggestionKeyboardMethodAuthority<
+      readonly [options?: FocusOptions],
+      void
+    >(ownerWindow, htmlElementPrototype, "focus");
+    const addWindowEventListener = captureSuggestionKeyboardWindowMethod(
+      ownerWindow,
+      "addEventListener",
+    );
+    const removeWindowEventListener = captureSuggestionKeyboardWindowMethod(
+      ownerWindow,
+      "removeEventListener",
+    );
+    const authorities = [
+      type,
+      target,
+      currentTarget,
+      phase,
+      bubbles,
+      cancelable,
+      composed,
+      defaultPrevented,
+      cancelBubble,
+      key,
+      code,
+      location,
+      ctrlKey,
+      metaKey,
+      altKey,
+      shiftKey,
+      repeat,
+      composing,
+      view,
+      composedPath,
+      preventDefault,
+      focus,
+    ];
+    if (
+      !trusted ||
+      !activeElement ||
+      !addWindowEventListener ||
+      !removeWindowEventListener ||
+      authorities.some((authority) => authority === null)
+    ) {
+      return null;
+    }
+    let stale = false;
+    const intrinsicsAreCurrent = () => {
+      if (stale) return false;
+      const current =
+        ownerDocument.defaultView === ownerWindow &&
+        ownerWindow.Event === EventConstructor &&
+        ownerWindow.UIEvent === UIEventConstructor &&
+        ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+        ownerWindow.Document === DocumentConstructor &&
+        ownerWindow.HTMLElement === HTMLElementConstructor &&
+        ownerWindow.Object.getPrototypeOf === prototypeOf &&
+        ownerWindow.Reflect.apply === apply &&
+        EventConstructor.prototype === eventPrototype &&
+        UIEventConstructor.prototype === uiEventPrototype &&
+        KeyboardEventConstructor.prototype === keyboardPrototype &&
+        DocumentConstructor.prototype === documentPrototype &&
+        HTMLElementConstructor.prototype === htmlElementPrototype &&
+        prototypeLinks.every(
+          ([prototype, parent]) => prototypeOf(prototype) === parent,
+        ) &&
+        prototypeOf(keyboardPrototype) === uiEventPrototype &&
+        prototypeOf(uiEventPrototype) === eventPrototype &&
+        trusted.isCurrent() &&
+        activeElement.isCurrent() &&
+        addWindowEventListener.isCurrent() &&
+        removeWindowEventListener.isCurrent() &&
+        authorities.every((authority) => authority?.isCurrent());
+      if (!current) stale = true;
+      return current;
+    };
+    const terminal = createSuggestionKeyboardWindowRegistration(
+      ownerWindow,
+      ownerDocument,
+      KeyboardEventConstructor,
+      keyboardPrototype,
+      currentTarget!,
+      phase!,
+      composedPath!,
+      addWindowEventListener,
+      removeWindowEventListener,
+      apply,
+      prototypeOf,
+      intrinsicsAreCurrent,
+    );
+    if (!terminal) return null;
+    return Object.freeze({
+      ownerWindow,
+      Event: EventConstructor,
+      KeyboardEvent: KeyboardEventConstructor,
+      HTMLElement: HTMLElementConstructor,
+      keyboardPrototype,
+      prototypeOf,
+      apply,
+      trusted,
+      activeElement,
+      type: type!,
+      target: target!,
+      currentTarget: currentTarget!,
+      phase: phase!,
+      bubbles: bubbles!,
+      cancelable: cancelable!,
+      composed: composed!,
+      defaultPrevented: defaultPrevented!,
+      cancelBubble: cancelBubble!,
+      key: key!,
+      code: code!,
+      location: location!,
+      ctrlKey: ctrlKey!,
+      metaKey: metaKey!,
+      altKey: altKey!,
+      shiftKey: shiftKey!,
+      repeat: repeat!,
+      composing: composing!,
+      view: view!,
+      composedPath: composedPath!,
+      preventDefault: preventDefault!,
+      focus: focus!,
+      addWindowEventListener,
+      removeWindowEventListener,
+      terminal,
+      isCurrent: () => intrinsicsAreCurrent() && terminal.isCurrent(),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function suggestionActionEventPath(
+  source: Node,
+  ownerDocument: Document,
+): readonly EventTarget[] | null {
+  const path: EventTarget[] = [];
+  for (let current: Node | null = source; current; current = current.parentNode) {
+    path.push(current);
+    if (current === ownerDocument) return Object.freeze(path);
+  }
+  return null;
+}
+
+function suggestionNavigationKey(key: string): SuggestionNavigationKey | null {
+  switch (key) {
+    case "ArrowLeft":
+    case "ArrowUp":
+    case "ArrowRight":
+    case "ArrowDown":
+    case "Home":
+    case "End":
+      return key;
+    default:
+      return null;
+  }
+}
+
+function suggestionKeyboardMovement(
+  publication: SuggestionActionPublication,
+  source: SuggestionActionControlPublication,
+  key: SuggestionNavigationKey,
+): SuggestionKeyboardMovement | null {
+  const sourceIndex = publication.actions.indexOf(source);
+  if (sourceIndex < 0) return null;
+  let destinationIndex: number;
+  if (key === "ArrowLeft" || key === "ArrowUp") {
+    destinationIndex = sourceIndex - 1;
+  } else if (key === "ArrowRight" || key === "ArrowDown") {
+    destinationIndex = sourceIndex + 1;
+  } else if (key === "Home") {
+    destinationIndex = 0;
+  } else {
+    destinationIndex = publication.actions.length - 1;
+  }
+  const destination = publication.actions[destinationIndex];
+  if (!destination || destination === source) return null;
+  return Object.freeze({
+    identity: Symbol("suggestion-keyboard-movement"),
+    publicationIdentity: publication.identity,
+    sourceIdentity: source.identity,
+    sourceActionIdentity: source.action.identity,
+    destinationIdentity: destination.identity,
+    destinationActionIdentity: destination.action.identity,
+    key,
+    source,
+    destination,
+  });
+}
+
+function captureSuggestionReactKeyProof(
+  authority: SuggestionKeyboardAuthority,
+  event: KeyboardEvent<HTMLDivElement>,
+  nativeEvent: globalThis.KeyboardEvent,
+  target: HTMLButtonElement,
+  currentTarget: HTMLDivElement,
+  phase: number,
+  key: SuggestionNavigationKey,
+  code: string,
+  location: number,
+  view: Window,
+): SuggestionReactKeyProof | null {
+  try {
+    const preventDefault = event.preventDefault;
+    const stopPropagation = event.stopPropagation;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
+    if (
+      event.nativeEvent !== nativeEvent ||
+      event.type !== "keydown" ||
+      event.target !== target ||
+      event.currentTarget !== currentTarget ||
+      event.eventPhase !== phase ||
+      event.key !== key ||
+      event.code !== code ||
+      event.location !== location ||
+      !event.bubbles ||
+      !event.cancelable ||
+      event.defaultPrevented ||
+      !event.isTrusted ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      event.shiftKey ||
+      event.repeat ||
+      event.isComposing ||
+      event.view !== view ||
+      typeof preventDefault !== "function" ||
+      typeof stopPropagation !== "function" ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      authority.apply(isDefaultPrevented, event, []) !== false ||
+      authority.apply(isPropagationStopped, event, []) !== false
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event,
+      nativeEvent,
+      target,
+      currentTarget,
+      phase,
+      preventDefault,
+      stopPropagation,
+      isDefaultPrevented,
+      isPropagationStopped,
+      defaultPreventedResult: false,
+      propagationStoppedResult: false,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function suggestionReactKeyProofIsCurrent(
+  authority: SuggestionKeyboardAuthority,
+  proof: SuggestionReactKeyProof,
+): boolean {
+  try {
+    const event = proof.event as KeyboardEvent<HTMLElement>;
+    return (
+      event.preventDefault === proof.preventDefault &&
+      event.stopPropagation === proof.stopPropagation &&
+      event.isDefaultPrevented === proof.isDefaultPrevented &&
+      event.isPropagationStopped === proof.isPropagationStopped &&
+      authority.apply(proof.isDefaultPrevented, proof.event, []) ===
+        proof.defaultPreventedResult &&
+      authority.apply(proof.isPropagationStopped, proof.event, []) ===
+        proof.propagationStoppedResult
+    );
+  } catch {
+    return false;
+  }
+}
+
+function suggestionReactKeyProofWasPrevented(
+  authority: SuggestionKeyboardAuthority,
+  proof: SuggestionReactKeyProof,
+): boolean {
+  try {
+    const event = proof.event as KeyboardEvent<HTMLElement>;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    return (
+      event.preventDefault === proof.preventDefault &&
+      event.stopPropagation === proof.stopPropagation &&
+      event.isPropagationStopped === proof.isPropagationStopped &&
+      event.defaultPrevented === true &&
+      typeof isDefaultPrevented === "function" &&
+      authority.apply(isDefaultPrevented, proof.event, []) === true &&
+      authority.apply(proof.isPropagationStopped, proof.event, []) ===
+        proof.propagationStoppedResult
+    );
+  } catch {
+    return false;
+  }
+}
+
+function suggestionPublishedActionsAreCurrent(
+  publication: SuggestionActionPublication,
+): boolean {
+  const expected = [publication.acceptControl, publication.rejectControl].filter(
+    (control): control is SuggestionActionControlPublication =>
+      Boolean(
+        control &&
+          control.action.enabled &&
+          suggestionActionControlIsEnabled(control.element),
+      ),
+  );
+  return (
+    Object.isFrozen(publication.actions) &&
+    publication.actions.length <= 2 &&
+    publication.actions.length === expected.length &&
+    publication.actions.every((control, index) => {
+      const expectedAction =
+        control.kind === "accept"
+          ? publication.render.accept
+          : publication.render.reject;
+      const expectedElement =
+        control.kind === "accept"
+          ? publication.elements.accept
+          : publication.elements.reject;
+      const expectedCallback =
+        control.kind === "accept"
+          ? publication.authority.onAccept
+          : publication.authority.onReject;
+      const path = suggestionActionEventPath(
+        control.element,
+        publication.ownerDocument,
+      );
+      return (
+        control === expected[index] &&
+        control.publicationIdentity === publication.identity &&
+        control.actionIdentity === control.action.identity &&
+        control.action === expectedAction &&
+        control.action.renderIdentity === publication.render.identity &&
+        control.action.kind === control.kind &&
+        control.action.callback === expectedCallback &&
+        control.element === expectedElement &&
+        control.element.parentElement === publication.elements.root &&
+        control.action.enabled &&
+        suggestionActionControlIsEnabled(control.element) &&
+        path !== null &&
+        path.length === control.path.length &&
+        path.every((entry, pathIndex) => entry === control.path[pathIndex])
+      );
+    })
+  );
+}
+
 function suggestionActionButtonPresentationsMatch(
   previous: SuggestionActionButtonPresentation | null,
   current: SuggestionActionButtonPresentation | null,
@@ -685,30 +1684,32 @@ function exactSuggestionActionDomIsCurrent(publication: SuggestionActionPublicat
   ) {
     return false;
   }
-  return authority.order.every((kind, index) => {
-    const button = buttons[index];
-    const expected = kind === "accept" ? accept : reject;
-    const expectedPresentation = kind === "accept" ? presentation.accept : presentation.reject;
-    return (
-      !!button &&
-      !!expectedPresentation &&
-      button === expected &&
-      root.children.item(index) === button &&
-      button.isConnected &&
-      button.ownerDocument === ownerDocument &&
-      button.parentElement === root &&
-      button.tagName === "BUTTON" &&
-      button.type === "button" &&
-      button.disabled === expectedPresentation.disabled &&
-      button.className === expectedPresentation.className &&
-      button.dataset.testid === expectedPresentation.testId &&
-      button.textContent?.trim() === expectedPresentation.label &&
-      button.title === (expectedPresentation.title ?? "") &&
-      button.getAttribute("aria-label") === expectedPresentation.ariaLabel &&
-      button.getAttribute("aria-busy") === (expectedPresentation.busy ? "true" : null) &&
-      (expectedPresentation.disabled || suggestionActionControlIsEnabled(button))
-    );
-  });
+  return (
+    authority.order.every((kind, index) => {
+      const button = buttons[index];
+      const expected = kind === "accept" ? accept : reject;
+      const expectedPresentation = kind === "accept" ? presentation.accept : presentation.reject;
+      return (
+        !!button &&
+        !!expectedPresentation &&
+        button === expected &&
+        root.children.item(index) === button &&
+        button.isConnected &&
+        button.ownerDocument === ownerDocument &&
+        button.parentElement === root &&
+        button.tagName === "BUTTON" &&
+        button.type === "button" &&
+        button.disabled === expectedPresentation.disabled &&
+        button.className === expectedPresentation.className &&
+        button.dataset.testid === expectedPresentation.testId &&
+        button.textContent?.trim() === expectedPresentation.label &&
+        button.title === (expectedPresentation.title ?? "") &&
+        button.getAttribute("aria-label") === expectedPresentation.ariaLabel &&
+        button.getAttribute("aria-busy") === (expectedPresentation.busy ? "true" : null) &&
+        (expectedPresentation.disabled || suggestionActionControlIsEnabled(button))
+      );
+    }) && suggestionPublishedActionsAreCurrent(publication)
+  );
 }
 
 function suggestionNativeSnapshotFieldsMatch(delivery: SuggestionNativeDelivery): boolean {
@@ -853,6 +1854,19 @@ function createSuggestionActionRender(
     let domGuard: SuggestionActionDomGuard | null = null;
     const nativeDeliveries = new WeakMap<globalThis.MouseEvent, SuggestionNativeDelivery>();
     const nativeBubbleTargets = new Set<EventTarget>();
+    const keyboardProofs = new WeakMap<
+      globalThis.KeyboardEvent,
+      SuggestionKeyboardNativeProof
+    >();
+    const invalidKeyboardEvents = new WeakSet<Event>();
+    const keyboardOwnerWindow = publication.ownerDocument.defaultView;
+    const keyboardAuthority =
+      authority.batch === null && keyboardOwnerWindow
+        ? captureSuggestionKeyboardAuthority(
+            keyboardOwnerWindow,
+            publication.ownerDocument,
+          )
+        : null;
 
     const removeListeners = () => {
       const ownerWindow = publication.ownerDocument.defaultView;
@@ -860,6 +1874,7 @@ function createSuggestionActionRender(
       removeSuggestionClickListener(publication.elements.root, crossNativeRoot);
       for (const target of nativeBubbleTargets) removeSuggestionClickListener(target, finalizeNative);
       nativeBubbleTargets.clear();
+      keyboardAuthority?.terminal.release();
     };
     const release = () => {
       if (released) return;
@@ -1282,6 +2297,465 @@ function createSuggestionActionRender(
       void accepted;
     }
 
+    const suggestionPathsMatch = (
+      expected: readonly EventTarget[],
+      current: readonly EventTarget[],
+    ) =>
+      expected.length === current.length &&
+      expected.every((entry, index) => current[index] === entry);
+
+    const delegatedRootIsCurrent = (
+      path: readonly EventTarget[],
+      delegatedRoot: EventTarget,
+    ) => {
+      const actionRootIndex = path.indexOf(publication.elements.root);
+      const delegatedRootIndex = path.indexOf(delegatedRoot);
+      return (
+        actionRootIndex > 0 &&
+        delegatedRootIndex > actionRootIndex &&
+        delegatedRootIndex < path.length - 1 &&
+        path.lastIndexOf(delegatedRoot) === delegatedRootIndex
+      );
+    };
+
+    const keyboardCandidateIsCurrent = (
+      movement: SuggestionKeyboardMovement,
+    ) => {
+      const source = movement.source;
+      const destination = movement.destination;
+      const sourceControl =
+        source.kind === "accept"
+          ? publication.acceptControl
+          : publication.rejectControl;
+      const destinationControl =
+        destination.kind === "accept"
+          ? publication.acceptControl
+          : publication.rejectControl;
+      return (
+        authority.batch === null &&
+        currentRuntime === runtime &&
+        movement.publicationIdentity === publication.identity &&
+        movement.sourceIdentity === source.identity &&
+        movement.sourceActionIdentity === source.action.identity &&
+        movement.destinationIdentity === destination.identity &&
+        movement.destinationActionIdentity === destination.action.identity &&
+        source !== destination &&
+        source === sourceControl &&
+        destination === destinationControl &&
+        source.action ===
+          (source.kind === "accept" ? render.accept : render.reject) &&
+        destination.action ===
+          (destination.kind === "accept" ? render.accept : render.reject) &&
+        source.action.callback ===
+          (source.kind === "accept" ? authority.onAccept : authority.onReject) &&
+        destination.action.callback ===
+          (destination.kind === "accept"
+            ? authority.onAccept
+            : authority.onReject) &&
+        publication.actions.includes(source) &&
+        publication.actions.includes(destination) &&
+        suggestionPublishedActionsAreCurrent(publication) &&
+        suggestionActionControlIsEnabled(source.element) &&
+        suggestionActionControlIsEnabled(destination.element) &&
+        !cells.claimedPublications.has(publication) &&
+        !cells.claimedControls.has(source) &&
+        !cells.claimedControls.has(destination) &&
+        !cells.claimedActions.has(source.action) &&
+        !cells.claimedActions.has(destination.action) &&
+        publicationIsCurrent() &&
+        keyboardAuthority?.ownerWindow ===
+          publication.ownerDocument.defaultView &&
+        keyboardAuthority.isCurrent() &&
+        keyboardAuthority.activeElement.read(publication.ownerDocument) ===
+          source.element
+      );
+    };
+
+    const nativeKeyboardIsCurrent = (
+      proof: SuggestionKeyboardNativeProof,
+      expectedPhase: number,
+    ) => {
+      const keyboard = keyboardAuthority;
+      if (!keyboard) return false;
+      try {
+        const event = proof.event;
+        const path = keyboard.composedPath.call(event);
+        const eventView = keyboard.view.read(event);
+        return (
+          proof.publication === publication &&
+          keyboard.isCurrent() &&
+          event instanceof keyboard.KeyboardEvent &&
+          keyboard.prototypeOf(event) === keyboard.keyboardPrototype &&
+          publication.ownerDocument.defaultView === keyboard.ownerWindow &&
+          keyboard.trusted.matches(event) &&
+          keyboard.trusted.read(event) === true &&
+          keyboard.type.read(event) === "keydown" &&
+          keyboard.target.read(event) === proof.movement.source.element &&
+          keyboard.currentTarget.read(event) === proof.delegatedRoot &&
+          keyboard.phase.read(event) === expectedPhase &&
+          keyboard.bubbles.read(event) &&
+          keyboard.cancelable.read(event) &&
+          keyboard.composed.read(event) &&
+          !keyboard.defaultPrevented.read(event) &&
+          !keyboard.cancelBubble.read(event) &&
+          keyboard.key.read(event) === proof.key &&
+          keyboard.code.read(event) === proof.code &&
+          keyboard.location.read(event) === proof.location &&
+          !keyboard.ctrlKey.read(event) &&
+          !keyboard.metaKey.read(event) &&
+          !keyboard.altKey.read(event) &&
+          !keyboard.shiftKey.read(event) &&
+          !keyboard.repeat.read(event) &&
+          !keyboard.composing.read(event) &&
+          (eventView === keyboard.ownerWindow ||
+            eventView === proof.window.receiver) &&
+          suggestionPathsMatch(proof.path, path) &&
+          suggestionPathsMatch(proof.window.path, path) &&
+          proof.movement.source.path.length + 1 === path.length &&
+          proof.movement.source.path.every(
+            (entry, index) => path[index] === entry,
+          ) &&
+          delegatedRootIsCurrent(path, proof.delegatedRoot) &&
+          path.at(-2) === publication.ownerDocument &&
+          path.at(-1) === proof.terminal &&
+          proof.window.registration === keyboard.terminal &&
+          proof.window.nativeEvent === event &&
+          proof.window.receiver === proof.window.currentTarget &&
+          proof.window.receiver === proof.window.terminal &&
+          proof.window.receiver === proof.terminal &&
+          keyboard.terminal.proofFor(event) === proof.window &&
+          keyboardCandidateIsCurrent(proof.movement)
+        );
+      } catch {
+        return false;
+      }
+    };
+
+    const releaseKeyboardClaims = (proof: SuggestionKeyboardNativeProof) => {
+      cells.claimedPublications.delete(publication);
+      cells.claimedControls.delete(proof.movement.source);
+      cells.claimedControls.delete(proof.movement.destination);
+      cells.claimedActions.delete(proof.movement.source.action);
+      cells.claimedActions.delete(proof.movement.destination.action);
+    };
+
+    const claimKeyboard = (proof: SuggestionKeyboardNativeProof) => {
+      const keyboard = keyboardAuthority;
+      const capture = proof.capture;
+      const bubble = proof.bubble;
+      if (
+        !keyboard ||
+        !bubble ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedControls.has(proof.movement.source) ||
+        cells.claimedControls.has(proof.movement.destination) ||
+        cells.claimedActions.has(proof.movement.source.action) ||
+        cells.claimedActions.has(proof.movement.destination.action) ||
+        cells.claimedNativeEvents.has(proof.event) ||
+        cells.claimedReactEvents.has(capture.event) ||
+        cells.claimedReactEvents.has(bubble.event) ||
+        cells.claimedMovements.has(proof.movement) ||
+        cells.claimedWindowProofs.has(proof.window) ||
+        claimedSuggestionNativeEvents.has(proof.event) ||
+        claimedSuggestionKeyboardReactEvents.has(capture.event) ||
+        claimedSuggestionKeyboardReactEvents.has(bubble.event) ||
+        claimedSuggestionKeyboardMovements.has(proof.movement) ||
+        claimedSuggestionKeyboardWindowProofs.has(proof.window) ||
+        !cells.evaluatingPublications.has(publication) ||
+        proof.window.registration !== keyboard.terminal ||
+        !keyboard.terminal.claim(proof.window)
+      ) {
+        return false;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedControls.add(proof.movement.source);
+      cells.claimedControls.add(proof.movement.destination);
+      cells.claimedActions.add(proof.movement.source.action);
+      cells.claimedActions.add(proof.movement.destination.action);
+      cells.claimedNativeEvents.add(proof.event);
+      cells.claimedReactEvents.add(capture.event);
+      cells.claimedReactEvents.add(bubble.event);
+      cells.claimedMovements.add(proof.movement);
+      cells.claimedWindowProofs.add(proof.window);
+      claimedSuggestionNativeEvents.add(proof.event);
+      claimedSuggestionKeyboardReactEvents.add(capture.event);
+      claimedSuggestionKeyboardReactEvents.add(bubble.event);
+      claimedSuggestionKeyboardMovements.add(proof.movement);
+      claimedSuggestionKeyboardWindowProofs.add(proof.window);
+      return true;
+    };
+
+    const stageCaptureKey = (event: KeyboardEvent<HTMLDivElement>) => {
+      const keyboard = keyboardAuthority;
+      if (!keyboard || !event || typeof event !== "object") return;
+      let nativeEvent: globalThis.KeyboardEvent;
+      try {
+        nativeEvent = event.nativeEvent;
+      } catch {
+        return;
+      }
+      if (!nativeEvent || typeof nativeEvent !== "object") return;
+      const existing = keyboardProofs.get(nativeEvent);
+      if (
+        existing ||
+        cells.attemptedNativeEvents.has(nativeEvent) ||
+        cells.attemptedReactEvents.has(event) ||
+        attemptedSuggestionKeyboardNativeEvents.has(nativeEvent) ||
+        attemptedSuggestionKeyboardReactEvents.has(event)
+      ) {
+        if (existing) existing.crossed = true;
+        invalidKeyboardEvents.add(nativeEvent);
+        keyboardProofs.delete(nativeEvent);
+        cells.attemptedNativeEvents.add(nativeEvent);
+        cells.attemptedReactEvents.add(event);
+        attemptedSuggestionKeyboardNativeEvents.add(nativeEvent);
+        attemptedSuggestionKeyboardReactEvents.add(event);
+        return;
+      }
+      cells.attemptedNativeEvents.add(nativeEvent);
+      cells.attemptedReactEvents.add(event);
+      attemptedSuggestionKeyboardNativeEvents.add(nativeEvent);
+      attemptedSuggestionKeyboardReactEvents.add(event);
+      try {
+        const target = keyboard.target.read(nativeEvent);
+        const source =
+          publication.acceptControl?.element === target
+            ? publication.acceptControl
+            : publication.rejectControl?.element === target
+              ? publication.rejectControl
+              : null;
+        const key = suggestionNavigationKey(keyboard.key.read(nativeEvent));
+        const windowProof = keyboard.terminal.proofFor(nativeEvent);
+        const eventView = keyboard.view.read(nativeEvent);
+        const delegatedRoot = keyboard.currentTarget.read(nativeEvent);
+        const code = keyboard.code.read(nativeEvent);
+        const location = keyboard.location.read(nativeEvent);
+        if (
+          authority.batch !== null ||
+          !source ||
+          !key ||
+          !windowProof ||
+          !keyboard.isCurrent() ||
+          publication.ownerDocument.defaultView !== keyboard.ownerWindow ||
+          !(nativeEvent instanceof keyboard.KeyboardEvent) ||
+          keyboard.prototypeOf(nativeEvent) !== keyboard.keyboardPrototype ||
+          !keyboard.trusted.matches(nativeEvent) ||
+          keyboard.trusted.read(nativeEvent) !== true ||
+          keyboard.type.read(nativeEvent) !== "keydown" ||
+          keyboard.target.read(nativeEvent) !== source.element ||
+          !delegatedRoot ||
+          keyboard.phase.read(nativeEvent) !==
+            keyboard.Event.CAPTURING_PHASE ||
+          !keyboard.bubbles.read(nativeEvent) ||
+          !keyboard.cancelable.read(nativeEvent) ||
+          !keyboard.composed.read(nativeEvent) ||
+          keyboard.defaultPrevented.read(nativeEvent) ||
+          keyboard.cancelBubble.read(nativeEvent) ||
+          keyboard.key.read(nativeEvent) !== key ||
+          keyboard.ctrlKey.read(nativeEvent) ||
+          keyboard.metaKey.read(nativeEvent) ||
+          keyboard.altKey.read(nativeEvent) ||
+          keyboard.shiftKey.read(nativeEvent) ||
+          keyboard.repeat.read(nativeEvent) ||
+          keyboard.composing.read(nativeEvent) ||
+          (eventView !== keyboard.ownerWindow &&
+            eventView !== windowProof.receiver) ||
+          keyboard.activeElement.read(publication.ownerDocument) !==
+            source.element ||
+          !suggestionPublishedActionsAreCurrent(publication) ||
+          !publicationIsCurrent()
+        ) {
+          return;
+        }
+        const movement = suggestionKeyboardMovement(
+          publication,
+          source,
+          key,
+        );
+        if (!movement || !keyboardCandidateIsCurrent(movement)) return;
+        const path = keyboard.composedPath.call(nativeEvent);
+        const terminal = path.at(-1);
+        if (
+          !terminal ||
+          path.length !== source.path.length + 1 ||
+          !suggestionPathsMatch(path, windowProof.path) ||
+          path.at(-2) !== publication.ownerDocument ||
+          terminal !== windowProof.receiver ||
+          windowProof.receiver !== windowProof.currentTarget ||
+          windowProof.receiver !== windowProof.terminal ||
+          !source.path.every((entry, index) => path[index] === entry) ||
+          !delegatedRootIsCurrent(path, delegatedRoot)
+        ) {
+          return;
+        }
+        const capture = captureSuggestionReactKeyProof(
+          keyboard,
+          event,
+          nativeEvent,
+          source.element,
+          publication.elements.root,
+          keyboard.Event.CAPTURING_PHASE,
+          key,
+          code,
+          location,
+          eventView,
+        );
+        if (!capture) return;
+        const proof: SuggestionKeyboardNativeProof = {
+          event: nativeEvent,
+          publication,
+          movement,
+          delegatedRoot,
+          path: Object.freeze([...path]),
+          terminal,
+          window: windowProof,
+          key,
+          code,
+          location,
+          capture,
+          bubble: null,
+          crossed: false,
+        };
+        keyboardProofs.set(nativeEvent, proof);
+        queueMicrotask(() => {
+          if (keyboardProofs.get(nativeEvent) !== proof) return;
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+        });
+      } catch {
+        invalidKeyboardEvents.add(nativeEvent);
+        keyboardProofs.delete(nativeEvent);
+      }
+    };
+
+    const stageBubbleKey = (event: KeyboardEvent<HTMLDivElement>) => {
+      const keyboard = keyboardAuthority;
+      if (!keyboard || !event || typeof event !== "object") return;
+      let nativeEvent: globalThis.KeyboardEvent;
+      try {
+        nativeEvent = event.nativeEvent;
+      } catch {
+        return;
+      }
+      if (!nativeEvent || typeof nativeEvent !== "object") return;
+      const proof = keyboardProofs.get(nativeEvent);
+      if (
+        cells.attemptedReactEvents.has(event) ||
+        attemptedSuggestionKeyboardReactEvents.has(event)
+      ) {
+        if (proof) proof.crossed = true;
+        invalidKeyboardEvents.add(nativeEvent);
+        keyboardProofs.delete(nativeEvent);
+        return;
+      }
+      cells.attemptedReactEvents.add(event);
+      attemptedSuggestionKeyboardReactEvents.add(event);
+      if (!proof) return;
+      try {
+        if (
+          proof.crossed ||
+          invalidKeyboardEvents.has(nativeEvent) ||
+          proof.bubble ||
+          event === proof.capture.event ||
+          event.nativeEvent !== proof.event ||
+          proof.publication !== publication ||
+          keyboard.phase.read(proof.event) !==
+            keyboard.Event.BUBBLING_PHASE ||
+          !nativeKeyboardIsCurrent(
+            proof,
+            keyboard.Event.BUBBLING_PHASE,
+          )
+        ) {
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+          return;
+        }
+        const eventView = keyboard.view.read(proof.event);
+        if (!eventView) {
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+          return;
+        }
+        const bubble = captureSuggestionReactKeyProof(
+          keyboard,
+          event,
+          proof.event,
+          proof.movement.source.element,
+          publication.elements.root,
+          keyboard.Event.BUBBLING_PHASE,
+          proof.key,
+          proof.code,
+          proof.location,
+          eventView,
+        );
+        if (!bubble) {
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+          return;
+        }
+        proof.bubble = bubble;
+        if (
+          proof.capture.event === bubble.event ||
+          proof.capture.currentTarget !== publication.elements.root ||
+          bubble.currentTarget !== proof.capture.currentTarget ||
+          proof.capture.phase !== keyboard.Event.CAPTURING_PHASE ||
+          bubble.phase !== keyboard.Event.BUBBLING_PHASE ||
+          !suggestionReactKeyProofIsCurrent(keyboard, proof.capture) ||
+          !suggestionReactKeyProofIsCurrent(keyboard, bubble) ||
+          !nativeKeyboardIsCurrent(
+            proof,
+            keyboard.Event.BUBBLING_PHASE,
+          ) ||
+          keyboardProofs.get(nativeEvent) !== proof
+        ) {
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+          return;
+        }
+        cells.evaluatingPublications.add(publication);
+        let claimed = false;
+        try {
+          claimed =
+            nativeKeyboardIsCurrent(
+              proof,
+              keyboard.Event.BUBBLING_PHASE,
+            ) &&
+            suggestionReactKeyProofIsCurrent(keyboard, proof.capture) &&
+            suggestionReactKeyProofIsCurrent(keyboard, bubble) &&
+            keyboardProofs.get(nativeEvent) === proof &&
+            claimKeyboard(proof);
+        } finally {
+          cells.evaluatingPublications.delete(publication);
+        }
+        keyboardProofs.delete(nativeEvent);
+        if (!claimed) return;
+        try {
+          keyboard.apply(bubble.preventDefault, bubble.event, []);
+          if (
+            !keyboard.defaultPrevented.read(proof.event) ||
+            !suggestionReactKeyProofWasPrevented(keyboard, bubble)
+          ) {
+            return;
+          }
+          keyboard.focus.call(proof.movement.destination.element, {
+            preventScroll: true,
+          });
+          requestSuccessor();
+        } finally {
+          releaseKeyboardClaims(proof);
+        }
+      } catch {
+        proof.crossed = true;
+        invalidKeyboardEvents.add(nativeEvent);
+        keyboardProofs.delete(nativeEvent);
+      }
+    };
+
     const runtime: SuggestionActionPublicationRuntime = Object.freeze({
       publication,
       publish: (owners: readonly SuggestionActionElementOwnerView[]) => {
@@ -1311,6 +2785,8 @@ function createSuggestionActionRender(
       stageCaptureAction,
       stageBubbleAction,
       stageBubbleRoot,
+      stageCaptureKey,
+      stageBubbleKey,
       retireForElement: () => {
         retire("element");
       },
@@ -1437,11 +2913,56 @@ function createSuggestionActionRender(
     const elements = committedElements();
     const placement = elements ? captureSuggestionActionPlacement(elements.root) : null;
     if (!elements || !placement) return undefined;
+    const identity = Symbol("suggestion-action-publication");
+    const control = (
+      kind: SuggestionActionKind,
+      element: HTMLButtonElement,
+      action: SuggestionActionDefinition,
+    ): SuggestionActionControlPublication | null => {
+      const path = suggestionActionEventPath(element, elements.root.ownerDocument);
+      if (!path) return null;
+      return Object.freeze({
+        identity: Symbol(`suggestion-${kind}-control`),
+        publicationIdentity: identity,
+        actionIdentity: action.identity,
+        kind,
+        element,
+        path,
+        action,
+      });
+    };
+    const acceptControl =
+      elements.accept && render.accept
+        ? control("accept", elements.accept, render.accept)
+        : null;
+    const rejectControl =
+      elements.reject && render.reject
+        ? control("reject", elements.reject, render.reject)
+        : null;
+    if (
+      (authority.canAccept && !acceptControl) ||
+      (authority.canReject && !rejectControl)
+    ) {
+      return undefined;
+    }
+    const actions = Object.freeze(
+      [acceptControl, rejectControl].filter(
+        (published): published is SuggestionActionControlPublication =>
+          Boolean(
+            published &&
+              published.action.enabled &&
+              suggestionActionControlIsEnabled(published.element),
+          ),
+      ),
+    );
     const publication: SuggestionActionPublication = Object.freeze({
-      identity: Symbol("suggestion-action-publication"),
+      identity,
       render,
       authority,
       elements,
+      acceptControl,
+      rejectControl,
+      actions,
       ownerDocument: elements.root.ownerDocument,
       dom: snapshotSuggestionActionDom(elements.root),
       placement,
@@ -1518,6 +3039,18 @@ function createSuggestionActionRender(
     runtime.stageBubbleRoot(event);
   };
 
+  const onRootKeyDownCapture = (event: KeyboardEvent<HTMLDivElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageCaptureKey(event);
+  };
+
+  const onRootKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const runtime = currentRuntime;
+    if (!runtime || runtime.isRetired()) return;
+    runtime.stageBubbleKey(event);
+  };
+
   Object.assign(render, {
     identity,
     authority,
@@ -1526,6 +3059,8 @@ function createSuggestionActionRender(
     captureRoot: rootOwner.capture,
     onRootClickCapture,
     onRootClick,
+    onRootKeyDownCapture,
+    onRootKeyDown,
     captureAccept: accept?.capture ?? null,
     onAcceptCapture: accept?.onClickCapture ?? null,
     onAccept: accept?.onClick ?? null,
@@ -1566,7 +3101,14 @@ function PublishedSuggestionActions({
     retired: new WeakSet<SuggestionActionPublication>(),
     claimedPublications: new WeakSet<SuggestionActionPublication>(),
     claimedActions: new WeakSet<SuggestionActionDefinition>(),
+    claimedControls: new WeakSet<SuggestionActionControlPublication>(),
     claimedReactEvents: new WeakSet<object>(),
+    claimedNativeEvents: new WeakSet<Event>(),
+    attemptedReactEvents: new WeakSet<object>(),
+    attemptedNativeEvents: new WeakSet<Event>(),
+    claimedMovements: new WeakSet<SuggestionKeyboardMovement>(),
+    claimedWindowProofs: new WeakSet<SuggestionKeyboardWindowProof>(),
+    evaluatingPublications: new WeakSet<SuggestionActionPublication>(),
   }));
   const replayCleanup = useRef(0);
   useLayoutEffect(() => {
@@ -1637,6 +3179,8 @@ function PublishedSuggestionActions({
     captureRoot,
     onRootClickCapture,
     onRootClick,
+    onRootKeyDownCapture,
+    onRootKeyDown,
     captureAccept,
     onAcceptCapture,
     onAccept: onAcceptClick,
@@ -1648,7 +3192,15 @@ function PublishedSuggestionActions({
   const rejectPresentation = presentation.reject;
 
   return (
-    <div ref={captureRoot} className={presentation.rootClassName} onClickCapture={onRootClickCapture} onClick={onRootClick} data-testid={presentation.rootTestId}>
+    <div
+      ref={captureRoot}
+      className={presentation.rootClassName}
+      onClickCapture={onRootClickCapture}
+      onClick={onRootClick}
+      onKeyDownCapture={onRootKeyDownCapture}
+      onKeyDown={onRootKeyDown}
+      data-testid={presentation.rootTestId}
+    >
       {canAccept && (
         <button
           ref={captureAccept}

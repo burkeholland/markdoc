@@ -449,6 +449,8 @@ interface CapturedSuggestionActions {
   root: HTMLDivElement;
   rootCapture: ReviewMouseHandler;
   rootClick: ReviewMouseHandler;
+  rootKeyCapture: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  rootKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   rootRef: ReviewElementRef<HTMLDivElement>;
   accept: CapturedSuggestionControl | null;
   reject: CapturedSuggestionControl | null;
@@ -471,10 +473,203 @@ function captureSuggestionActions(scope: ParentNode = document, index = 0): Capt
     root,
     rootCapture: reactProperty<ReviewMouseHandler>(root, "onClickCapture"),
     rootClick: reactProperty<ReviewMouseHandler>(root, "onClick"),
+    rootKeyCapture: reactProperty<
+      (event: ReactKeyboardEvent<HTMLDivElement>) => void
+    >(root, "onKeyDownCapture"),
+    rootKeyDown: reactProperty<
+      (event: ReactKeyboardEvent<HTMLDivElement>) => void
+    >(root, "onKeyDown"),
     rootRef: reactProperty<ReviewElementRef<HTMLDivElement>>(root, "ref"),
     accept: accept ? captureSuggestionControl(accept) : null,
     reject: reject ? captureSuggestionControl(reject) : null,
   };
+}
+
+type SuggestionNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+function suggestionEventView(
+  ownerDocument: Document,
+  ownerWindow: Window,
+): Window {
+  const implementationSymbol = Object.getOwnPropertySymbols(ownerDocument).find(
+    (symbol) => String(symbol) === "Symbol(impl)",
+  );
+  return implementationSymbol
+    ? (
+        ownerDocument as unknown as Record<
+          symbol,
+          { _globalObject: Window }
+        >
+      )[implementationSymbol]._globalObject
+    : ownerWindow;
+}
+
+function suggestionKeyboardEvent(
+  element: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = element.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The suggestion action has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: suggestionEventView(element.ownerDocument, ownerWindow),
+    ...init,
+  });
+  if (trusted) markRequestModeEventTrusted(event);
+  return event;
+}
+
+function dispatchSuggestionKey(
+  element: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const event = suggestionKeyboardEvent(element, key, init, trusted);
+  act(() => element.dispatchEvent(event));
+  return event;
+}
+
+function replaceKeyboardWrapperMethods(
+  event: ReactKeyboardEvent<HTMLDivElement>,
+) {
+  const originalPreventDefault = event.preventDefault;
+  const originalStopPropagation = event.stopPropagation;
+  const originalIsDefaultPrevented = event.isDefaultPrevented;
+  const originalIsPropagationStopped = event.isPropagationStopped;
+  const preventDefault = vi.fn(function (
+    this: ReactKeyboardEvent<HTMLDivElement>,
+  ) {
+    return Reflect.apply(originalPreventDefault, this, []);
+  });
+  const stopPropagation = vi.fn(function (
+    this: ReactKeyboardEvent<HTMLDivElement>,
+  ) {
+    return Reflect.apply(originalStopPropagation, this, []);
+  });
+  const isDefaultPrevented = vi.fn(function (
+    this: ReactKeyboardEvent<HTMLDivElement>,
+  ) {
+    return Reflect.apply(originalIsDefaultPrevented, this, []);
+  });
+  const isPropagationStopped = vi.fn(function (
+    this: ReactKeyboardEvent<HTMLDivElement>,
+  ) {
+    return Reflect.apply(originalIsPropagationStopped, this, []);
+  });
+  Object.setPrototypeOf(event, Object.create(Object.getPrototypeOf(event)));
+  Object.defineProperties(event, {
+    preventDefault: { configurable: true, value: preventDefault },
+    stopPropagation: { configurable: true, value: stopPropagation },
+    isDefaultPrevented: { configurable: true, value: isDefaultPrevented },
+    isPropagationStopped: {
+      configurable: true,
+      value: isPropagationStopped,
+    },
+  });
+  return {
+    preventDefault,
+    stopPropagation,
+    isDefaultPrevented,
+    isPropagationStopped,
+  };
+}
+
+function dispatchSuggestionKeyWithReactPairMutation(
+  actions: CapturedSuggestionActions,
+  target: HTMLButtonElement,
+  key: SuggestionNavigationKey,
+  mutations: {
+    captureBefore?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+    captureAfter?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+    bubbleBefore?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  } = {},
+) {
+  const propsKey = Object.keys(actions.root).find((entry) =>
+    entry.startsWith("__reactProps$"),
+  );
+  if (!propsKey) throw new Error("React props were not attached to the suggestion root");
+  const record = actions.root as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const props = record[propsKey];
+  const capture = props.onKeyDownCapture;
+  const bubble = props.onKeyDown;
+  const currentTarget = Object.getOwnPropertyDescriptor(
+    target.ownerDocument.defaultView!.Event.prototype,
+    "currentTarget",
+  )?.get;
+  if (
+    typeof capture !== "function" ||
+    typeof bubble !== "function" ||
+    !currentTarget
+  ) {
+    throw new Error("The suggestion root has no complete key delivery pair");
+  }
+  const delivery: {
+    capture: ReactKeyboardEvent<HTMLDivElement> | null;
+    bubble: ReactKeyboardEvent<HTMLDivElement> | null;
+    nativeCaptureTarget: EventTarget | null;
+    nativeBubbleTarget: EventTarget | null;
+  } = {
+    capture: null,
+    bubble: null,
+    nativeCaptureTarget: null,
+    nativeBubbleTarget: null,
+  };
+  const wrapped = {
+    ...props,
+    onKeyDownCapture: (value: ReactKeyboardEvent<HTMLDivElement>) => {
+      delivery.capture = value;
+      delivery.nativeCaptureTarget = Reflect.apply(
+        currentTarget,
+        value.nativeEvent,
+        [],
+      ) as EventTarget | null;
+      mutations.captureBefore?.(value);
+      Reflect.apply(capture, undefined, [value]);
+      mutations.captureAfter?.(value);
+    },
+    onKeyDown: (value: ReactKeyboardEvent<HTMLDivElement>) => {
+      delivery.bubble = value;
+      delivery.nativeBubbleTarget = Reflect.apply(
+        currentTarget,
+        value.nativeEvent,
+        [],
+      ) as EventTarget | null;
+      mutations.bubbleBefore?.(value);
+      Reflect.apply(bubble, undefined, [value]);
+    },
+  };
+  record[propsKey] = wrapped;
+  try {
+    const nativeEvent = dispatchSuggestionKey(target, key);
+    if (!delivery.capture || !delivery.bubble) {
+      throw new Error("React did not deliver both suggestion key wrappers");
+    }
+    return {
+      nativeEvent,
+      captureEvent: delivery.capture,
+      bubbleEvent: delivery.bubble,
+      nativeCaptureTarget: delivery.nativeCaptureTarget,
+      nativeBubbleTarget: delivery.nativeBubbleTarget,
+    };
+  } finally {
+    if (record[propsKey] === wrapped) record[propsKey] = props;
+  }
 }
 
 function captureSuggestionBatchActions(scope: ParentNode = document): CapturedSuggestionActions {
@@ -487,6 +682,12 @@ function captureSuggestionBatchActions(scope: ParentNode = document): CapturedSu
     root,
     rootCapture: reactProperty<ReviewMouseHandler>(root, "onClickCapture"),
     rootClick: reactProperty<ReviewMouseHandler>(root, "onClick"),
+    rootKeyCapture: reactProperty<
+      (event: ReactKeyboardEvent<HTMLDivElement>) => void
+    >(root, "onKeyDownCapture"),
+    rootKeyDown: reactProperty<
+      (event: ReactKeyboardEvent<HTMLDivElement>) => void
+    >(root, "onKeyDown"),
     rootRef: reactProperty<ReviewElementRef<HTMLDivElement>>(root, "ref"),
     accept: accept ? captureSuggestionControl(accept) : null,
     reject: reject ? captureSuggestionControl(reject) : null,
@@ -897,6 +1098,422 @@ describe("CommentsPanel", () => {
         act(() => root.unmount());
         host.remove();
       }
+    });
+
+    it.each([
+      ["accept", "reject", "ArrowRight"],
+      ["accept", "reject", "ArrowDown"],
+      ["accept", "reject", "End"],
+      ["reject", "accept", "ArrowLeft"],
+      ["reject", "accept", "ArrowUp"],
+      ["reject", "accept", "Home"],
+    ] as const)(
+      "moves from %s to %s with %s exactly once without deciding the suggestion",
+      async (sourceKind, destinationKind, key) => {
+        const fixture = reviewSession(
+          `suggestion-keyboard-${sourceKind}-${key.toLowerCase()}`,
+        );
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        const accept = vi.spyOn(session, "acceptCommentSuggestion");
+        const reject = vi.spyOn(session.comments, "rejectSuggestion");
+        const nativePreventDefault = Event.prototype.preventDefault;
+        const nativeFocus = HTMLElement.prototype.focus;
+        const preventDefault = vi
+          .spyOn(Event.prototype, "preventDefault")
+          .mockImplementation(function (this: Event) {
+            Reflect.apply(nativePreventDefault, this, []);
+          });
+        const focus = vi
+          .spyOn(HTMLElement.prototype, "focus")
+          .mockImplementation(function (
+            this: HTMLElement,
+            options?: FocusOptions,
+          ) {
+            void options;
+            Reflect.apply(nativeFocus, this, []);
+          });
+        const rendered = render(
+          <StrictMode>{suggestionPanel(session)}</StrictMode>,
+        );
+        try {
+          await screen.findByTestId("suggestion-accept-comment");
+          const actions = captureSuggestionActions();
+          const source =
+            sourceKind === "accept" ? actions.accept : actions.reject;
+          const destination =
+            destinationKind === "accept" ? actions.accept : actions.reject;
+          if (!source || !destination) {
+            throw new Error("Both suggestion decisions were not rendered");
+          }
+          source.element.focus();
+          preventDefault.mockClear();
+          focus.mockClear();
+          const markup = actions.root.innerHTML;
+
+          const event = dispatchSuggestionKey(
+            source.element as HTMLButtonElement,
+            key,
+          );
+
+          expect(event.defaultPrevented).toBe(true);
+          expect(preventDefault).toHaveBeenCalledOnce();
+          expect(focus).toHaveBeenCalledExactlyOnceWith({
+            preventScroll: true,
+          });
+          expect(focus.mock.instances[0]).toBe(destination.element);
+          expect(destination.element).toHaveFocus();
+          expect(actions.root.innerHTML).toBe(markup);
+          expect(accept).not.toHaveBeenCalled();
+          expect(reject).not.toHaveBeenCalled();
+          expect(api.documents.comment).not.toHaveBeenCalled();
+        } finally {
+          rendered.unmount();
+          focus.mockRestore();
+          preventDefault.mockRestore();
+        }
+      },
+    );
+
+    it.each([
+      ["accept", "ArrowLeft"],
+      ["accept", "ArrowUp"],
+      ["accept", "Home"],
+      ["reject", "ArrowRight"],
+      ["reject", "ArrowDown"],
+      ["reject", "End"],
+    ] as const)(
+      "leaves the %s %s boundary unprevented without wrapping or crossing cards",
+      async (sourceKind, key) => {
+        const fixture = reviewSession(
+          `suggestion-keyboard-boundary-${sourceKind}-${key.toLowerCase()}`,
+        );
+        session = fixture.session;
+        addCommentSuggestion(session, fixture.user);
+        addCommentSuggestion(session, fixture.user);
+        render(<StrictMode>{suggestionPanel(session)}</StrictMode>);
+        await waitFor(() =>
+          expect(screen.getAllByTestId("suggestion-actions")).toHaveLength(2),
+        );
+        const first = captureSuggestionActions(document, 0);
+        const second = captureSuggestionActions(document, 1);
+        const source =
+          sourceKind === "accept" ? first.accept : first.reject;
+        if (!source) throw new Error("The boundary source was not rendered");
+        source.element.focus();
+
+        const event = dispatchSuggestionKey(
+          source.element as HTMLButtonElement,
+          key,
+        );
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(source.element).toHaveFocus();
+        expect(second.accept?.element).not.toHaveFocus();
+        expect(second.reject?.element).not.toHaveFocus();
+      },
+    );
+
+    it("authenticates distinct root wrappers, the delegated root, and the backing Window receiver", async () => {
+      const fixture = reviewSession("suggestion-keyboard-provenance");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      const nativePreventDefault = Event.prototype.preventDefault;
+      const nativeFocus = HTMLElement.prototype.focus;
+      const preventDefault = vi
+        .spyOn(Event.prototype, "preventDefault")
+        .mockImplementation(function (this: Event) {
+          Reflect.apply(nativePreventDefault, this, []);
+        });
+      const focus = vi
+        .spyOn(HTMLElement.prototype, "focus")
+        .mockImplementation(function (
+          this: HTMLElement,
+          options?: FocusOptions,
+        ) {
+          Reflect.apply(
+            nativeFocus,
+            this,
+            options === undefined ? [] : [options],
+          );
+        });
+      const currentTarget = Object.getOwnPropertyDescriptor(
+        Event.prototype,
+        "currentTarget",
+      )?.get;
+      const composedPath = Event.prototype.composedPath;
+      if (!currentTarget) throw new Error("Event.currentTarget has no getter");
+      const observations: {
+        receiver: EventTarget;
+        currentTarget: EventTarget | null;
+        terminal: EventTarget | undefined;
+      }[] = [];
+      const observeWindow = function (this: EventTarget, event: Event) {
+        observations.push({
+          receiver: this,
+          currentTarget: Reflect.apply(currentTarget, event, []) as EventTarget,
+          terminal: (
+            Reflect.apply(composedPath, event, []) as EventTarget[]
+          ).at(-1),
+        });
+      };
+      window.addEventListener("keydown", observeWindow, true);
+      const implementationSymbol = Object.getOwnPropertySymbols(document).find(
+        (symbol) => String(symbol) === "Symbol(impl)",
+      );
+      const backingReceiver = implementationSymbol
+        ? (
+            document as unknown as Record<
+              symbol,
+              { _globalObject: EventTarget }
+            >
+          )[implementationSymbol]._globalObject
+        : window;
+      const rendered = render(
+        <StrictMode>{suggestionPanel(session)}</StrictMode>,
+      );
+      try {
+        await screen.findByTestId("suggestion-accept-comment");
+        const actions = captureSuggestionActions();
+        const source = actions.accept!.element as HTMLButtonElement;
+        const destination = actions.reject!.element;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        let captureMethods:
+          | ReturnType<typeof replaceKeyboardWrapperMethods>
+          | null = null;
+        let bubbleMethods:
+          | ReturnType<typeof replaceKeyboardWrapperMethods>
+          | null = null;
+
+        const delivery = dispatchSuggestionKeyWithReactPairMutation(
+          actions,
+          source,
+          "ArrowRight",
+          {
+            captureBefore: (event) => {
+              captureMethods = replaceKeyboardWrapperMethods(event);
+            },
+            bubbleBefore: (event) => {
+              bubbleMethods = replaceKeyboardWrapperMethods(event);
+            },
+          },
+        );
+
+        expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+        expect(delivery.captureEvent).not.toBe(delivery.bubbleEvent);
+        expect(delivery.captureEvent.nativeEvent).toBe(delivery.nativeEvent);
+        expect(delivery.bubbleEvent.nativeEvent).toBe(delivery.nativeEvent);
+        expect(Object.getPrototypeOf(delivery.captureEvent)).not.toBe(
+          Object.getPrototypeOf(delivery.bubbleEvent),
+        );
+        expect(captureMethods!.preventDefault).not.toBe(
+          bubbleMethods!.preventDefault,
+        );
+        expect(captureMethods!.preventDefault).not.toHaveBeenCalled();
+        expect(bubbleMethods!.preventDefault).toHaveBeenCalledOnce();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(destination).toHaveFocus();
+        expect(delivery.nativeCaptureTarget).toBe(rendered.container);
+        expect(delivery.nativeBubbleTarget).toBe(rendered.container);
+        expect(observations).toEqual([
+          {
+            receiver: backingReceiver,
+            currentTarget: backingReceiver,
+            terminal: backingReceiver,
+          },
+        ]);
+      } finally {
+        rendered.unmount();
+        window.removeEventListener("keydown", observeWindow, true);
+        focus.mockRestore();
+        preventDefault.mockRestore();
+      }
+    });
+
+    it("rejects untrusted, modified, repeated, composing, cancelled, foreign, wrong-focus, and plain keys before clean recovery", async () => {
+      const fixture = reviewSession("suggestion-keyboard-invalid-input");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      render(<StrictMode>{suggestionPanel(session)}</StrictMode>);
+      await screen.findByTestId("suggestion-accept-comment");
+      const actions = captureSuggestionActions();
+      const source = actions.accept!.element as HTMLButtonElement;
+      const destination = actions.reject!.element;
+      const outsider = document.createElement("button");
+      document.body.append(outsider);
+      const rejected = [
+        suggestionKeyboardEvent(source, "ArrowRight", {}, false),
+        suggestionKeyboardEvent(source, "ArrowRight", { ctrlKey: true }),
+        suggestionKeyboardEvent(source, "ArrowRight", { metaKey: true }),
+        suggestionKeyboardEvent(source, "ArrowRight", { altKey: true }),
+        suggestionKeyboardEvent(source, "ArrowRight", { shiftKey: true }),
+        suggestionKeyboardEvent(source, "ArrowRight", { repeat: true }),
+        suggestionKeyboardEvent(source, "ArrowRight", { isComposing: true }),
+        suggestionKeyboardEvent(source, "Enter"),
+        suggestionKeyboardEvent(source, " "),
+        suggestionKeyboardEvent(source, "Tab"),
+      ];
+      const cancelled = suggestionKeyboardEvent(source, "ArrowRight");
+      cancelled.preventDefault();
+      rejected.push(cancelled);
+      const frame = document.createElement("iframe");
+      document.body.append(frame);
+      const foreignWindow = frame.contentWindow;
+      if (!foreignWindow) throw new Error("The foreign frame has no window");
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        code: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: suggestionEventView(foreignWindow.document, foreignWindow),
+      });
+      markRequestModeEventTrusted(foreign);
+      rejected.push(foreign);
+
+      try {
+        for (const event of rejected) {
+          source.focus();
+          act(() => source.dispatchEvent(event));
+          expect(destination).not.toHaveFocus();
+        }
+        outsider.focus();
+        const wrongFocus = dispatchSuggestionKey(source, "ArrowRight");
+        expect(wrongFocus.defaultPrevented).toBe(false);
+        expect(outsider).toHaveFocus();
+
+        source.focus();
+        const accepted = dispatchSuggestionKey(source, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(destination).toHaveFocus();
+      } finally {
+        frame.remove();
+        outsider.remove();
+      }
+    });
+
+    it("skips absent decisions and accepts a clean successor event", async () => {
+      const fixture = reviewSession("suggestion-keyboard-enabled-actions");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user, "document");
+      const reject = vi.spyOn(session.comments, "rejectSuggestion");
+      const rendered = render(
+        <StrictMode>{suggestionPanel(session)}</StrictMode>,
+      );
+      await screen.findByTestId("suggestion-reject-comment");
+      const single = captureSuggestionActions();
+      expect(single.accept).toBeNull();
+      single.reject!.element.focus();
+      for (const key of [
+        "ArrowLeft",
+        "ArrowUp",
+        "ArrowRight",
+        "ArrowDown",
+        "Home",
+        "End",
+      ] as const) {
+        const event = dispatchSuggestionKey(
+          single.reject!.element as HTMLButtonElement,
+          key,
+        );
+        expect(event.defaultPrevented).toBe(false);
+        expect(single.reject!.element).toHaveFocus();
+      }
+      expect(reject).not.toHaveBeenCalled();
+
+      rendered.unmount();
+      addCommentSuggestion(session, fixture.user);
+      render(<StrictMode>{suggestionPanel(session)}</StrictMode>);
+      await screen.findByTestId("suggestion-accept-comment");
+      const current = captureSuggestionActions(document, 1);
+      current.accept!.element.focus();
+      const modified = dispatchSuggestionKey(
+        current.accept!.element as HTMLButtonElement,
+        "ArrowRight",
+        { ctrlKey: true },
+      );
+      expect(modified.defaultPrevented).toBe(false);
+      expect(current.accept!.element).toHaveFocus();
+
+      const accepted = dispatchSuggestionKey(
+        current.accept!.element as HTMLButtonElement,
+        "ArrowRight",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(current.reject!.element).toHaveFocus();
+      expect(reject).not.toHaveBeenCalled();
+    });
+
+    it("skips the disabled Accept decision for an outdated suggestion", async () => {
+      const fixture = reviewSession("suggestion-keyboard-outdated");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      session.ytext.insert(7, "changed ");
+      const accept = vi.spyOn(session, "acceptCommentSuggestion");
+      const reject = vi.spyOn(session.comments, "rejectSuggestion");
+      render(<StrictMode>{suggestionPanel(session)}</StrictMode>);
+      const acceptButton = await screen.findByTestId(
+        "suggestion-accept-comment",
+      );
+      const actions = captureSuggestionActions();
+      expect(acceptButton).toBeDisabled();
+      expect(actions.reject!.element).toBeEnabled();
+      actions.reject!.element.focus();
+
+      const previous = dispatchSuggestionKey(
+        actions.reject!.element as HTMLButtonElement,
+        "ArrowLeft",
+      );
+      const first = dispatchSuggestionKey(
+        actions.reject!.element as HTMLButtonElement,
+        "Home",
+      );
+
+      expect(previous.defaultPrevented).toBe(false);
+      expect(first.defaultPrevented).toBe(false);
+      expect(actions.reject!.element).toHaveFocus();
+      expect(accept).not.toHaveBeenCalled();
+      expect(reject).not.toHaveBeenCalled();
+    });
+
+    it("keeps batch-review decisions outside each card's keyboard navigation", async () => {
+      const fixture = reviewSession("suggestion-keyboard-batch-isolation");
+      session = fixture.session;
+      addCommentSuggestion(session, fixture.user);
+      addCommentSuggestion(session, fixture.user);
+      render(<StrictMode>{suggestionPanel(session)}</StrictMode>);
+      fireEvent.click(screen.getByTestId("comments-tab-suggestions"));
+      await screen.findByTestId("suggestion-batch-actions");
+      const batch = captureSuggestionBatchActions();
+      const cards = screen.getAllByTestId("suggestion-actions");
+      const card = captureSuggestionActions(document, 1);
+      batch.accept!.element.focus();
+
+      const batchEvent = dispatchSuggestionKey(
+        batch.accept!.element as HTMLButtonElement,
+        "ArrowRight",
+      );
+
+      expect(batchEvent.defaultPrevented).toBe(false);
+      expect(batch.accept!.element).toHaveFocus();
+      expect(batch.reject!.element).not.toHaveFocus();
+      expect(cards).toHaveLength(3);
+
+      card.accept!.element.focus();
+      const cardEvent = dispatchSuggestionKey(
+        card.accept!.element as HTMLButtonElement,
+        "ArrowRight",
+      );
+      expect(cardEvent.defaultPrevented).toBe(true);
+      expect(card.reject!.element).toHaveFocus();
+      expect(batch.accept!.element).not.toHaveFocus();
+      expect(batch.reject!.element).not.toHaveFocus();
+      expect(api.documents.comment).not.toHaveBeenCalled();
     });
 
     it.each(["pointer Accept", "keyboard Reject"] as const)(
