@@ -1025,6 +1025,95 @@ describe("phone pane switch keyboard navigation", () => {
   });
 
   it.each([
+    "capture query replaces itself",
+    "capture query replaces bubble query",
+    "bubble query replaces itself",
+  ] as const)(
+    "rejects post-prevention drift when the %s and admits a clean successor",
+    (drift) => {
+      const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+      const onChange = vi.fn<(layout: Layout) => void>();
+      const { host } = renderDirect(strictSegment(onChange));
+      const source = pane(host, "rich");
+      let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+      const restoreCapture = interceptKeyDown(
+        source,
+        "onKeyDownCapture",
+        (original, event) => {
+          if (drift !== "bubble query replaces itself") {
+            const publicQuery = event.isDefaultPrevented;
+            event.isDefaultPrevented = function captureQueryWithDrift(
+              this: typeof event,
+            ) {
+              const result = Reflect.apply(publicQuery, this, []);
+              if (this.nativeEvent.defaultPrevented) {
+                if (drift === "capture query replaces itself") {
+                  this.isDefaultPrevented = vi.fn(() => true);
+                } else {
+                  if (!bubbleWrapper) {
+                    throw new Error("The bubble wrapper was not observed");
+                  }
+                  bubbleWrapper.isDefaultPrevented = vi.fn(() => true);
+                }
+              }
+              return result;
+            };
+          }
+          original(event);
+        },
+      );
+      const restoreBubble = interceptKeyDown(
+        source,
+        "onKeyDown",
+        (original, event) => {
+          bubbleWrapper = event;
+          if (drift === "bubble query replaces itself") {
+            const publicPreventDefault = event.preventDefault;
+            event.preventDefault = function preventWithDriftingQuery(
+              this: typeof event,
+            ) {
+              Reflect.apply(publicPreventDefault, this, []);
+              const postPreventionQuery = this.isDefaultPrevented;
+              this.isDefaultPrevented = function bubbleQueryWithDrift(
+                this: typeof event,
+              ) {
+                const result = Reflect.apply(
+                  postPreventionQuery,
+                  this,
+                  [],
+                );
+                this.isDefaultPrevented = vi.fn(() => true);
+                return result;
+              };
+            };
+          }
+          original(event);
+        },
+      );
+      source.focus();
+      focus.mockClear();
+
+      const rejected = dispatchKey(source, "ArrowRight");
+      restoreBubble();
+      restoreCapture();
+
+      expect(rejected.defaultPrevented).toBe(true);
+      expect(onChange).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expectSelection(host, "rich");
+      expect(source).toHaveFocus();
+
+      const successor = dispatchKey(source, "ArrowRight");
+      expect(successor.defaultPrevented).toBe(true);
+      expect(onChange).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledWith("code");
+      expect(pane(host, "code")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    },
+  );
+
+  it.each([
     ["prevented", { prevented: true }],
     ["stopped", { stopped: true }],
     ["Alt-modified", { altKey: true }],

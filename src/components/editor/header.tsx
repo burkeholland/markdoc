@@ -8605,14 +8605,13 @@ function layoutSegmentReactMethodsRemainExact(
   event: React.KeyboardEvent<HTMLButtonElement>,
   methods: LayoutSegmentReactKeyboardMethods,
   currentIsDefaultPrevented: (...args: never[]) => unknown,
-  defaultPrevented = false,
+  expectedIsDefaultPrevented = methods.isDefaultPrevented,
 ) {
   return (
     event.preventDefault === methods.preventDefault
     && event.isDefaultPrevented === currentIsDefaultPrevented
     && event.isPropagationStopped === methods.isPropagationStopped
-    && (defaultPrevented
-      || currentIsDefaultPrevented === methods.isDefaultPrevented)
+    && currentIsDefaultPrevented === expectedIsDefaultPrevented
   );
 }
 
@@ -8706,6 +8705,7 @@ function layoutSegmentReactKeyboardRemainsExact(
   native: LayoutSegmentNativeKeyboardFacts,
   currentTarget: HTMLButtonElement | null,
   defaultPrevented = false,
+  expectedIsDefaultPrevented = snapshot.methods.isDefaultPrevented,
 ) {
   try {
     const event = snapshot.event;
@@ -8751,7 +8751,7 @@ function layoutSegmentReactKeyboardRemainsExact(
         event,
         snapshot.methods,
         currentIsDefaultPrevented,
-        defaultPrevented,
+        expectedIsDefaultPrevented,
       )
     );
   } catch {
@@ -9326,6 +9326,7 @@ function createLayoutSegmentPresentation(
         expectedLayout: Layout,
         defaultPrevented = false,
         activeDelivery: LayoutSegmentKeyDelivery | null = null,
+        bubbleDefault = bubble.methods.isDefaultPrevented,
       ) => Boolean(
         pairingStore === pairs
         && !pairs.isDisposed()
@@ -9351,6 +9352,7 @@ function createLayoutSegmentPresentation(
           currentNative,
           pair.source,
           defaultPrevented,
+          bubbleDefault,
         )
         && movementIsCurrent(
           runtime,
@@ -9365,11 +9367,13 @@ function createLayoutSegmentPresentation(
       );
       const cancellationIsCurrent = (
         snapshot: LayoutSegmentReactKeyboardSnapshot,
-        method: (...args: never[]) => unknown,
+        property: "isDefaultPrevented" | "isPropagationStopped",
+        expectedMethod: (...args: never[]) => unknown,
         expected: boolean,
         currentNative: LayoutSegmentNativeKeyboardFacts,
         expectedLayout: Layout,
         activeDelivery: LayoutSegmentKeyDelivery | null = null,
+        bubbleDefault = bubble.methods.isDefaultPrevented,
       ) => {
         if (
           !deliveryIsCurrent(
@@ -9377,20 +9381,48 @@ function createLayoutSegmentPresentation(
             expectedLayout,
             currentNative.defaultPrevented,
             activeDelivery,
+            bubbleDefault,
+          )
+        ) {
+          return false;
+        }
+        let method: unknown;
+        try {
+          method = snapshot.event[property];
+        } catch {
+          return false;
+        }
+        if (
+          typeof method !== "function"
+          || method !== expectedMethod
+          || !deliveryIsCurrent(
+            currentNative,
+            expectedLayout,
+            currentNative.defaultPrevented,
+            activeDelivery,
+            bubbleDefault,
           )
         ) {
           return false;
         }
         const result = invokeReactMethod(events, method, snapshot.event);
         const after = events.readKeyboard(nativeEvent);
+        let currentMethod: unknown;
+        try {
+          currentMethod = snapshot.event[property];
+        } catch {
+          return false;
+        }
         return Boolean(
           result?.value === expected
           && after
+          && currentMethod === method
           && deliveryIsCurrent(
             after,
             expectedLayout,
             currentNative.defaultPrevented,
             activeDelivery,
+            bubbleDefault,
           )
         );
       };
@@ -9398,6 +9430,7 @@ function createLayoutSegmentPresentation(
         currentNative: LayoutSegmentNativeKeyboardFacts,
         expectedLayout: Layout,
         activeDelivery: LayoutSegmentKeyDelivery | null = null,
+        bubbleDefault = bubble.methods.isDefaultPrevented,
       ) => {
         if (
           !deliveryIsCurrent(
@@ -9405,46 +9438,51 @@ function createLayoutSegmentPresentation(
             expectedLayout,
             currentNative.defaultPrevented,
             activeDelivery,
+            bubbleDefault,
           )
         ) {
           return false;
         }
-        const captureDefault = pair.capture.event.isDefaultPrevented;
-        const bubbleDefault = bubble.event.isDefaultPrevented;
         return (
-          typeof captureDefault === "function"
-          && typeof bubbleDefault === "function"
-          && cancellationIsCurrent(
+          cancellationIsCurrent(
             pair.capture,
-            captureDefault,
+            "isDefaultPrevented",
+            pair.capture.methods.isDefaultPrevented,
             false,
             currentNative,
             expectedLayout,
             activeDelivery,
+            bubbleDefault,
           )
           && cancellationIsCurrent(
             pair.capture,
+            "isPropagationStopped",
             pair.capture.methods.isPropagationStopped,
             false,
             currentNative,
             expectedLayout,
             activeDelivery,
+            bubbleDefault,
           )
           && cancellationIsCurrent(
             bubble,
+            "isDefaultPrevented",
             bubbleDefault,
             currentNative.defaultPrevented,
             currentNative,
             expectedLayout,
             activeDelivery,
+            bubbleDefault,
           )
           && cancellationIsCurrent(
             bubble,
+            "isPropagationStopped",
             bubble.methods.isPropagationStopped,
             false,
             currentNative,
             expectedLayout,
             activeDelivery,
+            bubbleDefault,
           )
         );
       };
@@ -9487,21 +9525,40 @@ function createLayoutSegmentPresentation(
         bubble.event,
       );
       const preventedNative = events.readKeyboard(nativeEvent);
+      let postPreventionBubbleDefault: unknown;
+      try {
+        postPreventionBubbleDefault = bubble.event.isDefaultPrevented;
+      } catch {
+        return;
+      }
       if (
         !prevention
         || !preventedNative
+        || typeof postPreventionBubbleDefault !== "function"
         || !deliveryIsCurrent(
           preventedNative,
           layout,
           true,
           delivery,
+          postPreventionBubbleDefault,
         )
-        || !wrappersAreCurrent(preventedNative, layout, delivery)
+        || !wrappersAreCurrent(
+          preventedNative,
+          layout,
+          delivery,
+          postPreventionBubbleDefault,
+        )
       ) {
         return;
       }
       if (
-        !deliveryIsCurrent(preventedNative, layout, true, delivery)
+        !deliveryIsCurrent(
+          preventedNative,
+          layout,
+          true,
+          delivery,
+          postPreventionBubbleDefault,
+        )
         || !invokeLayout(pair.destinationRow.authority.value)
       ) {
         return;
@@ -9515,17 +9572,20 @@ function createLayoutSegmentPresentation(
           committedLayout,
           true,
           delivery,
+          postPreventionBubbleDefault,
         )
         || !wrappersAreCurrent(
           selectedNative,
           committedLayout,
           delivery,
+          postPreventionBubbleDefault,
         )
         || !deliveryIsCurrent(
           selectedNative,
           committedLayout,
           true,
           delivery,
+          postPreventionBubbleDefault,
         )
       ) {
         return;
