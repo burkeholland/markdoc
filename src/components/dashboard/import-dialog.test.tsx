@@ -169,6 +169,7 @@ type ResultKeyDown = (
 
 interface CapturedResultNavigationControl {
   readonly element: HTMLElement;
+  readonly onKeyDownCapture: ResultKeyDown;
   readonly onKeyDown: ResultKeyDown;
 }
 
@@ -181,6 +182,10 @@ function captureResultNavigationControls(
     ),
   ).map((element) => ({
     element,
+    onKeyDownCapture: reactProp<ResultKeyDown>(
+      element,
+      "onKeyDownCapture",
+    ),
     onKeyDown: reactProp<ResultKeyDown>(element, "onKeyDown"),
   }));
 }
@@ -240,6 +245,82 @@ function dispatchResultKey(
     allowed = source.dispatchEvent(event);
   });
   return { allowed, event };
+}
+
+function dispatchResultKeyWithBoundaryProbe(
+  source: HTMLElement,
+  key: string,
+  alter?: (
+    phase: "capture-before" | "capture-after" | "bubble-before",
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => void,
+  focus = true,
+) {
+  const propsKey = Object.keys(source).find((key) =>
+    key.startsWith("__reactProps$"));
+  if (!propsKey) {
+    throw new Error(`React props were not attached to ${source.tagName}`);
+  }
+  const record = source as unknown as Record<
+    string,
+    Record<string, unknown> | undefined
+  >;
+  const props = record[propsKey];
+  const captureHandler = props?.onKeyDownCapture;
+  const bubbleHandler = props?.onKeyDown;
+  if (
+    !props ||
+    typeof captureHandler !== "function" ||
+    typeof bubbleHandler !== "function"
+  ) {
+    throw new Error("Both result keyboard boundaries must be attached");
+  }
+  const pair: {
+    capture?: ReactKeyboardEvent<HTMLElement>;
+    bubble?: ReactKeyboardEvent<HTMLElement>;
+  } = {};
+  const replacement = {
+    ...props,
+    onKeyDownCapture: (event: ReactKeyboardEvent<HTMLElement>) => {
+      pair.capture = event;
+      alter?.("capture-before", event);
+      (captureHandler as ResultKeyDown)(event);
+      alter?.("capture-after", event);
+    },
+    onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => {
+      pair.bubble = event;
+      alter?.("bubble-before", event);
+      (bubbleHandler as ResultKeyDown)(event);
+    },
+  };
+  record[propsKey] = replacement;
+  if (focus) source.focus();
+  const ownerWindow = source.ownerDocument.defaultView;
+  if (!ownerWindow) {
+    throw new Error("The import result action has no owner window");
+  }
+  const nativeEvent = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    code: key,
+    key,
+  });
+  markResultKeyTrusted(nativeEvent);
+  try {
+    act(() => {
+      source.dispatchEvent(nativeEvent);
+    });
+  } finally {
+    if (record[propsKey] === replacement) record[propsKey] = props;
+  }
+  if (!pair.capture || !pair.bubble) {
+    throw new Error("The key did not cross both result boundaries");
+  }
+  return {
+    nativeEvent,
+    capture: pair.capture,
+    bubble: pair.bubble,
+  };
 }
 
 function interceptResultKeyDown(
@@ -640,6 +721,324 @@ describe("ImportDialog result action keyboard navigation", () => {
       warnings: [],
     },
   ];
+
+  it("pairs distinct genuine React capture and bubble wrappers for one native key", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={vi.fn()}
+              items={navigationItems(retry, retryAll)}
+              ignored={[]}
+            />
+          </StrictMode>,
+        );
+      });
+      const controls = captureResultNavigationControls();
+      const source = controls[0]!.element;
+      const pair = dispatchResultKeyWithBoundaryProbe(
+        source,
+        "ArrowDown",
+      );
+
+      expect(pair.capture).not.toBe(pair.bubble);
+      expect(pair.capture.nativeEvent).toBe(pair.nativeEvent);
+      expect(pair.bubble.nativeEvent).toBe(pair.nativeEvent);
+      expect(pair.capture.isDefaultPrevented()).toBe(false);
+      expect(pair.bubble.isDefaultPrevented()).toBe(false);
+      expect(pair.nativeEvent.defaultPrevented).toBe(true);
+      expect(controls[1]!.element).toHaveFocus();
+      expect(retry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["capture", "capture-after", "isDefaultPrevented"],
+    ["bubble", "bubble-before", "isPropagationStopped"],
+  ] as const)(
+    "rejects %s predicate-method drift before claim and admits a clean successor",
+    (_boundary, alteredPhase, property) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const retry = vi.fn();
+      const retryAll = vi.fn();
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <ImportDialog
+                open
+                onOpenChange={vi.fn()}
+                items={navigationItems(retry, retryAll)}
+                ignored={[]}
+              />
+            </StrictMode>,
+          );
+        });
+        const controls = captureResultNavigationControls();
+        const source = controls[0]!.element;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const rejected = dispatchResultKeyWithBoundaryProbe(
+          source,
+          "ArrowDown",
+          (phase, event) => {
+            if (phase !== alteredPhase) return;
+            Object.defineProperty(event, property, {
+              configurable: true,
+              enumerable: true,
+              value: () => false,
+              writable: true,
+            });
+          },
+          false,
+        );
+
+        expect(rejected.nativeEvent.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+
+        const accepted = dispatchResultKey(
+          source,
+          "ArrowDown",
+          {},
+          true,
+          false,
+        );
+        expect(accepted.allowed).toBe(false);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledOnce();
+        expect(controls[1]!.element).toHaveFocus();
+        expect(retry).not.toHaveBeenCalled();
+        expect(retryAll).not.toHaveBeenCalled();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it("accepts the real Window backing receiver and rejects a receiver lookalike", () => {
+    const additions = vi.spyOn(window, "addEventListener");
+    const removals = vi.spyOn(window, "removeEventListener");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={vi.fn()}
+              items={navigationItems(retry, retryAll)}
+              ignored={[]}
+            />
+          </StrictMode>,
+        );
+      });
+      const listener = additions.mock.calls
+        .filter(
+          ([type, candidate, options]) =>
+            type === "keydown" &&
+            options === true &&
+            typeof candidate === "function" &&
+            candidate.name === "rememberImportResultNavigationNative",
+        )
+        .map(([, candidate]) => candidate)
+        .at(-1);
+      if (typeof listener !== "function") {
+        throw new Error("No import result Window capture listener was added");
+      }
+      const controls = captureResultNavigationControls();
+      const source = controls[0]!.element;
+      const lookalike = Object.create(
+        Object.getPrototypeOf(window),
+      ) as Record<string, unknown>;
+      Object.defineProperties(lookalike, {
+        document: { configurable: true, value: document },
+        self: { configurable: true, value: lookalike },
+        window: { configurable: true, value: lookalike },
+      });
+      const rejected = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "ArrowDown",
+        key: "ArrowDown",
+      });
+      markResultKeyTrusted(rejected);
+      source.focus();
+      act(() => {
+        Reflect.apply(listener, lookalike, [rejected]);
+      });
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+
+      const receivers: EventTarget[] = [];
+      let intrinsicCurrentTarget: EventTarget | null = null;
+      let originalTerminal: EventTarget | null = null;
+      function observeBackingReceiver(
+        this: EventTarget,
+        event: Event,
+      ) {
+        receivers.push(this);
+        intrinsicCurrentTarget = event.currentTarget;
+        originalTerminal = event.composedPath().at(-1) ?? null;
+      }
+      window.addEventListener("keydown", observeBackingReceiver, true);
+      try {
+        const accepted = dispatchResultKey(
+          source,
+          "ArrowDown",
+          {},
+          true,
+          false,
+        );
+        expect(accepted.allowed).toBe(false);
+      } finally {
+        window.removeEventListener(
+          "keydown",
+          observeBackingReceiver,
+          true,
+        );
+      }
+      expect(receivers).toHaveLength(1);
+      expect(receivers[0]).toBe(intrinsicCurrentTarget);
+      expect(receivers[0]).toBe(originalTerminal);
+      expect(controls[1]!.element).toHaveFocus();
+      expect(retry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      removals.mockRestore();
+      additions.mockRestore();
+    }
+  });
+
+  it.each(["structural", "same-prototype", "window-self"] as const)(
+    "rejects a %s composed-path terminal lookalike by identity",
+    (kind) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        Event.prototype,
+        "composedPath",
+      );
+      if (!descriptor || typeof descriptor.value !== "function") {
+        throw new Error("Event.prototype.composedPath is unavailable");
+      }
+      const nativeComposedPath = descriptor.value as Event["composedPath"];
+      const lookalike =
+        kind === "same-prototype"
+          ? (Object.create(
+              Object.getPrototypeOf(window),
+            ) as Record<string, unknown>)
+          : {};
+      Object.defineProperty(lookalike, "document", {
+        configurable: true,
+        value: document,
+      });
+      if (kind === "window-self") {
+        Object.defineProperties(lookalike, {
+          self: { configurable: true, value: lookalike },
+          window: { configurable: true, value: lookalike },
+        });
+      }
+      Object.defineProperty(Event.prototype, "composedPath", {
+        ...descriptor,
+        value: function (this: Event) {
+          const path = Reflect.apply(nativeComposedPath, this, []);
+          return path.length > 0
+            ? [
+                ...path.slice(0, -1),
+                lookalike as unknown as EventTarget,
+              ]
+            : path;
+        },
+      });
+      const hostileHost = document.createElement("div");
+      document.body.append(hostileHost);
+      const hostileRoot = createRoot(hostileHost);
+      try {
+        act(() => {
+          hostileRoot.render(
+            <StrictMode>
+              <ImportDialog
+                open
+                onOpenChange={vi.fn()}
+                items={navigationItems(vi.fn(), vi.fn())}
+                ignored={[]}
+              />
+            </StrictMode>,
+          );
+        });
+        const hostileControls = captureResultNavigationControls();
+        const source = hostileControls[0]!.element;
+        const rejected = dispatchResultKey(source, "ArrowDown");
+        expect(rejected.allowed).toBe(true);
+        expect(rejected.event.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+      } finally {
+        act(() => hostileRoot.unmount());
+        hostileHost.remove();
+        Object.defineProperty(
+          Event.prototype,
+          "composedPath",
+          descriptor,
+        );
+      }
+
+      const cleanHost = document.createElement("div");
+      document.body.append(cleanHost);
+      const cleanRoot = createRoot(cleanHost);
+      try {
+        act(() => {
+          cleanRoot.render(
+            <StrictMode>
+              <ImportDialog
+                open
+                onOpenChange={vi.fn()}
+                items={navigationItems(vi.fn(), vi.fn())}
+                ignored={[]}
+              />
+            </StrictMode>,
+          );
+        });
+        const cleanControls = captureResultNavigationControls();
+        const accepted = dispatchResultKey(
+          cleanControls[0]!.element,
+          "ArrowDown",
+        );
+        expect(accepted.allowed).toBe(false);
+        expect(cleanControls[1]!.element).toHaveFocus();
+      } finally {
+        act(() => cleanRoot.unmount());
+        cleanHost.remove();
+      }
+    },
+  );
 
   it.each([
     ["ArrowDown", 0, 1],
