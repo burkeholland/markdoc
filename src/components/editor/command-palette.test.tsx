@@ -16,7 +16,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function command(id: string, title: string, run = vi.fn()): Command {
+function command(id: string, title: string, run: Command["run"] = vi.fn()): Command {
   return { id, title, keywords: [], group: "Test", run };
 }
 
@@ -59,6 +59,105 @@ function exactEvent<T extends HTMLElement>(currentTarget: T, extra: Record<strin
     preventDefault: vi.fn(() => nativeEvent.preventDefault()),
     ...extra,
   };
+}
+
+function markJsdomEventTrusted(event: Event): void {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function exposeJsdomNativeDefaultView(ownerDocument: Document): () => void {
+  const implementationSymbol = Object.getOwnPropertySymbols(ownerDocument).find(
+    (symbol) => String(symbol) === "Symbol(impl)",
+  );
+  if (!implementationSymbol) {
+    throw new Error("Document implementation slot was not available");
+  }
+  const nativeOwnerWindow = (
+    ownerDocument as unknown as Record<
+      symbol,
+      { _globalObject: Window & typeof globalThis }
+    >
+  )[implementationSymbol]._globalObject;
+  const previous = Object.getOwnPropertyDescriptor(ownerDocument, "defaultView");
+  Object.defineProperty(ownerDocument, "defaultView", {
+    configurable: true,
+    value: nativeOwnerWindow,
+  });
+  if (ownerDocument.defaultView !== nativeOwnerWindow) {
+    throw new Error("Unable to expose jsdom's native owner window");
+  }
+  return () => {
+    if (previous) {
+      Object.defineProperty(ownerDocument, "defaultView", previous);
+    } else if (!Reflect.deleteProperty(ownerDocument, "defaultView")) {
+      throw new Error("Unable to restore jsdom's public owner window");
+    }
+  };
+}
+
+function paletteKeyboardEvent(
+  input: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+): KeyboardEvent {
+  const ownerWindow = input.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("Palette input owner window was unavailable");
+  if (!(input instanceof ownerWindow.HTMLInputElement)) {
+    throw new Error("Palette key target was not an input");
+  }
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    code: key,
+    view: ownerWindow,
+    ...init,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  return event;
+}
+
+function dispatchPaletteKey(
+  input: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+): KeyboardEvent {
+  const event = paletteKeyboardEvent(input, key, init, trusted);
+  act(() => input.dispatchEvent(event));
+  return event;
+}
+
+function commandList(length: number, run: (index: number) => Command["run"] = () => vi.fn()) {
+  return Array.from({ length }, (_, index) =>
+    command(`item-${index}`, `Item ${index}`, run(index)),
+  );
+}
+
+function selectedCommand(input: HTMLElement): string | null {
+  return input.getAttribute("aria-activedescendant");
 }
 
 interface RowHandlerProps {
@@ -336,6 +435,7 @@ function SameMountBoundary({
 }
 
 let originalScrollIntoView: typeof Element.prototype.scrollIntoView;
+let restoreOwnerWindow: () => void;
 const unhandledRejections: unknown[] = [];
 const recordUnhandledRejection = (reason: unknown) => {
   unhandledRejections.push(reason);
@@ -343,6 +443,7 @@ const recordUnhandledRejection = (reason: unknown) => {
 
 beforeEach(() => {
   localStorage.clear();
+  restoreOwnerWindow = exposeJsdomNativeDefaultView(document);
   originalScrollIntoView = Element.prototype.scrollIntoView;
   Element.prototype.scrollIntoView = vi.fn();
   unhandledRejections.length = 0;
@@ -356,6 +457,7 @@ afterEach(async () => {
   Element.prototype.scrollIntoView = originalScrollIntoView;
   vi.clearAllTimers();
   vi.useRealTimers();
+  restoreOwnerWindow();
   expect(unhandledRejections).toEqual([]);
 });
 
@@ -376,9 +478,9 @@ describe("CommandPalette child loading", () => {
 
       fireEvent.click(recentOption);
       fireEvent.click(recentOption);
-      fireEvent.keyDown(input, { key: "Enter" });
+      dispatchPaletteKey(input, "Enter");
       fireEvent.click(screen.getByTestId("palette-item-recent"));
-      fireEvent.keyDown(input, { key: "Enter" });
+      dispatchPaletteKey(input, "Enter");
 
       await waitFor(() => expect(children).toHaveBeenCalledOnce());
       expect(screen.getByRole("status")).toHaveTextContent("Loading…");
@@ -433,7 +535,7 @@ describe("CommandPalette child loading", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByTestId("palette-item-recent")).toBeInTheDocument();
 
-    fireEvent.keyDown(screen.getByTestId("palette-input"), { key: "Enter" });
+    dispatchPaletteKey(screen.getByTestId("palette-input"), "Enter");
     await waitFor(() => expect(children).toHaveBeenCalledTimes(2));
     await settle(current, "resolve", [command("current", "Current result")]);
     expect(screen.getByTestId("palette-item-current")).toBeInTheDocument();
@@ -481,9 +583,9 @@ describe("CommandPalette child loading", () => {
     fireEvent.click(opener);
 
     const input = await screen.findByTestId("palette-input");
-    fireEvent.keyDown(input, { key: "Enter" });
+    dispatchPaletteKey(input, "Enter");
     await screen.findByTestId("palette-item-nested");
-    fireEvent.keyDown(input, { key: "Enter" });
+    dispatchPaletteKey(input, "Enter");
     expect(screen.getByRole("status")).toHaveTextContent("Loading…");
 
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
@@ -491,9 +593,9 @@ describe("CommandPalette child loading", () => {
     await settle(stale, "resolve", [command("stale", "Stale result")]);
     expect(screen.queryByTestId("palette-item-stale")).toBeNull();
 
-    fireEvent.keyDown(input, { key: "ArrowDown" });
+    dispatchPaletteKey(input, "ArrowDown");
     expect(input).toHaveAttribute("aria-activedescendant", "palette-item-ordinary");
-    fireEvent.keyDown(input, { key: "Enter" });
+    dispatchPaletteKey(input, "Enter");
 
     await waitFor(() => expect(screen.queryByTestId("command-palette")).toBeNull());
     await waitFor(() => expect(run).toHaveBeenCalledOnce());
@@ -1298,32 +1400,32 @@ describe("CommandPalette command ownership", () => {
       fireEvent.click(opener);
       await act(async () => {});
       const input = screen.getByTestId("palette-input");
-      const endHandler = reactProps<InputHandlerProps>(input).onKeyDown;
-      const endEvent = exactEvent(input, { key: "End" });
+      const endEvent = paletteKeyboardEvent(input, "End");
+      const preventEnd = vi.spyOn(endEvent, "preventDefault");
 
       act(() => {
-        endHandler(endEvent as unknown as React.KeyboardEvent<HTMLInputElement>);
-        endHandler(endEvent as unknown as React.KeyboardEvent<HTMLInputElement>);
+        input.dispatchEvent(endEvent);
+        input.dispatchEvent(endEvent);
       });
-      expect(endEvent.preventDefault).toHaveBeenCalledOnce();
+      expect(preventEnd).toHaveBeenCalledOnce();
       expect(input).toHaveAttribute("aria-activedescendant", "palette-item-third");
       expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
 
-      fireEvent.keyDown(input, { key: "Home" });
+      dispatchPaletteKey(input, "Home");
       expect(input).toHaveAttribute("aria-activedescendant", "palette-item-first");
-      fireEvent.keyDown(input, { key: "ArrowUp" });
+      dispatchPaletteKey(input, "ArrowUp");
       expect(input).toHaveAttribute("aria-activedescendant", "palette-item-third");
-      fireEvent.keyDown(input, { key: "ArrowDown" });
+      dispatchPaletteKey(input, "ArrowDown");
       expect(input).toHaveAttribute("aria-activedescendant", "palette-item-first");
 
-      const enterHandler = reactProps<InputHandlerProps>(input).onKeyDown;
-      const enterEvent = exactEvent(input, { key: "Enter" });
+      const enterEvent = paletteKeyboardEvent(input, "Enter");
+      const preventEnter = vi.spyOn(enterEvent, "preventDefault");
       act(() => {
-        enterHandler(enterEvent as unknown as React.KeyboardEvent<HTMLInputElement>);
-        enterHandler(enterEvent as unknown as React.KeyboardEvent<HTMLInputElement>);
+        input.dispatchEvent(enterEvent);
+        input.dispatchEvent(enterEvent);
       });
       await act(async () => vi.runAllTimersAsync());
-      expect(enterEvent.preventDefault).toHaveBeenCalledOnce();
+      expect(preventEnter).toHaveBeenCalledOnce();
       expect(setItem).toHaveBeenCalledOnce();
       expect(firstRun).toHaveBeenCalledOnce();
       expect(opener).toHaveFocus();
@@ -1334,6 +1436,374 @@ describe("CommandPalette command ownership", () => {
 });
 
 describe("CommandPalette direct-root Strict Mode replay", () => {
+  it("moves PageDown and PageUp through long and short flat result orders by ten with boundary clamping", async () => {
+    const mounted = await renderStrictRoot(<Harness items={commandList(20)} />);
+
+    try {
+      let input = await screen.findByTestId("palette-input");
+      expect(input).toHaveFocus();
+
+      expect(dispatchPaletteKey(input, "PageDown").defaultPrevented).toBe(true);
+      expect(selectedCommand(input)).toBe("palette-item-item-10");
+
+      fireEvent.mouseEnter(screen.getByTestId("palette-item-item-5"));
+      expect(selectedCommand(input)).toBe("palette-item-item-5");
+      dispatchPaletteKey(input, "PageDown");
+      expect(selectedCommand(input)).toBe("palette-item-item-15");
+
+      fireEvent.mouseEnter(screen.getByTestId("palette-item-item-19"));
+      dispatchPaletteKey(input, "PageUp");
+      expect(selectedCommand(input)).toBe("palette-item-item-9");
+
+      fireEvent.mouseEnter(screen.getByTestId("palette-item-item-14"));
+      dispatchPaletteKey(input, "PageUp");
+      expect(selectedCommand(input)).toBe("palette-item-item-4");
+
+      fireEvent.mouseEnter(screen.getByTestId("palette-item-item-18"));
+      dispatchPaletteKey(input, "PageDown");
+      expect(selectedCommand(input)).toBe("palette-item-item-19");
+      dispatchPaletteKey(input, "PageDown");
+      expect(selectedCommand(input)).toBe("palette-item-item-19");
+
+      fireEvent.mouseEnter(screen.getByTestId("palette-item-item-3"));
+      dispatchPaletteKey(input, "PageUp");
+      expect(selectedCommand(input)).toBe("palette-item-item-0");
+      dispatchPaletteKey(input, "PageUp");
+      expect(selectedCommand(input)).toBe("palette-item-item-0");
+
+      await mounted.render(<Harness items={commandList(6)} />);
+      input = await screen.findByTestId("palette-input");
+      expect(selectedCommand(input)).toBe("palette-item-item-0");
+      dispatchPaletteKey(input, "PageDown");
+      expect(selectedCommand(input)).toBe("palette-item-item-5");
+      dispatchPaletteKey(input, "PageUp");
+      expect(selectedCommand(input)).toBe("palette-item-item-0");
+      expect(input).toHaveFocus();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("claims one PageDown before one highlight transition without command or page work", async () => {
+    const runs = Array.from({ length: 15 }, () => vi.fn());
+    const children = vi.fn(() => [command("child", "Child")]);
+    const items = commandList(15, (index) => runs[index]!);
+    items[12] = childCommand("item-12", "Item 12", children);
+    const commands = vi.fn(() => items);
+    const onOpenChange = vi.fn();
+    const scroll = vi.fn();
+    window.addEventListener("scroll", scroll);
+    const mounted = await renderStrictRoot(
+      <CommandPalette open onOpenChange={onOpenChange} commands={commands} />,
+    );
+
+    try {
+      const input = await screen.findByTestId("palette-input");
+      const query = (input as HTMLInputElement).value;
+      const scrollX = window.scrollX;
+      const scrollY = window.scrollY;
+      const transitions: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => transitions.push(...records));
+      observer.observe(input, {
+        attributeFilter: ["aria-activedescendant"],
+        attributeOldValue: true,
+        attributes: true,
+      });
+      vi.mocked(Element.prototype.scrollIntoView).mockClear();
+      commands.mockClear();
+      const event = paletteKeyboardEvent(input, "PageDown");
+      const highlightedAtPrevention: Array<string | null> = [];
+      const preventDefault = vi
+        .spyOn(event, "preventDefault")
+        .mockImplementation(() => {
+          highlightedAtPrevention.push(selectedCommand(input));
+          Event.prototype.preventDefault.call(event);
+        });
+
+      act(() => input.dispatchEvent(event));
+      await act(async () => Promise.resolve());
+      transitions.push(...observer.takeRecords());
+      observer.disconnect();
+
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(highlightedAtPrevention).toEqual(["palette-item-item-0"]);
+      expect(selectedCommand(input)).toBe("palette-item-item-10");
+      expect(
+        screen
+          .getAllByRole("option")
+          .filter((row) => row.getAttribute("aria-selected") === "true"),
+      ).toHaveLength(1);
+      expect(transitions).toHaveLength(1);
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledOnce();
+      expect(input).toHaveFocus();
+      expect(input).toHaveValue(query);
+      expect(screen.getByTestId("command-palette")).toBeInTheDocument();
+      expect(commands).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(children).not.toHaveBeenCalled();
+      expect(runs.every((run) => run.mock.calls.length === 0)).toBe(true);
+      expect(scroll).not.toHaveBeenCalled();
+      expect(window.scrollX).toBe(scrollX);
+      expect(window.scrollY).toBe(scrollY);
+    } finally {
+      window.removeEventListener("scroll", scroll);
+      await mounted.unmount();
+    }
+  });
+
+  it("leaves Page keys inert without results and rejects non-exact input events", async () => {
+    const run = vi.fn();
+    const childProvider = vi.fn(() => [command("child", "Child")]);
+    const items = commandList(15, () => run);
+    items[12] = childCommand("item-12", "Item 12", childProvider);
+    const onOpenChange = vi.fn();
+    const mounted = await renderStrictRoot(
+      <CommandPalette open onOpenChange={onOpenChange} commands={commandProvider()} />,
+    );
+    const foreignFrame = document.createElement("iframe");
+    const focusOwner = document.createElement("button");
+    document.body.append(foreignFrame, focusOwner);
+
+    try {
+      let input = await screen.findByTestId("palette-input");
+      vi.mocked(Element.prototype.scrollIntoView).mockClear();
+      const emptyDown = dispatchPaletteKey(input, "PageDown");
+      const emptyUp = dispatchPaletteKey(input, "PageUp");
+      expect(emptyDown.defaultPrevented).toBe(false);
+      expect(emptyUp.defaultPrevented).toBe(false);
+      expect(selectedCommand(input)).toBeNull();
+      expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+
+      await mounted.render(
+        <CommandPalette open onOpenChange={onOpenChange} commands={commandProvider(...items)} />,
+      );
+      input = await screen.findByTestId("palette-input");
+      const handler = reactProps<InputHandlerProps>(input).onKeyDown;
+      vi.mocked(Element.prototype.scrollIntoView).mockClear();
+
+      for (const init of [
+        { altKey: true },
+        { ctrlKey: true },
+        { metaKey: true },
+        { shiftKey: true },
+        { repeat: true },
+        { isComposing: true },
+      ]) {
+        expect(dispatchPaletteKey(input, "PageDown", init).defaultPrevented).toBe(false);
+      }
+
+      expect(dispatchPaletteKey(input, "PageDown", {}, false).defaultPrevented).toBe(false);
+
+      const canceled = paletteKeyboardEvent(input, "PageDown");
+      canceled.preventDefault();
+      act(() => input.dispatchEvent(canceled));
+      expect(canceled.defaultPrevented).toBe(true);
+
+      const stopped = paletteKeyboardEvent(input, "PageDown");
+      stopped.stopPropagation();
+      act(() => input.dispatchEvent(stopped));
+      expect(stopped.defaultPrevented).toBe(false);
+
+      const activeElement = Object.getOwnPropertyDescriptor(document, "activeElement");
+      Object.defineProperty(document, "activeElement", {
+        configurable: true,
+        value: focusOwner,
+      });
+      try {
+        expect(dispatchPaletteKey(input, "PageDown").defaultPrevented).toBe(false);
+      } finally {
+        if (activeElement) {
+          Object.defineProperty(document, "activeElement", activeElement);
+        } else {
+          Reflect.deleteProperty(document, "activeElement");
+        }
+      }
+      expect(input).toHaveFocus();
+
+      const fabricated = exactEvent(input, { key: "PageDown" });
+      const proxied = new Proxy(exactEvent(input, { key: "PageDown" }), {});
+      const crossed = exactEvent(input, {
+        key: "PageDown",
+        nativeEvent: paletteKeyboardEvent(input, "PageDown"),
+      });
+      act(() => {
+        handler(fabricated as unknown as React.KeyboardEvent<HTMLInputElement>);
+        handler(proxied as unknown as React.KeyboardEvent<HTMLInputElement>);
+        handler(crossed as unknown as React.KeyboardEvent<HTMLInputElement>);
+      });
+      expect(fabricated.preventDefault).not.toHaveBeenCalled();
+      expect(proxied.preventDefault).not.toHaveBeenCalled();
+      expect(crossed.preventDefault).not.toHaveBeenCalled();
+
+      const foreignWindow = foreignFrame.contentWindow as
+        | (Window & typeof globalThis)
+        | null;
+      if (!foreignWindow) throw new Error("Foreign frame owner window was unavailable");
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "PageDown",
+        key: "PageDown",
+      });
+      markJsdomEventTrusted(foreign);
+      act(() => input.dispatchEvent(foreign));
+      expect(foreign.defaultPrevented).toBe(false);
+
+      expect(selectedCommand(input)).toBe("palette-item-item-0");
+      expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+      expect(run).not.toHaveBeenCalled();
+      expect(childProvider).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      const cleanSuccessor = dispatchPaletteKey(input, "PageDown");
+      expect(cleanSuccessor.defaultPrevented).toBe(true);
+      expect(selectedCommand(input)).toBe("palette-item-item-10");
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledOnce();
+    } finally {
+      await mounted.unmount();
+      foreignFrame.remove();
+      focusOwner.remove();
+    }
+  });
+
+  it.each(["mutate-restore", "detach-reinsert", "reorder-restore"] as const)(
+    "retires Page navigation after %s DOM history and accepts a distinct clean successor",
+    async (transition) => {
+      const mounted = await renderStrictRoot(<Harness items={commandList(15)} />);
+
+      try {
+        let input = await screen.findByTestId("palette-input");
+        const content = screen.getByTestId("command-palette");
+        const first = screen.getByTestId("palette-item-item-0");
+        const parent = first.parentElement;
+        if (!parent) throw new Error("Palette row group was unavailable");
+        if (transition === "mutate-restore") {
+          content.setAttribute("data-history-probe", "changed");
+          content.removeAttribute("data-history-probe");
+        } else if (transition === "detach-reinsert") {
+          const next = first.nextSibling;
+          first.remove();
+          parent.insertBefore(first, next);
+        } else {
+          const next = first.nextSibling;
+          parent.append(first);
+          parent.insertBefore(first, next);
+        }
+
+        vi.mocked(Element.prototype.scrollIntoView).mockClear();
+        const rejected = dispatchPaletteKey(input, "PageDown");
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(selectedCommand(input)).toBe("palette-item-item-0");
+        expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+
+        await mounted.render(
+          <Harness
+            key="clean-successor"
+            items={Array.from({ length: 15 }, (_, index) =>
+              command(`successor-${index}`, `Successor ${index}`),
+            )}
+          />,
+        );
+        input = await screen.findByTestId("palette-input");
+        const accepted = dispatchPaletteKey(input, "PageDown");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(selectedCommand(input)).toBe("palette-item-successor-10");
+        expect(input).toHaveFocus();
+      } finally {
+        await mounted.unmount();
+      }
+    },
+  );
+
+  it("rejects stale, replacement-restored, and cleaned-up Page handlers", async () => {
+    const oldItems = commandList(15);
+    const mounted = await renderStrictRoot(<Harness items={oldItems} />);
+    let unmounted = false;
+
+    try {
+      const originalInput = await screen.findByTestId("palette-input");
+      const staleHandler = reactProps<InputHandlerProps>(originalInput).onKeyDown;
+
+      await mounted.render(
+        <Harness
+          items={Array.from({ length: 15 }, (_, index) =>
+            command(`replacement-${index}`, `Replacement ${index}`),
+          )}
+        />,
+      );
+      await mounted.render(<Harness items={oldItems} />);
+      const currentInput = await screen.findByTestId("palette-input");
+      const restored = exactEvent(currentInput, { key: "PageDown" });
+      act(() =>
+        staleHandler(restored as unknown as React.KeyboardEvent<HTMLInputElement>),
+      );
+      expect(restored.preventDefault).not.toHaveBeenCalled();
+      expect(selectedCommand(currentInput)).toBe("palette-item-item-0");
+
+      const currentHandler = reactProps<InputHandlerProps>(currentInput).onKeyDown;
+      await mounted.unmount();
+      unmounted = true;
+      const cleanedUp = exactEvent(currentInput, { key: "PageDown" });
+      act(() =>
+        currentHandler(cleanedUp as unknown as React.KeyboardEvent<HTMLInputElement>),
+      );
+      expect(cleanedUp.preventDefault).not.toHaveBeenCalled();
+    } finally {
+      if (!unmounted) await mounted.unmount();
+    }
+  });
+
+  it("retains Arrow, Home, End, Enter, Backspace, Escape, and pointer behavior", async () => {
+    const leafRun = vi.fn();
+    const secondRun = vi.fn();
+    const children = vi.fn(() => [command("leaf", "Leaf", leafRun)]);
+    const mounted = await renderStrictRoot(
+      <Harness
+        items={[
+          childCommand("parent", "Parent…", children),
+          command("second", "Second", secondRun),
+        ]}
+      />,
+    );
+
+    try {
+      let input = await screen.findByTestId("palette-input");
+      dispatchPaletteKey(input, "ArrowUp");
+      expect(selectedCommand(input)).toBe("palette-item-second");
+      dispatchPaletteKey(input, "ArrowDown");
+      expect(selectedCommand(input)).toBe("palette-item-parent");
+      dispatchPaletteKey(input, "End");
+      expect(selectedCommand(input)).toBe("palette-item-second");
+      dispatchPaletteKey(input, "Home");
+      expect(selectedCommand(input)).toBe("palette-item-parent");
+
+      dispatchPaletteKey(input, "Enter");
+      await screen.findByTestId("palette-item-leaf");
+      expect(children).toHaveBeenCalledOnce();
+      expect(input).toHaveFocus();
+      dispatchPaletteKey(input, "Backspace");
+      expect(screen.getByTestId("palette-item-parent")).toBeInTheDocument();
+      expect(leafRun).not.toHaveBeenCalled();
+
+      const second = screen.getByTestId("palette-item-second");
+      fireEvent.mouseEnter(second);
+      expect(selectedCommand(input)).toBe("palette-item-second");
+      fireEvent.mouseDown(second);
+      expect(input).toHaveFocus();
+      fireEvent.click(second);
+      await waitFor(() => expect(secondRun).toHaveBeenCalledOnce());
+      expect(screen.queryByTestId("command-palette")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Open palette" }));
+      input = await screen.findByTestId("palette-input");
+      fireEvent.keyDown(input, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByTestId("command-palette")).toBeNull());
+      expect(secondRun).toHaveBeenCalledOnce();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
   it("keeps the fresh input and keyboard navigation exact after replay", async () => {
     const mounted = await renderStrictRoot(
       <Harness
@@ -1358,7 +1828,7 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
       expect(staleEvent.preventDefault).not.toHaveBeenCalled();
 
       fireEvent.change(input, { target: { value: "" } });
-      fireEvent.keyDown(input, { key: "End" });
+      dispatchPaletteKey(input, "End");
       expect(input).toHaveAttribute("aria-activedescendant", "palette-item-third");
     } finally {
       await mounted.unmount();
