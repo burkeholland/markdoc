@@ -518,6 +518,97 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("FileDropDialog metadata", () => {
+  it.each([
+    [0, "0 bytes"],
+    [1, "1 byte"],
+    [1023, "1023 bytes"],
+    [1024, "1 KiB"],
+    [1025, "1 KiB"],
+    [1126, "1.1 KiB"],
+    [1536, "1.5 KiB"],
+    [1048576, "1 MiB"],
+  ] as const)("describes %i bytes as %s without starting an action", (bytes, size) => {
+    const pending = {
+      file: new File([new Uint8Array(bytes)], "metadata.md"),
+      at: 0,
+    };
+    const handlers = callbacks();
+    render(dialog(pending, handlers));
+
+    const content = screen.getByRole("dialog", { name: "Dropped file" });
+    const description = screen.getByText(
+      `What should happen with “metadata.md” (${size})?`,
+    );
+    expect(content).toHaveAccessibleDescription(description.textContent);
+    expect(content).toHaveAttribute("aria-describedby", description.id);
+    expect(content.querySelectorAll("p")).toHaveLength(1);
+    expect(description).toBeVisible();
+    expect(description).not.toHaveAttribute("tabindex");
+    expect(content.querySelector("[aria-live]")).toBeNull();
+    expect(screen.getByRole("button", { name: "Close" })).toHaveFocus();
+    expectNoFileDropAction(handlers);
+  });
+
+  it.each([
+    [1024 ** 3, "1 GiB"],
+    [1.5 * 1024 ** 3, "1.5 GiB"],
+  ] as const)("formats %i bytes of File.size metadata as %s", (bytes, size) => {
+    const pending = dropped("large.md", 0);
+    vi.spyOn(pending.file, "size", "get").mockReturnValue(bytes);
+    const handlers = callbacks();
+    render(dialog(pending, handlers));
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(
+      `What should happen with “large.md” (${size})?`,
+    );
+    expectNoFileDropAction(handlers);
+  });
+
+  it("renders special-character filenames as literal text without extra HTML", () => {
+    const name = '<img src=x onerror="alert(1)"> & <b>notes</b>.md';
+    const pending = { file: new File(["x"], name), at: 0 };
+    const handlers = callbacks();
+    render(dialog(pending, handlers));
+
+    const content = screen.getByRole("dialog");
+    const expected = `What should happen with “${name}” (1 byte)?`;
+    const description = screen.getByText(expected);
+    expect(content).toHaveAccessibleDescription(expected);
+    expect(description.textContent).toBe(expected);
+    expect(description.children).toHaveLength(0);
+    expect(content.querySelector("img, b, script")).toBeNull();
+    expectNoFileDropAction(handlers);
+  });
+
+  it("replaces the pending name and size, including a new file with the same name", () => {
+    const handlers = callbacks();
+    const view = render(
+      dialog({ file: new File([], "first.md"), at: 0 }, handlers),
+    );
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(
+      "What should happen with “first.md” (0 bytes)?",
+    );
+
+    view.rerender(
+      dialog({ file: new File([new Uint8Array(1536)], "second.md"), at: 0 }, handlers),
+    );
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(
+      "What should happen with “second.md” (1.5 KiB)?",
+    );
+    expect(screen.queryByText(/first\.md/)).toBeNull();
+
+    view.rerender(
+      dialog({ file: new File(["x"], "second.md"), at: 0 }, handlers),
+    );
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(
+      "What should happen with “second.md” (1 byte)?",
+    );
+    expect(screen.queryByText(/1\.5 KiB/)).toBeNull();
+    expectNoFileDropAction(handlers);
+  });
+});
+
 describe("FileDropDialog action ownership", () => {
   it("reads and replaces once when Replace is activated twice before React commits", async () => {
     const pending = dropped("replace.md", 4);
@@ -527,6 +618,9 @@ describe("FileDropDialog action ownership", () => {
     activateBeforeCommit("file-drop-replace", "file-drop-replace");
     expect(ControlledFileReader.reads).toHaveLength(1);
     expect(ControlledFileReader.reads[0].file).toBe(pending.file);
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(
+      "What should happen with “replace.md” (6 bytes)?",
+    );
 
     await resolveRead(0, "\uFEFF# One\r\nTwo\rThree");
     expect(handlers.onReplace).toHaveBeenCalledTimes(1);
@@ -542,6 +636,9 @@ describe("FileDropDialog action ownership", () => {
 
     activateBeforeCommit("file-drop-insert", "file-drop-insert", "file-drop-replace");
     expect(ControlledFileReader.reads).toHaveLength(1);
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(
+      "What should happen with “insert.md” (6 bytes)?",
+    );
 
     await resolveRead(0, "Inserted\r\ntext");
     expect(handlers.onInsert).toHaveBeenCalledTimes(1);
@@ -560,6 +657,9 @@ describe("FileDropDialog action ownership", () => {
     activateBeforeCommit("file-drop-new", "file-drop-new", "file-drop-insert");
     expect(uploadImportFiles).toHaveBeenCalledTimes(1);
     expect(uploadImportFiles).toHaveBeenCalledWith([pending.file]);
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(
+      "What should happen with “new.md” (6 bytes)?",
+    );
 
     await act(async () => upload.resolve([{ id: "doc-new", title: "New", warnings: [] }]));
     expect(push).toHaveBeenCalledTimes(1);
@@ -596,13 +696,19 @@ describe("FileDropDialog action ownership", () => {
 
   it("keeps replacement file B owned when stale file A read success and finalizer arrive", async () => {
     const first = dropped("first.md", 3);
-    const second = dropped("second.md", 29);
+    const second = {
+      file: new File([new Uint8Array(1536)], "second.md", { type: "text/markdown" }),
+      at: 29,
+    };
     const handlers = callbacks();
     const view = render(dialog(first, handlers));
     fireEvent.click(screen.getByTestId("file-drop-replace"));
 
     view.rerender(dialog(second, handlers));
-    expect(screen.getByText(/second\.md/)).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(
+      "What should happen with “second.md” (1.5 KiB)?",
+    );
+    expect(screen.queryByText(/first\.md/)).toBeNull();
     expect(screen.getByTestId("file-drop-insert")).toBeEnabled();
     fireEvent.click(screen.getByTestId("file-drop-insert"));
     expect(ControlledFileReader.reads).toHaveLength(2);
@@ -612,6 +718,9 @@ describe("FileDropDialog action ownership", () => {
     expect(handlers.onInsert).not.toHaveBeenCalled();
     expect(handlers.onError).not.toHaveBeenCalled();
     expect(handlers.onClose).not.toHaveBeenCalled();
+    expect(screen.getByText(
+      "What should happen with “second.md” (1.5 KiB)?",
+    )).toBeVisible();
     for (const action of ["replace", "insert", "new"]) expect(screen.getByTestId(`file-drop-${action}`)).toBeDisabled();
     fireEvent.click(screen.getByTestId("file-drop-replace"));
     expect(ControlledFileReader.reads).toHaveLength(2);
@@ -776,6 +885,10 @@ describe("FileDropDialog action ownership", () => {
 
     expect(replace.element).toBeDisabled();
     expect(insert.element).toBeDisabled();
+    expect(open.element).toBeEnabled();
+    expect(screen.getByRole("dialog")).toHaveAccessibleDescription(
+      "What should happen with “readonly.md” (6 bytes)?",
+    );
     act(() => {
       invoke(replace);
       invoke(insert);
