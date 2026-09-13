@@ -18,6 +18,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ApiError } from "@/lib/api";
 import { ImageDialog } from "./dialogs";
 
@@ -166,9 +167,8 @@ async function chooseFromCommittedSuccessor(
   expect(settledInput).toBeEnabled();
   expect(settledInput).toHaveValue("");
   expect(upload).toBeEnabled();
-  await act(async () => {
-    fireEvent.click(upload);
-  });
+  await userEvent.setup().hover(upload);
+  fireEvent.click(upload);
   const currentInput = screen.getByTestId("image-file") as HTMLInputElement;
   expect(currentInput).toBe(settledInput);
   expect(currentInput).toBeEnabled();
