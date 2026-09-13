@@ -13,7 +13,15 @@ import {
 import { Monitor, Moon, Sun } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useHydrated } from "@/lib/hooks";
-import { isThemePreference, nextTheme, setThemePreference, themeLabel, themeStore, type ThemePreference } from "@/lib/theme";
+import {
+  isThemePreference,
+  nextTheme,
+  setThemePreference,
+  systemPrefersDark,
+  themeLabel,
+  themeStore,
+  type ThemePreference,
+} from "@/lib/theme";
 
 interface ThemeAuthority {
   preference: ThemePreference;
@@ -169,6 +177,8 @@ class PublicationCoordinator<A extends PublicationAuthority> {
   #claimedPublications = new WeakSet<Publication<A>>();
   #claimedActions = new WeakSet<object>();
   #claimedEvents = new WeakSet<object>();
+  #claimedDeliveryParts = new WeakSet<object>();
+  #activeDelivery: object | null = null;
 
   constructor(mount: symbol) {
     this.#mount = mount;
@@ -262,6 +272,41 @@ class PublicationCoordinator<A extends PublicationAuthority> {
     this.#claimedEvents.add(event);
     this.#claimedEvents.add(nativeEvent);
     return true;
+  }
+
+  claimDelivery(
+    publication: Publication<A>,
+    action: object,
+    events: readonly object[],
+    parts: readonly object[],
+    delivery: object,
+  ) {
+    const deliveryParts = [...parts, delivery];
+    if (
+      !this.isCurrent(publication)
+      || this.#activeDelivery
+      || this.#claimedPublications.has(publication)
+      || this.#claimedActions.has(action)
+      || events.some((event) => this.#claimedEvents.has(event))
+      || deliveryParts.some((part) => this.#claimedDeliveryParts.has(part))
+      || new Set([...events, ...deliveryParts]).size !== events.length + deliveryParts.length
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(publication);
+    this.#claimedActions.add(action);
+    for (const event of events) this.#claimedEvents.add(event);
+    for (const part of deliveryParts) this.#claimedDeliveryParts.add(part);
+    this.#activeDelivery = delivery;
+    return true;
+  }
+
+  deliveryIsActive(delivery: object) {
+    return this.#activeDelivery === delivery && this.#claimedDeliveryParts.has(delivery);
+  }
+
+  finishDelivery(delivery: object) {
+    if (this.#activeDelivery === delivery) this.#activeDelivery = null;
   }
 }
 
@@ -860,6 +905,7 @@ interface PickerAuthority extends PublicationAuthority {
   readonly revision: number;
   readonly preference: ThemePreference;
   readonly setPreference: (next: ThemePreference) => void;
+  readonly prefersDark: boolean;
   readonly rootClassName: string;
   readonly rows: readonly PickerRowAuthority[];
 }
@@ -868,6 +914,10 @@ interface PickerRowPresentation {
   readonly authority: PickerRowAuthority;
   readonly captureButton: (element: HTMLButtonElement | null) => void;
   readonly captureIcon: (element: SVGSVGElement | null) => void;
+  readonly buttonOwner: ElementOwner<HTMLButtonElement>;
+  readonly iconOwner: ElementOwner<SVGSVGElement>;
+  readonly action: object;
+  readonly keyboardAction: object;
   readonly onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   readonly onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 }
@@ -876,6 +926,7 @@ interface PickerPresentation {
   readonly captureRoot: (element: HTMLDivElement | null) => void;
   readonly rows: readonly PickerRowPresentation[];
   readonly establish: () => void | (() => void);
+  readonly onKeyDownCapture: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 }
 
 function pickerAuthoritiesMatch(
@@ -888,6 +939,7 @@ function pickerAuthoritiesMatch(
     && (!includeRevision || previous.revision === current.revision)
     && previous.preference === current.preference
     && previous.setPreference === current.setPreference
+    && previous.prefersDark === current.prefersDark
     && previous.rootClassName === current.rootClassName
     && previous.rows.length === current.rows.length
     && previous.rows.every((row, index) => {
@@ -906,19 +958,73 @@ function pickerAuthoritiesMatch(
   );
 }
 
-type IntrinsicGetter<T> = (target: object) => T;
-type IntrinsicMethod<A extends readonly unknown[], R> = (target: object, ...args: A) => R;
+interface IntrinsicGetter<T> {
+  readonly read: (target: object) => T;
+  readonly isCurrent: () => boolean;
+}
 
-function captureIntrinsicGetter<T>(prototype: object, property: string): IntrinsicGetter<T> | null {
+interface IntrinsicMethod<A extends readonly unknown[], R> {
+  readonly invoke: (target: object, ...args: A) => R;
+  readonly isCurrent: () => boolean;
+}
+
+interface WindowMethod {
+  readonly value: (...args: unknown[]) => unknown;
+  readonly isCurrent: () => boolean;
+}
+
+interface UnforgeableGetter<T> {
+  readonly read: (target: object) => T;
+  readonly matches: (target: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+function descriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: Readonly<PropertyDescriptor>,
+) {
+  if (!current) return false;
+  if (
+    current.configurable !== expected.configurable
+    || current.enumerable !== expected.enumerable
+  ) {
+    return false;
+  }
+  if ("value" in expected) {
+    return (
+      "value" in current
+      && current.value === expected.value
+      && current.writable === expected.writable
+    );
+  }
+  return (
+    !("value" in current)
+    && current.get === expected.get
+    && current.set === expected.set
+  );
+}
+
+function captureIntrinsicGetter<T>(
+  prototype: object,
+  property: string,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  getPrototypeOf: typeof Object.getPrototypeOf,
+  apply: typeof Reflect.apply,
+): IntrinsicGetter<T> | null {
   let current: object | null = prototype;
   while (current) {
-    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    const descriptor = getOwnPropertyDescriptor(current, property);
     if (descriptor) {
       if (typeof descriptor.get !== "function") return null;
       const getter = descriptor.get;
-      return (target) => Reflect.apply(getter, target, []) as T;
+      const expected = Object.freeze({ ...descriptor });
+      return Object.freeze({
+        read: (target: object) => apply(getter, target, []) as T,
+        isCurrent: () =>
+          descriptorsMatch(getOwnPropertyDescriptor(current!, property), expected),
+      });
     }
-    current = Object.getPrototypeOf(current) as object | null;
+    current = getPrototypeOf(current) as object | null;
   }
   return null;
 }
@@ -926,89 +1032,265 @@ function captureIntrinsicGetter<T>(prototype: object, property: string): Intrins
 function captureIntrinsicMethod<A extends readonly unknown[], R>(
   prototype: object,
   property: string,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  getPrototypeOf: typeof Object.getPrototypeOf,
+  apply: typeof Reflect.apply,
 ): IntrinsicMethod<A, R> | null {
   let current: object | null = prototype;
   while (current) {
-    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    const descriptor = getOwnPropertyDescriptor(current, property);
     if (descriptor) {
       if (typeof descriptor.value !== "function") return null;
       const method = descriptor.value as (...args: A) => R;
-      return (target, ...args) => Reflect.apply(method, target, args) as R;
+      const expected = Object.freeze({ ...descriptor });
+      return Object.freeze({
+        invoke: (target: object, ...args: A) => apply(method, target, args) as R,
+        isCurrent: () =>
+          descriptorsMatch(getOwnPropertyDescriptor(current!, property), expected),
+      });
     }
-    current = Object.getPrototypeOf(current) as object | null;
+    current = getPrototypeOf(current) as object | null;
   }
   return null;
 }
 
+function captureWindowMethod(
+  ownerWindow: Window & typeof globalThis,
+  property: "addEventListener" | "removeEventListener",
+): WindowMethod | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(Object.freeze({
+      target,
+      descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+      prototype,
+    }));
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(ownerWindow, property, ownerWindow);
+  if (!found || typeof value !== "function") return null;
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
+    && ownerWindow.Object.getPrototypeOf === getPrototypeOf
+    && ownerWindow.Reflect.get === reflectGet
+    && path.every(({ target: entry, descriptor, prototype }) => {
+      const current = getOwnPropertyDescriptor(entry, property);
+      return (
+        getPrototypeOf(entry) === prototype
+        && (descriptor ? descriptorsMatch(current, descriptor) : current === undefined)
+      );
+    })
+    && reflectGet(ownerWindow, property, ownerWindow) === value;
+  return isCurrent()
+    ? Object.freeze({
+        value: value as (...args: unknown[]) => unknown,
+        isCurrent,
+      })
+    : null;
+}
+
+function captureUnforgeableGetter<T>(
+  owner: object,
+  property: string,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+): UnforgeableGetter<T> | null {
+  const descriptor = getOwnPropertyDescriptor(owner, property);
+  if (!descriptor?.get || "value" in descriptor) return null;
+  const expected = Object.freeze({ ...descriptor });
+  const getter = descriptor.get;
+  const matches = (target: object) =>
+    descriptorsMatch(getOwnPropertyDescriptor(target, property), expected);
+  return Object.freeze({
+    read: (target: object) => apply(getter, target, []) as T,
+    matches,
+    isCurrent: () => matches(owner),
+  });
+}
+
+interface PickerNativeKeyboardFacts {
+  readonly type: string;
+  readonly currentTarget: EventTarget | null;
+  readonly phase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly target: EventTarget | null;
+  readonly path: readonly EventTarget[];
+  readonly isTrusted: boolean;
+  readonly view: EventTarget | null;
+  readonly composed: boolean;
+  readonly detail: number;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly repeat: boolean;
+  readonly composing: boolean;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+}
+
 interface PickerKeyboardAuthority {
   readonly view: Window & typeof globalThis;
-  readonly eventType: IntrinsicGetter<string>;
-  readonly eventTarget: IntrinsicGetter<EventTarget | null>;
-  readonly eventPhase: IntrinsicGetter<number>;
-  readonly eventBubbles: IntrinsicGetter<boolean>;
-  readonly eventCancelable: IntrinsicGetter<boolean>;
-  readonly eventDefaultPrevented: IntrinsicGetter<boolean>;
-  readonly eventCancelBubble: IntrinsicGetter<boolean>;
-  readonly eventPath: IntrinsicMethod<readonly [], EventTarget[]>;
-  readonly preventDefault: IntrinsicMethod<readonly [], void>;
-  readonly key: IntrinsicGetter<string>;
-  readonly repeat: IntrinsicGetter<boolean>;
-  readonly composing: IntrinsicGetter<boolean>;
-  readonly altKey: IntrinsicGetter<boolean>;
-  readonly ctrlKey: IntrinsicGetter<boolean>;
-  readonly metaKey: IntrinsicGetter<boolean>;
-  readonly shiftKey: IntrinsicGetter<boolean>;
-  readonly activeElement: IntrinsicGetter<Element | null>;
+  readonly keyboardPrototype: object;
+  readonly capturingPhase: number;
+  readonly bubblingPhase: number;
+  readonly apply: typeof Reflect.apply;
+  readonly readKeyboard: (event: object) => PickerNativeKeyboardFacts | null;
+  readonly methodMatches: (event: object, property: string, value: unknown) => boolean;
+  readonly activeElement: () => Element | null | undefined;
   readonly focus: IntrinsicMethod<readonly [FocusOptions?], void>;
+  readonly addEventListener: WindowMethod;
+  readonly removeEventListener: WindowMethod;
 }
 
 function capturePickerKeyboardAuthority(
   publication: Publication<PickerAuthority>,
 ): PickerKeyboardAuthority | null {
   const { ownerDocument, ownerRealm: view } = publication;
-  const eventPrototype = view.Event.prototype;
-  const keyboardPrototype = view.KeyboardEvent.prototype;
-  const eventType = captureIntrinsicGetter<string>(eventPrototype, "type");
-  const eventTarget = captureIntrinsicGetter<EventTarget | null>(eventPrototype, "target");
-  const eventPhase = captureIntrinsicGetter<number>(eventPrototype, "eventPhase");
-  const eventBubbles = captureIntrinsicGetter<boolean>(eventPrototype, "bubbles");
-  const eventCancelable = captureIntrinsicGetter<boolean>(eventPrototype, "cancelable");
-  const eventDefaultPrevented = captureIntrinsicGetter<boolean>(eventPrototype, "defaultPrevented");
-  const eventCancelBubble = captureIntrinsicGetter<boolean>(eventPrototype, "cancelBubble");
-  const eventPath = captureIntrinsicMethod<readonly [], EventTarget[]>(
-    eventPrototype,
-    "composedPath",
-  );
-  const preventDefault = captureIntrinsicMethod<readonly [], void>(
-    eventPrototype,
-    "preventDefault",
-  );
-  const key = captureIntrinsicGetter<string>(keyboardPrototype, "key");
-  const repeat = captureIntrinsicGetter<boolean>(keyboardPrototype, "repeat");
-  const composing = captureIntrinsicGetter<boolean>(keyboardPrototype, "isComposing");
-  const altKey = captureIntrinsicGetter<boolean>(keyboardPrototype, "altKey");
-  const ctrlKey = captureIntrinsicGetter<boolean>(keyboardPrototype, "ctrlKey");
-  const metaKey = captureIntrinsicGetter<boolean>(keyboardPrototype, "metaKey");
-  const shiftKey = captureIntrinsicGetter<boolean>(keyboardPrototype, "shiftKey");
+  const objectConstructor = view.Object;
+  const reflectObject = view.Reflect;
+  const eventConstructor = view.Event;
+  const uiEventConstructor = view.UIEvent;
+  const keyboardConstructor = view.KeyboardEvent;
+  const documentConstructor = view.Document;
+  const htmlElementConstructor = view.HTMLElement;
+  const eventPrototype = eventConstructor.prototype;
+  const uiEventPrototype = uiEventConstructor.prototype;
+  const keyboardPrototype = keyboardConstructor.prototype;
+  const documentPrototype = documentConstructor.prototype;
+  const htmlElementPrototype = htmlElementConstructor.prototype;
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  const getter = <T,>(prototype: object, property: string) =>
+    captureIntrinsicGetter<T>(
+      prototype,
+      property,
+      getOwnPropertyDescriptor,
+      getPrototypeOf,
+      apply,
+    );
+  const method = <A extends readonly unknown[], R>(
+    prototype: object,
+    property: string,
+  ) =>
+    captureIntrinsicMethod<A, R>(
+      prototype,
+      property,
+      getOwnPropertyDescriptor,
+      getPrototypeOf,
+      apply,
+    );
+  const eventType = getter<string>(eventPrototype, "type");
+  const eventTarget = getter<EventTarget | null>(eventPrototype, "target");
+  const eventCurrentTarget = getter<EventTarget | null>(eventPrototype, "currentTarget");
+  const eventPhase = getter<number>(eventPrototype, "eventPhase");
+  const eventBubbles = getter<boolean>(eventPrototype, "bubbles");
+  const eventCancelable = getter<boolean>(eventPrototype, "cancelable");
+  const eventDefaultPrevented = getter<boolean>(eventPrototype, "defaultPrevented");
+  const eventCancelBubble = getter<boolean>(eventPrototype, "cancelBubble");
+  const eventComposed = getter<boolean>(eventPrototype, "composed");
+  const eventPath = method<readonly [], EventTarget[]>(eventPrototype, "composedPath");
+  const eventView = getter<EventTarget | null>(uiEventPrototype, "view");
+  const eventDetail = getter<number>(uiEventPrototype, "detail");
+  const key = getter<string>(keyboardPrototype, "key");
+  const code = getter<string>(keyboardPrototype, "code");
+  const location = getter<number>(keyboardPrototype, "location");
+  const repeat = getter<boolean>(keyboardPrototype, "repeat");
+  const composing = getter<boolean>(keyboardPrototype, "isComposing");
+  const altKey = getter<boolean>(keyboardPrototype, "altKey");
+  const ctrlKey = getter<boolean>(keyboardPrototype, "ctrlKey");
+  const metaKey = getter<boolean>(keyboardPrototype, "metaKey");
+  const shiftKey = getter<boolean>(keyboardPrototype, "shiftKey");
   const activeElement = captureIntrinsicGetter<Element | null>(
-    view.Document.prototype,
+    documentPrototype,
     "activeElement",
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    apply,
   );
   const focus = captureIntrinsicMethod<readonly [FocusOptions?], void>(
-    view.HTMLElement.prototype,
+    htmlElementPrototype,
     "focus",
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    apply,
   );
+  const addEventListener = captureWindowMethod(view, "addEventListener");
+  const removeEventListener = captureWindowMethod(view, "removeEventListener");
+  let probe: KeyboardEvent;
+  try {
+    probe = new keyboardConstructor("theme-picker-keyboard-proof");
+  } catch {
+    return null;
+  }
+  const trusted = captureUnforgeableGetter<boolean>(
+    probe,
+    "isTrusted",
+    getOwnPropertyDescriptor,
+    apply,
+  );
+  const getters = Object.freeze([
+    eventType,
+    eventTarget,
+    eventCurrentTarget,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventComposed,
+    eventView,
+    eventDetail,
+    key,
+    code,
+    location,
+    repeat,
+    composing,
+    altKey,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    activeElement,
+  ]);
+  const methods = Object.freeze([eventPath, focus]);
   if (
-    !eventType
+    getters.some((intrinsic) => !intrinsic || !intrinsic.isCurrent())
+    || methods.some((intrinsic) => !intrinsic || !intrinsic.isCurrent())
+    || !eventType
     || !eventTarget
+    || !eventCurrentTarget
     || !eventPhase
     || !eventBubbles
     || !eventCancelable
     || !eventDefaultPrevented
     || !eventCancelBubble
+    || !eventComposed
     || !eventPath
-    || !preventDefault
+    || !eventView
+    || !eventDetail
     || !key
+    || !code
+    || !location
     || !repeat
     || !composing
     || !altKey
@@ -1017,30 +1299,113 @@ function capturePickerKeyboardAuthority(
     || !shiftKey
     || !activeElement
     || !focus
+    || !trusted
+    || !trusted.isCurrent()
+    || !addEventListener
+    || !addEventListener.isCurrent()
+    || !removeEventListener
+    || !removeEventListener.isCurrent()
     || ownerDocument.defaultView !== view
   ) {
     return null;
   }
+  let historyIsClean = true;
+  const intrinsicsAreCurrent = () => {
+    if (!historyIsClean) return false;
+    historyIsClean = (
+      ownerDocument.defaultView === view
+      && objectConstructor === view.Object
+      && reflectObject === view.Reflect
+      && eventConstructor === view.Event
+      && uiEventConstructor === view.UIEvent
+      && keyboardConstructor === view.KeyboardEvent
+      && documentConstructor === view.Document
+      && htmlElementConstructor === view.HTMLElement
+      && eventPrototype === eventConstructor.prototype
+      && uiEventPrototype === uiEventConstructor.prototype
+      && keyboardPrototype === keyboardConstructor.prototype
+      && documentPrototype === documentConstructor.prototype
+      && htmlElementPrototype === htmlElementConstructor.prototype
+      && view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
+      && view.Object.getPrototypeOf === getPrototypeOf
+      && view.Reflect.apply === apply
+      && getters.every((intrinsic) => intrinsic?.isCurrent() === true)
+      && methods.every((intrinsic) => intrinsic?.isCurrent() === true)
+      && trusted.isCurrent()
+      && addEventListener.isCurrent()
+      && removeEventListener.isCurrent()
+    );
+    return historyIsClean;
+  };
   return Object.freeze({
     view,
-    eventType,
-    eventTarget,
-    eventPhase,
-    eventBubbles,
-    eventCancelable,
-    eventDefaultPrevented,
-    eventCancelBubble,
-    eventPath,
-    preventDefault,
-    key,
-    repeat,
-    composing,
-    altKey,
-    ctrlKey,
-    metaKey,
-    shiftKey,
-    activeElement,
+    keyboardPrototype,
+    capturingPhase: eventConstructor.CAPTURING_PHASE,
+    bubblingPhase: eventConstructor.BUBBLING_PHASE,
+    apply,
+    readKeyboard: (event: object) => {
+      try {
+        if (
+          !intrinsicsAreCurrent()
+          || getPrototypeOf(event) !== keyboardPrototype
+          || !trusted.matches(event)
+          || trusted.read(event) !== true
+        ) {
+          return null;
+        }
+        return Object.freeze({
+          type: eventType.read(event),
+          currentTarget: eventCurrentTarget.read(event),
+          phase: eventPhase.read(event),
+          bubbles: eventBubbles.read(event),
+          cancelable: eventCancelable.read(event),
+          defaultPrevented: eventDefaultPrevented.read(event),
+          cancelBubble: eventCancelBubble.read(event),
+          target: eventTarget.read(event),
+          path: Object.freeze([...eventPath.invoke(event)]),
+          isTrusted: trusted.read(event),
+          view: eventView.read(event),
+          composed: eventComposed.read(event),
+          detail: eventDetail.read(event),
+          key: key.read(event),
+          code: code.read(event),
+          location: location.read(event),
+          repeat: repeat.read(event),
+          composing: composing.read(event),
+          altKey: altKey.read(event),
+          ctrlKey: ctrlKey.read(event),
+          metaKey: metaKey.read(event),
+          shiftKey: shiftKey.read(event),
+        });
+      } catch {
+        return null;
+      }
+    },
+    methodMatches: (event: object, property: string, value: unknown) => {
+      if (!intrinsicsAreCurrent() || typeof value !== "function") return false;
+      try {
+        let owner: object | null = event;
+        while (owner) {
+          const descriptor = getOwnPropertyDescriptor(owner, property);
+          if (descriptor) return "value" in descriptor && descriptor.value === value;
+          owner = getPrototypeOf(owner) as object | null;
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    },
+    activeElement: () => {
+      if (!intrinsicsAreCurrent()) return undefined;
+      try {
+        return activeElement.read(ownerDocument);
+      } catch {
+        return undefined;
+      }
+    },
     focus,
+    addEventListener,
+    removeEventListener,
   });
 }
 
@@ -1053,59 +1418,435 @@ function pickerDestination(key: string, current: number, count: number): number 
   return null;
 }
 
-function exactNativePickerKey(
-  event: ReactKeyboardEvent<HTMLButtonElement>,
-  publication: Publication<PickerAuthority>,
-  control: HTMLButtonElement,
+interface PickerWindowProof {
+  readonly registration: PickerKeyListener;
+  readonly publication: Publication<PickerAuthority>;
+  readonly nativeEvent: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface PickerKeyListener {
+  readonly proofFor: (
+    event: KeyboardEvent,
+    publication: Publication<PickerAuthority>,
+  ) => PickerWindowProof | null;
+  readonly retains: (
+    proof: PickerWindowProof,
+    publication: Publication<PickerAuthority>,
+  ) => boolean;
+  readonly activate: (publication: Publication<PickerAuthority>) => boolean;
+  readonly release: (publication: Publication<PickerAuthority>) => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface PickerReactKeyboardMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
+  readonly isDefaultPrevented: (...args: never[]) => unknown;
+  readonly isPropagationStopped: (...args: never[]) => unknown;
+}
+
+interface PickerReactKeyboardSnapshot {
+  readonly event: ReactKeyboardEvent<HTMLElement>;
+  readonly nativeEvent: KeyboardEvent;
+  readonly target: HTMLButtonElement;
+  readonly currentTarget: HTMLElement;
+  readonly phase: number;
+  readonly view: ReactKeyboardEvent<HTMLElement>["view"];
+  readonly methods: PickerReactKeyboardMethods;
+}
+
+interface PickerMovement {
+  readonly identity: symbol;
+  readonly publication: Publication<PickerAuthority>;
+  readonly sourceRow: PickerRowPresentation;
+  readonly destinationRow: PickerRowPresentation;
+  readonly source: HTMLButtonElement;
+  readonly destination: HTMLButtonElement;
+  readonly key: string;
+}
+
+interface PickerKeyPair {
+  readonly publication: Publication<PickerAuthority>;
+  readonly action: object;
+  readonly native: PickerNativeKeyboardFacts;
+  readonly nativeEvent: KeyboardEvent;
+  readonly capture: PickerReactKeyboardSnapshot;
+  readonly windowProof: PickerWindowProof;
+  readonly sourceRow: PickerRowPresentation;
+  readonly destinationRow: PickerRowPresentation;
+  readonly source: HTMLButtonElement;
+  readonly destination: HTMLButtonElement;
+  readonly key: string;
+  readonly movement: PickerMovement;
+  readonly publicationClaim: object;
+  readonly sourceClaim: object;
+  readonly destinationClaim: object;
+  readonly captureClaim: object;
+  readonly nativeClaim: object;
+  readonly windowClaim: object;
+}
+
+interface PickerKeyDelivery {
+  readonly pair: PickerKeyPair;
+  readonly bubble: PickerReactKeyboardSnapshot;
+}
+
+function createPickerKeyListener(
   authority: PickerKeyboardAuthority,
-): { readonly event: KeyboardEvent; readonly key: string } | null {
-  if (!event || typeof event !== "object") return null;
-  const nativeEvent = event.nativeEvent;
-  const reactEvent = event as ReactKeyboardEvent<HTMLButtonElement> & {
-    _reactName?: unknown;
+): PickerKeyListener {
+  const proofs = new WeakMap<KeyboardEvent, PickerWindowProof>();
+  const invalidEvents = new WeakSet<Event>();
+  let publication: Publication<PickerAuthority> | null = null;
+  let active = false;
+  let released = false;
+  const listener: EventListener = function (this: EventTarget, event: Event) {
+    const current = publication;
+    if (
+      !current
+      || !active
+      || released
+      || current.ownerRealm !== authority.view
+      || invalidEvents.has(event)
+    ) {
+      return;
+    }
+    if (proofs.has(event as KeyboardEvent)) {
+      proofs.delete(event as KeyboardEvent);
+      invalidEvents.add(event);
+      return;
+    }
+    const nativeEvent = event as KeyboardEvent;
+    const facts = authority.readKeyboard(nativeEvent);
+    const terminal = facts?.path.at(-1);
+    if (
+      !facts
+      || facts.type !== "keydown"
+      || facts.currentTarget !== this
+      || terminal !== this
+      || facts.phase !== authority.capturingPhase
+      || facts.path.at(-2) !== current.ownerDocument
+      || (facts.view !== null
+        && facts.view !== authority.view
+        && facts.view !== this)
+    ) {
+      invalidEvents.add(event);
+      return;
+    }
+    proofs.set(nativeEvent, Object.freeze({
+      registration,
+      publication: current,
+      nativeEvent,
+      receiver: this,
+      currentTarget: this,
+      terminal,
+      path: Object.freeze([...facts.path]),
+    }));
   };
-  const eventPrototype = Object.getPrototypeOf(event) as {
-    constructor?: { name?: unknown };
-  } | null;
-  if (
-    publication.ownerRealm !== authority.view
-    || publication.ownerDocument.defaultView !== authority.view
-    || !(nativeEvent instanceof authority.view.KeyboardEvent)
-  ) {
+  const proofFor = (
+    event: KeyboardEvent,
+    current: Publication<PickerAuthority>,
+  ) => {
+    const proof = proofs.get(event);
+    if (
+      !proof
+      || !active
+      || released
+      || publication !== current
+      || proof.registration !== registration
+      || proof.publication !== current
+      || proof.nativeEvent !== event
+      || proof.receiver !== proof.currentTarget
+      || proof.receiver !== proof.terminal
+      || invalidEvents.has(event)
+    ) {
+      return null;
+    }
+    const facts = authority.readKeyboard(event);
+    return (
+      facts
+      && facts.path.length === proof.path.length
+      && facts.path.every((entry, index) => entry === proof.path[index])
+      && facts.path.at(-2) === current.ownerDocument
+      && facts.path.at(-1) === proof.receiver
+    )
+      ? proof
+      : null;
+  };
+  const registration: PickerKeyListener = Object.freeze({
+    proofFor,
+    retains: (
+      proof: PickerWindowProof,
+      current: Publication<PickerAuthority>,
+    ) =>
+      publication === current
+      && proofFor(proof.nativeEvent, current) === proof
+      && current.ownerRealm === authority.view
+      && authority.addEventListener.isCurrent()
+      && authority.removeEventListener.isCurrent(),
+    activate: (current: Publication<PickerAuthority>) => {
+      if (
+        publication
+        || active
+        || released
+        || current.ownerRealm !== authority.view
+        || !authority.addEventListener.isCurrent()
+        || !authority.removeEventListener.isCurrent()
+      ) {
+        return false;
+      }
+      publication = current;
+      active = true;
+      try {
+        authority.apply(
+          authority.addEventListener.value,
+          authority.view,
+          ["keydown", listener, true],
+        );
+      } catch {
+        publication = null;
+        active = false;
+        return false;
+      }
+      if (registration.isCurrent()) return true;
+      publication = null;
+      active = false;
+      try {
+        authority.apply(
+          authority.removeEventListener.value,
+          authority.view,
+          ["keydown", listener, true],
+        );
+      } catch {
+        return false;
+      }
+      return false;
+    },
+    release: (current: Publication<PickerAuthority>) => {
+      if (publication !== current || released) return;
+      released = true;
+      const wasActive = active;
+      active = false;
+      publication = null;
+      if (!wasActive) return;
+      try {
+        authority.apply(
+          authority.removeEventListener.value,
+          authority.view,
+          ["keydown", listener, true],
+        );
+      } catch {
+        return;
+      }
+    },
+    isCurrent: () =>
+      active
+      && !released
+      && publication?.ownerRealm === authority.view
+      && authority.addEventListener.isCurrent()
+      && authority.removeEventListener.isCurrent(),
+  });
+  return registration;
+}
+
+function pickerNativeFactsMatch(
+  previous: PickerNativeKeyboardFacts,
+  current: PickerNativeKeyboardFacts,
+  defaultPrevented = false,
+) {
+  return (
+    previous.type === current.type
+    && previous.currentTarget === current.currentTarget
+    && previous.bubbles === current.bubbles
+    && previous.cancelable === current.cancelable
+    && current.defaultPrevented === defaultPrevented
+    && previous.cancelBubble === current.cancelBubble
+    && previous.target === current.target
+    && previous.path.length === current.path.length
+    && previous.path.every((entry, index) => entry === current.path[index])
+    && previous.isTrusted === current.isTrusted
+    && previous.view === current.view
+    && previous.composed === current.composed
+    && previous.detail === current.detail
+    && previous.key === current.key
+    && previous.code === current.code
+    && previous.location === current.location
+    && previous.repeat === current.repeat
+    && previous.composing === current.composing
+    && previous.altKey === current.altKey
+    && previous.ctrlKey === current.ctrlKey
+    && previous.metaKey === current.metaKey
+    && previous.shiftKey === current.shiftKey
+  );
+}
+
+function applyPickerReactMethod(
+  authority: PickerKeyboardAuthority,
+  method: (...args: never[]) => unknown,
+  event: ReactKeyboardEvent<HTMLElement>,
+) {
+  try {
+    return Object.freeze({
+      value: authority.apply(method, event, []),
+    });
+  } catch {
     return null;
   }
-  const nativeTarget = authority.eventTarget(nativeEvent);
-  const path = authority.eventPath(nativeEvent);
-  const key = authority.key(nativeEvent);
-  return (
-    authority.eventType(nativeEvent) === "keydown"
-    && authority.eventPhase(nativeEvent) !== authority.view.Event.NONE
-    && authority.eventBubbles(nativeEvent)
-    && authority.eventCancelable(nativeEvent)
-    && !authority.eventDefaultPrevented(nativeEvent)
-    && !authority.eventCancelBubble(nativeEvent)
-    && !authority.repeat(nativeEvent)
-    && !authority.composing(nativeEvent)
-    && !authority.altKey(nativeEvent)
-    && !authority.ctrlKey(nativeEvent)
-    && !authority.metaKey(nativeEvent)
-    && !authority.shiftKey(nativeEvent)
-    && event.type === "keydown"
-    && event.currentTarget === control
-    && event.target === nativeTarget
-    && nativeTarget instanceof authority.view.Node
-    && nativeTarget.ownerDocument === publication.ownerDocument
-    && control.contains(nativeTarget)
-    && path[0] === nativeTarget
-    && path.includes(control)
-    && path.includes(publication.root)
-    && snapshotContains(publication.dom, nativeTarget)
-    && authority.activeElement(publication.ownerDocument) === control
-    && eventPrototype?.constructor?.name === "SyntheticBaseEvent"
-    && reactEvent._reactName === "onKeyDown"
-  )
-    ? Object.freeze({ event: nativeEvent, key })
-    : null;
+}
+
+function capturePickerReactKeyboard(
+  event: ReactKeyboardEvent<HTMLElement>,
+  publication: Publication<PickerAuthority>,
+  authority: PickerKeyboardAuthority,
+  native: PickerNativeKeyboardFacts,
+  nativeEvent: KeyboardEvent,
+  target: HTMLButtonElement,
+  currentTarget: HTMLElement,
+  windowProof: PickerWindowProof,
+): PickerReactKeyboardSnapshot | null {
+  try {
+    const wrapper = event as ReactKeyboardEvent<HTMLElement>;
+    const preventDefault = wrapper.preventDefault;
+    const isDefaultPrevented = wrapper.isDefaultPrevented;
+    const isPropagationStopped = wrapper.isPropagationStopped;
+    const isComposing = (
+      wrapper as ReactKeyboardEvent<HTMLElement> & { isComposing?: unknown }
+    ).isComposing;
+    const view = wrapper.view;
+    const defaultResult = typeof isDefaultPrevented === "function"
+      ? applyPickerReactMethod(authority, isDefaultPrevented, wrapper)
+      : null;
+    const propagationResult = typeof isPropagationStopped === "function"
+      ? applyPickerReactMethod(authority, isPropagationStopped, wrapper)
+      : null;
+    if (
+      typeof preventDefault !== "function"
+      || typeof isDefaultPrevented !== "function"
+      || typeof isPropagationStopped !== "function"
+      || !authority.methodMatches(wrapper, "preventDefault", preventDefault)
+      || !authority.methodMatches(wrapper, "isDefaultPrevented", isDefaultPrevented)
+      || !authority.methodMatches(wrapper, "isPropagationStopped", isPropagationStopped)
+      || defaultResult?.value !== false
+      || propagationResult?.value !== false
+      || wrapper === (nativeEvent as unknown)
+      || wrapper.nativeEvent !== nativeEvent
+      || wrapper.type !== native.type
+      || wrapper.type !== "keydown"
+      || wrapper.target !== target
+      || wrapper.currentTarget !== currentTarget
+      || wrapper.eventPhase !== native.phase
+      || wrapper.bubbles !== native.bubbles
+      || wrapper.cancelable !== native.cancelable
+      || wrapper.defaultPrevented !== native.defaultPrevented
+      || wrapper.isTrusted !== native.isTrusted
+      || wrapper.key !== native.key
+      || wrapper.code !== native.code
+      || wrapper.location !== native.location
+      || wrapper.repeat !== native.repeat
+      || (isComposing !== undefined && isComposing !== native.composing)
+      || wrapper.altKey !== native.altKey
+      || wrapper.ctrlKey !== native.ctrlKey
+      || wrapper.metaKey !== native.metaKey
+      || wrapper.shiftKey !== native.shiftKey
+      || wrapper.detail !== native.detail
+      || (view !== null
+        && !Object.is(view, publication.ownerRealm)
+        && !Object.is(view, windowProof.receiver))
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event: wrapper,
+      nativeEvent,
+      target,
+      currentTarget,
+      phase: native.phase,
+      view,
+      methods: Object.freeze({
+        preventDefault,
+        isDefaultPrevented,
+        isPropagationStopped,
+      }),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function pickerReactKeyboardRemainsExact(
+  snapshot: PickerReactKeyboardSnapshot,
+  publication: Publication<PickerAuthority>,
+  authority: PickerKeyboardAuthority,
+  native: PickerNativeKeyboardFacts,
+  currentTarget: HTMLElement | null,
+  defaultPrevented = false,
+) {
+  try {
+    const event = snapshot.event;
+    const methods = snapshot.methods;
+    const currentIsDefaultPrevented = event.isDefaultPrevented;
+    const isComposing = (
+      event as ReactKeyboardEvent<HTMLElement> & { isComposing?: unknown }
+    ).isComposing;
+    const defaultResult = typeof currentIsDefaultPrevented === "function"
+      ? applyPickerReactMethod(authority, currentIsDefaultPrevented, event)
+      : null;
+    const propagationResult = applyPickerReactMethod(
+      authority,
+      methods.isPropagationStopped,
+      event,
+    );
+    return (
+      event.nativeEvent === snapshot.nativeEvent
+      && event.type === native.type
+      && event.target === snapshot.target
+      && event.target === native.target
+      && event.currentTarget === currentTarget
+      && event.eventPhase === snapshot.phase
+      && event.eventPhase === native.phase
+      && event.bubbles === native.bubbles
+      && event.cancelable === native.cancelable
+      && event.defaultPrevented === defaultPrevented
+      && event.isTrusted === native.isTrusted
+      && event.key === native.key
+      && event.code === native.code
+      && event.location === native.location
+      && event.repeat === native.repeat
+      && (isComposing === undefined || isComposing === native.composing)
+      && event.altKey === native.altKey
+      && event.ctrlKey === native.ctrlKey
+      && event.metaKey === native.metaKey
+      && event.shiftKey === native.shiftKey
+      && event.detail === native.detail
+      && event.view === snapshot.view
+      && (event.view === null
+        || Object.is(event.view, publication.ownerRealm)
+        || Object.is(event.view, native.path.at(-1)))
+      && event.preventDefault === methods.preventDefault
+      && event.isPropagationStopped === methods.isPropagationStopped
+      && authority.methodMatches(event, "preventDefault", methods.preventDefault)
+      && authority.methodMatches(
+        event,
+        "isPropagationStopped",
+        methods.isPropagationStopped,
+      )
+      && typeof currentIsDefaultPrevented === "function"
+      && authority.methodMatches(
+        event,
+        "isDefaultPrevented",
+        currentIsDefaultPrevented,
+      )
+      && defaultResult?.value === defaultPrevented
+      && propagationResult?.value === false
+      && (!defaultPrevented
+        ? currentIsDefaultPrevented === methods.isDefaultPrevented
+        : true)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function createPickerPresentation(
@@ -1116,8 +1857,21 @@ function createPickerPresentation(
   let currentRuntime: PublicationRuntime<PickerAuthority> | null = null;
   let lastRuntime: PublicationRuntime<PickerAuthority> | null = null;
   let keyboardAuthority: PickerKeyboardAuthority | null = null;
+  let keyboardListener: PickerKeyListener | null = null;
   let successorRequested = false;
-  const { mount, revision, preference, setPreference, rootClassName, rows } = authority;
+  let completePickerNavigation = (
+    _row: PickerRowAuthority,
+    _event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {};
+  const {
+    mount,
+    revision,
+    preference,
+    setPreference,
+    prefersDark,
+    rootClassName,
+    rows,
+  } = authority;
   const onElementChange = (
     owner: ElementOwnerView,
     element: Element | null,
@@ -1127,6 +1881,7 @@ function createPickerPresentation(
     const runtime = currentRuntime ?? lastRuntime;
     runtime?.noteRef(owner, element, previous);
     if (element === null || (element !== null && last !== null && element !== last)) {
+      if (currentRuntime) keyboardListener?.release(currentRuntime.publication);
       currentRuntime?.retireForElement();
       currentRuntime = null;
     }
@@ -1176,76 +1931,16 @@ function createPickerPresentation(
       }
       setPreference(row.preference);
     };
-    const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-      const publication = coordinator.active();
-      const button = buttonOwner.element();
-      if (
-        !publication
-        || publication.isRetired()
-        || !pickerAuthoritiesMatch(publication.authority, authority)
-        || !row.checked
-        || row.preference !== preference
-        || rows[row.index] !== row
-        || !button
-        || button.tabIndex !== 0
-        || !coordinator.isCurrent(publication)
-        || !factsAreCurrent()
-        || !exactDomIsCurrent()
-        || !publication.publishedDomMatches()
-        || themeStore.getSnapshot() !== preference
-        || !keyboardAuthority
-      ) {
-        return;
-      }
-      const exactEvent = exactNativePickerKey(
-        event,
-        publication,
-        button,
-        keyboardAuthority,
-      );
-      const destinationIndex = exactEvent
-        ? pickerDestination(exactEvent.key, row.index, rows.length)
-        : null;
-      const destination = destinationIndex === null
-        ? null
-        : rowPresentations[destinationIndex];
-      const destinationButton = destination?.buttonOwner.element();
-      if (
-        !exactEvent
-        || destinationIndex === null
-        || !destination
-        || destination.authority !== rows[destinationIndex]
-        || destination.authority.checked
-        || destination.authority.preference === preference
-        || !destinationButton
-        || destinationButton.ownerDocument !== publication.ownerDocument
-        || destinationButton.parentElement !== publication.root
-        || publication.root.children.item(destinationIndex) !== destinationButton
-        || coordinator.hasClaimed(
-          publication,
-          keyboardAction,
-          event,
-          exactEvent.event,
-        )
-        || !coordinator.claim(
-          publication,
-          keyboardAction,
-          event,
-          exactEvent.event,
-        )
-      ) {
-        return;
-      }
-      keyboardAuthority.preventDefault(exactEvent.event);
-      setPreference(destination.authority.preference);
-      keyboardAuthority.focus(destinationButton, { preventScroll: true });
-    };
+    const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+      completePickerNavigation(row, event);
     return Object.freeze({
       authority: row,
       captureButton: buttonOwner.capture,
       captureIcon: iconOwner.capture,
       buttonOwner,
       iconOwner,
+      action,
+      keyboardAction,
       onClick,
       onKeyDown,
     });
@@ -1254,13 +1949,29 @@ function createPickerPresentation(
     rootOwner,
     ...rowPresentations.flatMap(({ buttonOwner, iconOwner }) => [buttonOwner, iconOwner]),
   ]);
+  const systemThemeIsCurrent = () => {
+    try {
+      return systemPrefersDark() === prefersDark;
+    } catch {
+      return false;
+    }
+  };
+  const storeMatches = (expected: ThemePreference) => {
+    try {
+      return themeStore.getSnapshot() === expected;
+    } catch {
+      return false;
+    }
+  };
   const factsAreCurrent = () =>
     authority.mount === mount
     && authority.revision === revision
     && authority.preference === preference
     && authority.setPreference === setPreference
+    && authority.prefersDark === prefersDark
     && authority.rootClassName === rootClassName
     && authority.rows === rows
+    && systemThemeIsCurrent()
     && rootClassName === PICKER_CLASS_NAME
     && rows.length === THEME_OPTIONS.length
     && rows.every((row, index) => (
@@ -1318,6 +2029,435 @@ function createPickerPresentation(
       })
     );
   };
+  const movementIsCurrent = (
+    runtime: PublicationRuntime<PickerAuthority>,
+    publication: Publication<PickerAuthority>,
+    sourceRow: PickerRowPresentation,
+    destinationRow: PickerRowPresentation,
+    source: HTMLButtonElement,
+    destination: HTMLButtonElement,
+    key: string,
+    expectedStore: ThemePreference,
+  ) => {
+    const events = keyboardAuthority;
+    const listener = keyboardListener;
+    const destinationIndex = pickerDestination(
+      key,
+      sourceRow.authority.index,
+      rows.length,
+    );
+    return Boolean(
+      events
+      && listener
+      && currentRuntime === runtime
+      && !runtime.isRetired()
+      && publication === runtime.publication
+      && publication.authority === authority
+      && publication.ownerDocument.defaultView === publication.ownerRealm
+      && sourceRow.authority === rows[sourceRow.authority.index]
+      && destinationRow.authority === rows[destinationRow.authority.index]
+      && sourceRow.authority.checked
+      && sourceRow.authority.preference === preference
+      && sourceRow.authority.tabIndex === 0
+      && !destinationRow.authority.checked
+      && destinationRow.authority.preference !== preference
+      && destinationRow.authority.tabIndex === -1
+      && destinationIndex === destinationRow.authority.index
+      && sourceRow.buttonOwner.element() === source
+      && destinationRow.buttonOwner.element() === destination
+      && source.ownerDocument === publication.ownerDocument
+      && destination.ownerDocument === publication.ownerDocument
+      && source.parentElement === publication.root
+      && destination.parentElement === publication.root
+      && publication.root.children.item(sourceRow.authority.index) === source
+      && publication.root.children.item(destinationRow.authority.index) === destination
+      && events.activeElement() === source
+      && events.focus.isCurrent()
+      && listener.isCurrent()
+      && coordinator.isCurrent(publication)
+      && factsAreCurrent()
+      && exactDomIsCurrent()
+      && runtime.publishedDomMatches()
+      && storeMatches(expectedStore)
+    );
+  };
+  const keyPairs = new WeakMap<object, PickerKeyPair>();
+  const invalidNativeKeys = new WeakSet<object>();
+  const onKeyDownCapture = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    let nativeEvent: unknown;
+    let eventCurrentTarget: EventTarget | null;
+    try {
+      nativeEvent = event.nativeEvent;
+      eventCurrentTarget = event.currentTarget;
+    } catch {
+      return;
+    }
+    if (!nativeEvent || typeof nativeEvent !== "object" || invalidNativeKeys.has(nativeEvent)) {
+      return;
+    }
+    if (keyPairs.has(nativeEvent)) {
+      keyPairs.delete(nativeEvent);
+      invalidNativeKeys.add(nativeEvent);
+      return;
+    }
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const events = keyboardAuthority;
+    const listener = keyboardListener;
+    const root = rootOwner.element();
+    if (
+      !runtime
+      || !publication
+      || !events
+      || !listener
+      || !root
+      || runtime.isRetired()
+      || eventCurrentTarget !== root
+    ) {
+      return;
+    }
+    const native = events.readKeyboard(nativeEvent);
+    const proof = native
+      ? listener.proofFor(nativeEvent as KeyboardEvent, publication)
+      : null;
+    const sourceRow = native
+      ? rowPresentations.find((candidate) =>
+          candidate.buttonOwner.element() === native.target)
+      : undefined;
+    const source = sourceRow?.buttonOwner.element();
+    const destinationIndex = sourceRow && native
+      ? pickerDestination(native.key, sourceRow.authority.index, rows.length)
+      : null;
+    const destinationRow = destinationIndex === null
+      ? undefined
+      : rowPresentations[destinationIndex];
+    const destination = destinationRow?.buttonOwner.element();
+    const capture = (
+      native
+      && proof
+      && source
+      && destination
+    )
+      ? capturePickerReactKeyboard(
+          event,
+          publication,
+          events,
+          native,
+          nativeEvent as KeyboardEvent,
+          source,
+          root,
+          proof,
+        )
+      : null;
+    const nativeCurrentTarget = native?.currentTarget;
+    if (
+      !native
+      || !proof
+      || !sourceRow
+      || !source
+      || destinationIndex === null
+      || !destinationRow
+      || !destination
+      || !capture
+      || native.type !== "keydown"
+      || native.phase !== events.capturingPhase
+      || !native.bubbles
+      || !native.cancelable
+      || native.defaultPrevented
+      || native.cancelBubble
+      || !native.isTrusted
+      || !native.composed
+      || native.repeat
+      || native.composing
+      || native.altKey
+      || native.ctrlKey
+      || native.metaKey
+      || native.shiftKey
+      || native.target !== source
+      || !(nativeCurrentTarget instanceof events.view.Node)
+      || nativeCurrentTarget.ownerDocument !== publication.ownerDocument
+      || !nativeCurrentTarget.contains(publication.root)
+      || native.path[0] !== source
+      || native.path.filter((entry) => entry === source).length !== 1
+      || !native.path.includes(publication.root)
+      || native.path.at(-1) !== proof.receiver
+      || (native.view !== null
+        && native.view !== publication.ownerRealm
+        && native.view !== proof.receiver)
+      || sourceRow.authority !== rows[sourceRow.authority.index]
+      || destinationRow.authority !== rows[destinationIndex]
+      || sourceRow.keyboardAction !== rowPresentations[sourceRow.authority.index]?.keyboardAction
+      || coordinator.hasClaimed(
+        publication,
+        sourceRow.keyboardAction,
+        capture.event,
+        nativeEvent as Event,
+      )
+      || !movementIsCurrent(
+        runtime,
+        publication,
+        sourceRow,
+        destinationRow,
+        source,
+        destination,
+        native.key,
+        preference,
+      )
+    ) {
+      return;
+    }
+    const movement = Object.freeze<PickerMovement>({
+      identity: Symbol("theme-picker-keyboard-movement"),
+      publication,
+      sourceRow,
+      destinationRow,
+      source,
+      destination,
+      key: native.key,
+    });
+    keyPairs.set(nativeEvent, Object.freeze({
+      publication,
+      action: sourceRow.keyboardAction,
+      native,
+      nativeEvent: nativeEvent as KeyboardEvent,
+      capture,
+      windowProof: proof,
+      sourceRow,
+      destinationRow,
+      source,
+      destination,
+      key: native.key,
+      movement,
+      publicationClaim: Object.freeze({ publication }),
+      sourceClaim: Object.freeze({ sourceRow, source }),
+      destinationClaim: Object.freeze({ destinationRow, destination }),
+      captureClaim: Object.freeze({ capture }),
+      nativeClaim: Object.freeze({ nativeEvent }),
+      windowClaim: Object.freeze({ listener, proof, receiver: proof.receiver }),
+    }));
+  };
+  completePickerNavigation = (
+    row: PickerRowAuthority,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    let nativeEvent: unknown;
+    let eventCurrentTarget: EventTarget | null;
+    try {
+      nativeEvent = event.nativeEvent;
+      eventCurrentTarget = event.currentTarget;
+    } catch {
+      return;
+    }
+    if (!nativeEvent || typeof nativeEvent !== "object" || invalidNativeKeys.has(nativeEvent)) {
+      return;
+    }
+    const pair = keyPairs.get(nativeEvent);
+    if (!pair || pair.nativeEvent !== nativeEvent) return;
+    keyPairs.delete(nativeEvent);
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const events = keyboardAuthority;
+    const listener = keyboardListener;
+    if (
+      !runtime
+      || !publication
+      || !events
+      || !listener
+      || pair.publication !== publication
+      || pair.sourceRow.authority !== row
+      || pair.action !== pair.sourceRow.keyboardAction
+      || pair.source !== eventCurrentTarget
+    ) {
+      return;
+    }
+    const native = events.readKeyboard(nativeEvent);
+    const proof = native
+      ? listener.proofFor(nativeEvent as KeyboardEvent, publication)
+      : null;
+    const bubble = native && proof
+      ? capturePickerReactKeyboard(
+          event,
+          publication,
+          events,
+          native,
+          nativeEvent as KeyboardEvent,
+          pair.source,
+          pair.source,
+          proof,
+        )
+      : null;
+    if (
+      !native
+      || !proof
+      || !bubble
+      || bubble.event === pair.capture.event
+      || native.phase !== events.bubblingPhase
+      || pair.native.phase !== events.capturingPhase
+      || native.currentTarget !== pair.native.currentTarget
+      || proof !== pair.windowProof
+      || proof.receiver !== native.path.at(-1)
+      || !pickerNativeFactsMatch(pair.native, native)
+      || !pickerReactKeyboardRemainsExact(
+        pair.capture,
+        publication,
+        events,
+        pair.native,
+        null,
+      )
+      || !pickerReactKeyboardRemainsExact(
+        bubble,
+        publication,
+        events,
+        native,
+        pair.source,
+      )
+      || !movementIsCurrent(
+        runtime,
+        publication,
+        pair.sourceRow,
+        pair.destinationRow,
+        pair.source,
+        pair.destination,
+        pair.key,
+        preference,
+      )
+    ) {
+      return;
+    }
+    const delivery = Object.freeze<PickerKeyDelivery>({ pair, bubble });
+    if (
+      !coordinator.claimDelivery(
+        publication,
+        pair.action,
+        [pair.capture.event, bubble.event, pair.nativeEvent],
+        [
+          pair.movement,
+          pair.windowProof,
+          pair.publicationClaim,
+          pair.sourceClaim,
+          pair.destinationClaim,
+          pair.captureClaim,
+          pair.nativeClaim,
+          pair.windowClaim,
+        ],
+        delivery,
+      )
+    ) {
+      return;
+    }
+    try {
+      if (
+        !coordinator.deliveryIsActive(delivery)
+        || !listener.retains(pair.windowProof, publication)
+        || !pickerReactKeyboardRemainsExact(
+          pair.capture,
+          publication,
+          events,
+          pair.native,
+          null,
+        )
+        || !pickerReactKeyboardRemainsExact(
+          bubble,
+          publication,
+          events,
+          native,
+          pair.source,
+        )
+        || !movementIsCurrent(
+          runtime,
+          publication,
+          pair.sourceRow,
+          pair.destinationRow,
+          pair.source,
+          pair.destination,
+          pair.key,
+          preference,
+        )
+      ) {
+        return;
+      }
+      const prevention = applyPickerReactMethod(
+        events,
+        bubble.methods.preventDefault,
+        bubble.event,
+      );
+      const preventedNative = events.readKeyboard(pair.nativeEvent);
+      if (
+        !prevention
+        || !preventedNative
+        || preventedNative.phase !== events.bubblingPhase
+        || !pickerNativeFactsMatch(native, preventedNative, true)
+        || !listener.retains(pair.windowProof, publication)
+        || !coordinator.deliveryIsActive(delivery)
+        || !pickerReactKeyboardRemainsExact(
+          pair.capture,
+          publication,
+          events,
+          pair.native,
+          null,
+        )
+        || !pickerReactKeyboardRemainsExact(
+          bubble,
+          publication,
+          events,
+          preventedNative,
+          pair.source,
+          true,
+        )
+        || !movementIsCurrent(
+          runtime,
+          publication,
+          pair.sourceRow,
+          pair.destinationRow,
+          pair.source,
+          pair.destination,
+          pair.key,
+          preference,
+        )
+      ) {
+        return;
+      }
+      setPreference(pair.destinationRow.authority.preference);
+      const selectedNative = events.readKeyboard(pair.nativeEvent);
+      if (
+        !selectedNative
+        || selectedNative.phase !== events.bubblingPhase
+        || !pickerNativeFactsMatch(preventedNative, selectedNative, true)
+        || !listener.retains(pair.windowProof, publication)
+        || !coordinator.deliveryIsActive(delivery)
+        || !pickerReactKeyboardRemainsExact(
+          pair.capture,
+          publication,
+          events,
+          pair.native,
+          null,
+        )
+        || !pickerReactKeyboardRemainsExact(
+          bubble,
+          publication,
+          events,
+          selectedNative,
+          pair.source,
+          true,
+        )
+        || !movementIsCurrent(
+          runtime,
+          publication,
+          pair.sourceRow,
+          pair.destinationRow,
+          pair.source,
+          pair.destination,
+          pair.key,
+          pair.destinationRow.authority.preference,
+        )
+      ) {
+        return;
+      }
+      events.focus.invoke(pair.destination, { preventScroll: true });
+    } finally {
+      coordinator.finishDelivery(delivery);
+    }
+  };
   const requestReplaySuccessor = (runtime: PublicationRuntime<PickerAuthority>) => {
     const replay = runtime.replay();
     if (
@@ -1361,19 +2501,33 @@ function createPickerPresentation(
     currentRuntime = runtime;
     lastRuntime = runtime;
     keyboardAuthority = capturePickerKeyboardAuthority(runtime.publication);
-    if (!keyboardAuthority || !runtime.publish()) {
+    keyboardListener = keyboardAuthority
+      ? createPickerKeyListener(keyboardAuthority)
+      : null;
+    if (
+      !keyboardAuthority
+      || !keyboardListener
+      || !runtime.publish()
+      || !keyboardListener.activate(runtime.publication)
+    ) {
+      keyboardListener?.release(runtime.publication);
       runtime.retireForElement();
       currentRuntime = null;
       keyboardAuthority = null;
+      keyboardListener = null;
       return undefined;
     }
-    return runtime.retireForLayout;
+    return () => {
+      keyboardListener?.release(runtime.publication);
+      runtime.retireForLayout();
+    };
   };
 
   return Object.freeze({
     captureRoot: rootOwner.capture,
     rows: Object.freeze(rowPresentations),
     establish,
+    onKeyDownCapture,
   });
 }
 
@@ -1478,6 +2632,7 @@ export function ThemePicker() {
     revision: publicationRevision,
     preference,
     setPreference,
+    prefersDark: systemPrefersDark(),
     rootClassName: PICKER_CLASS_NAME,
     rows: candidateRows,
   });
@@ -1493,7 +2648,7 @@ export function ThemePicker() {
   );
 
   useLayoutEffect(() => presentation.establish(), [presentation]);
-  const { captureRoot, rows } = presentation;
+  const { captureRoot, rows, onKeyDownCapture } = presentation;
 
   return (
     <div
@@ -1501,6 +2656,7 @@ export function ThemePicker() {
       className={PICKER_CLASS_NAME}
       role="radiogroup"
       aria-label="Theme"
+      onKeyDownCapture={onKeyDownCapture}
       data-testid="theme-picker"
     >
       {rows.map((row) => {
