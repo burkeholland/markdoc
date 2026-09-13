@@ -18,6 +18,16 @@ import { compileFindRegex, type FindMatch, type FindOptions } from "@/editor/fin
 import { Tip } from "@/components/ui/primitives";
 import { cn, findReplaceShortcut, shortcut } from "@/lib/utils";
 import { shallowEqual, useSessionValue } from "./use-session";
+import {
+  findKeyboardPathIncludes,
+  freezeFindKeyboardRecord,
+  preventFindKeyboardDefault,
+  readFindKeyboardFacts,
+  sameFindKeyboardDelivery,
+  scheduleFindKeyboardRecordExpiry,
+  trustedFindKeyboardIntrinsics,
+  type FindNativeKeyboardFacts,
+} from "./find-keyboard-trust";
 
 export interface FindBarProps {
   session: CollabSession;
@@ -187,6 +197,7 @@ interface PublicationCells {
   readonly replaceFocus: CurrentCell<ReplaceFocusOwner | null>;
   readonly claimedActivations: WeakSet<object>;
   readonly claimedMouseDowns: WeakSet<object>;
+  readonly keyboardDeliveries: WeakMap<object, FindKeyboardDelivery>;
 }
 
 interface PublicationLifecycle {
@@ -198,6 +209,7 @@ function createInactivePublication(cells: PublicationCells): PublicationLifecycl
     establish: () => {
       cells.active.current?.retire();
       cells.successorOf.current = null;
+      cells.replay.current?.release();
       cells.replay.current = null;
       cells.replaceIntent.current = null;
     },
@@ -215,6 +227,8 @@ interface FindBarReplay {
   readonly source: FindBarPublication;
   readonly dom: FindBarDomSnapshot;
   readonly placement: FindBarPlacement;
+  readonly unchanged: () => boolean;
+  readonly release: () => void;
 }
 
 interface FindBarPlacement {
@@ -231,6 +245,11 @@ interface RefReplay {
   reattached: boolean;
 }
 
+interface FindKeyboardDelivery {
+  readonly publication: FindBarPublication;
+  readonly facts: FindNativeKeyboardFacts;
+}
+
 interface FindBarPublicationRuntime {
   readonly publication: FindBarPublication;
   readonly publish: (snapshot: FindBarDomSnapshot, owners: readonly ElementOwnerView[]) => void;
@@ -245,6 +264,8 @@ interface FindBarPublicationRuntime {
   readonly publishedDomMatches: () => boolean;
   readonly isExactElementReplay: () => boolean;
   readonly isExactLayoutReplay: () => boolean;
+  readonly replayDomUnchanged: () => boolean;
+  readonly releaseReplayGuard: () => void;
   readonly snapshot: () => FindBarDomSnapshot | null;
   readonly placement: () => FindBarPlacement | null;
 }
@@ -428,6 +449,8 @@ function createFindBarPublication({
       source: runtime.publication,
       dom: snapshot,
       placement,
+      unchanged: runtime.replayDomUnchanged,
+      release: runtime.releaseReplayGuard,
     });
     requestSuccessor();
   };
@@ -495,9 +518,9 @@ function createFindBarPublication({
       root.contains(element)
     );
   };
-  const claim = (event: object) => {
-    if (cells.claimedActivations.has(event)) return false;
-    cells.claimedActivations.add(event);
+  const claim = (...events: object[]) => {
+    if (events.some((event) => cells.claimedActivations.has(event))) return false;
+    for (const event of events) cells.claimedActivations.add(event);
     return true;
   };
   const reveal = (publication: FindBarPublication, match: FindMatch | null) => {
@@ -754,6 +777,11 @@ function createFindBarPublication({
     ...expectedControls().map((control) => controlOwners.get(control.id)!),
     ...(authority.showReplace ? [replaceOwner] : []),
   ];
+  const isCurrentKeyboardTarget = (target: Node) =>
+    target === searchOwner.element() ||
+    (authority.showReplace && target === replaceOwner.element()) ||
+    expectedControls().some((control) =>
+      target === controlOwners.get(control.id)?.element());
   const exactDomIsCurrent = () => {
     const root = bar.element();
     const searchElement = searchOwner.element();
@@ -841,8 +869,90 @@ function createFindBarPublication({
     let replayRefs: RefReplay[] = [];
     let invalidReplay = false;
     let layoutRetired = false;
+    let domChanged = false;
+    let domObserver: MutationObserver | null = null;
+    let keyboardListening = false;
+    let replayGuardReleaseQueued = false;
+    const root = bar.element();
+    if (!root) throw new Error("Cannot create a FindBar publication without its root");
+    const publishedRoot = root;
+    const ownerDocument = root.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const keyboardIntrinsics = ownerWindow
+      ? trustedFindKeyboardIntrinsics(ownerWindow)
+      : null;
+    const keyboardIntrinsicsAreCurrent = () =>
+      !!ownerWindow &&
+      trustedFindKeyboardIntrinsics(ownerWindow) === keyboardIntrinsics;
+    const uninstallKeyboard = () => {
+      if (!keyboardListening) return;
+      keyboardListening = false;
+      root.removeEventListener("keydown", rememberKeyboard, true);
+      ownerDocument.removeEventListener("keydown", deliverKeyboard);
+    };
+    const mutationIsRelevant = (record: MutationRecord) => {
+      // React temporarily rewrites controlled input names while restoring their state.
+      if (
+        record.type === "attributes" &&
+        record.attributeName === "name" &&
+        (
+          (record.target as Element).getAttribute?.("data-testid") === "find-input" ||
+          (record.target as Element).getAttribute?.("data-testid") === "replace-input"
+        )
+      ) {
+        return false;
+      }
+      if (record.target === root || root.contains(record.target)) return true;
+      if (
+        record.type === "attributes" &&
+        (
+          record.attributeName === "inert" ||
+          record.attributeName === "aria-disabled" ||
+          record.attributeName === "disabled"
+        )
+      ) {
+        return record.target instanceof Node &&
+          (root.contains(record.target) || record.target.contains(root));
+      }
+      if (record.type !== "childList") return false;
+      if (record.target === placementSnapshot?.parent) return true;
+      return [...record.addedNodes, ...record.removedNodes].some(
+        (node) => node === root || node.contains(root),
+      );
+    };
+    const recordMutations = (records: readonly MutationRecord[]) => {
+      if (!domChanged && records.some(mutationIsRelevant)) domChanged = true;
+      return domChanged;
+    };
+    const releaseReplayGuard = () => {
+      if (!domObserver) return;
+      recordMutations(domObserver.takeRecords());
+      domObserver.disconnect();
+      domObserver = null;
+    };
+    const queueReplayGuardRelease = () => {
+      if (replayGuardReleaseQueued) return;
+      replayGuardReleaseQueued = true;
+      queueMicrotask(() => {
+        if (!domObserver) return;
+        recordMutations(domObserver.takeRecords());
+        domObserver.disconnect();
+        domObserver = null;
+      });
+    };
+    const noteMutations = (records: readonly MutationRecord[]) => {
+      if (
+        recordMutations(records) &&
+        retire("element") &&
+        !successorRequested
+      ) {
+        successorRequested = true;
+        requestSuccessor();
+      }
+    };
     const retire = (reason: Retirement) => {
       if (retired) return false;
+      if (domObserver) recordMutations(domObserver.takeRecords());
       retired = true;
       retirement = reason;
       if (cells.active.current === publication) {
@@ -851,6 +961,9 @@ function createFindBarPublication({
       }
       cancelReplaceFocus(publication);
       if (currentRuntime?.publication === publication) currentRuntime = null;
+      uninstallKeyboard();
+      if (reason === "other") releaseReplayGuard();
+      else queueReplayGuardRelease();
       return true;
     };
     const publication: FindBarPublication = Object.freeze({
@@ -862,12 +975,66 @@ function createFindBarPublication({
       focusSearch: () => focusSearch(publication),
       scheduleReplaceFocus: () => scheduleReplaceFocus(publication),
     });
+    function rememberKeyboard(event: Event) {
+      if (
+        !keyboardListening ||
+        !keyboardIntrinsics ||
+        !keyboardIntrinsicsAreCurrent() ||
+        cells.claimedActivations.has(event) ||
+        !ownsAuthority(publication)
+      ) {
+        return;
+      }
+      const facts = readFindKeyboardFacts(
+        keyboardIntrinsics,
+        event,
+        ownerDocument,
+      );
+      if (
+        !facts ||
+        facts.type !== "keydown" ||
+        facts.key !== "F3" ||
+        facts.code !== "F3" ||
+        facts.repeat ||
+        !facts.isTrusted ||
+        !facts.view ||
+        facts.view !== facts.ownerView ||
+        facts.eventPhase === 0 ||
+        facts.currentTarget !== publishedRoot ||
+        !facts.bubbles ||
+        !facts.cancelable ||
+        facts.defaultPrevented ||
+        facts.isComposing ||
+        facts.altKey ||
+        facts.ctrlKey ||
+        facts.metaKey ||
+        facts.activeElement !== facts.target ||
+        !isCurrentKeyboardTarget(facts.target) ||
+        facts.path[0] !== facts.target ||
+        !findKeyboardPathIncludes(facts, publishedRoot) ||
+        !findKeyboardPathIncludes(facts, ownerDocument)
+      ) {
+        return;
+      }
+      const delivery = freezeFindKeyboardRecord<FindKeyboardDelivery>({
+        publication,
+        facts,
+      });
+      cells.keyboardDeliveries.set(event, delivery);
+      const scheduled = scheduleFindKeyboardRecordExpiry(facts.view, () => {
+        if (cells.keyboardDeliveries.get(event) === delivery) {
+          cells.keyboardDeliveries.delete(event);
+        }
+      });
+      if (!scheduled) cells.keyboardDeliveries.delete(event);
+    }
     const publishedDomMatches = () => {
-      const root = bar.element();
+      if (domObserver) noteMutations(domObserver.takeRecords());
       return Boolean(
+        !domChanged &&
         domSnapshot &&
         placementSnapshot &&
-        root &&
+        bar.element() === root &&
         root === domSnapshot.node &&
         root.isConnected &&
         findBarPlacementMatches(root, placementSnapshot) &&
@@ -887,6 +1054,53 @@ function createFindBarPublication({
         entry.detached &&
         entry.reattached &&
         entry.owner.element() === entry.element);
+    function deliverKeyboard(nativeEvent: Event) {
+      const delivery = cells.keyboardDeliveries.get(nativeEvent);
+      const currentFacts = keyboardIntrinsics
+        ? readFindKeyboardFacts(
+            keyboardIntrinsics,
+            nativeEvent,
+            ownerDocument,
+          )
+        : null;
+      if (
+        !ownerWindow ||
+        !keyboardIntrinsics ||
+        !keyboardIntrinsicsAreCurrent() ||
+        !delivery ||
+        delivery.publication !== publication ||
+        !currentFacts ||
+        currentFacts.defaultPrevented ||
+        !sameFindKeyboardDelivery(
+          delivery.facts,
+          currentFacts,
+          publishedRoot,
+          ownerDocument,
+        ) ||
+        !isCurrentKeyboardTarget(delivery.facts.target) ||
+        !factsAreCurrent() ||
+        !ownsAuthority(publication) ||
+        !publishedDomMatches() ||
+        !claim(nativeEvent) ||
+        !factsAreCurrent() ||
+        !ownsAuthority(publication) ||
+        !publishedDomMatches()
+      ) {
+        return;
+      }
+      cells.keyboardDeliveries.delete(nativeEvent);
+      if (!preventFindKeyboardDefault(keyboardIntrinsics, nativeEvent)) return;
+      if (
+        !factsAreCurrent() ||
+        !ownsAuthority(publication) ||
+        !publishedDomMatches()
+      ) {
+        return;
+      }
+      if (!authority.actionsDisabled) {
+        step(publication, delivery.facts.shiftKey ? -1 : 1);
+      }
+    }
     const runtime: FindBarPublicationRuntime = Object.freeze({
       publication,
       publish: (
@@ -909,6 +1123,23 @@ function createFindBarPublication({
         cells.active.current = publication;
         cells.successorOf.current = null;
         cells.replay.current = null;
+        const MutationObserverConstructor = ownerWindow?.MutationObserver;
+        if (MutationObserverConstructor) {
+          domObserver = new MutationObserverConstructor((records) => {
+            noteMutations(records);
+          });
+          domObserver.observe(ownerDocument, {
+            attributes: true,
+            characterData: true,
+            childList: true,
+            subtree: true,
+          });
+        }
+        if (keyboardIntrinsics) {
+          keyboardListening = true;
+          root.addEventListener("keydown", rememberKeyboard, true);
+          ownerDocument.addEventListener("keydown", deliverKeyboard);
+        }
       },
       retireForElement: () => {
         retire("element");
@@ -966,6 +1197,18 @@ function createFindBarPublication({
         established &&
         (refsHaveNoReplay() || refsHaveExactReplay()) &&
         publishedDomMatches(),
+      replayDomUnchanged: () => {
+        if (domObserver) recordMutations(domObserver.takeRecords());
+        return Boolean(
+          !domChanged &&
+          domSnapshot &&
+          placementSnapshot &&
+          root.isConnected &&
+          findBarPlacementMatches(root, placementSnapshot) &&
+          findBarDomMatches(domSnapshot)
+        );
+      },
+      releaseReplayGuard,
       snapshot: () => domSnapshot,
       placement: () => placementSnapshot,
     });
@@ -993,15 +1236,20 @@ function createFindBarPublication({
         !isExactReplaySuccessor(replay.source, authority) ||
         root !== replay.dom.node ||
         !findBarPlacementMatches(root, replay.placement) ||
-        !findBarDomMatches(replay.dom)
+        !findBarDomMatches(replay.dom) ||
+        !replay.unchanged()
       )
     ) {
       const exactDomStillCommitted =
         root === replay.dom.node &&
         findBarPlacementMatches(root, replay.placement) &&
-        findBarDomMatches(replay.dom);
+        findBarDomMatches(replay.dom) &&
+        replay.unchanged();
+      replay.release();
       cells.replay.current = null;
-      cells.successorOf.current = null;
+      if (cells.successorOf.current === replay.source) {
+        cells.successorOf.current = null;
+      }
       if (exactDomStillCommitted) requestSuccessor();
       return undefined;
     }
@@ -1012,6 +1260,7 @@ function createFindBarPublication({
     currentRuntime = runtime;
     lastRuntime = runtime;
     runtime.publish(snapshotFindBarDom(root), expectedOwners());
+    replay?.release();
     if (
       cells.focusRequest.current !== authority.focusRequest &&
       publication.focusSearch()
@@ -1030,9 +1279,11 @@ function createFindBarPublication({
   };
 
   const onBarKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const publication = currentRuntime?.publication;
-    if (!publication || !ownsBar(publication, event.currentTarget)) return;
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    if (!publication) return;
     const root = bar.element();
+    if (!ownsBar(publication, event.currentTarget)) return;
     const target = event.target;
     if (
       !root ||
@@ -1126,6 +1377,7 @@ export function FindBar({
     replaceFocus: new CurrentCell<ReplaceFocusOwner | null>(null),
     claimedActivations: new WeakSet<object>(),
     claimedMouseDowns: new WeakSet<object>(),
+    keyboardDeliveries: new WeakMap<object, FindKeyboardDelivery>(),
   }));
   const replacement = replacementDraft.visit === visit ? replacementDraft.value : "";
   const options = find?.options;

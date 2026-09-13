@@ -18,6 +18,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ApiError } from "@/lib/api";
 import { ImageDialog } from "./dialogs";
 
@@ -166,8 +167,8 @@ async function chooseFromCommittedSuccessor(
   expect(settledInput).toBeEnabled();
   expect(settledInput).toHaveValue("");
   expect(upload).toBeEnabled();
+  await userEvent.setup().hover(upload);
   fireEvent.click(upload);
-  await act(async () => {});
   const currentInput = screen.getByTestId("image-file") as HTMLInputElement;
   expect(currentInput).toBe(settledInput);
   expect(currentInput).toBeEnabled();
@@ -1548,7 +1549,15 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     const onUpload = vi.fn(() => upload.promise);
     const never = new Promise<never>(() => {});
     const pendingRender = vi.fn();
+    const pendingCommit = vi.fn();
     let begin = () => {};
+
+    function PendingCommitProbe() {
+      useLayoutEffect(() => {
+        pendingCommit();
+      }, []);
+      return null;
+    }
 
     function PendingRender(): ReactNode {
       pendingRender();
@@ -1570,7 +1579,12 @@ describe("ImageDialog exact Strict Mode ownership", () => {
             onSubmit={onSubmit}
             onUpload={onUpload}
           />
-          {pending && <PendingRender />}
+          {pending && (
+            <>
+              <PendingCommitProbe />
+              <PendingRender />
+            </>
+          )}
         </Suspense>
       );
     }
@@ -1583,6 +1597,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     }) as HTMLButtonElement;
     await act(async () => begin());
     expect(pendingRender).toHaveBeenCalled();
+    expect(pendingCommit).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Cancel" })).toBe(
       committedCancel,
     );
@@ -1590,11 +1605,14 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       upload.resolve({ url: "/api/assets/concurrent", alt: "Concurrent Alt" });
       await upload.promise;
     });
-    expect(screen.getByTestId("image-url")).toHaveValue(
-      "/api/assets/concurrent",
-    );
-    expect(screen.getByTestId("image-alt")).toHaveValue("Concurrent Alt");
-    await act(async () => {});
+    await waitFor(() => {
+      expect(screen.getByTestId("image-url")).toHaveValue(
+        "/api/assets/concurrent",
+      );
+      expect(screen.getByTestId("image-alt")).toHaveValue("Concurrent Alt");
+    });
+    expect(pendingRender).toHaveBeenCalled();
+    expect(pendingCommit).not.toHaveBeenCalled();
     const currentCancel = screen.getByRole("button", {
       name: "Cancel",
     }) as HTMLButtonElement;
@@ -1605,6 +1623,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(committedClose).toHaveBeenCalledOnce();
     expect(committedClose).toHaveBeenCalledWith(false);
     expect(pendingClose).not.toHaveBeenCalled();
+    expect(pendingCommit).not.toHaveBeenCalled();
   });
 
   it("rejects stale, crossed, and fabricated changes without poisoning current controls", async () => {
