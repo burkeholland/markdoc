@@ -11722,6 +11722,7 @@ interface TrashControlPublication {
   readonly kind: TrashPublishedActionKind;
   readonly cardIndex: number | null;
   readonly element: HTMLButtonElement;
+  readonly path: readonly EventTarget[];
   readonly action: TrashActionPublication;
 }
 
@@ -11731,6 +11732,7 @@ interface TrashCardPublication {
   readonly element: HTMLLIElement;
   readonly restore: TrashControlPublication;
   readonly purge: TrashControlPublication;
+  readonly actions: readonly TrashControlPublication[];
 }
 
 interface TrashDomSnapshot {
@@ -11798,6 +11800,10 @@ interface TrashPublicationCells {
   readonly claimedActions: WeakSet<TrashActionPublication>;
   readonly claimedReactEvents: WeakSet<object>;
   readonly claimedNativeEvents: WeakSet<Event>;
+  readonly attemptedReactEvents: WeakSet<object>;
+  readonly attemptedNativeEvents: WeakSet<Event>;
+  readonly claimedMovements: WeakSet<TrashKeyboardMovement>;
+  readonly claimedWindowProofs: WeakSet<TrashKeyboardWindowProof>;
   readonly evaluatingPublications: WeakSet<TrashPublication>;
 }
 
@@ -11825,6 +11831,14 @@ interface TrashPublicationRuntime {
   readonly snapshot: () => TrashDomSnapshot | null;
   readonly placement: () => TrashPlacement | null;
   readonly partialReplayElements: () => ReadonlySet<HTMLElement>;
+  readonly captureCardKeyDown: (
+    card: TrashCardPresentation,
+    event: ReactKeyboardEvent<HTMLLIElement>,
+  ) => void;
+  readonly bubbleCardKeyDown: (
+    card: TrashCardPresentation,
+    event: ReactKeyboardEvent<HTMLLIElement>,
+  ) => void;
 }
 
 interface TrashPublicationSet {
@@ -11840,6 +11854,12 @@ interface TrashPublicationSet {
     readonly captureCard: (element: HTMLLIElement | null) => void;
     readonly captureRestore: (element: HTMLButtonElement | null) => void;
     readonly capturePurge: (element: HTMLButtonElement | null) => void;
+    readonly captureKeyDown: (
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => void;
+    readonly bubbleKeyDown: (
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => void;
   }[];
   readonly establish: () => void | (() => void);
   readonly onRetry: (event: ReactMouseEvent<HTMLButtonElement>) => void;
@@ -11847,8 +11867,827 @@ interface TrashPublicationSet {
   readonly onPurge: (card: TrashCardPresentation, event: ReactMouseEvent<HTMLButtonElement>) => void;
 }
 
+type TrashNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+interface TrashPropertyAuthority<T> {
+  readonly read: (value: object) => T;
+  readonly isCurrent: () => boolean;
+}
+
+interface TrashMethodAuthority<Args extends readonly unknown[], Result> {
+  readonly value: (...args: Args) => Result;
+  readonly call: (receiver: object, ...args: Args) => Result;
+  readonly isCurrent: () => boolean;
+}
+
+interface TrashWindowMethodAuthority<Method> {
+  readonly value: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface TrashKeyboardWindowProof {
+  readonly registration: TrashKeyboardWindowRegistration;
+  readonly nativeEvent: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface TrashKeyboardWindowRegistration {
+  readonly proofFor: (
+    event: KeyboardEvent,
+  ) => TrashKeyboardWindowProof | null;
+  readonly claim: (proof: TrashKeyboardWindowProof) => boolean;
+  readonly release: () => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface TrashKeyboardAuthority {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof Event;
+  readonly KeyboardEvent: typeof KeyboardEvent;
+  readonly HTMLElement: typeof HTMLElement;
+  readonly keyboardPrototype: object;
+  readonly prototypeOf: typeof Object.getPrototypeOf;
+  readonly apply: typeof Reflect.apply;
+  readonly trusted: FilterTrustedAuthority;
+  readonly activeElement: FilterActiveElementAuthority;
+  readonly type: TrashPropertyAuthority<string>;
+  readonly target: TrashPropertyAuthority<EventTarget | null>;
+  readonly currentTarget: TrashPropertyAuthority<EventTarget | null>;
+  readonly phase: TrashPropertyAuthority<number>;
+  readonly bubbles: TrashPropertyAuthority<boolean>;
+  readonly cancelable: TrashPropertyAuthority<boolean>;
+  readonly composed: TrashPropertyAuthority<boolean>;
+  readonly defaultPrevented: TrashPropertyAuthority<boolean>;
+  readonly cancelBubble: TrashPropertyAuthority<boolean>;
+  readonly key: TrashPropertyAuthority<string>;
+  readonly code: TrashPropertyAuthority<string>;
+  readonly ctrlKey: TrashPropertyAuthority<boolean>;
+  readonly metaKey: TrashPropertyAuthority<boolean>;
+  readonly altKey: TrashPropertyAuthority<boolean>;
+  readonly shiftKey: TrashPropertyAuthority<boolean>;
+  readonly repeat: TrashPropertyAuthority<boolean>;
+  readonly composing: TrashPropertyAuthority<boolean>;
+  readonly view: TrashPropertyAuthority<Window | null>;
+  readonly composedPath: TrashMethodAuthority<readonly [], EventTarget[]>;
+  readonly preventDefault: TrashMethodAuthority<readonly [], void>;
+  readonly focus: TrashMethodAuthority<
+    readonly [options?: FocusOptions],
+    void
+  >;
+  readonly addWindowEventListener: TrashWindowMethodAuthority<
+    Window["addEventListener"]
+  >;
+  readonly removeWindowEventListener: TrashWindowMethodAuthority<
+    Window["removeEventListener"]
+  >;
+  readonly terminal: TrashKeyboardWindowRegistration;
+  readonly isCurrent: () => boolean;
+}
+
+interface TrashReactKeyProof {
+  readonly event: object;
+  readonly nativeEvent: KeyboardEvent;
+  readonly target: HTMLButtonElement;
+  readonly currentTarget: HTMLElement;
+  readonly phase: number;
+  readonly preventDefault: () => void;
+  readonly stopPropagation: () => void;
+  readonly isDefaultPrevented: () => boolean;
+  readonly isPropagationStopped: () => boolean;
+  readonly defaultPreventedResult: false;
+  readonly propagationStoppedResult: false;
+}
+
+interface TrashKeyboardMovement {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly cardIdentity: symbol;
+  readonly sourceIdentity: symbol;
+  readonly sourceActionIdentity: symbol;
+  readonly destinationIdentity: symbol;
+  readonly destinationActionIdentity: symbol;
+  readonly key: TrashNavigationKey;
+  readonly source: TrashControlPublication;
+  readonly destination: TrashControlPublication;
+}
+
+interface TrashKeyboardNativeProof {
+  readonly event: KeyboardEvent;
+  readonly publication: TrashPublication;
+  readonly card: TrashCardPublication;
+  readonly movement: TrashKeyboardMovement;
+  readonly path: readonly EventTarget[];
+  readonly terminal: EventTarget;
+  readonly window: TrashKeyboardWindowProof;
+  readonly key: TrashNavigationKey;
+  readonly capture: TrashReactKeyProof;
+  bubble: TrashReactKeyProof | null;
+  crossed: boolean;
+}
+
 const allowTrashRetry = () => true;
 const allowTrashAction = () => true;
+
+function captureTrashPropertyAuthority<T>(
+  view: Window & typeof globalThis,
+  prototype: object,
+  property: PropertyKey,
+): TrashPropertyAuthority<T> | null {
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const descriptorOwner = owner;
+      const expected = Object.freeze({ ...descriptor });
+      const getter = descriptor.get;
+      return Object.freeze({
+        read: (value: object) =>
+          apply(getter as (this: object) => T, value, []),
+        isCurrent: () =>
+          view.Object.getOwnPropertyDescriptor ===
+            getOwnPropertyDescriptor &&
+          view.Object.getPrototypeOf === getPrototypeOf &&
+          view.Reflect.apply === apply &&
+          filterDescriptorsMatch(
+            getOwnPropertyDescriptor(descriptorOwner, property),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function captureTrashMethodAuthority<
+  Args extends readonly unknown[],
+  Result,
+>(
+  view: Window & typeof globalThis,
+  prototype: object,
+  property: PropertyKey,
+): TrashMethodAuthority<Args, Result> | null {
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (descriptor) {
+      if (
+        !("value" in descriptor) ||
+        typeof descriptor.value !== "function"
+      ) {
+        return null;
+      }
+      const descriptorOwner = owner;
+      const expected = Object.freeze({ ...descriptor });
+      const method = descriptor.value as (...args: Args) => Result;
+      return Object.freeze({
+        value: method,
+        call: (receiver: object, ...args: Args) =>
+          apply(method, receiver, args),
+        isCurrent: () =>
+          view.Object.getOwnPropertyDescriptor ===
+            getOwnPropertyDescriptor &&
+          view.Object.getPrototypeOf === getPrototypeOf &&
+          view.Reflect.apply === apply &&
+          filterDescriptorsMatch(
+            getOwnPropertyDescriptor(descriptorOwner, property),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function captureTrashWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): TrashWindowMethodAuthority<Window[Property]> | null {
+  const getOwnPropertyDescriptor =
+    ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(
+      Object.freeze({
+        target,
+        descriptor: descriptor
+          ? Object.freeze({ ...descriptor })
+          : null,
+        prototype,
+      }),
+    );
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(
+    ownerWindow,
+    property,
+    ownerWindow,
+  ) as Window[Property];
+  if (!found || typeof value !== "function") return null;
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor ===
+      getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Reflect.get === reflectGet &&
+    path.every(({ target: entry, descriptor, prototype }) => {
+      if (getPrototypeOf(entry) !== prototype) return false;
+      const current = getOwnPropertyDescriptor(entry, property);
+      return descriptor
+        ? filterDescriptorsMatch(current, descriptor)
+        : current === undefined;
+    }) &&
+    reflectGet(ownerWindow, property, ownerWindow) === value;
+  return isCurrent() ? Object.freeze({ value, isCurrent }) : null;
+}
+
+function createTrashKeyboardWindowRegistration(
+  ownerWindow: Window & typeof globalThis,
+  ownerDocument: Document,
+  KeyboardEventConstructor: typeof KeyboardEvent,
+  keyboardPrototype: object,
+  currentTarget: TrashPropertyAuthority<EventTarget | null>,
+  phase: TrashPropertyAuthority<number>,
+  composedPath: TrashMethodAuthority<readonly [], EventTarget[]>,
+  addEventListener: TrashWindowMethodAuthority<
+    Window["addEventListener"]
+  >,
+  removeEventListener: TrashWindowMethodAuthority<
+    Window["removeEventListener"]
+  >,
+  apply: typeof Reflect.apply,
+  prototypeOf: typeof Object.getPrototypeOf,
+  intrinsicsAreCurrent: () => boolean,
+): TrashKeyboardWindowRegistration | null {
+  const proofs = new WeakMap<
+    KeyboardEvent,
+    TrashKeyboardWindowProof
+  >();
+  const invalidEvents = new WeakSet<Event>();
+  let claimed: TrashKeyboardWindowProof | null = null;
+  let active = false;
+  let released = false;
+  const listener: EventListener = function (
+    this: EventTarget,
+    event: Event,
+  ) {
+    if (
+      !active ||
+      released ||
+      !(event instanceof KeyboardEventConstructor) ||
+      prototypeOf(event) !== keyboardPrototype ||
+      invalidEvents.has(event) ||
+      !intrinsicsAreCurrent()
+    ) {
+      return;
+    }
+    if (proofs.has(event)) {
+      invalidEvents.add(event);
+      return;
+    }
+    try {
+      const eventCurrentTarget = currentTarget.read(event);
+      const eventPhase = phase.read(event);
+      const path = composedPath.call(event);
+      const terminal = path.at(-1);
+      if (
+        !eventCurrentTarget ||
+        eventCurrentTarget !== this ||
+        terminal !== this ||
+        eventPhase !== ownerWindow.Event.CAPTURING_PHASE ||
+        path.at(-2) !== ownerDocument
+      ) {
+        invalidEvents.add(event);
+        return;
+      }
+      proofs.set(
+        event,
+        Object.freeze({
+          registration,
+          nativeEvent: event,
+          receiver: this,
+          currentTarget: eventCurrentTarget,
+          terminal,
+          path: Object.freeze([...path]),
+        }),
+      );
+    } catch {
+      invalidEvents.add(event);
+    }
+  };
+  const proofFor = (event: KeyboardEvent) => {
+    const proof = proofs.get(event);
+    if (
+      !proof ||
+      !active ||
+      released ||
+      claimed !== null ||
+      invalidEvents.has(event) ||
+      proof.registration !== registration ||
+      proof.nativeEvent !== event ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      !intrinsicsAreCurrent()
+    ) {
+      return null;
+    }
+    try {
+      const path = composedPath.call(event);
+      return path.length === proof.path.length &&
+        path.every((entry, index) => entry === proof.path[index]) &&
+        path.at(-2) === ownerDocument &&
+        path.at(-1) === proof.receiver
+        ? proof
+        : null;
+    } catch {
+      invalidEvents.add(event);
+      return null;
+    }
+  };
+  const registration: TrashKeyboardWindowRegistration =
+    Object.freeze({
+      proofFor,
+      claim: (proof) => {
+        if (claimed || proofFor(proof.nativeEvent) !== proof) {
+          return false;
+        }
+        claimed = proof;
+        return true;
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        active = false;
+        apply(removeEventListener.value, ownerWindow, [
+          "keydown",
+          listener,
+          true,
+        ]);
+      },
+      isCurrent: () =>
+        active &&
+        !released &&
+        intrinsicsAreCurrent() &&
+        addEventListener.isCurrent() &&
+        removeEventListener.isCurrent(),
+    });
+  active = true;
+  try {
+    apply(addEventListener.value, ownerWindow, [
+      "keydown",
+      listener,
+      true,
+    ]);
+    if (registration.isCurrent()) return registration;
+    registration.release();
+    return null;
+  } catch {
+    active = false;
+    released = true;
+    return null;
+  }
+}
+
+function captureTrashKeyboardAuthority(
+  ownerWindow: Window & typeof globalThis,
+  ownerDocument: Document,
+): TrashKeyboardAuthority | null {
+  try {
+    const EventConstructor = ownerWindow.Event;
+    const UIEventConstructor = ownerWindow.UIEvent;
+    const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+    const DocumentConstructor = ownerWindow.Document;
+    const HTMLElementConstructor = ownerWindow.HTMLElement;
+    const eventPrototype = EventConstructor.prototype;
+    const uiEventPrototype = UIEventConstructor.prototype;
+    const keyboardPrototype = KeyboardEventConstructor.prototype;
+    const documentPrototype = DocumentConstructor.prototype;
+    const htmlElementPrototype = HTMLElementConstructor.prototype;
+    const prototypeOf = ownerWindow.Object.getPrototypeOf;
+    const apply = ownerWindow.Reflect.apply;
+    const prototypeLinks = [
+      [keyboardPrototype, prototypeOf(keyboardPrototype)],
+      [uiEventPrototype, prototypeOf(uiEventPrototype)],
+      [eventPrototype, prototypeOf(eventPrototype)],
+      [documentPrototype, prototypeOf(documentPrototype)],
+      [htmlElementPrototype, prototypeOf(htmlElementPrototype)],
+    ] as const;
+    const trusted = captureFilterTrustedAuthority(ownerWindow);
+    const activeElement =
+      captureFilterActiveElementAuthority(ownerWindow);
+    const type = captureTrashPropertyAuthority<string>(
+      ownerWindow,
+      eventPrototype,
+      "type",
+    );
+    const target =
+      captureTrashPropertyAuthority<EventTarget | null>(
+        ownerWindow,
+        eventPrototype,
+        "target",
+      );
+    const currentTarget =
+      captureTrashPropertyAuthority<EventTarget | null>(
+        ownerWindow,
+        eventPrototype,
+        "currentTarget",
+      );
+    const phase = captureTrashPropertyAuthority<number>(
+      ownerWindow,
+      eventPrototype,
+      "eventPhase",
+    );
+    const bubbles = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "bubbles",
+    );
+    const cancelable = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "cancelable",
+    );
+    const composed = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "composed",
+    );
+    const defaultPrevented =
+      captureTrashPropertyAuthority<boolean>(
+        ownerWindow,
+        eventPrototype,
+        "defaultPrevented",
+      );
+    const cancelBubble = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "cancelBubble",
+    );
+    const key = captureTrashPropertyAuthority<string>(
+      ownerWindow,
+      keyboardPrototype,
+      "key",
+    );
+    const code = captureTrashPropertyAuthority<string>(
+      ownerWindow,
+      keyboardPrototype,
+      "code",
+    );
+    const ctrlKey = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "ctrlKey",
+    );
+    const metaKey = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "metaKey",
+    );
+    const altKey = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "altKey",
+    );
+    const shiftKey = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "shiftKey",
+    );
+    const repeat = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "repeat",
+    );
+    const composing = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "isComposing",
+    );
+    const view = captureTrashPropertyAuthority<Window | null>(
+      ownerWindow,
+      uiEventPrototype,
+      "view",
+    );
+    const composedPath = captureTrashMethodAuthority<
+      readonly [],
+      EventTarget[]
+    >(ownerWindow, eventPrototype, "composedPath");
+    const preventDefault = captureTrashMethodAuthority<
+      readonly [],
+      void
+    >(ownerWindow, eventPrototype, "preventDefault");
+    const focus = captureTrashMethodAuthority<
+      readonly [options?: FocusOptions],
+      void
+    >(ownerWindow, htmlElementPrototype, "focus");
+    const addWindowEventListener = captureTrashWindowMethod(
+      ownerWindow,
+      "addEventListener",
+    );
+    const removeWindowEventListener = captureTrashWindowMethod(
+      ownerWindow,
+      "removeEventListener",
+    );
+    const authorities = [
+      type,
+      target,
+      currentTarget,
+      phase,
+      bubbles,
+      cancelable,
+      composed,
+      defaultPrevented,
+      cancelBubble,
+      key,
+      code,
+      ctrlKey,
+      metaKey,
+      altKey,
+      shiftKey,
+      repeat,
+      composing,
+      view,
+      composedPath,
+      preventDefault,
+      focus,
+    ];
+    if (
+      !trusted ||
+      !activeElement ||
+      !addWindowEventListener ||
+      !removeWindowEventListener ||
+      authorities.some((authority) => authority === null)
+    ) {
+      return null;
+    }
+    let stale = false;
+    const intrinsicsAreCurrent = () => {
+      if (stale) return false;
+      const current =
+        ownerDocument.defaultView === ownerWindow &&
+        ownerWindow.Event === EventConstructor &&
+        ownerWindow.UIEvent === UIEventConstructor &&
+        ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+        ownerWindow.Document === DocumentConstructor &&
+        ownerWindow.HTMLElement === HTMLElementConstructor &&
+        ownerWindow.Object.getPrototypeOf === prototypeOf &&
+        ownerWindow.Reflect.apply === apply &&
+        EventConstructor.prototype === eventPrototype &&
+        UIEventConstructor.prototype === uiEventPrototype &&
+        KeyboardEventConstructor.prototype === keyboardPrototype &&
+        DocumentConstructor.prototype === documentPrototype &&
+        HTMLElementConstructor.prototype ===
+          htmlElementPrototype &&
+        prototypeLinks.every(
+          ([prototype, parent]) =>
+            prototypeOf(prototype) === parent,
+        ) &&
+        prototypeOf(keyboardPrototype) === uiEventPrototype &&
+        prototypeOf(uiEventPrototype) === eventPrototype &&
+        trusted.isCurrent() &&
+        activeElement.isCurrent() &&
+        addWindowEventListener.isCurrent() &&
+        removeWindowEventListener.isCurrent() &&
+        authorities.every((candidate) =>
+          candidate?.isCurrent(),
+        );
+      if (!current) stale = true;
+      return current;
+    };
+    const terminal = createTrashKeyboardWindowRegistration(
+      ownerWindow,
+      ownerDocument,
+      KeyboardEventConstructor,
+      keyboardPrototype,
+      currentTarget!,
+      phase!,
+      composedPath!,
+      addWindowEventListener,
+      removeWindowEventListener,
+      apply,
+      prototypeOf,
+      intrinsicsAreCurrent,
+    );
+    if (!terminal) return null;
+    const authority: TrashKeyboardAuthority = {
+      ownerWindow,
+      Event: EventConstructor,
+      KeyboardEvent: KeyboardEventConstructor,
+      HTMLElement: HTMLElementConstructor,
+      keyboardPrototype,
+      prototypeOf,
+      apply,
+      trusted,
+      activeElement,
+      type: type!,
+      target: target!,
+      currentTarget: currentTarget!,
+      phase: phase!,
+      bubbles: bubbles!,
+      cancelable: cancelable!,
+      composed: composed!,
+      defaultPrevented: defaultPrevented!,
+      cancelBubble: cancelBubble!,
+      key: key!,
+      code: code!,
+      ctrlKey: ctrlKey!,
+      metaKey: metaKey!,
+      altKey: altKey!,
+      shiftKey: shiftKey!,
+      repeat: repeat!,
+      composing: composing!,
+      view: view!,
+      composedPath: composedPath!,
+      preventDefault: preventDefault!,
+      focus: focus!,
+      addWindowEventListener,
+      removeWindowEventListener,
+      terminal,
+      isCurrent: () =>
+        intrinsicsAreCurrent() && terminal.isCurrent(),
+    };
+    return Object.freeze(authority);
+  } catch {
+    return null;
+  }
+}
+
+function trashEventPath(
+  source: Node,
+  ownerDocument: Document,
+): readonly EventTarget[] | null {
+  const path: EventTarget[] = [];
+  for (let current: Node | null = source; current; current = current.parentNode) {
+    path.push(current);
+    if (current === ownerDocument) return Object.freeze(path);
+  }
+  return null;
+}
+
+function trashNavigationKey(key: string): TrashNavigationKey | null {
+  switch (key) {
+    case "ArrowLeft":
+    case "ArrowUp":
+    case "ArrowRight":
+    case "ArrowDown":
+    case "Home":
+    case "End":
+      return key;
+    default:
+      return null;
+  }
+}
+
+function trashMovement(
+  publication: TrashPublication,
+  card: TrashCardPublication,
+  source: TrashControlPublication,
+  key: TrashNavigationKey,
+): TrashKeyboardMovement | null {
+  const sourceIndex = card.actions.indexOf(source);
+  if (sourceIndex < 0) return null;
+  let destinationIndex: number;
+  if (key === "ArrowLeft" || key === "ArrowUp") {
+    destinationIndex = sourceIndex - 1;
+  } else if (key === "ArrowRight" || key === "ArrowDown") {
+    destinationIndex = sourceIndex + 1;
+  } else if (key === "Home") {
+    destinationIndex = 0;
+  } else {
+    destinationIndex = card.actions.length - 1;
+  }
+  const destination = card.actions[destinationIndex];
+  if (!destination || destination === source) return null;
+  return Object.freeze({
+    identity: Symbol("trash-keyboard-movement"),
+    publicationIdentity: publication.identity,
+    cardIdentity: card.identity,
+    sourceIdentity: source.identity,
+    sourceActionIdentity: source.action.identity,
+    destinationIdentity: destination.identity,
+    destinationActionIdentity: destination.action.identity,
+    key,
+    source,
+    destination,
+  });
+}
+
+function captureTrashReactKeyProof(
+  event: ReactKeyboardEvent<HTMLElement>,
+  nativeEvent: KeyboardEvent,
+  target: HTMLButtonElement,
+  currentTarget: HTMLElement,
+  phase: number,
+  key: TrashNavigationKey,
+): TrashReactKeyProof | null {
+  try {
+    const preventDefault = event.preventDefault;
+    const stopPropagation = event.stopPropagation;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
+    if (
+      event.nativeEvent !== nativeEvent ||
+      event.type !== "keydown" ||
+      event.target !== target ||
+      event.currentTarget !== currentTarget ||
+      event.eventPhase !== phase ||
+      event.key !== key ||
+      !event.bubbles ||
+      !event.cancelable ||
+      event.defaultPrevented ||
+      !event.isTrusted ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      event.shiftKey ||
+      event.repeat ||
+      event.isComposing ||
+      typeof preventDefault !== "function" ||
+      typeof stopPropagation !== "function" ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      TRUSTED_REFLECT_APPLY(isDefaultPrevented, event, []) !==
+        false ||
+      TRUSTED_REFLECT_APPLY(isPropagationStopped, event, []) !==
+        false
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event,
+      nativeEvent,
+      target,
+      currentTarget,
+      phase,
+      preventDefault,
+      stopPropagation,
+      isDefaultPrevented,
+      isPropagationStopped,
+      defaultPreventedResult: false,
+      propagationStoppedResult: false,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function trashReactKeyProofIsCurrent(
+  proof: TrashReactKeyProof,
+): boolean {
+  try {
+    const event = proof.event as ReactKeyboardEvent<HTMLElement>;
+    return (
+      event.preventDefault === proof.preventDefault &&
+      event.stopPropagation === proof.stopPropagation &&
+      event.isDefaultPrevented === proof.isDefaultPrevented &&
+      event.isPropagationStopped === proof.isPropagationStopped &&
+      TRUSTED_REFLECT_APPLY(
+        proof.isDefaultPrevented,
+        proof.event,
+        [],
+      ) === proof.defaultPreventedResult &&
+      TRUSTED_REFLECT_APPLY(
+        proof.isPropagationStopped,
+        proof.event,
+        [],
+      ) === proof.propagationStoppedResult
+    );
+  } catch {
+    return false;
+  }
+}
 
 class TrashElementOwner<T extends HTMLElement> implements TrashElementOwnerView {
   private current: T | null = null;
@@ -12130,6 +12969,12 @@ function createTrashPublication(
         captureCard: cardOwner.capture,
         captureRestore: restoreOwner.capture,
         capturePurge: purgeOwner.capture,
+        captureKeyDown: (
+          event: ReactKeyboardEvent<HTMLLIElement>,
+        ) => currentRuntime?.captureCardKeyDown(card, event),
+        bubbleKeyDown: (
+          event: ReactKeyboardEvent<HTMLLIElement>,
+        ) => currentRuntime?.bubbleCardKeyDown(card, event),
         cardOwner,
         restoreOwner,
         purgeOwner,
@@ -12431,12 +13276,19 @@ function createTrashPublication(
       element: HTMLButtonElement,
     ): TrashControlPublication => {
       const controlIdentity = Symbol(`trash-${kind}-control`);
+      const path = trashEventPath(element, root.ownerDocument);
+      if (!path) {
+        throw new Error(
+          "Cannot publish a Trash control outside its owner document",
+        );
+      }
       return Object.freeze({
         identity: controlIdentity,
         publicationIdentity: identity,
         kind,
         cardIndex,
         element,
+        path,
         action: Object.freeze({
           identity: Symbol(`trash-${kind}-action`),
           publicationIdentity: identity,
@@ -12454,12 +13306,27 @@ function createTrashPublication(
         if (!element || !restore || !purge) {
           throw new Error("Cannot publish a Trash row without every committed ref");
         }
+        const restoreControl = control(
+          "restore",
+          owned.authority.index,
+          restore,
+        );
+        const purgeControl = control(
+          "purge",
+          owned.authority.index,
+          purge,
+        );
         return Object.freeze({
           identity: Symbol("trash-card"),
           authority: owned.authority,
           element,
-          restore: control("restore", owned.authority.index, restore),
-          purge: control("purge", owned.authority.index, purge),
+          restore: restoreControl,
+          purge: purgeControl,
+          actions: Object.freeze(
+            [restoreControl, purgeControl].filter(({ element }) =>
+              trashIsEffectivelyEnabled(element),
+            ),
+          ),
         });
       }),
     );
@@ -12475,6 +13342,18 @@ function createTrashPublication(
     let replayRefs: TrashRefReplay[] = [];
     let partialReplayOwners = new Set<TrashElementOwnerView>();
     let invalidReplay = false;
+    const keyboardProofs = new WeakMap<
+      KeyboardEvent,
+      TrashKeyboardNativeProof
+    >();
+    const invalidKeyboardEvents = new WeakSet<Event>();
+    const keyboardOwnerWindow = root.ownerDocument.defaultView;
+    const keyboardAuthority = keyboardOwnerWindow
+      ? captureTrashKeyboardAuthority(
+          keyboardOwnerWindow,
+          root.ownerDocument,
+        )
+      : null;
     const publication: TrashPublication = Object.freeze({
       identity,
       render,
@@ -12490,6 +13369,454 @@ function createTrashPublication(
       retire: () => retire("other"),
       isRetired: () => retired,
     });
+
+    const publishedActionsAreCurrent = (
+      card: TrashCardPublication,
+    ) => {
+      const expected = [card.restore, card.purge].filter(
+        ({ element }) => trashIsEffectivelyEnabled(element),
+      );
+      return (
+        Object.isFrozen(card.actions) &&
+        card.actions.length <= 2 &&
+        card.actions.length === expected.length &&
+        card.actions.every(
+          (action, index) =>
+            action === expected[index] &&
+            action.publicationIdentity === publication.identity &&
+            action.cardIndex === card.authority.index &&
+            action.action.publicationIdentity ===
+              publication.identity &&
+            action.action.controlIdentity === action.identity &&
+            action.action.cardIndex === card.authority.index &&
+            action.action.kind === action.kind &&
+            trashIsEffectivelyEnabled(action.element),
+        )
+      );
+    };
+
+    const keyboardCandidateIsCurrent = (
+      card: TrashCardPublication,
+      movement: TrashKeyboardMovement,
+    ) => {
+      const source = movement.source;
+      const destination = movement.destination;
+      return (
+        currentRuntime === runtime &&
+        movement.publicationIdentity === publication.identity &&
+        movement.cardIdentity === card.identity &&
+        movement.sourceIdentity === source.identity &&
+        movement.sourceActionIdentity === source.action.identity &&
+        movement.destinationIdentity === destination.identity &&
+        movement.destinationActionIdentity ===
+          destination.action.identity &&
+        source !== destination &&
+        card.actions.includes(source) &&
+        card.actions.includes(destination) &&
+        publishedActionsAreCurrent(card) &&
+        candidateIsCurrent(
+          runtime,
+          publication,
+          card,
+          source,
+          source.action,
+        ) &&
+        candidateIsCurrent(
+          runtime,
+          publication,
+          card,
+          destination,
+          destination.action,
+        ) &&
+        keyboardAuthority?.ownerWindow ===
+          publication.ownerDocument.defaultView &&
+        keyboardAuthority.isCurrent() &&
+        keyboardAuthority.activeElement.read(
+          publication.ownerDocument,
+        ) === source.element
+      );
+    };
+
+    const pathsMatch = (
+      expected: readonly EventTarget[],
+      current: readonly EventTarget[],
+    ) =>
+      expected.length === current.length &&
+      expected.every((entry, index) => current[index] === entry);
+
+    const nativeKeyboardIsCurrent = (
+      proof: TrashKeyboardNativeProof,
+      expectedPhase: number,
+    ) => {
+      const authority = keyboardAuthority;
+      if (!authority) return false;
+      try {
+        const event = proof.event;
+        const path = authority.composedPath.call(event);
+        return (
+          authority.isCurrent() &&
+          event instanceof authority.KeyboardEvent &&
+          authority.prototypeOf(event) ===
+            authority.keyboardPrototype &&
+          publication.ownerDocument.defaultView ===
+            authority.ownerWindow &&
+          authority.trusted.matches(event) &&
+          authority.trusted.read(event) === true &&
+          authority.type.read(event) === "keydown" &&
+          authority.target.read(event) ===
+            proof.movement.source.element &&
+          authority.currentTarget.read(event) ===
+            proof.card.element &&
+          authority.phase.read(event) === expectedPhase &&
+          authority.bubbles.read(event) &&
+          authority.cancelable.read(event) &&
+          !authority.defaultPrevented.read(event) &&
+          !authority.cancelBubble.read(event) &&
+          authority.key.read(event) === proof.key &&
+          authority.code.read(event) === proof.key &&
+          !authority.ctrlKey.read(event) &&
+          !authority.metaKey.read(event) &&
+          !authority.altKey.read(event) &&
+          !authority.shiftKey.read(event) &&
+          !authority.repeat.read(event) &&
+          !authority.composing.read(event) &&
+          authority.view.read(event) === authority.ownerWindow &&
+          pathsMatch(proof.path, path) &&
+          pathsMatch(proof.window.path, path) &&
+          path.at(-2) === publication.ownerDocument &&
+          path.at(-1) === proof.terminal &&
+          proof.window.registration === authority.terminal &&
+          proof.window.nativeEvent === event &&
+          proof.window.receiver ===
+            proof.window.currentTarget &&
+          proof.window.receiver === proof.window.terminal &&
+          proof.window.receiver === proof.terminal &&
+          authority.terminal.proofFor(event) === proof.window &&
+          keyboardCandidateIsCurrent(proof.card, proof.movement)
+        );
+      } catch {
+        return false;
+      }
+    };
+
+    const releaseKeyboardClaims = (
+      proof: TrashKeyboardNativeProof,
+    ) => {
+      cells.claimedPublications.delete(publication);
+      cells.claimedCards.delete(proof.card);
+      cells.claimedControls.delete(proof.movement.source);
+      cells.claimedControls.delete(proof.movement.destination);
+      cells.claimedActions.delete(proof.movement.source.action);
+      cells.claimedActions.delete(
+        proof.movement.destination.action,
+      );
+    };
+
+    const claimKeyboard = (
+      proof: TrashKeyboardNativeProof,
+    ) => {
+      const authority = keyboardAuthority;
+      const capture = proof.capture;
+      const bubble = proof.bubble;
+      if (
+        !authority ||
+        !bubble ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedCards.has(proof.card) ||
+        cells.claimedControls.has(proof.movement.source) ||
+        cells.claimedControls.has(proof.movement.destination) ||
+        cells.claimedActions.has(proof.movement.source.action) ||
+        cells.claimedActions.has(
+          proof.movement.destination.action,
+        ) ||
+        cells.claimedNativeEvents.has(proof.event) ||
+        cells.claimedReactEvents.has(capture.event) ||
+        cells.claimedReactEvents.has(bubble.event) ||
+        cells.claimedMovements.has(proof.movement) ||
+        cells.claimedWindowProofs.has(proof.window) ||
+        !cells.evaluatingPublications.has(publication) ||
+        proof.window.registration !== authority.terminal ||
+        !authority.terminal.claim(proof.window)
+      ) {
+        return false;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedCards.add(proof.card);
+      cells.claimedControls.add(proof.movement.source);
+      cells.claimedControls.add(proof.movement.destination);
+      cells.claimedActions.add(proof.movement.source.action);
+      cells.claimedActions.add(
+        proof.movement.destination.action,
+      );
+      cells.claimedNativeEvents.add(proof.event);
+      cells.claimedReactEvents.add(capture.event);
+      cells.claimedReactEvents.add(bubble.event);
+      cells.claimedMovements.add(proof.movement);
+      cells.claimedWindowProofs.add(proof.window);
+      return true;
+    };
+
+    const captureCardKeyDown = (
+      cardAuthority: TrashCardPresentation,
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => {
+      const authority = keyboardAuthority;
+      if (!authority || !event || typeof event !== "object") return;
+      let nativeEvent: KeyboardEvent;
+      try {
+        nativeEvent = event.nativeEvent;
+      } catch {
+        return;
+      }
+      if (!nativeEvent || typeof nativeEvent !== "object") {
+        return;
+      }
+      const existing = keyboardProofs.get(nativeEvent);
+      if (
+        existing ||
+        cells.attemptedNativeEvents.has(nativeEvent) ||
+        cells.attemptedReactEvents.has(event)
+      ) {
+        if (existing) existing.crossed = true;
+        invalidKeyboardEvents.add(nativeEvent);
+        keyboardProofs.delete(nativeEvent);
+        if (nativeEvent && typeof nativeEvent === "object")
+          cells.attemptedNativeEvents.add(nativeEvent);
+        cells.attemptedReactEvents.add(event);
+        return;
+      }
+      cells.attemptedNativeEvents.add(nativeEvent);
+      cells.attemptedReactEvents.add(event);
+      try {
+        const card =
+          publication.cards[cardAuthority.index];
+        const target = authority.target.read(nativeEvent);
+        const source =
+          card?.restore.element === target
+            ? card.restore
+            : card?.purge.element === target
+              ? card.purge
+              : null;
+        const key = trashNavigationKey(
+          authority.key.read(nativeEvent),
+        );
+        const windowProof =
+          authority.terminal.proofFor(nativeEvent);
+        if (
+          !card ||
+          card.authority !== cardAuthority ||
+          !source ||
+          !key ||
+          !windowProof ||
+          !authority.isCurrent() ||
+          publication.ownerDocument.defaultView !==
+            authority.ownerWindow ||
+          !(nativeEvent instanceof authority.KeyboardEvent) ||
+          authority.prototypeOf(nativeEvent) !==
+            authority.keyboardPrototype ||
+          !authority.trusted.matches(nativeEvent) ||
+          authority.trusted.read(nativeEvent) !== true ||
+          authority.type.read(nativeEvent) !== "keydown" ||
+          authority.target.read(nativeEvent) !== source.element ||
+          authority.currentTarget.read(nativeEvent) !==
+            card.element ||
+          authority.phase.read(nativeEvent) !==
+            authority.Event.CAPTURING_PHASE ||
+          !authority.bubbles.read(nativeEvent) ||
+          !authority.cancelable.read(nativeEvent) ||
+          authority.defaultPrevented.read(nativeEvent) ||
+          authority.cancelBubble.read(nativeEvent) ||
+          authority.key.read(nativeEvent) !== key ||
+          authority.code.read(nativeEvent) !== key ||
+          authority.ctrlKey.read(nativeEvent) ||
+          authority.metaKey.read(nativeEvent) ||
+          authority.altKey.read(nativeEvent) ||
+          authority.shiftKey.read(nativeEvent) ||
+          authority.repeat.read(nativeEvent) ||
+          authority.composing.read(nativeEvent) ||
+          authority.view.read(nativeEvent) !==
+            authority.ownerWindow ||
+          authority.activeElement.read(
+            publication.ownerDocument,
+          ) !== source.element ||
+          !publishedActionsAreCurrent(card)
+        ) {
+          return;
+        }
+        const movement = trashMovement(
+          publication,
+          card,
+          source,
+          key,
+        );
+        if (
+          !movement ||
+          !keyboardCandidateIsCurrent(card, movement)
+        ) {
+          return;
+        }
+        const path = authority.composedPath.call(nativeEvent);
+        const terminal = path.at(-1);
+        if (
+          !terminal ||
+          path.length !== source.path.length + 1 ||
+          !pathsMatch(path, windowProof.path) ||
+          path.at(-2) !== publication.ownerDocument ||
+          terminal !== windowProof.receiver ||
+          windowProof.receiver !== windowProof.currentTarget ||
+          windowProof.receiver !== windowProof.terminal ||
+          !source.path.every(
+            (entry, index) => path[index] === entry,
+          )
+        ) {
+          return;
+        }
+        const capture = captureTrashReactKeyProof(
+          event,
+          nativeEvent,
+          source.element,
+          card.element,
+          authority.Event.CAPTURING_PHASE,
+          key,
+        );
+        if (!capture) return;
+        const proof: TrashKeyboardNativeProof = {
+          event: nativeEvent,
+          publication,
+          card,
+          movement,
+          path: Object.freeze([...path]),
+          terminal,
+          window: windowProof,
+          key,
+          capture,
+          bubble: null,
+          crossed: false,
+        };
+        keyboardProofs.set(nativeEvent, proof);
+        queueMicrotask(() => {
+          if (keyboardProofs.get(nativeEvent) !== proof) return;
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+        });
+      } catch {
+        invalidKeyboardEvents.add(nativeEvent);
+        keyboardProofs.delete(nativeEvent);
+      }
+    };
+
+    const bubbleCardKeyDown = (
+      cardAuthority: TrashCardPresentation,
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => {
+      const authority = keyboardAuthority;
+      if (!authority) return;
+      if (!event || typeof event !== "object") {
+        return;
+      }
+      let nativeEvent: KeyboardEvent;
+      try {
+        nativeEvent = event.nativeEvent;
+      } catch {
+        return;
+      }
+      if (!nativeEvent || typeof nativeEvent !== "object") return;
+      const proof = keyboardProofs.get(nativeEvent);
+      if (!proof) return;
+      cells.attemptedReactEvents.add(event);
+      try {
+        if (
+          proof.crossed ||
+          invalidKeyboardEvents.has(nativeEvent) ||
+          proof.bubble ||
+          event === proof.capture.event ||
+          event.nativeEvent !== proof.event ||
+          proof.card.authority !== cardAuthority ||
+          authority.phase.read(proof.event) !==
+            authority.Event.BUBBLING_PHASE ||
+          !nativeKeyboardIsCurrent(
+            proof,
+            authority.Event.BUBBLING_PHASE,
+          )
+        ) {
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+          return;
+        }
+        const bubble = captureTrashReactKeyProof(
+          event,
+          proof.event,
+          proof.movement.source.element,
+          proof.card.element,
+          authority.Event.BUBBLING_PHASE,
+          proof.key,
+        );
+        if (!bubble) {
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+          return;
+        }
+        proof.bubble = bubble;
+        if (
+          !trashReactKeyProofIsCurrent(proof.capture) ||
+          !trashReactKeyProofIsCurrent(bubble) ||
+          !nativeKeyboardIsCurrent(
+            proof,
+            authority.Event.BUBBLING_PHASE,
+          ) ||
+          keyboardProofs.get(nativeEvent) !== proof
+        ) {
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+          return;
+        }
+        cells.evaluatingPublications.add(publication);
+        let claimed = false;
+        try {
+          claimed =
+            nativeKeyboardIsCurrent(
+              proof,
+              authority.Event.BUBBLING_PHASE,
+            ) &&
+            trashReactKeyProofIsCurrent(proof.capture) &&
+            trashReactKeyProofIsCurrent(bubble) &&
+            keyboardProofs.get(nativeEvent) === proof &&
+            claimKeyboard(proof);
+        } finally {
+          cells.evaluatingPublications.delete(publication);
+        }
+        keyboardProofs.delete(nativeEvent);
+        if (!claimed) return;
+        try {
+          authority.preventDefault.call(proof.event);
+          authority.focus.call(
+            proof.movement.destination.element,
+            { preventScroll: true },
+          );
+          requestSuccessor();
+        } finally {
+          releaseKeyboardClaims(proof);
+        }
+      } catch {
+        proof.crossed = true;
+        invalidKeyboardEvents.add(nativeEvent);
+        keyboardProofs.delete(nativeEvent);
+      }
+    };
+
+    const releaseKeyboardListener = () => {
+      const authority = keyboardAuthority;
+      if (!authority) return;
+      try {
+        authority.terminal.release();
+      } catch {
+        return;
+      }
+    };
 
     const mutationIsRelevant = (record: MutationRecord) => {
       if (
@@ -12530,6 +13857,7 @@ function createTrashPublication(
       if (domObserver) recordMutations(domObserver.takeRecords());
       retired = true;
       retirement = reason;
+      releaseKeyboardListener();
       cells.retiredPublications.add(publication);
       for (const card of publication.cards) {
         cells.retiredCards.add(card);
@@ -12716,6 +14044,8 @@ function createTrashPublication(
             .filter(({ owner }) => partialReplayOwners.has(owner))
             .map(({ element }) => element),
         ),
+      captureCardKeyDown,
+        bubbleCardKeyDown,
     });
     return runtime;
   };
@@ -13061,6 +14391,10 @@ export function TrashView({
     claimedActions: new WeakSet(),
     claimedReactEvents: new WeakSet(),
     claimedNativeEvents: new WeakSet(),
+    attemptedReactEvents: new WeakSet(),
+    attemptedNativeEvents: new WeakSet(),
+    claimedMovements: new WeakSet(),
+    claimedWindowProofs: new WeakSet(),
     evaluatingPublications: new WeakSet(),
   }));
   const [, setPublicationRevision] = useState(0);
@@ -13170,6 +14504,8 @@ export function TrashView({
                 className="flex h-full min-w-0 flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm"
                 data-testid="trash-card"
                 aria-busy={card.busy || undefined}
+                onKeyDownCapture={publishedCard.captureKeyDown}
+                onKeyDown={publishedCard.bubbleKeyDown}
               >
                 <div className="mb-2 flex items-start justify-between gap-2">
                   <h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-5 text-ink">{card.title}</h3>
