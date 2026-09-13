@@ -2840,7 +2840,7 @@ function createActivityPublication({
         if (
           !keyboard.isCurrent() ||
           !keyboard.eventDefaultPrevented.read(nativeEvent) ||
-          bubbleEvent.defaultPrevented !== true ||
+          !bubbleEvent.defaultPrevented ||
           !keyboard.reactMethodMatches(
             bubbleEvent,
             "isDefaultPrevented",
