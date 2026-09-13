@@ -27,6 +27,13 @@ type HandlePointer = (event: ReactPointerEvent<HTMLDivElement>) => void;
 type HandleKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 type HandleDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => void;
 type HandleRef<T extends HTMLElement> = (element: T | null) => void;
+type TestKeyboardMethod = (this: object) => unknown;
+
+interface TestKeyboardMethods {
+  readonly preventDefault: TestKeyboardMethod;
+  readonly isDefaultPrevented: TestKeyboardMethod;
+  readonly isPropagationStopped: TestKeyboardMethod;
+}
 
 interface HandleHandlers {
   readonly pointerDown: HandlePointer;
@@ -34,6 +41,7 @@ interface HandleHandlers {
   readonly pointerUp: HandlePointer;
   readonly pointerCancel: HandlePointer;
   readonly lostPointerCapture: HandlePointer;
+  readonly keyDownCapture: HandleKeyboard;
   readonly keyDown: HandleKeyboard;
   readonly doubleClick: HandleDoubleClick;
 }
@@ -49,6 +57,31 @@ const setPointerCapture = vi.fn();
 const releasePointerCapture = vi.fn();
 const roots = new Set<Root>();
 const hosts = new Set<HTMLElement>();
+let restoreExactWindowRealm: (() => void) | null = null;
+
+const REACT_KEY_SCALARS = [
+  "type",
+  "nativeEvent",
+  "target",
+  "currentTarget",
+  "eventPhase",
+  "bubbles",
+  "cancelable",
+  "defaultPrevented",
+  "isTrusted",
+  "timeStamp",
+  "detail",
+  "key",
+  "code",
+  "location",
+  "ctrlKey",
+  "metaKey",
+  "altKey",
+  "shiftKey",
+  "repeat",
+  "isComposing",
+  "view",
+] as const;
 
 function ResizeBoundary({
   instance = "resize",
@@ -165,6 +198,7 @@ function handlers(handle: HTMLDivElement): HandleHandlers {
     pointerUp: reactHandler(handle, "onPointerUp"),
     pointerCancel: reactHandler(handle, "onPointerCancel"),
     lostPointerCapture: reactHandler(handle, "onLostPointerCapture"),
+    keyDownCapture: reactHandler(handle, "onKeyDownCapture"),
     keyDown: reactHandler(handle, "onKeyDown"),
     doubleClick: reactHandler(handle, "onDoubleClick"),
   };
@@ -272,6 +306,121 @@ function doubleClick(target: Element) {
   });
 }
 
+function eventImplementation(event: Event) {
+  return Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean; view: Window | null } =>
+        typeof candidate === "object"
+        && candidate !== null
+        && "isTrusted" in candidate
+        && typeof candidate.isTrusted === "boolean"
+        && "view" in candidate,
+    );
+}
+
+function trustKeyboardEvent(event: KeyboardEvent, ownerWindow: Window) {
+  const implementation = eventImplementation(event);
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  implementation.view = ownerWindow;
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted || event.view !== ownerWindow) {
+    throw new Error("The trusted owner-realm keyboard event was not created");
+  }
+}
+
+function keyboardEvent(
+  target: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The handle owner Window was unavailable");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    code: key,
+    key,
+    ...init,
+  });
+  trustKeyboardEvent(event, ownerWindow);
+  return event;
+}
+
+function keyDown(
+  target: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const event = keyboardEvent(target, key, init);
+  act(() => {
+    target.focus();
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
+function exposeKeyScalarsAsAccessors(event: object) {
+  const record = event as Record<PropertyKey, unknown>;
+  for (const property of REACT_KEY_SCALARS) {
+    let value = record[property];
+    Object.defineProperty(event, property, {
+      configurable: true,
+      enumerable: true,
+      get: () => value,
+      set: (next) => {
+        value = next;
+      },
+    });
+  }
+}
+
+function useExactWindowListenerRealm() {
+  if (restoreExactWindowRealm) return;
+  const exposedWindow = document.defaultView;
+  if (!exposedWindow) throw new Error("Document default view was unavailable");
+  let listenerReceiver: Window | null = null;
+  const observeReceiver = function (this: Window, event: Event) {
+    if (event.currentTarget !== this) {
+      throw new Error("Window listener receiver did not match currentTarget");
+    }
+    listenerReceiver = event.currentTarget as Window;
+  };
+  exposedWindow.addEventListener(
+    "panel-resize-window-probe",
+    observeReceiver,
+    { once: true },
+  );
+  exposedWindow.dispatchEvent(
+    new exposedWindow.Event("panel-resize-window-probe"),
+  );
+  if (!listenerReceiver) throw new Error("Window listener receiver was unavailable");
+  const ownDescriptor = Object.getOwnPropertyDescriptor(document, "defaultView");
+  Object.defineProperty(document, "defaultView", {
+    configurable: true,
+    value: listenerReceiver,
+  });
+  restoreExactWindowRealm = () => {
+    if (ownDescriptor) {
+      Object.defineProperty(document, "defaultView", ownDescriptor);
+    } else {
+      Reflect.deleteProperty(document, "defaultView");
+    }
+    restoreExactWindowRealm = null;
+  };
+}
+
 async function flushMutations() {
   await act(async () => {
     await Promise.resolve();
@@ -321,6 +470,7 @@ afterEach(() => {
   releasePointerCapture.mockReset();
   document.body.style.cursor = "";
   document.body.style.userSelect = "";
+  restoreExactWindowRealm?.();
 });
 
 describe("PanelResizeHandle", () => {
@@ -341,13 +491,13 @@ describe("PanelResizeHandle", () => {
     expect(handle.childNodes).toHaveLength(1);
     expect(currentLine(handle)).toHaveAttribute("aria-hidden", "true");
 
-    fireEvent.keyDown(handle, { key: "ArrowLeft" });
-    fireEvent.keyDown(handle, { key: "ArrowRight", shiftKey: true });
-    fireEvent.keyDown(handle, { key: "Home" });
-    fireEvent.keyDown(handle, { key: "End" });
-    fireEvent.keyDown(handle, { key: "Enter" });
+    keyDown(handle, "ArrowLeft");
+    keyDown(handle, "ArrowRight", { shiftKey: true });
+    keyDown(handle, "Home");
+    keyDown(handle, "End");
+    keyDown(handle, "Enter");
     doubleClick(handle);
-    fireEvent.keyDown(handle, { key: "ArrowUp" });
+    keyDown(handle, "ArrowUp");
 
     expect(onResize.mock.calls).toEqual([
       [PANEL_DEFAULT + PANEL_STEP],
@@ -356,6 +506,354 @@ describe("PanelResizeHandle", () => {
       [PANEL_MAX],
     ]);
     expect(onReset).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["ArrowLeft", false, 340, 356, false],
+    ["ArrowLeft", true, 340, 404, false],
+    ["ArrowRight", false, 340, 324, false],
+    ["ArrowRight", true, 340, 280, false],
+    ["ArrowLeft", true, 700, PANEL_MAX, false],
+    ["ArrowRight", true, 300, PANEL_MIN, false],
+    ["Home", false, 500, PANEL_MIN, false],
+    ["End", false, 500, PANEL_MAX, false],
+    ["Enter", false, 500, null, true],
+  ] as const)(
+    "uses the exact public-keyboard result for %s (Shift %s)",
+    (key, shiftKey, width, expected, reset) => {
+      const onResize = vi.fn();
+      const onReset = vi.fn();
+      const view = strictView({ width, onResize, onReset });
+      const handle = currentHandle(view.host);
+      const parent = handle.parentElement;
+      if (!parent) throw new Error("The resize handle parent was unavailable");
+      parent.scrollLeft = 13;
+      parent.scrollTop = 17;
+      const pageScroll = [window.scrollX, window.scrollY] as const;
+
+      const event = keyDown(handle, key, { shiftKey });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(parent.scrollLeft).toBe(13);
+      expect(parent.scrollTop).toBe(17);
+      expect([window.scrollX, window.scrollY]).toEqual(pageScroll);
+      if (reset) {
+        expect(onReset).toHaveBeenCalledOnce();
+        expect(onResize).not.toHaveBeenCalled();
+      } else {
+        expect(onResize).toHaveBeenCalledExactlyOnceWith(expected);
+        expect(onReset).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("authenticates phase-local wrappers, prototypes, and public methods", () => {
+    const onResize = vi.fn();
+    const view = strictView({ onResize });
+    const handle = currentHandle(view.host);
+    const originals: {
+      capture: TestKeyboardMethods | null;
+      bubble: TestKeyboardMethods | null;
+    } = { capture: null, bubble: null };
+    const prototypes: { capture: object | null; bubble: object | null } = {
+      capture: null,
+      bubble: null,
+    };
+    const phaseMethods = {
+      capture: {
+        preventDefault: vi.fn(function (this: object) {
+          return Reflect.apply(originals.capture!.preventDefault, this, []);
+        }),
+        isDefaultPrevented: vi.fn(function (this: object) {
+          return Reflect.apply(
+            originals.capture!.isDefaultPrevented,
+            this,
+            [],
+          );
+        }),
+        isPropagationStopped: vi.fn(function (this: object) {
+          return Reflect.apply(
+            originals.capture!.isPropagationStopped,
+            this,
+            [],
+          );
+        }),
+      },
+      bubble: {
+        preventDefault: vi.fn(function (this: object) {
+          return Reflect.apply(originals.bubble!.preventDefault, this, []);
+        }),
+        isDefaultPrevented: vi.fn(function (this: object) {
+          return Reflect.apply(
+            originals.bubble!.isDefaultPrevented,
+            this,
+            [],
+          );
+        }),
+        isPropagationStopped: vi.fn(function (this: object) {
+          return Reflect.apply(
+            originals.bubble!.isPropagationStopped,
+            this,
+            [],
+          );
+        }),
+      },
+    } satisfies Record<"capture" | "bubble", TestKeyboardMethods>;
+    const install = (
+      phase: "capture" | "bubble",
+      event: unknown,
+    ) => {
+      const wrapper = event as Record<PropertyKey, unknown>;
+      const preventDefault = wrapper.preventDefault;
+      const isDefaultPrevented = wrapper.isDefaultPrevented;
+      const isPropagationStopped = wrapper.isPropagationStopped;
+      if (
+        typeof preventDefault !== "function"
+        || typeof isDefaultPrevented !== "function"
+        || typeof isPropagationStopped !== "function"
+      ) {
+        throw new Error("React public keyboard methods were unavailable");
+      }
+      originals[phase] = {
+        preventDefault: preventDefault as TestKeyboardMethod,
+        isDefaultPrevented: isDefaultPrevented as TestKeyboardMethod,
+        isPropagationStopped: isPropagationStopped as TestKeyboardMethod,
+      };
+      const prototype = Object.create(Object.getPrototypeOf(wrapper)) as object;
+      prototypes[phase] = prototype;
+      Object.setPrototypeOf(wrapper, prototype);
+      Object.defineProperties(wrapper, {
+        preventDefault: {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: phaseMethods[phase].preventDefault,
+        },
+        isDefaultPrevented: {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: phaseMethods[phase].isDefaultPrevented,
+        },
+        isPropagationStopped: {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: phaseMethods[phase].isPropagationStopped,
+        },
+      });
+    };
+    const stopCapture = intercept<HandleKeyboard>(
+      handle,
+      "onKeyDownCapture",
+      (current, event) => {
+        install("capture", event);
+        current(event as ReactKeyboardEvent<HTMLDivElement>);
+      },
+    );
+    const stopBubble = intercept<HandleKeyboard>(
+      handle,
+      "onKeyDown",
+      (current, event) => {
+        install("bubble", event);
+        current(event as ReactKeyboardEvent<HTMLDivElement>);
+      },
+    );
+
+    const event = keyDown(handle, "ArrowLeft");
+    stopBubble();
+    stopCapture();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(prototypes.capture).not.toBe(prototypes.bubble);
+    expect(phaseMethods.capture.preventDefault)
+      .not.toBe(phaseMethods.bubble.preventDefault);
+    expect(phaseMethods.capture.isDefaultPrevented)
+      .not.toBe(phaseMethods.bubble.isDefaultPrevented);
+    expect(phaseMethods.capture.isPropagationStopped)
+      .not.toBe(phaseMethods.bubble.isPropagationStopped);
+    expect(phaseMethods.capture.preventDefault).not.toHaveBeenCalled();
+    expect(phaseMethods.bubble.preventDefault).toHaveBeenCalledOnce();
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+  });
+
+  it("admits exact public scalar accessors on both React deliveries", () => {
+    const onResize = vi.fn();
+    const view = strictView({ onResize });
+    const handle = currentHandle(view.host);
+    const wrappers: object[] = [];
+    const expose = (
+      current: HandleKeyboard,
+      event: unknown,
+    ) => {
+      exposeKeyScalarsAsAccessors(event as object);
+      wrappers.push(event as object);
+      current(event as ReactKeyboardEvent<HTMLDivElement>);
+    };
+    const stopCapture = intercept<HandleKeyboard>(
+      handle,
+      "onKeyDownCapture",
+      expose,
+    );
+    const stopBubble = intercept<HandleKeyboard>(
+      handle,
+      "onKeyDown",
+      expose,
+    );
+
+    const event = keyDown(handle, "ArrowLeft");
+    stopBubble();
+    stopCapture();
+
+    expect(wrappers).toHaveLength(2);
+    expect(wrappers[0]).not.toBe(wrappers[1]);
+    for (const wrapper of wrappers) {
+      for (const property of REACT_KEY_SCALARS) {
+        expect(Object.getOwnPropertyDescriptor(wrapper, property)?.get)
+          .toBeTypeOf("function");
+      }
+    }
+    expect(event.defaultPrevented).toBe(true);
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+  });
+
+  it.each(["absent", "replaced", "non-function", "unreadable"] as const)(
+    "does not authenticate %s private or optional wrapper fields",
+    (variant) => {
+      const onResize = vi.fn();
+      const view = strictView({ onResize });
+      const handle = currentHandle(view.host);
+      const mutate = (
+        current: HandleKeyboard,
+        event: unknown,
+      ) => {
+        for (const property of [
+          "_reactName",
+          "persist",
+          "isPersistent",
+          "stopPropagation",
+        ]) {
+          if (variant === "absent") {
+            Reflect.deleteProperty(event as object, property);
+          } else if (variant === "unreadable") {
+            Object.defineProperty(event as object, property, {
+              configurable: true,
+              get: () => {
+                throw new Error(`${property} must not be read for keydown`);
+              },
+            });
+          } else {
+            Object.defineProperty(event as object, property, {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: variant === "replaced" ? vi.fn() : null,
+            });
+          }
+        }
+        current(event as ReactKeyboardEvent<HTMLDivElement>);
+      };
+      const stopCapture = intercept<HandleKeyboard>(
+        handle,
+        "onKeyDownCapture",
+        mutate,
+      );
+      const stopBubble = intercept<HandleKeyboard>(
+        handle,
+        "onKeyDown",
+        mutate,
+      );
+
+      const event = keyDown(handle, "ArrowLeft");
+      stopBubble();
+      stopCapture();
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+    },
+  );
+
+  it("accepts the event-proven Window listener receiver", () => {
+    useExactWindowListenerRealm();
+    const onResize = vi.fn();
+    const view = strictView({ onResize });
+    const handle = currentHandle(view.host);
+
+    const event = keyDown(handle, "ArrowLeft");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+  });
+
+  it("rejects untrusted, wrong-focus, and foreign-realm native events", () => {
+    const onResize = vi.fn();
+    const outside = document.createElement("button");
+    const frame = document.createElement("iframe");
+    document.body.append(outside, frame);
+    hosts.add(outside);
+    hosts.add(frame);
+    const foreignWindow = frame.contentWindow as
+      | (Window & typeof globalThis)
+      | null;
+    if (!foreignWindow) throw new Error("The foreign Window was unavailable");
+    const view = strictView({ onResize });
+    const handle = currentHandle(view.host);
+    const ownerWindow = handle.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The handle owner Window was unavailable");
+    handle.focus();
+    const untrusted = new ownerWindow.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      key: "ArrowLeft",
+    });
+    act(() => handle.dispatchEvent(untrusted));
+
+    outside.focus();
+    const wrongFocus = keyboardEvent(handle, "ArrowLeft");
+    act(() => handle.dispatchEvent(wrongFocus));
+
+    const foreign = new foreignWindow.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      key: "ArrowLeft",
+    });
+    trustKeyboardEvent(foreign, foreignWindow);
+    handle.focus();
+    act(() => handle.dispatchEvent(foreign));
+
+    expect(untrusted.defaultPrevented).toBe(false);
+    expect(wrongFocus.defaultPrevented).toBe(false);
+    expect(foreign.defaultPrevented).toBe(false);
+    expect(onResize).not.toHaveBeenCalled();
+    const accepted = keyDown(handle, "ArrowLeft");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+  });
+
+  it("does no callback work for a natively cancelled key", () => {
+    let handle: HTMLDivElement | null = null;
+    const cancel = (event: Event) => {
+      if (event.target === handle) event.preventDefault();
+    };
+    document.addEventListener("keydown", cancel, true);
+    try {
+      const onResize = vi.fn();
+      const view = strictView({ onResize });
+      handle = currentHandle(view.host);
+
+      const rejected = keyDown(handle, "ArrowLeft");
+
+      expect(rejected.defaultPrevented).toBe(true);
+      expect(onResize).not.toHaveBeenCalled();
+      document.removeEventListener("keydown", cancel, true);
+      const accepted = keyDown(handle, "ArrowLeft");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+    } finally {
+      document.removeEventListener("keydown", cancel, true);
+    }
   });
 
   it("claims a Strict Mode drag once before stale, repeated, and fabricated start work", () => {
@@ -445,7 +943,7 @@ describe("PanelResizeHandle", () => {
           current(event as ReactKeyboardEvent<HTMLDivElement>);
         },
       );
-      fireEvent.keyDown(replacement, { key: "ArrowLeft" });
+      keyDown(replacement, "ArrowLeft");
       stop();
       expect(onResize).toHaveBeenLastCalledWith(356);
     },
@@ -482,8 +980,8 @@ describe("PanelResizeHandle", () => {
     const current = currentHandle(view.host);
     expect(current).toBe(handle);
     expect(current).toHaveAttribute("aria-valuenow", "600");
-    fireEvent.keyDown(current, { key: "ArrowLeft" });
-    fireEvent.keyDown(current, { key: "Enter" });
+    keyDown(current, "ArrowLeft");
+    keyDown(current, "Enter");
     expect(newResize).toHaveBeenCalledExactlyOnceWith(616);
     expect(newReset).toHaveBeenCalledOnce();
     expect(oldReset).not.toHaveBeenCalled();
@@ -518,7 +1016,7 @@ describe("PanelResizeHandle", () => {
           stale.keyDown(event as ReactKeyboardEvent<HTMLDivElement>);
         },
       );
-      fireEvent.keyDown(handle, { key: "ArrowLeft" });
+      keyDown(handle, "ArrowLeft");
       stop();
       expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
     },
@@ -533,13 +1031,13 @@ describe("PanelResizeHandle", () => {
     handle.setAttribute("aria-label", "Resize panel");
     await flushMutations();
 
-    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    keyDown(handle, "ArrowLeft");
     expect(onResize).not.toHaveBeenCalled();
 
     renderStrict(view.root, { onResize, boundary: 2 });
     const current = currentHandle(view.host);
     expect(handlers(current).keyDown).not.toBe(stale.keyDown);
-    fireEvent.keyDown(current, { key: "ArrowLeft" });
+    keyDown(current, "ArrowLeft");
     expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
   });
 
@@ -560,7 +1058,7 @@ describe("PanelResizeHandle", () => {
       parent.insertBefore(target, next);
       await flushMutations();
 
-      fireEvent.keyDown(handle, { key: "ArrowLeft" });
+      keyDown(handle, "ArrowLeft");
       expect(onResize).not.toHaveBeenCalled();
 
       renderStrict(view.root, {
@@ -569,7 +1067,7 @@ describe("PanelResizeHandle", () => {
       });
       const current = currentHandle(view.host);
       expect(handlers(current).keyDown).not.toBe(stale.keyDown);
-      fireEvent.keyDown(current, { key: "ArrowLeft" });
+      keyDown(current, "ArrowLeft");
       expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
     },
   );
@@ -585,7 +1083,7 @@ describe("PanelResizeHandle", () => {
     await flushMutations();
 
     expect(handlers(handle).keyDown).toBe(before.keyDown);
-    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    keyDown(handle, "ArrowLeft");
     expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
   });
 
@@ -825,6 +1323,515 @@ describe("PanelResizeHandle", () => {
     pointerUp(handle, 4);
   });
 
+  it("keeps the rightful pair through wrong, crossed, and reentrant React attempts", () => {
+    const onResize = vi.fn();
+    const view = strictView({ onResize });
+    const handle = currentHandle(view.host);
+    let captureWrapper: ReactKeyboardEvent<HTMLDivElement> | null = null;
+    const nested: { value: KeyboardEvent | null } = { value: null };
+    let reentered = false;
+    const stopCapture = intercept<HandleKeyboard>(
+      handle,
+      "onKeyDownCapture",
+      (current, event) => {
+        const wrapper = event as ReactKeyboardEvent<HTMLDivElement>;
+        if (!captureWrapper) {
+          captureWrapper = wrapper;
+          const key = wrapper.key;
+          Object.defineProperty(wrapper, "key", {
+            configurable: true,
+            enumerable: true,
+            get: () => {
+              if (!reentered) {
+                reentered = true;
+                nested.value = keyboardEvent(handle, "ArrowRight");
+                handle.dispatchEvent(nested.value);
+              }
+              return key;
+            },
+          });
+        }
+        current(wrapper);
+      },
+    );
+    const stopBubble = intercept<HandleKeyboard>(
+      handle,
+      "onKeyDown",
+      (current, event) => {
+        if (captureWrapper) current(captureWrapper);
+        current({ ...(event as object) } as ReactKeyboardEvent<HTMLDivElement>);
+        current(event as ReactKeyboardEvent<HTMLDivElement>);
+      },
+    );
+
+    const event = keyDown(handle, "ArrowLeft");
+    stopBubble();
+    stopCapture();
+
+    expect(nested.value).not.toBeNull();
+    expect(nested.value?.defaultPrevented).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+  });
+
+  it("rejects a structurally copied wrapper and recovers on a genuine delivery", () => {
+    const onResize = vi.fn();
+    const view = strictView({ onResize });
+    const handle = currentHandle(view.host);
+    const stop = intercept<HandleKeyboard>(
+      handle,
+      "onKeyDown",
+      (current, event) => {
+        current({ ...(event as object) } as ReactKeyboardEvent<HTMLDivElement>);
+      },
+    );
+
+    const rejected = keyDown(handle, "ArrowLeft");
+    stop();
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(onResize).not.toHaveBeenCalled();
+    const accepted = keyDown(handle, "ArrowLeft");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+  });
+
+  it("rejects phase-local public method drift without poisoning the next pair", () => {
+    const onResize = vi.fn();
+    const view = strictView({ onResize });
+    const handle = currentHandle(view.host);
+    const stop = intercept<HandleKeyboard>(
+      handle,
+      "onKeyDown",
+      (current, event) => {
+        current(event as ReactKeyboardEvent<HTMLDivElement>);
+        Object.defineProperty(event as object, "isPropagationStopped", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: vi.fn(() => false),
+        });
+      },
+    );
+
+    const rejected = keyDown(handle, "ArrowLeft");
+    stop();
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(onResize).not.toHaveBeenCalled();
+    const accepted = keyDown(handle, "ArrowLeft");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+  });
+
+  it("revalidates public methods after prevention before callback work", () => {
+    const onResize = vi.fn();
+    const view = strictView({ onResize });
+    const handle = currentHandle(view.host);
+    let retainedPrevent: ((this: object) => unknown) | null = null;
+    let bubbleWrapper: Record<PropertyKey, unknown> | null = null;
+    const prevent = vi.fn(function (this: object) {
+      if (!retainedPrevent || !bubbleWrapper) {
+        throw new Error("The bubble prevention proof was unavailable");
+      }
+      const result = Reflect.apply(retainedPrevent, this, []);
+      Object.defineProperty(bubbleWrapper, "isPropagationStopped", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: vi.fn(() => false),
+      });
+      return result;
+    });
+    const install = (
+      current: HandleKeyboard,
+      event: unknown,
+      bubble: boolean,
+    ) => {
+      const wrapper = event as Record<PropertyKey, unknown>;
+      if (!retainedPrevent) {
+        if (typeof wrapper.preventDefault !== "function") {
+          throw new Error("React preventDefault was unavailable");
+        }
+        retainedPrevent = wrapper.preventDefault as (this: object) => unknown;
+      }
+      if (bubble) bubbleWrapper = wrapper;
+      Object.defineProperty(wrapper, "preventDefault", {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: prevent,
+      });
+      current(event as ReactKeyboardEvent<HTMLDivElement>);
+    };
+    const stopCapture = intercept<HandleKeyboard>(
+      handle,
+      "onKeyDownCapture",
+      (current, event) => install(current, event, false),
+    );
+    const stopBubble = intercept<HandleKeyboard>(
+      handle,
+      "onKeyDown",
+      (current, event) => install(current, event, true),
+    );
+
+    const rejected = keyDown(handle, "ArrowLeft");
+    stopBubble();
+    stopCapture();
+
+    expect(prevent).toHaveBeenCalledOnce();
+    expect(rejected.defaultPrevented).toBe(true);
+    expect(onResize).not.toHaveBeenCalled();
+    const accepted = keyDown(handle, "ArrowLeft");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+  });
+
+  it.each([
+    ["post-prevention default", "ArrowLeft", "resize"],
+    ["capture propagation", "Enter", "reset"],
+  ] as const)(
+    "rejects %s late-query drift for %s and admits a clean successor",
+    (variant, key, effect) => {
+      const onResize = vi.fn();
+      const onReset = vi.fn();
+      const view = strictView({ onResize, onReset });
+      const handle = currentHandle(view.host);
+      let captureWrapper: Record<PropertyKey, unknown> | null = null;
+      let bubbleWrapper: Record<PropertyKey, unknown> | null = null;
+      let retainedBubblePrevent: TestKeyboardMethod | null = null;
+      let retainedCapturePropagation: TestKeyboardMethod | null = null;
+      const prevent = vi.fn(function (this: object) {
+        if (!retainedBubblePrevent || !bubbleWrapper) {
+          throw new Error("The retained bubble prevention was unavailable");
+        }
+        const result = Reflect.apply(retainedBubblePrevent, this, []);
+        if (variant === "post-prevention default") {
+          const currentDefault = bubbleWrapper.isDefaultPrevented;
+          if (typeof currentDefault !== "function") {
+            throw new Error("The post-prevention default query was unavailable");
+          }
+          Object.defineProperty(bubbleWrapper, "isDefaultPrevented", {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: function (this: object) {
+              const current = Reflect.apply(currentDefault, this, []);
+              if (!captureWrapper) {
+                throw new Error("The capture wrapper was unavailable");
+              }
+              Object.defineProperty(captureWrapper, "isDefaultPrevented", {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: vi.fn(() => false),
+              });
+              return current;
+            },
+          });
+        }
+        return result;
+      });
+      const capturePropagation = vi.fn(function (this: object) {
+        if (!retainedCapturePropagation || !captureWrapper) {
+          throw new Error("The retained capture propagation was unavailable");
+        }
+        const current = Reflect.apply(retainedCapturePropagation, this, []);
+        const nativeEvent = captureWrapper.nativeEvent;
+        if (
+          variant === "capture propagation"
+          && nativeEvent instanceof Event
+          && nativeEvent.defaultPrevented
+        ) {
+          if (!bubbleWrapper) {
+            throw new Error("The bubble wrapper was unavailable");
+          }
+          Object.defineProperty(bubbleWrapper, "isPropagationStopped", {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: vi.fn(() => false),
+          });
+        }
+        return current;
+      });
+      const stopCapture = intercept<HandleKeyboard>(
+        handle,
+        "onKeyDownCapture",
+        (current, event) => {
+          captureWrapper = event as Record<PropertyKey, unknown>;
+          if (variant === "capture propagation") {
+            const method = captureWrapper.isPropagationStopped;
+            if (typeof method !== "function") {
+              throw new Error("React capture propagation was unavailable");
+            }
+            retainedCapturePropagation = method as TestKeyboardMethod;
+            Object.defineProperty(
+              captureWrapper,
+              "isPropagationStopped",
+              {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: capturePropagation,
+              },
+            );
+          }
+          current(event as ReactKeyboardEvent<HTMLDivElement>);
+        },
+      );
+      const stopBubble = intercept<HandleKeyboard>(
+        handle,
+        "onKeyDown",
+        (current, event) => {
+          bubbleWrapper = event as Record<PropertyKey, unknown>;
+          const method = bubbleWrapper.preventDefault;
+          if (typeof method !== "function") {
+            throw new Error("React bubble prevention was unavailable");
+          }
+          retainedBubblePrevent = method as TestKeyboardMethod;
+          Object.defineProperty(bubbleWrapper, "preventDefault", {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: prevent,
+          });
+          current(event as ReactKeyboardEvent<HTMLDivElement>);
+        },
+      );
+
+      const rejected = keyDown(handle, key);
+      stopBubble();
+      stopCapture();
+
+      expect(prevent).toHaveBeenCalledOnce();
+      expect(rejected.defaultPrevented).toBe(true);
+      expect(onResize).not.toHaveBeenCalled();
+      expect(onReset).not.toHaveBeenCalled();
+      act(() => handle.dispatchEvent(rejected));
+      expect(onResize).not.toHaveBeenCalled();
+      expect(onReset).not.toHaveBeenCalled();
+
+      const accepted = keyDown(handle, key);
+      expect(accepted.defaultPrevented).toBe(true);
+      if (effect === "resize") {
+        expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+        expect(onReset).not.toHaveBeenCalled();
+      } else {
+        expect(onReset).toHaveBeenCalledOnce();
+        expect(onResize).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("rejects a replayed native event after exactly one callback", () => {
+    const onResize = vi.fn();
+    const view = strictView({ onResize });
+    const handle = currentHandle(view.host);
+    const event = keyDown(handle, "ArrowLeft");
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+
+    act(() => {
+      handle.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(onResize).toHaveBeenCalledOnce();
+  });
+
+  it("retires on owner-realm method drift and admits a clean successor", () => {
+    const onResize = vi.fn();
+    const view = strictView({ onResize });
+    const handle = currentHandle(view.host);
+    const stale = handlers(handle);
+    const ownerWindow = handle.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The handle owner Window was unavailable");
+    const prototype = ownerWindow.KeyboardEvent.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "key");
+    if (!descriptor?.get) throw new Error("KeyboardEvent.key was unavailable");
+    const rejected = keyboardEvent(handle, "ArrowLeft");
+    handle.focus();
+
+    act(() => {
+      Object.defineProperty(prototype, "key", {
+        ...descriptor,
+        get: function () {
+          return Reflect.apply(descriptor.get!, this, []);
+        },
+      });
+      try {
+        handle.dispatchEvent(rejected);
+      } finally {
+        Object.defineProperty(prototype, "key", descriptor);
+      }
+    });
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(onResize).not.toHaveBeenCalled();
+    const current = currentHandle(view.host);
+    expect(handlers(current).keyDown).not.toBe(stale.keyDown);
+    const accepted = keyDown(current, "ArrowLeft");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+  });
+
+  it("keeps the pair after a wrong Window receiver and releases listeners on cleanup", () => {
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("Document default view was unavailable");
+    const addDescriptor = Object.getOwnPropertyDescriptor(
+      ownerWindow,
+      "addEventListener",
+    );
+    const removeDescriptor = Object.getOwnPropertyDescriptor(
+      ownerWindow,
+      "removeEventListener",
+    );
+    const add = ownerWindow.addEventListener;
+    const remove = ownerWindow.removeEventListener;
+    const eventTargetPrototype = ownerWindow.EventTarget.prototype;
+    const targetAddDescriptor = Object.getOwnPropertyDescriptor(
+      eventTargetPrototype,
+      "addEventListener",
+    );
+    const targetRemoveDescriptor = Object.getOwnPropertyDescriptor(
+      eventTargetPrototype,
+      "removeEventListener",
+    );
+    const targetAdd = eventTargetPrototype.addEventListener;
+    const targetRemove = eventTargetPrototype.removeEventListener;
+    const active = new Set<EventListener>();
+    const documentActive = new Set<EventListener>();
+    const keyboardListener: { value: EventListener | null } = { value: null };
+    Object.defineProperty(eventTargetPrototype, "addEventListener", {
+      ...targetAddDescriptor,
+      value: function (
+        this: EventTarget,
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) {
+        if (
+          this === document
+          && type === "keydown"
+          && typeof listener === "function"
+        ) {
+          documentActive.add(listener);
+        }
+        return targetAdd.call(this, type, listener, options);
+      },
+    });
+    Object.defineProperty(eventTargetPrototype, "removeEventListener", {
+      ...targetRemoveDescriptor,
+      value: function (
+        this: EventTarget,
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | EventListenerOptions,
+      ) {
+        if (
+          this === document
+          && type === "keydown"
+          && typeof listener === "function"
+        ) {
+          documentActive.delete(listener);
+        }
+        return targetRemove.call(this, type, listener, options);
+      },
+    });
+    Object.defineProperty(ownerWindow, "addEventListener", {
+      configurable: true,
+      writable: true,
+      value: function (
+        this: Window,
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) {
+        if (type === "keydown" && typeof listener === "function") {
+          active.add(listener);
+          keyboardListener.value = listener;
+        }
+        return add.call(this, type, listener, options);
+      },
+    });
+    Object.defineProperty(ownerWindow, "removeEventListener", {
+      configurable: true,
+      writable: true,
+      value: function (
+        this: Window,
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | EventListenerOptions,
+      ) {
+        if (type === "keydown" && typeof listener === "function") {
+          active.delete(listener);
+        }
+        return remove.call(this, type, listener, options);
+      },
+    });
+    try {
+      const onResize = vi.fn();
+      const view = strictView({ onResize });
+      const handle = currentHandle(view.host);
+      expect(active).toHaveLength(1);
+      expect(documentActive).toHaveLength(1);
+      const stop = intercept<HandleKeyboard>(
+        handle,
+        "onKeyDown",
+        (current, event) => {
+          const native = (
+            event as ReactKeyboardEvent<HTMLDivElement>
+          ).nativeEvent;
+          current(event as ReactKeyboardEvent<HTMLDivElement>);
+          keyboardListener.value?.call(document, native);
+        },
+      );
+      const accepted = keyDown(handle, "ArrowLeft");
+      stop();
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+
+      act(() => view.root.unmount());
+      roots.delete(view.root);
+      expect(active).toHaveLength(0);
+      expect(documentActive).toHaveLength(0);
+      keyboardListener.value?.call(
+        ownerWindow,
+        keyboardEvent(handle, "ArrowLeft"),
+      );
+      expect(onResize).toHaveBeenCalledOnce();
+    } finally {
+      if (addDescriptor) {
+        Object.defineProperty(ownerWindow, "addEventListener", addDescriptor);
+      } else {
+        Reflect.deleteProperty(ownerWindow, "addEventListener");
+      }
+      if (removeDescriptor) {
+        Object.defineProperty(
+          ownerWindow,
+          "removeEventListener",
+          removeDescriptor,
+        );
+      } else {
+        Reflect.deleteProperty(ownerWindow, "removeEventListener");
+      }
+      if (targetAddDescriptor) {
+        Object.defineProperty(
+          eventTargetPrototype,
+          "addEventListener",
+          targetAddDescriptor,
+        );
+      }
+      if (targetRemoveDescriptor) {
+        Object.defineProperty(
+          eventTargetPrototype,
+          "removeEventListener",
+          targetRemoveDescriptor,
+        );
+      }
+    }
+  });
+
   it("claims keyboard and double-click wrappers and native events once before prevention or callbacks", () => {
     const onResize = vi.fn();
     const onReset = vi.fn();
@@ -841,7 +1848,7 @@ describe("PanelResizeHandle", () => {
         current(keyboardEvent);
       },
     );
-    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    keyDown(handle, "ArrowLeft");
     stopKey();
     expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
 
