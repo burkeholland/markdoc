@@ -268,6 +268,8 @@ type CapturedTableKeyDown = (
   event: ReactKeyboardEvent<HTMLButtonElement>,
 ) => void;
 
+type ReactKeyHandlerName = "onKeyDownCapture" | "onKeyDown";
+
 const TABLE_BUTTON_IDS = [
   "table-row-before",
   "table-row-after",
@@ -366,26 +368,103 @@ function tableButtons() {
   );
 }
 
-function interceptTableKeyDown(
-  element: HTMLButtonElement,
-  intercept: (original: CapturedTableKeyDown, event: object) => void,
+function interceptReactKeyDown<T extends HTMLElement>(
+  element: T,
+  name: ReactKeyHandlerName,
+  intercept: (
+    original: (event: ReactKeyboardEvent<T>) => void,
+    event: object,
+  ) => void,
 ) {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error("React props were not attached to the table control");
+  if (!propsKey) throw new Error("React props were not attached to the table keyboard boundary");
   const record = element as unknown as Record<string, Record<string, unknown>>;
   const props = record[propsKey];
-  const original = props.onKeyDown;
-  if (typeof original !== "function") throw new Error("The table key handler was unavailable");
+  const original = props[name];
+  if (typeof original !== "function") throw new Error(`The table ${name} handler was unavailable`);
   const replacement = {
     ...props,
-    onKeyDown: (event: object) => {
-      intercept(original as CapturedTableKeyDown, event);
+    [name]: (event: object) => {
+      intercept(original as (event: ReactKeyboardEvent<T>) => void, event);
     },
   };
   record[propsKey] = replacement;
   return () => {
     if (record[propsKey] === replacement) record[propsKey] = props;
   };
+}
+
+function interceptTableKeyDown(
+  element: HTMLButtonElement,
+  intercept: (original: CapturedTableKeyDown, event: object) => void,
+) {
+  return interceptReactKeyDown(element, "onKeyDown", intercept);
+}
+
+const REACT_KEY_PUBLIC_SCALARS = [
+  "type",
+  "nativeEvent",
+  "target",
+  "currentTarget",
+  "bubbles",
+  "cancelable",
+  "defaultPrevented",
+  "isTrusted",
+  "key",
+  "ctrlKey",
+  "metaKey",
+  "altKey",
+  "shiftKey",
+  "repeat",
+  "isComposing",
+  "view",
+  "eventPhase",
+] as const;
+
+const REACT_KEY_REQUIRED_METHODS = [
+  "preventDefault",
+  "isDefaultPrevented",
+  "isPropagationStopped",
+] as const;
+
+function exposeReactScalarsAsAccessors(event: object) {
+  const record = event as Record<PropertyKey, unknown>;
+  for (const property of REACT_KEY_PUBLIC_SCALARS) {
+    let value = record[property];
+    Object.defineProperty(event, property, {
+      configurable: true,
+      enumerable: true,
+      get: () => value,
+      set: (next) => {
+        value = next;
+      },
+    });
+  }
+}
+
+function isolateReactWrapper(
+  event: object,
+  prototype: object | null,
+  wrapMethods = false,
+) {
+  const record = event as Record<PropertyKey, unknown>;
+  for (const property of REACT_KEY_REQUIRED_METHODS) {
+    const original = record[property];
+    if (typeof original !== "function") {
+      throw new Error(`React ${property} was unavailable`);
+    }
+    Object.defineProperty(event, property, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: wrapMethods
+        ? function (this: object) {
+          return Reflect.apply(original, this, []);
+        }
+        : original,
+    });
+  }
+  Object.setPrototypeOf(event, prototype);
 }
 
 function captureControl(testId: string): CapturedControl {
@@ -1068,6 +1147,707 @@ describe("TableMenu geometry ownership", () => {
   );
 
   it.each([
+    ["ArrowRight", 0, 1],
+    ["Home", 7, 0],
+    ["End", 0, 9],
+  ] as const)(
+    "cancels %s synchronously before native dispatch returns",
+    async (key, sourceIndex, destinationIndex) => {
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => root.render(
+          <StrictMode>
+            <TableMenu
+              view={current.view}
+              session={current.session}
+              actions={current.actions}
+              format={current.format}
+              containerRef={current.containerRef}
+            />
+          </StrictMode>,
+        ));
+        browser.flush();
+        const menu = screen.getByTestId("table-menu");
+        const source = tableButtons()[sourceIndex];
+        const destination = tableButtons()[destinationIndex];
+        const phaseProofs: Array<{
+          boundary: "root" | "control";
+          phase: "capture" | "bubble";
+          wrapper: object;
+          nativeEvent: unknown;
+          target: unknown;
+          currentTarget: unknown;
+          eventPhase: unknown;
+          scalars: readonly unknown[];
+          methods: readonly unknown[];
+        }> = [];
+        const observe = (
+          boundary: "root" | "control",
+          phase: "capture" | "bubble",
+        ) => (
+          original: (event: ReactKeyboardEvent<HTMLElement>) => void,
+          wrapper: object,
+        ) => {
+          const record = wrapper as Record<PropertyKey, unknown>;
+          phaseProofs.push({
+            boundary,
+            phase,
+            wrapper,
+            nativeEvent: record.nativeEvent,
+            target: record.target,
+            currentTarget: record.currentTarget,
+            eventPhase: record.eventPhase,
+            scalars: REACT_KEY_PUBLIC_SCALARS.map((property) => (
+              property === "currentTarget" ? null : record[property]
+            )),
+            methods: REACT_KEY_REQUIRED_METHODS.map((property) => record[property]),
+          });
+          original(wrapper as ReactKeyboardEvent<HTMLElement>);
+        };
+        const restores = [
+          interceptReactKeyDown(menu, "onKeyDownCapture", observe("root", "capture")),
+          interceptReactKeyDown(source, "onKeyDownCapture", observe("control", "capture")),
+          interceptReactKeyDown(source, "onKeyDown", observe("control", "bubble")),
+          interceptReactKeyDown(menu, "onKeyDown", observe("root", "bubble")),
+        ];
+        source.focus();
+        const event = tableKeyboardEvent(source, key);
+        let dispatchResult = true;
+        const scrollBefore = current.container.scrollTop;
+
+        act(() => {
+          dispatchResult = source.dispatchEvent(event);
+          if (dispatchResult) current.container.scrollTop += 40;
+        });
+        restores.forEach((restore) => restore());
+
+        expect(dispatchResult).toBe(false);
+        expect(event.defaultPrevented).toBe(true);
+        expect(current.container.scrollTop).toBe(scrollBefore);
+        expect(destination).toHaveFocus();
+        expect(phaseProofs.map(({ boundary, phase }) => [boundary, phase])).toEqual([
+          ["root", "capture"],
+          ["control", "capture"],
+          ["control", "bubble"],
+          ["root", "bubble"],
+        ]);
+        const [rootCapture, controlCapture, controlBubble, rootBubble] = phaseProofs;
+        expect(rootCapture).not.toBe(controlCapture);
+        expect(controlBubble).not.toBe(rootBubble);
+        expect(rootCapture.wrapper).toBe(controlCapture.wrapper);
+        expect(controlBubble.wrapper).toBe(rootBubble.wrapper);
+        expect(rootCapture.nativeEvent).toBe(event);
+        expect(controlCapture.nativeEvent).toBe(event);
+        expect(controlBubble.nativeEvent).toBe(event);
+        expect(rootBubble.nativeEvent).toBe(event);
+        expect(rootCapture.target).toBe(source);
+        expect(controlCapture.target).toBe(source);
+        expect(controlBubble.target).toBe(source);
+        expect(rootBubble.target).toBe(source);
+        expect(rootCapture.currentTarget).toBe(menu);
+        expect(controlCapture.currentTarget).toBe(source);
+        expect(controlBubble.currentTarget).toBe(source);
+        expect(rootBubble.currentTarget).toBe(menu);
+        expect(rootCapture.eventPhase).toBe(Event.CAPTURING_PHASE);
+        expect(controlCapture.eventPhase).toBe(Event.CAPTURING_PHASE);
+        expect(controlBubble.eventPhase).toBe(Event.BUBBLING_PHASE);
+        expect(rootBubble.eventPhase).toBe(Event.BUBBLING_PHASE);
+        expect(rootCapture.scalars).toEqual(controlCapture.scalars);
+        expect(controlBubble.scalars).toEqual(rootBubble.scalars);
+        expect(rootCapture.methods).toEqual(controlCapture.methods);
+        expect(controlBubble.methods).toEqual(rootBubble.methods);
+        expect(current.tableAction).not.toHaveBeenCalled();
+        expect(current.alignAction).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+      }
+    },
+  );
+
+  it.each([
+    "wrapper",
+    "phase",
+    "currentTarget",
+    "target",
+    "nativeEvent",
+    "method",
+    "scalar",
+  ] as const)(
+    "rejects a control proof with mismatched %s while a clean successor recovers",
+    async (mismatch) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => root.render(<Boundary current={current} />));
+        browser.flush();
+        const menu = screen.getByTestId("table-menu");
+        const source = tableButtons()[0];
+        const other = tableButtons()[1];
+        const restore = interceptReactKeyDown(
+          source,
+          "onKeyDownCapture",
+          (original, wrapper) => {
+            const record = wrapper as Record<PropertyKey, unknown>;
+            if (mismatch === "wrapper") {
+              original(Object.create(
+                Object.getPrototypeOf(wrapper),
+                Object.getOwnPropertyDescriptors(wrapper),
+              ) as ReactKeyboardEvent<HTMLButtonElement>);
+              return;
+            }
+            const property = mismatch === "scalar"
+              ? "key"
+              : mismatch === "phase"
+                ? "eventPhase"
+                : mismatch === "method"
+                  ? "preventDefault"
+                  : mismatch;
+            Object.defineProperty(wrapper, property, {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: mismatch === "phase"
+                ? Event.BUBBLING_PHASE
+                : mismatch === "currentTarget"
+                  ? menu
+                  : mismatch === "target"
+                    ? other
+                    : mismatch === "nativeEvent"
+                      ? tableKeyboardEvent(source, "ArrowRight")
+                      : mismatch === "method"
+                        ? vi.fn()
+                        : "ArrowLeft",
+            });
+            original(record as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+          },
+        );
+        source.focus();
+        focus.mockClear();
+
+        const rejected = await dispatchTableKey(source, "ArrowRight");
+        restore();
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(current.tableAction).not.toHaveBeenCalled();
+        expect(current.alignAction).not.toHaveBeenCalled();
+
+        const recoveredSource = tableButtons()[0];
+        recoveredSource.focus();
+        focus.mockClear();
+        const recovered = await dispatchTableKey(recoveredSource, "ArrowRight");
+        expect(recovered.defaultPrevented).toBe(true);
+        expect(tableButtons()[1]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(current.tableAction).not.toHaveBeenCalled();
+        expect(current.alignAction).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+      }
+    },
+  );
+
+  it("rejects prevention deferred until a microtask as too late for native dispatch", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(
+        <StrictMode>
+          <TableMenu
+            view={current.view}
+            session={current.session}
+            actions={current.actions}
+            format={current.format}
+            containerRef={current.containerRef}
+          />
+        </StrictMode>,
+      ));
+      browser.flush();
+      const source = tableButtons()[0];
+      const restore = interceptTableKeyDown(source, (original, wrapper) => {
+        const record = wrapper as Record<PropertyKey, unknown>;
+        const preventDefault = record.preventDefault;
+        if (typeof preventDefault !== "function") {
+          throw new Error("React preventDefault was unavailable");
+        }
+        Object.defineProperty(wrapper, "preventDefault", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: function (this: object) {
+            queueMicrotask(() => Reflect.apply(preventDefault, this, []));
+          },
+        });
+        original(wrapper as ReactKeyboardEvent<HTMLButtonElement>);
+      });
+      source.focus();
+      focus.mockClear();
+      const event = tableKeyboardEvent(source, "ArrowRight");
+      let dispatchResult = false;
+      const scrollBefore = current.container.scrollTop;
+
+      await act(async () => {
+        dispatchResult = source.dispatchEvent(event);
+        if (dispatchResult) current.container.scrollTop += 40;
+        expect(event.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        await Promise.resolve();
+      });
+      restore();
+
+      expect(dispatchResult).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+      expect(current.container.scrollTop).toBe(scrollBefore + 40);
+      expect(source).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it.each([
+    ["isDefaultPrevented", "method"],
+    ["isDefaultPrevented", "publication"],
+    ["isDefaultPrevented", "dom"],
+    ["isPropagationStopped", "method"],
+    ["isPropagationStopped", "publication"],
+    ["isPropagationStopped", "dom"],
+  ] as const)(
+    "rejects a %s query that mutates %s before focus and accepts a clean successor",
+    async (query, mutationKind) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => root.render(
+          <StrictMode>
+            <TableMenu
+              view={current.view}
+              session={current.session}
+              actions={current.actions}
+              format={current.format}
+              containerRef={current.containerRef}
+            />
+          </StrictMode>,
+        ));
+        browser.flush();
+        const source = tableButtons()[0];
+        const mutate = vi.fn((wrapper: object) => {
+          if (mutationKind === "method") {
+            Object.defineProperty(wrapper, "preventDefault", {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: vi.fn(),
+            });
+          } else if (mutationKind === "publication") {
+            current.format.tablePos = 11;
+          } else {
+            source.setAttribute("data-query-mutation", "true");
+            source.removeAttribute("data-query-mutation");
+          }
+        });
+        const restore = interceptTableKeyDown(source, (original, wrapper) => {
+          const record = wrapper as Record<PropertyKey, unknown>;
+          if (query === "isDefaultPrevented") {
+            const preventDefault = record.preventDefault;
+            if (typeof preventDefault !== "function") {
+              throw new Error("React preventDefault was unavailable");
+            }
+            Object.defineProperty(wrapper, "preventDefault", {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: function (this: object) {
+                Reflect.apply(preventDefault, this, []);
+                Object.defineProperty(this, "isDefaultPrevented", {
+                  configurable: true,
+                  enumerable: true,
+                  writable: true,
+                  value: () => {
+                    mutate(this);
+                    return true;
+                  },
+                });
+              },
+            });
+          } else {
+            const isPropagationStopped = record.isPropagationStopped;
+            if (typeof isPropagationStopped !== "function") {
+              throw new Error("React isPropagationStopped was unavailable");
+            }
+            Object.defineProperty(wrapper, "isPropagationStopped", {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: function (this: Record<PropertyKey, unknown>) {
+                if (this.defaultPrevented === true) mutate(this);
+                return Reflect.apply(isPropagationStopped, this, []);
+              },
+            });
+          }
+          original(wrapper as ReactKeyboardEvent<HTMLButtonElement>);
+        });
+        source.focus();
+        focus.mockClear();
+
+        const rejected = tableKeyboardEvent(source, "ArrowRight");
+        await act(async () => {
+          source.dispatchEvent(rejected);
+          if (mutationKind === "publication") current.format.tablePos = 7;
+          await Promise.resolve();
+        });
+        restore();
+
+        expect(mutate).toHaveBeenCalledTimes(1);
+        expect(rejected.defaultPrevented).toBe(true);
+        expect(source).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+
+        const recoveredSource = tableButtons()[0];
+        recoveredSource.focus();
+        focus.mockClear();
+        const recovered = await dispatchTableKey(recoveredSource, "ArrowRight");
+        expect(recovered.defaultPrevented).toBe(true);
+        expect(tableButtons()[1]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(current.tableAction).not.toHaveBeenCalled();
+        expect(current.alignAction).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+      }
+    },
+  );
+
+  it.each([
+    ["capture", "persist", "absent"],
+    ["capture", "persist", "replaced"],
+    ["capture", "persist", "non-function"],
+    ["capture", "stopPropagation", "absent"],
+    ["capture", "stopPropagation", "replaced"],
+    ["capture", "stopPropagation", "non-function"],
+    ["bubble", "persist", "absent"],
+    ["bubble", "persist", "replaced"],
+    ["bubble", "persist", "non-function"],
+    ["bubble", "stopPropagation", "absent"],
+    ["bubble", "stopPropagation", "replaced"],
+    ["bubble", "stopPropagation", "non-function"],
+  ] as const)(
+    "ignores %s wrapper %s when it is %s",
+    async (phase, property, state) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => root.render(<Boundary current={current} />));
+        browser.flush();
+        const menu = screen.getByTestId("table-menu");
+        const source = tableButtons()[0];
+        const restore = interceptReactKeyDown(
+          phase === "capture" ? menu : source,
+          phase === "capture" ? "onKeyDownCapture" : "onKeyDown",
+          (original, event) => {
+            if (state === "absent") {
+              isolateReactWrapper(event, null);
+              expect(property in event).toBe(false);
+            } else {
+              Object.defineProperty(event, property, {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: state === "replaced" ? vi.fn() : 7,
+              });
+            }
+            original(event as ReactKeyboardEvent<typeof menu>);
+          },
+        );
+        source.focus();
+        focus.mockClear();
+
+        const event = await dispatchTableKey(source, "ArrowRight");
+        restore();
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(tableButtons()[1]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(current.tableAction).not.toHaveBeenCalled();
+        expect(current.alignAction).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+      }
+    },
+  );
+
+  it("accepts unrelated capture and bubble wrapper prototypes and method identities", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(<Boundary current={current} />));
+      browser.flush();
+      const menu = screen.getByTestId("table-menu");
+      const source = tableButtons()[0];
+      const capturePrototype = Object.create(null);
+      const bubblePrototype = Object.create(null);
+      let captureWrapper: object | null = null;
+      let bubbleWrapper: object | null = null;
+      const restoreCapture = interceptReactKeyDown(
+        menu,
+        "onKeyDownCapture",
+        (original, event) => {
+          captureWrapper = event;
+          isolateReactWrapper(event, capturePrototype);
+          original(event as ReactKeyboardEvent<HTMLDivElement>);
+        },
+      );
+      const restoreBubble = interceptReactKeyDown(
+        source,
+        "onKeyDown",
+        (original, event) => {
+          bubbleWrapper = event;
+          isolateReactWrapper(event, bubblePrototype, true);
+          original(event as ReactKeyboardEvent<HTMLButtonElement>);
+        },
+      );
+      source.focus();
+      focus.mockClear();
+
+      const event = await dispatchTableKey(source, "ArrowRight");
+      restoreCapture();
+      restoreBubble();
+
+      expect(captureWrapper).not.toBeNull();
+      expect(bubbleWrapper).not.toBeNull();
+      expect(Object.getPrototypeOf(captureWrapper)).toBe(capturePrototype);
+      expect(Object.getPrototypeOf(bubbleWrapper)).toBe(bubblePrototype);
+      expect(event.defaultPrevented).toBe(true);
+      expect(tableButtons()[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("accepts exact public scalar values from ordinary wrapper accessors", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const browser = controlledBrowser();
+    const current = fixture({
+      host: new DOMRect(50, 120, 800, 600),
+      tableBox: new DOMRect(400, 360, 500, 300),
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => root.render(<Boundary current={current} />));
+      browser.flush();
+      const menu = screen.getByTestId("table-menu");
+      const source = tableButtons()[0];
+      const wrappers: object[] = [];
+      const expose = (
+        original: (event: ReactKeyboardEvent<HTMLElement>) => void,
+        event: object,
+      ) => {
+        exposeReactScalarsAsAccessors(event);
+        wrappers.push(event);
+        original(event as ReactKeyboardEvent<HTMLElement>);
+      };
+      const restoreCapture = interceptReactKeyDown(
+        menu,
+        "onKeyDownCapture",
+        expose,
+      );
+      const restoreBubble = interceptReactKeyDown(
+        source,
+        "onKeyDown",
+        expose,
+      );
+      source.focus();
+      focus.mockClear();
+
+      const event = await dispatchTableKey(source, "ArrowRight");
+      restoreCapture();
+      restoreBubble();
+
+      expect(wrappers).toHaveLength(2);
+      for (const wrapper of wrappers) {
+        for (const property of REACT_KEY_PUBLIC_SCALARS) {
+          expect(Object.getOwnPropertyDescriptor(wrapper, property)?.get).toBeTypeOf("function");
+        }
+      }
+      expect(event.defaultPrevented).toBe(true);
+      expect(tableButtons()[1]).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it.each([1, 2] as const)(
+    "keeps an exact native pair through %s pre-bubble microtask checkpoint(s)",
+    async (checkpoints) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => root.render(<Boundary current={current} />));
+        browser.flush();
+        const source = tableButtons()[0];
+        const queued: VoidFunction[] = [];
+        vi.spyOn(globalThis, "queueMicrotask").mockImplementation((callback) => {
+          queued.push(callback);
+        });
+        source.addEventListener("keydown", () => {
+          for (let checkpoint = 0; checkpoint < checkpoints; checkpoint++) {
+            const pending = queued.splice(0);
+            pending.forEach((callback) => callback());
+          }
+        }, { capture: true, once: true });
+        source.focus();
+        focus.mockClear();
+        const event = tableKeyboardEvent(source, "ArrowRight");
+
+        await act(async () => {
+          source.dispatchEvent(event);
+          while (queued.length > 0) {
+            const pending = queued.splice(0);
+            pending.forEach((callback) => callback());
+          }
+          await Promise.resolve();
+        });
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(tableButtons()[1]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(current.tableAction).not.toHaveBeenCalled();
+        expect(current.alignAction).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+      }
+    },
+  );
+
+  it.each([
+    ["capture", "preventDefault"],
+    ["capture", "isDefaultPrevented"],
+    ["capture", "isPropagationStopped"],
+    ["bubble", "preventDefault"],
+    ["bubble", "isDefaultPrevented"],
+    ["bubble", "isPropagationStopped"],
+  ] as const)(
+    "rejects %s-phase drift in public %s and accepts a distinct clean successor",
+    async (phase, method) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const browser = controlledBrowser();
+      const current = fixture({
+        host: new DOMRect(50, 120, 800, 600),
+        tableBox: new DOMRect(400, 360, 500, 300),
+      });
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => root.render(<Boundary current={current} />));
+        browser.flush();
+        const menu = screen.getByTestId("table-menu");
+        const source = tableButtons()[0];
+        const restore = interceptReactKeyDown(
+          phase === "capture" ? source : menu,
+          phase === "capture" ? "onKeyDownCapture" : "onKeyDown",
+          (original, wrapper) => {
+            Object.defineProperty(wrapper, method, {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: method === "preventDefault" ? vi.fn() : vi.fn(() => false),
+            });
+            original(wrapper as ReactKeyboardEvent<typeof source>);
+          },
+        );
+        source.focus();
+        focus.mockClear();
+
+        const rejected = await dispatchTableKey(source, "ArrowRight");
+        restore();
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+
+        const recovered = await dispatchTableKey(source, "ArrowRight");
+        expect(recovered.defaultPrevented).toBe(true);
+        expect(tableButtons()[1]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(current.tableAction).not.toHaveBeenCalled();
+        expect(current.alignAction).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+      }
+    },
+  );
+
+  it.each([
     ["Home", 0],
     ["End", 9],
     ["PageDown", 4],
@@ -1188,7 +1968,7 @@ describe("TableMenu geometry ownership", () => {
     }
   });
 
-  it("uses captured owner-realm path, prevention, and focus intrinsics", async () => {
+  it("uses captured owner-realm path and focus intrinsics while rejecting native prevention drift", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const browser = controlledBrowser();
     const current = fixture({
@@ -1228,11 +2008,27 @@ describe("TableMenu geometry ownership", () => {
         await Promise.resolve();
       });
 
-      expect(event.defaultPrevented).toBe(true);
+      expect(event.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(publicPath).not.toHaveBeenCalled();
+      expect(publicPreventDefault).not.toHaveBeenCalled();
+      expect(publicFocus).not.toHaveBeenCalled();
+
+      const accepted = tableKeyboardEvent(source, "ArrowRight");
+      Object.defineProperty(accepted, "composedPath", {
+        configurable: true,
+        value: publicPath,
+      });
+      focus.mockClear();
+      await act(async () => {
+        source.dispatchEvent(accepted);
+        await Promise.resolve();
+      });
+      expect(accepted.defaultPrevented).toBe(true);
       expect(destination).toHaveFocus();
       expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
       expect(publicPath).not.toHaveBeenCalled();
-      expect(publicPreventDefault).not.toHaveBeenCalled();
       expect(publicFocus).not.toHaveBeenCalled();
       expect(current.tableAction).not.toHaveBeenCalled();
       expect(current.alignAction).not.toHaveBeenCalled();
