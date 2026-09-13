@@ -20,18 +20,27 @@ export function Avatar({
   className?: string;
   title?: string;
 }) {
-  const [failed, setFailed] = React.useState(false);
   const style: React.CSSProperties = { width: size, height: size, fontSize: Math.max(10, Math.round(size * 0.36)) };
   if (color) style.boxShadow = `0 0 0 2px var(--color-surface), 0 0 0 4px ${color}`;
   return (
     <span className={cn("avatar", className)} style={style} title={title ?? name}>
-      {src && !failed ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img src={src} alt={name} width={size} height={size} className="h-full w-full object-cover" onError={() => setFailed(true)} referrerPolicy="no-referrer" />
-      ) : (
-        <span style={color ? { color } : undefined}>{initials(name)}</span>
-      )}
+      <AvatarContent key={src} name={name} src={src} color={color} size={size} />
     </span>
+  );
+}
+
+function AvatarContent({ name, src, color, size }: {
+  name: string;
+  src?: string | null;
+  color?: string;
+  size: number;
+}) {
+  const [failed, setFailed] = React.useState(false);
+  return src && !failed ? (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={src} alt={name} width={size} height={size} className="h-full w-full object-cover" onError={() => setFailed(true)} referrerPolicy="no-referrer" />
+  ) : (
+    <span style={color ? { color } : undefined}>{initials(name)}</span>
   );
 }
 
