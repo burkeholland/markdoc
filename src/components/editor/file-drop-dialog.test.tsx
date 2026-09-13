@@ -1821,7 +1821,9 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         const frame = document.createElement("iframe");
         document.body.append(frame);
         try {
-          const foreignWindow = frame.contentWindow;
+          const foreignWindow = frame.contentWindow as
+            | (Window & typeof globalThis)
+            | null;
           if (!foreignWindow) throw new Error("The foreign window was not created");
           const foreignEvent = new foreignWindow.KeyboardEvent("keydown", {
             key: "ArrowRight",
@@ -1981,7 +1983,10 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         const nativeFocus = HTMLElement.prototype.focus;
         const focus = vi
           .spyOn(HTMLElement.prototype, "focus")
-          .mockImplementation(function (options) {
+          .mockImplementation(function (
+            this: HTMLElement,
+            options?: FocusOptions,
+          ) {
             Reflect.apply(nativeFocus, this, [options]);
             if (
               this instanceof HTMLButtonElement &&

@@ -866,7 +866,7 @@ function captureFileDropTrustedAuthority(
   };
   return Object.freeze({
     matches,
-    read: (event) =>
+    read: (event: object) =>
       apply(descriptor.get as (this: object) => boolean, event, []),
     isCurrent,
   });
@@ -1347,7 +1347,7 @@ function createFileDropKeyListener(
   const registration: FileDropKeyListener = Object.freeze({
     identity: Symbol("file-drop-window-key-listener"),
     listener,
-    activate: (current) => {
+    activate: (current: FileDropPublication) => {
       if (
         publication ||
         active ||
@@ -1384,7 +1384,10 @@ function createFileDropKeyListener(
       return false;
     },
     proofFor,
-    claim: (proof, current) => {
+    claim: (
+      proof: FileDropWindowProof,
+      current: FileDropPublication,
+    ) => {
       if (
         claimedProofs.has(proof) ||
         proofFor(proof.nativeEvent, current, proof.source) !== proof
@@ -1394,7 +1397,10 @@ function createFileDropKeyListener(
       claimedProofs.add(proof);
       return true;
     },
-    retains: (proof, current) =>
+    retains: (
+      proof: FileDropWindowProof,
+      current: FileDropPublication,
+    ) =>
       publication === current &&
       current.keyListener === registration &&
       claimedProofs.has(proof) &&
@@ -1407,7 +1413,7 @@ function createFileDropKeyListener(
       active &&
       !released &&
       keyboard.isCurrent(),
-    release: (current) => {
+    release: (current: FileDropPublication) => {
       if (publication !== current || released) return;
       released = true;
       const wasActive = active;
@@ -1449,8 +1455,8 @@ function exactFileDropKeyDelivery(
   }
   try {
     const snapshot = readFileDropNativeSnapshot(nativeEvent, keyboard);
-    const key = snapshot?.key;
-    if (!snapshot || !isFileDropNavigationKey(key)) return null;
+    if (!snapshot || !isFileDropNavigationKey(snapshot.key)) return null;
+    const key = snapshot.key;
     const sourceIndex = publication.options.findIndex(
       ({ button }) => button === snapshot.target,
     );
