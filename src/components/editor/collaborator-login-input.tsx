@@ -1456,6 +1456,7 @@ function readInputKeyboardReactProof(
   currentTarget: Element,
   authority: InputKeyboardAuthority,
   expectedPhase: number,
+  queryFenceIsCurrent: () => boolean,
 ): InputKeyboardReactProof | null {
   try {
     const values = event as Record<PropertyKey, unknown>;
@@ -1503,9 +1504,26 @@ function readInputKeyboardReactProof(
         currentTarget,
         false,
         isDefaultPrevented,
-      ) ||
+      )
+    ) {
+      return null;
+    }
+    if (
       authority.apply(isDefaultPrevented, event, []) !== false ||
+      !queryFenceIsCurrent() ||
+      !inputKeyboardReactFieldsMatch(
+        proof,
+        native,
+        currentTarget,
+        false,
+        isDefaultPrevented,
+      )
+    ) {
+      return null;
+    }
+    if (
       authority.apply(isPropagationStopped, event, []) !== false ||
+      !queryFenceIsCurrent() ||
       !inputKeyboardReactFieldsMatch(
         proof,
         native,
@@ -1549,43 +1567,6 @@ function inputKeyboardPhaseProofsMatch(
     rootProof.methods.isPropagationStopped ===
       inputProof.methods.isPropagationStopped
   );
-}
-
-function inputKeyboardReactProofIsCurrent(
-  proof: InputKeyboardReactProof,
-  native: InputKeyboardNativeProof,
-  authority: InputKeyboardAuthority,
-) {
-  try {
-    return (
-      inputKeyboardReactFieldsMatch(
-        proof,
-        native,
-        null,
-        false,
-        proof.methods.isDefaultPrevented,
-      ) &&
-      authority.apply(
-        proof.methods.isDefaultPrevented,
-        proof.event,
-        [],
-      ) === false &&
-      authority.apply(
-        proof.methods.isPropagationStopped,
-        proof.event,
-        [],
-      ) === false &&
-      inputKeyboardReactFieldsMatch(
-        proof,
-        native,
-        null,
-        false,
-        proof.methods.isDefaultPrevented,
-      )
-    );
-  } catch {
-    return false;
-  }
 }
 
 function createInputPublication(
@@ -3207,6 +3188,22 @@ function createInputPublication(
             currentTarget,
             authority,
             phase,
+            () =>
+              pair.handling &&
+              !pair.rejected &&
+              !pair.consumed &&
+              !pair.finalizing &&
+              activeNativeEvent?.deref() === pair.native.event &&
+              nativePairs.get(pair.native.event) === pair &&
+              authority.eventPhase.read(pair.native.event) === phase &&
+              !authority.eventDefaultPrevented.read(
+                pair.native.event,
+              ) &&
+              !authority.eventCancelBubble.read(
+                pair.native.event,
+              ) &&
+              nativeStillMatches(pair.native) &&
+              intentIsCurrent(pair.native.intent, false),
           );
         } finally {
           pair.handling = false;
@@ -3406,6 +3403,172 @@ function createInputPublication(
         }
       };
 
+      const terminalCancellationStateIsCurrent = (
+        pair: InputKeyboardNativeReactPair,
+        terminal: InputKeyboardTerminalProof,
+        prevention: InputKeyboardPreventionProof,
+        {
+          consumed,
+          nativeCurrentTarget,
+          reactCurrentTarget,
+          preventionRegistered,
+          windowRequired,
+        }: {
+          consumed: boolean;
+          nativeCurrentTarget?: EventTarget;
+          reactCurrentTarget: Element | null;
+          preventionRegistered: boolean;
+          windowRequired: boolean;
+        },
+      ) => {
+        const native = terminal.native;
+        const capturePrevented = prevention.capturePrevented;
+        const captureCurrentTarget = capturePrevented
+          ? reactCurrentTarget
+          : null;
+        return (
+          !released &&
+          !pair.rejected &&
+          pair.consumed === consumed &&
+          pair.finalizing &&
+          pair.native === native &&
+          pair.terminal === terminal &&
+          (!preventionRegistered ||
+            pair.prevention === prevention) &&
+          activeNativeEvent?.deref() === native.event &&
+          nativePairs.get(native.event) === pair &&
+          !native.crossed &&
+          pair.boundaryObserved &&
+          (!windowRequired ||
+            (windowListenerActive &&
+              pair.windowReceiver === native.pathTerminal)) &&
+          (nativeCurrentTarget === undefined ||
+            authority.eventCurrentTarget.read(native.event) ===
+              nativeCurrentTarget) &&
+          authority.eventPhase.read(native.event) ===
+            keyboardWindow.Event.BUBBLING_PHASE &&
+          authority.eventDefaultPrevented.read(native.event) &&
+          !authority.eventCancelBubble.read(native.event) &&
+          nativeStillMatches(native) &&
+          inputKeyboardPhaseProofsMatch(
+            terminal.reactRootCapture,
+            terminal.reactInputCapture,
+            native,
+            publication.root,
+            keyboardWindow.Event.CAPTURING_PHASE,
+          ) &&
+          inputKeyboardPhaseProofsMatch(
+            terminal.reactRootBubble,
+            terminal.reactInputBubble,
+            native,
+            publication.root,
+            keyboardWindow.Event.BUBBLING_PHASE,
+          ) &&
+          inputKeyboardReactFieldsMatch(
+            terminal.reactRootCapture,
+            native,
+            captureCurrentTarget,
+            capturePrevented,
+            capturePrevented
+              ? prevention.currentIsDefaultPrevented
+              : terminal.reactRootCapture.methods
+                  .isDefaultPrevented,
+          ) &&
+          inputKeyboardReactFieldsMatch(
+            terminal.reactInputCapture,
+            native,
+            captureCurrentTarget,
+            capturePrevented,
+            capturePrevented
+              ? prevention.currentIsDefaultPrevented
+              : terminal.reactInputCapture.methods
+                  .isDefaultPrevented,
+          ) &&
+          inputKeyboardReactFieldsMatch(
+            terminal.reactInputBubble,
+            native,
+            reactCurrentTarget,
+            true,
+            prevention.currentIsDefaultPrevented,
+          ) &&
+          inputKeyboardReactFieldsMatch(
+            terminal.reactRootBubble,
+            native,
+            reactCurrentTarget,
+            true,
+            prevention.currentIsDefaultPrevented,
+          ) &&
+          (consumed
+            ? claimedIntentIsCurrent(pair, terminal)
+            : intentIsCurrent(native.intent, false))
+        );
+      };
+
+      const authenticateCancellationQueries = (
+        pair: InputKeyboardNativeReactPair,
+        terminal: InputKeyboardTerminalProof,
+        prevention: InputKeyboardPreventionProof,
+        state: {
+          consumed: boolean;
+          nativeCurrentTarget?: EventTarget;
+          reactCurrentTarget: Element | null;
+          preventionRegistered: boolean;
+          windowRequired: boolean;
+        },
+      ) => {
+        const captureProof = terminal.reactRootCapture;
+        const bubbleProof = terminal.reactInputBubble;
+        const invoke = (
+          method: InputKeyboardReactMethod,
+          receiver: object,
+          expected: boolean,
+        ) => {
+          if (
+            !terminalCancellationStateIsCurrent(
+              pair,
+              terminal,
+              prevention,
+              state,
+            )
+          ) {
+            return false;
+          }
+          let result: unknown;
+          try {
+            result = authority.apply(method, receiver, []);
+          } catch {
+            return false;
+          }
+          return (
+            result === expected &&
+            terminalCancellationStateIsCurrent(
+              pair,
+              terminal,
+              prevention,
+              state,
+            )
+          );
+        };
+
+        return (
+          invoke(
+            prevention.currentIsDefaultPrevented,
+            bubbleProof.event,
+            true,
+          ) &&
+          invoke(
+            captureProof.methods.isPropagationStopped,
+            captureProof.event,
+            false,
+          ) &&
+          invoke(
+            bubbleProof.methods.isPropagationStopped,
+            bubbleProof.event,
+            false,
+          )
+        );
+      };
+
       const prepareTerminal = (
         pair: InputKeyboardNativeReactPair,
         terminal: InputKeyboardTerminalProof,
@@ -3439,15 +3602,19 @@ function createInputPublication(
             publication.root,
             keyboardWindow.Event.BUBBLING_PHASE,
           ) ||
-          !inputKeyboardReactProofIsCurrent(
+          !inputKeyboardReactFieldsMatch(
             terminal.reactRootCapture,
             native,
-            authority,
+            null,
+            false,
+            terminal.reactRootCapture.methods.isDefaultPrevented,
           ) ||
-          !inputKeyboardReactProofIsCurrent(
+          !inputKeyboardReactFieldsMatch(
             terminal.reactInputCapture,
             native,
-            authority,
+            null,
+            false,
+            terminal.reactInputCapture.methods.isDefaultPrevented,
           ) ||
           !inputKeyboardReactFieldsMatch(
             terminal.reactInputBubble,
@@ -3482,78 +3649,26 @@ function createInputPublication(
           ) {
             return null;
           }
-          const wrapperDefaultPrevented = authority.apply(
-            currentIsDefaultPrevented,
-            bubbleProof.event,
-            [],
-          );
-          const capturePropagationStopped = authority.apply(
-            captureProof.methods.isPropagationStopped,
-            captureProof.event,
-            [],
-          );
-          const bubblePropagationStopped = authority.apply(
-            bubbleProof.methods.isPropagationStopped,
-            bubbleProof.event,
-            [],
-          );
           const capturePrevented =
             captureProof.event === bubbleProof.event;
-          if (
-            wrapperDefaultPrevented !== true ||
-            capturePropagationStopped !== false ||
-            bubblePropagationStopped !== false ||
-            pair.rejected ||
-            pair.consumed ||
-            !pair.finalizing ||
-            pair.terminal !== terminal ||
-            native.crossed ||
-            !authority.eventDefaultPrevented.read(native.event) ||
-            authority.eventCancelBubble.read(native.event) ||
-            !nativeStillMatches(native) ||
-            !inputKeyboardReactFieldsMatch(
-              terminal.reactRootCapture,
-              native,
-              capturePrevented ? publication.root : null,
-              capturePrevented,
-              capturePrevented
-                ? currentIsDefaultPrevented
-                : terminal.reactRootCapture.methods
-                    .isDefaultPrevented,
-            ) ||
-            !inputKeyboardReactFieldsMatch(
-              terminal.reactInputCapture,
-              native,
-              capturePrevented ? publication.root : null,
-              capturePrevented,
-              capturePrevented
-                ? currentIsDefaultPrevented
-                : terminal.reactInputCapture.methods
-                    .isDefaultPrevented,
-            ) ||
-            !inputKeyboardReactFieldsMatch(
-              terminal.reactInputBubble,
-              native,
-              publication.root,
-              true,
-              currentIsDefaultPrevented,
-            ) ||
-            !inputKeyboardReactFieldsMatch(
-              terminal.reactRootBubble,
-              native,
-              publication.root,
-              true,
-              currentIsDefaultPrevented,
-            ) ||
-            !intentIsCurrent(native.intent, false)
-          ) {
-            return null;
-          }
-          return Object.freeze({
+          const prevention = Object.freeze({
             terminal,
             currentIsDefaultPrevented,
             capturePrevented,
           });
+          return authenticateCancellationQueries(
+            pair,
+            terminal,
+            prevention,
+            {
+              consumed: false,
+              reactCurrentTarget: publication.root,
+              preventionRegistered: false,
+              windowRequired: false,
+            },
+          )
+            ? prevention
+            : null;
         } catch {
           return null;
         }
@@ -3572,7 +3687,7 @@ function createInputPublication(
         if (
           pair.rejected ||
           pair.consumed ||
-          pair.finalizing ||
+          !pair.finalizing ||
           !terminal ||
           prevention?.terminal !== terminal ||
           native.crossed ||
@@ -3602,99 +3717,18 @@ function createInputPublication(
             publication.root,
             keyboardWindow.Event.BUBBLING_PHASE,
           ) ||
-          !inputKeyboardReactFieldsMatch(
-            reactRootCapture,
-            native,
-            null,
-            prevention.capturePrevented,
-            prevention.capturePrevented
-              ? prevention.currentIsDefaultPrevented
-              : reactRootCapture.methods.isDefaultPrevented,
-          ) ||
-          !inputKeyboardReactFieldsMatch(
-            reactInputCapture,
-            native,
-            null,
-            prevention.capturePrevented,
-            prevention.capturePrevented
-              ? prevention.currentIsDefaultPrevented
-              : reactInputCapture.methods.isDefaultPrevented,
-          ) ||
-          !inputKeyboardReactFieldsMatch(
-            reactInputBubble,
-            native,
-            null,
-            true,
-            prevention.currentIsDefaultPrevented,
-          ) ||
-          !inputKeyboardReactFieldsMatch(
-            reactRootBubble,
-            native,
-            null,
-            true,
-            prevention.currentIsDefaultPrevented,
-          ) ||
-          authority.apply(
-            prevention.currentIsDefaultPrevented,
-            reactInputBubble.event,
-            [],
-          ) !== true ||
-          authority.apply(
-            reactRootCapture.methods.isPropagationStopped,
-            reactRootCapture.event,
-            [],
-          ) !== false ||
-          authority.apply(
-            reactInputBubble.methods.isPropagationStopped,
-            reactInputBubble.event,
-            [],
-          ) !== false ||
-          pair.rejected ||
-          pair.consumed ||
-          pair.finalizing ||
-          pair.terminal !== terminal ||
-          pair.prevention !== prevention ||
-          native.crossed ||
-          authority.eventCurrentTarget.read(native.event) !==
-            ownerDocument ||
-          authority.eventPhase.read(native.event) !==
-            keyboardWindow.Event.BUBBLING_PHASE ||
-          !authority.eventDefaultPrevented.read(native.event) ||
-          authority.eventCancelBubble.read(native.event) ||
-          !nativeStillMatches(native) ||
-          !inputKeyboardReactFieldsMatch(
-            reactRootCapture,
-            native,
-            null,
-            prevention.capturePrevented,
-            prevention.capturePrevented
-              ? prevention.currentIsDefaultPrevented
-              : reactRootCapture.methods.isDefaultPrevented,
-          ) ||
-          !inputKeyboardReactFieldsMatch(
-            reactInputCapture,
-            native,
-            null,
-            prevention.capturePrevented,
-            prevention.capturePrevented
-              ? prevention.currentIsDefaultPrevented
-              : reactInputCapture.methods.isDefaultPrevented,
-          ) ||
-          !inputKeyboardReactFieldsMatch(
-            reactInputBubble,
-            native,
-            null,
-            true,
-            prevention.currentIsDefaultPrevented,
-          ) ||
-          !inputKeyboardReactFieldsMatch(
-            reactRootBubble,
-            native,
-            null,
-            true,
-            prevention.currentIsDefaultPrevented,
-          ) ||
-          !intentIsCurrent(native.intent, false)
+          !authenticateCancellationQueries(
+            pair,
+            terminal,
+            prevention,
+            {
+              consumed: false,
+              nativeCurrentTarget: ownerDocument,
+              reactCurrentTarget: null,
+              preventionRegistered: true,
+              windowRequired: false,
+            },
+          )
         ) {
           return null;
         }
@@ -3776,8 +3810,6 @@ function createInputPublication(
         terminal: InputKeyboardTerminalProof,
       ) => {
         const native = terminal.native;
-        const captureProof = terminal.reactRootCapture;
-        const bubbleProof = terminal.reactInputBubble;
         const prevention = pair.prevention;
         if (
           !prevention ||
@@ -3789,110 +3821,30 @@ function createInputPublication(
         if (!claim) return;
         try {
           if (
-            !claimedIntentIsCurrent(pair, terminal) ||
-            !windowListenerActive ||
-            activeNativeEvent?.deref() !== native.event ||
-            nativePairs.get(native.event) !== pair ||
-            pair.windowReceiver !== native.pathTerminal ||
-            authority.eventCurrentTarget.read(native.event) !==
-              pair.windowReceiver ||
-            authority.eventPhase.read(native.event) !==
-              keyboardWindow.Event.BUBBLING_PHASE ||
-            !authority.eventDefaultPrevented.read(native.event) ||
-            authority.eventCancelBubble.read(native.event) ||
-            !nativeStillMatches(native)
-          ) {
-            return;
-          }
-
-          let wrapperDefaultPrevented: unknown;
-          let capturePropagationStopped: unknown;
-          let bubblePropagationStopped: unknown;
-          try {
-            wrapperDefaultPrevented = authority.apply(
-              prevention.currentIsDefaultPrevented,
-              bubbleProof.event,
-              [],
-            );
-            capturePropagationStopped = authority.apply(
-              captureProof.methods.isPropagationStopped,
-              captureProof.event,
-              [],
-            );
-            bubblePropagationStopped = authority.apply(
-              bubbleProof.methods.isPropagationStopped,
-              bubbleProof.event,
-              [],
-            );
-          } catch {
-            return;
-          }
-
-          if (
-            wrapperDefaultPrevented !== true ||
-            capturePropagationStopped !== false ||
-            bubblePropagationStopped !== false ||
-            !windowListenerActive ||
-            released ||
-            activeNativeEvent?.deref() !== native.event ||
-            nativePairs.get(native.event) !== pair ||
-            pair.windowReceiver !== native.pathTerminal ||
-            authority.eventCurrentTarget.read(native.event) !==
-              pair.windowReceiver ||
-            authority.eventPhase.read(native.event) !==
-              keyboardWindow.Event.BUBBLING_PHASE ||
-            !authority.eventDefaultPrevented.read(native.event) ||
-            authority.eventCancelBubble.read(native.event) ||
-            !nativeStillMatches(native) ||
-            !inputKeyboardReactFieldsMatch(
-              terminal.reactRootCapture,
-              native,
-              null,
-              prevention.capturePrevented,
-              prevention.capturePrevented
-                ? prevention.currentIsDefaultPrevented
-                : terminal.reactRootCapture.methods
-                    .isDefaultPrevented,
+            !authenticateCancellationQueries(
+              pair,
+              terminal,
+              prevention,
+              {
+                consumed: true,
+                nativeCurrentTarget: pair.windowReceiver ?? undefined,
+                reactCurrentTarget: null,
+                preventionRegistered: true,
+                windowRequired: true,
+              },
             ) ||
-            !inputKeyboardReactFieldsMatch(
-              terminal.reactInputCapture,
-              native,
-              null,
-              prevention.capturePrevented,
-              prevention.capturePrevented
-                ? prevention.currentIsDefaultPrevented
-                : terminal.reactInputCapture.methods
-                    .isDefaultPrevented,
-            ) ||
-            !inputKeyboardReactFieldsMatch(
-              terminal.reactInputBubble,
-              native,
-              null,
-              true,
-              prevention.currentIsDefaultPrevented,
-            ) ||
-            !inputKeyboardReactFieldsMatch(
-              terminal.reactRootBubble,
-              native,
-              null,
-              true,
-              prevention.currentIsDefaultPrevented,
-            ) ||
-            !inputKeyboardPhaseProofsMatch(
-              terminal.reactRootCapture,
-              terminal.reactInputCapture,
-              native,
-              publication.root,
-              keyboardWindow.Event.CAPTURING_PHASE,
-            ) ||
-            !inputKeyboardPhaseProofsMatch(
-              terminal.reactRootBubble,
-              terminal.reactInputBubble,
-              native,
-              publication.root,
-              keyboardWindow.Event.BUBBLING_PHASE,
-            ) ||
-            !claimedIntentIsCurrent(pair, terminal)
+            !terminalCancellationStateIsCurrent(
+              pair,
+              terminal,
+              prevention,
+              {
+                consumed: true,
+                nativeCurrentTarget: pair.windowReceiver ?? undefined,
+                reactCurrentTarget: null,
+                preventionRegistered: true,
+                windowRequired: true,
+              },
+            )
           ) {
             return;
           }
@@ -4050,7 +4002,13 @@ function createInputPublication(
             if (pair) rejectPair(pair);
             return;
           }
-          const terminal = authenticateTerminal(pair);
+          pair.finalizing = true;
+          let terminal: InputKeyboardTerminalProof | null;
+          try {
+            terminal = authenticateTerminal(pair);
+          } finally {
+            pair.finalizing = false;
+          }
           if (!terminal) {
             rejectPair(pair);
             return;

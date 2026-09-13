@@ -1119,6 +1119,304 @@ describe("CollaboratorLoginInput", () => {
     },
   );
 
+  it.each([
+    {
+      stage: "React-root preparation",
+      queryInvocation: 1,
+      mutation: "default query replacing bubble propagation",
+    },
+    {
+      stage: "document authentication",
+      queryInvocation: 2,
+      mutation: "default query replacing bubble propagation",
+    },
+    {
+      stage: "Window settlement",
+      queryInvocation: 3,
+      mutation: "default query replacing bubble propagation",
+    },
+    {
+      stage: "React-root preparation",
+      queryInvocation: 1,
+      mutation: "capture propagation replacing bubble propagation",
+    },
+    {
+      stage: "document authentication",
+      queryInvocation: 2,
+      mutation: "capture propagation replacing bubble propagation",
+    },
+    {
+      stage: "Window settlement",
+      queryInvocation: 3,
+      mutation: "capture propagation replacing bubble propagation",
+    },
+  ] as const)(
+    "rejects late public query drift from $mutation at $stage before route settlement or any effect",
+    async ({ queryInvocation, mutation }) => {
+      searchUsers.mockImplementation(() =>
+        answer("octocat", "octodog", "octofox"),
+      );
+      const onChange = vi.fn();
+      const onPick = vi.fn();
+      const onSubmit = vi.fn();
+      const onRoleChange = vi.fn();
+      const onDialogClose = vi.fn();
+      const preventDefault = vi.spyOn(
+        window.Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+      const stalePropagation = vi.fn(() => false);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <KeyboardHarness
+                onChange={onChange}
+                onPick={onPick}
+                onSubmit={onSubmit}
+                onRoleChange={onRoleChange}
+                onDialogClose={onDialogClose}
+              />
+            </StrictMode>,
+          );
+        });
+        const exactInput = input();
+        const inputRoot = exactInput.parentElement;
+        if (!inputRoot) {
+          throw new Error("The input root was unavailable");
+        }
+        exactInput.focus();
+        await settle();
+        fireEvent.mouseOver(listOptions()[1]);
+        let captureWrapper: KeyboardEvent<HTMLDivElement> | null =
+          null;
+        let bubbleWrapper: KeyboardEvent<HTMLInputElement> | null =
+          null;
+        let lateQueries = 0;
+        const restoreCapture = interceptReactHandler<
+          KeyboardEvent<HTMLDivElement>
+        >(
+          inputRoot,
+          "onKeyDownCapture",
+          (original, event) => {
+            captureWrapper = event;
+            if (
+              mutation ===
+              "capture propagation replacing bubble propagation"
+            ) {
+              const retainedPropagation =
+                event.isPropagationStopped;
+              Object.defineProperty(
+                event,
+                "isPropagationStopped",
+                {
+                  configurable: true,
+                  enumerable: true,
+                  writable: true,
+                  value: function (this: object) {
+                    const result = Reflect.apply(
+                      retainedPropagation,
+                      this,
+                      [],
+                    );
+                    if (
+                      event.nativeEvent.defaultPrevented &&
+                      ++lateQueries === queryInvocation
+                    ) {
+                      if (!bubbleWrapper) {
+                        throw new Error(
+                          "The bubble wrapper was unavailable",
+                        );
+                      }
+                      Object.defineProperty(
+                        bubbleWrapper,
+                        "isPropagationStopped",
+                        {
+                          configurable: true,
+                          enumerable: true,
+                          writable: true,
+                          value: stalePropagation,
+                        },
+                      );
+                    }
+                    return result;
+                  },
+                },
+              );
+            }
+            original(event);
+          },
+        );
+        const restoreBubble = interceptReactHandler<
+          KeyboardEvent<HTMLInputElement>
+        >(
+          exactInput,
+          "onKeyDown",
+          (original, event) => {
+            bubbleWrapper = event;
+            if (
+              mutation ===
+              "default query replacing bubble propagation"
+            ) {
+              const retainedPreventDefault = event.preventDefault;
+              Object.defineProperty(event, "preventDefault", {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: function (this: object) {
+                  const result = Reflect.apply(
+                    retainedPreventDefault,
+                    this,
+                    [],
+                  );
+                  const record = this as Record<
+                    PropertyKey,
+                    unknown
+                  >;
+                  const currentDefaultQuery =
+                    record.isDefaultPrevented;
+                  if (
+                    typeof currentDefaultQuery !== "function"
+                  ) {
+                    throw new Error(
+                      "The post-prevention query was unavailable",
+                    );
+                  }
+                  Object.defineProperty(
+                    this,
+                    "isDefaultPrevented",
+                    {
+                      configurable: true,
+                      enumerable: true,
+                      writable: true,
+                      value: function (this: object) {
+                        const queryResult = Reflect.apply(
+                          currentDefaultQuery,
+                          this,
+                          [],
+                        );
+                        if (
+                          ++lateQueries === queryInvocation
+                        ) {
+                          Object.defineProperty(
+                            this,
+                            "isPropagationStopped",
+                            {
+                              configurable: true,
+                              enumerable: true,
+                              writable: true,
+                              value: stalePropagation,
+                            },
+                          );
+                        }
+                        return queryResult;
+                      },
+                    },
+                  );
+                  return result;
+                },
+              });
+            }
+            original(event);
+          },
+        );
+        preventDefault.mockClear();
+        focus.mockClear();
+        document.documentElement.scrollTop = 29;
+
+        const rejected = dispatchKeyDown(exactInput, "Enter");
+
+        expect(captureWrapper).not.toBeNull();
+        expect(bubbleWrapper).not.toBeNull();
+        expect(captureWrapper).not.toBe(bubbleWrapper);
+        expect(lateQueries).toBe(queryInvocation);
+        expect(rejected.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(stalePropagation).toHaveBeenCalledTimes(
+          queryInvocation === 1 ? 1 : 0,
+        );
+        expect(listOptions()[1]).toHaveAttribute(
+          "aria-selected",
+          "true",
+        );
+        expect(exactInput).toHaveAttribute(
+          "aria-activedescendant",
+          listOptions()[1].id,
+        );
+        expect(exactInput).toHaveValue("octo");
+        expect(exactInput).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(document.documentElement.scrollTop).toBe(29);
+        expect(
+          screen.getByRole("combobox", { name: "Role" }),
+        ).toHaveValue("editor");
+        expect(
+          screen.getByTestId("share-dialog-shell"),
+        ).toBeInTheDocument();
+        expect(onChange).not.toHaveBeenCalled();
+        expect(onPick).not.toHaveBeenCalled();
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(onRoleChange).not.toHaveBeenCalled();
+        expect(onDialogClose).not.toHaveBeenCalled();
+        expect(searchUsers).toHaveBeenCalledOnce();
+
+        act(() => {
+          exactInput.dispatchEvent(rejected);
+        });
+
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(stalePropagation).toHaveBeenCalledTimes(
+          queryInvocation === 1 ? 1 : 0,
+        );
+        expect(listOptions()[1]).toHaveAttribute(
+          "aria-selected",
+          "true",
+        );
+        expect(onChange).not.toHaveBeenCalled();
+        expect(onPick).not.toHaveBeenCalled();
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(onRoleChange).not.toHaveBeenCalled();
+        expect(onDialogClose).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(document.documentElement.scrollTop).toBe(29);
+        restoreCapture();
+        restoreBubble();
+
+        preventDefault.mockClear();
+        const recovered = dispatchKeyDown(input(), "Enter");
+
+        expect(recovered).not.toBe(rejected);
+        expect(recovered.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(stalePropagation).toHaveBeenCalledTimes(
+          queryInvocation === 1 ? 1 : 0,
+        );
+        expect(input()).toHaveValue("octodog");
+        expect(input()).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(document.documentElement.scrollTop).toBe(29);
+        expect(onChange).toHaveBeenCalledExactlyOnceWith(
+          "octodog",
+        );
+        expect(onPick).toHaveBeenCalledExactlyOnceWith(
+          "octodog",
+        );
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(onRoleChange).not.toHaveBeenCalled();
+        expect(onDialogClose).not.toHaveBeenCalled();
+        expect(searchUsers).toHaveBeenCalledOnce();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
   it("fences public prevention reentry without duplicating state or poisoning a clean successor", async () => {
     searchUsers.mockImplementation(() =>
       answer("octocat", "octodog", "octofox"),
