@@ -1048,26 +1048,32 @@ describe("NameVersionDialog keyboard action navigation", () => {
     const frame = document.createElement("iframe");
     document.body.append(frame);
     const ownerDocument = frame.contentDocument;
-    const ownerWindow = frame.contentWindow;
-    if (!ownerDocument || !ownerWindow) {
+    const backingWindow = frame.contentWindow;
+    if (!ownerDocument || !backingWindow) {
       frame.remove();
       throw new Error("The foreign keyboard realm was unavailable");
     }
-    const documentImplementationSymbol = Object.getOwnPropertySymbols(
-      ownerDocument,
-    ).find((symbol) => String(symbol) === "Symbol(impl)");
-    const backingReceiver = documentImplementationSymbol
-      ? (
-          ownerDocument as unknown as Record<
-            symbol,
-            { _globalObject: EventTarget }
-          >
-        )[documentImplementationSymbol]._globalObject
-      : null;
-    if (!backingReceiver || backingReceiver === ownerWindow) {
+    const addEventListener =
+      backingWindow.addEventListener.bind(backingWindow);
+    const removeEventListener =
+      backingWindow.removeEventListener.bind(backingWindow);
+    let ownerWindow!: Window & typeof globalThis;
+    ownerWindow = new Proxy(backingWindow, {
+      get: (target, property) => {
+        if (property === "addEventListener") return addEventListener;
+        if (property === "removeEventListener") return removeEventListener;
+        return Reflect.get(target, property, target);
+      },
+    }) as Window & typeof globalThis;
+    Object.defineProperty(ownerDocument, "defaultView", {
+      configurable: true,
+      value: ownerWindow,
+    });
+    if (ownerDocument.defaultView !== ownerWindow) {
       frame.remove();
-      throw new Error("The foreign Window backing receiver was unavailable");
+      throw new Error("The foreign Window facade was not published");
     }
+    const backingReceiver: EventTarget = backingWindow;
     const lookalike = Object.create(
       ownerWindow.Window.prototype,
     ) as Window & Record<string, unknown>;
