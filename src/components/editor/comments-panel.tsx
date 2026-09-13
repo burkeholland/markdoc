@@ -7034,18 +7034,76 @@ interface MentionDomEvidence {
 
 interface MentionReactMethods {
   readonly preventDefault: (...args: never[]) => unknown;
-  readonly stopPropagation: (...args: never[]) => unknown;
   readonly isDefaultPrevented: (...args: never[]) => unknown;
   readonly isPropagationStopped: (...args: never[]) => unknown;
-  readonly persist: (...args: never[]) => unknown;
 }
 
 interface MentionReactProof {
   readonly event: object;
   readonly nativeEvent: globalThis.KeyboardEvent;
-  readonly nativeView: Window | null;
+  readonly currentTarget: HTMLElement;
+  readonly phase: number;
   readonly key: MentionNavigationKey;
+  readonly type: string;
+  readonly target: EventTarget;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly trusted: boolean;
+  readonly view: Window | null;
+  readonly detail: number;
+  readonly code: string;
+  readonly location: number;
+  readonly charCode: number;
+  readonly keyCode: number;
+  readonly which: number;
+  readonly locale: unknown;
+  readonly repeat: boolean;
+  readonly composing: boolean | undefined;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
   readonly methods: MentionReactMethods;
+}
+
+interface MentionKeyboardAuthority {
+  readonly keyboard: RequestModeKeyboardAuthority;
+  readonly charCode: RequestModeCapturedGetter<number> | null;
+  readonly keyCode: RequestModeCapturedGetter<number> | null;
+  readonly which: RequestModeCapturedGetter<number> | null;
+  readonly locale: RequestModeCapturedGetter<unknown> | null;
+  readonly isCurrent: () => boolean;
+}
+
+interface MentionNativeFacts extends RequestModeNativeKeyboardFacts {
+  readonly charCode: number;
+  readonly keyCode: number;
+  readonly which: number;
+  readonly locale: unknown;
+}
+
+interface MentionNativeProof {
+  readonly event: globalThis.KeyboardEvent;
+  readonly facts: MentionNativeFacts;
+  readonly receiver: EventTarget;
+  readonly terminal: EventTarget;
+  readonly action: MentionAction;
+}
+
+interface MentionKeyboardPair {
+  readonly native: MentionNativeProof;
+  rootCapture: MentionReactProof | null;
+  textareaCapture: MentionReactProof | null;
+  textareaBubble: MentionReactProof | null;
+  rootBubble: MentionReactProof | null;
+  readonly postDefaultQueries: WeakMap<
+    object,
+    MentionReactMethods["isDefaultPrevented"]
+  >;
+  readonly postDefaultPrevented: WeakMap<object, boolean>;
+  finalizing: boolean;
+  consumed: boolean;
 }
 
 interface MentionPublication {
@@ -7058,7 +7116,7 @@ interface MentionPublication {
   readonly rowElements: readonly HTMLLIElement[];
   readonly ownerDocument: Document;
   readonly ownerWindow: Window & typeof globalThis;
-  readonly keyboard: RequestModeKeyboardAuthority;
+  readonly keyboard: MentionKeyboardAuthority;
   readonly dom: MentionDomEvidence;
   readonly actions: Readonly<Record<MentionNavigationKey, MentionAction>>;
   readonly captureRoot: (event: KeyboardEvent<HTMLDivElement>) => void;
@@ -8144,7 +8202,7 @@ function readRequestModeNativeKeyboardFacts(
 }
 
 function requestModeEventPath(
-  source: HTMLButtonElement,
+  source: HTMLElement,
   ownerDocument: Document,
 ): readonly EventTarget[] | null {
   const path: EventTarget[] = [];
@@ -9637,9 +9695,6 @@ function createRequestModePresentation(
   });
 }
 
-const claimedMentionReactEvents = new WeakSet<object>();
-const claimedMentionNativeEvents = new WeakSet<Event>();
-
 function createMentionCells(): MentionCells {
   const active: MentionCells["active"] = { current: null };
   return {
@@ -9851,145 +9906,82 @@ function createMentionDomEvidence(
   });
 }
 
-function mentionNativeKey(
-  event: KeyboardEvent<HTMLElement>,
-  publication: MentionPublication,
-) {
-  const keyboard = publication.keyboard;
-  const nativeEvent = event.nativeEvent;
-  if (
-    !(nativeEvent instanceof keyboard.KeyboardEvent) ||
-    publication.ownerWindow.Object.getPrototypeOf(nativeEvent) !==
-      keyboard.KeyboardEvent.prototype ||
-    !keyboard.trusted.matches(nativeEvent)
-  ) {
-    return null;
-  }
+function captureMentionKeyboardAuthority(
+  keyboard: RequestModeKeyboardAuthority,
+): MentionKeyboardAuthority | null {
+  const ownerWindow = keyboard.ownerWindow;
+  const charCode = captureRequestModeGetter<number>(
+    ownerWindow,
+    keyboard.KeyboardEvent.prototype,
+    "charCode",
+  );
+  const keyCode = captureRequestModeGetter<number>(
+    ownerWindow,
+    keyboard.KeyboardEvent.prototype,
+    "keyCode",
+  );
+  const which = captureRequestModeGetter<number>(
+    ownerWindow,
+    keyboard.KeyboardEvent.prototype,
+    "which",
+  );
+  const locale = captureRequestModeGetter<unknown>(
+    ownerWindow,
+    keyboard.KeyboardEvent.prototype,
+    "locale",
+  );
+  if (!charCode || !keyCode || !which) return null;
+  return Object.freeze({
+    keyboard,
+    charCode,
+    keyCode,
+    which,
+    locale,
+    isCurrent: () =>
+      keyboard.requestModeIsCurrent() &&
+      charCode.isCurrent() &&
+      keyCode.isCurrent() &&
+      which.isCurrent() &&
+      (!locale || locale.isCurrent()),
+  });
+}
+
+function readMentionNativeFacts(
+  event: object,
+  authority: MentionKeyboardAuthority,
+): MentionNativeFacts | null {
+  const facts = readRequestModeNativeKeyboardFacts(event, authority.keyboard);
+  if (!facts || !authority.isCurrent()) return null;
   try {
-    const key = keyboard.key.read(nativeEvent);
-    if (
-      key !== "ArrowDown" &&
-      key !== "ArrowUp" &&
-      key !== "Home" &&
-      key !== "End"
-    ) {
-      return null;
-    }
-    const target = keyboard.eventTarget.read(nativeEvent);
-    const path = keyboard.eventPath.invoke(nativeEvent);
-    const nativeView = keyboard.eventView.read(nativeEvent);
-    return keyboard.isCurrent() &&
-      keyboard.eventType.read(nativeEvent) === "keydown" &&
-      keyboard.eventPhase.read(nativeEvent) !== keyboard.Event.NONE &&
-      keyboard.eventBubbles.read(nativeEvent) &&
-      keyboard.eventCancelable.read(nativeEvent) &&
-      !keyboard.eventDefaultPrevented.read(nativeEvent) &&
-      !keyboard.eventCancelBubble.read(nativeEvent) &&
-      (nativeView === null || nativeView === publication.ownerWindow) &&
-      keyboard.trusted.read(nativeEvent) &&
-      !keyboard.repeat.read(nativeEvent) &&
-      !keyboard.composing.read(nativeEvent) &&
-      !keyboard.altKey.read(nativeEvent) &&
-      !keyboard.ctrlKey.read(nativeEvent) &&
-      !keyboard.metaKey.read(nativeEvent) &&
-      !keyboard.shiftKey.read(nativeEvent) &&
-      target === publication.textarea &&
-      target instanceof keyboard.Node &&
-      target.ownerDocument === publication.ownerDocument &&
-      path[0] === publication.textarea &&
-      path.filter((entry) => entry === publication.textarea).length === 1 &&
-      path.includes(publication.root) &&
-      path.includes(publication.ownerDocument) &&
-      keyboard.activeElement.read(publication.ownerDocument) ===
-        publication.textarea
-      ? Object.freeze({ event: nativeEvent, nativeView, key })
-      : null;
+    return Object.freeze({
+      ...facts,
+      charCode: authority.charCode!.read(event),
+      keyCode: authority.keyCode!.read(event),
+      which: authority.which!.read(event),
+      locale: authority.locale?.read(event),
+    });
   } catch {
     return null;
   }
 }
 
-function readMentionReactProof(
-  event: KeyboardEvent<HTMLElement>,
-  currentTarget: HTMLElement,
-  publication: MentionPublication,
-  expectedEvent?: object,
-  expectedMethods?: MentionReactMethods,
-): MentionReactProof | null {
-  if (!event || typeof event !== "object") return null;
-  const native = mentionNativeKey(event, publication);
-  if (!native || (expectedEvent && event !== expectedEvent)) return null;
-  const reactEvent = event as KeyboardEvent<HTMLElement> & {
-    _reactName?: unknown;
-    isDefaultPrevented?: unknown;
-    isPropagationStopped?: unknown;
-    isComposing?: unknown;
-    persist?: unknown;
-  };
-  const methods = Object.freeze({
-    preventDefault: reactEvent.preventDefault as (...args: never[]) => unknown,
-    stopPropagation: reactEvent.stopPropagation as (...args: never[]) => unknown,
-    isDefaultPrevented:
-      reactEvent.isDefaultPrevented as (...args: never[]) => unknown,
-    isPropagationStopped:
-      reactEvent.isPropagationStopped as (...args: never[]) => unknown,
-    persist: reactEvent.persist as (...args: never[]) => unknown,
-  });
-  if (
-    typeof methods.preventDefault !== "function" ||
-    typeof methods.stopPropagation !== "function" ||
-    typeof methods.isDefaultPrevented !== "function" ||
-    typeof methods.isPropagationStopped !== "function" ||
-    typeof methods.persist !== "function"
-  ) {
-    return null;
-  }
-  try {
-    const apply = publication.ownerWindow.Reflect.apply;
-    const composing = reactEvent.isComposing;
-    return (
-      reactEvent._reactName === "onKeyDown" &&
-      event.type === "keydown" &&
-      event.currentTarget === currentTarget &&
-      event.target === publication.textarea &&
-      event.nativeEvent === native.event &&
-      event.key === native.key &&
-      event.bubbles === publication.keyboard.eventBubbles.read(native.event) &&
-      event.cancelable ===
-        publication.keyboard.eventCancelable.read(native.event) &&
-      !event.defaultPrevented &&
-      event.isTrusted &&
-      Object.is(event.view, native.nativeView) &&
-      event.eventPhase ===
-        publication.keyboard.eventPhase.read(native.event) &&
-      !event.repeat &&
-      (composing === undefined || composing === false) &&
-      !event.altKey &&
-      !event.ctrlKey &&
-      !event.metaKey &&
-      !event.shiftKey &&
-      apply(methods.isDefaultPrevented, event, []) === false &&
-      apply(methods.isPropagationStopped, event, []) === false &&
-      (!expectedMethods ||
-        (methods.preventDefault === expectedMethods.preventDefault &&
-          methods.stopPropagation === expectedMethods.stopPropagation &&
-          methods.isDefaultPrevented ===
-            expectedMethods.isDefaultPrevented &&
-          methods.isPropagationStopped ===
-            expectedMethods.isPropagationStopped &&
-          methods.persist === expectedMethods.persist))
-    )
-      ? Object.freeze({
-          event,
-          nativeEvent: native.event,
-          nativeView: native.nativeView,
-          key: native.key,
-          methods,
-        })
-      : null;
-  } catch {
-    return null;
-  }
+function mentionNativeFactsMatch(
+  first: MentionNativeFacts,
+  second: MentionNativeFacts,
+  defaultPrevented: boolean,
+) {
+  return (
+    requestModeNativeKeyboardFactsMatch(
+      first,
+      second,
+      defaultPrevented,
+      false,
+    ) &&
+    first.charCode === second.charCode &&
+    first.keyCode === second.keyCode &&
+    first.which === second.which &&
+    Object.is(first.locale, second.locale)
+  );
 }
 
 function createMentionPublication(
@@ -10021,15 +10013,22 @@ function createMentionPublication(
     return null;
   }
   const exactRows = Object.freeze(rowElements as HTMLLIElement[]);
-  const keyboard = captureRequestModeKeyboardAuthority(
+  const capturedKeyboard = captureRequestModeKeyboardAuthority(
     ownerDocument,
     ownerWindow,
   );
+  const keyboard = capturedKeyboard
+    ? captureMentionKeyboardAuthority(capturedKeyboard)
+    : null;
   const dom = createMentionDomEvidence(textarea, list);
   if (!keyboard || !dom) {
     dom?.release();
     return null;
   }
+  const eventDocument = ownerDocument;
+  const eventTextarea = textarea;
+  const eventWindow = ownerWindow;
+  const eventKeyboard = keyboard;
   const identity = Symbol("mention-keyboard-publication");
   const actions = Object.freeze(
     Object.fromEntries(
@@ -10050,18 +10049,42 @@ function createMentionPublication(
     ),
   ) as Readonly<Record<MentionNavigationKey, MentionAction>>;
   let retired = false;
-  let captureRoot: MentionReactProof | null = null;
-  let captureTextarea: MentionReactProof | null = null;
-  let bubbleTextarea: MentionReactProof | null = null;
+  let nativePairs: WeakMap<globalThis.KeyboardEvent, MentionKeyboardPair> | null =
+    new WeakMap();
+  let attemptedNativeEvents = new WeakSet<globalThis.KeyboardEvent>();
+  let activeNativePair: WeakRef<MentionKeyboardPair> | null = null;
+  let publicCallActive = false;
+  let publicCallGeneration = 0;
+  const capturedAddEventListener = ownerWindow.addEventListener;
+  const capturedRemoveEventListener = ownerWindow.removeEventListener;
+  const apply = ownerWindow.Reflect.apply;
+  let listenerActive = false;
+
   const retire = () => {
     if (retired) return;
     retired = true;
     cells.retired.add(publication);
     if (cells.active.current === publication) cells.active.current = null;
+    if (listenerActive) {
+      listenerActive = false;
+      try {
+        apply(capturedRemoveEventListener, ownerWindow, [
+          "keydown",
+          onWindowCapture,
+          true,
+        ]);
+        apply(capturedRemoveEventListener, ownerWindow, [
+          "keydown",
+          onWindowBubble,
+        ]);
+      } catch {
+        // Retiring makes the captured listener access unusable even when removal throws.
+      }
+    }
+    nativePairs = null;
+    attemptedNativeEvents = new WeakSet();
+    activeNativePair = null;
     dom.release();
-    captureRoot = null;
-    captureTextarea = null;
-    bubbleTextarea = null;
   };
   const invalidate = () => {
     if (retired) return;
@@ -10075,49 +10098,787 @@ function createMentionPublication(
       !cells.retired.has(publication) &&
       mentionFactsAreCurrent(publication) &&
       mentionDomIsExact(publication) &&
-      keyboard.isCurrent()
+      keyboard.isCurrent() &&
+      ownerDocument.defaultView === ownerWindow &&
+      ownerWindow.addEventListener === capturedAddEventListener &&
+      ownerWindow.removeEventListener === capturedRemoveEventListener
     ) {
       return true;
     }
     if (!retired && cells.active.current === publication) invalidate();
     return false;
   };
-  const claim = (
-    action: MentionAction,
-    captureEvent: object,
-    bubbleEvent: object,
-    nativeEvent: Event,
+
+  const callPublic = <Value,>(callback: () => Value) => {
+    if (publicCallActive) {
+      publicCallGeneration += 1;
+      return null;
+    }
+    const generation = publicCallGeneration;
+    publicCallActive = true;
+    try {
+      const value = callback();
+      return generation === publicCallGeneration ? Object.freeze({ value }) : null;
+    } catch {
+      return null;
+    } finally {
+      publicCallActive = false;
+    }
+  };
+
+  const pairIsCurrent = (
+    pair: MentionKeyboardPair,
+    consumed = false,
+  ) =>
+    !publicCallActive &&
+    !retired &&
+    pair.finalizing === consumed &&
+    pair.consumed === consumed &&
+    nativePairs?.get(pair.native.event) === pair &&
+    activeNativePair?.deref() === pair &&
+    isCurrent();
+
+  const defaultQueryFor = (
+    pair: MentionKeyboardPair,
+    proof: MentionReactProof,
+    defaultPrevented: boolean,
+  ) =>
+    defaultPrevented &&
+    proof.event === pair.textareaBubble?.event &&
+    pair.postDefaultQueries.get(proof.event)
+      ? pair.postDefaultQueries.get(proof.event)!
+      : proof.methods.isDefaultPrevented;
+
+  const reactMethodsAreCurrent = (
+    pair: MentionKeyboardPair,
+    proof: MentionReactProof,
+    defaultPrevented: boolean,
   ) => {
+    const values = proof.event as Record<PropertyKey, unknown>;
+    const preventDefault = callPublic(() => values.preventDefault);
     if (
-      action.publicationIdentity !== publication.identity ||
-      publication.actions[action.key] !== action ||
-      cells.claimedPublications.has(publication) ||
-      cells.claimedActions.has(action) ||
-      cells.claimedReactEvents.has(captureEvent) ||
-      cells.claimedReactEvents.has(bubbleEvent) ||
-      cells.claimedNativeEvents.has(nativeEvent) ||
-      claimedMentionReactEvents.has(captureEvent) ||
-      claimedMentionReactEvents.has(bubbleEvent) ||
-      claimedMentionNativeEvents.has(nativeEvent) ||
-      !isCurrent()
+      !preventDefault ||
+      preventDefault.value !== proof.methods.preventDefault ||
+      !pairIsCurrent(pair, pair.consumed)
     ) {
       return false;
     }
+    const isDefaultPrevented = callPublic(() => values.isDefaultPrevented);
+    if (
+      !isDefaultPrevented ||
+      isDefaultPrevented.value !== defaultQueryFor(pair, proof, defaultPrevented) ||
+      !pairIsCurrent(pair, pair.consumed)
+    ) {
+      return false;
+    }
+    const isPropagationStopped = callPublic(
+      () => values.isPropagationStopped,
+    );
+    return Boolean(
+      isPropagationStopped &&
+        isPropagationStopped.value === proof.methods.isPropagationStopped &&
+        pairIsCurrent(pair, pair.consumed),
+    );
+  };
+
+  const reactScalarsAreCurrent = (
+    pair: MentionKeyboardPair,
+    proof: MentionReactProof,
+    defaultPrevented: boolean,
+  ) => {
+    if (defaultPrevented && !pair.postDefaultPrevented.has(proof.event)) {
+      return false;
+    }
+    const expectedDefaultPrevented = defaultPrevented
+      ? pair.postDefaultPrevented.get(proof.event)
+      : false;
+    const values = proof.event as Record<PropertyKey, unknown>;
+    const read = <Value,>(callback: () => Value) => {
+      const result = callPublic(callback);
+      return result && pairIsCurrent(pair, pair.consumed) ? result : null;
+    };
+    const nativeEvent = read(() => values.nativeEvent);
+    const type = read(() => values.type);
+    const target = read(() => values.target);
+    const currentTarget = read(() => values.currentTarget);
+    const eventPhase = read(() => values.eventPhase);
+    const bubbles = read(() => values.bubbles);
+    const cancelable = read(() => values.cancelable);
+    const currentDefaultPrevented = read(() => values.defaultPrevented);
+    const trusted = read(() => values.isTrusted);
+    const key = read(() => values.key);
+    const code = read(() => values.code);
+    const location = read(() => values.location);
+    const charCode = read(() => values.charCode);
+    const keyCode = read(() => values.keyCode);
+    const which = read(() => values.which);
+    const locale = read(() => values.locale);
+    const detail = read(() => values.detail);
+    const view = read(() => values.view);
+    const repeat = read(() => values.repeat);
+    const composing = read(() => values.isComposing);
+    const altKey = read(() => values.altKey);
+    const ctrlKey = read(() => values.ctrlKey);
+    const metaKey = read(() => values.metaKey);
+    const shiftKey = read(() => values.shiftKey);
+    const sharesReactDelivery = [
+      pair.rootCapture,
+      pair.textareaCapture,
+      pair.textareaBubble,
+      pair.rootBubble,
+    ].some((other) => other !== proof && other?.event === proof.event);
+    const releasedReactPhase =
+      sharesReactDelivery &&
+      currentTarget?.value === null &&
+      (eventPhase?.value === ownerWindow.Event.NONE ||
+        [
+          pair.rootCapture,
+          pair.textareaCapture,
+          pair.textareaBubble,
+          pair.rootBubble,
+        ].some(
+          (other) =>
+            other?.event === proof.event &&
+            eventPhase?.value === other.phase,
+        ));
+    return Boolean(
+      nativeEvent?.value === proof.nativeEvent &&
+        type?.value === proof.type &&
+        target?.value === proof.target &&
+        (currentTarget?.value === proof.currentTarget ||
+          releasedReactPhase) &&
+        (eventPhase?.value === proof.phase ||
+          releasedReactPhase) &&
+        bubbles?.value === proof.bubbles &&
+        cancelable?.value === proof.cancelable &&
+        currentDefaultPrevented?.value === expectedDefaultPrevented &&
+        trusted?.value === proof.trusted &&
+        key?.value === proof.key &&
+        code?.value === proof.code &&
+        location?.value === proof.location &&
+        charCode?.value === proof.charCode &&
+        keyCode?.value === proof.keyCode &&
+        which?.value === proof.which &&
+        Object.is(locale?.value, proof.locale) &&
+        detail?.value === proof.detail &&
+        Object.is(view?.value, proof.view) &&
+        repeat?.value === proof.repeat &&
+        composing?.value === proof.composing &&
+        altKey?.value === proof.altKey &&
+        ctrlKey?.value === proof.ctrlKey &&
+        metaKey?.value === proof.metaKey &&
+        shiftKey?.value === proof.shiftKey &&
+        pairIsCurrent(pair, pair.consumed),
+    );
+  };
+
+  const reactProofIsCurrent = (
+    pair: MentionKeyboardPair,
+    proof: MentionReactProof,
+    defaultPrevented: boolean,
+  ) =>
+    reactScalarsAreCurrent(pair, proof, defaultPrevented) &&
+    reactMethodsAreCurrent(pair, proof, defaultPrevented);
+
+  const readReactProof = (
+    pair: MentionKeyboardPair,
+    event: object,
+    currentTarget: HTMLElement,
+    phase: number,
+  ): MentionReactProof | null => {
+    if (!pairIsCurrent(pair) || !event || typeof event !== "object") {
+      return null;
+    }
+    const values = event as Record<PropertyKey, unknown>;
+    const read = <Value,>(callback: () => Value) => {
+      const result = callPublic(callback);
+      return result && pairIsCurrent(pair) ? result : null;
+    };
+    const nativeEvent = read(() => values.nativeEvent);
+    if (nativeEvent?.value !== pair.native.event) return null;
+    const type = read(() => values.type);
+    const target = read(() => values.target);
+    const actualCurrentTarget = read(() => values.currentTarget);
+    const eventPhase = read(() => values.eventPhase);
+    const bubbles = read(() => values.bubbles);
+    const cancelable = read(() => values.cancelable);
+    const defaultPrevented = read(() => values.defaultPrevented);
+    const trusted = read(() => values.isTrusted);
+    const key = read(() => values.key);
+    const code = read(() => values.code);
+    const location = read(() => values.location);
+    const charCode = read(() => values.charCode);
+    const keyCode = read(() => values.keyCode);
+    const which = read(() => values.which);
+    const locale = read(() => values.locale);
+    const detail = read(() => values.detail);
+    const view = read(() => values.view);
+    const repeat = read(() => values.repeat);
+    const composing = read(() => values.isComposing);
+    const altKey = read(() => values.altKey);
+    const ctrlKey = read(() => values.ctrlKey);
+    const metaKey = read(() => values.metaKey);
+    const shiftKey = read(() => values.shiftKey);
+    const preventDefault = read(() => values.preventDefault);
+    const isDefaultPrevented = read(() => values.isDefaultPrevented);
+    const isPropagationStopped = read(() => values.isPropagationStopped);
+    if (
+      !type ||
+      !target ||
+      !actualCurrentTarget ||
+      !eventPhase ||
+      !bubbles ||
+      !cancelable ||
+      !defaultPrevented ||
+      !trusted ||
+      !key ||
+      !code ||
+      !location ||
+      !charCode ||
+      !keyCode ||
+      !which ||
+      !locale ||
+      !detail ||
+      !view ||
+      !repeat ||
+      !composing ||
+      !altKey ||
+      !ctrlKey ||
+      !metaKey ||
+      !shiftKey ||
+      !preventDefault ||
+      !isDefaultPrevented ||
+      !isPropagationStopped ||
+      typeof preventDefault.value !== "function" ||
+      typeof isDefaultPrevented.value !== "function" ||
+      typeof isPropagationStopped.value !== "function"
+    ) {
+      return null;
+    }
+    const facts = pair.native.facts;
+    if (
+      type.value !== "keydown" ||
+      target.value !== textarea ||
+      actualCurrentTarget.value !== currentTarget ||
+      eventPhase.value !== phase ||
+      bubbles.value !== facts.bubbles ||
+      cancelable.value !== facts.cancelable ||
+      defaultPrevented.value !== false ||
+      trusted.value !== facts.trusted ||
+      key.value !== facts.key ||
+      code.value !== facts.code ||
+      location.value !== facts.location ||
+      charCode.value !== facts.charCode ||
+      keyCode.value !== facts.keyCode ||
+      which.value !== facts.which ||
+      !Object.is(locale.value, facts.locale) ||
+      detail.value !== facts.detail ||
+      !Object.is(view.value, facts.view) ||
+      repeat.value !== facts.repeat ||
+      (composing.value !== undefined && composing.value !== facts.composing) ||
+      altKey.value !== facts.altKey ||
+      ctrlKey.value !== facts.ctrlKey ||
+      metaKey.value !== facts.metaKey ||
+      shiftKey.value !== facts.shiftKey
+    ) {
+      return null;
+    }
+    const proof = Object.freeze({
+      event,
+      nativeEvent: pair.native.event,
+      currentTarget,
+      phase,
+      key: facts.key as MentionNavigationKey,
+      type: type.value,
+      target: target.value as EventTarget,
+      bubbles: bubbles.value as boolean,
+      cancelable: cancelable.value as boolean,
+      defaultPrevented: false,
+      trusted: trusted.value as boolean,
+      view: view.value as Window | null,
+      detail: detail.value as number,
+      code: code.value as string,
+      location: location.value as number,
+      charCode: charCode.value as number,
+      keyCode: keyCode.value as number,
+      which: which.value as number,
+      locale: locale.value,
+      repeat: repeat.value as boolean,
+      composing: composing.value as boolean | undefined,
+      altKey: altKey.value as boolean,
+      ctrlKey: ctrlKey.value as boolean,
+      metaKey: metaKey.value as boolean,
+      shiftKey: shiftKey.value as boolean,
+      methods: Object.freeze({
+        preventDefault:
+          preventDefault.value as MentionReactMethods["preventDefault"],
+        isDefaultPrevented:
+          isDefaultPrevented.value as MentionReactMethods["isDefaultPrevented"],
+        isPropagationStopped:
+          isPropagationStopped.value as MentionReactMethods["isPropagationStopped"],
+      }),
+    } satisfies MentionReactProof);
+    const query = (
+      method: MentionReactMethods["isDefaultPrevented"] |
+        MentionReactMethods["isPropagationStopped"],
+    ) => {
+      if (!reactProofIsCurrent(pair, proof, false)) return false;
+      const result = callPublic(() => apply(method, event, []));
+      return Boolean(
+        result?.value === false &&
+          reactProofIsCurrent(pair, proof, false) &&
+          pairIsCurrent(pair),
+      );
+    };
+    return query(proof.methods.isDefaultPrevented) &&
+      query(proof.methods.isPropagationStopped)
+      ? proof
+      : null;
+  };
+
+  const stageForReact = (event: object) => {
+    if (publicCallActive) {
+      publicCallGeneration += 1;
+      return null;
+    }
+    if (!event || typeof event !== "object") return null;
+    const carried = callPublic(
+      () => (event as Record<PropertyKey, unknown>).nativeEvent,
+    );
+    if (
+      !carried ||
+      !isCurrent() ||
+      !carried.value ||
+      typeof carried.value !== "object"
+    ) {
+      return null;
+    }
+    return nativePairs?.get(carried.value as globalThis.KeyboardEvent) ?? null;
+  };
+
+  const nativeFactsAreCurrent = (
+    pair: MentionKeyboardPair,
+    defaultPrevented: boolean,
+    phase: number,
+    receiver: EventTarget,
+  ) => {
+    const current = readMentionNativeFacts(pair.native.event, keyboard);
+    const expectedPath = requestModeEventPath(textarea, ownerDocument);
+    const terminal = current?.path.at(-1);
+    return Boolean(
+      current &&
+        expectedPath &&
+        terminal &&
+        pair.native.receiver === pair.native.terminal &&
+        receiver === pair.native.receiver &&
+        current.currentTarget === receiver &&
+        current.phase === phase &&
+        current.target === textarea &&
+        current.path.at(0) === textarea &&
+        requestModePathMatches(current.path, expectedPath, terminal) &&
+        terminal === receiver &&
+        (current.view === null ||
+          current.view === ownerWindow ||
+          current.view === receiver) &&
+        current.type === "keydown" &&
+        current.bubbles &&
+        current.cancelable &&
+        current.defaultPrevented === defaultPrevented &&
+        !current.cancelBubble &&
+        current.detail === 0 &&
+        current.location ===
+          ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_STANDARD &&
+        !current.repeat &&
+        !current.composing &&
+        !current.altKey &&
+        !current.ctrlKey &&
+        !current.metaKey &&
+        !current.shiftKey &&
+        mentionNativeFactsMatch(
+          pair.native.facts,
+          current,
+          defaultPrevented,
+        ) &&
+        keyboard.keyboard.activeElement.read(ownerDocument) === textarea,
+    );
+  };
+
+  const terminalIsCurrent = (
+    pair: MentionKeyboardPair,
+    defaultPrevented: boolean,
+    claimed: boolean,
+  ) => {
+    const action = pair.native.action;
+    const proofs = [
+      pair.rootCapture,
+      pair.textareaCapture,
+      pair.textareaBubble,
+      pair.rootBubble,
+    ];
+    return Boolean(
+      proofs.every((proof) => proof !== null) &&
+        proofs.every(
+          (proof) =>
+            proof !== null &&
+            proof.nativeEvent === pair.native.event &&
+            proof.target === textarea &&
+            proof.key === action.key &&
+              proof.defaultPrevented === false &&
+              reactProofIsCurrent(pair, proof, defaultPrevented),
+        ) &&
+        pair.rootCapture?.currentTarget === root &&
+        pair.rootCapture.phase === ownerWindow.Event.CAPTURING_PHASE &&
+        pair.textareaCapture?.currentTarget === textarea &&
+        pair.textareaCapture.phase === ownerWindow.Event.CAPTURING_PHASE &&
+        pair.textareaBubble?.currentTarget === textarea &&
+        pair.textareaBubble.phase === ownerWindow.Event.BUBBLING_PHASE &&
+        pair.rootBubble?.currentTarget === root &&
+        pair.rootBubble.phase === ownerWindow.Event.BUBBLING_PHASE &&
+        action.publicationIdentity === publication.identity &&
+        actions[action.key] === action &&
+        action.source === authority.highlight &&
+        action.destination !== null &&
+        action.destination ===
+          mentionDestination(
+            action.key,
+            authority.highlight,
+            authority.rows.length,
+          ) &&
+        (claimed
+          ? cells.claimedPublications.has(publication) &&
+            cells.claimedActions.has(action) &&
+            cells.claimedNativeEvents.has(pair.native.event) &&
+            proofs.every(
+              (proof) =>
+                proof !== null && cells.claimedReactEvents.has(proof.event),
+            )
+          : !cells.claimedPublications.has(publication) &&
+            !cells.claimedActions.has(action) &&
+            !cells.claimedNativeEvents.has(pair.native.event) &&
+            proofs.every(
+              (proof) =>
+                proof !== null && !cells.claimedReactEvents.has(proof.event),
+            )) &&
+        pairIsCurrent(pair, claimed) &&
+        nativeFactsAreCurrent(
+          pair,
+          defaultPrevented,
+          ownerWindow.Event.BUBBLING_PHASE,
+          pair.native.receiver,
+        ),
+    );
+  };
+
+  const queryTerminal = (
+    pair: MentionKeyboardPair,
+    proof: MentionReactProof,
+    method: MentionReactMethods["isDefaultPrevented"] |
+      MentionReactMethods["isPropagationStopped"],
+    expected: boolean,
+    defaultPrevented: boolean,
+    claimed: boolean,
+  ) => {
+    if (
+      !terminalIsCurrent(pair, defaultPrevented, claimed) ||
+      (method !== defaultQueryFor(pair, proof, defaultPrevented) &&
+        method !== proof.methods.isPropagationStopped)
+    ) {
+      return false;
+    }
+    const result = callPublic(() => apply(method, proof.event, []));
+    return Boolean(
+      result?.value === expected &&
+        terminalIsCurrent(pair, defaultPrevented, claimed) &&
+        reactProofIsCurrent(pair, proof, defaultPrevented),
+    );
+  };
+
+  const claimTerminal = (pair: MentionKeyboardPair) => {
+    const proofs = [
+      pair.rootCapture,
+      pair.textareaCapture,
+      pair.textareaBubble,
+      pair.rootBubble,
+    ];
+    const action = pair.native.action;
+    if (
+      !terminalIsCurrent(pair, false, false) ||
+      proofs.some((proof) => proof === null) ||
+      nativePairs?.get(pair.native.event) !== pair
+    ) {
+      return false;
+    }
+    pair.consumed = true;
+    pair.finalizing = true;
     cells.claimedPublications.add(publication);
     cells.claimedActions.add(action);
-    cells.claimedReactEvents.add(captureEvent);
-    cells.claimedReactEvents.add(bubbleEvent);
-    cells.claimedNativeEvents.add(nativeEvent);
-    claimedMentionReactEvents.add(captureEvent);
-    claimedMentionReactEvents.add(bubbleEvent);
-    claimedMentionNativeEvents.add(nativeEvent);
+    cells.claimedNativeEvents.add(pair.native.event);
+    for (const proof of proofs) {
+      cells.claimedReactEvents.add(proof!.event);
+    }
     return true;
   };
-  const clearProof = () => {
-    captureRoot = null;
-    captureTextarea = null;
-    bubbleTextarea = null;
-  };
+
+  function onWindowCapture(this: EventTarget, event: Event) {
+    if (publicCallActive) {
+      publicCallGeneration += 1;
+      return;
+    }
+    try {
+      if (
+        retired ||
+        !listenerActive ||
+        !isCurrent()
+      ) {
+        return;
+      }
+      const facts = readMentionNativeFacts(event, eventKeyboard);
+      const expectedPath = requestModeEventPath(eventTextarea, eventDocument);
+      const terminal = facts?.path.at(-1);
+      const action =
+        facts &&
+        (facts.key === "ArrowDown" ||
+          facts.key === "ArrowUp" ||
+          facts.key === "Home" ||
+          facts.key === "End")
+          ? actions[facts.key]
+          : null;
+      if (
+        !facts ||
+        !terminal ||
+        !expectedPath ||
+        !action ||
+        action.source !== authority.highlight ||
+        action.destination === null ||
+        action.destination !==
+          mentionDestination(
+            action.key,
+            authority.highlight,
+            authority.rows.length,
+          ) ||
+        facts.currentTarget !== this ||
+        facts.phase !== eventWindow.Event.CAPTURING_PHASE ||
+        facts.target !== textarea ||
+        facts.path.at(0) !== textarea ||
+        terminal !== this ||
+        !requestModePathMatches(facts.path, expectedPath, terminal) ||
+        (facts.view !== null &&
+          facts.view !== eventWindow &&
+          facts.view !== this) ||
+        facts.type !== "keydown" ||
+        !facts.bubbles ||
+        !facts.cancelable ||
+        facts.defaultPrevented ||
+        facts.cancelBubble ||
+        facts.detail !== 0 ||
+        facts.location !==
+          eventWindow.KeyboardEvent.DOM_KEY_LOCATION_STANDARD ||
+        facts.repeat ||
+        facts.composing ||
+        facts.altKey ||
+        facts.ctrlKey ||
+        facts.metaKey ||
+        facts.shiftKey ||
+        eventKeyboard.keyboard.activeElement.read(eventDocument) !== textarea ||
+        attemptedNativeEvents.has(event as globalThis.KeyboardEvent)
+      ) {
+        if (attemptedNativeEvents.has(event as globalThis.KeyboardEvent)) {
+          nativePairs?.delete(event as globalThis.KeyboardEvent);
+        }
+        return;
+      }
+      const active = activeNativePair?.deref();
+      if (
+        active &&
+        eventKeyboard.keyboard.eventPhase.read(active.native.event) ===
+          eventWindow.Event.NONE
+      ) {
+        activeNativePair = null;
+      }
+      if (activeNativePair?.deref()) return;
+      attemptedNativeEvents.add(event as globalThis.KeyboardEvent);
+      const pair: MentionKeyboardPair = {
+        native: Object.freeze({
+          event: event as globalThis.KeyboardEvent,
+          facts,
+          receiver: this,
+          terminal,
+          action,
+        }),
+        rootCapture: null,
+        textareaCapture: null,
+        textareaBubble: null,
+        rootBubble: null,
+        postDefaultQueries: new WeakMap(),
+        postDefaultPrevented: new WeakMap(),
+        finalizing: false,
+        consumed: false,
+      };
+      nativePairs?.set(event as globalThis.KeyboardEvent, pair);
+      activeNativePair = new WeakRef(pair);
+    } catch {
+      return;
+    }
+  }
+
+  function onWindowBubble(this: EventTarget, event: Event) {
+    if (publicCallActive) {
+      publicCallGeneration += 1;
+      return;
+    }
+    const pair = nativePairs?.get(event as globalThis.KeyboardEvent);
+    if (!pair) return;
+    try {
+      if (
+        publicCallActive ||
+        retired ||
+        !listenerActive ||
+        this !== pair.native.receiver ||
+        !terminalIsCurrent(pair, false, false)
+      ) {
+        return;
+      }
+      const proofs = [
+        pair.rootCapture!,
+        pair.textareaCapture!,
+        pair.textareaBubble!,
+        pair.rootBubble!,
+      ];
+      for (const proof of proofs) {
+        if (
+          !queryTerminal(
+            pair,
+            proof,
+            proof.methods.isDefaultPrevented,
+            false,
+            false,
+            false,
+          ) ||
+          !queryTerminal(
+            pair,
+            proof,
+            proof.methods.isPropagationStopped,
+            false,
+            false,
+            false,
+          )
+        ) {
+          return;
+        }
+      }
+      if (!claimTerminal(pair)) return;
+      try {
+        const textareaBubble = pair.textareaBubble!;
+        const prevented = callPublic(() =>
+          apply(
+            textareaBubble.methods.preventDefault,
+            textareaBubble.event,
+            [],
+          ),
+        );
+        if (!prevented) return;
+        // Only prevention's receiver (including exact-object aliases) may get
+        // React's replacement query. Capture it before any other public getter.
+        const currentDefault = callPublic(
+          () =>
+            (textareaBubble.event as Record<PropertyKey, unknown>)
+              .isDefaultPrevented,
+        );
+        if (
+          !currentDefault ||
+          typeof currentDefault.value !== "function" ||
+          !pairIsCurrent(pair, true)
+        ) {
+          return;
+        }
+        pair.postDefaultQueries.set(
+          textareaBubble.event,
+          currentDefault.value as MentionReactMethods["isDefaultPrevented"],
+        );
+        if (!proofs.every((proof) => reactMethodsAreCurrent(pair, proof, true))) {
+          return;
+        }
+        for (const proof of proofs) {
+          if (pair.postDefaultPrevented.has(proof.event)) continue;
+          const currentDefaultPrevented = callPublic(
+            () =>
+              (proof.event as Record<PropertyKey, unknown>)
+                .defaultPrevented,
+          );
+          if (
+            !currentDefaultPrevented ||
+            typeof currentDefaultPrevented.value !== "boolean" ||
+            !pairIsCurrent(pair, true) ||
+            !proofs.every((current) => reactMethodsAreCurrent(pair, current, true))
+          ) {
+            return;
+          }
+          pair.postDefaultPrevented.set(
+            proof.event,
+            currentDefaultPrevented.value,
+          );
+        }
+        const currentDefaultPrevented = pair.postDefaultPrevented.get(
+          textareaBubble.event,
+        );
+        if (
+          currentDefaultPrevented === undefined ||
+          !terminalIsCurrent(pair, true, true) ||
+          !queryTerminal(
+            pair,
+            textareaBubble,
+            defaultQueryFor(pair, textareaBubble, true),
+            currentDefaultPrevented,
+            true,
+            true,
+          )
+        ) {
+          return;
+        }
+        for (const proof of proofs) {
+          if (
+            !queryTerminal(
+              pair,
+              proof,
+              defaultQueryFor(pair, proof, true),
+              pair.postDefaultPrevented.get(proof.event) ?? false,
+              true,
+              true,
+            ) ||
+            !queryTerminal(
+              pair,
+              proof,
+              proof.methods.isPropagationStopped,
+              false,
+              true,
+              true,
+            )
+          ) {
+            return;
+          }
+        }
+        if (
+          !terminalIsCurrent(pair, true, true) ||
+          !reactProofIsCurrent(pair, textareaBubble, true)
+        ) {
+          return;
+        }
+        const destination = pair.native.action.destination;
+        if (destination === null) return;
+        const highlighted = callPublic(() => authority.setHighlight(destination));
+        if (!highlighted || !terminalIsCurrent(pair, true, true)) return;
+      } finally {
+        cells.claimedPublications.delete(publication);
+        cells.claimedActions.delete(pair.native.action);
+        pair.finalizing = false;
+      }
+    } catch {
+      return;
+    } finally {
+      nativePairs?.delete(pair.native.event);
+      if (activeNativePair?.deref() === pair) activeNativePair = null;
+    }
+  }
 
   const publication: MentionPublication = Object.freeze({
     identity,
@@ -10133,84 +10894,80 @@ function createMentionPublication(
     dom,
     actions,
     captureRoot: (event: KeyboardEvent<HTMLDivElement>) => {
-      clearProof();
-      if (!isCurrent()) return;
-      captureRoot = readMentionReactProof(event, root, publication);
+      const pair = stageForReact(event);
+      if (
+        !pair ||
+        pair.rootCapture ||
+        pair.textareaCapture ||
+        pair.textareaBubble ||
+        pair.rootBubble
+      ) {
+        return;
+      }
+      const proof = readReactProof(
+        pair,
+        event,
+        root,
+        ownerWindow.Event.CAPTURING_PHASE,
+      );
+      if (proof) pair.rootCapture = proof;
     },
     captureTextarea: (event: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (!captureRoot || captureTextarea || !isCurrent()) return;
-      captureTextarea = readMentionReactProof(
+      const pair = stageForReact(event);
+      if (
+        !pair ||
+        !pair.rootCapture ||
+        pair.textareaCapture ||
+        pair.textareaBubble ||
+        pair.rootBubble
+      ) {
+        return;
+      }
+      const proof = readReactProof(
+        pair,
         event,
         textarea,
-        publication,
-        captureRoot.event,
-        captureRoot.methods,
+        ownerWindow.Event.CAPTURING_PHASE,
       );
+      if (proof) pair.textareaCapture = proof;
     },
     bubbleTextarea: (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      const pair = stageForReact(event);
       if (
-        !captureRoot ||
-        !captureTextarea ||
-        bubbleTextarea ||
-        !isCurrent()
+        !pair ||
+        !pair.rootCapture ||
+        !pair.textareaCapture ||
+        pair.textareaBubble ||
+        pair.rootBubble
       ) {
         return;
       }
-      bubbleTextarea = readMentionReactProof(
+      const proof = readReactProof(
+        pair,
         event,
         textarea,
-        publication,
+        ownerWindow.Event.BUBBLING_PHASE,
       );
-      if (
-        bubbleTextarea?.nativeEvent !== captureRoot.nativeEvent ||
-        bubbleTextarea?.key !== captureRoot.key
-      ) {
-        bubbleTextarea = null;
-      }
+      if (proof) pair.textareaBubble = proof;
     },
     bubbleRoot: (event: KeyboardEvent<HTMLDivElement>) => {
-      const capture = captureRoot;
-      const capturedTextarea = captureTextarea;
-      const bubbledTextarea = bubbleTextarea;
-      const bubbledRoot =
-        bubbledTextarea &&
-        readMentionReactProof(
-          event,
-          root,
-          publication,
-          bubbledTextarea.event,
-          bubbledTextarea.methods,
-        );
-      clearProof();
+      const pair = stageForReact(event);
       if (
-        !capture ||
-        !capturedTextarea ||
-        !bubbledTextarea ||
-        !bubbledRoot ||
-        capture.event !== capturedTextarea.event ||
-        capture.nativeEvent !== bubbledTextarea.nativeEvent ||
-        capture.key !== bubbledTextarea.key ||
-        !isCurrent()
+        !pair ||
+        !pair.rootCapture ||
+        !pair.textareaCapture ||
+        !pair.textareaBubble ||
+        pair.rootBubble
       ) {
         return;
       }
-      const action = actions[capture.key];
-      if (
-        action.destination === null ||
-        action.source !== authority.highlight ||
-        !claim(
-          action,
-          capture.event,
-          bubbledTextarea.event,
-          capture.nativeEvent,
-        )
-      ) {
-        return;
-      }
-      keyboard.eventPreventDefault.invoke(capture.nativeEvent);
-      if (!keyboard.eventDefaultPrevented.read(capture.nativeEvent)) return;
-      authority.setHighlight(action.destination);
-      if (action.destination === action.source) authority.requestSuccessor();
+      const proof = readReactProof(
+        pair,
+        event,
+        root,
+        ownerWindow.Event.BUBBLING_PHASE,
+      );
+      if (proof) pair.rootBubble = proof;
     },
     retire,
     isRetired: () => retired,
@@ -10222,6 +10979,18 @@ function createMentionPublication(
   const previous = cells.active.current;
   previous?.retire();
   cells.active.current = publication;
+  try {
+    apply(capturedAddEventListener, ownerWindow, [
+      "keydown",
+      onWindowCapture,
+      true,
+    ]);
+    apply(capturedAddEventListener, ownerWindow, ["keydown", onWindowBubble]);
+    listenerActive = true;
+  } catch {
+    retire();
+    return null;
+  }
   return publication;
 }
 
