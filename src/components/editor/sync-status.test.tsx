@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { compile } from "tailwindcss";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import {
@@ -1453,6 +1454,245 @@ describe("Sync dialog metadata titles", () => {
     expect(screen.queryByTestId("sync-merge")).toBeNull();
     expect(screen.queryByTestId("sync-take-remote")).toBeNull();
     expect(screen.queryByTestId("sync-compare")).toBeNull();
+  });
+});
+
+describe("Sync dialog result wrapping", () => {
+  const longErrors = [
+    { name: "unbroken", text: "GitHubSyncFailure".repeat(20) },
+    { name: "ordinary", text: "GitHub could not accept these changes; your local edits are still available. ".repeat(4) },
+    { name: "literal markup", text: '<a href="https://example.com">Retry & keep "my" edits</a><img src=x><script>unexpected()</script>'.repeat(3) },
+  ];
+  const gistDoc: DocumentDto = {
+    ...DOC,
+    storage: "gist",
+    gistId: "gist-1",
+    gistFile: "big.md",
+    repoOwner: null,
+    repoName: null,
+    repoBranch: null,
+    repoPath: null,
+    githubUrl: "https://gist.github.com/o/gist-1",
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  function expectResultRow(row: HTMLElement, text: string, outcome: "error" | "done") {
+    const root = screen.getByTestId("sync-dialog");
+    const icon = row.firstChild;
+    expect(row.tagName).toBe("DIV");
+    expect(row.parentElement).toBe(root);
+    expect(root.lastElementChild).toBe(row);
+    expect(row.previousElementSibling).toBe(screen.getByTestId("commit-message").parentElement);
+    expect(row.textContent).toBe(` ${text}`);
+    expect(row.childNodes).toHaveLength(3);
+    expect([...row.childNodes].map((node) => [node.nodeType, node.nodeValue])).toEqual([
+      [Node.ELEMENT_NODE, null],
+      [Node.TEXT_NODE, " "],
+      [Node.TEXT_NODE, text],
+    ]);
+    expect(row.children).toHaveLength(1);
+    expect(icon).toBe(row.firstElementChild);
+    expect(icon).toHaveAttribute("width", "14");
+    expect(icon).toHaveAttribute("height", "14");
+    expect(icon).toHaveAttribute("aria-hidden", "true");
+    expect(icon).toHaveClass("shrink-0");
+    expect(row.firstElementChild?.tagName).toBe("svg");
+    expect(row).toHaveClass("flex", "items-center", "gap-2", "rounded-lg", "px-3", "py-2", "text-sm", "wrap-anywhere");
+    if (outcome === "error") {
+      expect(row).toHaveAttribute("role", "alert");
+      expect(row).not.toHaveAttribute("data-testid");
+      expect(row).toHaveClass("bg-red-50", "text-danger", "dark:bg-red-950/40");
+    } else {
+      expect(row).toHaveAttribute("data-testid", "sync-done");
+      expect(row).not.toHaveAttribute("role");
+      expect(row).toHaveClass("bg-surface-2", "text-ink-2");
+      expect(icon).toHaveClass("text-success");
+    }
+    expect(row).not.toHaveAttribute("tabindex");
+    expect(row).not.toHaveAttribute("title");
+    expect(row.querySelectorAll("button, input, a, img, script, [tabindex], [contenteditable], [title]")).toHaveLength(0);
+    expect(root.querySelectorAll("button, input, a[href], [tabindex]")).toHaveLength(5);
+  }
+
+  function expectPassiveResult(row: HTMLElement, actions: SyncActions, onOpenChange: Mock) {
+    const input = screen.getByTestId("commit-message");
+    input.focus();
+    const markup = document.body.innerHTML;
+    const actionCounts = [actions.merge, actions.keepMine, actions.takeRemote, actions.compare]
+      .map((action) => vi.mocked(action).mock.calls.length);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(() => {
+      throw new Error("Unexpected request during Sync result hover");
+    });
+    const send = vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {
+      throw new Error("Unexpected XHR during Sync result hover");
+    });
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const animation = vi.spyOn(window, "requestAnimationFrame");
+    try {
+      for (const target of [row, row.firstElementChild!]) {
+        fireEvent.pointerOver(target);
+        fireEvent.pointerEnter(target);
+        fireEvent.mouseOver(target);
+        fireEvent.mouseEnter(target);
+        fireEvent.mouseLeave(target);
+        fireEvent.mouseOut(target);
+        fireEvent.pointerLeave(target);
+        fireEvent.pointerOut(target);
+      }
+      expect(document.body.innerHTML).toBe(markup);
+      expect(input).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(timeout).not.toHaveBeenCalled();
+      expect(interval).not.toHaveBeenCalled();
+      expect(animation).not.toHaveBeenCalled();
+      expect([actions.merge, actions.keepMine, actions.takeRemote, actions.compare]
+        .map((action) => vi.mocked(action).mock.calls.length)).toEqual(actionCounts);
+      expect(onOpenChange).not.toHaveBeenCalled();
+    } finally {
+      // Clear retained spy restorers before teardown switches off fake timers.
+      vi.restoreAllMocks();
+    }
+  }
+
+  describe.each([
+    { storage: "repo", doc: DOC },
+    { storage: "gist", doc: gistDoc },
+  ])("$storage results", ({ doc }) => {
+    it.each(longErrors)("keeps a long $name error literal beside its icon and allows one retry", async ({ name, text }) => {
+      expect(text.length).toBeGreaterThanOrEqual(240);
+      const failure = name === "literal markup"
+        ? new ApiError(400, "Validation failed", [{ message: text }])
+        : name === "ordinary" ? new ApiError(409, text) : new Error(text);
+      const merge = vi.fn<SyncActions["merge"]>()
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValueOnce(0);
+      const actions = syncActions({ merge });
+      const onOpenChange = vi.fn();
+      render(<SyncDialog open onOpenChange={onOpenChange} doc={doc} sync={DIVERGED} actions={actions} />);
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("sync-merge"));
+      });
+      const row = screen.getByRole("alert");
+      expectResultRow(row, text, "error");
+      expectPassiveResult(row, actions, onOpenChange);
+      expect(merge).toHaveBeenCalledExactlyOnceWith();
+      expect(screen.getByTestId("commit-message")).toHaveValue("Update big.md");
+      for (const id of ["sync-merge", "sync-keep-mine", "sync-take-remote", "sync-compare"]) {
+        expect(screen.getByTestId(id)).toBeEnabled();
+      }
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("sync-merge"));
+        fireEvent.click(screen.getByTestId("sync-merge"));
+      });
+      expect(merge).toHaveBeenCalledTimes(2);
+      expect(actions.keepMine).not.toHaveBeenCalled();
+      expect(actions.takeRemote).not.toHaveBeenCalled();
+      expect(actions.compare).not.toHaveBeenCalled();
+      expect(row).not.toBeInTheDocument();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expectResultRow(screen.getByTestId("sync-done"), "Merged — review, then publish", "done");
+    });
+
+    it.each([
+      { name: "clean merge", action: "merge", testId: "sync-merge", conflicts: 0, text: "Merged — review, then publish" },
+      { name: "one conflict", action: "merge", testId: "sync-merge", conflicts: 1, text: "1 conflict to resolve in the editor" },
+      { name: "multiple conflicts", action: "merge", testId: "sync-merge", conflicts: 2, text: "2 conflicts to resolve in the editor" },
+      { name: "Keep mine", action: "keepMine", testId: "sync-keep-mine", conflicts: 0, text: "Published your version" },
+      { name: "Take GitHub", action: "takeRemote", testId: "sync-take-remote", conflicts: 0, text: "Replaced with GitHub's copy" },
+    ] as const)("preserves the supported $name outcome, icon and close delay", async ({ action, testId, conflicts, text }) => {
+      const actions = syncActions({ merge: vi.fn(async () => conflicts) });
+      const onOpenChange = vi.fn();
+      render(<SyncDialog open onOpenChange={onOpenChange} doc={doc} sync={DIVERGED} actions={actions} />);
+      await act(async () => {
+        fireEvent.click(screen.getByTestId(testId));
+        fireEvent.click(screen.getByTestId(testId));
+      });
+      expectResultRow(screen.getByTestId("sync-done"), text, "done");
+      expect(screen.queryByRole("alert")).toBeNull();
+      for (const kind of ["merge", "keepMine", "takeRemote", "compare"] as const) {
+        expect(actions[kind]).toHaveBeenCalledTimes(kind === action ? 1 : 0);
+      }
+      if (action === "keepMine") expect(actions.keepMine).toHaveBeenCalledExactlyOnceWith("Update big.md");
+      else expect(actions[action]).toHaveBeenCalledExactlyOnceWith();
+      for (const id of ["sync-merge", "sync-keep-mine", "sync-take-remote"]) {
+        expect(screen.getByTestId(id)).toBeDisabled();
+      }
+      expect(screen.getByTestId("sync-compare")).toBeEnabled();
+      expectPassiveResult(screen.getByTestId("sync-done"), actions, onOpenChange);
+      act(() => vi.advanceTimersByTime(899));
+      expect(onOpenChange).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(1));
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    });
+
+    it.each([
+      { transition: "replacement", outcome: "error" },
+      { transition: "replacement", outcome: "done" },
+      { transition: "reopen", outcome: "error" },
+      { transition: "reopen", outcome: "done" },
+      { transition: "document switch", outcome: "error" },
+      { transition: "document switch", outcome: "done" },
+    ] as const)("removes a settled $outcome on $transition and retires its controls", async ({ transition, outcome }) => {
+      const actions = syncActions({
+        merge: outcome === "error"
+          ? vi.fn<SyncActions["merge"]>().mockRejectedValue(new ApiError(409, longErrors[0].text))
+          : vi.fn(async () => 2),
+      });
+      const onOpenChange = vi.fn();
+      const props = { open: true, onOpenChange, doc, sync: DIVERGED, actions };
+      const view = render(<SyncDialog {...props} />);
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("sync-merge"));
+      });
+      const row = outcome === "error" ? screen.getByRole("alert") : screen.getByTestId("sync-done");
+      expectResultRow(row, outcome === "error" ? longErrors[0].text : "2 conflicts to resolve in the editor", outcome);
+      const retired = captureSyncCallbacks();
+      const nextProps = {
+        ...props,
+        doc: transition === "document switch" ? { ...doc, id: "next-doc", title: "Next document" } : doc,
+        sync: transition === "replacement" ? UPDATED_SYNC : DIVERGED,
+      };
+      if (transition === "reopen") view.rerender(<SyncDialog {...props} open={false} />);
+      view.rerender(<SyncDialog {...nextProps} />);
+      expect(row).not.toBeInTheDocument();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByTestId("sync-done")).toBeNull();
+      act(() => {
+        expect(invokeCapturedCallbacks(retired)).not.toHaveBeenCalled();
+      });
+      expect(actions.merge).toHaveBeenCalledOnce();
+      expect(actions.keepMine).not.toHaveBeenCalled();
+      expect(actions.takeRemote).not.toHaveBeenCalled();
+      expect(actions.compare).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(900));
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId("sync-keep-mine"));
+        fireEvent.click(screen.getByTestId("sync-keep-mine"));
+      });
+      expect(actions.keepMine).toHaveBeenCalledExactlyOnceWith("Update big.md");
+      expect(actions.merge).toHaveBeenCalledOnce();
+      expect(actions.takeRemote).not.toHaveBeenCalled();
+      expect(actions.compare).not.toHaveBeenCalled();
+      expectResultRow(screen.getByTestId("sync-done"), "Published your version", "done");
+    });
+  });
+
+  it("emits inherited anywhere wrapping and nonshrinking icons from installed Tailwind", async () => {
+    const { build } = await compile("@tailwind utilities;");
+    const css = build(["wrap-anywhere", "shrink-0"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).toMatch(/\.shrink-0\s*\{\s*flex-shrink:\s*0;\s*\}/);
+    expect(css).not.toMatch(/word-break:|white-space:|text-overflow:|overflow:\s*(hidden|auto|scroll)/);
   });
 });
 
