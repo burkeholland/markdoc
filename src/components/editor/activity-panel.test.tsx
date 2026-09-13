@@ -3246,6 +3246,19 @@ describe("ActivityPanel header focus movement", () => {
           close.disabled = false;
         } else if (mutation === "replace and restore destination") {
           const replacement = close.cloneNode(true);
+          const HTMLButtonElementConstructor =
+            close.ownerDocument === document
+              ? close.ownerDocument.defaultView?.HTMLButtonElement
+              : undefined;
+          if (
+            !HTMLButtonElementConstructor ||
+            replacement.ownerDocument !== document ||
+            !(replacement instanceof HTMLButtonElementConstructor)
+          ) {
+            throw new Error(
+              "The replacement close control was not an owner-realm current-document button",
+            );
+          }
           close.replaceWith(replacement);
           replacement.replaceWith(close);
         } else {
