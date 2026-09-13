@@ -106,6 +106,14 @@ type CreateNavigationKey =
   | "Home"
   | "End";
 
+const PUBLIC_KEYBOARD_METHODS = [
+  "preventDefault",
+  "isDefaultPrevented",
+  "isPropagationStopped",
+] as const;
+
+type PublicKeyboardMethod = (typeof PUBLIC_KEYBOARD_METHODS)[number];
+
 function setNativeProvenance(event: Event, target: EventTarget) {
   const path: EventTarget[] = [];
   if (target instanceof Node) {
@@ -536,6 +544,7 @@ function dispatchRowKeyboardWithReactPairMutation(
     captureBefore?: (event: ReactKeyboardEvent<HTMLLIElement>) => void;
     captureAfter?: (event: ReactKeyboardEvent<HTMLLIElement>) => void;
     bubbleBefore?: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+    bubbleAfter?: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   } = {},
   init: KeyboardEventInit = {},
 ) {
@@ -600,6 +609,7 @@ function dispatchRowKeyboardWithReactPairMutation(
       delivery.bubblePhase = event.eventPhase;
       mutations.bubbleBefore?.(event);
       (bubble as RowActionKeyDownHandler)(event);
+      mutations.bubbleAfter?.(event);
     },
   };
   rowProperties[rowPropsKey] = wrappedRow;
@@ -4437,10 +4447,8 @@ describe("Settings → Webhooks: exact committed controls", () => {
       (["capture", "bubble"] as const).flatMap((phase) =>
         ([
           "preventDefault",
-          "stopPropagation",
           "isDefaultPrevented",
           "isPropagationStopped",
-          "persist",
         ] as const).map((method) => [phase, method] as const)),
     )(
       "rejects retained %s-wrapper %s drift and admits a fresh event",
@@ -4513,6 +4521,532 @@ describe("Settings → Webhooks: exact committed controls", () => {
         }]);
       },
     );
+
+    it("accepts absent, replaced, and non-function optional wrapper members alongside public scalar accessors", async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [disabledWebhook] })));
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackRowNavigationEffects,
+      );
+      const effects = view.setup;
+      const row = await within(view.host)
+        .findByTestId("webhook-row") as HTMLLIElement;
+      await settle();
+      const source = within(row)
+        .getByTestId("webhook-test") as HTMLButtonElement;
+      const destination = within(row)
+        .getByTestId("webhook-delete") as HTMLButtonElement;
+      const receivers: object[] = [];
+      const identities = new Map<
+        "capture" | "bubble",
+        Record<PublicKeyboardMethod, unknown>
+      >();
+      const rewritePublicSurface = (
+        phase: "capture" | "bubble",
+        event: ReactKeyboardEvent<HTMLElement>,
+      ) => {
+        const key = event.key;
+        const code = event.code;
+        Object.defineProperties(event, {
+          // Ordinary public accessors that return the exact published values.
+          key: { configurable: true, enumerable: true, get: () => key },
+          code: { configurable: true, enumerable: true, get: () => code },
+          // Private and optional members this route must never consult.
+          _reactName: { configurable: true, value: null },
+          persist: { configurable: true, value: "not a function" },
+          isPersistent: { configurable: true, value: undefined },
+          stopPropagation: { configurable: true, value: { ignored: true } },
+        });
+        const originals: Record<
+          PublicKeyboardMethod,
+          (...args: never[]) => unknown
+        > = {
+          preventDefault: event.preventDefault,
+          isDefaultPrevented: event.isDefaultPrevented,
+          isPropagationStopped: event.isPropagationStopped,
+        };
+        const replacements: Record<PublicKeyboardMethod, unknown> = {
+          preventDefault: null,
+          isDefaultPrevented: null,
+          isPropagationStopped: null,
+        };
+        for (const name of PUBLIC_KEYBOARD_METHODS) {
+          const original = originals[name];
+          const replacement = function (this: object) {
+            receivers.push(this);
+            return Reflect.apply(original, this, []);
+          };
+          replacements[name] = replacement;
+          Object.defineProperty(event, name, {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: replacement,
+          });
+        }
+        identities.set(phase, replacements);
+      };
+      source.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+
+      const delivery = dispatchRowKeyboardWithReactPairMutation(
+        row,
+        source,
+        {
+          captureBefore: (event) => rewritePublicSurface(
+            "capture",
+            event as ReactKeyboardEvent<HTMLElement>,
+          ),
+          bubbleBefore: (event) => rewritePublicSurface(
+            "bubble",
+            event as ReactKeyboardEvent<HTMLElement>,
+          ),
+        },
+        rowNavigationInit("ArrowRight"),
+      );
+
+      const capturePhase = identities.get("capture");
+      const bubblePhase = identities.get("bubble");
+      expect(capturePhase).toBeDefined();
+      expect(bubblePhase).toBeDefined();
+      for (const name of PUBLIC_KEYBOARD_METHODS) {
+        expect(capturePhase![name]).not.toBe(bubblePhase![name]);
+      }
+      expect(receivers.length).toBeGreaterThanOrEqual(4);
+      expect(receivers.every((receiver) =>
+        receiver === delivery.captureEvent ||
+        receiver === delivery.bubbleEvent)).toBe(true);
+      expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: destination,
+        options: { preventScroll: true },
+      }]);
+      expect(destination).toHaveFocus();
+      expect(effects.scrollTo).not.toHaveBeenCalled();
+      expect(effects.scrollBy).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["capture", "isDefaultPrevented"],
+      ["capture", "isPropagationStopped"],
+      ["bubble", "isDefaultPrevented"],
+      ["bubble", "isPropagationStopped"],
+      ["bubble", "preventDefault"],
+    ] as const)(
+      "rejects a throwing public %s-wrapper %s and admits a clean successor",
+      async (phase, method) => {
+        fetchMock.mockImplementation(() =>
+          Promise.resolve(response({ webhooks: [activeWebhook] })));
+        const view = renderKeyboardDirect(
+          <StrictMode><WebhooksPanel /></StrictMode>,
+          trackRowNavigationEffects,
+        );
+        const effects = view.setup;
+        const row = await within(view.host)
+          .findByTestId("webhook-row") as HTMLLIElement;
+        await settle();
+        const source = within(row)
+          .getByTestId("webhook-test") as HTMLButtonElement;
+        const destination = within(row)
+          .getByTestId("webhook-delete") as HTMLButtonElement;
+        const callsBefore = fetchMock.mock.calls.length;
+        source.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+
+        const hostile = (event: ReactKeyboardEvent<HTMLElement>) => {
+          Object.defineProperty(event, method, {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: () => {
+              throw new Error("hostile public row method");
+            },
+          });
+        };
+        const rejected = dispatchRowKeyboardWithReactPairMutation(
+          row,
+          source,
+          phase === "capture"
+            ? {
+                captureBefore: (event) => hostile(
+                  event as ReactKeyboardEvent<HTMLElement>,
+                ),
+              }
+            : {
+                bubbleBefore: (event) => hostile(
+                  event as ReactKeyboardEvent<HTMLElement>,
+                ),
+              },
+          rowNavigationInit("ArrowRight"),
+        ).nativeEvent;
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(effects.preventDefault).not.toHaveBeenCalled();
+        expect(effects.focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expect(fetchMock).toHaveBeenCalledTimes(callsBefore);
+
+        const accepted = dispatchKeyboardEvent(
+          source,
+          rowNavigationInit("ArrowRight"),
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focusCalls).toEqual([{
+          target: destination,
+          options: { preventScroll: true },
+        }]);
+        expect(fetchMock).toHaveBeenCalledTimes(callsBefore);
+      },
+    );
+
+    it.each(["preventDefault", "isPropagationStopped"] as const)(
+      "rejects bubble %s identity drift raised during prevention before any focus",
+      async (property) => {
+        fetchMock.mockImplementation(() =>
+          Promise.resolve(response({ webhooks: [activeWebhook] })));
+        const view = renderKeyboardDirect(
+          <StrictMode><WebhooksPanel /></StrictMode>,
+          trackRowNavigationEffects,
+        );
+        const effects = view.setup;
+        const row = await within(view.host)
+          .findByTestId("webhook-row") as HTMLLIElement;
+        await settle();
+        const source = within(row)
+          .getByTestId("webhook-test") as HTMLButtonElement;
+        const destination = within(row)
+          .getByTestId("webhook-delete") as HTMLButtonElement;
+        source.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+
+        const rejected = dispatchRowKeyboardWithReactPairMutation(
+          row,
+          source,
+          {
+            bubbleBefore: (event) => {
+              const original = event.preventDefault;
+              Object.defineProperty(event, "preventDefault", {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: function (this: ReactKeyboardEvent<HTMLButtonElement>) {
+                  Reflect.apply(original, this, []);
+                  Object.defineProperty(this, property, {
+                    configurable: true,
+                    enumerable: true,
+                    writable: true,
+                    value: () => false,
+                  });
+                },
+              });
+            },
+          },
+          rowNavigationInit("ArrowRight"),
+        ).nativeEvent;
+
+        expect(rejected.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+
+        effects.preventDefault.mockClear();
+        const accepted = dispatchKeyboardEvent(
+          source,
+          rowNavigationInit("ArrowRight"),
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focusCalls).toEqual([{
+          target: destination,
+          options: { preventScroll: true },
+        }]);
+      },
+    );
+
+    it("invokes the retained bubble prevention once and accepts React's replaced default query", async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [activeWebhook] })));
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackRowNavigationEffects,
+      );
+      const effects = view.setup;
+      const row = await within(view.host)
+        .findByTestId("webhook-row") as HTMLLIElement;
+      await settle();
+      const source = within(row)
+        .getByTestId("webhook-test") as HTMLButtonElement;
+      const destination = within(row)
+        .getByTestId("webhook-delete") as HTMLButtonElement;
+      source.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      const before: {
+        preventDefault: unknown;
+        isDefaultPrevented: unknown;
+        isPropagationStopped: unknown;
+      } = {
+        preventDefault: null,
+        isDefaultPrevented: null,
+        isPropagationStopped: null,
+      };
+      let preventionCalls = 0;
+
+      const delivery = dispatchRowKeyboardWithReactPairMutation(
+        row,
+        source,
+        {
+          bubbleBefore: (event) => {
+            const original = event.preventDefault;
+            const wrapped = function (
+              this: ReactKeyboardEvent<HTMLButtonElement>,
+            ) {
+              preventionCalls += 1;
+              Reflect.apply(original, this, []);
+            };
+            Object.defineProperty(event, "preventDefault", {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: wrapped,
+            });
+            before.preventDefault = wrapped;
+            before.isDefaultPrevented = event.isDefaultPrevented;
+            before.isPropagationStopped = event.isPropagationStopped;
+          },
+        },
+        rowNavigationInit("ArrowRight"),
+      );
+
+      const bubble = delivery.bubbleEvent;
+      expect(preventionCalls).toBe(1);
+      expect(bubble.preventDefault).toBe(before.preventDefault);
+      expect(bubble.isPropagationStopped).toBe(before.isPropagationStopped);
+      expect(bubble.isPropagationStopped()).toBe(false);
+      expect(bubble.isDefaultPrevented).not.toBe(before.isDefaultPrevented);
+      expect(bubble.isDefaultPrevented()).toBe(true);
+      expect(delivery.captureEvent.isDefaultPrevented()).toBe(false);
+      expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: destination,
+        options: { preventScroll: true },
+      }]);
+    });
+
+    it("keeps the exact row pair across nested microtask checkpoints between the React phases", async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [activeWebhook] })));
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackRowNavigationEffects,
+      );
+      const effects = view.setup;
+      const row = await within(view.host)
+        .findByTestId("webhook-row") as HTMLLIElement;
+      await settle();
+      const source = within(row)
+        .getByTestId("webhook-test") as HTMLButtonElement;
+      const destination = within(row)
+        .getByTestId("webhook-delete") as HTMLButtonElement;
+      const ownerWindow = row.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The webhook row has no owner Window");
+      source.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      let drained = 0;
+      let checkpoints = 0;
+      const checkpoint = vi
+        .spyOn(ownerWindow, "queueMicrotask")
+        .mockImplementation((callback: VoidFunction) => {
+          checkpoints += 1;
+          callback();
+        });
+      const delivery = (() => {
+        try {
+          return dispatchRowKeyboardWithReactPairMutation(
+            row,
+            source,
+            {
+              captureAfter: () => {
+                ownerWindow.queueMicrotask(() => {
+                  drained += 1;
+                  ownerWindow.queueMicrotask(() => {
+                    drained += 1;
+                  });
+                });
+              },
+            },
+            rowNavigationInit("ArrowRight"),
+          );
+        } finally {
+          checkpoint.mockRestore();
+        }
+      })();
+
+      expect(drained).toBe(2);
+      expect(checkpoints).toBeGreaterThanOrEqual(2);
+      expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: destination,
+        options: { preventScroll: true },
+      }]);
+      expect(destination).toHaveFocus();
+    });
+
+    it("ignores reentrant row capture and action bubble attempts raised from a public query", async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [activeWebhook] })));
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackRowNavigationEffects,
+      );
+      const effects = view.setup;
+      const row = await within(view.host)
+        .findByTestId("webhook-row") as HTMLLIElement;
+      await settle();
+      const source = within(row)
+        .getByTestId("webhook-test") as HTMLButtonElement;
+      const destination = within(row)
+        .getByTestId("webhook-delete") as HTMLButtonElement;
+      const rowCapture = reactProp<RowCaptureHandler>(row, "onKeyDownCapture");
+      const actionBubble =
+        reactProp<RowActionKeyDownHandler>(source, "onKeyDown");
+      const callsBefore = fetchMock.mock.calls.length;
+      source.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      const reentries = { capture: 0, bubble: 0 };
+
+      const delivery = dispatchRowKeyboardWithReactPairMutation(
+        row,
+        source,
+        {
+          bubbleBefore: (event) => {
+            const original = event.isPropagationStopped;
+            Object.defineProperty(event, "isPropagationStopped", {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: function (this: ReactKeyboardEvent<HTMLButtonElement>) {
+                if (reentries.capture < 2) {
+                  reentries.capture += 1;
+                  rowCapture(
+                    event as unknown as ReactKeyboardEvent<HTMLLIElement>,
+                  );
+                  reentries.bubble += 1;
+                  actionBubble(event);
+                }
+                return Reflect.apply(original, this, []);
+              },
+            });
+          },
+        },
+        rowNavigationInit("ArrowRight"),
+      );
+
+      expect(reentries.capture).toBeGreaterThanOrEqual(1);
+      expect(reentries.bubble).toBeGreaterThanOrEqual(1);
+      expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: destination,
+        options: { preventScroll: true },
+      }]);
+      expect(fetchMock).toHaveBeenCalledTimes(callsBefore);
+    });
+
+    it("ignores crossed, cross-row, and duplicate action handlers without consuming the rightful pair", async () => {
+      const confirmMock = vi.fn(() => true);
+      vi.stubGlobal("confirm", confirmMock);
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({
+          webhooks: [disabledWebhook, activeWebhook],
+        })));
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackRowNavigationEffects,
+      );
+      const effects = view.setup;
+      const rows = await within(view.host).findAllByTestId("webhook-row");
+      await settle();
+      const first = rows[0] as HTMLLIElement;
+      const source = within(first)
+        .getByTestId("webhook-test") as HTMLButtonElement;
+      const destination = within(first)
+        .getByTestId("webhook-delete") as HTMLButtonElement;
+      const crossed = reactProp<RowActionKeyDownHandler>(
+        destination,
+        "onKeyDown",
+      );
+      const otherRowAction = reactProp<RowActionKeyDownHandler>(
+        within(rows[1]).getByTestId("webhook-test") as HTMLButtonElement,
+        "onKeyDown",
+      );
+      const duplicate = reactProp<RowActionKeyDownHandler>(source, "onKeyDown");
+      const callsBefore = fetchMock.mock.calls.length;
+      source.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+
+      const blocked = dispatchRowKeyboardWithReactPairMutation(
+        first,
+        source,
+        {
+          bubbleBefore: (event) => {
+            crossed(event);
+            otherRowAction(event);
+          },
+        },
+        rowNavigationInit("ArrowRight"),
+      ).nativeEvent;
+
+      expect(blocked.defaultPrevented).toBe(false);
+      expect(effects.preventDefault).not.toHaveBeenCalled();
+      expect(effects.focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+      const delivered = dispatchRowKeyboardWithReactPairMutation(
+        first,
+        source,
+        {
+          bubbleAfter: (event) => {
+            crossed(event);
+            otherRowAction(event);
+            duplicate(event);
+          },
+        },
+        rowNavigationInit("ArrowRight"),
+      ).nativeEvent;
+
+      expect(delivered.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: destination,
+        options: { preventScroll: true },
+      }]);
+      expect(destination).toHaveFocus();
+      expect(fetchMock).toHaveBeenCalledTimes(callsBefore);
+      expect(confirmMock).not.toHaveBeenCalled();
+    });
 
     it("binds null view and the delegated native root to the proven backing Window receiver while rejecting a foreign view", async () => {
       fetchMock.mockImplementation(() =>
