@@ -752,7 +752,7 @@ describe("ImportDialog result action keyboard navigation", () => {
       expect(pair.capture.nativeEvent).toBe(pair.nativeEvent);
       expect(pair.bubble.nativeEvent).toBe(pair.nativeEvent);
       expect(pair.capture.isDefaultPrevented()).toBe(false);
-      expect(pair.bubble.isDefaultPrevented()).toBe(false);
+      expect(pair.bubble.isDefaultPrevented()).toBe(true);
       expect(pair.nativeEvent.defaultPrevented).toBe(true);
       expect(controls[1]!.element).toHaveFocus();
       expect(retry).not.toHaveBeenCalled();
@@ -814,7 +814,6 @@ describe("ImportDialog result action keyboard navigation", () => {
 
   it.each([
     ["capture", "capture-after", "isDefaultPrevented"],
-    ["bubble", "bubble-before", "isPropagationStopped"],
   ] as const)(
     "rejects %s predicate-method drift before claim and admits a clean successor",
     (_boundary, alteredPhase, property) => {
@@ -888,6 +887,307 @@ describe("ImportDialog result action keyboard navigation", () => {
     },
   );
 
+  it("accepts independent public phase methods, scalar accessors, and irrelevant private fields", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    const methodIdentities = new Map<
+      string,
+      Record<
+        "preventDefault" | "isDefaultPrevented" | "isPropagationStopped",
+        (...args: never[]) => unknown
+      >
+    >();
+    const receivers: object[] = [];
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={vi.fn()}
+              items={navigationItems(retry, retryAll)}
+              ignored={[]}
+            />
+          </StrictMode>,
+        );
+      });
+      const controls = captureResultNavigationControls();
+      const pair = dispatchResultKeyWithBoundaryProbe(
+        controls[0]!.element,
+        "ArrowDown",
+        (phase, event) => {
+          if (!phase.endsWith("before")) return;
+          const key = event.key;
+          const code = event.code;
+          Object.defineProperties(event, {
+            key: {
+              configurable: true,
+              enumerable: true,
+              get: () => key,
+            },
+            code: {
+              configurable: true,
+              enumerable: true,
+              get: () => code,
+            },
+            _reactName: {
+              configurable: true,
+              value: null,
+            },
+            persist: {
+              configurable: true,
+              value: "not a function",
+            },
+            isPersistent: {
+              configurable: true,
+              value: undefined,
+            },
+            stopPropagation: {
+              configurable: true,
+              value: { ignored: true },
+            },
+          });
+          const originals = {
+            preventDefault: event.preventDefault,
+            isDefaultPrevented: event.isDefaultPrevented,
+            isPropagationStopped: event.isPropagationStopped,
+          };
+          const replacements = Object.fromEntries(
+            Object.entries(originals).map(([name, original]) => [
+              name,
+              function (this: object) {
+                receivers.push(this);
+                return Reflect.apply(original, this, []);
+              },
+            ]),
+          ) as Record<
+            keyof typeof originals,
+            (...args: never[]) => unknown
+          >;
+          for (const [name, replacement] of Object.entries(replacements)) {
+            Object.defineProperty(event, name, {
+              configurable: true,
+              enumerable: true,
+              value: replacement,
+              writable: true,
+            });
+          }
+          methodIdentities.set(phase, replacements);
+        },
+      );
+
+      expect(methodIdentities.get("capture-before")).toBeDefined();
+      expect(methodIdentities.get("bubble-before")).toBeDefined();
+      expect(methodIdentities.get("capture-before")?.preventDefault).not.toBe(
+        methodIdentities.get("bubble-before")?.preventDefault,
+      );
+      expect(receivers.length).toBeGreaterThanOrEqual(5);
+      expect(
+        receivers.every(
+          (receiver) => receiver === pair.capture || receiver === pair.bubble,
+        ),
+      ).toBe(true);
+      expect(pair.nativeEvent.defaultPrevented).toBe(true);
+      expect(controls[1]!.element).toHaveFocus();
+      expect(retry).not.toHaveBeenCalled();
+      expect(retryAll).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["capture query", "capture-before", "isDefaultPrevented"],
+    ["bubble query", "bubble-before", "isDefaultPrevented"],
+    ["prevention", "bubble-before", "preventDefault"],
+  ] as const)(
+    "rejects a throwing public %s without poisoning a clean successor",
+    (_attempt, alteredPhase, property) => {
+      const preventDefault = vi.spyOn(
+        Event.prototype,
+        "preventDefault",
+      );
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <ImportDialog
+                open
+                onOpenChange={vi.fn()}
+                items={navigationItems(vi.fn(), vi.fn())}
+                ignored={[]}
+              />
+            </StrictMode>,
+          );
+        });
+        const controls = captureResultNavigationControls();
+        const source = controls[0]!.element;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const rejected = dispatchResultKeyWithBoundaryProbe(
+          source,
+          "ArrowDown",
+          (phase, event) => {
+            if (phase !== alteredPhase) return;
+            Object.defineProperty(event, property, {
+              configurable: true,
+              enumerable: true,
+              value: () => {
+                throw new Error("hostile public method");
+              },
+              writable: true,
+            });
+          },
+          false,
+        );
+
+        expect(rejected.nativeEvent.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+
+        const accepted = dispatchResultKey(
+          source,
+          "ArrowDown",
+          {},
+          true,
+          false,
+        );
+        expect(accepted.allowed).toBe(false);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledOnce();
+        expect(controls[1]!.element).toHaveFocus();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it.each(["preventDefault", "isPropagationStopped"] as const)(
+    "rejects %s identity drift during public prevention before focus",
+    (property) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      try {
+        act(() => {
+          root.render(
+            <StrictMode>
+              <ImportDialog
+                open
+                onOpenChange={vi.fn()}
+                items={navigationItems(vi.fn(), vi.fn())}
+                ignored={[]}
+              />
+            </StrictMode>,
+          );
+        });
+        const controls = captureResultNavigationControls();
+        const source = controls[0]!.element;
+        source.focus();
+        focus.mockClear();
+        const rejected = dispatchResultKeyWithBoundaryProbe(
+          source,
+          "ArrowDown",
+          (phase, event) => {
+            if (phase !== "bubble-before") return;
+            const originalPreventDefault = event.preventDefault;
+            Object.defineProperty(event, "preventDefault", {
+              configurable: true,
+              enumerable: true,
+              value: function (this: ReactKeyboardEvent<HTMLElement>) {
+                Reflect.apply(originalPreventDefault, this, []);
+                Object.defineProperty(this, property, {
+                  configurable: true,
+                  enumerable: true,
+                  value: () => false,
+                  writable: true,
+                });
+              },
+              writable: true,
+            });
+          },
+          false,
+        );
+
+        expect(rejected.nativeEvent.defaultPrevented).toBe(true);
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+
+        const accepted = dispatchResultKey(
+          source,
+          "ArrowDown",
+          {},
+          true,
+          false,
+        );
+        expect(accepted.allowed).toBe(false);
+        expect(focus).toHaveBeenCalledOnce();
+        expect(controls[1]!.element).toHaveFocus();
+      } finally {
+        act(() => root.unmount());
+        host.remove();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it("keeps an exact pair across nested microtask checkpoints between React phases", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let checkpoint: ReturnType<typeof vi.spyOn> | null = null;
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <ImportDialog
+              open
+              onOpenChange={vi.fn()}
+              items={navigationItems(vi.fn(), vi.fn())}
+              ignored={[]}
+            />
+          </StrictMode>,
+        );
+      });
+      checkpoint = vi
+        .spyOn(window, "queueMicrotask")
+        .mockImplementation((callback: VoidFunction) => callback());
+      const controls = captureResultNavigationControls();
+      const pair = dispatchResultKeyWithBoundaryProbe(
+        controls[0]!.element,
+        "ArrowDown",
+        (phase) => {
+          if (phase !== "capture-after") return;
+          window.queueMicrotask(() => {
+            window.queueMicrotask(() => undefined);
+          });
+        },
+      );
+
+      expect(checkpoint.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(pair.nativeEvent.defaultPrevented).toBe(true);
+      expect(controls[1]!.element).toHaveFocus();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+      checkpoint?.mockRestore();
+    }
+  });
+
   it("accepts the real Window backing receiver and rejects a receiver lookalike", () => {
     const additions = vi.spyOn(window, "addEventListener");
     const removals = vi.spyOn(window, "removeEventListener");
@@ -915,7 +1215,12 @@ describe("ImportDialog result action keyboard navigation", () => {
             type === "keydown" &&
             options === true &&
             typeof candidate === "function" &&
-            candidate.name === "rememberImportResultNavigationNative",
+            !removals.mock.calls.some(
+              ([removedType, removedCandidate, removedOptions]) =>
+                removedType === type &&
+                removedCandidate === candidate &&
+                removedOptions === options,
+            ),
         )
         .map(([, candidate]) => candidate)
         .at(-1);
@@ -1437,6 +1742,27 @@ describe("ImportDialog result action keyboard navigation", () => {
       expect(focus).not.toHaveBeenCalled();
       expect(onOpenChange).not.toHaveBeenCalled();
 
+      const tab = dispatchResultKey(
+        only.element,
+        "Tab",
+        {},
+        true,
+        false,
+      );
+      expect(tab.allowed).toBe(false);
+      expect(tab.event.defaultPrevented).toBe(true);
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      dispatchResultKey(
+        only.element,
+        "Escape",
+        {},
+        true,
+        false,
+      );
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      onOpenChange.mockClear();
+
       invokeResultControl(captureResultOpen());
       expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
     } finally {
@@ -1899,7 +2225,7 @@ describe("ImportDialog result action keyboard navigation", () => {
     },
   );
 
-  it("rejects stale facts and crossed handlers, then retires all work at cleanup", () => {
+  it("rejects stale facts without letting crossed handlers consume or cleanup replay authority", () => {
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const host = document.createElement("div");
@@ -1970,19 +2296,20 @@ describe("ImportDialog result action keyboard navigation", () => {
             true,
             false,
           ).allowed,
-        ).toBe(true);
+        ).toBe(false);
       } finally {
         restore();
       }
-      expect(preventDefault).not.toHaveBeenCalled();
-      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(current[1]!.element).toHaveFocus();
 
       const recovered = dispatchResultKey(
         current[0]!.element,
         "ArrowDown",
         {},
         true,
-        false,
+        true,
       );
       expect(recovered.allowed).toBe(false);
       expect(current[1]!.element).toHaveFocus();
