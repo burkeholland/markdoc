@@ -1099,22 +1099,29 @@ describe("ImportDialog failed-import reason wrapping", () => {
     expect(uploadImportBatch).not.toHaveBeenCalled();
   });
 
-  it.each(["close", "replacement"] as const)("retires wrapped-row actions across %s without affecting the next row", (change) => {
+  it.each([
+    { mode: "Strict", change: "close" },
+    { mode: "Strict", change: "replacement" },
+    { mode: "ordinary", change: "close" },
+    { mode: "ordinary", change: "replacement" },
+  ])("retires wrapped-row actions across $change in $mode mode without affecting the next row", ({ mode, change }) => {
     const oldRetry = vi.fn();
     const nextRetry = vi.fn();
     const onOpenChange = vi.fn();
     const [success, failed] = resultItems(oldRetry);
     const oldItem = { ...failed, error: "o".repeat(300) };
-    const dialog = (open: boolean, item: ImportItem) => (
-      <StrictMode>
-        <ImportDialog key={item.name} open={open} onOpenChange={onOpenChange} items={[success, item]} ignored={[]} />
-      </StrictMode>
-    );
+    const dialog = (open: boolean, item: ImportItem) => {
+      const content = <ImportDialog open={open} onOpenChange={onOpenChange} items={[success, item]} ignored={[]} />;
+      return mode === "Strict" ? <StrictMode>{content}</StrictMode> : content;
+    };
     const view = render(dialog(true, oldItem));
+    const resultRoot = screen.getByTestId("import-dialog");
+    const dialogElement = screen.getByRole("dialog");
     const rows = screen.getAllByTestId("import-item");
     const neighborHtml = rows[0].outerHTML;
     expectImportError(rows[1], oldItem.error);
     const retired = captureResultRowRetry();
+    const retiredOpen = captureResultOpen();
     const nextItem = { ...failed, name: change === "replacement" ? "replacement.md" : failed.name, error: "n".repeat(300), retry: nextRetry };
     if (change === "close") {
       view.rerender(dialog(false, oldItem));
@@ -1126,8 +1133,15 @@ describe("ImportDialog failed-import reason wrapping", () => {
     const currentRows = screen.getAllByTestId("import-item");
     expect(rows[1]).not.toBeInTheDocument();
     expect(currentRows[0].outerHTML).toBe(neighborHtml);
+    if (change === "replacement") {
+      expect(screen.getByTestId("import-dialog")).toBe(resultRoot);
+      expect(screen.getByRole("dialog")).toBe(dialogElement);
+      expect(currentRows[0]).toBe(rows[0]);
+      expect(captureResultOpen().element).toBe(retiredOpen.element);
+    }
     expectImportError(currentRows[1], nextItem.error);
     const current = captureResultRowRetry();
+    invokeResultControl(retiredOpen, captureResultOpen().element);
     invokeResultControl(retired);
     invokeResultControl(retired, current.element);
     expect(oldRetry).not.toHaveBeenCalled();
@@ -2846,6 +2860,129 @@ describe("ImportDialog result action keyboard navigation", () => {
 });
 
 describe("ImportDialog result publications", () => {
+  it.each([
+    "complete",
+    "row only",
+    "retry only",
+    "row left detached",
+    "retry left detached",
+    "retained successful row",
+    "retained Open",
+    "retained failed row",
+    "retained Retry",
+    "restored message mutation",
+  ] as const)("requires exact newly placed row replay: %s", (change) => {
+    const onOpenChange = vi.fn();
+    const retainedRetry = vi.fn();
+    const oldRetry = vi.fn();
+    const nextRetry = vi.fn();
+    const retryAll = vi.fn();
+    const [success, failed] = resultItems(retainedRetry);
+    const items: ImportItem[] = [
+      success,
+      { ...failed, retryAll },
+      { ...failed, name: "old.md", error: "o".repeat(300), retry: oldRetry, retryAll },
+    ];
+    const dialog = (results: ImportItem[]) => (
+      <ImportDialog open onOpenChange={onOpenChange} items={results} ignored={[]} />
+    );
+    const view = render(dialog(items));
+    const originalRows = screen.getAllByTestId("import-item");
+    const root = screen.getByTestId("import-dialog");
+    const neighborHtml = originalRows[0].outerHTML;
+    const oldOpen = captureResultOpen();
+    const oldRetainedRetry = captureResultRowRetry(0);
+    const oldReplacedRetry = captureResultRowRetry(1);
+    const oldBatchRetry = captureResultRetry();
+    const retainedReason = "Changed data on the retained row";
+    const replacementReason = "n".repeat(300);
+    const replacement: ImportItem[] = [
+      success,
+      { ...items[1], error: retainedReason },
+      { ...items[2], name: "replacement.md", error: replacementReason, retry: nextRetry },
+    ];
+    view.rerender(dialog(replacement));
+    const rows = screen.getAllByTestId("import-item");
+    const replayOpen = captureResultOpen();
+    const replayRetainedRetry = captureResultRowRetry(0);
+    const replayRetry = captureResultRowRetry(1);
+    const replayBatchRetry = captureResultRetry();
+    expect(screen.getByTestId("import-dialog")).toBe(root);
+    expect(rows[0]).toBe(originalRows[0]);
+    expect(rows[0].outerHTML).toBe(neighborHtml);
+    expect(rows[1]).toBe(originalRows[1]);
+    expect(replayOpen.element).toBe(oldOpen.element);
+    expect(replayRetainedRetry.element).toBe(oldRetainedRetry.element);
+    expect(replayBatchRetry.element).toBe(oldBatchRetry.element);
+    expect(rows[2]).not.toBe(originalRows[2]);
+    expect(originalRows[2]).not.toBeInTheDocument();
+    expect(replayRetry.element).not.toBe(oldReplacedRetry.element);
+    expectImportError(rows[1], retainedReason);
+    const message = expectImportError(rows[2], replacementReason);
+    const rowRef = reactRef(rows[2]);
+    const retryRef = reactRef(replayRetry.element);
+    const markup = root.outerHTML;
+
+    // Ordinary mode lets the captured refs exercise incomplete histories before any successor.
+    act(() => {
+      const unrelated =
+        change === "retained successful row" ? rows[0] :
+        change === "retained Open" ? replayOpen.element :
+        change === "retained failed row" ? rows[1] :
+        change === "retained Retry" ? replayRetainedRetry.element : null;
+      if (unrelated) {
+        // Retained DOM can still point at the previous fiber; its committed props carry the current ref.
+        const unrelatedRef = reactProp<RefCallback<HTMLElement>>(unrelated, "ref");
+        unrelatedRef(null);
+        unrelatedRef(unrelated);
+      }
+      if (change !== "retry only") rowRef(null);
+      if (change !== "row only") retryRef(null);
+      if (change === "restored message mutation") {
+        message.textContent = "Changed";
+        message.textContent = replacementReason;
+      }
+      if (change !== "retry only" && change !== "row left detached") rowRef(rows[2]);
+      if (change !== "row only" && change !== "retry left detached") retryRef(replayRetry.element);
+    });
+    expect(root.outerHTML).toBe(markup);
+    expect(rows[0].outerHTML).toBe(neighborHtml);
+
+    invokeResultControl(oldOpen, replayOpen.element);
+    invokeResultControl(oldRetainedRetry, replayRetainedRetry.element);
+    invokeResultControl(oldReplacedRetry, replayRetry.element);
+    invokeResultControl(oldBatchRetry, replayBatchRetry.element);
+    invokeResultControl(replayOpen);
+    invokeResultControl(replayRetainedRetry);
+    invokeResultControl(replayRetry);
+    invokeResultControl(replayBatchRetry);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(retainedRetry).not.toHaveBeenCalled();
+    expect(oldRetry).not.toHaveBeenCalled();
+    expect(nextRetry).not.toHaveBeenCalled();
+    expect(retryAll).not.toHaveBeenCalled();
+
+    if (change === "complete") {
+      expect(captureResultRowRetry(1).onClick).not.toBe(replayRetry.onClick);
+    } else {
+      expect(captureResultRowRetry(1).onClick).toBe(replayRetry.onClick);
+      // A separate ordinary publication recovers; incomplete replay cannot publish itself.
+      view.rerender(dialog(replacement));
+    }
+    const current = captureResultRowRetry(1);
+    invokeResultControl(replayRetry, current.element);
+    expect(nextRetry).not.toHaveBeenCalled();
+    invokeResultControl(current);
+    invokeResultControl(current);
+    expect(nextRetry).toHaveBeenCalledOnce();
+    expect(retainedRetry).not.toHaveBeenCalled();
+    expect(oldRetry).not.toHaveBeenCalled();
+    expect(retryAll).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+    expect(root.outerHTML).toBe(markup);
+  });
+
   it("binds repeated and crossed row retries to one exact current failed row", () => {
     const firstRetry = vi.fn();
     const secondRetry = vi.fn();

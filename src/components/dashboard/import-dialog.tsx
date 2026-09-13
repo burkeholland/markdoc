@@ -2797,6 +2797,9 @@ function createImportResultPublication(
     const publication = runtime.publication;
     const previous = cells.active.current;
     const predecessor = previous ?? cells.successorOf.current;
+    const predecessorRows = new Set<HTMLElement>(
+      predecessor?.rows.map((row) => row.item),
+    );
     const predecessorControls = new Set<HTMLElement>(
       predecessor
         ? [
@@ -2815,6 +2818,7 @@ function createImportResultPublication(
         ? [
             ...publication.rows.flatMap((row) =>
               [
+                ...(!predecessorRows.has(row.item) ? [row.item] : []),
                 ...(row.open && !predecessorControls.has(row.open.element)
                   ? [row.open.element]
                   : []),
