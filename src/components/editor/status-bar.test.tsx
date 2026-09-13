@@ -28,6 +28,9 @@ const controlled = vi.hoisted(() => ({
   sessionHook: vi.fn(),
   themePreference: "system",
   themeSetter: vi.fn(),
+  themeDisabled: false,
+  themeHidden: false,
+  themeContract: true,
 }));
 
 vi.mock("@/editor/markdown/lint", () => ({
@@ -50,11 +53,31 @@ vi.mock("./use-session", async (importOriginal) => {
   };
 });
 vi.mock("@/components/ui/theme-toggle", () => ({
-  ThemeToggle: ({ className }: { className?: string }) => (
-    <button type="button" className={className} data-testid="theme-toggle">
-      Theme
-    </button>
-  ),
+  ThemeToggle: ({ className }: { className?: string }) => {
+    const label = `Theme: ${
+      controlled.themePreference === "system"
+        ? "System"
+        : controlled.themePreference === "light"
+          ? "Light"
+          : "Dark"
+    }`;
+    return (
+      <button
+        type="button"
+        className={`icon-btn ${className ?? ""}`.trim()}
+        title={controlled.themeContract ? `${label} (click to switch)` : undefined}
+        aria-label={controlled.themeContract ? label : undefined}
+        disabled={controlled.themeDisabled}
+        hidden={controlled.themeHidden}
+        data-testid="theme-toggle"
+        data-theme-preference={
+          controlled.themeContract ? controlled.themePreference : undefined
+        }
+      >
+        Theme
+      </button>
+    );
+  },
   useTheme: () => [controlled.themePreference, controlled.themeSetter],
 }));
 
@@ -348,6 +371,21 @@ function desktopShortcuts() {
   );
   if (!element) throw new Error("Desktop shortcuts were not rendered");
   return element;
+}
+
+function statusControls(compact = false) {
+  const stats = screen.getByTestId("stats-button");
+  const menu = screen.getByTestId("layout-menu");
+  const storage = screen.getByTestId("storage-indicator");
+  if (compact) return [stats, storage, menu];
+  return [
+    stats,
+    menu,
+    screen.getByTestId("issues-button"),
+    storage,
+    screen.getByTestId("theme-toggle"),
+    desktopShortcuts(),
+  ];
 }
 
 function openMenu() {
@@ -671,6 +709,9 @@ beforeEach(() => {
   controlled.sessionValue = { text: "# Status bar", tree: {} };
   controlled.themePreference = "system";
   controlled.themeSetter.mockReset();
+  controlled.themeDisabled = false;
+  controlled.themeHidden = false;
+  controlled.themeContract = true;
 });
 
 afterEach(async () => {
@@ -910,6 +951,368 @@ describe("status bar Strict Mode controls", () => {
     });
     expect(issuesTrigger).toHaveAttribute("aria-expanded", "false");
     expect(issuesTrigger).toHaveFocus();
+  });
+});
+
+describe("status bar top-level keyboard navigation", () => {
+  it("moves to the next desktop control once without activation or scroll work", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const scroll = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+    try {
+      await renderStatus(statusProps(current));
+      const controls = statusControls();
+      const source = controls[3]!;
+      const destination = controls[4]!;
+      source.focus();
+      focus.mockClear();
+      const event = menuKey(source, "ArrowRight", {
+        code: "Numpad6",
+        location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+
+      act(() => {
+        source.dispatchEvent(event);
+      });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      expect(
+        preventDefault.mock.contexts.filter((context) => context === event),
+      ).toHaveLength(1);
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+      expect(controlled.themeSetter).not.toHaveBeenCalled();
+      expect(scroll).not.toHaveBeenCalled();
+      expect(screen.getByTestId("layout-menu")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+      expect(screen.getByTestId("issues-button")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
+    } finally {
+      focus.mockRestore();
+      preventDefault.mockRestore();
+      scroll.mockRestore();
+    }
+  });
+
+  it("covers every accepted desktop source and destination in committed order", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const cases: [number, number, "ArrowLeft" | "ArrowRight" | "Home" | "End"][] = [];
+    for (let index = 0; index < 5; index++) {
+      cases.push([index, index + 1, "ArrowRight"]);
+      cases.push([index + 1, index, "ArrowLeft"]);
+      cases.push([index, 5, "End"]);
+      cases.push([index + 1, 0, "Home"]);
+    }
+
+    for (const [from, to, key] of cases) {
+      const controls = statusControls();
+      const source = controls[from]!;
+      const destination = controls[to]!;
+      source.focus();
+      const event = menuKey(source, key);
+      await act(async () => {
+        source.dispatchEvent(event);
+        await Promise.resolve();
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+    }
+
+    expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(controlled.themeSetter).not.toHaveBeenCalled();
+    expect(screen.getByTestId("layout-menu")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.getByTestId("issues-button")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("uses compact visual order and accepts all four semantic keypad mappings", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    await renderStatus(statusProps(current, { compact: true, layout: "code" }));
+    const cases = [
+      [2, 1, "ArrowLeft", "Numpad4"],
+      [0, 1, "ArrowRight", "Numpad6"],
+      [2, 0, "Home", "Numpad7"],
+      [0, 2, "End", "Numpad1"],
+    ] as const;
+
+    for (const [from, to, key, code] of cases) {
+      const controls = statusControls(true);
+      const source = controls[from]!;
+      const destination = controls[to]!;
+      source.focus();
+      const event = menuKey(source, key, {
+        code,
+        location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+      await act(async () => {
+        source.dispatchEvent(event);
+        await Promise.resolve();
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+    }
+
+    expect(statusControls(true).map((control) => control.dataset.testid)).toEqual([
+      "stats-button",
+      "storage-indicator",
+      "layout-menu",
+    ]);
+    expect(screen.queryByTestId("issues-button")).toBeNull();
+    expect(screen.queryByTestId("theme-toggle")).toBeNull();
+    expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+  });
+
+  it("keeps bounded edges and non-navigation keys unprevented and inert", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const controls = statusControls();
+    const cases = [
+      [controls[0]!, "ArrowLeft"],
+      [controls[0]!, "Home"],
+      [controls.at(-1)!, "ArrowRight"],
+      [controls.at(-1)!, "End"],
+      [controls[3]!, "ArrowUp"],
+      [controls[3]!, "ArrowDown"],
+      [controls[3]!, "Tab"],
+      [controls[3]!, "Enter"],
+      [controls[3]!, " "],
+    ] as const;
+
+    for (const [source, key] of cases) {
+      source.focus();
+      const event = menuKey(source, key);
+      act(() => {
+        source.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+    }
+
+    expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(controlled.themeSetter).not.toHaveBeenCalled();
+  });
+
+  it.each(["disabled", "hidden"] as const)(
+    "skips an initially %s theme control",
+    async (state) => {
+      useExactWindowListenerRealm();
+      controlled.themeDisabled = state === "disabled";
+      controlled.themeHidden = state === "hidden";
+      const current = callbacks();
+      await renderStatus(statusProps(current));
+      const controls = statusControls();
+      const storage = controls[3]!;
+      const shortcuts = controls[5]!;
+      storage.focus();
+      const event = menuKey(storage, "ArrowRight");
+
+      act(() => {
+        storage.dispatchEvent(event);
+      });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(shortcuts).toHaveFocus();
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    },
+  );
+
+  it("skips disabled compact storage and does not publish absent desktop controls", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    await renderStatus(statusProps(current, {
+      compact: true,
+      layout: "code",
+      onStorage: undefined,
+    }));
+    const stats = screen.getByTestId("stats-button");
+    const menu = screen.getByTestId("layout-menu");
+    expect(screen.getByTestId("storage-indicator")).toBeDisabled();
+    stats.focus();
+    const event = menuKey(stats, "ArrowRight");
+
+    act(() => {
+      stats.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(menu).toHaveFocus();
+    expect(screen.queryByTestId("issues-button")).toBeNull();
+    expect(screen.queryByTestId("theme-toggle")).toBeNull();
+    expect(document.querySelector('[aria-label="Help and shortcuts"]')).toBeNull();
+    expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+  });
+
+  it("fails navigation closed for an inexact child trigger without disabling existing controls", async () => {
+    useExactWindowListenerRealm();
+    controlled.themeContract = false;
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const source = screen.getByTestId("issues-button");
+    source.focus();
+    const event = menuKey(source, "ArrowRight");
+
+    act(() => {
+      source.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(source).toHaveFocus();
+    fireEvent.click(screen.getByTestId("storage-indicator"));
+    expect(current.storage).toHaveBeenCalledOnce();
+  });
+
+  it("rejects modifiers, repeat, composition, cancellation, wrong focus, and lookalike views before recovering", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    try {
+      await renderStatus(statusProps(current));
+      const source = statusControls()[2]!;
+      const destination = statusControls()[3]!;
+      const reject = (event: KeyboardEvent) => {
+        focus.mockClear();
+        act(() => {
+          source.dispatchEvent(event);
+        });
+        expect(event.defaultPrevented).toBe(false);
+        expect(focus).not.toHaveBeenCalled();
+      };
+      for (const init of [
+        { ctrlKey: true },
+        { altKey: true },
+        { metaKey: true },
+        { shiftKey: true },
+        { repeat: true },
+        { isComposing: true },
+        { cancelable: false },
+        { bubbles: false },
+      ] satisfies KeyboardEventInit[]) {
+        source.focus();
+        reject(menuKey(source, "ArrowRight", init));
+      }
+      destination.focus();
+      reject(menuKey(source, "ArrowRight"));
+      source.focus();
+      const canceled = menuKey(source, "ArrowRight");
+      canceled.preventDefault();
+      focus.mockClear();
+      act(() => {
+        source.dispatchEvent(canceled);
+      });
+      expect(canceled.defaultPrevented).toBe(true);
+      expect(focus).not.toHaveBeenCalled();
+      const lookalike: Record<string, unknown> = {
+        document: source.ownerDocument,
+      };
+      lookalike.window = lookalike;
+      const crossed = menuKey(source, "ArrowRight");
+      Object.defineProperty(crossed, "view", {
+        configurable: true,
+        value: lookalike,
+      });
+      reject(crossed);
+
+      source.focus();
+      focus.mockClear();
+      const clean = menuKey(source, "ArrowRight");
+      act(() => {
+        source.dispatchEvent(clean);
+      });
+      expect(clean.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    } finally {
+      focus.mockRestore();
+    }
+  });
+
+  it("rejects DOM reorder and restore history, then accepts a clean successor", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    await renderStatus(statusProps(current));
+    const root = screen.getByTestId("status-bar");
+    const controls = statusControls();
+    const source = controls[2]!;
+    const destination = controls[3]!;
+    const next = destination.nextSibling;
+    root.insertBefore(destination, source);
+    root.insertBefore(destination, next);
+    source.focus();
+    const stale = menuKey(source, "ArrowRight");
+
+    act(() => {
+      source.dispatchEvent(stale);
+    });
+
+    expect(stale.defaultPrevented).toBe(false);
+    expect(source).toHaveFocus();
+    await nextTask();
+    const currentSource = statusControls()[2]!;
+    const currentDestination = statusControls()[3]!;
+    currentSource.focus();
+    const clean = menuKey(currentSource, "ArrowRight");
+    act(() => {
+      currentSource.dispatchEvent(clean);
+    });
+    expect(clean.defaultPrevented).toBe(true);
+    expect(currentDestination).toHaveFocus();
+    expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+  });
+
+  it("claims replay once and removes navigation listeners on cleanup", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    try {
+      const view = await renderStatus(statusProps(current));
+      const source = statusControls()[1]!;
+      const destination = statusControls()[2]!;
+      source.focus();
+      focus.mockClear();
+      const event = menuKey(source, "ArrowRight");
+      act(() => {
+        source.dispatchEvent(event);
+        source.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        view.root.unmount();
+        await Promise.resolve();
+      });
+      view.host.remove();
+      directViews.splice(directViews.indexOf(view), 1);
+      focus.mockClear();
+      const afterCleanup = menuKey(source, "ArrowLeft");
+      act(() => {
+        source.dispatchEvent(afterCleanup);
+      });
+      expect(afterCleanup.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    } finally {
+      focus.mockRestore();
+    }
   });
 });
 
