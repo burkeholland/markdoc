@@ -6,6 +6,7 @@ import {
   useEffect,
   useLayoutEffect,
   type ComponentProps,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -198,6 +199,181 @@ function captureClick(element: HTMLElement): () => void {
   return () => invoke(control);
 }
 
+type ActivityKeyHandler = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+
+/** jsdom keeps event trust in an internal slot; a genuine keydown is trusted before dispatch. */
+function markActivityEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal Activity event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The Activity event trust slot did not update");
+}
+
+function setActivityEventView(event: KeyboardEvent, view: Window) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { view: Window | null } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "view" in candidate,
+    );
+  if (!implementation) {
+    throw new Error("Unable to set jsdom's internal Activity event view slot");
+  }
+  implementation.view = view;
+}
+
+function replaceActivityPathTerminal(event: Event, terminal: EventTarget) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find((candidate): candidate is {
+      _path: Array<{ item: Record<symbol, unknown> }>;
+    } => {
+      if (!candidate || typeof candidate !== "object") return false;
+      return Array.isArray((candidate as { _path?: unknown })._path);
+    });
+  const entry = implementation?._path.at(-1);
+  const currentTerminal = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === currentTerminal,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error("Unable to replace jsdom's Activity path terminal");
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+  if (event.composedPath().at(-1) !== terminal) {
+    throw new Error("The Activity path terminal did not update");
+  }
+}
+
+function activityKeyboardEvent(
+  element: HTMLElement,
+  key: string,
+  init: Omit<KeyboardEventInit, "key"> = {},
+  trusted = true,
+) {
+  const ownerWindow = element.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The Activity header control has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markActivityEventTrusted(event);
+  return event;
+}
+
+function activityKey(
+  element: HTMLElement,
+  key: string,
+  init: Omit<KeyboardEventInit, "key"> = {},
+) {
+  const event = activityKeyboardEvent(element, key, init);
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
+}
+
+/**
+ * Everything a hostile listener can put on a React-like keydown wrapper: every field React copies
+ * from the native event, both phase predicates and `persist`, around the live native event itself.
+ */
+function fabricatedActivityKey(
+  currentTarget: HTMLButtonElement,
+  nativeEvent: KeyboardEvent,
+): ReactKeyboardEvent<HTMLButtonElement> {
+  return {
+    type: nativeEvent.type,
+    key: nativeEvent.key,
+    code: nativeEvent.code,
+    repeat: nativeEvent.repeat,
+    altKey: nativeEvent.altKey,
+    ctrlKey: nativeEvent.ctrlKey,
+    metaKey: nativeEvent.metaKey,
+    shiftKey: nativeEvent.shiftKey,
+    bubbles: nativeEvent.bubbles,
+    cancelable: nativeEvent.cancelable,
+    defaultPrevented: nativeEvent.defaultPrevented,
+    eventPhase: nativeEvent.eventPhase,
+    isTrusted: nativeEvent.isTrusted,
+    view: nativeEvent.view,
+    timeStamp: nativeEvent.timeStamp,
+    currentTarget,
+    target: nativeEvent.target,
+    nativeEvent,
+    _reactName: "onKeyDown",
+    isDefaultPrevented: () => nativeEvent.defaultPrevented,
+    isPropagationStopped: () => nativeEvent.cancelBubble,
+    persist: () => undefined,
+    preventDefault: () => nativeEvent.preventDefault(),
+    stopPropagation: () => nativeEvent.stopPropagation(),
+  } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
+}
+
+function headerControl(
+  name: "Refresh activity" | "Refreshing activity" | "Close activity",
+) {
+  const element = screen.getByRole("button", { name });
+  if (!(element instanceof HTMLButtonElement)) {
+    throw new Error(`Expected ${name} to be a header button`);
+  }
+  return element;
+}
+
+function activityPanel() {
+  return screen.getByTestId("activity-panel");
+}
+
+function activityHeader() {
+  const header = activityPanel().firstElementChild;
+  if (!(header instanceof HTMLElement)) throw new Error("Activity has no header");
+  return header;
+}
+
+function replaceKeyHandler(
+  element: HTMLElement,
+  handler: ActivityKeyHandler,
+  name: "onKeyDown" | "onKeyDownCapture" = "onKeyDown",
+) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the Activity control");
+  const record = element as unknown as Record<string, Record<string, unknown>>;
+  const props = record[propsKey];
+  record[propsKey] = { ...props, [name]: handler };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
+function headerPage(id = "header"): ActivityPageDto {
+  return { items: [row(id, `${id} editor`)], nextBefore: null };
+}
+
 const directRoots = new Set<Root>();
 
 function createDirectActivity(
@@ -258,6 +434,14 @@ function row(id: string, actorName: string): ActivityItemDto {
     detail: {},
     createdAt: "2026-09-01T09:00:00.000Z",
   };
+}
+
+/** A settled direct-root Strict Mode Activity panel, with whatever `activity` was mocked to answer. */
+async function mountHeaderView(docId: string, onClose: () => void = vi.fn()) {
+  const collab = session(docId);
+  const view = createStrictActivity({ session: collab, onClose });
+  await act(async () => {});
+  return { ...view, onClose, session: collab };
 }
 
 beforeEach(() => {
@@ -2148,5 +2332,1253 @@ describe("ActivityPanel exact action publications", () => {
     expect(activity).toHaveBeenCalledTimes(2);
     expect(activity).toHaveBeenNthCalledWith(1, "session-A", { limit: 50 });
     expect(activity).toHaveBeenNthCalledWith(2, "session-B", { limit: 50 });
+  });
+});
+
+describe("ActivityPanel header focus movement", () => {
+  it.each([
+    ["ArrowRight", "Refresh activity", "Close activity"],
+    ["ArrowDown", "Refresh activity", "Close activity"],
+    ["End", "Refresh activity", "Close activity"],
+    ["ArrowLeft", "Close activity", "Refresh activity"],
+    ["ArrowUp", "Close activity", "Refresh activity"],
+    ["Home", "Close activity", "Refresh activity"],
+  ] as const)(
+    "moves %s from %s to %s once, without acting, fetching or scrolling",
+    async (key, from, to) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      activity.mockResolvedValue(headerPage());
+      const onClose = vi.fn();
+      await mountHeaderView(`header-${key}-${from}`, onClose);
+      const source = headerControl(from);
+      const destination = headerControl(to);
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requests = activity.mock.calls.length;
+      const published = activityPanel().innerHTML;
+      const scroll = activityPanel().lastElementChild;
+      const scrollBefore = [window.scrollX, window.scrollY, scroll?.scrollTop ?? 0];
+
+      const event = activityKey(source, key);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(focus.mock.instances[0]).toBe(destination);
+      expect(activity).toHaveBeenCalledTimes(requests);
+      expect(onClose).not.toHaveBeenCalled();
+      expect(activityPanel().innerHTML).toBe(published);
+      expect([
+        window.scrollX,
+        window.scrollY,
+        activityPanel().lastElementChild?.scrollTop ?? 0,
+      ]).toEqual(scrollBefore);
+      expect(headerControl("Refresh activity")).toBeEnabled();
+      expect(headerControl("Close activity")).toBeEnabled();
+    },
+  );
+
+  it.each([
+    ["ArrowLeft", "Numpad4", "Close activity", "Refresh activity"],
+    ["ArrowUp", "Numpad8", "Close activity", "Refresh activity"],
+    ["ArrowRight", "Numpad6", "Refresh activity", "Close activity"],
+    ["ArrowDown", "Numpad2", "Refresh activity", "Close activity"],
+    ["Home", "Numpad7", "Close activity", "Refresh activity"],
+    ["End", "Numpad1", "Refresh activity", "Close activity"],
+  ] as const)(
+    "accepts %s from %s at the numpad location without acting",
+    async (key, code, from, to) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      activity.mockResolvedValue(headerPage());
+      const onClose = vi.fn();
+      await mountHeaderView(`header-numpad-${code}`, onClose);
+      const source = headerControl(from);
+      const destination = headerControl(to);
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requests = activity.mock.calls.length;
+
+      const event = activityKeyboardEvent(source, key, {
+        code,
+        location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+      const ownerWindow = source.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("Activity has no owner Window");
+      setActivityEventView(event, ownerWindow);
+      expect(event.view).toBe(ownerWindow);
+      act(() => source.dispatchEvent(event));
+
+      expect(event.code).toBe(code);
+      expect(event.location).toBe(KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(activity).toHaveBeenCalledTimes(requests);
+      expect(onClose).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["ArrowLeft", "Refresh activity"],
+    ["ArrowUp", "Refresh activity"],
+    ["Home", "Refresh activity"],
+    ["ArrowRight", "Close activity"],
+    ["ArrowDown", "Close activity"],
+    ["End", "Close activity"],
+  ] as const)(
+    "leaves %s on %s inert at the header boundary and keeps the panel usable",
+    async (key, from) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      activity.mockResolvedValue(headerPage());
+      const onClose = vi.fn();
+      await mountHeaderView(`boundary-${key}-${from}`, onClose);
+      const source = headerControl(from);
+      source.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requests = activity.mock.calls.length;
+
+      const event = activityKey(source, key);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(activity).toHaveBeenCalledTimes(requests);
+      expect(onClose).not.toHaveBeenCalled();
+
+      const accepted = activityKey(
+        source,
+        from === "Refresh activity" ? "ArrowRight" : "ArrowLeft",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(focus).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["present", "absent", "mutated"] as const)(
+    "authenticates the backing Window receiver when private React metadata is %s",
+    async (privateMetadata) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      activity.mockResolvedValue(headerPage());
+      await mountHeaderView(`header-window-receiver-${privateMetadata}`);
+      const refresh = headerControl("Refresh activity");
+      const close = headerControl("Close activity");
+      const capture = reactHandler<ActivityKeyHandler>(
+        refresh,
+        "onKeyDownCapture",
+      );
+      const bubble = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
+      const captures: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+      const bubbles: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+      const captureMethods: unknown[][] = [];
+      const bubbleMethods: unknown[][] = [];
+      const cancellationStates: boolean[][] = [];
+      const phaseFacts: Array<readonly [number, EventTarget | null]> = [];
+      const stagePrivateMetadata = (
+        event: ReactKeyboardEvent<HTMLButtonElement>,
+      ) => {
+        if (privateMetadata === "absent") {
+          Reflect.deleteProperty(event, "_reactName");
+        } else if (privateMetadata === "mutated") {
+          Object.defineProperty(event, "_reactName", {
+            configurable: true,
+            value: "onPrivateMetadataChanged",
+          });
+        }
+      };
+      const propsKey = Object.keys(refresh).find((key) =>
+        key.startsWith("__reactProps$"),
+      );
+      if (!propsKey) {
+        throw new Error(
+          "React props were not attached to the Activity control",
+        );
+      }
+      const record = refresh as unknown as Record<
+        string,
+        Record<string, unknown>
+      >;
+      const originalProps = record[propsKey];
+      record[propsKey] = {
+        ...originalProps,
+        onKeyDownCapture: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          stagePrivateMetadata(event);
+          captures.push(event);
+          captureMethods.push([
+            event.preventDefault,
+            event.stopPropagation,
+            event.isDefaultPrevented,
+            event.isPropagationStopped,
+            event.persist,
+          ]);
+          cancellationStates.push([
+            event.isDefaultPrevented(),
+            event.isPropagationStopped(),
+          ]);
+          phaseFacts.push([event.eventPhase, event.currentTarget]);
+          capture(event);
+        },
+        onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          stagePrivateMetadata(event);
+          bubbles.push(event);
+          bubbleMethods.push([
+            event.preventDefault,
+            event.stopPropagation,
+            event.isDefaultPrevented,
+            event.isPropagationStopped,
+            event.persist,
+          ]);
+          cancellationStates.push([
+            event.isDefaultPrevented(),
+            event.isPropagationStopped(),
+          ]);
+          phaseFacts.push([event.eventPhase, event.currentTarget]);
+          bubble(event);
+        },
+      };
+      const ownerWindow = refresh.ownerDocument.defaultView;
+      const currentTargetGetter = ownerWindow
+        ? Object.getOwnPropertyDescriptor(
+            ownerWindow.Event.prototype,
+            "currentTarget",
+          )?.get
+        : undefined;
+      const composedPath = ownerWindow?.Event.prototype.composedPath;
+      if (!ownerWindow || !currentTargetGetter || !composedPath) {
+        throw new Error("Activity Window event intrinsics were unavailable");
+      }
+      const nativeDelivery: {
+        receiver?: EventTarget;
+        currentTarget?: EventTarget | null;
+        terminal?: EventTarget;
+      } = {};
+      const event = activityKeyboardEvent(refresh, "ArrowRight");
+      const observeReceiver = function (this: EventTarget, nativeEvent: Event) {
+        if (nativeEvent !== event) return;
+        nativeDelivery.receiver = this;
+        nativeDelivery.currentTarget = Reflect.apply(
+          currentTargetGetter,
+          nativeEvent,
+          [],
+        ) as EventTarget | null;
+        nativeDelivery.terminal = Reflect.apply(
+          composedPath,
+          nativeEvent,
+          [],
+        ).at(-1);
+      };
+      ownerWindow.addEventListener("keydown", observeReceiver, true);
+      refresh.focus();
+      focus.mockClear();
+
+      try {
+        act(() => refresh.dispatchEvent(event));
+      } finally {
+        ownerWindow.removeEventListener("keydown", observeReceiver, true);
+        record[propsKey] = originalProps;
+      }
+
+      expect(captures).toHaveLength(1);
+      expect(bubbles).toHaveLength(1);
+      expect(captures[0]).not.toBe(bubbles[0]);
+      expect(captures[0]!.nativeEvent).toBe(event);
+      expect(bubbles[0]!.nativeEvent).toBe(event);
+      expect(captureMethods).toHaveLength(1);
+      expect(bubbleMethods).toHaveLength(1);
+      expect(cancellationStates).toEqual([
+        [false, false],
+        [false, false],
+      ]);
+      expect(phaseFacts).toEqual([
+        [Event.CAPTURING_PHASE, refresh],
+        [Event.BUBBLING_PHASE, refresh],
+      ]);
+      expect(nativeDelivery.receiver).toBe(nativeDelivery.currentTarget);
+      expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
+      expect(event.defaultPrevented).toBe(true);
+      expect(close).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    },
+  );
+
+  it("prevents through the exact bubble wrapper before a same-root ancestor observes it", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const onClose = vi.fn();
+    const observations: Array<{
+      event: ReactKeyboardEvent<HTMLDivElement>;
+      defaultPrevented: boolean;
+      nativeDefaultPrevented: boolean;
+      query: boolean;
+    }> = [];
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    act(() =>
+      root.render(
+        <StrictMode>
+          <div
+            onKeyDown={(event) => {
+              observations.push({
+                event,
+                defaultPrevented: event.defaultPrevented,
+                nativeDefaultPrevented: event.nativeEvent.defaultPrevented,
+                query: event.isDefaultPrevented(),
+              });
+            }}
+          >
+            <ActivityVisitBoundary
+              session={session("header-synthetic-ancestor")}
+              onClose={onClose}
+            />
+          </div>
+        </StrictMode>,
+      ),
+    );
+    await act(async () => {});
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    const capture = reactHandler<ActivityKeyHandler>(
+      refresh,
+      "onKeyDownCapture",
+    );
+    const bubble = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
+    let captureWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    let capturePreventDefault: unknown;
+    let bubblePreventDefault: unknown;
+    const publicPreventReceivers: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+    const restoreCapture = replaceKeyHandler(
+      refresh,
+      (event) => {
+        captureWrapper = event;
+        capturePreventDefault = event.preventDefault;
+        capture(event);
+      },
+      "onKeyDownCapture",
+    );
+    const restoreBubble = replaceKeyHandler(refresh, (event) => {
+      bubbleWrapper = event;
+      const originalPreventDefault = event.preventDefault;
+      const publicPreventDefault = function (
+        this: ReactKeyboardEvent<HTMLButtonElement>,
+      ) {
+        publicPreventReceivers.push(this);
+        return Reflect.apply(originalPreventDefault, this, []);
+      };
+      Object.defineProperty(event, "preventDefault", {
+        configurable: true,
+        value: publicPreventDefault,
+      });
+      bubblePreventDefault = publicPreventDefault;
+      bubble(event);
+    });
+    refresh.focus();
+    focus.mockClear();
+    nativePreventDefault.mockClear();
+    const requests = activity.mock.calls.length;
+    const published = activityPanel().innerHTML;
+    const scroll = activityPanel().lastElementChild;
+    const scrollBefore = [window.scrollX, window.scrollY, scroll?.scrollTop ?? 0];
+    const event = activityKeyboardEvent(refresh, "ArrowRight");
+    const ownerWindow = refresh.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("Activity has no owner Window");
+    setActivityEventView(event, ownerWindow);
+    expect(event.view).toBe(ownerWindow);
+
+    try {
+      act(() => refresh.dispatchEvent(event));
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+
+    expect(captureWrapper).not.toBeNull();
+    expect(bubbleWrapper).not.toBeNull();
+    expect(captureWrapper).not.toBe(bubbleWrapper);
+    expect(capturePreventDefault).not.toBe(bubblePreventDefault);
+    expect(publicPreventReceivers).toEqual([bubbleWrapper]);
+    expect(observations).toEqual([
+      {
+        event: bubbleWrapper,
+        defaultPrevented: true,
+        nativeDefaultPrevented: true,
+        query: true,
+      },
+    ]);
+    expect(event.defaultPrevented).toBe(true);
+    expect(nativePreventDefault).toHaveBeenCalledOnce();
+    expect(close).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(activity).toHaveBeenCalledTimes(requests);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+    expect(activityPanel().innerHTML).toBe(published);
+    expect([
+      window.scrollX,
+      window.scrollY,
+      activityPanel().lastElementChild?.scrollTop ?? 0,
+    ]).toEqual(scrollBefore);
+  });
+
+  it("rejects a structural Window terminal while retaining the genuine backing receiver", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    await mountHeaderView("header-structural-window");
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    const ownerWindow = refresh.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("Activity has no owner Window");
+    const structural = Object.create(
+      ownerWindow.Window.prototype,
+    ) as EventTarget;
+    Object.defineProperties(structural, {
+      document: { value: refresh.ownerDocument },
+      Window: { value: ownerWindow.Window },
+      Event: { value: ownerWindow.Event },
+      EventTarget: { value: ownerWindow.EventTarget },
+      KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+      Object: { value: ownerWindow.Object },
+      Reflect: { value: ownerWindow.Reflect },
+      window: { value: structural },
+      self: { value: structural },
+    });
+    const observation: {
+      receiver?: EventTarget;
+      currentTarget?: EventTarget | null;
+      terminal?: EventTarget;
+    } = {};
+    const event = activityKeyboardEvent(refresh, "ArrowRight");
+    const stageTerminal = vi.fn(function (
+      this: EventTarget,
+      nativeEvent: Event,
+    ) {
+      if (nativeEvent !== event) return;
+      observation.receiver = this;
+      observation.currentTarget = nativeEvent.currentTarget;
+      observation.terminal = nativeEvent.composedPath().at(-1);
+      replaceActivityPathTerminal(nativeEvent, structural);
+    });
+    ownerWindow.addEventListener("keydown", stageTerminal, {
+      capture: true,
+      once: true,
+    });
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    act(() => refresh.dispatchEvent(event));
+
+    expect(stageTerminal).toHaveBeenCalledOnce();
+    expect(observation.receiver).toBe(observation.currentTarget);
+    expect(observation.receiver).toBe(observation.terminal);
+    expect(observation.receiver).not.toBe(structural);
+    expect(event.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    const recovered = activityKey(refresh, "ArrowRight");
+
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(close).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
+
+  it("rejects a structural document defaultView and recovers through a clean publication", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const view = await mountHeaderView("header-structural-default-view");
+    const refresh = headerControl("Refresh activity");
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("Activity has no owner Window");
+    const structural = Object.create(
+      ownerWindow.Window.prototype,
+    ) as Window & typeof globalThis;
+    Object.defineProperties(structural, {
+      document: { value: document },
+      Window: { value: ownerWindow.Window },
+      Event: { value: ownerWindow.Event },
+      UIEvent: { value: ownerWindow.UIEvent },
+      EventTarget: { value: ownerWindow.EventTarget },
+      KeyboardEvent: { value: ownerWindow.KeyboardEvent },
+      Node: { value: ownerWindow.Node },
+      Document: { value: ownerWindow.Document },
+      HTMLElement: { value: ownerWindow.HTMLElement },
+      MutationObserver: { value: ownerWindow.MutationObserver },
+      Object: { value: ownerWindow.Object },
+      Reflect: { value: ownerWindow.Reflect },
+      window: { value: structural },
+      self: { value: structural },
+    });
+    const previous = Object.getOwnPropertyDescriptor(document, "defaultView");
+    const event = activityKeyboardEvent(refresh, "ArrowRight");
+    try {
+      Object.defineProperty(document, "defaultView", {
+        configurable: true,
+        value: structural,
+      });
+      refresh.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      act(() => refresh.dispatchEvent(event));
+    } finally {
+      if (previous) {
+        Object.defineProperty(document, "defaultView", previous);
+      } else {
+        Reflect.deleteProperty(document, "defaultView");
+      }
+    }
+
+    const restored = activityKey(refresh, "ArrowRight");
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(restored.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    renderStrictActivity(view.root, {
+      session: view.session,
+      onClose: view.onClose,
+    });
+    const currentRefresh = headerControl("Refresh activity");
+    currentRefresh.focus();
+    focus.mockClear();
+
+    const recovered = activityKey(currentRefresh, "ArrowRight");
+
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(headerControl("Close activity")).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it("rejects changed React cancellation method identity before clean recovery", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    await mountHeaderView("header-react-method-identity");
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    const bubble = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
+    const restore = replaceKeyHandler(refresh, (event) => {
+      bubble(event);
+      Object.defineProperty(event, "isDefaultPrevented", {
+        configurable: true,
+        value: () => false,
+      });
+    });
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const rejected = activityKey(refresh, "ArrowRight");
+    restore();
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    const recovered = activityKey(refresh, "ArrowRight");
+
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(close).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it("leaves every key inert while the refresh control is hidden", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const pending = deferred<ActivityPageDto>();
+    activity.mockReturnValue(pending.promise);
+    const onClose = vi.fn();
+    await mountHeaderView("header-hidden-refresh", onClose);
+    expect(screen.queryByRole("button", { name: "Refresh activity" })).toBeNull();
+    expect(activityHeader().children).toHaveLength(2);
+    const close = headerControl("Close activity");
+    close.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const requests = activity.mock.calls.length;
+
+    for (const key of ["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Home", "End"]) {
+      expect(activityKey(close, key).defaultPrevented).toBe(false);
+    }
+
+    expect(close).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(activity).toHaveBeenCalledTimes(requests);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("leaves every key inert while the refresh control is disabled", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const pending = deferred<ActivityPageDto>();
+    activity
+      .mockResolvedValueOnce(headerPage())
+      .mockResolvedValueOnce(headerPage())
+      .mockReturnValue(pending.promise);
+    const onClose = vi.fn();
+    await mountHeaderView("header-disabled-refresh", onClose);
+    act(() => headerControl("Refresh activity").click());
+    const refreshing = headerControl("Refreshing activity");
+    const close = headerControl("Close activity");
+    expect(refreshing).toBeDisabled();
+    close.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const requests = activity.mock.calls.length;
+
+    for (const key of ["ArrowLeft", "ArrowUp", "Home", "ArrowRight", "End"]) {
+      expect(activityKey(close, key).defaultPrevented).toBe(false);
+      expect(activityKey(refreshing, key).defaultPrevented).toBe(false);
+    }
+
+    expect(close).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(activity).toHaveBeenCalledTimes(requests);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps Tab order, Enter/Space activation and pointer actions unchanged", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    activity.mockResolvedValue(headerPage());
+    const onClose = vi.fn();
+    await mountHeaderView("header-activation", onClose);
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    expect(refresh.nextElementSibling).toBe(close);
+    expect(refresh.hasAttribute("tabindex")).toBe(false);
+    expect(close.hasAttribute("tabindex")).toBe(false);
+    expect([refresh.tabIndex, close.tabIndex]).toEqual([0, 0]);
+    close.focus();
+    focus.mockClear();
+    const requests = activity.mock.calls.length;
+
+    for (const key of ["Enter", " ", "Tab", "Escape"]) {
+      expect(activityKey(close, key).defaultPrevented).toBe(false);
+    }
+
+    expect(close).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(activity).toHaveBeenCalledTimes(requests);
+
+    act(() => refresh.click());
+    expect(activity).toHaveBeenCalledTimes(requests + 1);
+    act(() => close.click());
+    expect(onClose).toHaveBeenCalledOnce();
+    await act(async () => {});
+  });
+
+  it("uses captured owner-realm intrinsics and recovers through clean successors", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const onClose = vi.fn();
+    await mountHeaderView("header-intrinsics", onClose);
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const requests = activity.mock.calls.length;
+    const publicComposedPath = vi.fn(() => []);
+    const publicFocus = vi.fn();
+    const event = activityKeyboardEvent(refresh, "ArrowRight");
+    Object.defineProperties(event, {
+      composedPath: { configurable: true, value: publicComposedPath },
+    });
+    Object.defineProperty(close, "focus", {
+      configurable: true,
+      value: publicFocus,
+    });
+
+    act(() => {
+      refresh.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(close).toHaveFocus();
+    expect(publicComposedPath).not.toHaveBeenCalled();
+    expect(publicFocus).not.toHaveBeenCalled();
+    expect(focus).toHaveBeenCalledOnce();
+
+    const back = activityKey(close, "Home");
+
+    expect(back.defaultPrevented).toBe(true);
+    expect(refresh).toHaveFocus();
+    expect(focus).toHaveBeenCalledTimes(2);
+    expect(preventDefault).toHaveBeenCalledTimes(2);
+    expect(activity).toHaveBeenCalledTimes(requests);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("rejects untrusted, fabricated, foreign-realm and foreign-view keys before one genuine pair", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const onClose = vi.fn();
+    await mountHeaderView("header-authority", onClose);
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    const handler = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const ownerWindow = refresh.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Activity owner Window did not mount");
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignWindow = frame.contentDocument?.defaultView;
+    if (!foreignWindow) throw new Error("The foreign Activity realm did not mount");
+    const untrusted = activityKeyboardEvent(refresh, "ArrowRight", {}, false);
+    const foreign = new foreignWindow.KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    markActivityEventTrusted(foreign);
+    const foreignView = activityKeyboardEvent(refresh, "ArrowRight");
+    setActivityEventView(foreignView, foreignWindow);
+    expect(foreignView.view).toBe(foreignWindow);
+    const structuralWindow = new Proxy(
+      Object.create(Object.getPrototypeOf(ownerWindow), {
+        document: { configurable: true, value: refresh.ownerDocument },
+        Event: { configurable: true, value: ownerWindow.Event },
+        UIEvent: { configurable: true, value: ownerWindow.UIEvent },
+        KeyboardEvent: {
+          configurable: true,
+          value: ownerWindow.KeyboardEvent,
+        },
+      }),
+      {},
+    ) as Window;
+    const structuralView = activityKeyboardEvent(refresh, "ArrowRight");
+    setActivityEventView(structuralView, structuralWindow);
+    expect(structuralView.view).toBe(structuralWindow);
+    expect(structuralWindow).not.toBe(ownerWindow);
+    const replacedKey = activityKeyboardEvent(refresh, "ArrowRight");
+    Object.defineProperty(replacedKey, "key", {
+      configurable: true,
+      value: "End",
+    });
+    const fabricatedNative = activityKeyboardEvent(refresh, "ArrowRight");
+    const fabricated = fabricatedActivityKey(refresh, fabricatedNative);
+
+    act(() => {
+      refresh.dispatchEvent(untrusted);
+      refresh.dispatchEvent(foreign);
+      refresh.dispatchEvent(foreignView);
+      refresh.dispatchEvent(structuralView);
+      refresh.dispatchEvent(replacedKey);
+      handler(fabricated);
+    });
+
+    expect(untrusted.defaultPrevented).toBe(false);
+    expect(foreign.defaultPrevented).toBe(false);
+    expect(foreignView.defaultPrevented).toBe(false);
+    expect(structuralView.defaultPrevented).toBe(false);
+    expect(replacedKey.defaultPrevented).toBe(false);
+    expect(fabricatedNative.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    const genuine = activityKeyboardEvent(refresh, "ArrowRight");
+    setActivityEventView(genuine, ownerWindow);
+    expect(genuine.view).toBe(ownerWindow);
+    act(() => refresh.dispatchEvent(genuine));
+
+    expect(genuine.defaultPrevented).toBe(true);
+    expect(close).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(onClose).not.toHaveBeenCalled();
+    frame.remove();
+  });
+
+  it.each([
+    ["Alt-modified", { altKey: true }],
+    ["Control-modified", { ctrlKey: true }],
+    ["Meta-modified", { metaKey: true }],
+    ["Shift-modified", { shiftKey: true }],
+    ["repeating", { repeat: true }],
+    ["composing", { isComposing: true }],
+    ["non-bubbling", { bubbles: false }],
+    ["non-cancelable", { cancelable: false }],
+  ] as const)("rejects a %s key without prevention or focus", async (_name, init) => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    await mountHeaderView(`header-modifier-${_name}`);
+    const refresh = headerControl("Refresh activity");
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const event = activityKey(refresh, "ArrowRight", init);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    const accepted = activityKey(refresh, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(headerControl("Close activity")).toHaveFocus();
+  });
+
+  it.each(["prevented", "propagation-stopped"] as const)(
+    "rejects a previously %s key and keeps the publication usable",
+    async (state) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      activity.mockResolvedValue(headerPage());
+      await mountHeaderView(`header-${state}`);
+      const refresh = headerControl("Refresh activity");
+      refresh.focus();
+      focus.mockClear();
+      const event = activityKeyboardEvent(refresh, "ArrowRight");
+      if (state === "prevented") event.preventDefault();
+      else event.stopPropagation();
+      preventDefault.mockClear();
+
+      act(() => {
+        refresh.dispatchEvent(event);
+      });
+
+      expect(refresh).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      const accepted = activityKey(refresh, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(headerControl("Close activity")).toHaveFocus();
+    },
+  );
+
+  it("rejects wrong focus and a crossed control handler", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const onClose = vi.fn();
+    await mountHeaderView("header-crossed", onClose);
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    const refreshHandler = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const unfocused = activityKey(close, "ArrowLeft");
+
+    expect(unfocused.defaultPrevented).toBe(false);
+    expect(outside).toHaveFocus();
+
+    const restore = replaceKeyHandler(close, refreshHandler);
+    close.focus();
+    focus.mockClear();
+    const crossed = activityKey(close, "ArrowLeft");
+    restore();
+
+    expect(crossed.defaultPrevented).toBe(false);
+    expect(close).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    const accepted = activityKey(close, "ArrowLeft");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(refresh).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+    outside.remove();
+  });
+
+  it("rejects stale refresh and document facts, then accepts the committed successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const pending = deferred<ActivityPageDto>();
+    activity
+      .mockResolvedValueOnce(headerPage())
+      .mockResolvedValueOnce(headerPage())
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValue(headerPage("successor"));
+    const onClose = vi.fn();
+    const view = await mountHeaderView("stale-facts-A", onClose);
+    const close = headerControl("Close activity");
+    const staleHandler = reactHandler<ActivityKeyHandler>(close, "onKeyDown");
+    act(() => headerControl("Refresh activity").click());
+    pending.resolve(headerPage());
+    await act(async () => {});
+    expect(headerControl("Refresh activity")).toBeEnabled();
+    close.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const restore = replaceKeyHandler(close, staleHandler);
+    const stale = activityKey(close, "Home");
+    restore();
+
+    expect(stale.defaultPrevented).toBe(false);
+    expect(close).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    const current = activityKey(close, "Home");
+
+    expect(current.defaultPrevented).toBe(true);
+    expect(headerControl("Refresh activity")).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+
+    (view.session as { docId: string }).docId = "stale-facts-B";
+    close.focus();
+    focus.mockClear();
+
+    const mutated = activityKey(close, "Home");
+
+    expect(mutated.defaultPrevented).toBe(false);
+    expect(close).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).toHaveBeenCalledOnce();
+
+    renderStrictActivity(view.root, { session: view.session, onClose });
+    await act(async () => {});
+    const currentClose = headerControl("Close activity");
+    const currentRefresh = headerControl("Refresh activity");
+    expect(currentClose).not.toBe(close);
+    currentClose.focus();
+    focus.mockClear();
+
+    const accepted = activityKey(currentClose, "ArrowUp");
+
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(currentRefresh).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(activity).toHaveBeenLastCalledWith("stale-facts-B", { limit: 50 });
+  });
+
+  it.each([
+    "restored panel attribute",
+    "reordered and restored controls",
+    "replaced and restored control",
+  ] as const)("retires a %s and recovers through a fresh publication", async (mutation) => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const onClose = vi.fn();
+    const view = await mountHeaderView(`header-mutation-${mutation}`, onClose);
+    const panel = activityPanel();
+    const header = activityHeader();
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    if (mutation === "restored panel attribute") {
+      panel.setAttribute("data-header-change", "temporary");
+      panel.removeAttribute("data-header-change");
+    } else if (mutation === "reordered and restored controls") {
+      header.insertBefore(close, refresh);
+      header.append(close);
+    } else {
+      const replacement = refresh.cloneNode(true);
+      if (!(replacement instanceof HTMLButtonElement)) {
+        throw new Error("The replacement refresh control was not a button");
+      }
+      refresh.replaceWith(replacement);
+      replacement.replaceWith(refresh);
+    }
+    expect(refresh.nextElementSibling).toBe(close);
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const rejected = activityKey(refresh, "ArrowRight");
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    renderStrictActivity(view.root, { session: view.session, onClose });
+    const currentRefresh = headerControl("Refresh activity");
+    currentRefresh.focus();
+    focus.mockClear();
+
+    const accepted = activityKey(currentRefresh, "ArrowRight");
+
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(headerControl("Close activity")).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it.each(["key", "location"] as const)(
+    "retires replaced %s descriptor history until a fresh publication captures clean intrinsics",
+    async (property) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      activity.mockResolvedValue(headerPage());
+      const onClose = vi.fn();
+      const view = await mountHeaderView(
+        `header-descriptors-${property}`,
+        onClose,
+      );
+      const refresh = headerControl("Refresh activity");
+      const descriptor = Object.getOwnPropertyDescriptor(
+        window.KeyboardEvent.prototype,
+        property,
+      );
+      if (!descriptor) {
+        throw new Error(`KeyboardEvent.${property} had no descriptor`);
+      }
+      refresh.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      Object.defineProperty(window.KeyboardEvent.prototype, property, {
+        ...descriptor,
+        get: () =>
+          property === "key"
+            ? "ArrowRight"
+            : KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+
+      const poisoned = activityKey(refresh, "ArrowRight", {
+        code: "Numpad6",
+        location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+      Object.defineProperty(
+        window.KeyboardEvent.prototype,
+        property,
+        descriptor,
+      );
+      const restored = activityKey(refresh, "ArrowRight", {
+        code: "Numpad6",
+        location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+
+      expect(poisoned.defaultPrevented).toBe(false);
+      expect(restored.defaultPrevented).toBe(false);
+      expect(refresh).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      renderStrictActivity(view.root, { session: view.session, onClose });
+      const currentRefresh = headerControl("Refresh activity");
+      currentRefresh.focus();
+      focus.mockClear();
+
+      const accepted = activityKey(currentRefresh, "ArrowRight", {
+        code: "Numpad6",
+        location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(headerControl("Close activity")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("claims the publication, movement, wrapper and native event before replay", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const onClose = vi.fn();
+    await mountHeaderView("header-replay", onClose);
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const requests = activity.mock.calls.length;
+    const event = activityKeyboardEvent(refresh, "ArrowRight");
+
+    act(() => {
+      refresh.dispatchEvent(event);
+      close.dispatchEvent(event);
+      refresh.dispatchEvent(event);
+    });
+
+    expect(close).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(activity).toHaveBeenCalledTimes(requests);
+    expect(onClose).not.toHaveBeenCalled();
+
+    const successor = activityKey(close, "ArrowLeft");
+
+    expect(successor.defaultPrevented).toBe(true);
+    expect(refresh).toHaveFocus();
+    expect(focus).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * A hostile native listener between the panel and React's delegation root can hand the control's
+   * own bubble handler a complete React-like wrapper around the live, genuine, trusted native event
+   * before React delivers its own. Neither that forgery nor React's real, now crossed, delivery may
+   * prevent, focus, act, fetch or scroll; only a distinct clean event recovers.
+   */
+  it("rejects a forged wrapper from an earlier native panel listener and the crossed real delivery", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const onClose = vi.fn();
+    await mountHeaderView("header-native-forgery", onClose);
+    const panel = activityPanel();
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    const bubbleHandler = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const requests = activity.mock.calls.length;
+    const published = panel.innerHTML;
+    const scrollBefore = [
+      window.scrollX,
+      window.scrollY,
+      panel.lastElementChild?.scrollTop ?? 0,
+    ];
+    const forged: string[] = [];
+    const real: string[] = [];
+    const forge = (native: Event) => {
+      forged.push(
+        `${native.eventPhase}:${native.currentTarget === panel}:${native.defaultPrevented}`,
+      );
+      bubbleHandler(fabricatedActivityKey(refresh, native as KeyboardEvent));
+    };
+    const restoreHandler = replaceKeyHandler(refresh, (event) => {
+      real.push(`${event.currentTarget === refresh}:${event.eventPhase}`);
+      bubbleHandler(event);
+    });
+    panel.addEventListener("keydown", forge);
+
+    const forgedEvent = activityKey(refresh, "ArrowRight");
+
+    panel.removeEventListener("keydown", forge);
+    restoreHandler();
+
+    expect(forged).toEqual([`${Event.BUBBLING_PHASE}:true:false`]);
+    expect(real).toEqual([`true:${Event.BUBBLING_PHASE}`]);
+    expect(forgedEvent.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(activity).toHaveBeenCalledTimes(requests);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(activityPanel()).toBe(panel);
+    expect(panel.innerHTML).toBe(published);
+    expect([
+      window.scrollX,
+      window.scrollY,
+      panel.lastElementChild?.scrollTop ?? 0,
+    ]).toEqual(scrollBefore);
+    expect(headerControl("Refresh activity")).toBeEnabled();
+    expect(headerControl("Close activity")).toBeEnabled();
+
+    const accepted = activityKey(refresh, "ArrowRight");
+
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(close).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(focus.mock.instances[0]).toBe(close);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(activity).toHaveBeenCalledTimes(requests);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("rejects a replacement callback that withholds React's wrapper and forwards only a forgery", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const onClose = vi.fn();
+    await mountHeaderView("header-callback-forgery", onClose);
+    const refresh = headerControl("Refresh activity");
+    const close = headerControl("Close activity");
+    const bubbleHandler = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
+    const forwarded: Event[] = [];
+    const restoreHandler = replaceKeyHandler(refresh, (event) => {
+      forwarded.push(event.nativeEvent);
+      bubbleHandler(fabricatedActivityKey(refresh, event.nativeEvent));
+    });
+    refresh.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const requests = activity.mock.calls.length;
+
+    const forgedEvent = activityKey(refresh, "ArrowRight");
+
+    restoreHandler();
+    expect(forwarded).toEqual([forgedEvent]);
+    expect(forgedEvent.defaultPrevented).toBe(false);
+    expect(refresh).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(activity).toHaveBeenCalledTimes(requests);
+    expect(onClose).not.toHaveBeenCalled();
+
+    const accepted = activityKey(refresh, "ArrowRight");
+
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(close).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(activity).toHaveBeenCalledTimes(requests);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("does no keyboard work after cleanup and a clean panel recovers", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    activity.mockResolvedValue(headerPage());
+    const onClose = vi.fn();
+    const view = await mountHeaderView("header-cleanup", onClose);
+    const retiredClose = headerControl("Close activity");
+    const staleHandler = reactHandler<ActivityKeyHandler>(retiredClose, "onKeyDown");
+    retiredClose.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    act(() => view.root.unmount());
+    directRoots.delete(view.root);
+    view.host.remove();
+    const afterCleanup = activityKeyboardEvent(retiredClose, "ArrowLeft");
+    const fabricated = fabricatedActivityKey(retiredClose, afterCleanup);
+    act(() => {
+      retiredClose.dispatchEvent(afterCleanup);
+      staleHandler(fabricated);
+    });
+
+    expect(afterCleanup.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await mountHeaderView("header-cleanup-successor", onClose);
+    const currentClose = headerControl("Close activity");
+    currentClose.focus();
+    focus.mockClear();
+
+    const accepted = activityKey(currentClose, "ArrowLeft");
+
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(headerControl("Refresh activity")).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
   });
 });
