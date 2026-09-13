@@ -483,32 +483,6 @@ interface PanelToolbarNativeKeyProof {
   readonly composing: false;
 }
 
-/** The native facts a React keydown wrapper is checked against, shared by toolbar and row navigation. */
-interface PanelNativeKeyProofFacts {
-  readonly publication: { readonly ownerWindow: Window & typeof globalThis };
-  readonly event: globalThis.KeyboardEvent;
-  readonly target: HTMLButtonElement;
-  readonly key: string;
-}
-
-interface PanelRowReactEventMethods {
-  readonly preventDefault: (...args: never[]) => unknown;
-  readonly stopPropagation: (...args: never[]) => unknown;
-  readonly isDefaultPrevented: (...args: never[]) => unknown;
-  readonly isPropagationStopped: (...args: never[]) => unknown;
-  readonly persist: (...args: never[]) => unknown;
-}
-
-interface PanelRowReactKeyProof {
-  readonly event: object;
-  readonly nativeEvent: globalThis.KeyboardEvent;
-  readonly target: HTMLButtonElement;
-  readonly key: string;
-  readonly eventPhase: number;
-  readonly methods: PanelRowReactEventMethods;
-  readonly composing: false | null;
-}
-
 type PanelToolbarReactMethod = (...args: never[]) => unknown;
 
 interface PanelToolbarReactEventMethods {
@@ -535,6 +509,15 @@ interface PanelToolbarReactKeyProof {
   readonly timeStamp: number;
   readonly composing: false | null;
   readonly methods: PanelToolbarReactEventMethods;
+}
+
+type PanelRowReactKeyProof = Omit<PanelToolbarReactKeyProof, "currentTarget"> & {
+  readonly currentTarget: Element | null;
+};
+
+interface PanelRowPrevention {
+  readonly event: object;
+  readonly isDefaultPrevented: PanelToolbarReactMethod;
 }
 
 interface PanelToolbarMovement {
@@ -749,6 +732,14 @@ interface PanelRowNativeKeyProof {
   readonly target: HTMLButtonElement;
   readonly path: readonly EventTarget[];
   readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly locale: string | undefined;
+  readonly charCode: number;
+  readonly keyCode: number;
+  readonly which: number;
+  readonly detail: number;
+  readonly timeStamp: number;
   readonly destination: PanelRowKeyboardEntry;
   readonly trusted: true;
   readonly ctrlKey: false;
@@ -763,7 +754,7 @@ interface PanelRowNativeKeyProof {
 
 interface PanelRowTerminalKeyProof {
   readonly native: PanelRowNativeKeyProof;
-  readonly reactCapture: PanelRowReactKeyProof;
+  readonly reactProofs: readonly PanelRowReactKeyProof[];
   readonly reactBubble: PanelRowReactKeyProof;
 }
 
@@ -802,7 +793,6 @@ const PANEL_TOOLBAR_DEFINITIONS = Object.freeze([
   }),
 ] as const);
 const PANEL_TOOLBAR_PREVENT_SCROLL = Object.freeze({ preventScroll: true });
-const PANEL_TOOLBAR_MISSING = Symbol("panel-toolbar-missing");
 
 function panelToolbarDescriptorsMatch(
   current: PropertyDescriptor | undefined,
@@ -2248,79 +2238,84 @@ function panelPublicationIsCurrent(
 
 function readPanelRowReactKeyProof(
   event: object,
-  native: PanelNativeKeyProofFacts,
-  currentTarget: Element,
-  authority: PanelToolbarKeyboardAuthority,
-  expectedMethods?: PanelRowReactEventMethods,
+  native: PanelRowNativeKeyProof,
+  currentTarget: Element | null,
+  eventPhase: number,
+  defaultPrevented = false,
+  methodsAreCurrent: () => boolean = () => true,
 ): PanelRowReactKeyProof | null {
-  const ownValue = (property: PropertyKey) => {
-    const descriptor = authority.getOwnPropertyDescriptor(event, property);
-    return descriptor && "value" in descriptor
-      ? descriptor.value
-      : PANEL_TOOLBAR_MISSING;
+  const wrapper = event as KeyboardEvent<Element> & {
+    isComposing?: unknown;
+    locale?: unknown;
   };
-  const methodValue = (property: PropertyKey) => {
-    let current: object | null = event;
-    while (current) {
-      const descriptor = authority.getOwnPropertyDescriptor(current, property);
-      if (descriptor) {
-        return "value" in descriptor && typeof descriptor.value === "function"
-          ? descriptor.value
-          : PANEL_TOOLBAR_MISSING;
-      }
-      current = authority.getPrototypeOf(current) as object | null;
-    }
-    return PANEL_TOOLBAR_MISSING;
+  let valid = true;
+  const read = <T,>(getter: () => T): T | undefined => {
+    if (!valid) return undefined;
+    const value = getter();
+    valid = methodsAreCurrent();
+    return value;
   };
-  const preventDefault = methodValue("preventDefault");
-  const stopPropagation = methodValue("stopPropagation");
-  const isDefaultPrevented = methodValue("isDefaultPrevented");
-  const isPropagationStopped = methodValue("isPropagationStopped");
-  const persist = methodValue("persist");
+  const current = {
+    type: read(() => wrapper.type),
+    nativeEvent: read(() => wrapper.nativeEvent),
+    target: read(() => wrapper.target),
+    currentTarget: read(() => wrapper.currentTarget),
+    eventPhase: read(() => wrapper.eventPhase),
+    bubbles: read(() => wrapper.bubbles),
+    cancelable: read(() => wrapper.cancelable),
+    defaultPrevented: read(() => wrapper.defaultPrevented),
+    isTrusted: read(() => wrapper.isTrusted),
+    view: read(() => wrapper.view as unknown),
+    key: read(() => wrapper.key),
+    code: read(() => wrapper.code),
+    location: read(() => wrapper.location),
+    locale: read(() => wrapper.locale),
+    charCode: read(() => wrapper.charCode),
+    keyCode: read(() => wrapper.keyCode),
+    which: read(() => wrapper.which),
+    detail: read(() => wrapper.detail),
+    timeStamp: read(() => wrapper.timeStamp),
+    ctrlKey: read(() => wrapper.ctrlKey),
+    metaKey: read(() => wrapper.metaKey),
+    altKey: read(() => wrapper.altKey),
+    shiftKey: read(() => wrapper.shiftKey),
+    repeat: read(() => wrapper.repeat),
+    composing: read(() => wrapper.isComposing),
+    preventDefault: read(() => wrapper.preventDefault),
+    isDefaultPrevented: read(() => wrapper.isDefaultPrevented),
+    isPropagationStopped: read(() => wrapper.isPropagationStopped),
+  };
   if (
-    typeof preventDefault !== "function" ||
-    typeof stopPropagation !== "function" ||
-    typeof isDefaultPrevented !== "function" ||
-    typeof isPropagationStopped !== "function" ||
-    typeof persist !== "function"
-  ) {
-    return null;
-  }
-  const methods = Object.freeze({
-    preventDefault: preventDefault as (...args: never[]) => unknown,
-    stopPropagation: stopPropagation as (...args: never[]) => unknown,
-    isDefaultPrevented: isDefaultPrevented as (...args: never[]) => unknown,
-    isPropagationStopped: isPropagationStopped as (...args: never[]) => unknown,
-    persist: persist as (...args: never[]) => unknown,
-  });
-  const composing = ownValue("isComposing");
-  const eventPhase = ownValue("eventPhase");
-  if (
-    ownValue("type") !== "keydown" ||
-    ownValue("nativeEvent") !== native.event ||
-    ownValue("target") !== native.target ||
-    ownValue("currentTarget") !== currentTarget ||
-    ownValue("bubbles") !== true ||
-    ownValue("cancelable") !== true ||
-    ownValue("defaultPrevented") !== false ||
-    ownValue("isTrusted") !== true ||
-    ownValue("key") !== native.key ||
-    ownValue("ctrlKey") !== false ||
-    ownValue("metaKey") !== false ||
-    ownValue("altKey") !== false ||
-    ownValue("shiftKey") !== false ||
-    ownValue("repeat") !== false ||
-    (composing !== PANEL_TOOLBAR_MISSING && composing !== false) ||
-    ownValue("view") !== native.publication.ownerWindow ||
-    eventPhase !== authority.eventPhase.read(native.event) ||
-    authority.apply(isDefaultPrevented, event, []) !== false ||
-    authority.apply(isPropagationStopped, event, []) !== false ||
-    (expectedMethods &&
-      (methods.preventDefault !== expectedMethods.preventDefault ||
-        methods.stopPropagation !== expectedMethods.stopPropagation ||
-        methods.isDefaultPrevented !== expectedMethods.isDefaultPrevented ||
-        methods.isPropagationStopped !== expectedMethods.isPropagationStopped ||
-        methods.persist !== expectedMethods.persist))
+    !valid ||
+    event === native.event ||
+    current.type !== "keydown" ||
+    current.nativeEvent !== native.event ||
+    current.target !== native.target ||
+    current.currentTarget !== currentTarget ||
+    current.eventPhase !== eventPhase ||
+    current.bubbles !== true ||
+    current.cancelable !== true ||
+    current.defaultPrevented !== defaultPrevented ||
+    current.isTrusted !== true ||
+    current.view !== native.publication.ownerWindow ||
+    current.key !== native.key ||
+    current.code !== native.code ||
+    current.location !== native.location ||
+    current.locale !== native.locale ||
+    current.charCode !== native.charCode ||
+    current.keyCode !== native.keyCode ||
+    current.which !== native.which ||
+    current.detail !== native.detail ||
+    current.timeStamp !== native.timeStamp ||
+    current.ctrlKey !== false ||
+    current.metaKey !== false ||
+    current.altKey !== false ||
+    current.shiftKey !== false ||
+    current.repeat !== false ||
+    (current.composing !== undefined && current.composing !== false) ||
+    typeof current.preventDefault !== "function" ||
+    typeof current.isDefaultPrevented !== "function" ||
+    typeof current.isPropagationStopped !== "function"
   ) {
     return null;
   }
@@ -2328,67 +2323,25 @@ function readPanelRowReactKeyProof(
     event,
     nativeEvent: native.event,
     target: native.target,
+    currentTarget,
     key: native.key,
-    eventPhase: eventPhase as number,
-    methods,
-    composing: composing === false ? false : null,
+    code: native.code,
+    location: native.location,
+    locale: native.locale,
+    charCode: native.charCode,
+    keyCode: native.keyCode,
+    which: native.which,
+    detail: native.detail,
+    timeStamp: native.timeStamp,
+    view: current.view,
+    eventPhase,
+    methods: Object.freeze({
+      preventDefault: current.preventDefault,
+      isDefaultPrevented: current.isDefaultPrevented,
+      isPropagationStopped: current.isPropagationStopped,
+    }),
+    composing: current.composing === false ? false : null,
   });
-}
-
-function panelRowReactProofIsCurrent(
-  proof: PanelRowReactKeyProof,
-  native: PanelNativeKeyProofFacts,
-  authority: PanelToolbarKeyboardAuthority,
-) {
-  const event = proof.event;
-  const ownValue = (property: PropertyKey) => {
-    const descriptor = authority.getOwnPropertyDescriptor(event, property);
-    return descriptor && "value" in descriptor
-      ? descriptor.value
-      : PANEL_TOOLBAR_MISSING;
-  };
-  const methodValue = (property: PropertyKey) => {
-    let current: object | null = event;
-    while (current) {
-      const descriptor = authority.getOwnPropertyDescriptor(current, property);
-      if (descriptor) {
-        return "value" in descriptor && typeof descriptor.value === "function"
-          ? descriptor.value
-          : PANEL_TOOLBAR_MISSING;
-      }
-      current = authority.getPrototypeOf(current) as object | null;
-    }
-    return PANEL_TOOLBAR_MISSING;
-  };
-  return (
-    ownValue("type") === "keydown" &&
-    ownValue("nativeEvent") === native.event &&
-    ownValue("target") === native.target &&
-    ownValue("currentTarget") === null &&
-    ownValue("bubbles") === true &&
-    ownValue("cancelable") === true &&
-    ownValue("defaultPrevented") === false &&
-    ownValue("isTrusted") === true &&
-    ownValue("key") === native.key &&
-    ownValue("ctrlKey") === false &&
-    ownValue("metaKey") === false &&
-    ownValue("altKey") === false &&
-    ownValue("shiftKey") === false &&
-    ownValue("repeat") === false &&
-    (proof.composing === null
-      ? ownValue("isComposing") === PANEL_TOOLBAR_MISSING
-      : ownValue("isComposing") === false) &&
-    ownValue("view") === native.publication.ownerWindow &&
-    ownValue("eventPhase") === proof.eventPhase &&
-    methodValue("preventDefault") === proof.methods.preventDefault &&
-    methodValue("stopPropagation") === proof.methods.stopPropagation &&
-    methodValue("isDefaultPrevented") === proof.methods.isDefaultPrevented &&
-    methodValue("isPropagationStopped") ===
-      proof.methods.isPropagationStopped &&
-    methodValue("persist") === proof.methods.persist &&
-    authority.apply(proof.methods.isDefaultPrevented, event, []) === false &&
-    authority.apply(proof.methods.isPropagationStopped, event, []) === false
-  );
 }
 
 function panelToolbarKeyboardPublicationIsCurrent(
@@ -3730,8 +3683,14 @@ function createPanelRowKeyboardRuntime(
     | (Window & typeof globalThis)
     | null;
   if (!ownerWindow || runtime.root.ownerDocument !== ownerDocument) return null;
-  const authority = capturePanelToolbarKeyboardAuthority(ownerWindow);
-  if (!authority || !authority.isCurrent()) return null;
+  const authority = capturePanelToolbarKeyboardAuthority(ownerWindow, true);
+  if (
+    !authority ||
+    !panelToolbarHasPublicScalarAuthority(authority) ||
+    !authority.isCurrent()
+  ) {
+    return null;
+  }
   const windowAuthority = ownerWindow;
   const keyboardAuthority = authority;
   const identity = Symbol("versions-panel-row-keyboard-publication");
@@ -3805,6 +3764,7 @@ function createPanelRowKeyboardRuntime(
   let terminal: PanelRowTerminalKeyProof | null = null;
   let windowTerminal: PanelRowTerminalKeyProof | null = null;
   let windowListenerActive = false;
+  let callbackActive = false;
 
   const requestCurrentSuccessor = () => {
     if (successorRequested) return;
@@ -3835,6 +3795,14 @@ function createPanelRowKeyboardRuntime(
     authority.eventBubbles.read(proof.event) &&
     authority.eventCancelable.read(proof.event) &&
     authority.keyboardKey.read(proof.event) === proof.key &&
+    authority.keyboardCode.read(proof.event) === proof.code &&
+    authority.keyboardLocation.read(proof.event) === proof.location &&
+    authority.keyboardLocale?.read(proof.event) === proof.locale &&
+    authority.keyboardCharCode.read(proof.event) === proof.charCode &&
+    authority.keyboardKeyCode.read(proof.event) === proof.keyCode &&
+    authority.keyboardWhich.read(proof.event) === proof.which &&
+    authority.eventDetail.read(proof.event) === proof.detail &&
+    authority.eventTimeStamp.read(proof.event) === proof.timeStamp &&
     authority.keyboardCtrl.read(proof.event) === proof.ctrlKey &&
     authority.keyboardMeta.read(proof.event) === proof.metaKey &&
     authority.keyboardAlt.read(proof.event) === proof.altKey &&
@@ -3873,6 +3841,7 @@ function createPanelRowKeyboardRuntime(
   const exactNativeEvent = (
     event: Event,
     entry: PanelRowKeyboardEntry,
+    receiver: EventTarget,
   ): PanelRowNativeKeyProof | null => {
     if (
       !publicationIsCurrent() ||
@@ -3888,7 +3857,8 @@ function createPanelRowKeyboardRuntime(
     if (
       !destination ||
       publication.entries[destination.order] !== destination ||
-      authority.eventCurrentTarget.read(event) !== ownerDocument ||
+      authority.eventCurrentTarget.read(event) !== receiver ||
+      path.at(-1) !== receiver ||
       authority.eventPhase.read(event) !==
         ownerWindow.Event.CAPTURING_PHASE ||
       !authority.eventBubbles.read(event) ||
@@ -3945,6 +3915,14 @@ function createPanelRowKeyboardRuntime(
       target: entry.element,
       path: Object.freeze([...path]),
       key,
+      code: authority.keyboardCode.read(event),
+      location: authority.keyboardLocation.read(event),
+      locale: authority.keyboardLocale?.read(event),
+      charCode: authority.keyboardCharCode.read(event),
+      keyCode: authority.keyboardKeyCode.read(event),
+      which: authority.keyboardWhich.read(event),
+      detail: authority.eventDetail.read(event),
+      timeStamp: authority.eventTimeStamp.read(event),
       destination,
       trusted: true,
       ctrlKey: false,
@@ -3957,8 +3935,9 @@ function createPanelRowKeyboardRuntime(
       crossed: false,
     };
   };
-  const beginNativeEvent = (event: Event) => {
+  const beginNativeEvent = (event: Event, receiver: EventTarget) => {
     if (
+      callbackActive ||
       released ||
       authority.eventType.read(event) !== "keydown" ||
       authority.getPrototypeOf(event) !== authority.keyboardPrototype
@@ -3969,6 +3948,13 @@ function createPanelRowKeyboardRuntime(
     const entry =
       publication.entries.find(({ element }) => element === target) ?? null;
     if (!entry) return;
+    if (
+      nativeProof &&
+      authority.eventPhase.read(nativeProof.event) === ownerWindow.Event.NONE &&
+      authority.eventCurrentTarget.read(nativeProof.event) === null
+    ) {
+      clearProof(nativeProof);
+    }
     if (nativeProof) {
       if (nativeProof.event === event) return;
       nativeProof.crossed = true;
@@ -3977,27 +3963,152 @@ function createPanelRowKeyboardRuntime(
     }
     if (cells.attemptedRowNativeEvents.has(event)) return;
     cells.attemptedRowNativeEvents.add(event);
-    const proof = exactNativeEvent(event, entry);
+    const proof = exactNativeEvent(event, entry, receiver);
     if (!proof) return;
     nativeProof = proof;
-    queueMicrotask(() => {
-      if (nativeProof === proof && !terminal) rejectObservedEvent(proof);
-    });
   };
-  const readReact = (
-    event: object,
-    currentTarget: Element,
-    expectedMethods?: PanelRowReactEventMethods,
-  ) =>
-    nativeProof
-      ? readPanelRowReactKeyProof(
-          event,
-          nativeProof,
+  const readGuarded = <T,>(read: () => T) => {
+    if (callbackActive || released) return null;
+    callbackActive = true;
+    try {
+      return { value: read() };
+    } catch {
+      // Public wrapper getters and methods are external callbacks, not publication authority.
+      return null;
+    } finally {
+      callbackActive = false;
+    }
+  };
+  const nativeIsCurrent = (proof: PanelRowNativeKeyProof, prevented = false) =>
+    !released &&
+    nativeProof === proof &&
+    !proof.crossed &&
+    !proof.propagationStopped() &&
+    nativeStillMatches(proof) &&
+    authority.eventDefaultPrevented.read(proof.event) === prevented &&
+    !authority.eventCancelBubble.read(proof.event) &&
+    authority.activeElement.read(ownerDocument) === proof.target &&
+    publicationIsCurrent();
+  const retainedReactProofs = () =>
+    [reactListCapture, reactSelectCapture, reactSelectBubble, reactListBubble]
+      .filter((proof): proof is PanelRowReactKeyProof => proof !== null);
+  const methodsRemainExact = (
+    proofs: readonly PanelRowReactKeyProof[],
+    prevention: PanelRowPrevention | null,
+  ) => {
+    const matches = (proof: PanelRowReactKeyProof) => {
+      const event = proof.event as KeyboardEvent<Element>;
+      const defaultQuery = prevention?.event === proof.event
+        ? prevention.isDefaultPrevented
+        : proof.methods.isDefaultPrevented;
+      return (
+        event.preventDefault === proof.methods.preventDefault &&
+        event.isDefaultPrevented === defaultQuery &&
+        event.isPropagationStopped === proof.methods.isPropagationStopped
+      );
+    };
+    // Method accessors are public callbacks too; revisit earlier wrappers after later reads.
+    return proofs.every(matches) && [...proofs].reverse().every(matches);
+  };
+  const authenticateReact = (
+    proof: PanelRowReactKeyProof,
+    native: PanelRowNativeKeyProof,
+    currentTarget: Element | null,
+    prevention: PanelRowPrevention | null = null,
+    proofs: readonly PanelRowReactKeyProof[] = [...retainedReactProofs(), proof],
+  ) => {
+    const wrapperPrevented = prevention?.event === proof.event;
+    const defaultQuery = wrapperPrevented
+      ? prevention.isDefaultPrevented
+      : proof.methods.isDefaultPrevented;
+    const methodsAreCurrent = () => methodsRemainExact(proofs, prevention);
+    const authorityIsCurrent = () =>
+      nativeIsCurrent(native, prevention !== null) &&
+      (prevention === null ||
+        (cells.claimedRowPublications.has(publication) &&
+          cells.claimedRowEntries.has(native.entry) &&
+          cells.claimedRowActions.has(native.action) &&
+          cells.claimedRowNativeEvents.has(native.event) &&
+          proofs.every((react) => cells.claimedRowReactEvents.has(react.event)))) &&
+      methodsAreCurrent() &&
+      nativeIsCurrent(native, prevention !== null) &&
+      methodsAreCurrent();
+    const revalidate = () => readGuarded(authorityIsCurrent)?.value === true;
+    const readCurrent = () => {
+      if (!revalidate()) return null;
+      const current = readGuarded(() =>
+        readPanelRowReactKeyProof(
+          proof.event,
+          native,
           currentTarget,
-          authority,
-          expectedMethods,
-        )
-      : null;
+          proof.eventPhase,
+          wrapperPrevented,
+          methodsAreCurrent,
+        ),
+      )?.value;
+      return current &&
+        current.composing === proof.composing &&
+        current.methods.preventDefault === proof.methods.preventDefault &&
+        current.methods.isPropagationStopped === proof.methods.isPropagationStopped &&
+        current.methods.isDefaultPrevented === defaultQuery &&
+        revalidate()
+        ? current
+        : null;
+    };
+    const current = readCurrent();
+    if (!current) return false;
+    const defaultResult = readGuarded(() =>
+      authority.apply(defaultQuery, proof.event, []),
+    );
+    if (defaultResult?.value !== wrapperPrevented || !revalidate()) return false;
+    const afterDefault = readCurrent();
+    if (
+      defaultResult?.value !== wrapperPrevented ||
+      !afterDefault ||
+      afterDefault.methods.isDefaultPrevented !== current.methods.isDefaultPrevented
+    ) {
+      return false;
+    }
+    const propagationResult = readGuarded(() =>
+      authority.apply(proof.methods.isPropagationStopped, proof.event, []),
+    );
+    if (propagationResult?.value !== false || !revalidate()) return false;
+    const afterPropagation = readCurrent();
+    return (
+      propagationResult?.value === false &&
+      afterPropagation !== null &&
+      afterPropagation.methods.isDefaultPrevented === current.methods.isDefaultPrevented
+    );
+  };
+  const readReact = (event: object, currentTarget: Element, eventPhase: number) => {
+    const native = nativeProof;
+    if (
+      callbackActive ||
+      !native ||
+      !event ||
+      typeof event !== "object" ||
+      authority.eventPhase.read(native.event) !== eventPhase ||
+      cells.claimedRowReactEvents.has(event) ||
+      (cells.attemptedRowReactEvents.has(event) &&
+        ![reactListCapture, reactSelectCapture, reactSelectBubble, reactListBubble]
+          .some((proof) => proof?.event === event)) ||
+      !nativeIsCurrent(native)
+    ) {
+      return null;
+    }
+    cells.attemptedRowReactEvents.add(event);
+    const proof = readGuarded(() =>
+      readPanelRowReactKeyProof(
+        event,
+        native,
+        currentTarget,
+        eventPhase,
+        false,
+        () => methodsRemainExact(retainedReactProofs(), null),
+      ),
+    )?.value;
+    return proof && authenticateReact(proof, native, currentTarget) ? proof : null;
+  };
   const captureList = (
     groupIndex: number,
     event: KeyboardEvent<HTMLUListElement>,
@@ -4007,14 +4118,11 @@ function createPanelRowKeyboardRuntime(
       typeof event !== "object" ||
       !nativeProof ||
       nativeProof.entry.groupIndex !== groupIndex ||
-      reactListCapture ||
-      cells.claimedRowReactEvents.has(event) ||
-      cells.attemptedRowReactEvents.has(event)
+      reactListCapture
     ) {
       return;
     }
-    cells.attemptedRowReactEvents.add(event);
-    reactListCapture = readReact(event, nativeProof.entry.list);
+    reactListCapture = readReact(event, nativeProof.entry.list, ownerWindow.Event.CAPTURING_PHASE);
   };
   const captureSelect = (
     row: VersionRowPublication,
@@ -4026,44 +4134,27 @@ function createPanelRowKeyboardRuntime(
       !entry ||
       nativeProof.entry !== entry ||
       !reactListCapture ||
-      reactSelectCapture ||
-      event !== reactListCapture.event
+      reactSelectCapture
     ) {
       return;
     }
-    reactSelectCapture = readReact(
-      event,
-      entry.element,
-      reactListCapture.methods,
-    );
+    reactSelectCapture = readReact(event, entry.element, ownerWindow.Event.CAPTURING_PHASE);
   };
   const bubbleSelect = (
     row: VersionRowPublication,
     event: KeyboardEvent<HTMLButtonElement>,
   ) => {
     const entry = entryForRow(row);
-    const isNewWrapper =
-      Boolean(event) &&
-      typeof event === "object" &&
-      event !== reactSelectCapture?.event;
     if (
       !nativeProof ||
       !entry ||
       nativeProof.entry !== entry ||
       !reactSelectCapture ||
-      reactSelectBubble ||
-      (isNewWrapper &&
-        (cells.claimedRowReactEvents.has(event) ||
-          cells.attemptedRowReactEvents.has(event)))
+      reactSelectBubble
     ) {
       return;
     }
-    if (isNewWrapper) cells.attemptedRowReactEvents.add(event);
-    reactSelectBubble = readReact(
-      event,
-      entry.element,
-      reactSelectCapture.methods,
-    );
+    reactSelectBubble = readReact(event, entry.element, ownerWindow.Event.BUBBLING_PHASE);
   };
   const bubbleList = (
     groupIndex: number,
@@ -4073,25 +4164,20 @@ function createPanelRowKeyboardRuntime(
       !nativeProof ||
       nativeProof.entry.groupIndex !== groupIndex ||
       !reactSelectBubble ||
-      reactListBubble ||
-      event !== reactSelectBubble.event
+      reactListBubble
     ) {
       return;
     }
-    reactListBubble = readReact(
-      event,
-      nativeProof.entry.list,
-      reactSelectBubble.methods,
-    );
+    reactListBubble = readReact(event, nativeProof.entry.list, ownerWindow.Event.BUBBLING_PHASE);
   };
   const authenticateTerminal = (proof: PanelRowNativeKeyProof) => {
     if (
       proof.crossed ||
       boundaryProof !== proof ||
       !reactListCapture ||
-      reactSelectCapture?.event !== reactListCapture.event ||
+      !reactSelectCapture ||
       !reactSelectBubble ||
-      reactListBubble?.event !== reactSelectBubble.event ||
+      !reactListBubble ||
       !nativeStillMatches(proof) ||
       !publicationIsCurrent() ||
       authority.activeElement.read(ownerDocument) !== proof.target
@@ -4100,7 +4186,12 @@ function createPanelRowKeyboardRuntime(
     }
     return Object.freeze({
       native: proof,
-      reactCapture: reactListCapture,
+      reactProofs: Object.freeze([
+        reactListCapture,
+        reactSelectCapture,
+        reactSelectBubble,
+        reactListBubble,
+      ]),
       reactBubble: reactSelectBubble,
     });
   };
@@ -4111,8 +4202,7 @@ function createPanelRowKeyboardRuntime(
       cells.claimedRowEntries.has(native.entry) ||
       cells.claimedRowActions.has(native.action) ||
       cells.claimedRowNativeEvents.has(native.event) ||
-      cells.claimedRowReactEvents.has(proof.reactCapture.event) ||
-      cells.claimedRowReactEvents.has(proof.reactBubble.event)
+      proof.reactProofs.some((react) => cells.claimedRowReactEvents.has(react.event))
     ) {
       return false;
     }
@@ -4120,8 +4210,7 @@ function createPanelRowKeyboardRuntime(
     cells.claimedRowEntries.add(native.entry);
     cells.claimedRowActions.add(native.action);
     cells.claimedRowNativeEvents.add(native.event);
-    cells.claimedRowReactEvents.add(proof.reactCapture.event);
-    cells.claimedRowReactEvents.add(proof.reactBubble.event);
+    for (const react of proof.reactProofs) cells.claimedRowReactEvents.add(react.event);
     return true;
   };
   const settleTerminal = (proof: PanelRowTerminalKeyProof) => {
@@ -4133,25 +4222,42 @@ function createPanelRowKeyboardRuntime(
       released ||
       native.crossed ||
       native.propagationStopped() ||
-      authority.eventCurrentTarget.read(native.event) !== null ||
-      authority.eventPhase.read(native.event) !== ownerWindow.Event.NONE ||
+      authority.eventCurrentTarget.read(native.event) !== native.path.at(-1) ||
+      authority.eventPhase.read(native.event) !== ownerWindow.Event.BUBBLING_PHASE ||
       authority.eventDefaultPrevented.read(native.event) ||
       authority.eventCancelBubble.read(native.event) ||
       authority.activeElement.read(ownerDocument) !== native.target ||
       !nativeStillMatches(native) ||
-      !panelRowReactProofIsCurrent(proof.reactCapture, native, authority) ||
-      !panelRowReactProofIsCurrent(proof.reactBubble, native, authority) ||
+      !proof.reactProofs.every((react) => authenticateReact(react, native, null)) ||
       !publicationIsCurrent() ||
+      readGuarded(() => methodsRemainExact(proof.reactProofs, null))?.value !== true ||
       !claim(proof)
     ) {
       rejectObservedEvent(native);
       return;
     }
     const destination = native.destination;
+    const prevented = readGuarded(() => {
+      const event = proof.reactBubble.event as KeyboardEvent<Element>;
+      authority.apply(proof.reactBubble.methods.preventDefault, event, []);
+      // Only this immediate return-boundary read may adopt React's replacement query.
+      const isDefaultPrevented = event.isDefaultPrevented;
+      return typeof isDefaultPrevented === "function"
+        ? Object.freeze({ event, isDefaultPrevented })
+        : null;
+    })?.value;
+    const canFocus = Boolean(
+      prevented &&
+      proof.reactProofs.every((react) =>
+        authenticateReact(react, native, null, prevented, proof.reactProofs),
+      ) &&
+      readGuarded(() =>
+        nativeIsCurrent(native, true) && methodsRemainExact(proof.reactProofs, prevented),
+      )?.value === true,
+    );
     clearProof(native);
     runtime.retireForAction();
-    authority.eventPreventDefault.call(native.event);
-    if (authority.eventDefaultPrevented.read(native.event)) {
+    if (canFocus) {
       authority.focus.call(destination.element, PANEL_TOOLBAR_PREVENT_SCROLL);
     }
     requestCurrentSuccessor();
@@ -4172,13 +4278,15 @@ function createPanelRowKeyboardRuntime(
       path.at(-1) !== this ||
       !panelRowExactPathMatches(terminal.native.path, path)
     ) {
+      if (nativeProof?.event === event) rejectObservedEvent(nativeProof);
       return;
     }
     windowTerminal = terminal;
+    settleTerminal(terminal);
   }
-  const onNativeCapture = (event: Event) => {
-    beginNativeEvent(event);
-  };
+  function onNativeCapture(this: EventTarget, event: Event) {
+    beginNativeEvent(event, this);
+  }
   const onNativeBubble = (event: Event) => {
     const proof = nativeProof;
     if (
@@ -4192,7 +4300,10 @@ function createPanelRowKeyboardRuntime(
       return;
     }
     const authenticated = authenticateTerminal(proof);
-    if (!authenticated) return;
+    if (!authenticated) {
+      rejectObservedEvent(proof);
+      return;
+    }
     terminal = authenticated;
     windowListenerActive = true;
     authority.addWindowEventListener.call(
@@ -4200,9 +4311,6 @@ function createPanelRowKeyboardRuntime(
       "keydown",
       onNativeWindowBubble,
     );
-    queueMicrotask(() => {
-      if (terminal === authenticated) settleTerminal(authenticated);
-    });
   };
   const boundaryListeners = publication.entries.map((entry) => {
     const listener = (event: Event) => {
@@ -4231,8 +4339,9 @@ function createPanelRowKeyboardRuntime(
       return false;
     }
     published = true;
-    authority.addEventListener.call(
-      ownerDocument,
+    // Window capture precedes React even when Next delegates from the document itself.
+    authority.addWindowEventListener.call(
+      ownerWindow,
       "keydown",
       onNativeCapture,
       true,
@@ -4248,8 +4357,8 @@ function createPanelRowKeyboardRuntime(
     released = true;
     clearProof();
     if (!published) return;
-    authority.removeEventListener.call(
-      ownerDocument,
+    authority.removeWindowEventListener.call(
+      ownerWindow,
       "keydown",
       onNativeCapture,
       true,
