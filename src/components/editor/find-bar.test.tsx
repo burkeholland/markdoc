@@ -4001,11 +4001,11 @@ describe("FindBar first-row action navigation", () => {
   });
 
   it.each([
-    ["capture", "its own"],
-    ["bubble", "the capture"],
+    { predicatePhase: "capture", wrapperOwner: "its own" },
+    { predicatePhase: "bubble", wrapperOwner: "the capture" },
   ] as const)(
-    "focuses nothing when the %s predicate replaces %s wrapper's prevention after the effect",
-    async (predicatePhase) => {
+    "focuses nothing when the $predicatePhase predicate replaces $wrapperOwner wrapper's prevention after the effect",
+    async ({ predicatePhase }) => {
       const s = session("owner", `actions-predicate-${predicatePhase}`);
       const focus = trackActionFocus();
       const callbacks = silentCallbacks();
