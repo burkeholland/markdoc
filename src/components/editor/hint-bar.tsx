@@ -9,6 +9,7 @@ import {
   useState,
   useSyncExternalStore,
   type Dispatch,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type SetStateAction,
 } from "react";
@@ -39,7 +40,10 @@ export interface HintBarProps {
   onComment: () => void;
 }
 
-const ICONS: Record<HintId, typeof Bot> = { "collab-agent": Bot, "mention-copilot": MessageSquare };
+const ICONS: Record<HintId, typeof Bot> = {
+  "collab-agent": Bot,
+  "mention-copilot": MessageSquare,
+};
 
 const noopSubscribe = () => () => {};
 
@@ -148,12 +152,7 @@ interface HintRender {
 }
 
 type HintElementRole =
-  | "root"
-  | "icon"
-  | "text"
-  | "action"
-  | "dismiss"
-  | "dismissIcon";
+  "root" | "icon" | "text" | "action" | "dismiss" | "dismissIcon";
 
 interface HintElementOwnerView {
   readonly role: HintElementRole;
@@ -226,15 +225,145 @@ interface HintKeyboardReleaseProof extends HintKeyboardProof {
 
 interface HintNativeClickProof extends HintNativeMouseProof {
   readonly source:
-    | HintNativeMouseProof
-    | HintKeyboardProof
-    | HintKeyboardReleaseProof;
+    HintNativeMouseProof | HintKeyboardProof | HintKeyboardReleaseProof;
   readonly pointerUp: HintNativeMouseProof | null;
 }
 
 interface HintReactProof {
   readonly event: object;
   readonly native: HintNativeMouseProof | HintNativeClickProof;
+}
+
+type HintNavigationKey =
+  "ArrowLeft" | "ArrowUp" | "ArrowRight" | "ArrowDown" | "Home" | "End";
+
+type HintKeyPhase = "capture" | "bubble";
+
+interface HintCapturedIntrinsic {
+  readonly isCurrent: () => boolean;
+}
+
+interface HintCapturedGetter<Value> extends HintCapturedIntrinsic {
+  readonly read: (target: object) => Value;
+}
+
+interface HintCapturedValue<Value> extends HintCapturedIntrinsic {
+  readonly read: () => Value;
+}
+
+interface HintCapturedMethod<
+  Args extends readonly unknown[],
+  Result,
+> extends HintCapturedIntrinsic {
+  readonly invoke: (target: object, ...args: Args) => Result;
+}
+
+interface HintTrustedGetter extends HintCapturedIntrinsic {
+  readonly read: (event: object) => boolean;
+  readonly matches: (event: object) => boolean;
+}
+
+interface HintKeyboardAuthority {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof globalThis.Event;
+  readonly KeyboardEvent: typeof globalThis.KeyboardEvent;
+  readonly Node: typeof globalThis.Node;
+  readonly apply: typeof Reflect.apply;
+  readonly eventType: HintCapturedGetter<string>;
+  readonly eventTarget: HintCapturedGetter<EventTarget | null>;
+  readonly eventCurrentTarget: HintCapturedGetter<EventTarget | null>;
+  readonly eventPhase: HintCapturedGetter<number>;
+  readonly eventBubbles: HintCapturedGetter<boolean>;
+  readonly eventCancelable: HintCapturedGetter<boolean>;
+  readonly eventDefaultPrevented: HintCapturedGetter<boolean>;
+  readonly eventCancelBubble: HintCapturedGetter<boolean>;
+  readonly eventPath: HintCapturedMethod<readonly [], EventTarget[]>;
+  readonly eventPreventDefault: HintCapturedMethod<readonly [], void>;
+  readonly eventView: HintCapturedGetter<Window | null>;
+  readonly key: HintCapturedGetter<string>;
+  readonly code: HintCapturedGetter<string>;
+  readonly location: HintCapturedGetter<number>;
+  readonly repeat: HintCapturedGetter<boolean>;
+  readonly composing: HintCapturedGetter<boolean>;
+  readonly altKey: HintCapturedGetter<boolean>;
+  readonly ctrlKey: HintCapturedGetter<boolean>;
+  readonly metaKey: HintCapturedGetter<boolean>;
+  readonly shiftKey: HintCapturedGetter<boolean>;
+  readonly activeElement: HintCapturedGetter<Element | null>;
+  readonly documentView: HintCapturedValue<Window | null>;
+  readonly focus: HintCapturedMethod<readonly [FocusOptions?], void>;
+  readonly windowListen: HintCapturedMethod<
+    readonly [string, EventListener, boolean],
+    void
+  >;
+  readonly windowUnlisten: HintCapturedMethod<
+    readonly [string, EventListener, boolean],
+    void
+  >;
+  readonly trusted: HintTrustedGetter;
+  readonly reactMethodMatches: (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface HintReactKeyMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
+  readonly isDefaultPrevented: (...args: never[]) => unknown;
+  readonly isPropagationStopped: (...args: never[]) => unknown;
+}
+
+interface HintReactKeyFacts {
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly key: HintNavigationKey;
+  readonly delegationTarget: Node;
+  readonly methods: HintReactKeyMethods;
+}
+
+interface HintNativeKeySnapshot {
+  readonly event: globalThis.KeyboardEvent;
+  readonly publication: HintPublication;
+  readonly source: HintControl;
+  readonly key: HintNavigationKey;
+  readonly code: string;
+  readonly location: number;
+  readonly target: EventTarget | null;
+  readonly path: readonly EventTarget[];
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly view: Window | null;
+  readonly receiver: EventTarget;
+}
+
+interface HintNativeKeyDelivery {
+  readonly snapshot: HintNativeKeySnapshot;
+  delegationTarget: Node | null;
+  captureInvalid: boolean;
+  captureRootCount: number;
+  captureRootEvent: ReactKeyboardEvent<HTMLElement> | null;
+  captureMethods: HintReactKeyMethods | null;
+  captureControlCount: number;
+  captureControlEvent: ReactKeyboardEvent<HTMLButtonElement> | null;
+  bubbleInvalid: boolean;
+  bubbleMethods: HintReactKeyMethods | null;
+  bubbleControlCount: number;
+  bubbleControlEvent: ReactKeyboardEvent<HTMLButtonElement> | null;
+  bubbleRootCount: number;
+  bubbleRootEvent: ReactKeyboardEvent<HTMLElement> | null;
+}
+
+interface HintNavigationMovement {
+  readonly identity: symbol;
+  readonly publication: HintPublication;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly captureEvent: ReactKeyboardEvent<HTMLButtonElement>;
+  readonly bubbleEvent: ReactKeyboardEvent<HTMLButtonElement>;
+  readonly receiver: EventTarget;
+  readonly key: HintNavigationKey;
+  readonly source: HintControl;
+  readonly destination: HintControl;
 }
 
 interface HintPublication {
@@ -244,6 +373,7 @@ interface HintPublication {
   readonly ownerDocument: Document;
   readonly controls: Readonly<Record<HintControlKind, HintControl>>;
   readonly preserveFocus: HintAction;
+  readonly keyboard: HintKeyboardAuthority | null;
   readonly dom: HintDomSnapshot;
   readonly placement: HintPlacement;
   readonly retire: () => boolean;
@@ -269,6 +399,7 @@ interface HintPublicationCells {
   readonly claimedActions: WeakSet<HintAction>;
   readonly claimedReactEvents: WeakSet<object>;
   readonly claimedNativeEvents: WeakSet<Event>;
+  readonly claimedMovements: WeakSet<HintNavigationMovement>;
   readonly pressedPublications: WeakSet<HintPublication>;
   readonly pressedControls: WeakSet<HintControl>;
   readonly pressedActions: WeakSet<HintAction>;
@@ -289,8 +420,15 @@ interface HintPublicationRuntime {
   readonly captureReactMouseDown: (
     event: ReactMouseEvent<HTMLDivElement>,
   ) => void;
-  readonly captureReactClick: (
-    event: ReactMouseEvent<HTMLDivElement>,
+  readonly captureReactClick: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  readonly captureReactRootKey: (
+    phase: HintKeyPhase,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => void;
+  readonly captureReactControlKey: (
+    kind: HintControlKind,
+    phase: HintKeyPhase,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => void;
   readonly preserveActionFocus: (
     event: ReactMouseEvent<HTMLButtonElement>,
@@ -305,7 +443,9 @@ interface HintPublicationSet {
   readonly establish: () => void | (() => void);
   readonly captureRoot: (element: HTMLDivElement | null) => void | (() => void);
   readonly captureIcon: (element: SVGSVGElement | null) => void | (() => void);
-  readonly captureText: (element: HTMLSpanElement | null) => void | (() => void);
+  readonly captureText: (
+    element: HTMLSpanElement | null,
+  ) => void | (() => void);
   readonly captureAction: (
     element: HTMLButtonElement | null,
   ) => void | (() => void);
@@ -315,10 +455,22 @@ interface HintPublicationSet {
   readonly captureDismissIcon: (
     element: SVGSVGElement | null,
   ) => void | (() => void);
-  readonly captureMouseDown: (
-    event: ReactMouseEvent<HTMLDivElement>,
-  ) => void;
+  readonly captureMouseDown: (event: ReactMouseEvent<HTMLDivElement>) => void;
   readonly captureClick: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  readonly captureKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  readonly keyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  readonly capturePrimaryKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly primaryKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly captureDismissKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly dismissKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
   readonly preserveActionFocus: (
     event: ReactMouseEvent<HTMLButtonElement>,
   ) => void;
@@ -429,9 +581,7 @@ function hintDomContains(snapshot: HintDomSnapshot, node: Node): boolean {
   );
 }
 
-function snapshotHintPlacement(
-  root: HTMLDivElement,
-): HintPlacement | null {
+function snapshotHintPlacement(root: HTMLDivElement): HintPlacement | null {
   const placements: HintNodePlacement[] = [];
   const ownerDocument = root.ownerDocument;
   let current: Node | null = root;
@@ -585,9 +735,7 @@ function hintEventPathMatches(
     expected &&
       actual.length === expected.length &&
       hasOwnerDocumentView &&
-      actual
-        .slice(0, -1)
-        .every((entry, index) => entry === expected[index]),
+    actual.slice(0, -1).every((entry, index) => entry === expected[index]),
   );
 }
 
@@ -661,8 +809,7 @@ function hintFactsAreCurrent(render: HintRender) {
       (render.id === "collab-agent" ? render.onShare : render.onComment) &&
     hintRecordMatches(render.dismissedRecord, expectedDismissed) &&
     (!render.discovery ||
-      (!render.discovery.retired &&
-        render.discovery.key === render.key))
+      (!render.discovery.retired && render.discovery.key === render.key))
   );
 }
 
@@ -708,7 +855,8 @@ function hintElementsAreCurrent(
     root.children.item(2) !== action ||
     root.children.item(3) !== dismiss ||
     icon.parentElement !== root ||
-    icon.className.baseVal !== `lucide lucide-${render.id === "collab-agent" ? "bot" : "message-square"} ${HINT_ICON_CLASS}` ||
+    icon.className.baseVal !==
+      `lucide lucide-${render.id === "collab-agent" ? "bot" : "message-square"} ${HINT_ICON_CLASS}` ||
     icon.getAttribute("width") !== "14" ||
     icon.getAttribute("height") !== "14" ||
     icon.getAttribute("aria-hidden") !== "true" ||
@@ -747,7 +895,763 @@ function hintElementsAreCurrent(
     return false;
   }
   const controls = [...root.querySelectorAll<HTMLButtonElement>("button")];
-  return controls.length === 2 && controls[0] === action && controls[1] === dismiss;
+  return (
+    controls.length === 2 && controls[0] === action && controls[1] === dismiss
+  );
+}
+
+function hintDescriptorMatches(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current ||
+    current.configurable !== expected.configurable ||
+    current.enumerable !== expected.enumerable
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value && current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function captureHintGetter<Value>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: string,
+): HintCapturedGetter<Value> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const holder = owner;
+    const descriptor = getOwnPropertyDescriptor(holder, property);
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const expected = Object.freeze({ ...descriptor });
+      const getter = descriptor.get;
+      return Object.freeze({
+        read: (target: object) => apply(getter, target, []) as Value,
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor ===
+            getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          hintDescriptorMatches(
+            getOwnPropertyDescriptor(holder, property),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(holder) as object | null;
+  }
+  return null;
+}
+
+function captureHintValue<Value>(
+  ownerWindow: Window & typeof globalThis,
+  target: object,
+  property: string,
+): HintCapturedValue<Value> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const emptyOwners: object[] = [];
+  let owner: object | null = target;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (descriptor) {
+      if (!("value" in descriptor) && typeof descriptor.get !== "function") {
+        return null;
+      }
+      const holder = owner;
+      const expected = Object.freeze({ ...descriptor });
+      const read =
+        "value" in descriptor
+          ? () => descriptor.value as Value
+          : () => apply(descriptor.get!, target, []) as Value;
+      return Object.freeze({
+        read,
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor ===
+            getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          emptyOwners.every(
+            (candidate) =>
+              getOwnPropertyDescriptor(candidate, property) === undefined,
+          ) &&
+          hintDescriptorMatches(
+            getOwnPropertyDescriptor(holder, property),
+            expected,
+          ),
+      });
+    }
+    emptyOwners.push(owner);
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function captureHintTargetMethod<Args extends readonly unknown[], Result>(
+  ownerWindow: Window & typeof globalThis,
+  target: object,
+  property: string,
+): HintCapturedMethod<Args, Result> | null {
+  const captured = captureHintValue<(...args: Args) => Result>(
+    ownerWindow,
+    target,
+    property,
+  );
+  const apply = ownerWindow.Reflect.apply;
+  try {
+    const method = captured?.read();
+    if (!captured || typeof method !== "function") return null;
+    return Object.freeze({
+      invoke: (receiver: object, ...args: Args) =>
+        apply(method, receiver, args) as Result,
+      isCurrent: () => {
+        try {
+          return (
+            ownerWindow.Reflect.apply === apply &&
+            captured.isCurrent() &&
+            captured.read() === method
+          );
+        } catch {
+          return false;
+        }
+      },
+    });
+  } catch {
+    return null;
+  }
+}
+
+function captureHintMethod<Args extends readonly unknown[], Result>(
+  ownerWindow: Window & typeof globalThis,
+  prototype: object,
+  property: string,
+): HintCapturedMethod<Args, Result> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const holder = owner;
+    const descriptor = getOwnPropertyDescriptor(holder, property);
+    if (descriptor) {
+      if (typeof descriptor.value !== "function") return null;
+      const expected = Object.freeze({ ...descriptor });
+      const method = descriptor.value as (...args: Args) => Result;
+      return Object.freeze({
+        invoke: (target: object, ...args: Args) =>
+          apply(method, target, args) as Result,
+        isCurrent: () =>
+          ownerWindow.Object.getOwnPropertyDescriptor ===
+            getOwnPropertyDescriptor &&
+          ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+          ownerWindow.Reflect.apply === apply &&
+          hintDescriptorMatches(
+            getOwnPropertyDescriptor(holder, property),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(holder) as object | null;
+  }
+  return null;
+}
+
+function captureHintTrustedGetter(
+  ownerWindow: Window & typeof globalThis,
+): HintTrustedGetter | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const apply = ownerWindow.Reflect.apply;
+  let probe: globalThis.KeyboardEvent;
+  try {
+    probe = new ownerWindow.KeyboardEvent("hint-navigation-trust-probe");
+  } catch {
+    return null;
+  }
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function"
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const getter = descriptor.get;
+  const matches = (event: object) =>
+    hintDescriptorMatches(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    read: (event: object) => apply(getter, event, []) as boolean,
+    matches,
+    isCurrent: () =>
+      ownerWindow.Object.getOwnPropertyDescriptor ===
+        getOwnPropertyDescriptor &&
+      ownerWindow.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function captureHintKeyboardAuthority(
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): HintKeyboardAuthority | null {
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const NodeConstructor = ownerWindow.Node;
+  const DocumentConstructor = ownerWindow.Document;
+  const HTMLElementConstructor = ownerWindow.HTMLElement;
+  const apply = ownerWindow.Reflect.apply;
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const eventPrototype = EventConstructor.prototype;
+  const uiEventPrototype = UIEventConstructor.prototype;
+  const keyboardPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = DocumentConstructor.prototype;
+  const htmlElementPrototype = HTMLElementConstructor.prototype;
+  const eventType = captureHintGetter<string>(
+    ownerWindow,
+    eventPrototype,
+    "type",
+  );
+  const eventTarget = captureHintGetter<EventTarget | null>(
+    ownerWindow,
+    eventPrototype,
+    "target",
+  );
+  const eventCurrentTarget = captureHintGetter<EventTarget | null>(
+    ownerWindow,
+    eventPrototype,
+    "currentTarget",
+  );
+  const eventPhase = captureHintGetter<number>(
+    ownerWindow,
+    eventPrototype,
+    "eventPhase",
+  );
+  const eventBubbles = captureHintGetter<boolean>(
+    ownerWindow,
+    eventPrototype,
+    "bubbles",
+  );
+  const eventCancelable = captureHintGetter<boolean>(
+    ownerWindow,
+    eventPrototype,
+    "cancelable",
+  );
+  const eventDefaultPrevented = captureHintGetter<boolean>(
+    ownerWindow,
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const eventCancelBubble = captureHintGetter<boolean>(
+    ownerWindow,
+    eventPrototype,
+    "cancelBubble",
+  );
+  const eventPath = captureHintMethod<readonly [], EventTarget[]>(
+    ownerWindow,
+    eventPrototype,
+    "composedPath",
+  );
+  const eventPreventDefault = captureHintMethod<readonly [], void>(
+    ownerWindow,
+    eventPrototype,
+    "preventDefault",
+  );
+  const eventView = captureHintGetter<Window | null>(
+    ownerWindow,
+    uiEventPrototype,
+    "view",
+  );
+  const key = captureHintGetter<string>(ownerWindow, keyboardPrototype, "key");
+  const code = captureHintGetter<string>(
+    ownerWindow,
+    keyboardPrototype,
+    "code",
+  );
+  const location = captureHintGetter<number>(
+    ownerWindow,
+    keyboardPrototype,
+    "location",
+  );
+  const repeat = captureHintGetter<boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "repeat",
+  );
+  const composing = captureHintGetter<boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "isComposing",
+  );
+  const altKey = captureHintGetter<boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "altKey",
+  );
+  const ctrlKey = captureHintGetter<boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "ctrlKey",
+  );
+  const metaKey = captureHintGetter<boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "metaKey",
+  );
+  const shiftKey = captureHintGetter<boolean>(
+    ownerWindow,
+    keyboardPrototype,
+    "shiftKey",
+  );
+  const activeElement = captureHintGetter<Element | null>(
+    ownerWindow,
+    documentPrototype,
+    "activeElement",
+  );
+  const documentView = captureHintValue<Window | null>(
+    ownerWindow,
+    ownerDocument,
+    "defaultView",
+  );
+  const focus = captureHintMethod<readonly [FocusOptions?], void>(
+    ownerWindow,
+    htmlElementPrototype,
+    "focus",
+  );
+  const windowListen = captureHintTargetMethod<
+    readonly [string, EventListener, boolean],
+    void
+  >(ownerWindow, ownerWindow, "addEventListener");
+  const windowUnlisten = captureHintTargetMethod<
+    readonly [string, EventListener, boolean],
+    void
+  >(ownerWindow, ownerWindow, "removeEventListener");
+  const trusted = captureHintTrustedGetter(ownerWindow);
+  if (
+    !eventType ||
+    !eventTarget ||
+    !eventCurrentTarget ||
+    !eventPhase ||
+    !eventBubbles ||
+    !eventCancelable ||
+    !eventDefaultPrevented ||
+    !eventCancelBubble ||
+    !eventPath ||
+    !eventPreventDefault ||
+    !eventView ||
+    !key ||
+    !code ||
+    !location ||
+    !repeat ||
+    !composing ||
+    !altKey ||
+    !ctrlKey ||
+    !metaKey ||
+    !shiftKey ||
+    !activeElement ||
+    !documentView ||
+    !focus ||
+    !windowListen ||
+    !windowUnlisten ||
+    !trusted ||
+    documentView.read() !== ownerWindow
+  ) {
+    return null;
+  }
+  const captured: readonly HintCapturedIntrinsic[] = Object.freeze([
+    eventType,
+    eventTarget,
+    eventCurrentTarget,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventPath,
+    eventPreventDefault,
+    eventView,
+    key,
+    code,
+    location,
+    repeat,
+    composing,
+    altKey,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    activeElement,
+    documentView,
+    focus,
+    windowListen,
+    windowUnlisten,
+    trusted,
+  ]);
+  let historyIsClean = true;
+  const isCurrent = () => {
+    if (!historyIsClean) return false;
+    historyIsClean =
+      ownerWindow.Event === EventConstructor &&
+      ownerWindow.UIEvent === UIEventConstructor &&
+      ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+      ownerWindow.Node === NodeConstructor &&
+      ownerWindow.Document === DocumentConstructor &&
+      ownerWindow.HTMLElement === HTMLElementConstructor &&
+      EventConstructor.prototype === eventPrototype &&
+      UIEventConstructor.prototype === uiEventPrototype &&
+      KeyboardEventConstructor.prototype === keyboardPrototype &&
+      DocumentConstructor.prototype === documentPrototype &&
+      HTMLElementConstructor.prototype === htmlElementPrototype &&
+      captured.every((intrinsic) => intrinsic.isCurrent()) &&
+      documentView.read() === ownerWindow;
+    return historyIsClean;
+  };
+  const reactMethodMatches = (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => {
+    if (!isCurrent() || typeof value !== "function") return false;
+    try {
+      let owner: object | null = event;
+      for (let depth = 0; owner && depth < 16; depth++) {
+        const descriptor = getOwnPropertyDescriptor(owner, property);
+        if (descriptor) {
+          return "value" in descriptor && descriptor.value === value;
+        }
+        owner = getPrototypeOf(owner) as object | null;
+      }
+    } catch {
+      historyIsClean = false;
+    }
+    return false;
+  };
+  if (!isCurrent()) return null;
+  return Object.freeze({
+    ownerWindow,
+    Event: EventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    Node: NodeConstructor,
+    apply,
+    eventType,
+    eventTarget,
+    eventCurrentTarget,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventPath,
+    eventPreventDefault,
+    eventView,
+    key,
+    code,
+    location,
+    repeat,
+    composing,
+    altKey,
+    ctrlKey,
+    metaKey,
+    shiftKey,
+    activeElement,
+    documentView,
+    focus,
+    windowListen,
+    windowUnlisten,
+    trusted,
+    reactMethodMatches,
+    isCurrent,
+  });
+}
+
+function isHintNavigationKey(key: string): key is HintNavigationKey {
+  return (
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "Home" ||
+    key === "End"
+  );
+}
+
+function hintControlIsEnabled(control: HintControl) {
+  const { element } = control;
+  if (
+    !element.isConnected ||
+    element.disabled ||
+    element.matches(":disabled") ||
+    element.getAttribute("aria-disabled")?.toLowerCase() === "true"
+  ) {
+    return false;
+  }
+  for (
+    let node: HTMLElement | null = element;
+    node;
+    node = node.parentElement
+  ) {
+    if (
+      node.hasAttribute("inert") ||
+      node.getAttribute("aria-disabled")?.toLowerCase() === "true"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hintNavigationDestination(
+  publication: HintPublication,
+  source: HintControl,
+  key: HintNavigationKey,
+) {
+  const controls = [
+    publication.controls.primary,
+    publication.controls.dismiss,
+  ].filter(hintControlIsEnabled);
+  const sourceIndex = controls.indexOf(source);
+  if (sourceIndex < 0) return null;
+  const destinationIndex =
+    key === "ArrowRight" || key === "ArrowDown"
+      ? sourceIndex + 1
+      : key === "ArrowLeft" || key === "ArrowUp"
+        ? sourceIndex - 1
+        : key === "Home"
+          ? 0
+          : controls.length - 1;
+  const destination = controls[destinationIndex] ?? null;
+  return destination && destination !== source ? destination : null;
+}
+
+function hintNativeKeySnapshotMatches(
+  keyboard: HintKeyboardAuthority,
+  delivery: HintNativeKeyDelivery,
+) {
+  const { snapshot } = delivery;
+  const { event } = snapshot;
+  if (!keyboard.isCurrent()) return false;
+  try {
+    const path = keyboard.eventPath.invoke(event);
+    const view = keyboard.eventView.read(event);
+    return (
+      keyboard.ownerWindow.Object.getPrototypeOf(event) ===
+        keyboard.KeyboardEvent.prototype &&
+      keyboard.trusted.matches(event) &&
+      keyboard.trusted.read(event) &&
+      keyboard.eventType.read(event) === "keydown" &&
+      keyboard.key.read(event) === snapshot.key &&
+      keyboard.code.read(event) === snapshot.code &&
+      keyboard.location.read(event) === snapshot.location &&
+      keyboard.eventTarget.read(event) === snapshot.target &&
+      keyboard.eventBubbles.read(event) === snapshot.bubbles &&
+      keyboard.eventCancelable.read(event) === snapshot.cancelable &&
+      Object.is(view, snapshot.view) &&
+      (view === null ||
+        view === snapshot.publication.ownerDocument.defaultView ||
+        view === snapshot.receiver) &&
+      !keyboard.eventDefaultPrevented.read(event) &&
+      !keyboard.eventCancelBubble.read(event) &&
+      !keyboard.repeat.read(event) &&
+      !keyboard.composing.read(event) &&
+      !keyboard.altKey.read(event) &&
+      !keyboard.ctrlKey.read(event) &&
+      !keyboard.metaKey.read(event) &&
+      !keyboard.shiftKey.read(event) &&
+      snapshot.path[snapshot.path.length - 2] ===
+        snapshot.publication.ownerDocument &&
+      snapshot.path[snapshot.path.length - 1] === snapshot.receiver &&
+      path.length === snapshot.path.length &&
+      path.every((entry, index) => entry === snapshot.path[index])
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hintWrapperNativeEvent(
+  event: ReactKeyboardEvent<HTMLElement>,
+): object | null {
+  try {
+    const nativeEvent: unknown = event.nativeEvent;
+    return nativeEvent && typeof nativeEvent === "object" ? nativeEvent : null;
+  } catch {
+    return null;
+  }
+}
+
+function hintReactKeyMethods(
+  event: ReactKeyboardEvent<HTMLElement>,
+  keyboard: HintKeyboardAuthority,
+  expected?: HintReactKeyMethods,
+): HintReactKeyMethods | null {
+  try {
+    const methods = Object.freeze({
+      preventDefault: event.preventDefault as (...args: never[]) => unknown,
+      isDefaultPrevented: event.isDefaultPrevented as (
+        ...args: never[]
+      ) => unknown,
+      isPropagationStopped: event.isPropagationStopped as (
+        ...args: never[]
+      ) => unknown,
+    });
+    if (
+      !keyboard.reactMethodMatches(
+        event,
+        "preventDefault",
+        methods.preventDefault,
+      ) ||
+      !keyboard.reactMethodMatches(
+        event,
+        "isDefaultPrevented",
+        methods.isDefaultPrevented,
+      ) ||
+      !keyboard.reactMethodMatches(
+        event,
+        "isPropagationStopped",
+        methods.isPropagationStopped,
+      ) ||
+      keyboard.apply(methods.isDefaultPrevented, event, []) !== false ||
+      keyboard.apply(methods.isPropagationStopped, event, []) !== false ||
+      (expected !== undefined &&
+        (methods.preventDefault !== expected.preventDefault ||
+          methods.isDefaultPrevented !== expected.isDefaultPrevented ||
+          methods.isPropagationStopped !== expected.isPropagationStopped))
+    ) {
+      return null;
+    }
+    return methods;
+  } catch {
+    return null;
+  }
+}
+
+function exactHintReactKey<Element extends HTMLElement>(
+  event: ReactKeyboardEvent<Element>,
+  publication: HintPublication,
+  source: HTMLButtonElement,
+  reactCurrentTarget: Element,
+  phase: HintKeyPhase,
+  windowReceiver: EventTarget,
+  expectedMethods?: HintReactKeyMethods,
+): HintReactKeyFacts | null {
+  const keyboard = publication.keyboard;
+  if (
+    !event ||
+    typeof event !== "object" ||
+    !keyboard ||
+    !keyboard.isCurrent()
+  ) {
+    return null;
+  }
+  const nativeEvent = event.nativeEvent;
+  if (
+    !nativeEvent ||
+    typeof nativeEvent !== "object" ||
+    !(nativeEvent instanceof keyboard.KeyboardEvent) ||
+    keyboard.ownerWindow.Object.getPrototypeOf(nativeEvent) !==
+      keyboard.KeyboardEvent.prototype ||
+    !keyboard.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const key = keyboard.key.read(nativeEvent);
+    if (!isHintNavigationKey(key)) return null;
+    const code = keyboard.code.read(nativeEvent);
+    const location = keyboard.location.read(nativeEvent);
+    const target = keyboard.eventTarget.read(nativeEvent);
+    const currentTarget = keyboard.eventCurrentTarget.read(nativeEvent);
+    const path = keyboard.eventPath.invoke(nativeEvent);
+    const nativePhase = keyboard.eventPhase.read(nativeEvent);
+    const bubbles = keyboard.eventBubbles.read(nativeEvent);
+    const cancelable = keyboard.eventCancelable.read(nativeEvent);
+    const defaultPrevented = keyboard.eventDefaultPrevented.read(nativeEvent);
+    const cancelBubble = keyboard.eventCancelBubble.read(nativeEvent);
+    const trusted = keyboard.trusted.read(nativeEvent);
+    const repeat = keyboard.repeat.read(nativeEvent);
+    const composing = keyboard.composing.read(nativeEvent);
+    const altKey = keyboard.altKey.read(nativeEvent);
+    const ctrlKey = keyboard.ctrlKey.read(nativeEvent);
+    const metaKey = keyboard.metaKey.read(nativeEvent);
+    const shiftKey = keyboard.shiftKey.read(nativeEvent);
+    const nativeView = keyboard.eventView.read(nativeEvent);
+    const methods = hintReactKeyMethods(
+      event as ReactKeyboardEvent<HTMLElement>,
+      keyboard,
+      expectedMethods,
+    );
+    return keyboard.eventType.read(nativeEvent) === "keydown" &&
+      nativePhase ===
+        (phase === "capture"
+          ? keyboard.Event.CAPTURING_PHASE
+          : keyboard.Event.BUBBLING_PHASE) &&
+      bubbles &&
+      cancelable &&
+      !defaultPrevented &&
+      !cancelBubble &&
+      trusted &&
+      !repeat &&
+      !composing &&
+      !altKey &&
+      !ctrlKey &&
+      !metaKey &&
+      !shiftKey &&
+      (nativeView === null ||
+        nativeView === publication.ownerDocument.defaultView ||
+        nativeView === windowReceiver) &&
+      target === source &&
+      target instanceof keyboard.Node &&
+      target.ownerDocument === publication.ownerDocument &&
+      currentTarget instanceof keyboard.Node &&
+      (currentTarget === publication.ownerDocument ||
+        currentTarget.ownerDocument === publication.ownerDocument) &&
+      currentTarget.contains(publication.root) &&
+      path[0] === source &&
+      path.filter((entry) => entry === source).length === 1 &&
+      path.includes(currentTarget) &&
+      path.includes(publication.root) &&
+      path[path.length - 1] === windowReceiver &&
+      keyboard.activeElement.read(publication.ownerDocument) === source &&
+      event.type === "keydown" &&
+      event.currentTarget === reactCurrentTarget &&
+      event.target === target &&
+      event.nativeEvent === nativeEvent &&
+      event.key === key &&
+      event.code === code &&
+      event.location === location &&
+      event.repeat === repeat &&
+      event.altKey === altKey &&
+      event.ctrlKey === ctrlKey &&
+      event.metaKey === metaKey &&
+      event.shiftKey === shiftKey &&
+      event.bubbles === bubbles &&
+      event.cancelable === cancelable &&
+      event.defaultPrevented === defaultPrevented &&
+      event.eventPhase === nativePhase &&
+      event.isTrusted === trusted &&
+      Object.is(event.view, nativeView) &&
+      methods
+      ? Object.freeze({
+          nativeEvent,
+          key,
+          delegationTarget: currentTarget,
+          methods,
+        })
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function createHintPublication(
@@ -828,6 +1732,10 @@ function createHintPublication(
     const ownerWindow = ownerDocument.defaultView;
     const placement = snapshotHintPlacement(rootElement);
     if (!ownerWindow || !placement) return null;
+    const navigationKeyboard = captureHintKeyboardAuthority(
+      ownerDocument,
+      ownerWindow,
+    );
     const dom = snapshotHintDom(rootElement);
     const primaryAction: HintAction = Object.freeze({
       identity: Symbol("hint-primary-action"),
@@ -880,6 +1788,9 @@ function createHintPublication(
     let reactMouseDown: HintReactProof | null = null;
     let reactClick: HintReactProof | null = null;
     let interactionExpiry: number | null = null;
+    let navigationListening = false;
+    const nativeKeyDeliveries = new WeakMap<object, HintNativeKeyDelivery>();
+    const seenNativeKeys = new WeakSet<object>();
     const releasePrimaryPress = () => {
       cells.pressedPublications.delete(publication);
       cells.pressedControls.delete(controls.primary);
@@ -977,7 +1888,9 @@ function createHintPublication(
     };
     const nativeReactDispatchIsCurrent = (
       native: Event,
-      phase: typeof ownerWindow.Event.CAPTURING_PHASE | typeof ownerWindow.Event.BUBBLING_PHASE,
+      phase:
+        | typeof ownerWindow.Event.CAPTURING_PHASE
+        | typeof ownerWindow.Event.BUBBLING_PHASE,
     ) => {
       const currentTarget = native.currentTarget;
       return (
@@ -1184,9 +2097,7 @@ function createHintPublication(
       keyboardUp = null;
       reactClick = null;
       nativeClick =
-        proof && source
-          ? Object.freeze({ ...proof, source, pointerUp })
-          : null;
+        proof && source ? Object.freeze({ ...proof, source, pointerUp }) : null;
       if (!nativeClick) {
         releasePrimaryPress();
         return;
@@ -1201,6 +2112,19 @@ function createHintPublication(
       }, 0);
     };
     const releaseNativeListeners = () => {
+      if (navigationListening && navigationKeyboard) {
+        navigationListening = false;
+        try {
+          navigationKeyboard.windowUnlisten.invoke(
+            ownerWindow,
+            "keydown",
+            captureNavigationNative,
+            true,
+          );
+        } catch {
+          /* The retained listener stays inert because this publication is retired. */
+        }
+      }
       ownerDocument.removeEventListener("mousedown", onNativeMouseDown, true);
       ownerDocument.removeEventListener("mouseup", onNativeMouseUp, true);
       ownerDocument.removeEventListener("keydown", onNativeKeyDown, true);
@@ -1229,6 +2153,19 @@ function createHintPublication(
       );
       ownerWindow.addEventListener("blur", onNativeWindowBlur, true);
       ownerDocument.addEventListener("click", onNativeClick, true);
+      if (navigationKeyboard?.isCurrent()) {
+        try {
+          navigationKeyboard.windowListen.invoke(
+            ownerWindow,
+            "keydown",
+            captureNavigationNative,
+            true,
+          );
+          navigationListening = true;
+        } catch {
+          navigationListening = false;
+        }
+      }
     };
     const publishedDomMatches = () =>
       Boolean(
@@ -1271,12 +2208,463 @@ function createHintPublication(
       ownerDocument,
       controls,
       preserveFocus,
+      keyboard: navigationKeyboard,
       dom,
       placement,
       retire: () => retire("other"),
       isRetired: () => retired,
       publishedDomMatches,
     });
+
+    function captureNavigationNative(
+      this: EventTarget,
+      nativeEvent: Event,
+    ): void {
+      const keyboard = publication.keyboard;
+      if (
+        retired ||
+        !keyboard ||
+        !keyboard.isCurrent() ||
+        !(nativeEvent instanceof keyboard.KeyboardEvent) ||
+        keyboard.ownerWindow.Object.getPrototypeOf(nativeEvent) !==
+          keyboard.KeyboardEvent.prototype ||
+        seenNativeKeys.has(nativeEvent)
+      ) {
+        return;
+      }
+      seenNativeKeys.add(nativeEvent);
+      if (!publicationOwnsCurrentDom()) return;
+      try {
+        const currentTarget = keyboard.eventCurrentTarget.read(nativeEvent);
+        const path = keyboard.eventPath.invoke(nativeEvent);
+        if (
+          !keyboard.trusted.matches(nativeEvent) ||
+          keyboard.trusted.read(nativeEvent) !== true ||
+          keyboard.eventType.read(nativeEvent) !== "keydown" ||
+          currentTarget !== this ||
+          keyboard.eventPhase.read(nativeEvent) !==
+            keyboard.Event.CAPTURING_PHASE ||
+          path.length < 2 ||
+          path[path.length - 2] !== ownerDocument ||
+          path[path.length - 1] !== this
+        ) {
+          return;
+        }
+        const key = keyboard.key.read(nativeEvent);
+        const target = keyboard.eventTarget.read(nativeEvent);
+        const source =
+          target === controls.primary.element
+            ? controls.primary
+            : target === controls.dismiss.element
+              ? controls.dismiss
+              : null;
+        const view = keyboard.eventView.read(nativeEvent);
+        if (
+          !isHintNavigationKey(key) ||
+          !source ||
+          (view !== null && view !== ownerWindow && view !== this) ||
+          keyboard.activeElement.read(ownerDocument) !== source.element ||
+          source.element.ownerDocument !== ownerDocument ||
+          !source.element.isConnected ||
+          !hintControlIsEnabled(source) ||
+          keyboard.eventBubbles.read(nativeEvent) !== true ||
+          keyboard.eventCancelable.read(nativeEvent) !== true ||
+          keyboard.eventDefaultPrevented.read(nativeEvent) !== false ||
+          keyboard.eventCancelBubble.read(nativeEvent) !== false ||
+          keyboard.repeat.read(nativeEvent) !== false ||
+          keyboard.composing.read(nativeEvent) !== false ||
+          keyboard.ctrlKey.read(nativeEvent) !== false ||
+          keyboard.altKey.read(nativeEvent) !== false ||
+          keyboard.shiftKey.read(nativeEvent) !== false ||
+          keyboard.metaKey.read(nativeEvent) !== false
+        ) {
+          return;
+        }
+        const delivery: HintNativeKeyDelivery = {
+          snapshot: Object.freeze({
+            event: nativeEvent,
+            publication,
+            source,
+            key,
+            code: keyboard.code.read(nativeEvent),
+            location: keyboard.location.read(nativeEvent),
+            target,
+            path: Object.freeze([...path]),
+            bubbles: true,
+            cancelable: true,
+            view,
+            receiver: this,
+          }),
+          delegationTarget: null,
+          captureInvalid: false,
+          captureRootCount: 0,
+          captureRootEvent: null,
+          captureMethods: null,
+          captureControlCount: 0,
+          captureControlEvent: null,
+          bubbleInvalid: false,
+          bubbleMethods: null,
+          bubbleControlCount: 0,
+          bubbleControlEvent: null,
+          bubbleRootCount: 0,
+          bubbleRootEvent: null,
+        };
+        nativeKeyDeliveries.set(nativeEvent, delivery);
+        queueMicrotask(() => {
+          queueMicrotask(() => {
+            if (nativeKeyDeliveries.get(nativeEvent) === delivery) {
+              nativeKeyDeliveries.delete(nativeEvent);
+            }
+          });
+        });
+      } catch {
+        nativeKeyDeliveries.delete(nativeEvent);
+      }
+    }
+
+    const liveNavigationControls = () => {
+      const primary = action.element();
+      const close = dismiss.element();
+      if (
+        primary !== controls.primary.element ||
+        close !== controls.dismiss.element
+      ) {
+        return null;
+      }
+      return Object.freeze([controls.primary, controls.dismiss]);
+    };
+
+    const invalidateKeyDelivery = (
+      delivery: HintNativeKeyDelivery,
+      phase: HintKeyPhase,
+    ) => {
+      if (phase === "capture") delivery.captureInvalid = true;
+      else delivery.bubbleInvalid = true;
+    };
+
+    const stageHintRootKey = (
+      phase: HintKeyPhase,
+      event: ReactKeyboardEvent<HTMLDivElement>,
+    ) => {
+      const keyboard = publication.keyboard;
+      if (retired || !keyboard || !event || typeof event !== "object") {
+        return;
+      }
+      const carried = hintWrapperNativeEvent(event);
+      const delivery = carried ? nativeKeyDeliveries.get(carried) : undefined;
+      if (!delivery || delivery.snapshot.publication !== publication) return;
+      const expectedMethods =
+        phase === "capture" ? delivery.captureMethods : delivery.bubbleMethods;
+      const facts = exactHintReactKey(
+        event,
+        publication,
+        delivery.snapshot.source.element,
+        rootElement,
+        phase,
+        delivery.snapshot.receiver,
+        expectedMethods ?? undefined,
+      );
+      const controlsNow = liveNavigationControls();
+      if (
+        !facts ||
+        !controlsNow ||
+        !publicationOwnsCurrentDom() ||
+        delivery.snapshot.source.element !==
+          controlsNow[delivery.snapshot.source.kind === "primary" ? 0 : 1]
+            .element
+      ) {
+        invalidateKeyDelivery(delivery, phase);
+        return;
+      }
+      if (phase === "capture") {
+        if (
+          delivery.captureInvalid ||
+          delivery.captureRootCount !== 0 ||
+          delivery.captureRootEvent !== null ||
+          delivery.captureControlCount !== 0 ||
+          delivery.captureControlEvent !== null ||
+          delivery.delegationTarget !== null ||
+          facts.delegationTarget === rootElement ||
+          !delivery.snapshot.path.includes(facts.delegationTarget)
+        ) {
+          delivery.captureInvalid = true;
+          return;
+        }
+        delivery.captureRootCount = 1;
+        delivery.captureRootEvent = event;
+        delivery.captureMethods = facts.methods;
+        delivery.delegationTarget = facts.delegationTarget;
+        return;
+      }
+      if (
+        delivery.captureInvalid ||
+        delivery.bubbleInvalid ||
+        !delivery.delegationTarget ||
+        delivery.delegationTarget !== facts.delegationTarget ||
+        delivery.captureRootCount !== 1 ||
+        !delivery.captureRootEvent ||
+        delivery.captureControlCount !== 1 ||
+        delivery.captureControlEvent !== delivery.captureRootEvent ||
+        delivery.bubbleControlCount !== 1 ||
+        delivery.bubbleControlEvent !==
+          (event as ReactKeyboardEvent<HTMLElement>) ||
+        delivery.bubbleRootCount !== 0 ||
+        delivery.bubbleRootEvent !== null
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      delivery.bubbleRootCount = 1;
+      delivery.bubbleRootEvent = event;
+      finalizeNavigation(facts.nativeEvent);
+    };
+
+    const stageHintControlKey = (
+      kind: HintControlKind,
+      phase: HintKeyPhase,
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      const keyboard = publication.keyboard;
+      if (retired || !keyboard || !event || typeof event !== "object") {
+        return;
+      }
+      const carried = hintWrapperNativeEvent(event);
+      const delivery = carried ? nativeKeyDeliveries.get(carried) : undefined;
+      if (!delivery || delivery.snapshot.publication !== publication) return;
+      const source = controls[kind];
+      const expectedMethods =
+        phase === "capture" ? delivery.captureMethods : delivery.bubbleMethods;
+      const facts = exactHintReactKey(
+        event,
+        publication,
+        source.element,
+        source.element,
+        phase,
+        delivery.snapshot.receiver,
+        expectedMethods ?? undefined,
+      );
+      if (
+        !facts ||
+        !publicationOwnsCurrentDom() ||
+        delivery.snapshot.source !== source ||
+        delivery.snapshot.target !== source.element ||
+        delivery.snapshot.key !== facts.key ||
+        delivery.delegationTarget !== facts.delegationTarget ||
+        !hintNativeKeySnapshotMatches(keyboard, delivery)
+      ) {
+        invalidateKeyDelivery(delivery, phase);
+        return;
+      }
+      if (phase === "capture") {
+        if (
+          delivery.captureInvalid ||
+          delivery.captureRootCount !== 1 ||
+          delivery.captureRootEvent !== event ||
+          delivery.captureControlCount !== 0 ||
+          delivery.captureControlEvent !== null
+        ) {
+          delivery.captureInvalid = true;
+          return;
+        }
+        delivery.captureControlCount = 1;
+        delivery.captureControlEvent = event;
+        return;
+      }
+      if (
+        delivery.captureInvalid ||
+        delivery.bubbleInvalid ||
+        delivery.captureControlCount !== 1 ||
+        !delivery.captureControlEvent ||
+        delivery.captureControlEvent === event ||
+        delivery.bubbleControlCount !== 0 ||
+        delivery.bubbleControlEvent !== null ||
+        delivery.bubbleRootCount !== 0 ||
+        delivery.bubbleRootEvent !== null
+      ) {
+        delivery.bubbleInvalid = true;
+        return;
+      }
+      delivery.bubbleControlCount = 1;
+      delivery.bubbleControlEvent = event;
+      delivery.bubbleMethods = facts.methods;
+    };
+
+    function finalizeNavigation(nativeEvent: globalThis.KeyboardEvent): void {
+      const keyboard = publication.keyboard;
+      const delivery = nativeKeyDeliveries.get(nativeEvent);
+      if (
+        retired ||
+        !keyboard ||
+        !delivery ||
+        delivery.snapshot.publication !== publication
+      ) {
+        return;
+      }
+      const staged = delivery.snapshot;
+      const captureEvent = delivery.captureControlEvent;
+      const bubbleEvent = delivery.bubbleControlEvent;
+      const controlsNow = liveNavigationControls();
+      const methodsAreCurrent = (
+        event: ReactKeyboardEvent<HTMLElement>,
+        methods: HintReactKeyMethods,
+      ) =>
+        keyboard.reactMethodMatches(
+          event,
+          "preventDefault",
+          methods.preventDefault,
+        ) &&
+        keyboard.reactMethodMatches(
+          event,
+          "isDefaultPrevented",
+          methods.isDefaultPrevented,
+        ) &&
+        keyboard.reactMethodMatches(
+          event,
+          "isPropagationStopped",
+          methods.isPropagationStopped,
+        );
+      try {
+        if (
+          keyboard.eventCurrentTarget.read(nativeEvent) !==
+            delivery.delegationTarget ||
+          keyboard.eventPhase.read(nativeEvent) !==
+            keyboard.Event.BUBBLING_PHASE ||
+          delivery.captureInvalid ||
+          delivery.bubbleInvalid ||
+          delivery.captureRootCount !== 1 ||
+          !delivery.captureMethods ||
+          delivery.captureControlCount !== 1 ||
+          !captureEvent ||
+          delivery.captureRootEvent !== captureEvent ||
+          delivery.bubbleControlCount !== 1 ||
+          !delivery.bubbleMethods ||
+          !bubbleEvent ||
+          delivery.bubbleRootCount !== 1 ||
+          delivery.bubbleRootEvent !== bubbleEvent ||
+          captureEvent === bubbleEvent ||
+          !controlsNow ||
+          controlsNow[staged.source.kind === "primary" ? 0 : 1] !==
+            staged.source ||
+          keyboard.activeElement.read(ownerDocument) !==
+            staged.source.element ||
+          !hintNativeKeySnapshotMatches(keyboard, delivery) ||
+          !publicationOwnsCurrentDom() ||
+          !methodsAreCurrent(captureEvent, delivery.captureMethods) ||
+          !methodsAreCurrent(bubbleEvent, delivery.bubbleMethods) ||
+          keyboard.apply(
+            delivery.captureMethods.isDefaultPrevented,
+            captureEvent,
+            [],
+          ) !== false ||
+          keyboard.apply(
+            delivery.bubbleMethods.isDefaultPrevented,
+            bubbleEvent,
+            [],
+          ) !== false
+        ) {
+          return;
+        }
+        const destination = hintNavigationDestination(
+          publication,
+          staged.source,
+          staged.key,
+        );
+        if (
+          !destination ||
+          destination === staged.source ||
+          destination.element.ownerDocument !== ownerDocument ||
+          !destination.element.isConnected ||
+          destination.element.parentElement !== rootElement ||
+          !hintControlIsEnabled(destination)
+        ) {
+          return;
+        }
+        const movement: HintNavigationMovement = Object.freeze({
+          identity: Symbol("hint-navigation-movement"),
+          publication,
+          source: staged.source,
+          destination,
+          key: staged.key,
+          nativeEvent,
+          captureEvent,
+          bubbleEvent,
+          receiver: staged.receiver,
+        });
+        if (
+          cells.claimedPublications.has(publication) ||
+          cells.claimedControls.has(staged.source) ||
+          cells.claimedControls.has(destination) ||
+          cells.claimedActions.has(staged.source.action) ||
+          cells.claimedActions.has(destination.action) ||
+          cells.claimedReactEvents.has(captureEvent) ||
+          cells.claimedReactEvents.has(bubbleEvent) ||
+          cells.claimedNativeEvents.has(nativeEvent) ||
+          cells.claimedMovements.has(movement)
+        ) {
+          return;
+        }
+        cells.claimedPublications.add(publication);
+        cells.claimedControls.add(staged.source);
+        cells.claimedControls.add(destination);
+        cells.claimedActions.add(staged.source.action);
+        cells.claimedActions.add(destination.action);
+        cells.claimedReactEvents.add(captureEvent);
+        cells.claimedReactEvents.add(bubbleEvent);
+        cells.claimedNativeEvents.add(nativeEvent);
+        cells.claimedMovements.add(movement);
+        delivery.captureInvalid = true;
+        delivery.bubbleInvalid = true;
+        nativeKeyDeliveries.delete(nativeEvent);
+        if (
+          !publicationOwnsCurrentDom() ||
+          keyboard.activeElement.read(ownerDocument) !==
+            staged.source.element ||
+          hintNavigationDestination(publication, staged.source, staged.key) !==
+            destination ||
+          !methodsAreCurrent(captureEvent, delivery.captureMethods) ||
+          !methodsAreCurrent(bubbleEvent, delivery.bubbleMethods) ||
+          keyboard.apply(
+            delivery.captureMethods.isDefaultPrevented,
+            captureEvent,
+            [],
+          ) !== false ||
+          keyboard.apply(
+            delivery.bubbleMethods.isDefaultPrevented,
+            bubbleEvent,
+            [],
+          ) !== false
+        ) {
+          return;
+        }
+        keyboard.apply(delivery.bubbleMethods.preventDefault, bubbleEvent, []);
+        const postPreventionMethod = bubbleEvent.isDefaultPrevented as (
+          ...args: never[]
+        ) => unknown;
+        if (
+          keyboard.eventDefaultPrevented.read(nativeEvent) !== true ||
+          !keyboard.reactMethodMatches(
+            captureEvent,
+            "isDefaultPrevented",
+            delivery.captureMethods.isDefaultPrevented,
+          ) ||
+          !keyboard.reactMethodMatches(
+            bubbleEvent,
+            "isDefaultPrevented",
+            postPreventionMethod,
+          ) ||
+          keyboard.apply(postPreventionMethod, bubbleEvent, []) !== true
+        ) {
+          return;
+        }
+        keyboard.focus.invoke(destination.element, { preventScroll: true });
+        requestSuccessor();
+      } catch {
+        delivery.captureInvalid = true;
+        delivery.bubbleInvalid = true;
+        nativeKeyDeliveries.delete(nativeEvent);
+      }
+    }
+
     const exactReactProof = (
       proof: HintReactProof | null,
       event: ReactMouseEvent<HTMLButtonElement>,
@@ -1312,7 +2700,8 @@ function createHintPublication(
         cells.pressedPublications.has(publication) ||
         cells.pressedControls.has(control) ||
         cells.pressedActions.has(preserveFocus) ||
-        (reactMouseDown && cells.claimedReactEvents.has(reactMouseDown.event)) ||
+        (reactMouseDown &&
+          cells.claimedReactEvents.has(reactMouseDown.event)) ||
         cells.claimedReactEvents.has(event) ||
         cells.claimedNativeEvents.has(native.event)
       ) {
@@ -1491,6 +2880,19 @@ function createHintPublication(
       captureReactClick: (event: ReactMouseEvent<HTMLDivElement>) => {
         reactClick = captureReact(event, nativeClick, "click");
       },
+      captureReactRootKey: (
+        phase: HintKeyPhase,
+        event: ReactKeyboardEvent<HTMLDivElement>,
+      ) => {
+        stageHintRootKey(phase, event);
+      },
+      captureReactControlKey: (
+        kind: HintControlKind,
+        phase: HintKeyPhase,
+        event: ReactKeyboardEvent<HTMLButtonElement>,
+      ) => {
+        stageHintControlKey(kind, phase, event);
+      },
       preserveActionFocus: (event: ReactMouseEvent<HTMLButtonElement>) => {
         const control = controls.primary;
         if (
@@ -1603,6 +3005,24 @@ function createHintPublication(
     captureClick: (event: ReactMouseEvent<HTMLDivElement>) => {
       currentRuntime?.captureReactClick(event);
     },
+    captureKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      currentRuntime?.captureReactRootKey("capture", event);
+    },
+    keyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      currentRuntime?.captureReactRootKey("bubble", event);
+    },
+    capturePrimaryKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      currentRuntime?.captureReactControlKey("primary", "capture", event);
+    },
+    primaryKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      currentRuntime?.captureReactControlKey("primary", "bubble", event);
+    },
+    captureDismissKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      currentRuntime?.captureReactControlKey("dismiss", "capture", event);
+    },
+    dismissKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      currentRuntime?.captureReactControlKey("dismiss", "bubble", event);
+    },
     preserveActionFocus: (event: ReactMouseEvent<HTMLButtonElement>) => {
       currentRuntime?.preserveActionFocus(event);
     },
@@ -1648,9 +3068,7 @@ function PublishedHintBar({
   setRecord: Dispatch<SetStateAction<HintsRecord>>;
   setPinned: Dispatch<SetStateAction<PinnedHint | null>>;
 }) {
-  const [publicationMount] = useState(() =>
-    Symbol("hint publication mount"),
-  );
+  const [publicationMount] = useState(() => Symbol("hint publication mount"));
   const visit = useMemo<HintVisit>(
     () =>
       Object.freeze({
@@ -1673,6 +3091,7 @@ function PublishedHintBar({
     claimedActions: new WeakSet(),
     claimedReactEvents: new WeakSet(),
     claimedNativeEvents: new WeakSet(),
+    claimedMovements: new WeakSet(),
     pressedPublications: new WeakSet(),
     pressedControls: new WeakSet(),
     pressedActions: new WeakSet(),
@@ -1706,11 +3125,7 @@ function PublishedHintBar({
     storage: window.localStorage,
     discovery,
   });
-  const publication = createHintPublication(
-    render,
-    cells,
-    requestSuccessor,
-  );
+  const publication = createHintPublication(render, cells, requestSuccessor);
 
   useLayoutEffect(() => publication.establish(), [publication]);
 
@@ -1754,6 +3169,12 @@ function PublishedHintBar({
     captureDismissIcon,
     captureMouseDown,
     captureClick,
+    captureKeyDown,
+    keyDown,
+    capturePrimaryKeyDown,
+    primaryKeyDown,
+    captureDismissKeyDown,
+    dismissKeyDown,
     preserveActionFocus,
   } = publication;
   return (
@@ -1766,6 +3187,8 @@ function PublishedHintBar({
       data-hint={shown}
       onMouseDownCapture={captureMouseDown}
       onClickCapture={captureClick}
+      onKeyDownCapture={captureKeyDown}
+      onKeyDown={keyDown}
     >
       <Icon
         ref={captureIcon}
@@ -1781,6 +3204,8 @@ function PublishedHintBar({
         type="button"
         className={HINT_ACTION_CLASS}
         onMouseDown={preserveActionFocus}
+        onKeyDownCapture={capturePrimaryKeyDown}
+        onKeyDown={primaryKeyDown}
         onClick={activatePrimary}
         data-testid="hint-action"
       >
@@ -1790,6 +3215,8 @@ function PublishedHintBar({
         ref={captureDismiss}
         type="button"
         className={HINT_DISMISS_CLASS}
+        onKeyDownCapture={captureDismissKeyDown}
+        onKeyDown={dismissKeyDown}
         onClick={activateDismiss}
         aria-label="Dismiss hint"
         data-testid="hint-dismiss"
@@ -1806,17 +3233,31 @@ function PublishedHintBar({
  * (`markdoc:hints`). A hint that has appeared stays until ✕ or its action; once both are dismissed
  * the bar never mounts again. Never shown on phone widths.
  */
-export function HintBar({ session, actions, onShare, onComment }: HintBarProps) {
+export function HintBar({
+  session,
+  actions,
+  onShare,
+  onComment,
+}: HintBarProps) {
   // Storage is read after hydration so the server markup (no bar) matches the first client render.
-  const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false);
+  const hydrated = useSyncExternalStore(
+    noopSubscribe,
+    () => true,
+    () => false,
+  );
   const [record, setRecord] = useState<HintsRecord>(EMPTY_HINTS_RECORD);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    setRecord(readHintsRecord(typeof window === "undefined" ? null : window.localStorage));
+    setRecord(
+      readHintsRecord(
+        typeof window === "undefined" ? null : window.localStorage,
+      ),
+    );
     setLoaded(true);
   }, []);
   const wide = useMediaQuery(`(min-width: ${HINTS_MIN_WIDTH}px)`);
-  const active = hydrated && loaded && wide && !allHintsDismissed(record.dismissed);
+  const active =
+    hydrated && loaded && wide && !allHintsDismissed(record.dismissed);
 
   // Everything else comes from the live session; the selector returns small primitives so the bar
   // re-renders only when a gate actually flips, not per keystroke.
@@ -1849,7 +3290,10 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
   // request must settle before the same source can be requested for a replacement document.
   const settled = useOpenSettled(session);
   const documentId = session.docId;
-  const discoveryKey = useMemo<DiscoveryKey>(() => ({ session, documentId }), [session, documentId]);
+  const discoveryKey = useMemo<DiscoveryKey>(
+    () => ({ session, documentId }),
+    [session, documentId],
+  );
   const [discovery, setDiscovery] = useState<DiscoverySnapshot | null>(null);
   const discoveryCoordinator = useRef<DiscoveryCoordinator>({
     authority: null,
@@ -1857,7 +3301,12 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
     tokenOperation: null,
     nextOperation: 0,
   });
-  const needsShareInfo = active && settled && !record.dismissed.includes("collab-agent") && !record.agentSeen && !live.agentHere;
+  const needsShareInfo =
+    active &&
+    settled &&
+    !record.dismissed.includes("collab-agent") &&
+    !record.agentSeen &&
+    !live.agentHere;
   const retireDiscovery = useCallback((authority: DiscoveryAuthority) => {
     if (authority.retired) return;
     authority.retired = true;
@@ -1870,11 +3319,15 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
       }
     }
     if (authority.visibilityListener !== null) {
-      document.removeEventListener("visibilitychange", authority.visibilityListener);
+      document.removeEventListener(
+        "visibilitychange",
+        authority.visibilityListener,
+      );
       authority.visibilityListener = null;
     }
     authority.run = null;
-    if (discoveryCoordinator.current.authority === authority) discoveryCoordinator.current.authority = null;
+    if (discoveryCoordinator.current.authority === authority)
+      discoveryCoordinator.current.authority = null;
   }, []);
 
   useLayoutEffect(() => {
@@ -1901,14 +3354,21 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
     const coordinator = discoveryCoordinator.current;
     const authority = coordinator.authority;
     if (!authority || authority.key !== discoveryKey) return;
-    const ownsAuthority = () => !authority.retired && coordinator.authority === authority;
+    const ownsAuthority = () =>
+      !authority.retired && coordinator.authority === authority;
     if (!ownsAuthority()) return;
     authority.visible = document.visibilityState === "visible";
 
     const operationFor = (source: DiscoverySource) =>
-      source === "collaborators" ? coordinator.collaboratorsOperation : coordinator.tokenOperation;
-    const setOperation = (source: DiscoverySource, operation: DiscoveryOperation | null) => {
-      if (source === "collaborators") coordinator.collaboratorsOperation = operation;
+      source === "collaborators"
+        ? coordinator.collaboratorsOperation
+        : coordinator.tokenOperation;
+    const setOperation = (
+      source: DiscoverySource,
+      operation: DiscoveryOperation | null,
+    ) => {
+      if (source === "collaborators")
+        coordinator.collaboratorsOperation = operation;
       else coordinator.tokenOperation = operation;
     };
     const ownsOperation = (operation: DiscoveryOperation) =>
@@ -1934,7 +3394,9 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
         retry.timer = null;
       }
     };
-    const agentKnown = () => authority.collaborators?.agentKnown === true || authority.tokenUsed === true;
+    const agentKnown = () =>
+      authority.collaborators?.agentKnown === true ||
+      authority.tokenUsed === true;
     const scheduleRetry = () => {
       if (
         !ownsAuthority() ||
@@ -1946,7 +3408,8 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
         return;
       }
       const retryableSource =
-        (authority.collaborators === null && coordinator.collaboratorsOperation === null) ||
+        (authority.collaborators === null &&
+          coordinator.collaboratorsOperation === null) ||
         (authority.tokenUsed === null && coordinator.tokenOperation === null);
       if (!retryableSource || authority.retry !== null) return;
       const retry: DiscoveryRetry = { authority, timer: null };
@@ -1959,14 +3422,24 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
       authority.retry = retry;
     };
     const releaseOperation = (operation: DiscoveryOperation) => {
-      if (operation.authority !== authority || operationFor(operation.source) !== operation) return;
+      if (
+        operation.authority !== authority ||
+        operationFor(operation.source) !== operation
+      )
+        return;
       const currentSettlement = ownsOperation(operation);
       setOperation(operation.source, null);
       if (currentSettlement && ownsAuthority()) scheduleRetry();
       else coordinator.authority?.run?.();
     };
     const requestCollaborators = () => {
-      if (!ownsAuthority() || !authority.visible || authority.collaborators !== null || coordinator.collaboratorsOperation !== null) return;
+      if (
+        !ownsAuthority() ||
+        !authority.visible ||
+        authority.collaborators !== null ||
+        coordinator.collaboratorsOperation !== null
+      )
+        return;
       const operation: DiscoveryOperation = {
         authority,
         source: "collaborators",
@@ -1974,7 +3447,9 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
         operation: ++coordinator.nextOperation,
       };
       coordinator.collaboratorsOperation = operation;
-      void api.documents.collaborators(authority.key.documentId).then(
+      void api.documents
+        .collaborators(authority.key.documentId)
+        .then(
         (result) => {
           if (!ownsOperation(operation)) return;
           authority.collaborators = {
@@ -1986,10 +3461,17 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
         () => {
           if (!ownsOperation(operation)) return;
         },
-      ).finally(() => releaseOperation(operation));
+        )
+        .finally(() => releaseOperation(operation));
     };
     const requestTokens = () => {
-      if (!ownsAuthority() || !authority.visible || authority.tokenUsed !== null || coordinator.tokenOperation !== null) return;
+      if (
+        !ownsAuthority() ||
+        !authority.visible ||
+        authority.tokenUsed !== null ||
+        coordinator.tokenOperation !== null
+      )
+        return;
       const operation: DiscoveryOperation = {
         authority,
         source: "tokens",
@@ -1997,16 +3479,21 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
         operation: ++coordinator.nextOperation,
       };
       coordinator.tokenOperation = operation;
-      void api.tokens.list().then(
+      void api.tokens
+        .list()
+        .then(
         (result) => {
           if (!ownsOperation(operation)) return;
-          authority.tokenUsed = result.tokens.some((token) => !!token.lastUsedAt);
+            authority.tokenUsed = result.tokens.some(
+              (token) => !!token.lastUsedAt,
+            );
           publish(operation);
         },
         () => {
           if (!ownsOperation(operation)) return;
         },
-      ).finally(() => releaseOperation(operation));
+        )
+        .finally(() => releaseOperation(operation));
     };
     const run = () => {
       if (!ownsAuthority() || !authority.visible || agentKnown()) return;
@@ -2035,8 +3522,14 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
   }, [discoveryKey, needsShareInfo, retireDiscovery]);
 
   const currentDiscovery =
-    needsShareInfo && discovery?.authority.key === discoveryKey && !discovery.authority.retired ? discovery : null;
-  const discoveredAgent = currentDiscovery?.collaborators?.agentKnown === true || currentDiscovery?.tokenUsed === true;
+    needsShareInfo &&
+    discovery?.authority.key === discoveryKey &&
+    !discovery.authority.retired
+      ? discovery
+      : null;
+  const discoveredAgent =
+    currentDiscovery?.collaborators?.agentKnown === true ||
+    currentDiscovery?.tokenUsed === true;
 
   // Remember that an agent has been seen so hint (a) stays quiet in future documents.
   useEffect(() => {
@@ -2044,13 +3537,19 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
       currentDiscovery !== null &&
       !currentDiscovery.authority.retired &&
       discoveryCoordinator.current.authority === currentDiscovery.authority;
-    if (!loaded || record.agentSeen || !(live.agentHere || (discoveredAgent && discoveryStillOwnsVisit))) return;
+    if (
+      !loaded ||
+      record.agentSeen ||
+      !(live.agentHere || (discoveredAgent && discoveryStillOwnsVisit))
+    )
+      return;
     const next = { ...record, agentSeen: true };
     setRecord(next);
     writeHintsRecord(window.localStorage, next);
   }, [loaded, live.agentHere, discoveredAgent, currentDiscovery, record]);
 
-  const agentEverConnected = record.agentSeen || live.agentHere || discoveredAgent;
+  const agentEverConnected =
+    record.agentSeen || live.agentHere || discoveredAgent;
   const agentAbsenceKnown =
     currentDiscovery?.collaborators != null &&
     currentDiscovery.tokenUsed !== null &&
@@ -2059,16 +3558,25 @@ export function HintBar({ session, actions, onShare, onComment }: HintBarProps) 
     ? Math.max(live.people, currentDiscovery.collaborators?.collaborators ?? 0)
     : 0;
   const due = active
-    ? dueHint({ collaborators, agentEverConnected, commentThreads: live.threads }, record.dismissed)
+    ? dueHint(
+        { collaborators, agentEverConnected, commentThreads: live.threads },
+        record.dismissed,
+      )
     : null;
 
   // A hint that appeared is pinned until the user acts on it, even if its gate turns false again
   // or another hint becomes due.
   const [pinned, setPinned] = useState<PinnedHint | null>(null);
   useEffect(() => {
-    if ((!pinned || pinned.key !== discoveryKey) && due) setPinned({ key: discoveryKey, id: due });
+    if ((!pinned || pinned.key !== discoveryKey) && due)
+      setPinned({ key: discoveryKey, id: due });
   }, [discoveryKey, due, pinned]);
-  const shown = pinned?.key === discoveryKey && !record.dismissed.includes(pinned.id) && active ? pinned.id : null;
+  const shown =
+    pinned?.key === discoveryKey &&
+    !record.dismissed.includes(pinned.id) &&
+    active
+      ? pinned.id
+      : null;
 
   if (!shown || !pinned) return null;
   return (

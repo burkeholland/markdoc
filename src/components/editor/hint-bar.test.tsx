@@ -1,10 +1,17 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import {
   StrictMode,
   useEffect,
   useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -34,8 +41,14 @@ vi.mock("@/lib/api", async (importOriginal) => {
 
 import { COLLAB_HINT_RETRY_MS, HintBar } from "./hint-bar";
 
-const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
-const originalVisibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+const originalMatchMedia = Object.getOwnPropertyDescriptor(
+  window,
+  "matchMedia",
+);
+const originalVisibility = Object.getOwnPropertyDescriptor(
+  document,
+  "visibilityState",
+);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -51,18 +64,36 @@ function collaboratorResult(count = 1, agentKnown = false) {
   return {
     owner: null,
     linkAccess: "private",
-    collaborators: Array.from({ length: count }, (_, index) => ({ login: `person-${index}` })),
+    collaborators: Array.from({ length: count }, (_, index) => ({
+      login: `person-${index}`,
+    })),
     agents: agentKnown
-      ? [{ name: "Copilot", login: "person/Copilot", ownerLogin: "person", ownerName: "Person", present: false, collaboratorsMayAsk: true }]
+      ? [
+          {
+            name: "Copilot",
+            login: "person/Copilot",
+            ownerLogin: "person",
+            ownerName: "Person",
+            present: false,
+            collaboratorsMayAsk: true,
+          },
+        ]
       : [],
   };
 }
 
 function tokenResult(used = false) {
-  return { tokens: used ? [{ lastUsedAt: "2026-09-07T15:00:00.000Z" }] : [{ lastUsedAt: null }] };
+  return {
+    tokens: used
+      ? [{ lastUsedAt: "2026-09-07T15:00:00.000Z" }]
+      : [{ lastUsedAt: null }],
+  };
 }
 
-function fakeSession(docId: string, options: { people?: number; agentHere?: boolean; threads?: number } = {}) {
+function fakeSession(
+  docId: string,
+  options: { people?: number; agentHere?: boolean; threads?: number } = {},
+) {
   const listeners = new Set<() => void>();
   return {
     docId,
@@ -78,11 +109,17 @@ function fakeSession(docId: string, options: { people?: number; agentHere?: bool
       };
     },
     presence: () => [
-      ...Array.from({ length: options.people ?? 0 }, () => ({ isLocal: false, isAgent: false })),
+      ...Array.from({ length: options.people ?? 0 }, () => ({
+        isLocal: false,
+        isAgent: false,
+      })),
       ...(options.agentHere ? [{ isLocal: false, isAgent: true }] : []),
     ],
     comments: {
-      list: () => Array.from({ length: options.threads ?? 0 }, (_, index) => ({ id: `thread-${index}` })),
+      list: () =>
+        Array.from({ length: options.threads ?? 0 }, (_, index) => ({
+          id: `thread-${index}`,
+        })),
     },
   } as unknown as CollabSession;
 }
@@ -92,7 +129,14 @@ const onShare = vi.fn();
 const onComment = vi.fn();
 
 function mount(session = fakeSession("doc-1")) {
-  return render(<HintBar session={session} actions={actions} onShare={onShare} onComment={onComment} />);
+  return render(
+    <HintBar
+      session={session}
+      actions={actions}
+      onShare={onShare}
+      onComment={onComment}
+    />,
+  );
 }
 
 function HintBoundary({
@@ -121,7 +165,13 @@ function HintBoundary({
   }, [boundary, onBoundary]);
   useEffect(() => () => onPassiveCleanup?.(), [boundary, onPassiveCleanup]);
   return present ? (
-    <HintBar key={instance} session={session} actions={editorActions} onShare={share} onComment={comment} />
+    <HintBar
+      key={instance}
+      session={session}
+      actions={editorActions}
+      onShare={share}
+      onComment={comment}
+    />
   ) : null;
 }
 
@@ -142,15 +192,23 @@ let visibility: DocumentVisibilityState;
 const directRoots: { root: Root; host: HTMLDivElement }[] = [];
 
 function reactHandler<T>(element: Element, name: string): T {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
-  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey)
+    throw new Error(`React props were not attached to ${element.tagName}`);
+  const props = (
+    element as unknown as Record<string, Record<string, unknown> | undefined>
+  )[propsKey];
   const handler = props?.[name];
-  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
+  if (typeof handler !== "function")
+    throw new Error(`${name} was not attached to ${element.tagName}`);
   return handler as T;
 }
 
 type HintMouseHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+type HintKeyHandler = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+type HintRootKeyHandler = (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 type HintRef = (element: Element | null) => void;
 
 interface CapturedHint {
@@ -162,13 +220,23 @@ interface CapturedHint {
   readonly dismissIcon: SVGSVGElement;
   readonly actionHandler: HintMouseHandler;
   readonly dismissHandler: HintMouseHandler;
+  readonly captureRootKey: HintRootKeyHandler;
+  readonly bubbleRootKey: HintRootKeyHandler;
+  readonly captureActionKey: HintKeyHandler;
+  readonly bubbleActionKey: HintKeyHandler;
+  readonly captureDismissKey: HintKeyHandler;
+  readonly bubbleDismissKey: HintKeyHandler;
   readonly refs: readonly HintRef[];
 }
 
 function captureHint(host: ParentNode = document): CapturedHint {
   const root = host.querySelector<HTMLDivElement>("[data-testid='hint-bar']");
-  const actionElement = host.querySelector<HTMLButtonElement>("[data-testid='hint-action']");
-  const dismissElement = host.querySelector<HTMLButtonElement>("[data-testid='hint-dismiss']");
+  const actionElement = host.querySelector<HTMLButtonElement>(
+    "[data-testid='hint-action']",
+  );
+  const dismissElement = host.querySelector<HTMLButtonElement>(
+    "[data-testid='hint-dismiss']",
+  );
   const icon = root?.firstElementChild;
   const text = icon?.nextElementSibling;
   const dismissIcon = dismissElement?.firstElementChild;
@@ -182,8 +250,14 @@ function captureHint(host: ParentNode = document): CapturedHint {
   ) {
     throw new Error("The complete HintBar publication is not mounted");
   }
-  const actionHandler = reactHandler<HintMouseHandler>(actionElement, "onClick");
-  const dismissHandler = reactHandler<HintMouseHandler>(dismissElement, "onClick");
+  const actionHandler = reactHandler<HintMouseHandler>(
+    actionElement,
+    "onClick",
+  );
+  const dismissHandler = reactHandler<HintMouseHandler>(
+    dismissElement,
+    "onClick",
+  );
   return {
     root,
     icon,
@@ -193,16 +267,183 @@ function captureHint(host: ParentNode = document): CapturedHint {
     dismissIcon,
     actionHandler,
     dismissHandler,
+    captureRootKey: reactHandler<HintRootKeyHandler>(root, "onKeyDownCapture"),
+    bubbleRootKey: reactHandler<HintRootKeyHandler>(root, "onKeyDown"),
+    captureActionKey: reactHandler<HintKeyHandler>(
+      actionElement,
+      "onKeyDownCapture",
+    ),
+    bubbleActionKey: reactHandler<HintKeyHandler>(actionElement, "onKeyDown"),
+    captureDismissKey: reactHandler<HintKeyHandler>(
+      dismissElement,
+      "onKeyDownCapture",
+    ),
+    bubbleDismissKey: reactHandler<HintKeyHandler>(dismissElement, "onKeyDown"),
     refs: [root, icon, text, actionElement, dismissElement, dismissIcon].map(
       (element) => reactHandler<HintRef>(element, "ref"),
     ),
   };
 }
 
+function markHintEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal HintBar event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The HintBar event trust slot did not update");
+  }
+}
+
+function setHintEventView(event: KeyboardEvent, view: Window) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { view: Window | null } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "view" in candidate,
+    );
+  if (!implementation) {
+    throw new Error("Unable to set jsdom's internal HintBar event view slot");
+  }
+  implementation.view = view;
+}
+
+function replaceHintPathTerminal(event: Event, terminal: EventTarget) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (
+        candidate,
+      ): candidate is {
+        _path: Array<{ item: Record<symbol, unknown> }>;
+      } => {
+        if (!candidate || typeof candidate !== "object") return false;
+        return Array.isArray((candidate as { _path?: unknown })._path);
+      },
+    );
+  const entry = implementation?._path.at(-1);
+  const currentTerminal = event.composedPath().at(-1);
+  const wrapper = entry
+    ? Object.getOwnPropertySymbols(entry.item).find(
+        (symbol) => entry.item[symbol] === currentTerminal,
+      )
+    : undefined;
+  if (!entry || !wrapper) {
+    throw new Error("Unable to replace jsdom's HintBar path terminal");
+  }
+  const item: Record<symbol, unknown> = {};
+  Object.defineProperty(item, wrapper, { value: terminal });
+  entry.item = item;
+}
+
+function hintKeyboardEvent(
+  element: HTMLElement,
+  key: string,
+  init: Omit<KeyboardEventInit, "key"> = {},
+  trusted = true,
+) {
+  const ownerWindow = element.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The HintBar control has no owner Window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markHintEventTrusted(event);
+  return event;
+}
+
+function hintKey(
+  element: HTMLElement,
+  key: string,
+  init: Omit<KeyboardEventInit, "key"> = {},
+) {
+  const event = hintKeyboardEvent(element, key, init);
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
+}
+
+function fabricatedHintKey(
+  currentTarget: HTMLButtonElement,
+  nativeEvent: KeyboardEvent,
+): ReactKeyboardEvent<HTMLButtonElement> {
+  return {
+    type: nativeEvent.type,
+    key: nativeEvent.key,
+    code: nativeEvent.code,
+    repeat: nativeEvent.repeat,
+    altKey: nativeEvent.altKey,
+    ctrlKey: nativeEvent.ctrlKey,
+    metaKey: nativeEvent.metaKey,
+    shiftKey: nativeEvent.shiftKey,
+    bubbles: nativeEvent.bubbles,
+    cancelable: nativeEvent.cancelable,
+    defaultPrevented: nativeEvent.defaultPrevented,
+    eventPhase: nativeEvent.eventPhase,
+    isTrusted: nativeEvent.isTrusted,
+    view: nativeEvent.view,
+    timeStamp: nativeEvent.timeStamp,
+    currentTarget,
+    target: nativeEvent.target,
+    nativeEvent,
+    _reactName: "onKeyDown",
+    isDefaultPrevented: () => nativeEvent.defaultPrevented,
+    isPropagationStopped: () => nativeEvent.cancelBubble,
+    persist: () => undefined,
+    preventDefault: () => nativeEvent.preventDefault(),
+    stopPropagation: () => nativeEvent.stopPropagation(),
+  } as unknown as ReactKeyboardEvent<HTMLButtonElement>;
+}
+
+function replaceHintKeyHandler(
+  element: HTMLElement,
+  handler: HintKeyHandler | HintRootKeyHandler,
+  name: "onKeyDown" | "onKeyDownCapture" = "onKeyDown",
+) {
+  const propsKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactProps$"),
+  );
+  if (!propsKey) {
+    throw new Error("React props were not attached to the HintBar control");
+  }
+  const record = element as unknown as Record<string, Record<string, unknown>>;
+  const props = record[propsKey];
+  record[propsKey] = { ...props, [name]: handler };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
 function fabricatedClick(
   currentTarget: HTMLButtonElement,
   target: EventTarget = currentTarget,
-  nativeEvent = new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }),
+  nativeEvent = new MouseEvent("click", {
+    bubbles: true,
+    button: 0,
+    detail: 1,
+  }),
 ) {
   return {
     type: "click",
@@ -239,10 +480,7 @@ function pointerActivate(target: Element) {
   return { down, up, click };
 }
 
-function keyboardActivate(
-  button: HTMLButtonElement,
-  key: "Enter" | " ",
-) {
+function keyboardActivate(button: HTMLButtonElement, key: "Enter" | " ") {
   button.focus();
   fireEvent.keyDown(button, { bubbles: true, key });
   if (key === " ") fireEvent.keyUp(button, { bubbles: true, key });
@@ -370,11 +608,40 @@ async function crossTaskBoundary() {
   expect(crossed).toBe(true);
 }
 
+function strictNavigationTree(
+  session: CollabSession,
+  comment: () => void = onComment,
+) {
+  return (
+    <StrictMode>
+      <HintBar
+        session={session}
+        actions={actions}
+        onShare={onShare}
+        onComment={comment}
+      />
+    </StrictMode>
+  );
+}
+
+async function mountStrictNavigation(
+  id: string,
+  comment: () => void = onComment,
+) {
+  window.localStorage.setItem(
+    HINTS_STORAGE_KEY,
+    JSON.stringify({ dismissed: ["collab-agent"], agentSeen: false }),
+  );
+  const session = fakeSession(`hint-navigation-${id}`, { threads: 1 });
+  const root = createHintRoot();
+  await renderHintRoot(root, strictNavigationTree(session, comment));
+  return { root, session, hint: captureHint() };
+}
+
 async function buildHintBarBrowserHarness() {
   const testUint8Array = globalThis.Uint8Array;
-  globalThis.Uint8Array = Object.getPrototypeOf(
-    new TextEncoder().encode(""),
-  ).constructor as typeof Uint8Array;
+  globalThis.Uint8Array = Object.getPrototypeOf(new TextEncoder().encode(""))
+    .constructor as typeof Uint8Array;
   try {
     const [{ build }, path] = await Promise.all([
       import("esbuild"),
@@ -466,7 +733,10 @@ describe("HintBar collaborator discovery", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     visibility = "visible";
-    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
       writable: true,
@@ -499,9 +769,11 @@ describe("HintBar collaborator discovery", () => {
     cleanup();
     vi.useRealTimers();
     vi.restoreAllMocks();
-    if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
+    if (originalMatchMedia)
+      Object.defineProperty(window, "matchMedia", originalMatchMedia);
     else Reflect.deleteProperty(window, "matchMedia");
-    if (originalVisibility) Object.defineProperty(document, "visibilityState", originalVisibility);
+    if (originalVisibility)
+      Object.defineProperty(document, "visibilityState", originalVisibility);
     else Reflect.deleteProperty(document, "visibilityState");
   });
 
@@ -509,9 +781,13 @@ describe("HintBar collaborator discovery", () => {
     "requests both sources, keeps a failed %s source unknown, and retries only that source",
     async (failedSource) => {
       if (failedSource === "collaborators") {
-        collaborators.mockRejectedValueOnce(new Error("share unavailable")).mockResolvedValueOnce(collaboratorResult());
+        collaborators
+          .mockRejectedValueOnce(new Error("share unavailable"))
+          .mockResolvedValueOnce(collaboratorResult());
       } else {
-        tokens.mockRejectedValueOnce(new Error("tokens unavailable")).mockResolvedValueOnce(tokenResult());
+        tokens
+          .mockRejectedValueOnce(new Error("tokens unavailable"))
+          .mockResolvedValueOnce(tokenResult());
       }
 
       mount();
@@ -527,16 +803,23 @@ describe("HintBar collaborator discovery", () => {
 
       await act(() => vi.advanceTimersByTimeAsync(1));
       await flushPromises();
-      expect(collaborators).toHaveBeenCalledTimes(failedSource === "collaborators" ? 2 : 1);
+      expect(collaborators).toHaveBeenCalledTimes(
+        failedSource === "collaborators" ? 2 : 1,
+      );
       expect(tokens).toHaveBeenCalledTimes(failedSource === "tokens" ? 2 : 1);
-      expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", "collab-agent");
+      expect(screen.getByTestId("hint-bar")).toHaveAttribute(
+        "data-hint",
+        "collab-agent",
+      );
     },
   );
 
   it.each(["known collaborator agent", "used token"] as const)(
     "persists positive agent evidence from a %s and never shows the setup hint",
     async (source) => {
-      collaborators.mockResolvedValue(collaboratorResult(1, source === "known collaborator agent"));
+      collaborators.mockResolvedValue(
+        collaboratorResult(1, source === "known collaborator agent"),
+      );
       tokens.mockResolvedValue(tokenResult(source === "used token"));
 
       mount();
@@ -553,7 +836,9 @@ describe("HintBar collaborator discovery", () => {
   it("allows at most one request per source in flight across timer and visibility triggers", async () => {
     const shareRetry = deferred<ReturnType<typeof collaboratorResult>>();
     const tokenList = deferred<ReturnType<typeof tokenResult>>();
-    collaborators.mockRejectedValueOnce(new Error("share unavailable")).mockReturnValueOnce(shareRetry.promise);
+    collaborators
+      .mockRejectedValueOnce(new Error("share unavailable"))
+      .mockReturnValueOnce(shareRetry.promise);
     tokens.mockReturnValue(tokenList.promise);
 
     mount();
@@ -577,8 +862,12 @@ describe("HintBar collaborator discovery", () => {
   it("pauses failed-source retries while hidden and resumes each once on visibility return", async () => {
     const shareRetry = deferred<ReturnType<typeof collaboratorResult>>();
     const tokenRetry = deferred<ReturnType<typeof tokenResult>>();
-    collaborators.mockRejectedValueOnce(new Error("share unavailable")).mockReturnValueOnce(shareRetry.promise);
-    tokens.mockRejectedValueOnce(new Error("tokens unavailable")).mockReturnValueOnce(tokenRetry.promise);
+    collaborators
+      .mockRejectedValueOnce(new Error("share unavailable"))
+      .mockReturnValueOnce(shareRetry.promise);
+    tokens
+      .mockRejectedValueOnce(new Error("tokens unavailable"))
+      .mockReturnValueOnce(tokenRetry.promise);
 
     visibility = "hidden";
     mount();
@@ -602,14 +891,23 @@ describe("HintBar collaborator discovery", () => {
   });
 
   it("stops discovery after the relevant hint is dismissed", async () => {
-    window.localStorage.setItem(HINTS_STORAGE_KEY, JSON.stringify({ dismissed: ["mention-copilot"], agentSeen: false }));
+    window.localStorage.setItem(
+      HINTS_STORAGE_KEY,
+      JSON.stringify({ dismissed: ["mention-copilot"], agentSeen: false }),
+    );
     mount();
     await flushPromises();
-    expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", "collab-agent");
+    expect(screen.getByTestId("hint-bar")).toHaveAttribute(
+      "data-hint",
+      "collab-agent",
+    );
 
     pointerActivate(screen.getByTestId("hint-dismiss"));
     expect(screen.queryByTestId("hint-bar")).not.toBeInTheDocument();
-    expect(readHintsRecord(window.localStorage).dismissed).toEqual(["collab-agent", "mention-copilot"]);
+    expect(readHintsRecord(window.localStorage).dismissed).toEqual([
+      "collab-agent",
+      "mention-copilot",
+    ]);
 
     setVisibility("hidden");
     setVisibility("visible");
@@ -624,12 +922,18 @@ describe("HintBar collaborator discovery", () => {
     const oldTokens = deferred<ReturnType<typeof tokenResult>>();
     const newShare = deferred<ReturnType<typeof collaboratorResult>>();
     const newTokens = deferred<ReturnType<typeof tokenResult>>();
-    collaborators.mockReturnValueOnce(oldShare.promise).mockReturnValueOnce(newShare.promise);
-    tokens.mockReturnValueOnce(oldTokens.promise).mockReturnValueOnce(newTokens.promise);
+    collaborators
+      .mockReturnValueOnce(oldShare.promise)
+      .mockReturnValueOnce(newShare.promise);
+    tokens
+      .mockReturnValueOnce(oldTokens.promise)
+      .mockReturnValueOnce(newTokens.promise);
     const storageWrites = vi.spyOn(Storage.prototype, "setItem");
     const timers = vi.spyOn(globalThis, "setTimeout");
 
-    const rendered = render(<HintBoundary session={fakeSession("boundary-old")} />);
+    const rendered = render(
+      <HintBoundary session={fakeSession("boundary-old")} />,
+    );
     expect(collaborators).toHaveBeenCalledTimes(1);
     expect(tokens).toHaveBeenCalledTimes(1);
     rendered.rerender(
@@ -649,12 +953,17 @@ describe("HintBar collaborator discovery", () => {
       await Promise.resolve();
     });
 
-    expect(collaborators.mock.calls.map(([document]) => document)).toEqual(["boundary-old", "boundary-new"]);
+    expect(collaborators.mock.calls.map(([document]) => document)).toEqual([
+      "boundary-old",
+      "boundary-new",
+    ]);
     expect(tokens).toHaveBeenCalledTimes(2);
     expect(storageWrites).toHaveBeenCalledTimes(0);
     expect(readHintsRecord(window.localStorage).agentSeen).toBe(false);
     expect(screen.queryByTestId("hint-bar")).not.toBeInTheDocument();
-    expect(timers.mock.calls.filter(([, delay]) => delay === COLLAB_HINT_RETRY_MS)).toHaveLength(0);
+    expect(
+      timers.mock.calls.filter(([, delay]) => delay === COLLAB_HINT_RETRY_MS),
+    ).toHaveLength(0);
 
     act(() => document.dispatchEvent(new Event("visibilitychange")));
     await act(() => vi.advanceTimersByTimeAsync(COLLAB_HINT_RETRY_MS * 3));
@@ -666,9 +975,14 @@ describe("HintBar collaborator discovery", () => {
     await flushPromises();
     expect(collaborators).toHaveBeenCalledTimes(2);
     expect(tokens).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", "collab-agent");
+    expect(screen.getByTestId("hint-bar")).toHaveAttribute(
+      "data-hint",
+      "collab-agent",
+    );
     expect(storageWrites).toHaveBeenCalledTimes(0);
-    expect(timers.mock.calls.filter(([, delay]) => delay === COLLAB_HINT_RETRY_MS)).toHaveLength(0);
+    expect(
+      timers.mock.calls.filter(([, delay]) => delay === COLLAB_HINT_RETRY_MS),
+    ).toHaveLength(0);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -679,12 +993,15 @@ describe("HintBar collaborator discovery", () => {
     tokens.mockReturnValue(oldTokens.promise);
     const storageWrites = vi.spyOn(Storage.prototype, "setItem");
     const unhandledRejections: unknown[] = [];
-    const onUnhandledRejection = (reason: unknown) => unhandledRejections.push(reason);
+    const onUnhandledRejection = (reason: unknown) =>
+      unhandledRejections.push(reason);
     process.on("unhandledRejection", onUnhandledRejection);
     let timersAtBoundary = -1;
 
     try {
-      const rendered = render(<HintBoundary session={fakeSession("boundary-removed")} />);
+      const rendered = render(
+        <HintBoundary session={fakeSession("boundary-removed")} />,
+      );
       expect(collaborators).toHaveBeenCalledTimes(1);
       expect(tokens).toHaveBeenCalledTimes(1);
       rendered.rerender(
@@ -725,14 +1042,25 @@ describe("HintBar collaborator discovery", () => {
     const oldTokens = deferred<ReturnType<typeof tokenResult>>();
     const newShare = deferred<ReturnType<typeof collaboratorResult>>();
     const newTokens = deferred<ReturnType<typeof tokenResult>>();
-    collaborators.mockReturnValueOnce(oldShare.promise).mockReturnValueOnce(newShare.promise);
-    tokens.mockReturnValueOnce(oldTokens.promise).mockReturnValueOnce(newTokens.promise);
+    collaborators
+      .mockReturnValueOnce(oldShare.promise)
+      .mockReturnValueOnce(newShare.promise);
+    tokens
+      .mockReturnValueOnce(oldTokens.promise)
+      .mockReturnValueOnce(newTokens.promise);
 
     const oldSession = fakeSession("doc-old");
     const newSession = fakeSession("doc-new");
     const { rerender } = mount(oldSession);
     expect(collaborators).toHaveBeenCalledWith("doc-old");
-    rerender(<HintBar session={newSession} actions={actions} onShare={onShare} onComment={onComment} />);
+    rerender(
+      <HintBar
+        session={newSession}
+        actions={actions}
+        onShare={onShare}
+        onComment={onComment}
+      />,
+    );
     expect(collaborators).toHaveBeenCalledOnce();
     expect(tokens).toHaveBeenCalledOnce();
 
@@ -748,7 +1076,10 @@ describe("HintBar collaborator discovery", () => {
     newTokens.resolve(tokenResult());
     await flushPromises();
     expect(readHintsRecord(window.localStorage).agentSeen).toBe(false);
-    expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", "collab-agent");
+    expect(screen.getByTestId("hint-bar")).toHaveAttribute(
+      "data-hint",
+      "collab-agent",
+    );
   });
 
   it("clears its retry timer on unmount", async () => {
@@ -779,8 +1110,13 @@ describe("HintBar collaborator discovery", () => {
       session: fakeSession("action-comment", { threads: 1 }),
       destination: "comment",
     },
-  ] as const)("claims the current $id Action once before its exact destination", async ({ id, dismissed, session, destination }) => {
-    window.localStorage.setItem(HINTS_STORAGE_KEY, JSON.stringify({ dismissed, agentSeen: false }));
+  ] as const)(
+    "claims the current $id Action once before its exact destination",
+    async ({ id, dismissed, session, destination }) => {
+      window.localStorage.setItem(
+        HINTS_STORAGE_KEY,
+        JSON.stringify({ dismissed, agentSeen: false }),
+      );
     const storageWrites = vi.spyOn(Storage.prototype, "setItem");
     const root = createHintRoot();
 
@@ -798,17 +1134,25 @@ describe("HintBar collaborator discovery", () => {
     });
 
     expect(storageWrites).toHaveBeenCalledOnce();
-    expect(readHintsRecord(window.localStorage).dismissed).toEqual(["collab-agent", "mention-copilot"]);
+      expect(readHintsRecord(window.localStorage).dismissed).toEqual([
+        "collab-agent",
+        "mention-copilot",
+      ]);
     expect(actions.focus).not.toHaveBeenCalled();
     expect(onShare).toHaveBeenCalledTimes(destination === "share" ? 1 : 0);
-    expect(onComment).toHaveBeenCalledTimes(destination === "comment" ? 1 : 0);
+      expect(onComment).toHaveBeenCalledTimes(
+        destination === "comment" ? 1 : 0,
+      );
     expect(screen.queryByTestId("hint-bar")).toBeNull();
-  });
+    },
+  );
 
   it.each([
     ["inside", true],
     ["outside", false],
-  ] as const)("claims the current Dismiss once with focus $0 the exact publication", async (_label, focusInside) => {
+  ] as const)(
+    "claims the current Dismiss once with focus $0 the exact publication",
+    async (_label, focusInside) => {
     window.localStorage.setItem(
       HINTS_STORAGE_KEY,
       JSON.stringify({ dismissed: ["collab-agent"], agentSeen: false }),
@@ -819,7 +1163,12 @@ describe("HintBar collaborator discovery", () => {
     const root = createHintRoot();
 
     try {
-      await renderHintRoot(root, <HintBoundary session={fakeSession("dismiss-focus", { threads: 1 })} />);
+        await renderHintRoot(
+          root,
+          <HintBoundary
+            session={fakeSession("dismiss-focus", { threads: 1 })}
+          />,
+        );
       const callbacks = captureHintCallbacks();
       if (focusInside) screen.getByTestId("hint-dismiss").focus();
       else outside.focus();
@@ -837,7 +1186,8 @@ describe("HintBar collaborator discovery", () => {
     } finally {
       outside.remove();
     }
-  });
+    },
+  );
 
   it.each([
     ["session/document", "action"],
@@ -883,7 +1233,8 @@ describe("HintBar collaborator discovery", () => {
       );
       const stale = captureHintCallbacks();
       const publicationA = screen.getByTestId("hint-bar");
-      if (currentActivation === "dismiss") screen.getByTestId("hint-dismiss").focus();
+      if (currentActivation === "dismiss")
+        screen.getByTestId("hint-dismiss").focus();
       const preventDefault = vi.fn();
 
       await renderHintRoot(
@@ -912,7 +1263,10 @@ describe("HintBar collaborator discovery", () => {
 
       expect(passiveCleanups).toBe(1);
       expect(preventDefault).not.toHaveBeenCalled();
-      expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", "mention-copilot");
+      expect(screen.getByTestId("hint-bar")).toHaveAttribute(
+        "data-hint",
+        "mention-copilot",
+      );
       if (replacement !== "session/document") {
         expect(screen.getByTestId("hint-bar")).toBe(publicationA);
       }
@@ -921,7 +1275,8 @@ describe("HintBar collaborator discovery", () => {
         expect(current.actionElement).toBe(stale.actionElement);
         expect(current.dismissElement).toBe(stale.dismissElement);
       }
-      if (currentActivation === "dismiss") screen.getByTestId("hint-dismiss").focus();
+      if (currentActivation === "dismiss")
+        screen.getByTestId("hint-dismiss").focus();
 
       act(() => {
         if (currentActivation === "action") current.action();
@@ -932,11 +1287,15 @@ describe("HintBar collaborator discovery", () => {
 
       expect(storageWrites).toHaveBeenCalledOnce();
       expect(actionsA.focus).not.toHaveBeenCalled();
-      expect(actionsB.focus).toHaveBeenCalledTimes(currentActivation === "dismiss" ? 1 : 0);
+      expect(actionsB.focus).toHaveBeenCalledTimes(
+        currentActivation === "dismiss" ? 1 : 0,
+      );
       expect(commentA).toHaveBeenCalledTimes(
         currentActivation === "action" && commentA === commentB ? 1 : 0,
       );
-      expect(commentB).toHaveBeenCalledTimes(currentActivation === "action" ? 1 : 0);
+      expect(commentB).toHaveBeenCalledTimes(
+        currentActivation === "action" ? 1 : 0,
+      );
       expect(shareA).not.toHaveBeenCalled();
       expect(shareB).not.toHaveBeenCalled();
     },
@@ -1137,9 +1496,15 @@ describe("HintBar collaborator discovery", () => {
 
       await renderHintRoot(
         root,
-        <HintBoundary instance="A" session={fakeSession("record-A", { threads: 1 })} />,
+        <HintBoundary
+          instance="A"
+          session={fakeSession("record-A", { threads: 1 })}
+        />,
       );
-      expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", "mention-copilot");
+      expect(screen.getByTestId("hint-bar")).toHaveAttribute(
+        "data-hint",
+        "mention-copilot",
+      );
       const stale = captureHintCallbacks();
 
       window.localStorage.setItem(
@@ -1154,7 +1519,9 @@ describe("HintBar collaborator discovery", () => {
         root,
         <HintBoundary
           instance="B"
-          session={fakeSession("record-B", { threads: replaceShownHint ? 0 : 1 })}
+          session={fakeSession("record-B", {
+            threads: replaceShownHint ? 0 : 1,
+          })}
           boundary={1}
           onBoundary={() => {
             stale.action();
@@ -1245,8 +1612,14 @@ describe("HintBar collaborator discovery", () => {
     const storageWrites = vi.spyOn(Storage.prototype, "setItem");
     const root = createHintRoot();
 
-    await renderHintRoot(root, <HintBoundary session={fakeSession("discovery-A")} />);
-    expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", "collab-agent");
+    await renderHintRoot(
+      root,
+      <HintBoundary session={fakeSession("discovery-A")} />,
+    );
+    expect(screen.getByTestId("hint-bar")).toHaveAttribute(
+      "data-hint",
+      "collab-agent",
+    );
     const stale = captureHintCallbacks();
     const currentShare = deferred<ReturnType<typeof collaboratorResult>>();
     const currentTokens = deferred<ReturnType<typeof tokenResult>>();
@@ -1283,7 +1656,10 @@ describe("HintBar collaborator discovery", () => {
     currentShare.resolve(collaboratorResult());
     currentTokens.resolve(tokenResult());
     await flushPromises();
-    expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", "collab-agent");
+    expect(screen.getByTestId("hint-bar")).toHaveAttribute(
+      "data-hint",
+      "collab-agent",
+    );
     const current = captureHintCallbacks();
 
     act(() => {
@@ -1315,9 +1691,7 @@ describe("HintBar collaborator discovery", () => {
         HINTS_STORAGE_KEY,
         JSON.stringify({
           dismissed:
-            id === "collab-agent"
-              ? ["mention-copilot"]
-              : ["collab-agent"],
+            id === "collab-agent" ? ["mention-copilot"] : ["collab-agent"],
           agentSeen: false,
         }),
       );
@@ -1428,9 +1802,7 @@ describe("HintBar collaborator discovery", () => {
         }
 
         expect(storageWrites).toHaveBeenCalledOnce();
-        expect(editorActions.focus).toHaveBeenCalledTimes(
-          focusInside ? 1 : 0,
-        );
+        expect(editorActions.focus).toHaveBeenCalledTimes(focusInside ? 1 : 0);
         expect(onShare).not.toHaveBeenCalled();
         expect(onComment).not.toHaveBeenCalled();
         pointerActivate(current.dismissElement);
@@ -1459,10 +1831,9 @@ describe("HintBar collaborator discovery", () => {
       const editorActions = {
         focus: vi.fn(),
       } as unknown as EditorActions;
-      const session = fakeSession(
-        `strict-task-boundary-${provenance}`,
-        { threads: 1 },
-      );
+      const session = fakeSession(`strict-task-boundary-${provenance}`, {
+        threads: 1,
+      });
       const root = createHintRoot();
       const tree = (instance: string) => (
         <StrictMode>
@@ -1577,10 +1948,7 @@ describe("HintBar collaborator discovery", () => {
         );
         const current = captureHint();
         const storageWrites = vi.spyOn(Storage.prototype, "setItem");
-        if (
-          cancellation === "focus loss" ||
-          cancellation === "window blur"
-        ) {
+        if (cancellation === "focus loss" || cancellation === "window blur") {
           current.actionElement.focus();
           fireEvent.keyDown(current.actionElement, {
             bubbles: true,
@@ -1679,11 +2047,15 @@ describe("HintBar collaborator discovery", () => {
             await control.click();
           } else {
             await control.focus();
-            await page.keyboard.press(activation === " " ? "Space" : activation);
+            await page.keyboard.press(
+              activation === " " ? "Space" : activation,
+            );
           }
           const accepted = activation === " " ? "focus" : "comment";
           await expect
-            .poll(async () => (await readEvents(page)).filter((event) => event === accepted))
+            .poll(async () =>
+              (await readEvents(page)).filter((event) => event === accepted),
+            )
             .toHaveLength(1);
           const events = await readEvents(page);
           const checkpoint =
@@ -1715,10 +2087,13 @@ describe("HintBar collaborator discovery", () => {
             await control.click();
           } else {
             await control.focus();
-            await page.keyboard.press(activation === " " ? "Space" : activation);
+            await page.keyboard.press(
+              activation === " " ? "Space" : activation,
+            );
           }
           await page.waitForTimeout(20);
-          await control.evaluate((element, detail) => {
+          await control.evaluate(
+            (element, detail) => {
             element.dispatchEvent(
               new MouseEvent("click", {
                 bubbles: true,
@@ -1726,16 +2101,16 @@ describe("HintBar collaborator discovery", () => {
                 detail,
               }),
             );
-          }, activation === "pointer" ? 1 : 0);
+            },
+            activation === "pointer" ? 1 : 0,
+          );
           await page.waitForTimeout(20);
           const events = await readEvents(page);
           expect(events).not.toContain("comment");
           expect(events).not.toContain("focus");
           expect(
             await page.evaluate(() =>
-              JSON.parse(
-                localStorage.getItem("markdoc:hints") ?? "null",
-              ),
+              JSON.parse(localStorage.getItem("markdoc:hints") ?? "null"),
             ),
           ).toEqual({
             dismissed: ["collab-agent"],
@@ -1886,7 +2261,8 @@ describe("HintBar collaborator discovery", () => {
       { once: true },
     );
     pointerActivate(current.actionElement);
-    if (!stoppedClick) throw new Error("The stopped native click was not captured");
+    if (!stoppedClick)
+      throw new Error("The stopped native click was not captured");
     current.actionHandler(
       fabricatedClick(
         current.actionElement,
@@ -2097,4 +2473,458 @@ describe("HintBar collaborator discovery", () => {
     expect(commentA).not.toHaveBeenCalled();
     expect(commentB).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    ["ArrowRight", "primary", "dismiss"],
+    ["ArrowDown", "primary", "dismiss"],
+    ["End", "primary", "dismiss"],
+    ["ArrowLeft", "dismiss", "primary"],
+    ["ArrowUp", "dismiss", "primary"],
+    ["Home", "dismiss", "primary"],
+  ] as const)(
+    "moves bounded Strict Mode focus for %s from %s to %s without action work",
+    async (key, sourceKind, destinationKind) => {
+      const comment = vi.fn();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const { hint } = await mountStrictNavigation(
+        `${key}-${sourceKind}`,
+        comment,
+      );
+      const source =
+        sourceKind === "primary" ? hint.actionElement : hint.dismissElement;
+      const destination =
+        destinationKind === "primary"
+          ? hint.actionElement
+          : hint.dismissElement;
+      const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+      source.focus();
+      focus.mockClear();
+      const scrollBefore = [
+        window.scrollX,
+        window.scrollY,
+        hint.root.scrollLeft,
+        hint.root.scrollTop,
+      ];
+
+      const event = hintKey(source, key);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(focus.mock.instances[0]).toBe(destination);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(storageWrites).not.toHaveBeenCalled();
+      expect(comment).not.toHaveBeenCalled();
+      expect(onShare).not.toHaveBeenCalled();
+      expect(actions.focus).not.toHaveBeenCalled();
+      expect([
+        window.scrollX,
+        window.scrollY,
+        hint.root.scrollLeft,
+        hint.root.scrollTop,
+      ]).toEqual(scrollBefore);
+    },
+  );
+
+  it.each([
+    ["ArrowLeft", "primary"],
+    ["ArrowUp", "primary"],
+    ["Home", "primary"],
+    ["ArrowRight", "dismiss"],
+    ["ArrowDown", "dismiss"],
+    ["End", "dismiss"],
+  ] as const)(
+    "leaves the bounded %s edge at %s unprevented",
+    async (key, sourceKind) => {
+      const { hint } = await mountStrictNavigation(`edge-${key}-${sourceKind}`);
+      const source =
+        sourceKind === "primary" ? hint.actionElement : hint.dismissElement;
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      source.focus();
+      focus.mockClear();
+
+      const event = hintKey(source, key);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["ArrowLeft", "Numpad4", KeyboardEvent.DOM_KEY_LOCATION_NUMPAD, "dismiss"],
+    ["ArrowUp", "Numpad8", KeyboardEvent.DOM_KEY_LOCATION_NUMPAD, "dismiss"],
+    ["ArrowRight", "Numpad6", KeyboardEvent.DOM_KEY_LOCATION_NUMPAD, "primary"],
+    ["ArrowDown", "Numpad2", KeyboardEvent.DOM_KEY_LOCATION_NUMPAD, "primary"],
+    ["Home", "Numpad7", KeyboardEvent.DOM_KEY_LOCATION_NUMPAD, "dismiss"],
+    ["End", "Numpad1", KeyboardEvent.DOM_KEY_LOCATION_NUMPAD, "primary"],
+  ] as const)(
+    "accepts semantic %s with unrestricted keypad snapshot %s",
+    async (key, code, location, sourceKind) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const { hint } = await mountStrictNavigation(`keypad-${code}`);
+      const source =
+        sourceKind === "primary" ? hint.actionElement : hint.dismissElement;
+      const destination =
+        sourceKind === "primary" ? hint.dismissElement : hint.actionElement;
+      source.focus();
+      focus.mockClear();
+
+      const event = hintKey(source, key, { code, location });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    },
+  );
+
+  it("accepts distinct capture and bubble wrappers, prototypes, and public methods", async () => {
+    const { hint } = await mountStrictNavigation("distinct-wrappers");
+    const capture = hint.captureRootKey;
+    const bubble = hint.bubbleActionKey;
+    const wrappers: ReactKeyboardEvent<HTMLDivElement>[] = [];
+    const preventions: ReturnType<typeof vi.fn>[] = [];
+    const wrap = (
+      event: ReactKeyboardEvent<HTMLDivElement>,
+      handler: HintRootKeyHandler,
+    ) => {
+      const parent = Object.getPrototypeOf(event);
+      Object.setPrototypeOf(event, Object.create(parent));
+      const inherited = event.preventDefault;
+      const prevention = vi.fn(function (
+        this: ReactKeyboardEvent<HTMLDivElement>,
+      ) {
+        return inherited.call(this);
+      });
+      Object.defineProperty(event, "preventDefault", {
+        configurable: true,
+        value: prevention,
+      });
+      wrappers.push(event);
+      preventions.push(prevention);
+      handler(event);
+    };
+    const restoreCapture = replaceHintKeyHandler(
+      hint.root,
+      (event: ReactKeyboardEvent<HTMLDivElement>) =>
+        wrap(event as unknown as ReactKeyboardEvent<HTMLDivElement>, capture),
+      "onKeyDownCapture",
+    );
+    const restoreBubble = replaceHintKeyHandler(
+      hint.actionElement,
+      (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+        wrap(
+          event as unknown as ReactKeyboardEvent<HTMLDivElement>,
+          bubble as unknown as HintRootKeyHandler,
+        ),
+    );
+    hint.actionElement.focus();
+
+    const event = hintKey(hint.actionElement, "ArrowRight");
+    restoreCapture();
+    restoreBubble();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(hint.dismissElement).toHaveFocus();
+    expect(wrappers).toHaveLength(2);
+    expect(wrappers[0]).not.toBe(wrappers[1]);
+    expect(Object.getPrototypeOf(wrappers[0])).not.toBe(
+      Object.getPrototypeOf(wrappers[1]),
+    );
+    expect(wrappers[0]?.preventDefault).not.toBe(wrappers[1]?.preventDefault);
+    expect(wrappers[0]?.isDefaultPrevented).not.toBe(
+      wrappers[1]?.isDefaultPrevented,
+    );
+    expect(preventions[0]).not.toHaveBeenCalled();
+    expect(preventions[1]).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["untrusted", {}, false],
+    ["repeat", { repeat: true }, true],
+    ["composing", { isComposing: true }, true],
+    ["control modifier", { ctrlKey: true }, true],
+    ["alternate modifier", { altKey: true }, true],
+    ["shift modifier", { shiftKey: true }, true],
+    ["meta modifier", { metaKey: true }, true],
+    ["noncancelable", { cancelable: false }, true],
+    ["nonbubbling", { bubbles: false }, true],
+  ] as const)(
+    "rejects a %s native key and recovers with a clean event",
+    async (_case, init, trusted) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const { hint } = await mountStrictNavigation(`reject-${_case}`);
+      hint.actionElement.focus();
+      focus.mockClear();
+      const rejected = hintKeyboardEvent(
+        hint.actionElement,
+        "ArrowRight",
+        init,
+        trusted,
+      );
+
+      act(() => hint.actionElement.dispatchEvent(rejected));
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(hint.actionElement).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      const accepted = hintKey(hint.actionElement, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(hint.dismissElement).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    },
+  );
+
+  it("rejects pre-cancellation and changed React cancellation methods before recovery", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const { hint } = await mountStrictNavigation("cancellation");
+    hint.actionElement.focus();
+    focus.mockClear();
+    const cancel = (event: Event) => event.preventDefault();
+    hint.actionElement.addEventListener("keydown", cancel, {
+      capture: true,
+      once: true,
+    });
+
+    const cancelled = hintKey(hint.actionElement, "ArrowRight");
+
+    expect(cancelled.defaultPrevented).toBe(true);
+    expect(hint.actionElement).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).toHaveBeenCalledOnce();
+    preventDefault.mockClear();
+
+    const bubble = hint.bubbleActionKey;
+    const restore = replaceHintKeyHandler(
+      hint.actionElement,
+      (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+        bubble(event);
+        Object.defineProperty(event, "isDefaultPrevented", {
+          configurable: true,
+          value: () => false,
+        });
+      },
+    );
+    const drifted = hintKey(hint.actionElement, "ArrowRight");
+    restore();
+
+    expect(drifted.defaultPrevented).toBe(false);
+    expect(hint.actionElement).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    const accepted = hintKey(hint.actionElement, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(hint.dismissElement).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it.each(["disabled", "absent"] as const)(
+    "rejects a %s destination, its restoration, and recovers through a clean publication",
+    async (condition) => {
+      const view = await mountStrictNavigation(`destination-${condition}`);
+      const { hint } = view;
+      const parent = hint.dismissElement.parentNode;
+      const next = hint.dismissElement.nextSibling;
+      hint.actionElement.focus();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      if (condition === "disabled") hint.dismissElement.disabled = true;
+      else hint.dismissElement.remove();
+
+      const rejected = hintKey(hint.actionElement, "ArrowRight");
+      if (condition === "disabled") hint.dismissElement.disabled = false;
+      else parent?.insertBefore(hint.dismissElement, next);
+      const restored = hintKey(hint.actionElement, "ArrowRight");
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(restored.defaultPrevented).toBe(false);
+      expect(hint.actionElement).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      await renderHintRoot(view.root, strictNavigationTree(view.session));
+      const current = captureHint();
+      current.actionElement.focus();
+      focus.mockClear();
+      const accepted = hintKey(current.actionElement, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(current.dismissElement).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    },
+  );
+
+  it("binds native receiver, currentTarget, path terminal, and owner view exactly", async () => {
+    const { hint } = await mountStrictNavigation("native-receiver");
+    const ownerWindow = hint.root.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("HintBar has no owner Window");
+    const observation: {
+      receiver?: EventTarget;
+      currentTarget?: EventTarget | null;
+      terminal?: EventTarget;
+    } = {};
+    const accepted = hintKeyboardEvent(hint.actionElement, "ArrowRight");
+    setHintEventView(accepted, ownerWindow);
+    const observe = vi.fn(function (this: EventTarget, nativeEvent: Event) {
+      if (nativeEvent !== accepted) return;
+      observation.receiver = this;
+      observation.currentTarget = nativeEvent.currentTarget;
+      observation.terminal = nativeEvent.composedPath().at(-1);
+    });
+    ownerWindow.addEventListener("keydown", observe, {
+      capture: true,
+      once: true,
+    });
+    hint.actionElement.focus();
+
+    act(() => hint.actionElement.dispatchEvent(accepted));
+
+    expect(observation.receiver).toBe(observation.currentTarget);
+    expect(observation.receiver).toBe(observation.terminal);
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(hint.dismissElement).toHaveFocus();
+
+    const current = captureHint();
+    current.dismissElement.focus();
+    const structural = Object.create(
+      ownerWindow.Window.prototype,
+    ) as EventTarget;
+    const rejected = hintKeyboardEvent(current.dismissElement, "ArrowLeft");
+    const replaceTerminal = (nativeEvent: Event) => {
+      if (nativeEvent === rejected) {
+        replaceHintPathTerminal(nativeEvent, structural);
+      }
+    };
+    ownerWindow.addEventListener("keydown", replaceTerminal, {
+      capture: true,
+      once: true,
+    });
+    act(() => current.dismissElement.dispatchEvent(rejected));
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(current.dismissElement).toHaveFocus();
+  });
+
+  it("rejects structural wrappers and a replayed native event, then admits successors", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const { hint } = await mountStrictNavigation("lookalike-replay");
+    const native = hintKeyboardEvent(hint.actionElement, "ArrowRight");
+    const forged = fabricatedHintKey(hint.actionElement, native);
+    hint.actionElement.focus();
+    focus.mockClear();
+
+    act(() => {
+      hint.captureActionKey(forged);
+      hint.bubbleActionKey(forged);
+    });
+    expect(native.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+
+    act(() => {
+      hint.actionElement.dispatchEvent(native);
+      hint.dismissElement.dispatchEvent(native);
+      hint.actionElement.dispatchEvent(native);
+    });
+    expect(native.defaultPrevented).toBe(true);
+    expect(hint.dismissElement).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(preventDefault).toHaveBeenCalledOnce();
+
+    const current = captureHint();
+    const successor = hintKey(current.dismissElement, "ArrowLeft");
+    expect(successor.defaultPrevented).toBe(true);
+    expect(current.actionElement).toHaveFocus();
+    expect(focus).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects stale callbacks, restored DOM, and post-cleanup work while clean publications recover", async () => {
+    const commentA = vi.fn();
+    const view = await mountStrictNavigation("stale-cleanup", commentA);
+    const stale = view.hint;
+    const staleNative = hintKeyboardEvent(stale.actionElement, "ArrowRight");
+    const staleWrapper = fabricatedHintKey(stale.actionElement, staleNative);
+    await renderHintRoot(
+      view.root,
+      strictNavigationTree(view.session, vi.fn()),
+    );
+    const current = captureHint();
+    current.actionElement.focus();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+
+    act(() => {
+      stale.captureActionKey(staleWrapper);
+      stale.bubbleActionKey(staleWrapper);
+    });
+    expect(staleNative.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+
+    current.root.setAttribute("data-transient", "changed");
+    current.root.removeAttribute("data-transient");
+    const restored = hintKey(current.actionElement, "ArrowRight");
+    expect(restored.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+
+    await renderHintRoot(view.root, strictNavigationTree(view.session));
+    const recovered = captureHint();
+    recovered.actionElement.focus();
+    focus.mockClear();
+    expect(
+      hintKey(recovered.actionElement, "ArrowRight").defaultPrevented,
+    ).toBe(true);
+    expect(recovered.dismissElement).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+
+    const retired = captureHint();
+    act(() => view.root.unmount());
+    directRoots.splice(
+      directRoots.findIndex((entry) => entry.root === view.root),
+      1,
+    );
+    const afterCleanup = hintKeyboardEvent(retired.dismissElement, "ArrowLeft");
+    act(() => retired.dismissElement.dispatchEvent(afterCleanup));
+    expect(afterCleanup.defaultPrevented).toBe(false);
+    expect(focus).toHaveBeenCalledOnce();
+    expect(preventDefault).toHaveBeenCalledOnce();
+  });
+
+  it.each(["Tab", "click", "Enter", " "] as const)(
+    "keeps %s activation behavior usable after accepted navigation",
+    async (activation) => {
+      const comment = vi.fn();
+      const { hint } = await mountStrictNavigation(
+        `activation-${activation}`,
+        comment,
+      );
+      const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+      hint.dismissElement.focus();
+      expect(hintKey(hint.dismissElement, "Home").defaultPrevented).toBe(true);
+      const current = captureHint();
+
+      if (activation === "Tab") {
+        const tab = hintKey(current.actionElement, "Tab");
+        expect(tab.defaultPrevented).toBe(false);
+        current.dismissElement.focus();
+        pointerActivate(current.actionElement);
+      } else if (activation === "click") {
+        pointerActivate(current.actionElement);
+      } else {
+        keyboardActivate(current.actionElement, activation);
+      }
+
+      expect(storageWrites).toHaveBeenCalledOnce();
+      expect(comment).toHaveBeenCalledOnce();
+      expect(onShare).not.toHaveBeenCalled();
+      expect(actions.focus).not.toHaveBeenCalled();
+    },
+  );
 });
