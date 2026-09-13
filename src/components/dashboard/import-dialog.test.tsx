@@ -695,6 +695,251 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("ImportDialog result hover labels", () => {
+  function expectLabels(row: HTMLElement, primaryText: string, filename?: string) {
+    const labels = row.querySelectorAll<HTMLSpanElement>("span.truncate");
+    expect(labels).toHaveLength(filename === undefined ? 1 : 2);
+    const primary = labels[0];
+    if (!primary) throw new Error("The import row has no primary label");
+    expect(primary.className).toBe("truncate text-sm text-ink");
+    expect(primary.textContent).toBe(primaryText);
+    expect(primary).toHaveAttribute("title", primaryText);
+    if (filename !== undefined) {
+      const secondary = labels[1];
+      expect(secondary.className).toBe("truncate text-xs text-ink-4");
+      expect(secondary.textContent).toBe(filename);
+      expect(secondary).toHaveAttribute("title", filename);
+    }
+    for (const label of labels) {
+      expect(label.childElementCount).toBe(0);
+      expect(label).not.toHaveAttribute("tabindex");
+      expect(label).not.toHaveAttribute("role");
+    }
+    return labels;
+  }
+
+  it.each([
+    { kind: "absent", title: undefined, displayed: "notes.md", filename: undefined },
+    { kind: "same as filename", title: "notes.md", displayed: "notes.md", filename: undefined },
+    { kind: "empty", title: "", displayed: "", filename: undefined },
+    { kind: "distinct", title: "Imported notes", displayed: "Imported notes", filename: "notes.md" },
+  ])("matches displayed text for a $kind title without changing Open", ({ title, displayed, filename }) => {
+    const onOpenChange = vi.fn();
+    render(
+      <ImportDialog
+        open
+        onOpenChange={onOpenChange}
+        items={[{ name: "notes.md", title, status: "done", id: "notes", warnings: ["Kept warning"] }]}
+        ignored={[]}
+      />,
+    );
+    const row = screen.getByTestId("import-item");
+    expectLabels(row, displayed, filename);
+    expect(row.className).toBe("import-item");
+    expect(row).toHaveAttribute("data-status", "done");
+    expect(within(row).getByLabelText("Imported")).toHaveClass("text-emerald-600");
+    expect(row.children[1].className).toBe("min-w-0 flex-1");
+    expect(row.children[1].firstElementChild?.className).toBe("flex items-center gap-2");
+    const warning = within(row).getByTestId("import-warning");
+    expect(warning.className).toBe("import-warning");
+    expect(warning.textContent).toBe(" Kept warning");
+    const open = captureResultOpen();
+    expect(open.element.tagName).toBe("A");
+    expect(open.element.className).toBe("import-open");
+    expect(open.element.textContent).toBe("Open");
+    expect(open.element).toHaveAttribute("href", "/d/notes");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const event = invokeResultControl(open);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.stopPropagation).not.toHaveBeenCalled();
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("keeps long title and filename labels literal and hover work-free after setup", () => {
+    const title = '  <img src="x"> & "quoted" '.padEnd(198, "t") + "  ";
+    const name = '<svg data-file="literal"> & '.padEnd(220, "f") + ".md";
+    expect(title).toHaveLength(200);
+    expect(name.length).toBeGreaterThanOrEqual(200);
+    const onOpenChange = vi.fn();
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    render(
+      <ImportDialog
+        open
+        onOpenChange={onOpenChange}
+        items={[
+          { name, title, status: "done", id: "long-labels", warnings: [] },
+          { name: "failed.md", status: "error", error: "Import failed", warnings: [], retry, retryAll },
+        ]}
+        ignored={[]}
+      />,
+    );
+    const labels = expectLabels(screen.getAllByTestId("import-item")[0], title, name);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    const focusBefore = document.activeElement;
+    const domBefore = document.body.innerHTML;
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected hover request"));
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const microtask = vi.spyOn(globalThis, "queueMicrotask");
+    const animationFrame = vi.spyOn(window, "requestAnimationFrame");
+
+    // Stay synchronous: jsdom checks native title semantics, not tooltip paint or timing.
+    for (const label of labels) {
+      fireEvent.pointerOver(label);
+      fireEvent.pointerMove(label);
+      fireEvent.mouseOver(label);
+      fireEvent.mouseMove(label);
+      fireEvent.mouseOut(label);
+      fireEvent.pointerOut(label);
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(retry).not.toHaveBeenCalled();
+    expect(retryAll).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(timeout).not.toHaveBeenCalled();
+    expect(interval).not.toHaveBeenCalled();
+    expect(microtask).not.toHaveBeenCalled();
+    expect(animationFrame).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(focusBefore);
+    expect(document.body.innerHTML).toBe(domBefore);
+  });
+
+  it("updates both labels and removes obsolete filenames when results change", () => {
+    const onOpenChange = vi.fn();
+    const item: ImportItem = {
+      name: "original.md",
+      title: "Original title",
+      status: "done",
+      id: "original",
+      warnings: [],
+    };
+    const view = render(<ImportDialog open onOpenChange={onOpenChange} items={[item]} ignored={[]} />);
+    const originalRow = screen.getByTestId("import-item");
+    const originalLabel = expectLabels(originalRow, "Original title", "original.md")[0];
+    for (const title of ["Updated title", "", "original.md", undefined]) {
+      view.rerender(
+        <ImportDialog open onOpenChange={onOpenChange} items={[{ ...item, title }]} ignored={[]} />,
+      );
+      const row = screen.getByTestId("import-item");
+      expect(row).toBe(originalRow);
+      expectLabels(row, title ?? item.name, title && title !== item.name ? item.name : undefined);
+      expect(row.querySelector("span.truncate")).toBe(originalLabel);
+    }
+    view.rerender(
+      <ImportDialog
+        open
+        onOpenChange={onOpenChange}
+        items={[{ ...item, name: "replacement.md", title: "Replacement title", id: "replacement" }]}
+        ignored={[]}
+      />,
+    );
+    expectLabels(screen.getByTestId("import-item"), "Replacement title", "replacement.md");
+    expect(originalRow).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Original title")).toBeNull();
+    expect(screen.queryByTitle("original.md")).toBeNull();
+    const open = captureResultOpen();
+    expect(open.element).toHaveAttribute("href", "/d/replacement");
+    expect(invokeResultControl(open).preventDefault).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("refreshes completion and retry labels with one request per row or batch retry", async () => {
+    const first = new File(["# First"], "first.md", { type: "text/markdown" });
+    const second = new File(["# Second"], "second.md", { type: "text/markdown" });
+    const third = new File(["# Third"], "third.md", { type: "text/markdown" });
+    const initial = deferred<ImportBatch>();
+    const rowRetry = deferred<ImportBatch>();
+    const batchRetry = deferred<ImportBatch>();
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    uploadImportBatch
+      .mockReturnValueOnce(initial.promise)
+      .mockReturnValueOnce(rowRetry.promise)
+      .mockReturnValueOnce(batchRetry.promise);
+    render(
+      <StrictMode>
+        <Harness batches={[[first, second, third]]} onDone={onDone} onError={onError} />
+      </StrictMode>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
+    expect(uploadImportBatch).toHaveBeenCalledExactlyOnceWith([first, second, third], []);
+    for (const [index, row] of screen.getAllByTestId("import-item").entries()) {
+      expectLabels(row, [first, second, third][index].name);
+      expect(row).toHaveAttribute("data-status", "uploading");
+      expect(within(row).getByLabelText("Importing")).toHaveClass("animate-spin", "text-ink-3");
+    }
+    await act(async () => {
+      initial.resolve({
+        documents: [{ id: "first", title: "First imported", warnings: ["First warning"] }],
+        failed: [
+          { index: 1, name: second.name, error: "Second failed" },
+          { index: 2, name: third.name, error: "Third failed" },
+        ],
+      });
+    });
+    const rows = screen.getAllByTestId("import-item");
+    expectLabels(rows[0], "First imported", first.name);
+    expectLabels(rows[1], second.name);
+    expectLabels(rows[2], third.name);
+    expect(within(rows[0]).getByTestId("import-warning").textContent).toBe(" First warning");
+    expect(within(rows[1]).getByLabelText("Failed")).toHaveClass("text-red-600");
+    expect(within(rows[1]).getByText("Second failed").className).toBe("mt-0.5 text-xs text-red-600");
+    expect(onDone).toHaveBeenCalledOnce();
+    const retry = within(rows[1]).getByRole("button", { name: "Retry second.md" });
+    expect(retry.className).toBe("btn btn-sm btn-outline shrink-0");
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [second], []);
+    expectLabels(screen.getAllByTestId("import-item")[1], second.name);
+    expect(screen.getAllByTestId("import-item")[1]).toHaveAttribute("data-status", "uploading");
+    await act(async () => {
+      rowRetry.resolve({
+        documents: [{ id: "second", title: "Second recovered", warnings: [] }],
+        failed: [],
+      });
+    });
+    const afterRowRetry = screen.getAllByTestId("import-item");
+    expectLabels(afterRowRetry[0], "First imported", first.name);
+    expectLabels(afterRowRetry[1], "Second recovered", second.name);
+    expectLabels(afterRowRetry[2], third.name);
+    expect(onDone).toHaveBeenCalledTimes(2);
+    const retryAll = screen.getByRole("button", { name: "Retry failed" });
+    expect(retryAll.className).toBe("btn btn-sm btn-outline mt-4");
+    fireEvent.click(retryAll);
+    fireEvent.click(retryAll);
+    expect(uploadImportBatch).toHaveBeenCalledTimes(3);
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(3, [third], []);
+    await act(async () => {
+      batchRetry.resolve({
+        documents: [{ id: "third", title: "Third recovered", warnings: [] }],
+        failed: [],
+      });
+    });
+    const completed = screen.getAllByTestId("import-item");
+    expectLabels(completed[0], "First imported", first.name);
+    expectLabels(completed[1], "Second recovered", second.name);
+    expectLabels(completed[2], "Third recovered", third.name);
+    expect(completed.map((row) => row.dataset.status)).toEqual(["done", "done", "done"]);
+    expect(screen.getAllByTestId("import-open").map((link) => link.getAttribute("href"))).toEqual([
+      "/d/first",
+      "/d/second",
+      "/d/third",
+    ]);
+    expect(screen.queryByTestId("import-row-retry")).toBeNull();
+    expect(screen.queryByTestId("import-retry")).toBeNull();
+    expect(onDone).toHaveBeenCalledTimes(3);
+    expect(onError).not.toHaveBeenCalled();
+    expect(uploadImportBatch).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("ImportDialog result action keyboard navigation", () => {
   const navigationItems = (
     retry: () => void,
@@ -2653,7 +2898,7 @@ describe("ImportDialog result publications", () => {
         items[1].retry = staleRetry;
         retry.disabled = false;
       } else {
-        const label = open.parentElement?.querySelector("span[title]");
+        const label = open.parentElement?.querySelector("span.truncate.text-sm");
         if (!label) throw new Error("Strict replay Open row had no title");
         label.textContent = "Changed";
         label.textContent = "First";
@@ -3733,9 +3978,9 @@ describe("useFileImport - retry ownership", () => {
     });
 
     const rows = screen.getAllByTestId("import-item");
-    expect(rows.map((row) => row.querySelector("[title]")?.getAttribute("title"))).toEqual([
+    expect(rows.map((row) => row.querySelector("span.truncate.text-sm")?.getAttribute("title"))).toEqual([
       "first.md",
-      "second.md",
+      "Second imported",
       "third.md",
     ]);
     expect(rows.map((row) => row.dataset.status)).toEqual(["error", "done", "error"]);
@@ -4642,7 +4887,7 @@ describe("useFileImport - retry ownership", () => {
     expect(await screen.findByText("First failure reason")).toBeInTheDocument();
     expect(screen.getByTestId("import-ignored")).toHaveTextContent("notes.pdf");
     const initialRows = screen.getAllByTestId("import-item");
-    expect(initialRows.map((row) => row.querySelector("[title]")?.textContent)).toEqual(["First", "second.md"]);
+    expect(initialRows.map((row) => row.querySelector("span.truncate.text-sm")?.textContent)).toEqual(["First", "second.md"]);
     expect(initialRows[0]).toHaveAttribute("data-status", "done");
     expect(initialRows[1]).toHaveAttribute("data-status", "error");
     expect(within(initialRows[0]).getByTestId("import-open")).toHaveAttribute("href", "/d/doc-first");
