@@ -6819,8 +6819,8 @@ export const ShareDialog = memo(function ShareDialog({
               >
                 <Avatar name={presentation.list.owner.name ?? presentation.list.owner.login ?? "Owner"} src={presentation.list.owner.image} size={32} />
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium text-ink">{presentation.list.owner.name ?? presentation.list.owner.login}</div>
-                  {presentation.list.owner.login && <div className="truncate text-xs text-ink-3">@{presentation.list.owner.login}</div>}
+                  <div className="truncate text-sm font-medium text-ink" title={presentation.list.owner.name ?? presentation.list.owner.login ?? undefined}>{presentation.list.owner.name ?? presentation.list.owner.login}</div>
+                  {presentation.list.owner.login && <div className="truncate text-xs text-ink-3" title={`@${presentation.list.owner.login}`}>@{presentation.list.owner.login}</div>}
                 </div>
                 <span className="text-xs font-medium text-ink-3">Owner</span>
               </li>
@@ -6836,8 +6836,8 @@ export const ShareDialog = memo(function ShareDialog({
                 >
                   <Avatar name={collaborator.name ?? collaborator.login} src={collaborator.image ?? `https://avatars.githubusercontent.com/${collaborator.login}?s=64`} size={32} />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-ink">{collaborator.name ?? collaborator.login}</div>
-                    <div className="truncate text-xs text-ink-3">@{collaborator.login}</div>
+                    <div className="truncate text-sm font-medium text-ink" title={collaborator.name ?? collaborator.login}>{collaborator.name ?? collaborator.login}</div>
+                    <div className="truncate text-xs text-ink-3" title={`@${collaborator.login}`}>@{collaborator.login}</div>
                   </div>
                   {presentation.isOwner ? (
                     <>
