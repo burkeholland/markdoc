@@ -11756,7 +11756,7 @@ describe("CommentsPanel", () => {
 
     const collaboratorResponse = (opts: {
       owner?: { login: string; name: string; image: null } | null;
-      collaborators?: { login: string; name: string; image: null }[];
+      collaborators?: { login: string; name: string | null; image: null }[];
       agents?: CollaboratorsResponse["agents"];
     } = {}) =>
       ({
@@ -11786,6 +11786,7 @@ describe("CommentsPanel", () => {
       remoteAwareness.add(awareness);
       awareness.setLocalState({ user: { color: "#2563eb", colorLight: "#2563eb33", avatar: null, role: "editor", ...user }, lastActive: Date.now() });
       applyAwarenessUpdate(target.awareness, encodeAwarenessUpdate(awareness, [doc.clientID]), "server");
+      return awareness;
     };
 
     const panel = (current: CollabSession) => (
@@ -11828,6 +11829,248 @@ describe("CommentsPanel", () => {
       window.localStorage.removeItem(AGENT_CONNECT_DISMISSED_KEY);
       vi.mocked(api.tokens.list).mockReset().mockResolvedValue({ tokens: [] } as never);
       vi.mocked(api.documents.collaborators).mockReset().mockResolvedValue({ owner: null, collaborators: [], agents: [] } as never);
+    });
+
+    describe("native mention titles", () => {
+      const names = [
+        `  Alexandra Long Display Identity with a literal <b title="quoted">"first" & 'name'</b> and enough additional family, team, department, organization, and collaboration detail to remain readable in full even when the narrow mention option clips its visible label.  `,
+        `  Beatrice Different Display Identity with a literal <img src="not-an-image">"second" & 'name' and distinct additional family, team, department, organization, and collaboration detail that must survive replacement without leaking the previous person's tooltip.  `,
+      ];
+      const agentName = "ReviewAgent123456789ReviewAgent123456789ReviewAgent123456789ReviewAgent123456789";
+      const absentAgentName = "AbsentAgent123456789AbsentAgent123456789AbsentAgent123456789AbsentAgent123456789";
+      const longLogin = "person-12345678901234567890123456789012";
+      const agentLogin = (owner: string, name = agentName) => `${owner}/${name.slice(0, 39)}`;
+      const nameClass = "min-w-0 flex-1 truncate text-[13px]";
+      const loginClass = "truncate text-xs text-ink-3";
+
+      function expectLabel(element: Element | null, text: string, className = nameClass) {
+        if (!(element instanceof HTMLSpanElement)) throw new Error("Missing mention label span");
+        expect(element.textContent).toBe(text);
+        expect(element.getAttribute("title")).toBe(text);
+        expect(element.className).toBe(className);
+        expect(element.getAttributeNames().sort()).toEqual(["class", "title"]);
+        expect(element.children).toHaveLength(0);
+        expect(element.tabIndex).toBe(-1);
+      }
+
+      function expectName(login: string, name: string) {
+        const row = option(login);
+        if (!row) throw new Error(`Missing mention option ${login}`);
+        expectLabel(row.children.item(1), name);
+        return row;
+      }
+
+      it.each(["comment", "reply"] as const)("keeps full literal titles and agent reasons without new controls or hover actions in a %s", async (kind) => {
+        for (const name of names) expect(name.length).toBeGreaterThanOrEqual(200);
+        expect(names[0]).not.toBe(names[1]);
+        expect(agentName).toHaveLength(80);
+        expect(absentAgentName).toHaveLength(80);
+        expect(longLogin).toHaveLength(39);
+        vi.mocked(api.documents.collaborators).mockResolvedValue(collaboratorResponse({
+          collaborators: [
+            { login: longLogin, name: names[0], image: null },
+            { login: "beatrice", name: names[1], image: null },
+          ],
+          agents: [
+            { login: agentLogin("alice"), name: agentName, ownerLogin: "alice", ownerName: "Alice", present: true, collaboratorsMayAsk: false },
+            { login: agentLogin("allowed"), name: agentName, ownerLogin: "allowed", ownerName: names[0], present: false, collaboratorsMayAsk: true },
+            { login: agentLogin("locked"), name: agentName, ownerLogin: "locked", ownerName: names[1], present: false, collaboratorsMayAsk: false },
+          ],
+        }));
+        vi.mocked(api.tokens.list).mockResolvedValue(tokenResponse(agentName, absentAgentName, "Overflow"));
+        const current = makeSession(`mention-title-${kind}`, "Alice", "alice");
+        addPresence(current, { id: `agent:alice:${agentName}`, name: agentName, login: null, isAgent: true, userLogin: "alice", userName: "Alice" });
+        if (kind === "reply") {
+          current.setPendingComment(null);
+          current.comments.add({ from: 0, to: 0, body: "Existing thread", author: current.user });
+        }
+        mountPanel(current);
+        if (kind === "reply") fireEvent.click(await screen.findByTestId("comment-reply"));
+        const box = await screen.findByTestId("comment-composer") as HTMLTextAreaElement;
+        box.focus();
+        await userEvent.setup().paste("@");
+        await waitFor(() => expect(option(agentLogin("alice", absentAgentName))).toBeVisible());
+        const rows = screen.getAllByTestId("mention-option");
+        expect(rows.map((row) => row.dataset.login)).toEqual([
+          longLogin, "beatrice", agentLogin("alice"), agentLogin("allowed"), agentLogin("locked"), agentLogin("alice", absentAgentName),
+        ]);
+        expect(option("alice/Overflow")).toBeUndefined();
+        const displayNames = [names[0], names[1], agentName, `${names[0].trim()}'s ${agentName}`, `${names[1].trim()}'s ${agentName}`, absentAgentName];
+        const reason = `Only ${names[1].trim()} can ask this agent`;
+        const metadata = [
+          `@${longLogin}`, "@beatrice", "agent", "agent", "owner only", "your agent · not here yet",
+        ];
+        const metadataTitles = [
+          `@${longLogin}`, "@beatrice", "Agent of @alice", "Agent of @allowed", reason, "One of your API tokens; it has not been in this document yet",
+        ];
+        const list = screen.getByRole("listbox", { name: "Mention someone" });
+        expect(box).toHaveAttribute("aria-controls", list.id);
+        const requests = [api.documents.collaborators, api.documents.reviews, api.documents.comment, api.documents.createRequest, api.tokens.list];
+        const requestCounts = requests.map((request) => vi.mocked(request).mock.calls.length);
+        const fetch = vi.spyOn(globalThis, "fetch");
+        const update = vi.fn();
+        current.ydoc.on("update", update);
+        const controls = Array.from(document.querySelectorAll("button, input, textarea, a, [tabindex]"));
+        try {
+          for (const [index, row] of rows.entries()) {
+            expectName(row.dataset.login!, displayNames[index]);
+            expect(row.childNodes).toHaveLength(3);
+            expect(row.children).toHaveLength(3);
+            expect(row).toHaveAttribute("role", "option");
+            expect(row.id).toBe(`${list.id}-option-${index}`);
+            expect(row.tabIndex).toBe(-1);
+            expect(row.querySelectorAll("button, input, textarea, a, [tabindex]")).toHaveLength(0);
+            const avatar = row.children[0];
+            expect(avatar).toHaveStyle({ width: "20px", height: "20px" });
+            expect(avatar.querySelector("svg") !== null).toBe(index >= 2);
+            expect(avatar).toHaveAttribute("title", index < 2 ? displayNames[index] : `${index === 5 ? absentAgentName : agentName} (agent)`);
+            const meta = row.children[2];
+            expect(meta.textContent).toBe(metadata[index]);
+            expect(meta.getAttribute("title")).toBe(metadataTitles[index]);
+            expect(meta.className).toBe(index < 2 ? loginClass : `flex min-w-0 items-center gap-1 truncate text-xs text-ink-${index === 4 ? "3" : "4"}`);
+            expect(meta.children).toHaveLength(index === 4 ? 1 : 0);
+            if (index < 2) expectLabel(meta, metadata[index], loginClass);
+            expect(row.hasAttribute("data-own")).toBe(index === 5);
+            expect(row.hasAttribute("data-locked")).toBe(index === 4);
+            expect(row.getAttribute("aria-disabled")).toBe(index === 4 ? "true" : null);
+            expect(row.getAttribute("title")).toBe(index === 4 ? reason : null);
+            fireEvent.mouseEnter(row.children[1]);
+            fireEvent.mouseOver(meta);
+            expect(row).toHaveAttribute("aria-selected", "true");
+            expect(row.className).toBe(`menu-item py-1.5 bg-surface-3${index === 4 ? " text-ink-3" : ""}`);
+            expect(box).toHaveAttribute("aria-activedescendant", row.id);
+            expect(box).toHaveFocus();
+            expect(box.value).toBe("@");
+          }
+          expect(requests.map((request) => vi.mocked(request).mock.calls.length)).toEqual(requestCounts);
+          expect(fetch).not.toHaveBeenCalled();
+          expect(update).not.toHaveBeenCalled();
+          expect(Array.from(document.querySelectorAll("button, input, textarea, a, [tabindex]"))).toEqual(controls);
+          expect(screen.queryByRole("tooltip")).toBeNull();
+          expect(current.comments.list()).toHaveLength(kind === "reply" ? 1 : 0);
+          if (kind === "reply") expect(current.comments.list()[0].replies).toHaveLength(0);
+        } finally {
+          current.ydoc.off("update", update);
+        }
+        fireEvent.change(box, { target: { value: "@PERSON" } });
+        fireEvent.select(box);
+        expect(screen.getAllByTestId("mention-option")).toHaveLength(1);
+        expectName(longLogin, names[0]);
+        fireEvent.keyDown(box, { key: "Escape" });
+        await waitFor(() => expect(screen.queryByTestId("mention-option")).toBeNull());
+        fireEvent.change(box, { target: { value: "@review" } });
+        expect(screen.getAllByTestId("mention-option").map((row) => row.dataset.login)).toEqual([
+          agentLogin("alice"), agentLogin("allowed"), agentLogin("locked"),
+        ]);
+        expectName(agentLogin("allowed"), displayNames[3]);
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(1);
+        expect(api.tokens.list).toHaveBeenCalledTimes(1);
+      });
+
+      it("updates same-ID presence names and owner decoration, restores cached identities on removal, and keeps empty names raw", async () => {
+        vi.mocked(api.documents.collaborators).mockResolvedValue(collaboratorResponse({
+          collaborators: [
+            { login: longLogin, name: names[0], image: null },
+            { login: "empty", name: "", image: null },
+            { login: "spaces", name: "  ", image: null },
+            { login: "fallback", name: null, image: null },
+          ],
+          agents: [{ login: agentLogin("owner"), name: agentName, ownerLogin: "owner", ownerName: null, present: false, collaboratorsMayAsk: true }],
+        }));
+        const current = makeSession("mention-title-presence", "Alice", "alice");
+        const human = addPresence(current, { id: "same-person", name: names[1], login: longLogin });
+        const departing = addPresence(current, { id: "departing", name: "Temporary <i>label</i>", login: "departing" });
+        const agent = addPresence(current, { id: `agent:owner:${agentName}`, name: agentName, login: null, isAgent: true, userLogin: "owner", userName: names[0] });
+        mountPanel(current);
+        const box = await openPicker();
+        await waitFor(() => expect(option("empty")).toBeVisible());
+        const humanRow = expectName(longLogin, names[1]);
+        const agentRow = expectName(agentLogin("owner"), `${names[0].trim()}'s ${agentName}`);
+        expectName("empty", "");
+        expectName("spaces", "  ");
+        expectName("fallback", "fallback");
+        const departingRow = expectName("departing", "Temporary <i>label</i>");
+
+        const relay = async (change: () => void) => {
+          await act(async () => {
+            change();
+            lastProvider().opts.onAwarenessChange?.({ states: [] });
+          });
+        };
+        await relay(() => {
+          human.setLocalStateField("user", { ...human.getLocalState()!.user, name: names[0] });
+          agent.setLocalStateField("user", { ...agent.getLocalState()!.user, userName: names[1] });
+          for (const awareness of [human, agent]) applyAwarenessUpdate(current.awareness, encodeAwarenessUpdate(awareness, [awareness.clientID]), "server");
+        });
+        await waitFor(() => {
+          expect(expectName(longLogin, names[0])).toBe(humanRow);
+          expect(expectName(agentLogin("owner"), `${names[1].trim()}'s ${agentName}`)).toBe(agentRow);
+        });
+        expect(agentRow.children[2]).toHaveAttribute("title", "Agent of @owner");
+        expect(box.value).toBe("@");
+
+        await relay(() => removeAwarenessStates(current.awareness, [human.clientID, agent.clientID, departing.clientID], "server"));
+        await waitFor(() => {
+          expectName(longLogin, names[0]);
+          expectName(agentLogin("owner"), `owner's ${agentName}`);
+        });
+        expect(option("departing")).toBeUndefined();
+        expect(departingRow).not.toBeInTheDocument();
+        expect(Array.from(document.querySelectorAll("span[title]")).some((span) => span.getAttribute("title") === `${names[1].trim()}'s ${agentName}`)).toBe(false);
+        act(() => current.setPendingComment(null));
+        await waitFor(() => expect(screen.queryByTestId("comment-composer")).toBeNull());
+        act(() => current.setPendingComment({ from: 0, to: 0 }));
+        await openPicker();
+        expectName(longLogin, names[0]);
+        expectName(agentLogin("owner"), `owner's ${agentName}`);
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(1);
+        expect(api.tokens.list).toHaveBeenCalledTimes(1);
+      });
+
+      it.each(["pointer", "Enter"] as const)("inserts once with current %s selection after document replacement and ignores retired controls", async (selection) => {
+        vi.mocked(api.documents.collaborators).mockResolvedValueOnce(collaboratorResponse({
+          collaborators: [{ login: longLogin, name: names[0], image: null }],
+        })).mockResolvedValueOnce(collaboratorResponse({
+          collaborators: [{ login: longLogin, name: names[1], image: null }],
+        }));
+        const oldSession = makeSession("mention-title-old", "Alice", "alice");
+        const view = mountPanel(oldSession);
+        const retiredBox = await openPicker();
+        await waitFor(() => expect(option(longLogin)).toBeVisible());
+        const retiredRow = expectName(longLogin, names[0]);
+        const retiredClick = reactProperty<() => void>(retiredRow, "onClick");
+        act(() => oldSession.setPendingComment(null));
+        await waitFor(() => expect(screen.queryByTestId("comment-composer")).toBeNull());
+        const current = makeSession("mention-title-current", "Alice", "alice");
+        view.replace(current);
+        const box = await openPicker();
+        await waitFor(() => expect(option(longLogin)).toBeVisible());
+        const row = expectName(longLogin, names[1]);
+        expectLabel(row.children[2], `@${longLogin}`, loginClass);
+        expect(retiredRow).not.toBeInTheDocument();
+        expect(retiredBox).not.toBeInTheDocument();
+        fireEvent.click(retiredRow);
+        act(() => retiredClick());
+        mentionKey(retiredBox, "Enter");
+        expect(box.value).toBe("@");
+        fireEvent.mouseEnter(row.children[1]);
+        expect(box).toHaveAttribute("aria-activedescendant", row.id);
+        expect(box.value).toBe("@");
+        if (selection === "pointer") {
+          fireEvent.mouseDown(row.children[1]);
+          fireEvent.click(row.children[1]);
+        } else {
+          mentionKey(box, "Enter");
+        }
+        expect(box.value).toBe(`@${longLogin} `);
+        await waitFor(() => expect(screen.queryByTestId("mention-option")).toBeNull());
+        expect(current.comments.list()).toHaveLength(0);
+        expect(oldSession.comments.list()).toHaveLength(0);
+        expect(api.documents.comment).not.toHaveBeenCalled();
+        expect(api.documents.createRequest).not.toHaveBeenCalled();
+        expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+        expect(api.tokens.list).toHaveBeenCalledTimes(2);
+      });
     });
 
     it("shows only current presence while replacement viewer requests settle, then publishes only current collaborators, agents, permissions, and tokens", async () => {
