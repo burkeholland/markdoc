@@ -292,6 +292,7 @@ interface FileDropKeyListener {
 }
 
 interface FileDropReactMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
   readonly isDefaultPrevented: (...args: never[]) => unknown;
   readonly isPropagationStopped: (...args: never[]) => unknown;
 }
@@ -1480,17 +1481,21 @@ function exactFileDropKeyDelivery(
       return null;
     }
     const reactEvent = event as ReactKeyboardEvent<HTMLElement> & {
+      preventDefault?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
     };
     const methods = Object.freeze({
+      preventDefault:
+        reactEvent.preventDefault as (...args: never[]) => unknown,
       isDefaultPrevented:
         reactEvent.isDefaultPrevented as (...args: never[]) => unknown,
       isPropagationStopped:
         reactEvent.isPropagationStopped as (...args: never[]) => unknown,
     });
     const dispatchTarget = snapshot.currentTarget;
-    return typeof methods.isDefaultPrevented === "function" &&
+    return typeof methods.preventDefault === "function" &&
+      typeof methods.isDefaultPrevented === "function" &&
       typeof methods.isPropagationStopped === "function" &&
       keyboard.apply(methods.isDefaultPrevented, event, []) === false &&
       keyboard.apply(methods.isPropagationStopped, event, []) === false &&
@@ -1546,6 +1551,7 @@ function exactFileDropKeyDelivery(
       event.shiftKey === snapshot.shiftKey &&
       event.repeat === snapshot.repeat &&
       Object.is(event.view, snapshot.view) &&
+      reactEvent.preventDefault === methods.preventDefault &&
       reactEvent.isDefaultPrevented === methods.isDefaultPrevented &&
       reactEvent.isPropagationStopped ===
         methods.isPropagationStopped
@@ -1575,6 +1581,7 @@ function fileDropSameWrapperDeliveriesMatch(
   return (
     left.publication === right.publication &&
     left.wrapper === right.wrapper &&
+    left.methods.preventDefault === right.methods.preventDefault &&
     left.methods.isDefaultPrevented ===
       right.methods.isDefaultPrevented &&
     left.methods.isPropagationStopped ===
@@ -1596,10 +1603,6 @@ function fileDropDistinctWrapperDeliveriesMatch(
   return (
     capture.publication === bubble.publication &&
     capture.wrapper !== bubble.wrapper &&
-    capture.methods.isDefaultPrevented ===
-      bubble.methods.isDefaultPrevented &&
-    capture.methods.isPropagationStopped ===
-      bubble.methods.isPropagationStopped &&
     capture.nativeEvent === bubble.nativeEvent &&
     capture.listener === bubble.listener &&
     capture.dispatchTarget === bubble.dispatchTarget &&
@@ -1614,12 +1617,14 @@ function fileDropReactMethodsRemainFalse(
   delivery: FileDropKeyDelivery,
 ) {
   const event = delivery.wrapper as ReactKeyboardEvent<HTMLElement> & {
+    preventDefault?: unknown;
     isDefaultPrevented?: unknown;
     isPropagationStopped?: unknown;
   };
   const { keyboard } = delivery.publication;
   try {
     return (
+      event.preventDefault === delivery.methods.preventDefault &&
       event.isDefaultPrevented ===
         delivery.methods.isDefaultPrevented &&
       event.isPropagationStopped ===
@@ -1629,6 +1634,35 @@ function fileDropReactMethodsRemainFalse(
         delivery.wrapper,
         [],
       ) === false &&
+      keyboard.apply(
+        delivery.methods.isPropagationStopped,
+        delivery.wrapper,
+        [],
+      ) === false
+    );
+  } catch {
+    return false;
+  }
+}
+
+function fileDropReactPreventionMatches(
+  delivery: FileDropKeyDelivery,
+) {
+  const event = delivery.wrapper as ReactKeyboardEvent<HTMLElement> & {
+    preventDefault?: unknown;
+    isDefaultPrevented?: unknown;
+    isPropagationStopped?: unknown;
+  };
+  const { keyboard } = delivery.publication;
+  const isDefaultPrevented = event.isDefaultPrevented;
+  try {
+    return (
+      event.preventDefault === delivery.methods.preventDefault &&
+      event.isPropagationStopped ===
+        delivery.methods.isPropagationStopped &&
+      typeof isDefaultPrevented === "function" &&
+      event.defaultPrevented === true &&
+      keyboard.apply(isDefaultPrevented, delivery.wrapper, []) === true &&
       keyboard.apply(
         delivery.methods.isPropagationStopped,
         delivery.wrapper,
@@ -2696,8 +2730,8 @@ function createFileDropPresentation(
       return;
     }
     publication.keyboard.apply(
-      publication.keyboard.event.preventDefault,
-      rootBubble.nativeEvent,
+      rootBubble.methods.preventDefault,
+      rootBubble.wrapper,
       [],
     );
     if (
@@ -2706,6 +2740,7 @@ function createFileDropPresentation(
         rootBubble.nativeEvent,
         [],
       ) !== true ||
+      !fileDropReactPreventionMatches(rootBubble) ||
       !publication.keyListener.retains(listener, publication) ||
       !coordinator.retainsNavigation(claim) ||
       !owns(publication) ||

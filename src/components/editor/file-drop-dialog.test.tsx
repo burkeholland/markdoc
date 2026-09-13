@@ -1427,7 +1427,7 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         expect(busyHandlers.onError).not.toHaveBeenCalled();
       });
 
-      it("authenticates exact root and option wrappers around the genuine Window delivery", () => {
+      it("accepts distinct capture and bubble wrappers and cancels through the exact bubble wrapper", () => {
         const focus = vi.spyOn(HTMLElement.prototype, "focus");
         const handlers = callbacks();
         renderStrict(propsFor(dropped("wrapper-delivery.md", 9), handlers));
@@ -1450,9 +1450,84 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         const rootBubble = reactProp<
           (event: ReactKeyboardEvent<HTMLDivElement>) => void
         >(root, "onKeyDown");
+        const nativePreventDefault =
+          ownerWindow.Event.prototype.preventDefault;
+        const capturePrototype = Object.create(null);
+        const bubblePrototype = Object.create(null);
+        const capturePreventDefault = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return undefined;
+        });
+        const captureIsDefaultPrevented = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return false;
+        });
+        const captureIsPropagationStopped = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return false;
+        });
+        const bubblePrevented = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return true;
+        });
+        const bubblePreventDefault = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          Reflect.apply(nativePreventDefault, this.nativeEvent, []);
+          Object.defineProperties(this, {
+            defaultPrevented: {
+              configurable: true,
+              enumerable: true,
+              value: true,
+              writable: true,
+            },
+            isDefaultPrevented: {
+              configurable: true,
+              enumerable: true,
+              value: bubblePrevented,
+              writable: true,
+            },
+          });
+        });
+        const bubbleIsDefaultPrevented = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return false;
+        });
+        const bubbleIsPropagationStopped = vi.fn(function (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) {
+          return false;
+        });
+        const createWrapper = (
+          event: ReactKeyboardEvent<HTMLElement>,
+          prototype: object,
+          methods: {
+            preventDefault: () => void;
+            isDefaultPrevented: () => boolean;
+            isPropagationStopped: () => boolean;
+          },
+        ) =>
+          Object.assign(Object.create(prototype), event, methods) as
+            ReactKeyboardEvent<HTMLElement>;
+        const setCurrentTarget = (
+          event: ReactKeyboardEvent<HTMLElement>,
+          currentTarget: HTMLElement,
+        ) => {
+          if (!Reflect.set(event, "currentTarget", currentTarget)) {
+            throw new Error("Unable to set the test wrapper currentTarget");
+          }
+        };
+        let captureWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
+        let bubbleWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
         const boundaries: {
           name: string;
           wrapper: object;
+          preventDefault: () => void;
           isDefaultPrevented: () => boolean;
           isPropagationStopped: () => boolean;
           defaultPrevented: boolean;
@@ -1465,6 +1540,7 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
           boundaries.push({
             name,
             wrapper: event,
+            preventDefault: event.preventDefault,
             isDefaultPrevented: event.isDefaultPrevented,
             isPropagationStopped: event.isPropagationStopped,
             defaultPrevented: event.isDefaultPrevented(),
@@ -1473,24 +1549,60 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         };
         const restoreRoot = replaceReactProps(root, {
           onKeyDownCapture: (event: ReactKeyboardEvent<HTMLDivElement>) => {
-            record("root capture", event);
-            rootCapture(event);
+            captureWrapper = createWrapper(
+              event,
+              capturePrototype,
+              {
+                preventDefault: capturePreventDefault,
+                isDefaultPrevented: captureIsDefaultPrevented,
+                isPropagationStopped: captureIsPropagationStopped,
+              },
+            );
+            setCurrentTarget(captureWrapper, root);
+            record("root capture", captureWrapper);
+            rootCapture(
+              captureWrapper as ReactKeyboardEvent<HTMLDivElement>,
+            );
           },
           onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
-            record("root bubble", event);
-            rootBubble(event);
+            if (!bubbleWrapper) {
+              throw new Error("The bubble wrapper was not created");
+            }
+            setCurrentTarget(bubbleWrapper, root);
+            record("root bubble", bubbleWrapper);
+            rootBubble(
+              bubbleWrapper as ReactKeyboardEvent<HTMLDivElement>,
+            );
           },
         });
         const restoreOption = replaceReactProps(source, {
           onKeyDownCapture: (
-            event: ReactKeyboardEvent<HTMLButtonElement>,
+            _event: ReactKeyboardEvent<HTMLButtonElement>,
           ) => {
-            record("option capture", event);
-            optionCapture(event);
+            if (!captureWrapper) {
+              throw new Error("The capture wrapper was not created");
+            }
+            setCurrentTarget(captureWrapper, source);
+            record("option capture", captureWrapper);
+            optionCapture(
+              captureWrapper as ReactKeyboardEvent<HTMLButtonElement>,
+            );
           },
           onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-            record("option bubble", event);
-            optionBubble(event);
+            bubbleWrapper = createWrapper(
+              event,
+              bubblePrototype,
+              {
+                preventDefault: bubblePreventDefault,
+                isDefaultPrevented: bubbleIsDefaultPrevented,
+                isPropagationStopped: bubbleIsPropagationStopped,
+              },
+            );
+            setCurrentTarget(bubbleWrapper, source);
+            record("option bubble", bubbleWrapper);
+            optionBubble(
+              bubbleWrapper as ReactKeyboardEvent<HTMLButtonElement>,
+            );
           },
         });
         const nativeEvent = fileDropKeyEvent(source, "ArrowRight");
@@ -1542,13 +1654,28 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         expect(boundaries[0]!.wrapper).toBe(boundaries[1]!.wrapper);
         expect(boundaries[2]!.wrapper).toBe(boundaries[3]!.wrapper);
         expect(boundaries[0]!.wrapper).not.toBe(boundaries[2]!.wrapper);
+        expect(Object.getPrototypeOf(boundaries[0]!.wrapper)).toBe(
+          capturePrototype,
+        );
+        expect(Object.getPrototypeOf(boundaries[2]!.wrapper)).toBe(
+          bubblePrototype,
+        );
+        expect(boundaries[0]!.preventDefault).toBe(
+          boundaries[1]!.preventDefault,
+        );
+        expect(boundaries[2]!.preventDefault).toBe(
+          boundaries[3]!.preventDefault,
+        );
+        expect(boundaries[0]!.preventDefault).not.toBe(
+          boundaries[2]!.preventDefault,
+        );
         expect(boundaries[0]!.isDefaultPrevented).toBe(
           boundaries[1]!.isDefaultPrevented,
         );
         expect(boundaries[2]!.isDefaultPrevented).toBe(
           boundaries[3]!.isDefaultPrevented,
         );
-        expect(boundaries[0]!.isDefaultPrevented).toBe(
+        expect(boundaries[0]!.isDefaultPrevented).not.toBe(
           boundaries[2]!.isDefaultPrevented,
         );
         expect(boundaries[0]!.isPropagationStopped).toBe(
@@ -1557,7 +1684,7 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         expect(boundaries[2]!.isPropagationStopped).toBe(
           boundaries[3]!.isPropagationStopped,
         );
-        expect(boundaries[0]!.isPropagationStopped).toBe(
+        expect(boundaries[0]!.isPropagationStopped).not.toBe(
           boundaries[2]!.isPropagationStopped,
         );
         expect(
@@ -1568,7 +1695,13 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         ).toBe(true);
         expect(nativeDelivery.receiver).toBe(nativeDelivery.currentTarget);
         expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
+        expect(capturePreventDefault).not.toHaveBeenCalled();
+        expect(bubblePreventDefault).toHaveBeenCalledOnce();
+        expect(bubblePreventDefault.mock.contexts[0]).toBe(bubbleWrapper);
         expect(nativeEvent.defaultPrevented).toBe(true);
+        expect(bubbleWrapper?.defaultPrevented).toBe(true);
+        expect(bubbleWrapper?.isDefaultPrevented()).toBe(true);
+        expect(bubbleWrapper?.isPropagationStopped()).toBe(false);
         expect(options.insert).toHaveFocus();
         expect(focus).toHaveBeenCalledExactlyOnceWith({
           preventScroll: true,
@@ -1576,9 +1709,80 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         expectNoFileDropAction(handlers);
       });
 
+      it("exposes public cancellation to a same-root ancestor without fallback work", () => {
+        const preventDefault = vi.spyOn(
+          Event.prototype,
+          "preventDefault",
+        );
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const fallback = vi.fn();
+        const observed: Array<{
+          defaultPrevented: boolean;
+          isDefaultPrevented: boolean;
+        }> = [];
+        const handlers = callbacks();
+        renderDirect(
+          <StrictMode>
+            <div
+              onKeyDown={(event) => {
+                const cancellation = {
+                  defaultPrevented: event.defaultPrevented,
+                  isDefaultPrevented: event.isDefaultPrevented(),
+                };
+                observed.push(cancellation);
+                if (
+                  !cancellation.defaultPrevented ||
+                  !cancellation.isDefaultPrevented
+                ) {
+                  fallback();
+                }
+              }}
+            >
+              <FileDropDialog
+                {...propsFor(
+                  dropped("same-root-cancellation.md", 12),
+                  handlers,
+                )}
+              />
+            </div>
+          </StrictMode>,
+        );
+        const options = fileDropOptions();
+        const scroll = { x: window.scrollX, y: window.scrollY };
+        options.replace.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const event = dispatchFileDropKey(
+          options.replace,
+          "ArrowRight",
+        );
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(observed).toEqual([
+          {
+            defaultPrevented: true,
+            isDefaultPrevented: true,
+          },
+        ]);
+        expect(fallback).not.toHaveBeenCalled();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(focus.mock.contexts[0]).toBe(options.insert);
+        expect(options.insert).toHaveFocus();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(
+          scroll,
+        );
+        expectNoFileDropAction(handlers);
+      });
+
       it.each([
+        ["capture", "preventDefault"],
         ["capture", "isDefaultPrevented"],
         ["capture", "isPropagationStopped"],
+        ["bubble", "preventDefault"],
         ["bubble", "isDefaultPrevented"],
         ["bubble", "isPropagationStopped"],
       ] as const)(
@@ -1594,7 +1798,7 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
           const options = fileDropOptions();
           const source = options.replace;
           const root = screen.getByTestId("file-drop-dialog");
-          const element = phase === "capture" ? root : source;
+          const element = phase === "capture" ? source : root;
           const property =
             phase === "capture" ? "onKeyDownCapture" : "onKeyDown";
           const original = reactProp<
