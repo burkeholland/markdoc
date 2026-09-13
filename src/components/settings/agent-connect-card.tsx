@@ -2710,10 +2710,9 @@ class AgentTabCoordinator {
         } satisfies AgentTabAction),
       ]),
     ) as Record<ConnectTarget, AgentTabAction>);
-    let publication!: AgentTabPublication;
-    const coordinator = this;
+    const recordWindowEvent = this.#recordWindowEvent.bind(this);
     const callback: EventListener = function (this: EventTarget, event: Event) {
-      coordinator.#recordWindowEvent(publication, windowListener, this, event);
+      recordWindowEvent(publication, windowListener, this, event);
     };
     const windowListener: AgentTabWindowListener = {
       identity: Symbol("agent-tab-window-listener"),
@@ -2723,7 +2722,7 @@ class AgentTabCoordinator {
       callback,
       active: false,
     };
-    publication = {
+    const publication: AgentTabPublication = {
       identity: Symbol("agent-tab-publication"),
       draft,
       generation,
