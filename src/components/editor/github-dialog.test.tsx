@@ -1101,6 +1101,249 @@ describe("GitHubSignInPrompt ownership", () => {
   });
 });
 
+describe("GitHubPicker metadata titles", () => {
+  const primaryClass = "truncate text-sm font-medium text-ink";
+  const secondaryClass = "truncate text-xs text-ink-3";
+  const pathClass = "truncate font-mono text-[13px] text-ink-2";
+  const filename = `${"long-filename-".repeat(18)}<b title="quoted">literal</b>.md`;
+  const description = `${"Long description ".repeat(15)}<img src="literal" alt='quoted'>`;
+  const fullName = `octo/${"long-repository-".repeat(16)}<i title="quoted">literal</i>`;
+  const path = `docs/${"long-path-".repeat(23)}<a href="literal">quoted</a>.md`;
+
+  function expectMetadata(element: HTMLElement, value: string, tag: string, className: string) {
+    expect(element.tagName).toBe(tag);
+    expect(element.className).toBe(className);
+    expect(element.textContent).toBe(value);
+    expect(element.title).toBe(value);
+    expect(element.getAttributeNames().sort()).toEqual(["class", "title"]);
+    expect(element.children).toHaveLength(0);
+    expect(element.childNodes).toHaveLength(1);
+    expect(element.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(element.tabIndex).toBe(-1);
+  }
+
+  async function hoverMetadata(elements: HTMLElement[], onImported: ReturnType<typeof vi.fn>) {
+    const sources = [gists, repos, branches, files];
+    const calls = sources.map((source) => source.mock.calls.length);
+    const picker = screen.getByTestId("github-picker");
+    const focus = document.activeElement;
+    for (const element of elements) {
+      fireEvent.mouseOver(element);
+      fireEvent.mouseMove(element);
+      fireEvent.mouseOut(element);
+    }
+    await act(async () => {});
+    expect(sources.map((source) => source.mock.calls.length)).toEqual(calls);
+    expect(importDocument).not.toHaveBeenCalled();
+    expect(linkDocument).not.toHaveBeenCalled();
+    expect(onImported).not.toHaveBeenCalled();
+    expect(signIn).not.toHaveBeenCalled();
+    expect(picker).toBeInTheDocument();
+    expect(document.activeElement).toBe(focus);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  }
+
+  it("keeps long literal gist metadata, names and icons intact through hover and one explicit import", async () => {
+    expect(filename.length).toBeGreaterThanOrEqual(200);
+    expect(description.length).toBeGreaterThanOrEqual(200);
+    const item = { ...gist("literal-gist", filename), description };
+    gists.mockResolvedValue({ gists: [item] });
+    const request = deferred<{ document: { id: string; title: string } }>();
+    importDocument.mockReturnValue(request.promise);
+    const onImported = vi.fn();
+    render(<GitHubPicker mode="import" githubAvailable githubConfigured onImported={onImported} />);
+    const row = await screen.findByTestId("gist-item");
+    const name = within(row).getByTitle(filename);
+    const detail = within(row).getByTitle(description);
+    expectMetadata(name, filename, "DIV", primaryClass);
+    expectMetadata(detail, description, "DIV", secondaryClass);
+    expect(Array.from(row.children, (child) => child.tagName.toLowerCase())).toEqual(["svg", "div", "span"]);
+    expect(name.parentElement?.children).toHaveLength(2);
+    expect(name.nextElementSibling).toBe(detail);
+    expect(row.querySelectorAll("svg")).toHaveLength(2);
+    expect(row.querySelector("svg")).toHaveAttribute("width", "16");
+    expect(row.querySelector(".lucide-lock")).toHaveAttribute("width", "12");
+    expect(row.querySelectorAll("button, a, input, select, textarea, [tabindex]")).toHaveLength(0);
+    expect(row).toHaveClass("hover:bg-surface-2", "disabled:opacity-50");
+    expect(row).toHaveAccessibleName(`${filename} ${description} ${row.lastElementChild?.textContent}`);
+    expect(row).toBeEnabled();
+
+    await hoverMetadata([name, detail], onImported);
+    expect(screen.getByTestId("gist-item")).toBe(row);
+    expect(screen.getByTestId("picker-tab-gist")).toHaveAttribute("aria-pressed", "true");
+    expect(row).toBeEnabled();
+    fireEvent.click(name);
+    expect(importDocument).toHaveBeenCalledExactlyOnceWith({
+      source: "gist", gistId: item.id, filename,
+    });
+    expect(row).toBeDisabled();
+    expectMetadata(name, filename, "DIV", primaryClass);
+    expectMetadata(detail, description, "DIV", secondaryClass);
+    await act(async () => {
+      request.resolve({ document: { id: "literal-import", title: "Imported" } });
+      await request.promise;
+    });
+    expect(onImported).toHaveBeenCalledExactlyOnceWith("literal-import");
+    expect(row).toBeEnabled();
+  });
+
+  it("keeps long repository and file metadata passive until their existing selections", async () => {
+    expect(fullName.length).toBeGreaterThanOrEqual(200);
+    expect(path.length).toBeGreaterThanOrEqual(200);
+    const repo = { ...repository(), fullName, description, private: true };
+    repos.mockResolvedValue({ repos: [repo] });
+    files.mockResolvedValue({ files: [repoFile(path)] });
+    const request = deferred<{ document: { id: string; title: string } }>();
+    importDocument.mockReturnValue(request.promise);
+    const onImported = vi.fn();
+    render(<GitHubPicker mode="import" githubAvailable githubConfigured onImported={onImported} />);
+    await screen.findByTestId("gist-item");
+    fireEvent.click(screen.getByTestId("picker-tab-repo"));
+    const row = await screen.findByTestId("repo-item");
+    const name = within(row).getByTitle(fullName);
+    const detail = within(row).getByTitle(description);
+    expectMetadata(name, fullName, "DIV", primaryClass);
+    expectMetadata(detail, description, "DIV", secondaryClass);
+    expect(Array.from(row.children, (child) => child.tagName.toLowerCase())).toEqual(["svg", "div", "span"]);
+    expect(name.parentElement?.children).toHaveLength(2);
+    expect(name.nextElementSibling).toBe(detail);
+    expect(row.querySelectorAll("svg")).toHaveLength(2);
+    expect(row.querySelector("svg")).toHaveAttribute("width", "16");
+    expect(row.querySelector(".lucide-lock")).toHaveAttribute("width", "12");
+    expect(row.querySelectorAll("button, a, input, select, textarea, [tabindex]")).toHaveLength(0);
+    expect(row).toHaveAccessibleName(`${fullName} ${description} ${row.lastElementChild?.textContent}`);
+    expect(row).toBeEnabled();
+    await hoverMetadata([name, detail], onImported);
+    expect(screen.getByTestId("repo-item")).toBe(row);
+    expect(screen.queryByTestId("branch-list")).toBeNull();
+    fireEvent.click(name);
+    const file = await screen.findByTestId("repo-file");
+    await screen.findByTestId("branch-select");
+    expect(branches).toHaveBeenCalledExactlyOnceWith(repo.owner, repo.name);
+    expect(files).toHaveBeenCalledExactlyOnceWith(repo.owner, repo.name, repo.defaultBranch);
+    const filePath = within(file).getByTitle(path);
+    expectMetadata(filePath, path, "SPAN", pathClass);
+    expect(Array.from(file.children, (child) => child.tagName.toLowerCase())).toEqual(["svg", "span", "span"]);
+    expect(file.querySelectorAll("svg")).toHaveLength(1);
+    expect(file.querySelector("svg")).toHaveAttribute("width", "15");
+    expect(file.querySelectorAll("button, a, input, select, textarea, [tabindex]")).toHaveLength(0);
+    expect(file.lastElementChild?.textContent).toBe("Open");
+    expect(file).toHaveAccessibleName(`${path}Open`);
+    expect(file).toBeEnabled();
+    await hoverMetadata([filePath], onImported);
+    expect(screen.getByTestId("branch-select")).toHaveValue("main");
+    expect(screen.getByTestId("repo-file")).toBe(file);
+    fireEvent.click(filePath);
+    expect(importDocument).toHaveBeenCalledExactlyOnceWith({
+      source: "repo", owner: repo.owner, repo: repo.name, branch: "main", path,
+    });
+    expect(file).toBeDisabled();
+    expectMetadata(filePath, path, "SPAN", pathClass);
+    await act(async () => {
+      request.resolve({ document: { id: "file-import", title: "Imported" } });
+      await request.promise;
+    });
+    expect(onImported).toHaveBeenCalledExactlyOnceWith("file-import");
+    expect(file).toBeEnabled();
+  });
+
+  it.each([null, "", "   "])("preserves fallback and optional-description truthiness for %j", async (value) => {
+    const item = { ...gist(), description: value };
+    const repo = { ...repository(), description: value };
+    gists.mockResolvedValue({ gists: [item] });
+    repos.mockResolvedValue({ repos: [repo] });
+    renderPicker();
+    const gistRow = await screen.findByTestId("gist-item");
+    expectMetadata(
+      within(gistRow).getByTitle(value || item.id, { normalizer: (text) => text }),
+      value || item.id, "DIV", secondaryClass,
+    );
+    fireEvent.click(screen.getByTestId("picker-tab-repo"));
+    const repoRow = await screen.findByTestId("repo-item");
+    const name = within(repoRow).getByTitle(repo.fullName);
+    expect(name.parentElement?.children).toHaveLength(value ? 2 : 1);
+    if (value) {
+      expectMetadata(within(repoRow).getByTitle(value, { normalizer: (text) => text }), value, "DIV", secondaryClass);
+    } else {
+      expect(name.nextElementSibling).toBeNull();
+      expect(repoRow.querySelectorAll("[title]")).toHaveLength(1);
+    }
+  });
+
+  it("retains same-row titles during search and tabs, then updates the same gist key on picker replacement", async () => {
+    const item = gist("same-gist", filename);
+    const updated = { ...item, description };
+    gists.mockResolvedValueOnce({ gists: [item] }).mockResolvedValueOnce({ gists: [updated] });
+    const view = renderPicker();
+    const row = await screen.findByTestId("gist-item");
+    const name = within(row).getByTitle(filename);
+    fireEvent.change(screen.getByPlaceholderText("Filter gists"), { target: { value: "long-filename" } });
+    expect(screen.getByTestId("gist-item")).toBe(row);
+    expectMetadata(name, filename, "DIV", primaryClass);
+    fireEvent.change(screen.getByPlaceholderText("Filter gists"), { target: { value: "no-match" } });
+    expect(screen.queryByTitle(filename)).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText("Filter gists"), { target: { value: "" } });
+    expectMetadata(screen.getByTitle(filename), filename, "DIV", primaryClass);
+    fireEvent.click(screen.getByTestId("picker-tab-repo"));
+    await screen.findByTestId("repo-item");
+    expect(screen.queryByTitle(filename)).toBeNull();
+    expect(screen.queryByTitle(item.description!)).toBeNull();
+    fireEvent.click(screen.getByTestId("picker-tab-gist"));
+    expectMetadata(screen.getByTitle(item.description!), item.description!, "DIV", secondaryClass);
+    expect(gists).toHaveBeenCalledOnce();
+    view.rerender(<GitHubPicker key="refreshed" mode="import" githubAvailable githubConfigured />);
+    const replacement = await screen.findByTitle(description);
+    expectMetadata(replacement, description, "DIV", secondaryClass);
+    expectMetadata(screen.getByTitle(filename), filename, "DIV", primaryClass);
+    expect(screen.queryByTitle(item.description!)).toBeNull();
+    expect(gists).toHaveBeenCalledTimes(2);
+    view.unmount();
+    expect(screen.queryByTitle(filename)).toBeNull();
+    expect(screen.queryByTitle(description)).toBeNull();
+  });
+
+  it("replaces titles across branches, file search, repository selection and picker removal", async () => {
+    const nextPath = "release/current.md";
+    const nextRepo = repository("replacement", "trunk");
+    repos.mockResolvedValue({ repos: [currentRepo, nextRepo] });
+    branches.mockResolvedValue({ branches: ["main", "release", "trunk"] });
+    files.mockResolvedValueOnce({ files: [repoFile(path)] })
+      .mockResolvedValueOnce({ files: [repoFile(nextPath)] })
+      .mockResolvedValueOnce({ files: [repoFile("replacement.md")] });
+    const view = renderPicker();
+    await selectRepository();
+    await screen.findByTitle(path);
+    const branch = await screen.findByTestId("branch-select");
+    fireEvent.change(branch, { target: { value: "release" } });
+    expect(screen.queryByTitle(path)).toBeNull();
+    expectMetadata(await screen.findByTitle(nextPath), nextPath, "SPAN", pathClass);
+    fireEvent.change(screen.getByPlaceholderText("Filter files"), { target: { value: "no-match" } });
+    expect(screen.queryByTitle(nextPath)).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText("Filter files"), { target: { value: "" } });
+    expectMetadata(screen.getByTitle(nextPath), nextPath, "SPAN", pathClass);
+    expect(files.mock.calls).toEqual([
+      [currentRepo.owner, currentRepo.name, "main"],
+      [currentRepo.owner, currentRepo.name, "release"],
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: /Repositories/ }));
+    expect(screen.queryByTitle(nextPath)).toBeNull();
+    expectMetadata(await screen.findByTitle(nextRepo.fullName), nextRepo.fullName, "DIV", primaryClass);
+    expectMetadata(screen.getByTitle(nextRepo.description!), nextRepo.description!, "DIV", secondaryClass);
+    expect(screen.getByTitle(currentRepo.fullName)).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("Filter repositories"), { target: { value: "no-match" } });
+    expect(screen.queryByTitle(nextRepo.fullName)).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText("Filter repositories"), { target: { value: "replacement" } });
+    expect(screen.queryByTitle(currentRepo.fullName)).toBeNull();
+    fireEvent.click(screen.getByTitle(nextRepo.fullName));
+    expectMetadata(await screen.findByTitle("replacement.md"), "replacement.md", "SPAN", pathClass);
+    expect(files).toHaveBeenLastCalledWith(nextRepo.owner, nextRepo.name, "trunk");
+    expect(importDocument).not.toHaveBeenCalled();
+    expect(linkDocument).not.toHaveBeenCalled();
+    view.unmount();
+    expect(screen.queryByTitle("replacement.md")).toBeNull();
+  });
+});
+
 describe("GitHubPicker list recovery", () => {
   it("replaces a gist failure with its API reason and one guarded retry that reaches the empty state", async () => {
     const retry = deferred<{ gists: Gist[] }>();

@@ -5198,8 +5198,8 @@ function GitHubPickerVisit({
                       >
                         <FileText size={16} className="shrink-0 text-ink-4" />
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-medium text-ink">{row.file.filename}</div>
-                          <div className="truncate text-xs text-ink-3">{row.gist.description || row.gist.id}</div>
+                          <div className="truncate text-sm font-medium text-ink" title={row.file.filename}>{row.file.filename}</div>
+                          <div className="truncate text-xs text-ink-3" title={row.gist.description || row.gist.id}>{row.gist.description || row.gist.id}</div>
                         </div>
                         <span className="flex items-center gap-2 text-xs text-ink-4">
                           {!row.gist.public && <Lock size={12} />}
@@ -5273,8 +5273,8 @@ function GitHubPickerVisit({
                       >
                         <GitHubIcon size={16} className="shrink-0 text-ink-4" />
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-sm font-medium text-ink">{row.fullName}</div>
-                          {row.description && <div className="truncate text-xs text-ink-3">{row.description}</div>}
+                          <div className="truncate text-sm font-medium text-ink" title={row.fullName}>{row.fullName}</div>
+                          {row.description && <div className="truncate text-xs text-ink-3" title={row.description}>{row.description}</div>}
                         </div>
                         <span className="flex items-center gap-2 text-xs text-ink-4">
                           {row.private && <Lock size={12} />}
@@ -5481,7 +5481,7 @@ function GitHubPickerVisit({
                           data-testid="repo-file"
                         >
                           <FileText size={15} className="shrink-0 text-ink-4" />
-                          <span className="truncate font-mono text-[13px] text-ink-2">{row.path}</span>
+                          <span className="truncate font-mono text-[13px] text-ink-2" title={row.path}>{row.path}</span>
                           {presentation.mode === "import" && <span className="ml-auto text-xs text-accent">Open</span>}
                         </button>
                       </li>
