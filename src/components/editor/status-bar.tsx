@@ -125,15 +125,24 @@ interface StatusBarNativeEventPublication {
   event: Event;
   type: string;
   target: EventTarget | null;
+  currentTarget: EventTarget | null;
+  ownerWindowCapture: (Window & typeof globalThis) | null;
+  intrinsicCurrentTarget: EventTarget | null | undefined;
+  intrinsicView: Window | null | undefined;
   path: readonly EventTarget[];
   bubbles: boolean;
   cancelable: boolean;
   composed: boolean;
   defaultPrevented: boolean;
+  cancelBubble: boolean;
+  trusted: boolean;
   timeStamp: number;
   phase: number;
+  view: Window | null | undefined;
   key: string | undefined;
   code: string | undefined;
+  repeat: boolean | undefined;
+  composing: boolean | undefined;
   button: number | undefined;
   ctrlKey: boolean | undefined;
   altKey: boolean | undefined;
@@ -158,7 +167,65 @@ interface StatusBarReactEventPublication {
   defaultPrevented: boolean;
   timeStamp: number;
   phase: number;
+  preventDefault: SyntheticEvent<HTMLElement, Event>["preventDefault"];
+  stopPropagation: SyntheticEvent<HTMLElement, Event>["stopPropagation"];
+  isDefaultPrevented: SyntheticEvent<HTMLElement, Event>["isDefaultPrevented"];
+  isPropagationStopped: SyntheticEvent<HTMLElement, Event>["isPropagationStopped"];
   claimed: boolean;
+}
+
+interface StatusBarIntrinsicGetter<T> {
+  read: (target: object) => T;
+  isCurrent: () => boolean;
+}
+
+interface StatusBarIntrinsicMethod<Args extends readonly unknown[], Result> {
+  call: (target: object, ...args: Args) => Result;
+  isCurrent: () => boolean;
+}
+
+interface StatusBarTrustAuthority {
+  matches: (event: object) => boolean;
+  read: (event: object) => boolean;
+  isCurrent: () => boolean;
+}
+
+interface StatusBarKeyboardAuthority {
+  ownerWindow: Window & typeof globalThis;
+  eventPrototype: Event;
+  keyboardPrototype: KeyboardEvent;
+  documentPrototype: Document;
+  htmlElementPrototype: HTMLElement;
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
+  getPrototypeOf: typeof Object.getPrototypeOf;
+  apply: typeof Reflect.apply;
+  eventType: StatusBarIntrinsicGetter<string>;
+  eventTarget: StatusBarIntrinsicGetter<EventTarget | null>;
+  eventCurrentTarget: StatusBarIntrinsicGetter<EventTarget | null>;
+  eventPhase: StatusBarIntrinsicGetter<number>;
+  eventBubbles: StatusBarIntrinsicGetter<boolean>;
+  eventCancelable: StatusBarIntrinsicGetter<boolean>;
+  eventComposed: StatusBarIntrinsicGetter<boolean>;
+  eventDefaultPrevented: StatusBarIntrinsicGetter<boolean>;
+  eventCancelBubble: StatusBarIntrinsicGetter<boolean>;
+  eventTimeStamp: StatusBarIntrinsicGetter<number>;
+  eventPath: StatusBarIntrinsicMethod<readonly [], EventTarget[]>;
+  eventPreventDefault: StatusBarIntrinsicMethod<readonly [], void>;
+  eventStopPropagation: StatusBarIntrinsicMethod<readonly [], void>;
+  eventStopImmediatePropagation: StatusBarIntrinsicMethod<readonly [], void>;
+  eventView: StatusBarIntrinsicGetter<Window | null>;
+  keyboardKey: StatusBarIntrinsicGetter<string>;
+  keyboardCode: StatusBarIntrinsicGetter<string>;
+  keyboardCtrl: StatusBarIntrinsicGetter<boolean>;
+  keyboardMeta: StatusBarIntrinsicGetter<boolean>;
+  keyboardAlt: StatusBarIntrinsicGetter<boolean>;
+  keyboardShift: StatusBarIntrinsicGetter<boolean>;
+  keyboardRepeat: StatusBarIntrinsicGetter<boolean>;
+  keyboardComposing: StatusBarIntrinsicGetter<boolean>;
+  activeElement: StatusBarIntrinsicGetter<Element | null>;
+  focus: StatusBarIntrinsicMethod<readonly [FocusOptions?], void>;
+  isTrusted: StatusBarTrustAuthority;
+  isCurrent: () => boolean;
 }
 
 interface StatusBarEventIntent {
@@ -274,6 +341,8 @@ interface StatusBarGeneration {
   relationSeals: StatusBarRelationSeal[];
   observers: StatusBarObserverPublication[];
   removeEventListeners: (() => void)[];
+  keyboardAuthority: StatusBarKeyboardAuthority | null;
+  directionalMutationObserved: boolean;
   retired: boolean;
 }
 
@@ -284,6 +353,10 @@ interface StatusBarPublicationManager {
   active: StatusBarGeneration | null;
   statsBoundary: StatusBarStatsBoundaryPublication | null;
   portalBoundaries: Map<StatusBarPortalSlot, StatusBarPortalBoundaryPublication>;
+  directionalNativeEvents: WeakSet<Event>;
+  directionalReactEvents: WeakSet<object>;
+  directionalFocusEvents: WeakSet<Event>;
+  directionalDestinations: WeakSet<object>;
   successorRequested: boolean;
   requestSuccessor: () => void;
 }
@@ -297,6 +370,40 @@ interface StatusBarValueIntent<T> {
 interface StatusBarDisclosureIntent {
   authority: StatusBarAuthority;
   event: StatusBarEventIntent;
+}
+
+type StatusBarMenuFocusDirection = "first" | "last";
+
+interface StatusBarMenuFocusIntent {
+  authority: StatusBarAuthority;
+  generation: StatusBarGeneration;
+  publication: StatusBarControlPublication<HTMLButtonElement>;
+  interaction: StatusBarEventIntent;
+  keyboardAuthority: StatusBarKeyboardAuthority;
+  direction: StatusBarMenuFocusDirection;
+  native: StatusBarNativeEventPublication;
+  react: StatusBarReactEventPublication;
+  trigger: HTMLButtonElement;
+  root: HTMLElement;
+  ownerDocument: Document;
+  ownerWindow: Window & typeof globalThis;
+  claimed: boolean;
+}
+
+interface StatusBarIssuesFocusIntent extends StatusBarMenuFocusIntent {
+  destination: StatusBarIssuePublication;
+}
+
+interface StatusBarDirectionalPropagationProof {
+  event: ReactKeyboardEvent<HTMLElement>;
+  nativeEvent: Event;
+  generation: StatusBarGeneration;
+  native: StatusBarNativeEventPublication;
+  currentTarget: HTMLElement;
+  key: "ArrowDown" | "ArrowUp";
+  stopPropagation: ReactKeyboardEvent<HTMLElement>["stopPropagation"];
+  isPropagationStopped: ReactKeyboardEvent<HTMLElement>["isPropagationStopped"];
+  apply: typeof Reflect.apply;
 }
 
 type StatusBarReactEvent =
@@ -323,6 +430,299 @@ const STATUS_BAR_NATIVE_EVENTS = [
   "dismissableLayer.focusOutside",
 ] as const;
 
+function statusBarDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return Boolean(
+    current
+    && current.configurable === expected.configurable
+    && current.enumerable === expected.enumerable
+    && current.get === expected.get
+    && current.set === expected.set
+    && current.value === expected.value
+    && current.writable === expected.writable
+  );
+}
+
+function statusBarEventView(event: Event) {
+  if (!("view" in event)) return undefined;
+  const view = event.view;
+  return view === null || typeof view === "object"
+    ? view as Window | null
+    : undefined;
+}
+
+function captureStatusBarKeyboardAuthority(
+  ownerWindow: Window & typeof globalThis,
+): StatusBarKeyboardAuthority | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const eventPrototype = ownerWindow.Event.prototype;
+  const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
+  const documentPrototype = ownerWindow.Document.prototype;
+  const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const prototypeLinks: (readonly [object, object | null])[] = [];
+  const authorities: { isCurrent: () => boolean }[] = [];
+  const capturedPrototypes = new Set<object>();
+  let stale = false;
+  const retainCurrent = (current: boolean) => {
+    if (!current) stale = true;
+    return !stale;
+  };
+  const capturePrototypeChain = (prototype: object) => {
+    let current: object | null = prototype;
+    while (current && !capturedPrototypes.has(current)) {
+      capturedPrototypes.add(current);
+      const parent = getPrototypeOf(current) as object | null;
+      prototypeLinks.push([current, parent]);
+      current = parent;
+    }
+  };
+  [
+    keyboardPrototype,
+    eventPrototype,
+    documentPrototype,
+    htmlElementPrototype,
+  ].forEach(capturePrototypeChain);
+
+  const captureGetter = <T,>(
+    prototype: object,
+    property: PropertyKey,
+  ): StatusBarIntrinsicGetter<T> | null => {
+    let current: object | null = prototype;
+    while (current) {
+      const descriptor = getOwnPropertyDescriptor(current, property);
+      if (descriptor) {
+        if (typeof descriptor.get !== "function") return null;
+        const owner = current;
+        const expected = Object.freeze({ ...descriptor });
+        const getter = descriptor.get;
+        const authority = Object.freeze({
+          read: (target: object) => apply(getter, target, []) as T,
+          isCurrent: () =>
+            retainCurrent(statusBarDescriptorsMatch(
+              getOwnPropertyDescriptor(owner, property),
+              expected,
+            )),
+        });
+        authorities.push(authority);
+        return authority;
+      }
+      current = getPrototypeOf(current) as object | null;
+    }
+    return null;
+  };
+
+  const captureMethod = <Args extends readonly unknown[], Result>(
+    prototype: object,
+    property: PropertyKey,
+  ): StatusBarIntrinsicMethod<Args, Result> | null => {
+    let current: object | null = prototype;
+    while (current) {
+      const descriptor = getOwnPropertyDescriptor(current, property);
+      if (descriptor) {
+        if (typeof descriptor.value !== "function") return null;
+        const owner = current;
+        const expected = Object.freeze({ ...descriptor });
+        const method = descriptor.value as (...args: Args) => Result;
+        const authority = Object.freeze({
+          call: (target: object, ...args: Args) =>
+            apply(method, target, args) as Result,
+          isCurrent: () =>
+            retainCurrent(statusBarDescriptorsMatch(
+              getOwnPropertyDescriptor(owner, property),
+              expected,
+            )),
+        });
+        authorities.push(authority);
+        return authority;
+      }
+      current = getPrototypeOf(current) as object | null;
+    }
+    return null;
+  };
+
+  const eventType = captureGetter<string>(eventPrototype, "type");
+  const eventTarget = captureGetter<EventTarget | null>(eventPrototype, "target");
+  const eventCurrentTarget = captureGetter<EventTarget | null>(
+    eventPrototype,
+    "currentTarget",
+  );
+  const eventPhase = captureGetter<number>(eventPrototype, "eventPhase");
+  const eventBubbles = captureGetter<boolean>(eventPrototype, "bubbles");
+  const eventCancelable = captureGetter<boolean>(eventPrototype, "cancelable");
+  const eventComposed = captureGetter<boolean>(eventPrototype, "composed");
+  const eventDefaultPrevented = captureGetter<boolean>(
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const eventCancelBubble = captureGetter<boolean>(
+    eventPrototype,
+    "cancelBubble",
+  );
+  const eventTimeStamp = captureGetter<number>(eventPrototype, "timeStamp");
+  const eventPath = captureMethod<readonly [], EventTarget[]>(
+    eventPrototype,
+    "composedPath",
+  );
+  const eventPreventDefault = captureMethod<readonly [], void>(
+    eventPrototype,
+    "preventDefault",
+  );
+  const eventStopPropagation = captureMethod<readonly [], void>(
+    eventPrototype,
+    "stopPropagation",
+  );
+  const eventStopImmediatePropagation = captureMethod<readonly [], void>(
+    eventPrototype,
+    "stopImmediatePropagation",
+  );
+  const eventView = captureGetter<Window | null>(
+    ownerWindow.UIEvent.prototype,
+    "view",
+  );
+  const keyboardKey = captureGetter<string>(keyboardPrototype, "key");
+  const keyboardCode = captureGetter<string>(keyboardPrototype, "code");
+  const keyboardCtrl = captureGetter<boolean>(keyboardPrototype, "ctrlKey");
+  const keyboardMeta = captureGetter<boolean>(keyboardPrototype, "metaKey");
+  const keyboardAlt = captureGetter<boolean>(keyboardPrototype, "altKey");
+  const keyboardShift = captureGetter<boolean>(keyboardPrototype, "shiftKey");
+  const keyboardRepeat = captureGetter<boolean>(keyboardPrototype, "repeat");
+  const keyboardComposing = captureGetter<boolean>(
+    keyboardPrototype,
+    "isComposing",
+  );
+  const activeElement = captureGetter<Element | null>(
+    documentPrototype,
+    "activeElement",
+  );
+  const focus = captureMethod<readonly [FocusOptions?], void>(
+    htmlElementPrototype,
+    "focus",
+  );
+
+  let trustProbe: KeyboardEvent;
+  try {
+    trustProbe = new ownerWindow.KeyboardEvent("status-bar-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const trustDescriptor = getOwnPropertyDescriptor(trustProbe, "isTrusted");
+  if (
+    !trustDescriptor
+    || trustDescriptor.configurable !== false
+    || typeof trustDescriptor.get !== "function"
+    || trustDescriptor.set !== undefined
+  )
+    return null;
+  const expectedTrustDescriptor = Object.freeze({ ...trustDescriptor });
+  const isTrusted = Object.freeze({
+    matches: (event: object) =>
+      statusBarDescriptorsMatch(
+        getOwnPropertyDescriptor(event, "isTrusted"),
+        expectedTrustDescriptor,
+      ),
+    read: (event: object) =>
+      apply(
+        trustDescriptor.get as (this: object) => boolean,
+        event,
+        [],
+      ) as boolean,
+    isCurrent: () =>
+      retainCurrent(statusBarDescriptorsMatch(
+        getOwnPropertyDescriptor(trustProbe, "isTrusted"),
+        expectedTrustDescriptor,
+      )),
+  });
+
+  if (
+    !eventType
+    || !eventTarget
+    || !eventCurrentTarget
+    || !eventPhase
+    || !eventBubbles
+    || !eventCancelable
+    || !eventComposed
+    || !eventDefaultPrevented
+    || !eventCancelBubble
+    || !eventTimeStamp
+    || !eventPath
+    || !eventPreventDefault
+    || !eventStopPropagation
+    || !eventStopImmediatePropagation
+    || !eventView
+    || !keyboardKey
+    || !keyboardCode
+    || !keyboardCtrl
+    || !keyboardMeta
+    || !keyboardAlt
+    || !keyboardShift
+    || !keyboardRepeat
+    || !keyboardComposing
+    || !activeElement
+    || !focus
+  )
+    return null;
+
+  const isCurrent = () => {
+    if (stale) return false;
+    return retainCurrent(
+      ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
+      && ownerWindow.Object.getPrototypeOf === getPrototypeOf
+      && ownerWindow.Reflect.apply === apply
+      && ownerWindow.Event.prototype === eventPrototype
+      && ownerWindow.KeyboardEvent.prototype === keyboardPrototype
+      && ownerWindow.Document.prototype === documentPrototype
+      && ownerWindow.HTMLElement.prototype === htmlElementPrototype
+      && prototypeLinks.every(
+        ([prototype, parent]) => getPrototypeOf(prototype) === parent,
+      )
+      && isTrusted.isCurrent()
+      && authorities.every((authority) => authority.isCurrent()),
+    );
+  };
+
+  return Object.freeze({
+    ownerWindow,
+    eventPrototype,
+    keyboardPrototype,
+    documentPrototype,
+    htmlElementPrototype,
+    getOwnPropertyDescriptor,
+    getPrototypeOf,
+    apply,
+    eventType,
+    eventTarget,
+    eventCurrentTarget,
+    eventPhase,
+    eventBubbles,
+    eventCancelable,
+    eventComposed,
+    eventDefaultPrevented,
+    eventCancelBubble,
+    eventTimeStamp,
+    eventPath,
+    eventPreventDefault,
+    eventStopPropagation,
+    eventStopImmediatePropagation,
+    eventView,
+    keyboardKey,
+    keyboardCode,
+    keyboardCtrl,
+    keyboardMeta,
+    keyboardAlt,
+    keyboardShift,
+    keyboardRepeat,
+    keyboardComposing,
+    activeElement,
+    focus,
+    isTrusted,
+    isCurrent,
+  });
+}
+
 const StatusBarStatsPopover = memo(
   StatsPopover,
   (previous, next) => (
@@ -344,6 +744,10 @@ function createPublicationManager(
     active: null,
     statsBoundary: null,
     portalBoundaries: new Map(),
+    directionalNativeEvents: new WeakSet(),
+    directionalReactEvents: new WeakSet(),
+    directionalFocusEvents: new WeakSet(),
+    directionalDestinations: new WeakSet(),
     successorRequested: false,
     requestSuccessor,
   };
@@ -433,6 +837,120 @@ function expectedStatusBarSlots(authority: StatusBarAuthority) {
     authority.issueRows.forEach((row) => slots.push(`issue:${row.index}`));
   }
   return slots;
+}
+
+function isStatusBarMenuItemSlot(slot: string) {
+  return (
+    slot.startsWith("layout:")
+    || slot === "line-wrapping"
+    || slot === "sync-scroll"
+    || slot.startsWith("theme:")
+    || slot === "compact-shortcuts"
+  );
+}
+
+function statusBarAuthoritiesAreSuccessive(
+  closed: StatusBarAuthority,
+  open: StatusBarAuthority,
+  disclosure: "menu" | "issues",
+) {
+  return (
+    Object.isFrozen(closed)
+    && Object.isFrozen(open)
+    && closed !== open
+    && (
+      disclosure === "menu"
+        ? !closed.menuOpen && open.menuOpen
+        : closed.menuOpen === open.menuOpen
+    )
+    && closed.mount === open.mount
+    && closed.publicationRevision === open.publicationRevision
+    && closed.session === open.session
+    && closed.source === open.source
+    && closed.tree === open.tree
+    && closed.document === open.document
+    && closed.layout === open.layout
+    && closed.layoutValues === open.layoutValues
+    && closed.onLayout === open.onLayout
+    && closed.lineWrapping === open.lineWrapping
+    && closed.onLineWrapping === open.onLineWrapping
+    && closed.syncScroll === open.syncScroll
+    && closed.onSyncScroll === open.onSyncScroll
+    && closed.compact === open.compact
+    && closed.hydrated === open.hydrated
+    && closed.statsSelection === open.statsSelection
+    && closed.statsSelectionFrom === open.statsSelectionFrom
+    && closed.statsSelectionTo === open.statsSelectionTo
+    && closed.statsGoal === open.statsGoal
+    && closed.statsGoalKind === open.statsGoalKind
+    && closed.statsGoalMode === open.statsGoalMode
+    && closed.statsGoalValue === open.statsGoalValue
+    && closed.statsGoalSetBy === open.statsGoalSetBy
+    && closed.statsGoalSetAt === open.statsGoalSetAt
+    && closed.issueSnapshot === open.issueSnapshot
+    && closed.issueRows.length === open.issueRows.length
+    && closed.issueRows.every((row, index) => {
+      const successor = open.issueRows[index];
+      return Boolean(
+        successor
+        && row.snapshot === successor.snapshot
+        && row.issue === successor.issue
+        && row.index === successor.index
+        && row.line === successor.line
+        && row.column === successor.column
+        && row.offset === successor.offset
+        && row.message === successor.message
+        && row.rule === successor.rule
+        && row.severity === successor.severity
+      );
+    })
+    && closed.onIssueSelect === open.onIssueSelect
+    && closed.onShortcuts === open.onShortcuts
+    && closed.onStorage === open.onStorage
+    && closed.themePreference === open.themePreference
+    && closed.themeValues === open.themeValues
+    && closed.setThemePreference === open.setThemePreference
+    && (
+      disclosure === "issues"
+        ? !closed.issuesOpen && open.issuesOpen
+        : closed.issuesOpen === open.issuesOpen
+    )
+  );
+}
+
+function statusBarMenuAuthoritiesAreSuccessive(
+  closed: StatusBarAuthority,
+  open: StatusBarAuthority,
+) {
+  return statusBarAuthoritiesAreSuccessive(closed, open, "menu");
+}
+
+function statusBarIssuesAuthoritiesAreSuccessive(
+  closed: StatusBarAuthority,
+  open: StatusBarAuthority,
+) {
+  return statusBarAuthoritiesAreSuccessive(closed, open, "issues");
+}
+
+function statusBarEventPathIsExact(
+  target: Node,
+  path: readonly EventTarget[],
+  ownerDocument: Document,
+  ownerWindow: Window,
+) {
+  const expected: EventTarget[] = [];
+  let current: Node | null = target;
+  while (current) {
+    expected.push(current);
+    current = current.parentNode;
+  }
+  const pathWindow = path.at(-1);
+  return (
+    expected.includes(ownerDocument)
+    && path.length === expected.length + 1
+    && arraysAreIdentical(expected, path.slice(0, -1))
+    && pathWindow === ownerWindow
+  );
 }
 
 function stableAttributes(element: Element) {
@@ -546,6 +1064,67 @@ function refreshNodeSeals(generation: StatusBarGeneration) {
     sealNode(generation.statsPortalRoot, generation.nodeSeals);
 }
 
+function mutationTouchesStatusBarDirectionalDisclosure(
+  generation: StatusBarGeneration,
+  record: MutationRecord,
+) {
+  const ownedNodes: HTMLElement[] = [];
+  for (const disclosure of ["menu", "issues"] as const) {
+    const trigger = generation.controls.get(`${disclosure}-trigger`)?.control;
+    const boundary = generation.authority[
+      disclosure === "menu" ? "menuOpen" : "issuesOpen"
+    ]
+      ? generation.portalBoundaries.get(`${disclosure}-content`)
+      : undefined;
+    if (
+      !boundary
+      && record.type === "attributes"
+      && record.target === trigger
+      && record.attributeName
+      && ["data-radix-popper-side", "data-radix-popper-align"].includes(
+        record.attributeName,
+      )
+      && record.oldValue !== null
+      && !trigger?.hasAttribute(record.attributeName)
+    )
+      continue;
+    ownedNodes.push(...[trigger, boundary?.content, boundary?.portal].filter(
+      (node): node is HTMLElement => Boolean(node),
+    ));
+  }
+  const uniqueOwnedNodes = [...new Set(ownedNodes)];
+  if (
+    uniqueOwnedNodes.some(
+      (node) =>
+        record.target === node
+        || node.contains(record.target),
+    )
+  )
+    return true;
+  if (record.type !== "childList") return false;
+  return [...record.addedNodes, ...record.removedNodes].some((changed) =>
+    uniqueOwnedNodes.some(
+      (node) =>
+        changed === node
+        || changed.contains(node)
+        || node.contains(changed),
+    ),
+  );
+}
+
+function retainStatusBarDirectionalMutationHistory(
+  generation: StatusBarGeneration,
+  records: readonly MutationRecord[],
+) {
+  if (
+    !generation.directionalMutationObserved
+    && records.some((record) =>
+      mutationTouchesStatusBarDirectionalDisclosure(generation, record)
+    )
+  )
+    generation.directionalMutationObserved = true;
+}
+
 function validateGeneration(generation: StatusBarGeneration, drain = true): boolean {
   if (generation.retired) return false;
   const placementLease = generation.statsPlacementLease;
@@ -572,6 +1151,7 @@ function validateGeneration(generation: StatusBarGeneration, drain = true): bool
   if (drain) {
     for (const publication of generation.observers) {
       const records = publication.observer.takeRecords();
+      retainStatusBarDirectionalMutationHistory(generation, records);
       const lease = generation.statsMutationLease;
       const deferredStatsClose = Boolean(
         records.length > 0
@@ -1634,6 +2214,7 @@ function observeGenerationTarget(
   statsPortal = false,
 ) {
   const observer = new MutationObserver((records) => {
+    retainStatusBarDirectionalMutationHistory(generation, records);
     const lease = generation.statsMutationLease;
     if (
       records.length > 0
@@ -1955,23 +2536,52 @@ function armStatsMutationFromNative(
   beginStatsMutationLease(generation, false, nativeEvents, null);
 }
 
-function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
-  if (!validateGeneration(generation)) return;
+function recordNativeEvent(
+  generation: StatusBarGeneration,
+  event: Event,
+  ownerWindowCapture: (Window & typeof globalThis) | null = null,
+) {
   if (generation.nativeEvents.has(event)) return;
+  const retainDirectionalObservation = Boolean(
+    ownerWindowCapture
+    && event.type === "keydown"
+    && "key" in event
+    && (event.key === "ArrowDown" || event.key === "ArrowUp"),
+  );
+  if (!retainDirectionalObservation && !validateGeneration(generation)) return;
+  const keyboardAuthority = generation.keyboardAuthority;
+  if (ownerWindowCapture) keyboardAuthority?.isCurrent();
   const path = event.composedPath();
   const publication: StatusBarNativeEventPublication = {
     event,
     type: event.type,
     target: event.target,
+    currentTarget: event.currentTarget,
+    ownerWindowCapture,
+    intrinsicCurrentTarget: ownerWindowCapture && keyboardAuthority
+      ? keyboardAuthority.eventCurrentTarget.read(event)
+      : undefined,
+    intrinsicView: ownerWindowCapture && keyboardAuthority
+      ? keyboardAuthority.eventView.read(event)
+      : undefined,
     path: Object.freeze([...path]),
     bubbles: event.bubbles,
     cancelable: event.cancelable,
     composed: event.composed,
     defaultPrevented: event.defaultPrevented,
+    cancelBubble: event.cancelBubble,
+    trusted: event.isTrusted,
     timeStamp: event.timeStamp,
     phase: event.eventPhase,
+    view: statusBarEventView(event),
     key: "key" in event && typeof event.key === "string" ? event.key : undefined,
     code: "code" in event && typeof event.code === "string" ? event.code : undefined,
+    repeat: "repeat" in event && typeof event.repeat === "boolean"
+      ? event.repeat
+      : undefined,
+    composing: "isComposing" in event && typeof event.isComposing === "boolean"
+      ? event.isComposing
+      : undefined,
     button: "button" in event && typeof event.button === "number" ? event.button : undefined,
     ctrlKey: "ctrlKey" in event && typeof event.ctrlKey === "boolean" ? event.ctrlKey : undefined,
     altKey: "altKey" in event && typeof event.altKey === "boolean" ? event.altKey : undefined,
@@ -1986,6 +2596,7 @@ function recordNativeEvent(generation: StatusBarGeneration, event: Event) {
     expired: false,
   };
   generation.nativeEvents.set(event, publication);
+  if (retainDirectionalObservation && !validateGeneration(generation)) return;
   let preserveForOutside = false;
   const ownerWindow = generation.ownerDocument.defaultView;
   const PointerEventConstructor = ownerWindow?.PointerEvent;
@@ -2076,6 +2687,7 @@ function activateGeneration(
   const root = controls.get("root")?.control;
   if (!(root instanceof HTMLElement) || !root.isConnected) return;
   const ownerDocument = root.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView;
   const statsTriggers = root.querySelectorAll<HTMLElement>('[data-testid="stats-button"]');
   const statsTrigger = statsTriggers.item(0);
   if (
@@ -2157,6 +2769,10 @@ function activateGeneration(
     relationSeals: [],
     observers: [],
     removeEventListeners: [],
+    keyboardAuthority: ownerWindow
+      ? captureStatusBarKeyboardAuthority(ownerWindow)
+      : null,
+    directionalMutationObserved: false,
     retired: false,
   };
   for (const slot of ["menu-content", "issues-content"] as const) {
@@ -2232,9 +2848,14 @@ function activateGeneration(
     ownerDocument.addEventListener(type, listener, true);
     generation.removeEventListeners.push(() => ownerDocument.removeEventListener(type, listener, true));
   });
-  const ownerWindow = ownerDocument.defaultView;
   if (ownerWindow) {
-    const listener = (event: KeyboardEvent) => recordNativeEvent(generation, event);
+    const listener = function (
+      this: Window,
+      event: KeyboardEvent,
+    ) {
+      if (this !== ownerWindow) return;
+      recordNativeEvent(generation, event, ownerWindow);
+    };
     ownerWindow.addEventListener("keydown", listener, true);
     generation.removeEventListeners.push(() => ownerWindow.removeEventListener("keydown", listener, true));
   }
@@ -2333,6 +2954,10 @@ function reactEventIsExact(publication: StatusBarReactEventPublication) {
     && event.cancelable === publication.cancelable
     && event.defaultPrevented === publication.defaultPrevented
     && event.timeStamp === publication.timeStamp
+    && event.preventDefault === publication.preventDefault
+    && event.stopPropagation === publication.stopPropagation
+    && event.isDefaultPrevented === publication.isDefaultPrevented
+    && event.isPropagationStopped === publication.isPropagationStopped
   );
 }
 
@@ -2371,6 +2996,10 @@ function rememberReactEvent(
       defaultPrevented: event.defaultPrevented,
       timeStamp: event.timeStamp,
       phase: event.eventPhase,
+      preventDefault: event.preventDefault,
+      stopPropagation: event.stopPropagation,
+      isDefaultPrevented: event.isDefaultPrevented,
+      isPropagationStopped: event.isPropagationStopped,
       claimed: false,
     };
     generation.reactEvents.set(event, publication);
@@ -2569,6 +3198,710 @@ function claimIntent(intent: StatusBarEventIntent, action: string) {
     generation.outsidePointerChain = null;
   }
   return true;
+}
+
+function statusBarMenuFocusDirection(
+  event: ReactKeyboardEvent<HTMLElement>,
+): StatusBarMenuFocusDirection | null {
+  if (event.key === "ArrowDown") return "first";
+  if (event.key === "ArrowUp") return "last";
+  return null;
+}
+
+function isStatusBarMenuTriggerPublication(
+  publication: StatusBarControlPublication,
+  ownerWindow: Window & typeof globalThis,
+): publication is StatusBarControlPublication<HTMLButtonElement> {
+  return (
+    publication.slot === "menu-trigger"
+    && publication.control instanceof ownerWindow.HTMLButtonElement
+  );
+}
+
+function isStatusBarIssuesTriggerPublication(
+  publication: StatusBarControlPublication,
+  ownerWindow: Window & typeof globalThis,
+): publication is StatusBarControlPublication<HTMLButtonElement> {
+  return (
+    publication.slot === "issues-trigger"
+    && publication.control instanceof ownerWindow.HTMLButtonElement
+  );
+}
+
+function statusBarDirectionalNativeIsExact(
+  generation: StatusBarGeneration,
+  publication: StatusBarControlPublication<HTMLButtonElement>,
+  native: StatusBarNativeEventPublication,
+  keyboardAuthority: StatusBarKeyboardAuthority,
+  direction: StatusBarMenuFocusDirection,
+) {
+  const event = native.event;
+  const trigger = publication.control;
+  const ownerRealm = keyboardAuthority.ownerWindow;
+  const ownerWindow = native.ownerWindowCapture;
+  const key = direction === "first" ? "ArrowDown" : "ArrowUp";
+  return (
+    ownerWindow !== null
+    && keyboardAuthority.isCurrent()
+    && keyboardAuthority.getPrototypeOf(event)
+      === keyboardAuthority.keyboardPrototype
+    && keyboardAuthority.isTrusted.matches(event)
+    && keyboardAuthority.isTrusted.read(event)
+    && !keyboardAuthority.getOwnPropertyDescriptor(event, "preventDefault")
+    && !keyboardAuthority.getOwnPropertyDescriptor(event, "stopPropagation")
+    && !keyboardAuthority.getOwnPropertyDescriptor(
+      event,
+      "stopImmediatePropagation",
+    )
+    && native.trusted
+    && native.type === "keydown"
+    && native.target === trigger
+    && native.currentTarget === ownerWindow
+    && native.intrinsicCurrentTarget === ownerWindow
+    && native.path.at(-1) === ownerWindow
+    && native.phase === ownerRealm.Event.CAPTURING_PHASE
+    && native.bubbles
+    && native.cancelable
+    && !native.defaultPrevented
+    && !native.cancelBubble
+    && (
+      native.intrinsicView === null
+      || Object.is(native.intrinsicView, ownerWindow)
+    )
+    && Object.is(native.view, native.intrinsicView)
+    && native.key === key
+    && native.ctrlKey === false
+    && native.metaKey === false
+    && native.altKey === false
+    && native.shiftKey === false
+    && native.repeat === false
+    && native.composing === false
+    && statusBarEventPathIsExact(
+      trigger,
+      native.path,
+      generation.ownerDocument,
+      ownerWindow,
+    )
+    && keyboardAuthority.eventType.read(event) === native.type
+    && keyboardAuthority.eventTarget.read(event) === native.target
+    && keyboardAuthority.eventBubbles.read(event) === native.bubbles
+    && keyboardAuthority.eventCancelable.read(event) === native.cancelable
+    && keyboardAuthority.eventComposed.read(event) === native.composed
+    && keyboardAuthority.eventDefaultPrevented.read(event)
+      === native.defaultPrevented
+    && keyboardAuthority.eventCancelBubble.read(event) === native.cancelBubble
+    && keyboardAuthority.eventTimeStamp.read(event) === native.timeStamp
+    && arraysAreIdentical(
+      keyboardAuthority.eventPath.call(event),
+      native.path,
+    )
+    && Object.is(
+      keyboardAuthority.eventView.read(event),
+      native.intrinsicView,
+    )
+    && keyboardAuthority.keyboardKey.read(event) === native.key
+    && keyboardAuthority.keyboardCode.read(event) === native.code
+    && keyboardAuthority.keyboardCtrl.read(event) === native.ctrlKey
+    && keyboardAuthority.keyboardMeta.read(event) === native.metaKey
+    && keyboardAuthority.keyboardAlt.read(event) === native.altKey
+    && keyboardAuthority.keyboardShift.read(event) === native.shiftKey
+    && keyboardAuthority.keyboardRepeat.read(event) === native.repeat
+    && keyboardAuthority.keyboardComposing.read(event) === native.composing
+    && keyboardAuthority.activeElement.read(generation.ownerDocument)
+      === trigger
+  );
+}
+
+function statusBarDirectionalReactIsExact(
+  event: ReactKeyboardEvent<HTMLElement>,
+  react: StatusBarReactEventPublication,
+  native: StatusBarNativeEventPublication,
+  publication: StatusBarControlPublication<HTMLButtonElement>,
+  keyboardAuthority: StatusBarKeyboardAuthority,
+  direction: StatusBarMenuFocusDirection,
+) {
+  const key = direction === "first" ? "ArrowDown" : "ArrowUp";
+  return (
+    react.event === event
+    && react.native === native
+    && event.nativeEvent === native.event
+    && event.currentTarget === publication.control
+    && event.target === publication.control
+    && event.type === "keydown"
+    && event.eventPhase === keyboardAuthority.ownerWindow.Event.CAPTURING_PHASE
+    && event.bubbles === native.bubbles
+    && event.cancelable === native.cancelable
+    && !event.defaultPrevented
+    && event.isTrusted
+    && Object.is(event.view, native.intrinsicView)
+    && event.key === key
+    && event.code === native.code
+    && event.ctrlKey === false
+    && event.metaKey === false
+    && event.altKey === false
+    && event.shiftKey === false
+    && event.repeat === false
+    && (!("isComposing" in event) || event.isComposing === false)
+    && event.preventDefault === react.preventDefault
+    && event.stopPropagation === react.stopPropagation
+    && event.isDefaultPrevented === react.isDefaultPrevented
+    && event.isPropagationStopped === react.isPropagationStopped
+    && !keyboardAuthority.apply(event.isDefaultPrevented, event, [])
+    && !keyboardAuthority.apply(event.isPropagationStopped, event, [])
+    && reactEventIsExact(react)
+  );
+}
+
+function createStatusBarMenuFocusIntent(
+  manager: StatusBarPublicationManager,
+  authority: StatusBarAuthority,
+  disclosure: StatusBarDisclosureIntent | null,
+  event: ReactKeyboardEvent<HTMLElement>,
+): StatusBarMenuFocusIntent | null {
+  const direction = statusBarMenuFocusDirection(event);
+  const intent = disclosure?.event;
+  const generation = intent?.generation;
+  const publication = intent?.publication;
+  const keyboardAuthority = generation?.keyboardAuthority;
+  const native = intent?.nativeEvents[0];
+  const react = intent?.reactEvents[0];
+  const ownerWindow = native?.ownerWindowCapture;
+  if (
+    !direction
+    || authority.menuOpen
+    || disclosure?.authority !== authority
+    || !intent
+    || !generation
+    || generation !== manager.active
+    || generation.authority !== authority
+    || generation.retired
+    || generation.directionalMutationObserved
+    || !keyboardAuthority
+    || !publication
+    || !isStatusBarMenuTriggerPublication(publication, keyboardAuthority.ownerWindow)
+    || generation.controls.get("menu-trigger") !== publication
+    || intent.nativeEvents.length !== 1
+    || intent.reactEvents.length !== 1
+    || !native
+    || !react
+    || !ownerWindow
+    || manager.directionalNativeEvents.has(native.event)
+    || manager.directionalReactEvents.has(react.event)
+    || !statusBarDirectionalNativeIsExact(
+      generation,
+      publication,
+      native,
+      keyboardAuthority,
+      direction,
+    )
+    || !statusBarDirectionalReactIsExact(
+      event,
+      react,
+      native,
+      publication,
+      keyboardAuthority,
+      direction,
+    )
+    || !validateGeneration(generation)
+    || generation.directionalMutationObserved
+  )
+    return null;
+  return {
+    authority,
+    generation,
+    publication,
+    interaction: intent,
+    keyboardAuthority,
+    direction,
+    native,
+    react,
+    trigger: publication.control,
+    root: generation.root,
+    ownerDocument: generation.ownerDocument,
+    ownerWindow,
+    claimed: false,
+  };
+}
+
+function createStatusBarIssuesFocusIntent(
+  manager: StatusBarPublicationManager,
+  authority: StatusBarAuthority,
+  disclosure: StatusBarDisclosureIntent | null,
+  event: ReactKeyboardEvent<HTMLElement>,
+): StatusBarIssuesFocusIntent | null {
+  const direction = statusBarMenuFocusDirection(event);
+  const destination = direction === "first"
+    ? authority.issueRows[0]
+    : authority.issueRows.at(-1);
+  const intent = disclosure?.event;
+  const generation = intent?.generation;
+  const publication = intent?.publication;
+  const keyboardAuthority = generation?.keyboardAuthority;
+  const native = intent?.nativeEvents[0];
+  const react = intent?.reactEvents[0];
+  const ownerWindow = native?.ownerWindowCapture;
+  if (
+    !direction
+    || authority.compact
+    || authority.issuesOpen
+    || !destination
+    || disclosure?.authority !== authority
+    || !intent
+    || !generation
+    || generation !== manager.active
+    || generation.authority !== authority
+    || generation.retired
+    || generation.directionalMutationObserved
+    || !keyboardAuthority
+    || !publication
+    || !isStatusBarIssuesTriggerPublication(
+      publication,
+      keyboardAuthority.ownerWindow,
+    )
+    || generation.controls.get("issues-trigger") !== publication
+    || intent.nativeEvents.length !== 1
+    || intent.reactEvents.length !== 1
+    || !native
+    || !react
+    || !ownerWindow
+    || manager.directionalNativeEvents.has(native.event)
+    || manager.directionalReactEvents.has(react.event)
+    || manager.directionalDestinations.has(destination)
+    || !issuePublicationIsExact(authority, destination)
+    || !statusBarDirectionalNativeIsExact(
+      generation,
+      publication,
+      native,
+      keyboardAuthority,
+      direction,
+    )
+    || !statusBarDirectionalReactIsExact(
+      event,
+      react,
+      native,
+      publication,
+      keyboardAuthority,
+      direction,
+    )
+    || !validateGeneration(generation)
+    || generation.directionalMutationObserved
+  )
+    return null;
+  return {
+    authority,
+    generation,
+    publication,
+    interaction: intent,
+    keyboardAuthority,
+    direction,
+    destination,
+    native,
+    react,
+    trigger: publication.control,
+    root: generation.root,
+    ownerDocument: generation.ownerDocument,
+    ownerWindow,
+    claimed: false,
+  };
+}
+
+function suppressRejectedStatusBarDirectionalKey(
+  manager: StatusBarPublicationManager,
+  event: ReactKeyboardEvent<HTMLElement>,
+) {
+  if (!statusBarMenuFocusDirection(event)) return;
+  const generation = manager.active;
+  const keyboardAuthority = generation?.keyboardAuthority;
+  const react = generation?.reactEvents.get(event);
+  if (
+    !generation
+    || !keyboardAuthority
+    || !react
+    || event.currentTarget
+      !== generation.controls.get("menu-trigger")?.control
+    || typeof event.stopPropagation !== "function"
+    || typeof event.isPropagationStopped !== "function"
+    || keyboardAuthority.apply(event.isPropagationStopped, event, [])
+    || react.event !== event
+    || event.stopPropagation !== react.stopPropagation
+    || event.isPropagationStopped !== react.isPropagationStopped
+    || !reactEventIsExact(react)
+  )
+    return;
+  keyboardAuthority.apply(
+    react.stopPropagation,
+    event,
+    [],
+  );
+}
+
+function captureStatusBarDirectionalPropagationProof(
+  manager: StatusBarPublicationManager,
+  event: ReactKeyboardEvent<HTMLElement>,
+): StatusBarDirectionalPropagationProof | null {
+  const key = event.key;
+  const generation = manager.active;
+  const keyboardAuthority = generation?.keyboardAuthority;
+  const native = generation?.nativeEvents.get(event.nativeEvent);
+  const currentTarget = event.currentTarget;
+  if (
+    !generation
+    || !keyboardAuthority
+    || !native
+    || (key !== "ArrowDown" && key !== "ArrowUp")
+    || currentTarget !== event.target
+    || native.event !== event.nativeEvent
+    || native.type !== "keydown"
+    || native.target !== currentTarget
+    || native.key !== key
+    || keyboardAuthority.eventType.read(event.nativeEvent) !== native.type
+    || keyboardAuthority.eventTarget.read(event.nativeEvent) !== native.target
+    || keyboardAuthority.keyboardKey.read(event.nativeEvent) !== native.key
+    || keyboardAuthority.eventPhase.read(event.nativeEvent)
+      !== keyboardAuthority.ownerWindow.Event.CAPTURING_PHASE
+    || event.eventPhase !== keyboardAuthority.ownerWindow.Event.CAPTURING_PHASE
+    || typeof event.stopPropagation !== "function"
+    || typeof event.isPropagationStopped !== "function"
+  )
+    return null;
+  const apply = keyboardAuthority.apply;
+  if (apply(event.isPropagationStopped, event, [])) return null;
+  return Object.freeze({
+    event,
+    nativeEvent: event.nativeEvent,
+    generation,
+    native,
+    currentTarget,
+    key,
+    stopPropagation: event.stopPropagation,
+    isPropagationStopped: event.isPropagationStopped,
+    apply,
+  });
+}
+
+function suppressRetiredStatusBarDirectionalKey(
+  manager: StatusBarPublicationManager,
+  event: ReactKeyboardEvent<HTMLElement>,
+  proof: StatusBarDirectionalPropagationProof | null,
+) {
+  const generation = proof?.generation;
+  const native = proof?.native;
+  const triggerPublication = generation?.controls.get("menu-trigger");
+  if (
+    !proof
+    || !generation
+    || !generation.retired
+    || manager.active !== generation
+    || proof.event !== event
+    || proof.nativeEvent !== event.nativeEvent
+    || proof.currentTarget !== event.currentTarget
+    || proof.key !== event.key
+    || proof.stopPropagation !== event.stopPropagation
+    || proof.isPropagationStopped !== event.isPropagationStopped
+    || manager.directionalNativeEvents.has(proof.nativeEvent)
+    || manager.directionalReactEvents.has(proof.event)
+    || generation.actions.size !== 0
+    || generation.authority.menuOpen
+    || triggerPublication?.control !== proof.currentTarget
+    || triggerPublication.claimed
+    || proof.currentTarget.getAttribute("aria-expanded") !== "false"
+    || generation.ownerDocument.activeElement !== proof.currentTarget
+    || proof.nativeEvent.type !== "keydown"
+    || proof.nativeEvent.target !== proof.currentTarget
+    || native?.event !== proof.nativeEvent
+    || generation.nativeEvents.get(proof.nativeEvent) !== native
+    || native.claimed
+    || native.type !== "keydown"
+    || native.target !== proof.currentTarget
+    || native.key !== proof.key
+    || event.defaultPrevented
+    || proof.nativeEvent.defaultPrevented
+    || proof.apply(event.isPropagationStopped, event, [])
+  )
+    return;
+  proof.apply(proof.stopPropagation, event, []);
+}
+
+function statusBarMenuFocusPublications(
+  generation: StatusBarGeneration,
+) {
+  const content = generation.controls.get("menu-content")?.control;
+  const ownerWindow = generation.ownerDocument.defaultView;
+  if (!ownerWindow || !(content instanceof ownerWindow.HTMLElement))
+    return null;
+  const slots = expectedStatusBarSlots(generation.authority).filter(
+    isStatusBarMenuItemSlot,
+  );
+  const publications: StatusBarControlPublication[] = [];
+  for (const slot of slots) {
+    const publication = generation.controls.get(slot);
+    if (
+      !publication
+      || publication.slot !== slot
+      || publication.authority !== generation.authority
+      || publication.root !== generation.root
+      || !publication.control.isConnected
+      || !content.contains(publication.control)
+      || !publication.control.getAttribute("role")?.startsWith("menuitem")
+    )
+      return null;
+    if (publication.enabled && controlIsEnabled(publication.control))
+      publications.push(publication);
+  }
+  return publications;
+}
+
+function statusBarIssuesFocusPublications(
+  generation: StatusBarGeneration,
+) {
+  const content = generation.controls.get("issues-content")?.control;
+  const ownerWindow = generation.ownerDocument.defaultView;
+  if (!ownerWindow || !(content instanceof ownerWindow.HTMLElement))
+    return null;
+  const publications: StatusBarControlPublication[] = [];
+  for (const row of generation.authority.issueRows) {
+    const slot = `issue:${row.index}`;
+    const publication = generation.controls.get(slot);
+    if (
+      !publication
+      || publication.slot !== slot
+      || publication.authority !== generation.authority
+      || publication.root !== generation.root
+      || !(publication.control instanceof ownerWindow.HTMLButtonElement)
+      || !publication.control.isConnected
+      || !content.contains(publication.control)
+      || !issuePublicationIsExact(generation.authority, row)
+      || !publication.enabled
+      || !controlIsEnabled(publication.control)
+    )
+      return null;
+    publications.push(publication);
+  }
+  const renderedRows = [...content.querySelectorAll<HTMLButtonElement>("button")];
+  return arraysAreIdentical(
+    renderedRows,
+    publications.map(({ control }) => control),
+  )
+    ? publications
+    : null;
+}
+
+function exactStatusBarMenuAutoFocusEvent(
+  event: Event,
+  content: HTMLElement,
+  keyboardAuthority: StatusBarKeyboardAuthority,
+  ownerWindow: Window,
+) {
+  const ownerRealm = keyboardAuthority.ownerWindow;
+  return (
+    keyboardAuthority.isCurrent()
+    && keyboardAuthority.getPrototypeOf(event) === ownerRealm.CustomEvent.prototype
+    && event instanceof ownerRealm.CustomEvent
+    && keyboardAuthority.eventType.read(event)
+      === "focusScope.autoFocusOnMount"
+    && keyboardAuthority.eventTarget.read(event) === content
+    && keyboardAuthority.eventCurrentTarget.read(event) === content
+    && keyboardAuthority.eventPhase.read(event) === ownerRealm.Event.AT_TARGET
+    && !keyboardAuthority.eventBubbles.read(event)
+    && keyboardAuthority.eventCancelable.read(event)
+    && !keyboardAuthority.eventComposed.read(event)
+    && !keyboardAuthority.eventDefaultPrevented.read(event)
+    && !keyboardAuthority.eventCancelBubble.read(event)
+    && event.detail === null
+    && statusBarEventPathIsExact(
+      content,
+      keyboardAuthority.eventPath.call(event),
+      content.ownerDocument,
+      ownerWindow,
+    )
+  );
+}
+
+function completeStatusBarMenuFocus(
+  manager: StatusBarPublicationManager,
+  authority: StatusBarAuthority,
+  focusIntentRef: MutableRefObject<StatusBarMenuFocusIntent | null>,
+  contentPublicationRef: MutableRefObject<StatusBarControlPublication<HTMLDivElement> | null>,
+  event: Event,
+) {
+  const intent = focusIntentRef.current;
+  const generation = manager.active;
+  const contentPublication = contentPublicationRef.current;
+  const portalBoundary = generation?.portalBoundaries.get("menu-content");
+  if (
+    !intent
+    || intent.claimed
+    || !generation
+    || generation.retired
+    || generation.authority !== authority
+    || !statusBarMenuAuthoritiesAreSuccessive(intent.authority, authority)
+    || intent.generation === generation
+    || !intent.generation.retired
+    || intent.generation.manager !== manager
+    || intent.generation.authority !== intent.authority
+    || intent.generation.root !== intent.root
+    || intent.generation.controls.get("menu-trigger") !== intent.publication
+    || !intent.publication.claimed
+    || !intent.native.claimed
+    || !intent.react.claimed
+    || intent.trigger !== intent.publication.control
+    || intent.trigger.ownerDocument !== intent.ownerDocument
+    || intent.ownerDocument.defaultView !== intent.keyboardAuthority.ownerWindow
+    || intent.native.ownerWindowCapture !== intent.ownerWindow
+    || generation.root !== intent.root
+    || generation.ownerDocument !== intent.ownerDocument
+    || generation.keyboardAuthority === null
+    || generation.keyboardAuthority.ownerWindow
+      !== intent.keyboardAuthority.ownerWindow
+    || !intent.keyboardAuthority.isCurrent()
+    || generation.directionalMutationObserved
+    || generation.actions.has("menu-direction-focus")
+    || manager.directionalFocusEvents.has(event)
+    || !contentPublication
+    || generation.controls.get("menu-content") !== contentPublication
+    || contentPublication.authority !== authority
+    || event.currentTarget !== contentPublication.control
+    || !portalBoundary
+    || !statusBarPortalBoundaryIsExact(portalBoundary, true)
+    || contentPublication.control.getAttribute("data-align") !== "end"
+    || !contentPublication.control.getAttribute("data-side")
+    || intent.trigger.getAttribute("aria-expanded") !== "true"
+    || intent.trigger.getAttribute("aria-controls")
+      !== contentPublication.control.id
+    || keyboardAuthorityActiveElement(intent) !== intent.trigger
+    || !exactStatusBarMenuAutoFocusEvent(
+      event,
+      contentPublication.control,
+      intent.keyboardAuthority,
+      intent.ownerWindow,
+    )
+    || !validateGeneration(generation)
+    || generation.directionalMutationObserved
+  ) {
+    if (focusIntentRef.current === intent) focusIntentRef.current = null;
+    return;
+  }
+  const publications = statusBarMenuFocusPublications(generation);
+  const destination = intent.direction === "first"
+    ? publications?.[0]
+    : publications?.at(-1);
+  if (!destination) {
+    focusIntentRef.current = null;
+    return;
+  }
+  intent.claimed = true;
+  generation.actions.add("menu-direction-focus");
+  manager.directionalFocusEvents.add(event);
+  focusIntentRef.current = null;
+  intent.keyboardAuthority.eventPreventDefault.call(event);
+  intent.keyboardAuthority.focus.call(
+    destination.control,
+    { preventScroll: true },
+  );
+}
+
+function completeStatusBarIssuesFocus(
+  manager: StatusBarPublicationManager,
+  authority: StatusBarAuthority,
+  focusIntentRef: MutableRefObject<StatusBarIssuesFocusIntent | null>,
+  contentPublicationRef: MutableRefObject<StatusBarControlPublication<HTMLDivElement> | null>,
+  event: Event,
+) {
+  const intent = focusIntentRef.current;
+  const generation = manager.active;
+  const contentPublication = contentPublicationRef.current;
+  const portalBoundary = generation?.portalBoundaries.get("issues-content");
+  const currentDestination = intent
+    ? authority.issueRows[intent.destination.index]
+    : undefined;
+  if (
+    !intent
+    || intent.claimed
+    || !generation
+    || generation.retired
+    || generation.authority !== authority
+    || !statusBarIssuesAuthoritiesAreSuccessive(intent.authority, authority)
+    || intent.generation === generation
+    || !intent.generation.retired
+    || intent.generation.manager !== manager
+    || intent.generation.authority !== intent.authority
+    || intent.generation.root !== intent.root
+    || intent.generation.controls.get("issues-trigger") !== intent.publication
+    || !intent.publication.claimed
+    || !intent.native.claimed
+    || !intent.react.claimed
+    || intent.trigger !== intent.publication.control
+    || intent.trigger.ownerDocument !== intent.ownerDocument
+    || intent.ownerDocument.defaultView !== intent.keyboardAuthority.ownerWindow
+    || intent.native.ownerWindowCapture !== intent.ownerWindow
+    || generation.root !== intent.root
+    || generation.ownerDocument !== intent.ownerDocument
+    || generation.keyboardAuthority === null
+    || generation.keyboardAuthority.ownerWindow
+      !== intent.keyboardAuthority.ownerWindow
+    || !intent.keyboardAuthority.isCurrent()
+    || generation.directionalMutationObserved
+    || generation.actions.has("issues-direction-focus")
+    || manager.directionalFocusEvents.has(event)
+    || !manager.directionalDestinations.has(intent.destination)
+    || !contentPublication
+    || generation.controls.get("issues-content") !== contentPublication
+    || contentPublication.authority !== authority
+    || event.currentTarget !== contentPublication.control
+    || !portalBoundary
+    || !statusBarPortalBoundaryIsExact(portalBoundary, true)
+    || contentPublication.control.getAttribute("data-align") !== "end"
+    || !contentPublication.control.getAttribute("data-side")
+    || intent.trigger.getAttribute("aria-expanded") !== "true"
+    || intent.trigger.getAttribute("aria-controls")
+      !== contentPublication.control.id
+    || keyboardAuthorityActiveElement(intent) !== intent.trigger
+    || !currentDestination
+    || currentDestination.issue !== intent.destination.issue
+    || currentDestination.index !== intent.destination.index
+    || currentDestination.line !== intent.destination.line
+    || currentDestination.column !== intent.destination.column
+    || currentDestination.offset !== intent.destination.offset
+    || currentDestination.message !== intent.destination.message
+    || currentDestination.rule !== intent.destination.rule
+    || currentDestination.severity !== intent.destination.severity
+    || !issuePublicationIsExact(authority, currentDestination)
+    || !exactStatusBarMenuAutoFocusEvent(
+      event,
+      contentPublication.control,
+      intent.keyboardAuthority,
+      intent.ownerWindow,
+    )
+    || !validateGeneration(generation)
+    || generation.directionalMutationObserved
+  ) {
+    if (focusIntentRef.current === intent) focusIntentRef.current = null;
+    return;
+  }
+  const publications = statusBarIssuesFocusPublications(generation);
+  const destination = intent.direction === "first"
+    ? publications?.[0]
+    : publications?.at(-1);
+  if (
+    !destination
+    || destination.slot !== `issue:${currentDestination.index}`
+  ) {
+    focusIntentRef.current = null;
+    return;
+  }
+  intent.claimed = true;
+  generation.actions.add("issues-direction-focus");
+  manager.directionalFocusEvents.add(event);
+  focusIntentRef.current = null;
+  intent.keyboardAuthority.eventPreventDefault.call(event);
+  intent.keyboardAuthority.focus.call(
+    destination.control,
+    { preventScroll: true },
+  );
+}
+
+function keyboardAuthorityActiveElement(intent: StatusBarMenuFocusIntent) {
+  return intent.keyboardAuthority.activeElement.read(intent.ownerDocument);
 }
 
 function useStatusBarIntent<T>(authority: StatusBarAuthority) {
@@ -2968,6 +4301,10 @@ function completeReactIntent(
     defaultPrevented: event.defaultPrevented,
     timeStamp: event.timeStamp,
     phase: event.eventPhase,
+    preventDefault: event.preventDefault,
+    stopPropagation: event.stopPropagation,
+    isDefaultPrevented: event.isDefaultPrevented,
+    isPropagationStopped: event.isPropagationStopped,
     claimed: false,
   };
   generation.reactEvents.set(event, reactEvent);
@@ -3077,12 +4414,14 @@ function StatusBarMenuContent({
   rootRef,
   manager,
   intentRef,
+  focusIntentRef,
   children,
 }: {
   authority: StatusBarAuthority;
   rootRef: RefObject<HTMLElement | null>;
   manager: StatusBarPublicationManager;
   intentRef: MutableRefObject<StatusBarDisclosureIntent | null>;
+  focusIntentRef: MutableRefObject<StatusBarMenuFocusIntent | null>;
   children: ReactNode;
 }) {
   const [setContent, createReactIntent, , publicationRef] = useStatusBarControl<HTMLDivElement>(
@@ -3106,6 +4445,16 @@ function StatusBarMenuContent({
     if (intent && claimIntent(intent, "menu-disclosure"))
       intentRef.current = { authority, event: intent };
   }, [authority, intentRef, manager, publicationRef]);
+  const openAutoFocus = useCallback((event: Event) => {
+    completeStatusBarMenuFocus(
+      manager,
+      authority,
+      focusIntentRef,
+      publicationRef,
+      event,
+    );
+  }, [authority, focusIntentRef, manager, publicationRef]);
+  const openAutoFocusProps = { onOpenAutoFocus: openAutoFocus };
 
   return (
     <MenuContent
@@ -3119,6 +4468,7 @@ function StatusBarMenuContent({
       onPointerDownOutside={authorizeOutside}
       onFocusOutside={authorizeOutside}
       onEscapeKeyDown={authorizeEscape}
+      {...openAutoFocusProps}
     >
       {children}
     </MenuContent>
@@ -3130,12 +4480,14 @@ function StatusBarIssuesContent({
   rootRef,
   manager,
   intentRef,
+  focusIntentRef,
   children,
 }: {
   authority: StatusBarAuthority;
   rootRef: RefObject<HTMLElement | null>;
   manager: StatusBarPublicationManager;
   intentRef: MutableRefObject<StatusBarDisclosureIntent | null>;
+  focusIntentRef: MutableRefObject<StatusBarIssuesFocusIntent | null>;
   children: ReactNode;
 }) {
   const [setContent, createReactIntent, , publicationRef] = useStatusBarControl<HTMLDivElement>(
@@ -3159,6 +4511,16 @@ function StatusBarIssuesContent({
     if (intent && claimIntent(intent, "issues-disclosure"))
       intentRef.current = { authority, event: intent };
   }, [authority, intentRef, manager, publicationRef]);
+  const openAutoFocus = useCallback((event: Event) => {
+    completeStatusBarIssuesFocus(
+      manager,
+      authority,
+      focusIntentRef,
+      publicationRef,
+      event,
+    );
+  }, [authority, focusIntentRef, manager, publicationRef]);
+  const openAutoFocusProps = { onOpenAutoFocus: openAutoFocus };
 
   return (
     <PopoverContent
@@ -3172,6 +4534,7 @@ function StatusBarIssuesContent({
       onPointerDownOutside={authorizeOutside}
       onFocusOutside={authorizeOutside}
       onEscapeKeyDown={authorizeEscape}
+      {...openAutoFocusProps}
     >
       {children}
     </PopoverContent>
@@ -3302,7 +4665,9 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   ]);
   const rootRef = useRef<HTMLElement>(null);
   const menuIntentRef = useRef<StatusBarDisclosureIntent | null>(null);
+  const menuFocusIntentRef = useRef<StatusBarMenuFocusIntent | null>(null);
   const issuesIntentRef = useRef<StatusBarDisclosureIntent | null>(null);
+  const issuesFocusIntentRef = useRef<StatusBarIssuesFocusIntent | null>(null);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -3310,7 +4675,27 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     const publication = registerControl(manager, authority, "root", root, root);
     if (!publication) return;
     if (menuIntentRef.current?.authority !== authority) menuIntentRef.current = null;
+    const menuFocusIntent = menuFocusIntentRef.current;
+    if (
+      menuFocusIntent
+      && menuFocusIntent.authority !== authority
+      && !statusBarMenuAuthoritiesAreSuccessive(
+        menuFocusIntent.authority,
+        authority,
+      )
+    )
+      menuFocusIntentRef.current = null;
     if (issuesIntentRef.current?.authority !== authority) issuesIntentRef.current = null;
+    const issuesFocusIntent = issuesFocusIntentRef.current;
+    if (
+      issuesFocusIntent
+      && issuesFocusIntent.authority !== authority
+      && !statusBarIssuesAuthoritiesAreSuccessive(
+        issuesFocusIntent.authority,
+        authority,
+      )
+    )
+      issuesFocusIntentRef.current = null;
     return () => {
       if (menuIntentRef.current?.authority === authority) menuIntentRef.current = null;
       if (issuesIntentRef.current?.authority === authority) issuesIntentRef.current = null;
@@ -3347,12 +4732,14 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   const desktopShortcutsIntentRef = useRef<StatusBarEventIntent | null>(null);
 
   const authorizeMenuChange = useCallback((event: StatusBarReactEvent) => {
+    menuFocusIntentRef.current = null;
     rememberReactEvent(manager, event);
     const intent = createMenuIntent(event);
-    if (intent) menuIntentRef.current = { authority, event: intent };
+    menuIntentRef.current = intent ? { authority, event: intent } : null;
   }, [authority, createMenuIntent, manager]);
 
   const authorizeIssuesChange = useCallback((event: StatusBarReactEvent) => {
+    issuesFocusIntentRef.current = null;
     rememberReactEvent(manager, event);
     const intent = createIssuesIntent(event);
     if (intent) issuesIntentRef.current = { authority, event: intent };
@@ -3387,6 +4774,69 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     setMenuOpen(open);
   }, [authority, manager]);
 
+  const authorizeDirectionalMenuOpen = useCallback((
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => {
+    const propagationProof = captureStatusBarDirectionalPropagationProof(
+      manager,
+      event,
+    );
+    authorizeMenuChange(event);
+    if (!statusBarMenuFocusDirection(event)) return;
+    const disclosure = menuIntentRef.current;
+    const focusIntent = createStatusBarMenuFocusIntent(
+      manager,
+      authority,
+      disclosure,
+      event,
+    );
+    if (
+      !focusIntent
+      || !claimIntent(
+        focusIntent.interaction,
+        `menu-direction:${focusIntent?.direction ?? "rejected"}`,
+      )
+    ) {
+      menuIntentRef.current = null;
+      suppressRejectedStatusBarDirectionalKey(manager, event);
+      suppressRetiredStatusBarDirectionalKey(
+        manager,
+        event,
+        propagationProof,
+      );
+      return;
+    }
+    const intent = focusIntent.interaction;
+    if (
+      !claimIntent(intent, "menu-disclosure")
+      || focusIntent.generation.directionalMutationObserved
+      || !focusIntent.keyboardAuthority.isCurrent()
+    ) {
+      menuIntentRef.current = null;
+      suppressRejectedStatusBarDirectionalKey(manager, event);
+      suppressRetiredStatusBarDirectionalKey(
+        manager,
+        event,
+        propagationProof,
+      );
+      return;
+    }
+    manager.directionalNativeEvents.add(focusIntent.native.event);
+    manager.directionalReactEvents.add(focusIntent.react.event);
+    focusIntent.keyboardAuthority.apply(
+      focusIntent.react.preventDefault,
+      event,
+      [],
+    );
+    if (!event.defaultPrevented || !event.isDefaultPrevented()) {
+      menuIntentRef.current = null;
+      return;
+    }
+    menuIntentRef.current = { authority, event: intent };
+    menuFocusIntentRef.current = focusIntent;
+    changeMenuOpen(true);
+  }, [authority, authorizeMenuChange, changeMenuOpen, manager]);
+
   const changeIssuesOpen = useCallback((open: boolean) => {
     const intent = issuesIntentRef.current;
     if (
@@ -3415,6 +4865,54 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
     issuesIntentRef.current = null;
     setIssuesOpen(open);
   }, [authority, manager]);
+
+  const authorizeDirectionalIssuesOpen = useCallback((
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => {
+    if (!statusBarMenuFocusDirection(event)) return;
+    authorizeIssuesChange(event);
+    const disclosure = issuesIntentRef.current;
+    const focusIntent = createStatusBarIssuesFocusIntent(
+      manager,
+      authority,
+      disclosure,
+      event,
+    );
+    if (
+      !focusIntent
+      || !claimIntent(
+        focusIntent.interaction,
+        `issues-direction:${focusIntent?.direction ?? "rejected"}`,
+      )
+    ) {
+      issuesIntentRef.current = null;
+      return;
+    }
+    const intent = focusIntent.interaction;
+    if (
+      !claimIntent(intent, "issues-disclosure")
+      || focusIntent.generation.directionalMutationObserved
+      || !focusIntent.keyboardAuthority.isCurrent()
+    ) {
+      issuesIntentRef.current = null;
+      return;
+    }
+    manager.directionalDestinations.add(focusIntent.destination);
+    manager.directionalNativeEvents.add(focusIntent.native.event);
+    manager.directionalReactEvents.add(focusIntent.react.event);
+    focusIntent.keyboardAuthority.apply(
+      focusIntent.react.preventDefault,
+      event,
+      [],
+    );
+    if (!event.defaultPrevented || !event.isDefaultPrevented()) {
+      issuesIntentRef.current = null;
+      return;
+    }
+    issuesIntentRef.current = { authority, event: intent };
+    issuesFocusIntentRef.current = focusIntent;
+    changeIssuesOpen(true);
+  }, [authority, authorizeIssuesChange, changeIssuesOpen, manager]);
 
   const document = authority.document;
   const storageLabel =
@@ -3450,7 +4948,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
             className="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-surface-3 hover:text-ink max-md:order-last max-md:text-ink-2 max-md:transition-colors md:h-7 md:w-auto md:gap-1 md:px-2"
             aria-label={compact ? "View options" : undefined}
             onPointerDownCapture={authorizeMenuChange}
-            onKeyDownCapture={authorizeMenuChange}
+            onKeyDownCapture={authorizeDirectionalMenuOpen}
             data-testid="layout-menu"
           >
             {/* The phone name from the first byte: `compact` (and so `aria-label`) is false until hydration, and the
@@ -3471,6 +4969,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
           rootRef={rootRef}
           manager={manager}
           intentRef={menuIntentRef}
+          focusIntentRef={menuFocusIntentRef}
         >
           <StatusBarMenuControls
             authority={authority}
@@ -3491,6 +4990,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
             type="button"
             className={cn("inline-flex h-7 items-center gap-1.5 rounded-md px-2 hover:bg-surface-3 max-md:hidden", issues.length ? (errors ? "text-danger" : "text-warning") : "text-ink-3 hover:text-ink")}
             onClickCapture={authorizeIssuesChange}
+            onKeyDownCapture={authorizeDirectionalIssuesOpen}
             data-testid="issues-button"
           >
             {issues.length ? <AlertTriangle size={14} /> : <Check size={14} />}
@@ -3502,6 +5002,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
           rootRef={rootRef}
           manager={manager}
           intentRef={issuesIntentRef}
+          focusIntentRef={issuesFocusIntentRef}
         >
           <div className="border-b border-line px-3 py-2 text-xs font-semibold uppercase tracking-wider text-ink-3">Markdown issues</div>
           {issues.length === 0 ? (

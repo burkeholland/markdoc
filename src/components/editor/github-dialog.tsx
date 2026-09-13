@@ -13,9 +13,11 @@ import {
   useRef,
   useState,
   type ChangeEvent as ReactChangeEvent,
+  type Dispatch,
   type FormEvent as ReactFormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type SetStateAction,
 } from "react";
 import { signIn } from "next-auth/react";
 import { Check, ExternalLink, FileText, GitBranch, Loader2, Lock, Search, Unlink } from "lucide-react";
@@ -28,9 +30,1326 @@ import { GistAutoUpdateControl } from "./gist-auto-update";
 
 type Tab = "gist" | "repo";
 
+const GITHUB_SIGN_IN_ROOT_CLASS =
+  "flex flex-col items-center gap-3 rounded-xl border border-dashed border-line-2 p-6 text-center text-sm text-ink-3";
+const GITHUB_SIGN_IN_BUTTON_CLASS = "btn btn-primary gap-2";
+const GITHUB_SIGN_IN_COPY =
+  "Gists and repositories need a GitHub account. You are signed in without one — sign in with GitHub to use them as storage.";
+const GITHUB_SIGN_IN_LABEL = "Sign in with GitHub";
+const GITHUB_ICON_PATH =
+  "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z";
+
+const seenGitHubSignInNativeEvents = new WeakSet<object>();
+const taintedGitHubSignInNativeEvents = new WeakSet<object>();
+
 interface GitHubSignInOperation {
-  readonly owner: symbol;
+  readonly identity: symbol;
+  readonly mount: symbol;
+}
+
+interface GitHubSignInRender {
+  readonly identity: object;
+  readonly mount: symbol;
+  readonly revision: number;
+  readonly githubConfigured: boolean;
+  readonly redirectTo: string | undefined;
+  readonly busyOperation: GitHubSignInOperation | null;
+  readonly callback: typeof signIn;
+  readonly action: object;
+}
+
+interface GitHubSignInDomSnapshot {
+  readonly node: Node;
+  readonly nodeValue: string | null;
+  readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly children: readonly GitHubSignInDomSnapshot[];
+}
+
+interface GitHubSignInNodePlacement {
+  readonly node: Node;
+  readonly parent: Node;
+  readonly previousSibling: Node | null;
+  readonly nextSibling: Node | null;
+}
+
+interface GitHubSignInPlacement {
+  readonly document: Document;
+  readonly chain: readonly GitHubSignInNodePlacement[];
+}
+
+interface GitHubSignInDomGuard {
+  readonly isClean: () => boolean;
+  readonly release: () => void;
+}
+
+interface GitHubSignInElementOwnerView {
+  readonly element: () => HTMLElement | null;
+}
+
+interface GitHubSignInRefReplay {
+  readonly owner: GitHubSignInElementOwnerView;
+  readonly element: HTMLElement;
+  detached: boolean;
+  reattached: boolean;
+}
+
+interface GitHubSignInPublication {
+  readonly render: GitHubSignInRender;
+  readonly root: HTMLDivElement;
+  readonly button: HTMLButtonElement;
+  readonly ownerDocument: Document;
   readonly redirectTo: string;
+  readonly callback: typeof signIn;
+  readonly dom: GitHubSignInDomSnapshot;
+  readonly placement: GitHubSignInPlacement;
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+  readonly isExact: () => boolean;
+}
+
+interface GitHubSignInReplay {
+  readonly source: GitHubSignInPublication;
+  readonly dom: GitHubSignInDomSnapshot;
+  readonly placement: GitHubSignInPlacement;
+  readonly historyIsClean: () => boolean;
+  readonly release: () => void;
+  readonly expectSuccessor: (identity: object) => void;
+  readonly successorTransitionIsExact: (identity: object) => boolean;
+}
+
+interface GitHubSignInClickAdmission {
+  readonly publication: GitHubSignInPublication;
+  readonly nativeEvent: MouseEvent;
+  readonly captureEvent: ReactMouseEvent<HTMLDivElement>;
+  readonly target: Node;
+  readonly root: HTMLDivElement;
+  readonly button: HTMLButtonElement;
+  readonly deliverBubble: (event: ReactMouseEvent<HTMLButtonElement>) => boolean;
+  readonly bubbleEvent: () => ReactMouseEvent<HTMLButtonElement> | null;
+  readonly rejectAdditional: (event: object) => void;
+  readonly isExact: () => boolean;
+}
+
+interface GitHubSignInCells {
+  readonly active: { current: GitHubSignInPublication | null };
+  readonly successorOf: { current: GitHubSignInPublication | null };
+  readonly replay: { current: GitHubSignInReplay | null };
+  readonly operation: { current: GitHubSignInOperation | null };
+  readonly disposed: { current: boolean };
+  readonly claimedPublications: WeakSet<GitHubSignInPublication>;
+  readonly claimedActions: WeakSet<object>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+  readonly clickAdmissions: WeakMap<Event, GitHubSignInClickAdmission>;
+}
+
+interface GitHubSignInPublicationRuntime {
+  readonly publication: GitHubSignInPublication;
+  readonly publish: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: GitHubSignInElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isExactElementReplay: () => boolean;
+  readonly isExactLayoutReplay: () => boolean;
+  readonly replay: () => GitHubSignInReplay | null;
+  readonly beginReplayHandoff: () => void;
+  readonly claimActivation: () => boolean;
+}
+
+interface GitHubSignInPresentation {
+  readonly captureRoot: (element: HTMLDivElement | null) => void;
+  readonly captureButton: (element: HTMLButtonElement | null) => void;
+  readonly prepareReplay: () => void;
+  readonly establish: () => void | (() => void);
+  readonly onRootClickCapture: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  readonly onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+}
+
+class GitHubSignInElementOwner<T extends HTMLElement>
+  implements GitHubSignInElementOwnerView {
+  #current: T | null = null;
+  #last: T | null = null;
+
+  constructor(
+    private readonly onChange: (
+      owner: GitHubSignInElementOwnerView,
+      element: HTMLElement | null,
+      previous: HTMLElement | null,
+      last: HTMLElement | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.#current;
+
+  readonly capture = (element: T | null) => {
+    if (element === this.#current) return;
+    const previous = this.#current;
+    const last = this.#last;
+    this.#current = element;
+    if (element) this.#last = element;
+    this.onChange(this, element, previous, last);
+  };
+}
+
+function snapshotGitHubSignInAttributes(
+  node: Node,
+): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotGitHubSignInDom(node: Node): GitHubSignInDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: snapshotGitHubSignInAttributes(node),
+    children: Object.freeze(
+      [...node.childNodes].map(snapshotGitHubSignInDom),
+    ),
+  });
+}
+
+function githubSignInDomMatches(snapshot: GitHubSignInDomSnapshot): boolean {
+  const { node } = snapshot;
+  if (node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = snapshotGitHubSignInAttributes(node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || expected[0] !== name || expected[1] !== value;
+    })
+  ) {
+    return false;
+  }
+  return (
+    node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) =>
+        node.childNodes.item(index) === child.node &&
+        githubSignInDomMatches(child),
+    )
+  );
+}
+
+function githubSignInSnapshotContains(
+  snapshot: GitHubSignInDomSnapshot,
+  node: Node,
+): boolean {
+  return (
+    snapshot.node === node ||
+    snapshot.children.some((child) =>
+      githubSignInSnapshotContains(child, node),
+    )
+  );
+}
+
+function captureGitHubSignInPlacement(
+  root: HTMLDivElement,
+): GitHubSignInPlacement | null {
+  if (!root.isConnected) return null;
+  const ownerDocument = root.ownerDocument;
+  const chain: GitHubSignInNodePlacement[] = [];
+  let node: Node = root;
+  while (node !== ownerDocument) {
+    const parent = node.parentNode;
+    if (!parent) return null;
+    chain.push(
+      Object.freeze({
+        node,
+        parent,
+        previousSibling: node.previousSibling,
+        nextSibling: node.nextSibling,
+      }),
+    );
+    node = parent;
+  }
+  return chain.length > 0
+    ? Object.freeze({
+        document: ownerDocument,
+        chain: Object.freeze(chain),
+      })
+    : null;
+}
+
+function githubSignInPlacementMatches(
+  root: HTMLDivElement,
+  placement: GitHubSignInPlacement,
+): boolean {
+  return (
+    root.isConnected &&
+    root.ownerDocument === placement.document &&
+    placement.chain[0]?.node === root &&
+    placement.chain.every(
+      (entry) =>
+        entry.node.parentNode === entry.parent &&
+        entry.node.previousSibling === entry.previousSibling &&
+        entry.node.nextSibling === entry.nextSibling,
+    )
+  );
+}
+
+function githubSignInPlacementChanged(
+  record: MutationRecord,
+  entry: GitHubSignInNodePlacement,
+): boolean {
+  if (record.type !== "childList" || record.target !== entry.parent) {
+    return false;
+  }
+  if (
+    record.previousSibling === entry.node ||
+    record.nextSibling === entry.node
+  ) {
+    return true;
+  }
+  return [...record.addedNodes, ...record.removedNodes].some(
+    (node) => node === entry.node || node.contains(entry.node),
+  );
+}
+
+function createGitHubSignInDomGuard(
+  root: HTMLDivElement,
+  placement: GitHubSignInPlacement,
+  onMutation: () => void,
+): GitHubSignInDomGuard | null {
+  const Observer = placement.document.defaultView?.MutationObserver;
+  if (typeof Observer !== "function") return null;
+
+  let changed = false;
+  let released = false;
+  let observer: MutationObserver;
+  let observe: MutationObserver["observe"];
+  let takeRecords: MutationObserver["takeRecords"];
+  let disconnect: MutationObserver["disconnect"];
+  const placementNodes = new Set(placement.chain.map(({ node }) => node));
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed || released) return;
+    changed = records.some(
+      (record) =>
+        record.target === root ||
+        root.contains(record.target) ||
+        (record.type === "attributes" && placementNodes.has(record.target)) ||
+        placement.chain.some((entry) =>
+          githubSignInPlacementChanged(record, entry),
+        ),
+    );
+    if (changed) onMutation();
+  };
+
+  try {
+    observer = new Observer(recordChanges);
+    observe = observer.observe;
+    takeRecords = observer.takeRecords;
+    disconnect = observer.disconnect;
+    if (
+      typeof observe !== "function" ||
+      typeof takeRecords !== "function" ||
+      typeof disconnect !== "function"
+    ) {
+      return null;
+    }
+    Reflect.apply(observe, observer, [
+      root,
+      {
+        attributeOldValue: true,
+        attributes: true,
+        characterData: true,
+        childList: true,
+        subtree: true,
+      },
+    ]);
+    const observedParents = new Set<Node>(
+      placement.chain.map(({ parent }) => parent),
+    );
+    for (const parent of observedParents) {
+      const observeAttributes =
+        placementNodes.has(parent) &&
+        parent.nodeType ===
+          placement.document.defaultView?.Node.ELEMENT_NODE;
+      Reflect.apply(observe, observer, [
+        parent,
+        observeAttributes
+          ? {
+              attributeOldValue: true,
+              attributes: true,
+              childList: true,
+            }
+          : { childList: true },
+      ]);
+    }
+    for (const entry of placement.chain) {
+      if (
+        entry.node !== root &&
+        !observedParents.has(entry.node) &&
+        entry.node.nodeType === placement.document.defaultView?.Node.ELEMENT_NODE
+      ) {
+        Reflect.apply(observe, observer, [
+          entry.node,
+          { attributeOldValue: true, attributes: true },
+        ]);
+      }
+    }
+  } catch {
+    try {
+      if (typeof disconnect! === "function") {
+        Reflect.apply(disconnect!, observer!, []);
+      }
+    } catch {
+      // A poisoned observer is never admitted as publication authority.
+    }
+    return null;
+  }
+
+  const readRecords = () => {
+    if (released || changed) return !changed;
+    try {
+      recordChanges(Reflect.apply(takeRecords, observer, []));
+    } catch {
+      changed = true;
+      onMutation();
+    }
+    return !changed;
+  };
+  return Object.freeze({
+    isClean: readRecords,
+    release: () => {
+      if (released) return;
+      readRecords();
+      released = true;
+      try {
+        Reflect.apply(disconnect, observer, []);
+      } catch {
+        // The captured control is already retired even if a poisoned primitive cannot disconnect.
+      }
+    },
+  });
+}
+
+function githubSignInIconIsExact(
+  icon: Element,
+  parent: HTMLElement,
+  size: number,
+  className: string | null,
+): boolean {
+  const path = icon.firstElementChild;
+  return (
+    icon.localName === "svg" &&
+    icon.parentElement === parent &&
+    icon.getAttribute("viewBox") === "0 0 16 16" &&
+    icon.getAttribute("width") === String(size) &&
+    icon.getAttribute("height") === String(size) &&
+    icon.getAttribute("fill") === "currentColor" &&
+    icon.getAttribute("class") === className &&
+    icon.getAttribute("aria-hidden") === "true" &&
+    icon.children.length === 1 &&
+    icon.childNodes.length === 1 &&
+    path?.localName === "path" &&
+    path.getAttribute("d") === GITHUB_ICON_PATH
+  );
+}
+
+function githubSignInEffectivelyEnabled(button: HTMLButtonElement): boolean {
+  if (
+    button.disabled ||
+    button.matches(":disabled") ||
+    button.hidden ||
+    button.getAttribute("aria-disabled")?.toLowerCase() === "true"
+  ) {
+    return false;
+  }
+  for (
+    let element: HTMLElement | null = button;
+    element;
+    element = element.parentElement
+  ) {
+    if (
+      element.hidden ||
+      element.hasAttribute("inert") ||
+      element.getAttribute("aria-hidden")?.toLowerCase() === "true" ||
+      element.getAttribute("aria-disabled")?.toLowerCase() === "true"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function githubSignInDomIsExact(
+  render: GitHubSignInRender,
+  root: HTMLDivElement | null,
+  button: HTMLButtonElement | null,
+): boolean {
+  const ownerWindow = root?.ownerDocument.defaultView;
+  const rootIcon = root?.children.item(0);
+  const copy = root?.children.item(1);
+  const buttonIcon = button?.children.item(0);
+  return Boolean(
+    render.githubConfigured &&
+      render.busyOperation === null &&
+      ownerWindow &&
+      root instanceof ownerWindow.HTMLDivElement &&
+      button instanceof ownerWindow.HTMLButtonElement &&
+      root.isConnected &&
+      button.isConnected &&
+      root.ownerDocument === button.ownerDocument &&
+      root.tagName === "DIV" &&
+      root.className === GITHUB_SIGN_IN_ROOT_CLASS &&
+      root.dataset.testid === "github-signin-prompt" &&
+      root.children.length === 3 &&
+      root.childNodes.length === 3 &&
+      rootIcon instanceof ownerWindow.SVGSVGElement &&
+      githubSignInIconIsExact(rootIcon, root, 24, "text-ink-4") &&
+      copy instanceof ownerWindow.HTMLParagraphElement &&
+      copy.parentElement === root &&
+      copy.textContent === GITHUB_SIGN_IN_COPY &&
+      copy.childNodes.length === 1 &&
+      copy.firstChild?.nodeType === ownerWindow.Node.TEXT_NODE &&
+      root.children.item(2) === button &&
+      root.childNodes.item(2) === button &&
+      button.parentElement === root &&
+      button.tagName === "BUTTON" &&
+      button.type === "button" &&
+      button.getAttribute("type") === "button" &&
+      button.className === GITHUB_SIGN_IN_BUTTON_CLASS &&
+      button.dataset.testid === "github-signin" &&
+      githubSignInEffectivelyEnabled(button) &&
+      button.children.length === 1 &&
+      button.childNodes.length === 2 &&
+      buttonIcon instanceof ownerWindow.SVGSVGElement &&
+      githubSignInIconIsExact(buttonIcon, button, 16, null) &&
+      button.childNodes.item(1)?.nodeType === ownerWindow.Node.TEXT_NODE &&
+      button.childNodes.item(1)?.nodeValue === ` ${GITHUB_SIGN_IN_LABEL}` &&
+      button.textContent?.trim() === GITHUB_SIGN_IN_LABEL &&
+      root.querySelectorAll("button").length === 1,
+  );
+}
+
+function githubSignInRendersMatch(
+  previous: GitHubSignInRender,
+  current: GitHubSignInRender,
+): boolean {
+  return (
+    previous.mount === current.mount &&
+    previous.githubConfigured === current.githubConfigured &&
+    previous.redirectTo === current.redirectTo &&
+    previous.busyOperation === current.busyOperation &&
+    previous.callback === current.callback
+  );
+}
+
+function exactGitHubSignInReactClick(
+  event: ReactMouseEvent<Element>,
+  nativeEvent: MouseEvent,
+  currentTarget: Element,
+  target: Node,
+  phase: number,
+): boolean {
+  try {
+    const reactEvent = event as ReactMouseEvent<Element> & {
+      _reactName?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    const prototype = Object.getPrototypeOf(event) as {
+      constructor?: { name?: unknown };
+    } | null;
+    return (
+      event.nativeEvent === nativeEvent &&
+      event.type === "click" &&
+      nativeEvent.type === "click" &&
+      event.currentTarget === currentTarget &&
+      event.target === target &&
+      nativeEvent.target === target &&
+      event.button === 0 &&
+      nativeEvent.button === 0 &&
+      event.buttons === nativeEvent.buttons &&
+      event.altKey === nativeEvent.altKey &&
+      event.ctrlKey === nativeEvent.ctrlKey &&
+      event.metaKey === nativeEvent.metaKey &&
+      event.shiftKey === nativeEvent.shiftKey &&
+      event.clientX === nativeEvent.clientX &&
+      event.clientY === nativeEvent.clientY &&
+      event.detail === nativeEvent.detail &&
+      event.bubbles &&
+      nativeEvent.bubbles &&
+      event.cancelable === nativeEvent.cancelable &&
+      event.eventPhase === nativeEvent.eventPhase &&
+      nativeEvent.eventPhase === phase &&
+      event.isTrusted === nativeEvent.isTrusted &&
+      event.timeStamp === nativeEvent.timeStamp &&
+      !event.defaultPrevented &&
+      !nativeEvent.defaultPrevented &&
+      prototype?.constructor?.name === "SyntheticBaseEvent" &&
+      reactEvent._reactName === "onClick" &&
+      typeof event.preventDefault === "function" &&
+      typeof event.stopPropagation === "function" &&
+      typeof reactEvent.isDefaultPrevented === "function" &&
+      !reactEvent.isDefaultPrevented() &&
+      typeof reactEvent.isPropagationStopped === "function" &&
+      !reactEvent.isPropagationStopped() &&
+      typeof reactEvent.persist === "function"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function createGitHubSignInClickAdmission(
+  publication: GitHubSignInPublication,
+  nativeEvent: MouseEvent,
+  event: ReactMouseEvent<HTMLDivElement>,
+  target: Node,
+): GitHubSignInClickAdmission {
+  let delivered: ReactMouseEvent<HTMLButtonElement> | null = null;
+  let invalid = false;
+  return Object.freeze({
+    publication,
+    nativeEvent,
+    captureEvent: event,
+    target,
+    root: publication.root,
+    button: publication.button,
+    deliverBubble: (candidate: ReactMouseEvent<HTMLButtonElement>) => {
+      if (delivered || (candidate as object) === (event as object)) {
+        invalid = true;
+        return false;
+      }
+      delivered = candidate;
+      return true;
+    },
+    bubbleEvent: () => delivered,
+    rejectAdditional: (candidate: object) => {
+      if (candidate !== event || delivered) invalid = true;
+    },
+    isExact: () =>
+      !invalid &&
+      delivered !== null &&
+      event.currentTarget === null &&
+      delivered.currentTarget === null,
+  });
+}
+
+function settleGitHubSignInFailure(
+  cells: GitHubSignInCells,
+  operation: GitHubSignInOperation,
+  setBusyOperation: Dispatch<
+    SetStateAction<GitHubSignInOperation | null>
+  >,
+) {
+  if (
+    cells.disposed.current ||
+    cells.operation.current !== operation
+  ) {
+    return;
+  }
+  cells.operation.current = null;
+  setBusyOperation((current) => (current === operation ? null : current));
+}
+
+function watchGitHubSignInFailure(
+  pending: PromiseLike<unknown>,
+  cells: GitHubSignInCells,
+  operation: GitHubSignInOperation,
+  setBusyOperation: Dispatch<
+    SetStateAction<GitHubSignInOperation | null>
+  >,
+) {
+  void Promise.resolve(pending).then(
+    () => undefined,
+    () => settleGitHubSignInFailure(cells, operation, setBusyOperation),
+  );
+}
+
+function createGitHubSignInPresentation(
+  render: GitHubSignInRender,
+  cells: GitHubSignInCells,
+  requestSuccessor: () => void,
+  setBusyOperation: Dispatch<
+    SetStateAction<GitHubSignInOperation | null>
+  >,
+): GitHubSignInPresentation {
+  let currentRuntime: GitHubSignInPublicationRuntime | null = null;
+  let lastRuntime: GitHubSignInPublicationRuntime | null = null;
+  let successorRequested = false;
+
+  const onElementChange = (
+    owner: GitHubSignInElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      element === null ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      currentRuntime?.retireForElement();
+    }
+    if (
+      runtime?.isExactElementReplay() &&
+      cells.successorOf.current === runtime.publication
+    ) {
+      requestReplaySuccessor(runtime);
+    }
+  };
+  const rootOwner = new GitHubSignInElementOwner<HTMLDivElement>(
+    onElementChange,
+  );
+  const buttonOwner = new GitHubSignInElementOwner<HTMLButtonElement>(
+    onElementChange,
+  );
+  const expectedOwners = (): readonly GitHubSignInElementOwnerView[] => [
+    rootOwner,
+    buttonOwner,
+  ];
+
+  const factsAreCurrent = () =>
+    !cells.disposed.current &&
+    render.callback === signIn &&
+    render.githubConfigured &&
+    render.busyOperation === null &&
+    cells.operation.current === null;
+
+  const createRuntime = (
+    root: HTMLDivElement,
+    button: HTMLButtonElement,
+    placement: GitHubSignInPlacement,
+    redirectTo: string,
+  ): GitHubSignInPublicationRuntime => {
+    type Retirement = "element" | "layout" | "mutation" | "other";
+    const dom = snapshotGitHubSignInDom(root);
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let established = false;
+    let layoutRetired = false;
+    let invalidReplay = false;
+    let activationClaimed = false;
+    let replayHandedOff = false;
+    let replayHandoffInvalid = false;
+    let expectedSuccessor: object | null = null;
+    let replayRefs: GitHubSignInRefReplay[] = [];
+    let guard: GitHubSignInDomGuard | null = null;
+    let removeNativeListener: (() => void) | null = null;
+
+    const publishedDomMatches = () =>
+      Boolean(
+        guard &&
+          guard.isClean() &&
+          rootOwner.element() === root &&
+          buttonOwner.element() === button &&
+          root === dom.node &&
+          githubSignInPlacementMatches(root, placement) &&
+          githubSignInDomMatches(dom),
+      );
+    const retire = (reason: Retirement) => {
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      removeNativeListener?.();
+      removeNativeListener = null;
+      if (cells.active.current === publication) {
+        cells.active.current = null;
+        cells.successorOf.current =
+          !cells.claimedPublications.has(publication) &&
+          (reason === "element" || reason === "layout")
+            ? publication
+            : null;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      if (cells.successorOf.current !== publication) {
+        guard?.release();
+        guard = null;
+        return true;
+      }
+      queueMicrotask(() => {
+        if (cells.replay.current?.source !== publication) {
+          if (cells.successorOf.current === publication) {
+            cells.successorOf.current = null;
+          }
+          guard?.release();
+          guard = null;
+        }
+      });
+      return true;
+    };
+    const publication: GitHubSignInPublication = Object.freeze({
+      render,
+      root,
+      button,
+      ownerDocument: root.ownerDocument,
+      redirectTo,
+      callback: render.callback,
+      dom,
+      placement,
+      retire: () => retire("other"),
+      isRetired: () => retired,
+      isExact: () => {
+        if (retired) return false;
+        let exact = false;
+        try {
+          exact =
+            currentRuntime?.publication === publication &&
+            cells.active.current === publication &&
+            publication.render === render &&
+            publication.callback === signIn &&
+            publication.ownerDocument === root.ownerDocument &&
+            publication.ownerDocument.defaultView !== null &&
+            factsAreCurrent() &&
+            githubSignInDomIsExact(render, root, button) &&
+            publishedDomMatches();
+        } catch {
+          exact = false;
+        }
+        if (!exact) retire("other");
+        return exact;
+      },
+    });
+    const refsHaveNoReplay = () =>
+      !invalidReplay &&
+      replayRefs.every(
+        (entry) =>
+          !entry.detached &&
+          !entry.reattached &&
+          entry.owner.element() === entry.element,
+      );
+    const refsHaveExactReplay = () =>
+      !invalidReplay &&
+      replayRefs.length > 0 &&
+      replayRefs.every(
+        (entry) =>
+          entry.detached &&
+          entry.reattached &&
+          entry.owner.element() === entry.element,
+      );
+
+    const runtime: GitHubSignInPublicationRuntime = Object.freeze({
+      publication,
+      publish: () => {
+        established = true;
+        replayRefs = expectedOwners().map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish GitHubSignInPrompt without every committed ref",
+            );
+          }
+          return { owner, element, detached: false, reattached: false };
+        });
+        guard = createGitHubSignInDomGuard(
+          root,
+          placement,
+          () => retire("mutation"),
+        );
+        if (!guard) return false;
+        const activeGuard = guard;
+
+        try {
+          const add = publication.ownerDocument.addEventListener;
+          const remove = publication.ownerDocument.removeEventListener;
+          if (typeof add !== "function" || typeof remove !== "function") {
+            activeGuard.release();
+            guard = null;
+            return false;
+          }
+          Reflect.apply(add, publication.ownerDocument, [
+            "click",
+            completeNativeClick,
+          ]);
+          removeNativeListener = () => {
+            try {
+              Reflect.apply(remove, publication.ownerDocument, [
+                "click",
+                completeNativeClick,
+              ]);
+            } catch {
+              // The publication is already inert even if listener removal was poisoned.
+            }
+          };
+        } catch {
+          activeGuard.release();
+          guard = null;
+          return false;
+        }
+
+        const previous = cells.active.current;
+        if (previous && previous !== publication) previous.retire();
+        cells.active.current = publication;
+        cells.successorOf.current = null;
+        cells.replay.current = null;
+        return true;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        layoutRetired = true;
+        retire("layout");
+      },
+      noteRef: (
+        owner: GitHubSignInElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
+        if (!established) return;
+        if (replayHandedOff && element !== null) {
+          replayHandoffInvalid = true;
+        }
+        const proof = replayRefs.find((entry) => entry.owner === owner);
+        if (!proof) {
+          invalidReplay = true;
+          return;
+        }
+        if (element === null && previous === proof.element) {
+          proof.detached = true;
+          proof.reattached = false;
+        } else if (
+          element === proof.element &&
+          previous === null &&
+          proof.detached
+        ) {
+          proof.reattached = true;
+        } else if (element !== previous) {
+          invalidReplay = true;
+        }
+      },
+      isExactElementReplay: () =>
+        retired &&
+        retirement === "element" &&
+        layoutRetired &&
+        established &&
+        refsHaveExactReplay() &&
+        publishedDomMatches(),
+      isExactLayoutReplay: () =>
+        retired &&
+        retirement === "layout" &&
+        established &&
+        (refsHaveNoReplay() || refsHaveExactReplay()) &&
+        publishedDomMatches(),
+      replay: () =>
+        guard
+          ? Object.freeze({
+              source: publication,
+              dom,
+              placement,
+              historyIsClean: guard.isClean,
+              release: guard.release,
+              expectSuccessor: (identity: object) => {
+                expectedSuccessor = identity;
+              },
+              successorTransitionIsExact: (identity: object) =>
+                replayHandedOff &&
+                !replayHandoffInvalid &&
+                expectedSuccessor === identity &&
+                replayRefs.every(
+                  (entry) =>
+                    entry.detached &&
+                    !entry.reattached &&
+                    entry.owner.element() === null,
+                ),
+            })
+          : null,
+      beginReplayHandoff: () => {
+        replayHandedOff = true;
+      },
+      claimActivation: () => {
+        if (activationClaimed) return false;
+        activationClaimed = true;
+        return true;
+      },
+    });
+
+    function completeNativeClick(event: Event) {
+      const admission = cells.clickAdmissions.get(event);
+      cells.clickAdmissions.delete(event);
+      if (!admission) return;
+      const activeRuntime = currentRuntime;
+      const activePublication = activeRuntime?.publication;
+      const bubbleEvent = admission.bubbleEvent();
+      const ownerWindow = publication.ownerDocument.defaultView;
+      const target = event.target;
+      let exact = false;
+      try {
+        exact = Boolean(
+          activeRuntime &&
+            activePublication === publication &&
+            admission.publication === publication &&
+            admission.nativeEvent === event &&
+            admission.root === root &&
+            admission.button === button &&
+            admission.target === target &&
+            admission.isExact() &&
+            ownerWindow &&
+            event instanceof ownerWindow.MouseEvent &&
+            event.type === "click" &&
+            event.button === 0 &&
+            event.bubbles &&
+            !event.defaultPrevented &&
+            event.currentTarget === publication.ownerDocument &&
+            event.eventPhase === ownerWindow.Event.BUBBLING_PHASE &&
+            target instanceof ownerWindow.Node &&
+            target.ownerDocument === publication.ownerDocument &&
+            button.contains(target) &&
+            event.composedPath().includes(root) &&
+            event.composedPath().includes(button) &&
+            githubSignInSnapshotContains(dom, target) &&
+            seenGitHubSignInNativeEvents.has(event) &&
+            !taintedGitHubSignInNativeEvents.has(event) &&
+            !cells.claimedPublications.has(publication) &&
+            !cells.claimedActions.has(render.action) &&
+            !cells.claimedReactEvents.has(admission.captureEvent) &&
+            bubbleEvent &&
+            !cells.claimedReactEvents.has(bubbleEvent) &&
+            !cells.claimedNativeEvents.has(event) &&
+            publication.isExact() &&
+            activeRuntime.claimActivation(),
+        );
+      } catch {
+        exact = false;
+      }
+      if (!exact || !bubbleEvent) {
+        if (event && typeof event === "object") {
+          taintedGitHubSignInNativeEvents.add(event);
+        }
+        return;
+      }
+
+      cells.claimedPublications.add(publication);
+      cells.claimedActions.add(render.action);
+      cells.claimedReactEvents.add(admission.captureEvent);
+      cells.claimedReactEvents.add(bubbleEvent);
+      cells.claimedNativeEvents.add(event);
+      const operation: GitHubSignInOperation = Object.freeze({
+        identity: Symbol("github-sign-in-operation"),
+        mount: render.mount,
+      });
+      cells.operation.current = operation;
+      publication.retire();
+      setBusyOperation(operation);
+
+      let pending: PromiseLike<unknown>;
+      try {
+        pending = publication.callback("github", {
+          redirectTo: publication.redirectTo,
+        });
+      } catch {
+        settleGitHubSignInFailure(cells, operation, setBusyOperation);
+        return;
+      }
+      watchGitHubSignInFailure(
+        pending,
+        cells,
+        operation,
+        setBusyOperation,
+      );
+    }
+
+    return runtime;
+  };
+
+  const requestReplaySuccessor = (
+    runtime: GitHubSignInPublicationRuntime,
+  ) => {
+    const replay = runtime.replay();
+    if (
+      successorRequested ||
+      !replay ||
+      cells.disposed.current ||
+      cells.successorOf.current !== runtime.publication ||
+      cells.claimedPublications.has(runtime.publication) ||
+      !factsAreCurrent() ||
+      !githubSignInDomIsExact(
+        render,
+        rootOwner.element() as HTMLDivElement | null,
+        buttonOwner.element() as HTMLButtonElement | null,
+      ) ||
+      !replay.historyIsClean()
+    ) {
+      return;
+    }
+    successorRequested = true;
+    runtime.beginReplayHandoff();
+    cells.replay.current = replay;
+    requestSuccessor();
+  };
+
+  const prepareReplay = () => {
+    const replay = cells.replay.current;
+    if (
+      replay &&
+      githubSignInRendersMatch(replay.source.render, render)
+    ) {
+      replay.expectSuccessor(render.identity);
+    }
+  };
+
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        (lastRuntime.isExactLayoutReplay() ||
+          lastRuntime.isExactElementReplay()) &&
+        cells.successorOf.current === lastRuntime.publication
+      ) {
+        requestReplaySuccessor(lastRuntime);
+      }
+      return undefined;
+    }
+    if (!factsAreCurrent()) return undefined;
+
+    const root = rootOwner.element();
+    const button = buttonOwner.element();
+    if (!githubSignInDomIsExact(render, root as HTMLDivElement | null, button as HTMLButtonElement | null)) {
+      return undefined;
+    }
+    if (!root || !button) return undefined;
+    const placement = captureGitHubSignInPlacement(root);
+    const ownerWindow = root.ownerDocument.defaultView;
+    let redirectTo: string;
+    try {
+      if (
+        !placement ||
+        !ownerWindow ||
+        typeof ownerWindow.MouseEvent !== "function" ||
+        typeof ownerWindow.Node !== "function" ||
+        typeof ownerWindow.Event !== "function"
+      ) {
+        return undefined;
+      }
+      redirectTo = render.redirectTo ?? ownerWindow.location.href;
+    } catch {
+      return undefined;
+    }
+
+    const replay = cells.replay.current;
+    if (replay) {
+      const sameRender = githubSignInRendersMatch(
+        replay.source.render,
+        render,
+      );
+      let exactReplay = false;
+      try {
+        exactReplay =
+          sameRender &&
+          replay.source.isRetired() &&
+          cells.successorOf.current === replay.source &&
+          replay.successorTransitionIsExact(render.identity) &&
+          replay.historyIsClean() &&
+          root === replay.dom.node &&
+          githubSignInPlacementMatches(root, replay.placement) &&
+          githubSignInDomMatches(replay.dom);
+      } catch {
+        exactReplay = false;
+      }
+      cells.replay.current = null;
+      replay.release();
+      if (cells.successorOf.current === replay.source) {
+        cells.successorOf.current = null;
+      }
+      if (sameRender && !exactReplay) return undefined;
+    }
+
+    const runtime = createRuntime(root, button, placement, redirectTo);
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish()) {
+      runtime.retireForElement();
+      currentRuntime = null;
+      return undefined;
+    }
+    return runtime.retireForLayout;
+  };
+
+  const taint = (event: ReactMouseEvent<Element> | null | undefined) => {
+    try {
+      const nativeEvent = event?.nativeEvent;
+      if (nativeEvent && typeof nativeEvent === "object") {
+        taintedGitHubSignInNativeEvents.add(nativeEvent);
+      }
+    } catch {
+      // Fabricated wrappers are rejected without consulting more of their surface.
+    }
+  };
+
+  const onRootClickCapture = (
+    event: ReactMouseEvent<HTMLDivElement>,
+  ) => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const root = rootOwner.element();
+    const button = buttonOwner.element();
+    const ownerWindow = publication?.ownerDocument.defaultView;
+    let nativeEvent: Event | null = null;
+    let target: EventTarget | null = null;
+    try {
+      nativeEvent = event?.nativeEvent ?? null;
+      target = event?.target ?? null;
+    } catch {
+      taint(event);
+      return;
+    }
+    if (
+      publication &&
+      ownerWindow &&
+      nativeEvent instanceof ownerWindow.MouseEvent &&
+      target instanceof ownerWindow.Node &&
+      button?.contains(target)
+    ) {
+      if (
+        seenGitHubSignInNativeEvents.has(nativeEvent) ||
+        taintedGitHubSignInNativeEvents.has(nativeEvent)
+      ) {
+        taintedGitHubSignInNativeEvents.add(nativeEvent);
+        return;
+      }
+      seenGitHubSignInNativeEvents.add(nativeEvent);
+    }
+
+    let exact = false;
+    try {
+      exact = Boolean(
+        runtime &&
+          publication &&
+          root &&
+          button &&
+          ownerWindow &&
+          nativeEvent instanceof ownerWindow.MouseEvent &&
+          target instanceof ownerWindow.Node &&
+          event.currentTarget === root &&
+          publication.render === render &&
+          cells.active.current === publication &&
+          target.ownerDocument === publication.ownerDocument &&
+          button.contains(target) &&
+          nativeEvent.composedPath().includes(root) &&
+          nativeEvent.composedPath().includes(button) &&
+          githubSignInSnapshotContains(publication.dom, target) &&
+          exactGitHubSignInReactClick(
+            event,
+            nativeEvent,
+            root,
+            target,
+            ownerWindow.Event.CAPTURING_PHASE,
+          ) &&
+          publication.isExact(),
+      );
+    } catch {
+      exact = false;
+    }
+    if (
+      !exact ||
+      !publication ||
+      !ownerWindow ||
+      !(nativeEvent instanceof ownerWindow.MouseEvent) ||
+      !(target instanceof ownerWindow.Node)
+    ) {
+      taint(event);
+      return;
+    }
+
+    const existing = cells.clickAdmissions.get(nativeEvent);
+    if (existing) {
+      existing.rejectAdditional(event);
+      taintedGitHubSignInNativeEvents.add(nativeEvent);
+      return;
+    }
+    cells.clickAdmissions.set(
+      nativeEvent,
+      createGitHubSignInClickAdmission(
+        publication,
+        nativeEvent,
+        event,
+        target,
+      ),
+    );
+  };
+
+  const onClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    let nativeEvent: Event | null = null;
+    let target: EventTarget | null = null;
+    try {
+      nativeEvent = event?.nativeEvent ?? null;
+      target = event?.target ?? null;
+    } catch {
+      taint(event);
+      return;
+    }
+    const ownerWindow = currentRuntime?.publication.ownerDocument.defaultView;
+    const admission =
+      ownerWindow && nativeEvent instanceof ownerWindow.Event
+        ? cells.clickAdmissions.get(nativeEvent)
+        : undefined;
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const button = buttonOwner.element();
+    const publicationWindow = publication?.ownerDocument.defaultView;
+    let exact = false;
+    try {
+      exact = Boolean(
+        admission &&
+          runtime &&
+          publication &&
+          button &&
+          publicationWindow &&
+          nativeEvent instanceof publicationWindow.MouseEvent &&
+          target instanceof publicationWindow.Node &&
+          admission.publication === publication &&
+          admission.nativeEvent === nativeEvent &&
+          admission.target === target &&
+          admission.root === publication.root &&
+          admission.button === button &&
+          publication.render === render &&
+          cells.active.current === publication &&
+          target.ownerDocument === publication.ownerDocument &&
+          button.contains(target) &&
+          exactGitHubSignInReactClick(
+            event,
+            nativeEvent,
+            button,
+            target,
+            publicationWindow.Event.BUBBLING_PHASE,
+          ) &&
+          publication.isExact() &&
+          admission.deliverBubble(event),
+      );
+    } catch {
+      exact = false;
+    }
+    if (!exact) {
+      admission?.rejectAdditional(event);
+      taint(event);
+    }
+  };
+
+  return Object.freeze({
+    captureRoot: rootOwner.capture,
+    captureButton: buttonOwner.capture,
+    prepareReplay,
+    establish,
+    onRootClickCapture,
+    onClick,
+  });
+}
+
+function disposeGitHubSignInCells(cells: GitHubSignInCells) {
+  cells.disposed.current = true;
+  cells.operation.current = null;
+  const active = cells.active.current;
+  cells.active.current = null;
+  active?.retire();
+  const replay = cells.replay.current;
+  cells.replay.current = null;
+  replay?.release();
+  cells.successorOf.current = null;
 }
 
 /**
@@ -38,54 +1357,79 @@ interface GitHubSignInOperation {
  * sentence names, or why there is none. `redirectTo` defaults to the page the user is on.
  */
 export function GitHubSignInPrompt({ githubConfigured, redirectTo }: { githubConfigured: boolean; redirectTo?: string }) {
-  const promptOwner = useRef<symbol | null>(null);
-  const activeSignIn = useRef<GitHubSignInOperation | null>(null);
+  const [mount] = useState(() => Symbol("github-sign-in-prompt"));
+  const [cells] = useState<GitHubSignInCells>(() => ({
+    active: { current: null },
+    successorOf: { current: null },
+    replay: { current: null },
+    operation: { current: null },
+    disposed: { current: false },
+    claimedPublications: new WeakSet(),
+    claimedActions: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+    clickAdmissions: new WeakMap(),
+  }));
+  const [revision, setRevision] = useState(0);
   const [busyOperation, setBusyOperation] = useState<GitHubSignInOperation | null>(null);
-
-  useLayoutEffect(() => {
-    const owner = Symbol("github-sign-in-prompt");
-    promptOwner.current = owner;
-    activeSignIn.current = null;
-    setBusyOperation(null);
-    return () => {
-      if (promptOwner.current === owner) promptOwner.current = null;
-      if (activeSignIn.current?.owner === owner) activeSignIn.current = null;
-    };
+  const requestSuccessor = useCallback(() => {
+    setRevision((current) => current + 1);
   }, []);
+  const render = Object.freeze<GitHubSignInRender>({
+    identity: Object.freeze({}),
+    mount,
+    revision,
+    githubConfigured,
+    redirectTo,
+    busyOperation,
+    callback: signIn,
+    action: Object.freeze({ identity: Symbol("github-sign-in-action") }),
+  });
+  const presentation = createGitHubSignInPresentation(
+    render,
+    cells,
+    requestSuccessor,
+    setBusyOperation,
+  );
 
-  const beginSignIn = () => {
-    const owner = promptOwner.current;
-    if (!owner || activeSignIn.current) return;
-    const operation: GitHubSignInOperation = {
-      owner,
-      redirectTo: redirectTo ?? window.location.href,
-    };
-    activeSignIn.current = operation;
-    setBusyOperation(operation);
-    void signIn("github", { redirectTo: operation.redirectTo }).catch(() => {
-      if (promptOwner.current !== owner || activeSignIn.current !== operation) return;
-      activeSignIn.current = null;
-      setBusyOperation((current) => (current === operation ? null : current));
-    });
-  };
+  useInsertionEffect(
+    () => () => disposeGitHubSignInCells(cells),
+    [cells],
+  );
+  useInsertionEffect(() => presentation.prepareReplay(), [presentation]);
+  useLayoutEffect(() => presentation.establish(), [presentation]);
 
   const busy = busyOperation !== null;
+  const {
+    captureRoot,
+    captureButton,
+    onRootClickCapture,
+    onClick,
+  } = presentation;
   return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line-2 p-6 text-center text-sm text-ink-3" data-testid="github-signin-prompt">
+    <div
+      ref={captureRoot}
+      className={GITHUB_SIGN_IN_ROOT_CLASS}
+      data-testid="github-signin-prompt"
+      onClickCapture={onRootClickCapture}
+    >
       <GitHubIcon className="text-ink-4" size={24} />
       {githubConfigured ? (
         <>
-          <p>
-            Gists and repositories need a GitHub account. You are signed in without one — sign in with GitHub to use them as storage.
-          </p>
+          <p>{GITHUB_SIGN_IN_COPY}</p>
           <button
+            ref={captureButton}
             type="button"
-            className="btn btn-primary gap-2"
+            className={GITHUB_SIGN_IN_BUTTON_CLASS}
             disabled={busy}
-            onClick={beginSignIn}
+            onClick={onClick}
             data-testid="github-signin"
           >
-            {busy ? <Loader2 size={16} className="animate-spin" /> : <GitHubIcon size={16} />} Sign in with GitHub
+            {busy ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <GitHubIcon size={16} />
+            )} Sign in with GitHub
           </button>
         </>
       ) : (
@@ -3304,6 +4648,14 @@ export const GitHubDialog = memo(function GitHubDialog({
 type CommitPrimitive = string | number | boolean | null | undefined;
 type CommitRetirement = "element" | "layout" | "ordinary";
 type CommitChangingControl = "message" | null;
+type CommitActionKind = "cancel" | "submit";
+type CommitActionNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
 
 const COMMIT_FORM_CLASS = "flex flex-col gap-3";
 const COMMIT_LABEL_CLASS = "text-sm font-medium text-ink-2";
@@ -3387,6 +4739,171 @@ interface CommitDialogAuthority {
   readonly submitDisabled: boolean;
   readonly submitText: "Commit" | "Update gist" | "Published";
   readonly submitIcon: "busy" | "done" | null;
+  readonly actionOrder: readonly [
+    CommitDialogAction,
+    CommitDialogAction,
+  ];
+}
+
+interface CommitDialogAction {
+  readonly identity: symbol;
+  readonly visit: CommitDialogVisit;
+  readonly documentFacts: CommitDocumentFacts;
+  readonly message: string;
+  readonly callback:
+    | CommitDialogVisit["onCommit"]
+    | CommitDialogVisit["onOpenChange"];
+  readonly kind: CommitActionKind;
+  readonly order: 0 | 1;
+  readonly eligible: boolean;
+}
+
+interface CommitPublishedAction {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly action: CommitDialogAction;
+  readonly element: HTMLButtonElement;
+  readonly order: 0 | 1;
+}
+
+type CommitActionKeyboardGetter = (this: object) => unknown;
+
+interface CommitActionKeyboardGetterAuthority<Field extends string> {
+  readonly getters: Readonly<Record<Field, CommitActionKeyboardGetter>>;
+  readonly isCurrent: () => boolean;
+}
+
+interface CommitActionKeyboardMethodAuthority<Method> {
+  readonly method: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface CommitActionKeyboardWindowMethod<Method> {
+  readonly value: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface CommitActionKeyboardTrustAuthority {
+  readonly matches: (event: object) => boolean;
+  readonly read: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface CommitActionKeyboardTerminalProof {
+  readonly registration: CommitActionKeyboardTerminalRegistration;
+  readonly nativeEvent: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface CommitActionKeyboardTerminalRegistration {
+  readonly proofFor: (
+    event: KeyboardEvent,
+  ) => CommitActionKeyboardTerminalProof | null;
+  readonly claim: (proof: CommitActionKeyboardTerminalProof) => boolean;
+  readonly release: () => void;
+  readonly isCurrent: () => boolean;
+}
+
+type CommitActionKeyboardEventField =
+  | "type"
+  | "target"
+  | "currentTarget"
+  | "eventPhase"
+  | "bubbles"
+  | "cancelable"
+  | "defaultPrevented"
+  | "cancelBubble"
+  | "composed";
+type CommitActionKeyboardKeyField =
+  | "key"
+  | "code"
+  | "location"
+  | "repeat"
+  | "isComposing"
+  | "ctrlKey"
+  | "altKey"
+  | "metaKey"
+  | "shiftKey";
+
+interface CommitActionKeyboardAuthority {
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof Event;
+  readonly KeyboardEvent: typeof KeyboardEvent;
+  readonly HTMLElement: typeof HTMLElement;
+  readonly event: CommitActionKeyboardGetterAuthority<CommitActionKeyboardEventField>["getters"];
+  readonly keyboard: CommitActionKeyboardGetterAuthority<CommitActionKeyboardKeyField>["getters"];
+  readonly view: CommitActionKeyboardGetter;
+  readonly detail: CommitActionKeyboardGetter;
+  readonly activeElement: CommitActionKeyboardGetter;
+  readonly composedPath: Event["composedPath"];
+  readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
+  readonly trusted: CommitActionKeyboardTrustAuthority;
+  readonly terminal: CommitActionKeyboardTerminalRegistration;
+  readonly apply: typeof Reflect.apply;
+  readonly prototypeOf: typeof Object.getPrototypeOf;
+  readonly isCurrent: () => boolean;
+}
+
+interface CommitActionKeyboardEventSnapshot {
+  readonly event: KeyboardEvent;
+  readonly type: string;
+  readonly target: HTMLElement;
+  readonly currentTarget: EventTarget;
+  readonly phase: number;
+  readonly path: readonly EventTarget[];
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly composed: boolean;
+  readonly key: CommitActionNavigationKey;
+  readonly code: string;
+  readonly location: number;
+  readonly repeat: boolean;
+  readonly composing: boolean;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly view: ReactKeyboardEvent<HTMLDivElement>["view"];
+  readonly detail: number;
+  readonly trusted: true;
+  readonly terminal: CommitActionKeyboardTerminalProof;
+}
+
+interface CommitActionReactMethods {
+  readonly preventDefault: ReactKeyboardEvent<HTMLDivElement>["preventDefault"];
+  readonly isDefaultPrevented: () => boolean;
+  readonly isPropagationStopped: () => boolean;
+}
+
+interface CommitActionReactSnapshot {
+  readonly event: ReactKeyboardEvent<HTMLDivElement>;
+  readonly nativeEvent: KeyboardEvent;
+  readonly target: HTMLElement;
+  readonly currentTarget: HTMLDivElement;
+  readonly phase: number;
+  readonly methods: CommitActionReactMethods;
+}
+
+interface CommitActionNavigationPair {
+  readonly publication: CommitDialogPublication;
+  readonly authority: CommitActionKeyboardAuthority;
+  readonly native: CommitActionKeyboardEventSnapshot;
+  readonly capture: CommitActionReactSnapshot;
+  readonly terminal: CommitActionKeyboardTerminalProof;
+  readonly source: CommitPublishedAction;
+  readonly destination: CommitPublishedAction;
+  readonly key: CommitActionNavigationKey;
+  readonly movement: object;
+  readonly publicationClaim: object;
+  readonly actionClaim: object;
+  readonly sourceClaim: object;
+  readonly destinationClaim: object;
 }
 
 interface CommitDomSnapshot {
@@ -3476,6 +4993,8 @@ interface CommitDialogPublication {
   readonly bridgeDom: CommitDomSnapshot;
   readonly overlayDom: CommitDomSnapshot;
   readonly contentDom: CommitDomSnapshot;
+  readonly actions: readonly CommitPublishedAction[];
+  readonly keyboard: CommitActionKeyboardAuthority | null;
   readonly retire: () => void;
   readonly isRetired: () => boolean;
   readonly publishedDomMatches: () => boolean;
@@ -3621,6 +5140,854 @@ function commitDescriptorsMatch(
       current.get === expected.get &&
       current.set === expected.set,
   );
+}
+
+function captureCommitActionKeyboardGetters<
+  const Fields extends readonly string[],
+>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  fields: Fields,
+): CommitActionKeyboardGetterAuthority<Fields[number]> | null {
+  const entries: [Fields[number], CommitActionKeyboardGetter][] = [];
+  const descriptors: [Fields[number], PropertyDescriptor][] = [];
+  for (const field of fields) {
+    const descriptor = getOwnPropertyDescriptor(prototype, field);
+    if (!descriptor || typeof descriptor.get !== "function") return null;
+    entries.push([field, descriptor.get]);
+    descriptors.push([field, Object.freeze({ ...descriptor })]);
+  }
+  const getters = Object.freeze(
+    Object.fromEntries(entries),
+  ) as Readonly<Record<Fields[number], CommitActionKeyboardGetter>>;
+  return Object.freeze({
+    getters,
+    isCurrent: () =>
+      descriptors.every(([field, expected]) =>
+        commitDescriptorsMatch(
+          getOwnPropertyDescriptor(prototype, field),
+          expected,
+        ),
+      ),
+  });
+}
+
+function captureCommitActionKeyboardMethod<Method>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  name: PropertyKey,
+): CommitActionKeyboardMethodAuthority<Method> | null {
+  const descriptor = getOwnPropertyDescriptor(prototype, name);
+  if (!descriptor || typeof descriptor.value !== "function") return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    method: descriptor.value as Method,
+    isCurrent: () =>
+      commitDescriptorsMatch(
+        getOwnPropertyDescriptor(prototype, name),
+        expected,
+      ),
+  });
+}
+
+function captureCommitActionKeyboardWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): CommitActionKeyboardWindowMethod<Window[Property]> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(
+      Object.freeze({
+        target,
+        descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+        prototype,
+      }),
+    );
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(
+    ownerWindow,
+    property,
+    ownerWindow,
+  ) as Window[Property];
+  if (!found || typeof value !== "function") return null;
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Reflect.get === reflectGet &&
+    path.every(
+      ({ target: entry, descriptor, prototype }) =>
+        getPrototypeOf(entry) === prototype &&
+        (descriptor
+          ? commitDescriptorsMatch(
+              getOwnPropertyDescriptor(entry, property),
+              descriptor,
+            )
+          : getOwnPropertyDescriptor(entry, property) === undefined),
+    ) &&
+    reflectGet(ownerWindow, property, ownerWindow) === value;
+  return isCurrent() ? Object.freeze({ value, isCurrent }) : null;
+}
+
+function captureCommitActionKeyboardTrust(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+  probe: KeyboardEvent,
+): CommitActionKeyboardTrustAuthority | null {
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    descriptor.enumerable !== true ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    commitDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(
+        descriptor.get as CommitActionKeyboardGetter,
+        event,
+        [],
+      ) as boolean,
+    isCurrent: () => matches(probe),
+  });
+}
+
+function createCommitActionKeyboardTerminal(
+  ownerWindow: Window & typeof globalThis,
+  ownerDocument: Document,
+  KeyboardEventConstructor: typeof KeyboardEvent,
+  keyboardEventPrototype: object,
+  eventCurrentTarget: CommitActionKeyboardGetter,
+  eventPhase: CommitActionKeyboardGetter,
+  composedPath: Event["composedPath"],
+  addEventListener: CommitActionKeyboardWindowMethod<
+    Window["addEventListener"]
+  >,
+  removeEventListener: CommitActionKeyboardWindowMethod<
+    Window["removeEventListener"]
+  >,
+  apply: typeof Reflect.apply,
+  prototypeOf: typeof Object.getPrototypeOf,
+  intrinsicsAreCurrent: () => boolean,
+): CommitActionKeyboardTerminalRegistration | null {
+  const proofs = new WeakMap<KeyboardEvent, CommitActionKeyboardTerminalProof>();
+  const invalidEvents = new WeakSet<Event>();
+  const claimedEvents = new WeakSet<Event>();
+  let active = false;
+  let released = false;
+
+  const listener: EventListener = function (
+    this: EventTarget,
+    event: Event,
+  ) {
+    if (
+      !active ||
+      released ||
+      prototypeOf(event) !== keyboardEventPrototype ||
+      invalidEvents.has(event) ||
+      claimedEvents.has(event) ||
+      !intrinsicsAreCurrent()
+    ) {
+      return;
+    }
+    if (proofs.has(event as KeyboardEvent)) {
+      invalidEvents.add(event);
+      return;
+    }
+    try {
+      const currentTarget = apply(
+        eventCurrentTarget,
+        event,
+        [],
+      ) as EventTarget | null;
+      const phase = apply(eventPhase, event, []) as number;
+      const path = apply(composedPath, event, []) as EventTarget[];
+      const terminal = path.at(-1);
+      if (
+        currentTarget !== this ||
+        terminal !== this ||
+        phase !== ownerWindow.Event.CAPTURING_PHASE ||
+        path.at(-2) !== ownerDocument
+      ) {
+        invalidEvents.add(event);
+        return;
+      }
+      proofs.set(
+        event as KeyboardEvent,
+        Object.freeze({
+          registration,
+          nativeEvent: event as KeyboardEvent,
+          receiver: this,
+          currentTarget,
+          terminal,
+          path: Object.freeze([...path]),
+        }),
+      );
+    } catch {
+      invalidEvents.add(event);
+    }
+  };
+
+  const proofFor = (event: KeyboardEvent) => {
+    const proof = proofs.get(event);
+    if (
+      !proof ||
+      !active ||
+      released ||
+      claimedEvents.has(event) ||
+      invalidEvents.has(event) ||
+      proof.registration !== registration ||
+      proof.nativeEvent !== event ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      !intrinsicsAreCurrent()
+    ) {
+      return null;
+    }
+    try {
+      const path = apply(composedPath, event, []) as EventTarget[];
+      return path.length === proof.path.length &&
+        path.every((entry, index) => entry === proof.path[index]) &&
+        path.at(-2) === ownerDocument &&
+        path.at(-1) === proof.receiver
+        ? proof
+        : null;
+    } catch {
+      invalidEvents.add(event);
+      return null;
+    }
+  };
+
+  const registration: CommitActionKeyboardTerminalRegistration =
+    Object.freeze({
+      proofFor,
+      claim: (proof: CommitActionKeyboardTerminalProof) => {
+        if (
+          proofFor(proof.nativeEvent) !== proof ||
+          claimedEvents.has(proof.nativeEvent)
+        ) {
+          return false;
+        }
+        claimedEvents.add(proof.nativeEvent);
+        return true;
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        active = false;
+        apply(removeEventListener.value, ownerWindow, [
+          "keydown",
+          listener,
+          true,
+        ]);
+      },
+      isCurrent: () =>
+        active &&
+        !released &&
+        intrinsicsAreCurrent() &&
+        addEventListener.isCurrent() &&
+        removeEventListener.isCurrent(),
+    });
+
+  active = true;
+  try {
+    apply(addEventListener.value, ownerWindow, ["keydown", listener, true]);
+    if (registration.isCurrent()) return registration;
+    registration.release();
+    return null;
+  } catch {
+    active = false;
+    released = true;
+    return null;
+  }
+}
+
+function captureCommitActionKeyboardAuthority(
+  ownerDocument: Document,
+): CommitActionKeyboardAuthority | null {
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) return null;
+  const objectConstructor = ownerWindow.Object;
+  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+  const prototypeOf = objectConstructor.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const DocumentConstructor = ownerWindow.Document;
+  const HTMLElementConstructor = ownerWindow.HTMLElement;
+  const eventPrototype = EventConstructor.prototype;
+  const uiEventPrototype = UIEventConstructor.prototype;
+  const keyboardEventPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = DocumentConstructor.prototype;
+  const eventGetters = captureCommitActionKeyboardGetters(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    [
+      "type",
+      "target",
+      "currentTarget",
+      "eventPhase",
+      "bubbles",
+      "cancelable",
+      "defaultPrevented",
+      "cancelBubble",
+      "composed",
+    ] as const,
+  );
+  const keyboardGetters = captureCommitActionKeyboardGetters(
+    getOwnPropertyDescriptor,
+    keyboardEventPrototype,
+    [
+      "key",
+      "code",
+      "location",
+      "repeat",
+      "isComposing",
+      "ctrlKey",
+      "altKey",
+      "metaKey",
+      "shiftKey",
+    ] as const,
+  );
+  const uiGetters = captureCommitActionKeyboardGetters(
+    getOwnPropertyDescriptor,
+    uiEventPrototype,
+    ["view", "detail"] as const,
+  );
+  const documentGetters = captureCommitActionKeyboardGetters(
+    getOwnPropertyDescriptor,
+    documentPrototype,
+    ["activeElement"] as const,
+  );
+  const composedPath =
+    captureCommitActionKeyboardMethod<Event["composedPath"]>(
+      getOwnPropertyDescriptor,
+      eventPrototype,
+      "composedPath",
+    );
+  const nativePreventDefault =
+    captureCommitActionKeyboardMethod<Event["preventDefault"]>(
+      getOwnPropertyDescriptor,
+      eventPrototype,
+      "preventDefault",
+    );
+  const focus = captureCommitActionKeyboardMethod<
+    (this: HTMLElement, options?: FocusOptions) => void
+  >(getOwnPropertyDescriptor, HTMLElementConstructor.prototype, "focus");
+  const addEventListener = captureCommitActionKeyboardWindowMethod(
+    ownerWindow,
+    "addEventListener",
+  );
+  const removeEventListener = captureCommitActionKeyboardWindowMethod(
+    ownerWindow,
+    "removeEventListener",
+  );
+  if (
+    !eventGetters ||
+    !keyboardGetters ||
+    !uiGetters ||
+    !documentGetters ||
+    !composedPath ||
+    !nativePreventDefault ||
+    !focus ||
+    !addEventListener ||
+    !removeEventListener
+  ) {
+    return null;
+  }
+  let probe: KeyboardEvent;
+  try {
+    probe = new KeyboardEventConstructor("commit-action-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const trusted = captureCommitActionKeyboardTrust(
+    getOwnPropertyDescriptor,
+    apply,
+    probe,
+  );
+  if (!trusted) return null;
+  let poisoned = false;
+  const intrinsicsAreCurrent = () => {
+    if (poisoned) return false;
+    try {
+      const current =
+        ownerDocument.defaultView === ownerWindow &&
+        ownerWindow.Object === objectConstructor &&
+        ownerWindow.Object.getOwnPropertyDescriptor ===
+          getOwnPropertyDescriptor &&
+        ownerWindow.Object.getPrototypeOf === prototypeOf &&
+        ownerWindow.Reflect.apply === apply &&
+        ownerWindow.Event === EventConstructor &&
+        ownerWindow.UIEvent === UIEventConstructor &&
+        ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+        ownerWindow.Document === DocumentConstructor &&
+        ownerWindow.HTMLElement === HTMLElementConstructor &&
+        EventConstructor.prototype === eventPrototype &&
+        UIEventConstructor.prototype === uiEventPrototype &&
+        KeyboardEventConstructor.prototype === keyboardEventPrototype &&
+        DocumentConstructor.prototype === documentPrototype &&
+        prototypeOf(probe) === keyboardEventPrototype &&
+        prototypeOf(keyboardEventPrototype) === uiEventPrototype &&
+        prototypeOf(uiEventPrototype) === eventPrototype &&
+        eventGetters.isCurrent() &&
+        keyboardGetters.isCurrent() &&
+        uiGetters.isCurrent() &&
+        documentGetters.isCurrent() &&
+        composedPath.isCurrent() &&
+        nativePreventDefault.isCurrent() &&
+        focus.isCurrent() &&
+        addEventListener.isCurrent() &&
+        removeEventListener.isCurrent() &&
+        trusted.isCurrent();
+      if (!current) poisoned = true;
+      return current;
+    } catch {
+      poisoned = true;
+      return false;
+    }
+  };
+  try {
+    if (!intrinsicsAreCurrent() || trusted.read(probe) !== false) return null;
+  } catch {
+    return null;
+  }
+  const terminal = createCommitActionKeyboardTerminal(
+    ownerWindow,
+    ownerDocument,
+    KeyboardEventConstructor,
+    keyboardEventPrototype,
+    eventGetters.getters.currentTarget,
+    eventGetters.getters.eventPhase,
+    composedPath.method,
+    addEventListener,
+    removeEventListener,
+    apply,
+    prototypeOf,
+    intrinsicsAreCurrent,
+  );
+  if (!terminal) return null;
+  return Object.freeze({
+    ownerDocument,
+    ownerWindow,
+    Event: EventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    HTMLElement: HTMLElementConstructor,
+    event: eventGetters.getters,
+    keyboard: keyboardGetters.getters,
+    view: uiGetters.getters.view,
+    detail: uiGetters.getters.detail,
+    activeElement: documentGetters.getters.activeElement,
+    composedPath: composedPath.method,
+    focus: focus.method,
+    trusted,
+    terminal,
+    apply,
+    prototypeOf,
+    isCurrent: () => intrinsicsAreCurrent() && terminal.isCurrent(),
+  });
+}
+
+function commitActionKeyboardValue<Value>(
+  authority: CommitActionKeyboardAuthority,
+  getter: CommitActionKeyboardGetter,
+  target: object,
+): Value {
+  return authority.apply(getter, target, []) as Value;
+}
+
+function isCommitActionNavigationKey(
+  key: string,
+): key is CommitActionNavigationKey {
+  return (
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "Home" ||
+    key === "End"
+  );
+}
+
+function commitActionKeyboardObjectsMatch(left: object, right: object) {
+  return left === right;
+}
+
+function captureCommitActionKeyboardEvent(
+  authority: CommitActionKeyboardAuthority,
+  nativeEvent: Event,
+  expectedPhase: number,
+): CommitActionKeyboardEventSnapshot | null {
+  if (
+    !authority.isCurrent() ||
+    authority.prototypeOf(nativeEvent) !== authority.KeyboardEvent.prototype ||
+    !authority.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const type = commitActionKeyboardValue<string>(
+      authority,
+      authority.event.type,
+      nativeEvent,
+    );
+    const target = commitActionKeyboardValue<EventTarget | null>(
+      authority,
+      authority.event.target,
+      nativeEvent,
+    );
+    const currentTarget = commitActionKeyboardValue<EventTarget | null>(
+      authority,
+      authority.event.currentTarget,
+      nativeEvent,
+    );
+    const phase = commitActionKeyboardValue<number>(
+      authority,
+      authority.event.eventPhase,
+      nativeEvent,
+    );
+    const bubbles = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.event.bubbles,
+      nativeEvent,
+    );
+    const cancelable = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.event.cancelable,
+      nativeEvent,
+    );
+    const defaultPrevented = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.event.defaultPrevented,
+      nativeEvent,
+    );
+    const cancelBubble = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.event.cancelBubble,
+      nativeEvent,
+    );
+    const composed = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.event.composed,
+      nativeEvent,
+    );
+    const key = commitActionKeyboardValue<string>(
+      authority,
+      authority.keyboard.key,
+      nativeEvent,
+    );
+    const code = commitActionKeyboardValue<string>(
+      authority,
+      authority.keyboard.code,
+      nativeEvent,
+    );
+    const location = commitActionKeyboardValue<number>(
+      authority,
+      authority.keyboard.location,
+      nativeEvent,
+    );
+    const repeat = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.repeat,
+      nativeEvent,
+    );
+    const composing = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.isComposing,
+      nativeEvent,
+    );
+    const ctrlKey = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.ctrlKey,
+      nativeEvent,
+    );
+    const altKey = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.altKey,
+      nativeEvent,
+    );
+    const metaKey = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.metaKey,
+      nativeEvent,
+    );
+    const shiftKey = commitActionKeyboardValue<boolean>(
+      authority,
+      authority.keyboard.shiftKey,
+      nativeEvent,
+    );
+    const view = commitActionKeyboardValue<
+      ReactKeyboardEvent<HTMLDivElement>["view"] | null
+    >(
+      authority,
+      authority.view,
+      nativeEvent,
+    );
+    const detail = commitActionKeyboardValue<number>(
+      authority,
+      authority.detail,
+      nativeEvent,
+    );
+    const activeElement = commitActionKeyboardValue<Element | null>(
+      authority,
+      authority.activeElement,
+      authority.ownerDocument,
+    );
+    const path = authority.apply(
+      authority.composedPath,
+      nativeEvent,
+      [],
+    ) as EventTarget[];
+    const trusted = authority.trusted.read(nativeEvent);
+    const terminal = authority.terminal.proofFor(
+      nativeEvent as KeyboardEvent,
+    );
+    if (!view) return null;
+    if (
+      type !== "keydown" ||
+      !(target instanceof authority.HTMLElement) ||
+      target.ownerDocument !== authority.ownerDocument ||
+      activeElement !== target ||
+      !currentTarget ||
+      phase !== expectedPhase ||
+      !bubbles ||
+      !cancelable ||
+      defaultPrevented ||
+      cancelBubble ||
+      !isCommitActionNavigationKey(key) ||
+      repeat ||
+      composing ||
+      ctrlKey ||
+      altKey ||
+      metaKey ||
+      shiftKey ||
+      (!commitActionKeyboardObjectsMatch(view, authority.ownerWindow) &&
+        (!terminal ||
+          !commitActionKeyboardObjectsMatch(view, terminal.receiver))) ||
+      detail !== 0 ||
+      trusted !== true ||
+      !terminal
+    ) {
+      return null;
+    }
+    const expectedPath: EventTarget[] = [];
+    let node: Node | null = target;
+    while (node) {
+      expectedPath.push(node);
+      if (node === authority.ownerDocument) break;
+      node = node.parentNode;
+    }
+    expectedPath.push(terminal.receiver);
+    if (
+      expectedPath.at(-2) !== authority.ownerDocument ||
+      path.length !== expectedPath.length ||
+      path.some((entry, index) => entry !== expectedPath[index]) ||
+      path.length !== terminal.path.length ||
+      path.some((entry, index) => entry !== terminal.path[index]) ||
+      terminal.receiver !== terminal.currentTarget ||
+      terminal.receiver !== terminal.terminal ||
+      !path.includes(currentTarget)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event: nativeEvent as KeyboardEvent,
+      type,
+      target,
+      currentTarget,
+      phase,
+      path: Object.freeze([...path]),
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composed,
+      key,
+      code,
+      location,
+      repeat,
+      composing,
+      ctrlKey,
+      altKey,
+      metaKey,
+      shiftKey,
+      view,
+      detail,
+      trusted: true,
+      terminal,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function commitActionKeyboardEventsMatch(
+  capture: CommitActionKeyboardEventSnapshot,
+  bubble: CommitActionKeyboardEventSnapshot,
+  authority: CommitActionKeyboardAuthority,
+) {
+  return (
+    capture.event === bubble.event &&
+    capture.type === bubble.type &&
+    capture.target === bubble.target &&
+    capture.phase === authority.Event.CAPTURING_PHASE &&
+    bubble.phase === authority.Event.BUBBLING_PHASE &&
+    capture.bubbles === bubble.bubbles &&
+    capture.cancelable === bubble.cancelable &&
+    capture.defaultPrevented === bubble.defaultPrevented &&
+    capture.cancelBubble === bubble.cancelBubble &&
+    capture.composed === bubble.composed &&
+    capture.key === bubble.key &&
+    capture.code === bubble.code &&
+    capture.location === bubble.location &&
+    capture.repeat === bubble.repeat &&
+    capture.composing === bubble.composing &&
+    capture.ctrlKey === bubble.ctrlKey &&
+    capture.altKey === bubble.altKey &&
+    capture.metaKey === bubble.metaKey &&
+    capture.shiftKey === bubble.shiftKey &&
+    capture.view === bubble.view &&
+    capture.detail === bubble.detail &&
+    capture.trusted === bubble.trusted &&
+    capture.terminal === bubble.terminal &&
+    capture.path.length === bubble.path.length &&
+    capture.path.every((entry, index) => entry === bubble.path[index])
+  );
+}
+
+function captureCommitActionReactEvent(
+  event: ReactKeyboardEvent<HTMLDivElement>,
+  authority: CommitActionKeyboardAuthority,
+  native: CommitActionKeyboardEventSnapshot,
+  bridge: HTMLDivElement,
+): CommitActionReactSnapshot | null {
+  try {
+    const reactEvent = event as ReactKeyboardEvent<HTMLDivElement> & {
+      preventDefault?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+    };
+    const preventDefault = reactEvent.preventDefault;
+    const isDefaultPrevented = reactEvent.isDefaultPrevented;
+    const isPropagationStopped = reactEvent.isPropagationStopped;
+    if (
+      typeof preventDefault !== "function" ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      authority.apply(isDefaultPrevented, event, []) !== false ||
+      authority.apply(isPropagationStopped, event, []) !== false ||
+      reactEvent.preventDefault !== preventDefault ||
+      reactEvent.isDefaultPrevented !== isDefaultPrevented ||
+      reactEvent.isPropagationStopped !== isPropagationStopped ||
+      event.nativeEvent !== native.event ||
+      event.type !== native.type ||
+      event.target !== native.target ||
+      event.currentTarget !== bridge ||
+      event.eventPhase !== native.phase ||
+      event.bubbles !== native.bubbles ||
+      event.cancelable !== native.cancelable ||
+      event.defaultPrevented !== native.defaultPrevented ||
+      event.isTrusted !== native.trusted ||
+      event.key !== native.key ||
+      event.code !== native.code ||
+      event.location !== native.location ||
+      event.repeat !== native.repeat ||
+      event.ctrlKey !== native.ctrlKey ||
+      event.altKey !== native.altKey ||
+      event.metaKey !== native.metaKey ||
+      event.shiftKey !== native.shiftKey ||
+      event.view !== native.view
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event,
+      nativeEvent: native.event,
+      target: native.target,
+      currentTarget: bridge,
+      phase: native.phase,
+      methods: Object.freeze({
+        preventDefault,
+        isDefaultPrevented,
+        isPropagationStopped,
+      }),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function commitActionReactSnapshotMatches(
+  snapshot: CommitActionReactSnapshot,
+  authority: CommitActionKeyboardAuthority,
+  currentTarget: HTMLDivElement | null,
+) {
+  try {
+    const event = snapshot.event as ReactKeyboardEvent<HTMLDivElement> & {
+      preventDefault?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+    };
+    if (
+      event.nativeEvent === snapshot.nativeEvent &&
+      event.target === snapshot.target &&
+      event.currentTarget === currentTarget &&
+      event.preventDefault === snapshot.methods.preventDefault &&
+      event.isDefaultPrevented === snapshot.methods.isDefaultPrevented &&
+      event.isPropagationStopped === snapshot.methods.isPropagationStopped
+    ) {
+      if (
+        authority.apply(
+          snapshot.methods.isDefaultPrevented,
+          snapshot.event,
+          [],
+        ) !== false ||
+        authority.apply(
+          snapshot.methods.isPropagationStopped,
+          snapshot.event,
+          [],
+        ) !== false
+      ) {
+        return false;
+      }
+      return (
+        event.preventDefault === snapshot.methods.preventDefault &&
+        event.isDefaultPrevented === snapshot.methods.isDefaultPrevented &&
+        event.isPropagationStopped === snapshot.methods.isPropagationStopped
+      );
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function captureCommitEventSuppressionAuthority(
@@ -3840,6 +6207,18 @@ class CommitPublicationCoordinator {
   private readonly deliveredNativeEvents = new WeakSet<Event>();
   private readonly rejectedOutsidePointerDowns = new WeakSet<Event>();
   private readonly preparedSubmits = new WeakSet<Event>();
+  private readonly attemptedNavigationReactEvents = new WeakSet<object>();
+  private readonly attemptedNavigationNativeEvents = new WeakSet<object>();
+  private readonly claimedNavigationReactEvents = new WeakSet<object>();
+  private readonly claimedNavigationNativeEvents = new WeakSet<Event>();
+  private readonly claimedNavigationPairs =
+    new WeakSet<CommitActionNavigationPair>();
+  private readonly claimedNavigationMovements = new WeakSet<object>();
+  private readonly claimedNavigationPublicationClaims = new WeakSet<object>();
+  private readonly claimedNavigationActionClaims = new WeakSet<object>();
+  private readonly claimedNavigationSourceClaims = new WeakSet<object>();
+  private readonly claimedNavigationDestinationClaims = new WeakSet<object>();
+  private navigationDelivery: CommitDialogPublication | null = null;
   private readonly forms = new WeakSet<HTMLFormElement>();
   private readonly operations = new WeakSet<CommitDialogOperation>();
   private readonly timers = new WeakSet<CommitDialogTimerOwner>();
@@ -3976,6 +6355,89 @@ class CommitPublicationCoordinator {
       this.deliveredNativeEvents.has(nativeEvent) &&
       this.claimEvent(publication, action, event, nativeEvent)
     );
+  }
+
+  prepareNavigationCapture(event: object, nativeEvent: object) {
+    if (
+      this.navigationDelivery ||
+      this.attemptedNavigationReactEvents.has(event) ||
+      this.attemptedNavigationNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    this.attemptedNavigationReactEvents.add(event);
+    this.attemptedNavigationNativeEvents.add(nativeEvent);
+    return true;
+  }
+
+  prepareNavigationBubble(event: object, nativeEvent: object) {
+    if (
+      this.navigationDelivery ||
+      this.attemptedNavigationReactEvents.has(event) ||
+      !this.attemptedNavigationNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    this.attemptedNavigationReactEvents.add(event);
+    return true;
+  }
+
+  claimNavigation(pair: CommitActionNavigationPair) {
+    const nativeEvent = pair.native.event;
+    if (
+      this.navigationDelivery ||
+      !this.isCurrent(pair.publication) ||
+      pair.publication.keyboard !== pair.authority ||
+      this.claimedNavigationPairs.has(pair) ||
+      this.claimedNavigationMovements.has(pair.movement) ||
+      this.claimedNavigationPublicationClaims.has(pair.publicationClaim) ||
+      this.claimedNavigationActionClaims.has(pair.actionClaim) ||
+      this.claimedNavigationSourceClaims.has(pair.sourceClaim) ||
+      this.claimedNavigationDestinationClaims.has(pair.destinationClaim) ||
+      this.claimedNavigationReactEvents.has(pair.capture.event) ||
+      this.claimedNavigationNativeEvents.has(nativeEvent) ||
+      !this.attemptedNavigationReactEvents.has(pair.capture.event) ||
+      !this.attemptedNavigationNativeEvents.has(nativeEvent) ||
+      !pair.authority.terminal.claim(pair.terminal)
+    ) {
+      return false;
+    }
+    this.claimedNavigationPairs.add(pair);
+    this.claimedNavigationMovements.add(pair.movement);
+    this.claimedNavigationPublicationClaims.add(pair.publicationClaim);
+    this.claimedNavigationActionClaims.add(pair.actionClaim);
+    this.claimedNavigationSourceClaims.add(pair.sourceClaim);
+    this.claimedNavigationDestinationClaims.add(pair.destinationClaim);
+    this.claimedNavigationReactEvents.add(pair.capture.event);
+    this.claimedNavigationNativeEvents.add(nativeEvent);
+    this.navigationDelivery = pair.publication;
+    return true;
+  }
+
+  claimNavigationBubble(
+    pair: CommitActionNavigationPair,
+    event: object,
+  ) {
+    if (
+      this.navigationDelivery !== pair.publication ||
+      !this.claimedNavigationPairs.has(pair) ||
+      this.claimedNavigationReactEvents.has(event) ||
+      !this.attemptedNavigationReactEvents.has(event)
+    ) {
+      return false;
+    }
+    this.claimedNavigationReactEvents.add(event);
+    return true;
+  }
+
+  navigationIsDelivering(publication: CommitDialogPublication) {
+    return this.navigationDelivery === publication;
+  }
+
+  finishNavigation(publication: CommitDialogPublication) {
+    if (this.navigationDelivery === publication) {
+      this.navigationDelivery = null;
+    }
   }
 
   claimTerminal(publication: CommitDialogPublication, action: object, event: object, nativeEvent: object) {
@@ -4262,7 +6724,42 @@ function commitAuthoritiesMatch(
     previous.closeTimer === current.closeTimer &&
     previous.submitDisabled === current.submitDisabled &&
     previous.submitText === current.submitText &&
-    previous.submitIcon === current.submitIcon
+    previous.submitIcon === current.submitIcon &&
+    previous.actionOrder.length === current.actionOrder.length &&
+    previous.actionOrder.every((action, index) => {
+      const candidate = current.actionOrder[index];
+      return Boolean(
+        candidate &&
+          action.visit === candidate.visit &&
+          action.documentFacts === candidate.documentFacts &&
+          action.message === candidate.message &&
+          action.callback === candidate.callback &&
+          action.kind === candidate.kind &&
+          action.order === candidate.order &&
+          action.eligible === candidate.eligible,
+      );
+    })
+  );
+}
+
+function commitActionOrderMatches(authority: CommitDialogAuthority) {
+  const [cancel, submit] = authority.actionOrder;
+  return (
+    authority.actionOrder.length === 2 &&
+    cancel.kind === "cancel" &&
+    cancel.order === 0 &&
+    cancel.eligible &&
+    cancel.visit === authority.visit &&
+    cancel.documentFacts === authority.visit.documentFacts &&
+    cancel.message === authority.message &&
+    cancel.callback === authority.visit.onOpenChange &&
+    submit.kind === "submit" &&
+    submit.order === 1 &&
+    submit.eligible === !authority.submitDisabled &&
+    submit.visit === authority.visit &&
+    submit.documentFacts === authority.visit.documentFacts &&
+    submit.message === authority.message &&
+    submit.callback === authority.visit.onCommit
   );
 }
 
@@ -4334,6 +6831,7 @@ function commitAuthorityFactsMatch(
           ? "Update gist"
           : "Commit") &&
     authority.submitIcon === (authority.done ? "done" : authority.busy ? "busy" : null) &&
+    commitActionOrderMatches(authority) &&
     commitVisitFactsMatch(authority.visit) &&
     (operation === null ||
       (activeOperation.get() === operation &&
@@ -4348,6 +6846,64 @@ function commitAuthorityFactsMatch(
         commitVisitFactsMatch(timer.visit) &&
         timer.onOpenChange === authority.visit.onOpenChange))
   );
+}
+
+function commitPublishedActionsAreCurrent(
+  publication: CommitDialogPublication,
+  cancel: HTMLButtonElement,
+  submit: HTMLButtonElement,
+) {
+  const expected = publication.authority.actionOrder.filter(
+    ({ eligible }) => eligible,
+  );
+  return (
+    commitActionOrderMatches(publication.authority) &&
+    publication.actions.length === expected.length &&
+    publication.actions.every((published, index) => {
+      const action = expected[index];
+      const element = action?.kind === "cancel" ? cancel : submit;
+      return Boolean(
+        action &&
+          published.publicationIdentity === publication.identity &&
+          published.action === action &&
+          published.order === action.order &&
+          published.element === element &&
+          element.isConnected &&
+          element.ownerDocument === publication.ownerDocument &&
+          !element.disabled,
+      );
+    }) &&
+    new Set(publication.actions.map(({ element }) => element)).size ===
+      publication.actions.length
+  );
+}
+
+function commitActionNavigationDestination(
+  actions: readonly CommitPublishedAction[],
+  source: CommitPublishedAction,
+  key: CommitActionNavigationKey,
+) {
+  const sourceIndex = actions.indexOf(source);
+  if (sourceIndex < 0) return null;
+  let destinationIndex: number | null = null;
+  if (
+    (key === "ArrowLeft" || key === "ArrowUp") &&
+    sourceIndex > 0
+  ) {
+    destinationIndex = sourceIndex - 1;
+  } else if (
+    (key === "ArrowRight" || key === "ArrowDown") &&
+    sourceIndex + 1 < actions.length
+  ) {
+    destinationIndex = sourceIndex + 1;
+  } else if (key === "Home" && sourceIndex !== 0) {
+    destinationIndex = 0;
+  } else if (key === "End" && sourceIndex !== actions.length - 1) {
+    destinationIndex = actions.length - 1;
+  }
+  const destination =
+    destinationIndex === null ? null : actions[destinationIndex];
+  return destination && destination !== source ? destination : null;
 }
 
 function commitSnapshotAttributes(
@@ -5145,6 +7701,31 @@ function createCommitPublicationRuntime(
   const bridgeDom = commitSnapshotDom(dom.bridge, dom.content, dom.overlay, dom.gistSlot);
   const overlayDom = commitSnapshotDom(dom.overlay, dom.content, dom.overlay, dom.gistSlot);
   const contentDom = commitSnapshotDom(dom.content, dom.content, dom.overlay, dom.gistSlot);
+  const ownerWindow = placement.document.defaultView;
+  if (!ownerWindow) {
+    throw new Error("Cannot publish commit controls without an owner Window");
+  }
+  const keyboard = captureCommitActionKeyboardAuthority(placement.document);
+  const publicationIdentity = Symbol("commit-dialog-publication");
+  const actionElements = [owners.at(-2)?.element(), owners.at(-1)?.element()];
+  const actions = Object.freeze(
+    presentation.authority.actionOrder.flatMap((action) => {
+      if (!action.eligible) return [];
+      const element = actionElements[action.order];
+      if (!(element instanceof ownerWindow.HTMLButtonElement)) {
+        return [];
+      }
+      return [
+        Object.freeze<CommitPublishedAction>({
+          identity: Symbol(`commit-${action.kind}-published-action`),
+          publicationIdentity,
+          action,
+          element,
+          order: action.order,
+        }),
+      ];
+    }),
+  );
   let retired = false;
   let layoutRetired = false;
   let established = false;
@@ -5164,6 +7745,7 @@ function createCommitPublicationRuntime(
     if (reason === "layout") layoutRetired = true;
     if (retired) return;
     retired = true;
+    keyboard?.terminal.release();
     if (reason === "ordinary") invalidReplay = true;
     onRetire(publication);
     coordinator.retire(publication);
@@ -5172,7 +7754,7 @@ function createCommitPublicationRuntime(
     });
   };
   const publication: CommitDialogPublication = Object.freeze({
-    identity: Symbol("commit-dialog-publication"),
+    identity: publicationIdentity,
     presentation,
     authority: presentation.authority,
     ownerDocument: placement.document,
@@ -5185,6 +7767,8 @@ function createCommitPublicationRuntime(
     bridgeDom,
     overlayDom,
     contentDom,
+    actions,
+    keyboard,
     retire: () => retire("ordinary"),
     isRetired: () => retired,
     publishedDomMatches,
@@ -5208,7 +7792,15 @@ function createCommitPublicationRuntime(
         return { owner, element, detached: false, reattached: false };
       });
       guard = createCommitDomGuard(publication);
-      if (!guard || !coordinator.publish(publication)) {
+      if (
+        actions.length !==
+          presentation.authority.actionOrder.filter(
+            ({ eligible }) => eligible,
+          ).length ||
+        !guard ||
+        !coordinator.publish(publication)
+      ) {
+        keyboard?.terminal.release();
         guard?.release();
         return false;
       }
@@ -5325,6 +7917,7 @@ function createCommitDialogRender(
   let lastRuntime: CommitPublicationRuntime | null = null;
   let successorRequested = false;
   let establishmentQueued = false;
+  let navigationPair: CommitActionNavigationPair | null = null;
   let dismissal:
     | {
         readonly kind: "instant";
@@ -5854,6 +8447,280 @@ function createCommitDialogRender(
     }
     return exact;
   };
+  const actionNavigationIsCurrent = (
+    publication: CommitDialogPublication,
+    keyboard: CommitActionKeyboardAuthority,
+    source: CommitPublishedAction,
+    destination: CommitPublishedAction,
+    key: CommitActionNavigationKey,
+  ) => {
+    const dom = exactDom();
+    if (
+      !dom ||
+      publication.presentation !== render ||
+      publication.authority !== authority ||
+      publication.keyboard !== keyboard ||
+      keyboard.ownerDocument !== publication.ownerDocument ||
+      keyboard.ownerWindow !== publication.ownerDocument.defaultView ||
+      !keyboard.isCurrent() ||
+      !commitAuthorityFactsMatch(
+        authority,
+        latestAuthority,
+        currentVisit,
+        activeOperation,
+        activeTimer,
+        closedVisits,
+      ) ||
+      !coordinator.isCurrent(publication) ||
+      publication.isRetired() ||
+      !publication.publishedDomMatches() ||
+      !commitPublishedActionsAreCurrent(
+        publication,
+        dom.cancel,
+        dom.submit,
+      ) ||
+      !publication.actions.includes(source) ||
+      !publication.actions.includes(destination) ||
+      source === destination ||
+      source.action !== authority.actionOrder[source.order] ||
+      destination.action !== authority.actionOrder[destination.order] ||
+      source.element.disabled ||
+      destination.element.disabled ||
+      commitActionNavigationDestination(
+        publication.actions,
+        source,
+        key,
+      ) !== destination
+    ) {
+      return false;
+    }
+    try {
+      return (
+        commitActionKeyboardValue<Element | null>(
+          keyboard,
+          keyboard.activeElement,
+          keyboard.ownerDocument,
+        ) === source.element
+      );
+    } catch {
+      return false;
+    }
+  };
+  const captureActionNavigation = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return false;
+    }
+    if (
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      !coordinator.prepareNavigationCapture(event, nativeEvent)
+    ) {
+      return false;
+    }
+    const publication = coordinator.active();
+    const keyboard = publication?.keyboard;
+    const bridge = bridgeOwner.element();
+    if (
+      !publication ||
+      !keyboard ||
+      !bridge ||
+      navigationPair ||
+      publication.presentation !== render ||
+      publication.authority !== authority ||
+      publication.bridge !== bridge
+    ) {
+      return false;
+    }
+    const native = captureCommitActionKeyboardEvent(
+      keyboard,
+      nativeEvent as Event,
+      keyboard.Event.CAPTURING_PHASE,
+    );
+    const capture = native
+      ? captureCommitActionReactEvent(event, keyboard, native, bridge)
+      : null;
+    const dom = exactDom();
+    const source =
+      native && dom
+        ? publication.actions.find(
+            ({ element }) => element === native.target,
+          )
+        : undefined;
+    const destination =
+      source && native
+        ? commitActionNavigationDestination(
+            publication.actions,
+            source,
+            native.key,
+          )
+        : null;
+    if (
+      !native ||
+      !capture ||
+      !dom ||
+      !source ||
+      !destination ||
+      native.terminal !== keyboard.terminal.proofFor(native.event) ||
+      !commitPublishedActionsAreCurrent(
+        publication,
+        dom.cancel,
+        dom.submit,
+      ) ||
+      !actionNavigationIsCurrent(
+        publication,
+        keyboard,
+        source,
+        destination,
+        native.key,
+      )
+    ) {
+      return false;
+    }
+    const pair: CommitActionNavigationPair = Object.freeze({
+      publication,
+      authority: keyboard,
+      native,
+      capture,
+      terminal: native.terminal,
+      source,
+      destination,
+      key: native.key,
+      movement: Object.freeze({
+        publication,
+        source,
+        destination,
+        key: native.key,
+      }),
+      publicationClaim: Object.freeze({ publication }),
+      actionClaim: Object.freeze({ action: source.action }),
+      sourceClaim: Object.freeze({ source }),
+      destinationClaim: Object.freeze({ destination }),
+    });
+    navigationPair = pair;
+    keyboard.ownerWindow.queueMicrotask(() => {
+      if (navigationPair === pair) navigationPair = null;
+    });
+    return true;
+  };
+  const completeActionNavigation = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    const pair = navigationPair;
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return Boolean(pair);
+    }
+    if (
+      !pair ||
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      pair.native.event !== nativeEvent ||
+      !coordinator.prepareNavigationBubble(event, nativeEvent)
+    ) {
+      return false;
+    }
+    navigationPair = null;
+    const {
+      publication,
+      authority: keyboard,
+      source,
+      destination,
+      key,
+    } = pair;
+    try {
+      const bridge = bridgeOwner.element();
+      const native = captureCommitActionKeyboardEvent(
+        keyboard,
+        nativeEvent as Event,
+        keyboard.Event.BUBBLING_PHASE,
+      );
+      const bubble =
+        native && bridge
+          ? captureCommitActionReactEvent(event, keyboard, native, bridge)
+          : null;
+      if (
+        !bridge ||
+        !native ||
+        !bubble ||
+        bubble.event === pair.capture.event ||
+        bubble.nativeEvent !== pair.capture.nativeEvent ||
+        bubble.target !== pair.capture.target ||
+        bubble.currentTarget !== pair.capture.currentTarget ||
+        pair.capture.phase !== keyboard.Event.CAPTURING_PHASE ||
+        bubble.phase !== keyboard.Event.BUBBLING_PHASE ||
+        !commitActionKeyboardEventsMatch(pair.native, native, keyboard) ||
+        native.terminal !== pair.terminal ||
+        !commitActionReactSnapshotMatches(pair.capture, keyboard, null) ||
+        !actionNavigationIsCurrent(
+          publication,
+          keyboard,
+          source,
+          destination,
+          key,
+        ) ||
+        !coordinator.claimNavigation(pair) ||
+        !coordinator.claimNavigationBubble(pair, event)
+      ) {
+        return true;
+      }
+      if (
+        !coordinator.navigationIsDelivering(publication) ||
+        !commitActionReactSnapshotMatches(pair.capture, keyboard, null) ||
+        !commitActionReactSnapshotMatches(bubble, keyboard, bridge) ||
+        !actionNavigationIsCurrent(
+          publication,
+          keyboard,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return true;
+      }
+      keyboard.apply(bubble.methods.preventDefault, bubble.event, []);
+      const currentBubbleDefaultQuery = bubble.event.isDefaultPrevented;
+      if (
+        commitActionKeyboardValue<boolean>(
+          keyboard,
+          keyboard.event.defaultPrevented,
+          native.event,
+        ) !== true ||
+        bubble.event.defaultPrevented !== true ||
+        typeof currentBubbleDefaultQuery !== "function" ||
+        keyboard.apply(currentBubbleDefaultQuery, bubble.event, []) !== true ||
+        commitActionKeyboardValue<boolean>(
+          keyboard,
+          keyboard.event.cancelBubble,
+          native.event,
+        ) !== false ||
+        !coordinator.navigationIsDelivering(publication) ||
+        !actionNavigationIsCurrent(
+          publication,
+          keyboard,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return true;
+      }
+      keyboard.apply(keyboard.focus, destination.element, [
+        { preventScroll: true },
+      ]);
+      return true;
+    } catch {
+      return true;
+    } finally {
+      coordinator.finishNavigation(publication);
+    }
+  };
   const requestReplaySuccessor = (runtime: CommitPublicationRuntime) => {
     const replay = runtime.replay();
     const dom = exactDom();
@@ -5903,7 +8770,11 @@ function createCommitDialogRender(
       coordinator,
       expectedOwners(),
       dom,
-      () => {
+      (publication) => {
+        if (navigationPair?.publication === publication) {
+          navigationPair = null;
+        }
+        coordinator.finishNavigation(publication);
         rejectDismissal();
       },
     );
@@ -6127,10 +8998,14 @@ function createCommitDialogRender(
     deliverReactEvent(event, "onClick", "click");
   };
   const onBridgeKeyDownCapture = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    captureReactEvent(event, "onKeyDown", "keydown");
+    if (!captureActionNavigation(event)) {
+      captureReactEvent(event, "onKeyDown", "keydown");
+    }
   };
   const onBridgeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    deliverReactEvent(event, "onKeyDown", "keydown");
+    if (!completeActionNavigation(event)) {
+      deliverReactEvent(event, "onKeyDown", "keydown");
+    }
   };
   const onBridgeSubmitCapture = (event: ReactFormEvent<HTMLDivElement>) => {
     captureReactEvent(event, "onSubmit", "submit");
@@ -6758,8 +9633,34 @@ export const CommitDialog = memo(function CommitDialog({
     [coordinator, dismissalCapture],
   );
 
-  const authority =
+  const submitDisabled = Boolean(state?.busy || state?.done);
+  const actionOrder =
     visit && state?.visit === visit
+      ? Object.freeze([
+          Object.freeze<CommitDialogAction>({
+            identity: Symbol("commit-cancel-action"),
+            visit,
+            documentFacts: visit.documentFacts,
+            message: state.message,
+            callback: visit.onOpenChange,
+            kind: "cancel",
+            order: 0,
+            eligible: true,
+          }),
+          Object.freeze<CommitDialogAction>({
+            identity: Symbol("commit-submit-action"),
+            visit,
+            documentFacts: visit.documentFacts,
+            message: state.message,
+            callback: visit.onCommit,
+            kind: "submit",
+            order: 1,
+            eligible: !submitDisabled,
+          }),
+        ] as const)
+      : null;
+  const authority =
+    visit && state?.visit === visit && actionOrder
       ? Object.freeze<CommitDialogAuthority>({
           visit,
           revision: publicationRevision,
@@ -6771,13 +9672,14 @@ export const CommitDialog = memo(function CommitDialog({
           done: state.done,
           operation: state.operation,
           closeTimer: state.closeTimer,
-          submitDisabled: state.busy || state.done,
+          submitDisabled,
           submitText: state.done
             ? "Published"
             : visit.doc.storage === "gist"
               ? "Update gist"
               : "Commit",
           submitIcon: state.done ? "done" : state.busy ? "busy" : null,
+          actionOrder,
         })
       : null;
   const presentation = authority

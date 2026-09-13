@@ -822,19 +822,56 @@ function exactNativeInput(
 function exactNativeKey(
   event: ReactKeyboardEvent<HTMLInputElement>,
   input: HTMLInputElement,
+  captured: CapturedDismissal | null,
 ): KeyboardEvent | null {
-  const ownerWindow = input.ownerDocument.defaultView;
+  const ownerDocument = input.ownerDocument;
+  const ownerWindow = ownerDocument.defaultView;
   const nativeEvent = event.nativeEvent;
+  if (
+    !ownerWindow ||
+    captured?.kind !== "instant" ||
+    captured.document !== ownerDocument ||
+    captured.event !== nativeEvent ||
+    !(nativeEvent instanceof ownerWindow.KeyboardEvent) ||
+    Object.getPrototypeOf(nativeEvent) !== ownerWindow.KeyboardEvent.prototype
+  ) {
+    return null;
+  }
+  const path = nativeEvent.composedPath();
   return event.type === "keydown" &&
     !event.defaultPrevented &&
-    ownerWindow &&
-    nativeEvent instanceof ownerWindow.KeyboardEvent &&
+    !event.isDefaultPrevented() &&
+    !event.isPropagationStopped() &&
+    event.bubbles &&
+    event.cancelable &&
+    event.isTrusted &&
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.shiftKey &&
+    !event.repeat &&
     nativeEvent.type === "keydown" &&
     !nativeEvent.defaultPrevented &&
+    !nativeEvent.cancelBubble &&
+    nativeEvent.bubbles &&
+    nativeEvent.cancelable &&
+    nativeEvent.isTrusted &&
+    !nativeEvent.altKey &&
+    !nativeEvent.ctrlKey &&
+    !nativeEvent.metaKey &&
+    !nativeEvent.shiftKey &&
+    !nativeEvent.repeat &&
+    !nativeEvent.isComposing &&
+    nativeEvent.key === event.key &&
+    nativeEvent.view === ownerWindow &&
     event.currentTarget === input &&
     event.target === input &&
     nativeEvent.target === input &&
-    input.isConnected
+    input.isConnected &&
+    ownerDocument.activeElement === input &&
+    path[0] === input &&
+    path.includes(ownerDocument) &&
+    path.at(-1) === ownerWindow
     ? nativeEvent
     : null;
 }
@@ -2378,8 +2415,14 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                 if (!ownsElement(presentation, presentation.input, event.currentTarget)) return;
                 const key = event.key;
                 const isBack = key === "Backspace" && !presentation.state.query && !presentation.atRoot;
-                if (!["ArrowDown", "ArrowUp", "Home", "End", "Enter"].includes(key) && !isBack) return;
-                const nativeEvent = exactNativeKey(event, event.currentTarget);
+                const isPage = key === "PageDown" || key === "PageUp";
+                if (!["ArrowDown", "ArrowUp", "Home", "End", "Enter"].includes(key) && !isBack && !isPage) return;
+                if (isPage && presentation.flat.length === 0) return;
+                const nativeEvent = exactNativeKey(
+                  event,
+                  event.currentTarget,
+                  capturedDismissalRef.current,
+                );
                 if (!nativeEvent || !claimEvent(presentation, event, nativeEvent)) return;
                 event.preventDefault();
 
@@ -2402,6 +2445,13 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                   nextHighlight = 0;
                 } else if (key === "End") {
                   nextHighlight = Math.max(0, presentation.flat.length - 1);
+                } else if (key === "PageDown" && presentation.flat.length) {
+                  nextHighlight = Math.min(
+                    presentation.state.highlight + 10,
+                    presentation.flat.length - 1,
+                  );
+                } else if (key === "PageUp" && presentation.flat.length) {
+                  nextHighlight = Math.max(presentation.state.highlight - 10, 0);
                 }
                 if (nextHighlight === presentation.state.highlight) return;
                 invalidateChildRequest(presentation.state.childLoad?.request ?? null);

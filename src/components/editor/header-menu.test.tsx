@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { TooltipProvider } from "@/components/ui/primitives";
 import type { DocumentDto } from "@/server/dto";
+import type { SyncStatusDto } from "@/lib/api";
 
 vi.mock("@hocuspocus/provider", async () => {
   const { Awareness } = await import("y-protocols/awareness");
@@ -276,8 +277,109 @@ async function waitForOutsideListener() {
   });
 }
 
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object"
+        && candidate !== null
+        && "isTrusted" in candidate
+        && candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+function publishTrigger() {
+  return screen.getByTestId("publish-menu") as HTMLButtonElement;
+}
+
+function publishArrow(
+  key: "ArrowDown" | "ArrowUp",
+  init: Omit<KeyboardEventInit, "key"> = {},
+  trusted = true,
+) {
+  const button = publishTrigger();
+  const ownerWindow = button.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The Publish trigger has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    key,
+    ...init,
+  });
+  if (trusted) markJsdomEventTrusted(event);
+  act(() => button.dispatchEvent(event));
+  return event;
+}
+
+function linkedDocument(
+  githubUrl: string | null = "https://github.com/o/r/blob/main/doc.md",
+): DocumentDto {
+  return {
+    ...DOC,
+    storage: "repo",
+    repoOwner: "o",
+    repoName: "r",
+    repoBranch: "main",
+    repoPath: "doc.md",
+    publishedAt: "2026-09-08T01:00:00.000Z",
+    githubUrl,
+  };
+}
+
+function syncStatus(status: SyncStatusDto["status"] = "in-sync"): SyncStatusDto {
+  return {
+    status,
+    remote: {
+      sha: "abc123",
+      revision: "abc123",
+      url: "https://github.com/o/r/blob/main/doc.md",
+      updatedAt: null,
+    },
+    localChanged: false,
+    remoteChanged: status === "remote-unreadable",
+    lines: { local: 0, remote: 0 },
+    ...(status === "remote-unreadable"
+      ? { size: 3_000_000, limit: 2_097_152 }
+      : {}),
+  };
+}
+
 beforeEach(() => {
   vi.spyOn(window, "open").mockImplementation(() => null);
+  const eventTargetAdd = EventTarget.prototype.addEventListener;
+  const eventTargetRemove = EventTarget.prototype.removeEventListener;
+  const windowAdd = window.addEventListener;
+  const windowRemove = window.removeEventListener;
+  // jsdom's Window methods do not delegate through EventTarget.prototype.
+  vi.spyOn(EventTarget.prototype, "addEventListener").mockImplementation(
+    function (this: EventTarget, type, callback, options) {
+      if (callback === null) return;
+      if (this === window) windowAdd.call(window, type, callback, options);
+      else eventTargetAdd.call(this, type, callback, options);
+    },
+  );
+  vi.spyOn(EventTarget.prototype, "removeEventListener").mockImplementation(
+    function (this: EventTarget, type, callback, options) {
+      if (callback === null) return;
+      if (this === window) windowRemove.call(window, type, callback, options);
+      else eventTargetRemove.call(this, type, callback, options);
+    },
+  );
 });
 
 afterEach(async () => {
@@ -312,6 +414,48 @@ describe("editor header More menu authority", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
+  it("keeps the exact native selection through a mid-dispatch microtask checkpoint", async () => {
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    const history = item("history");
+    vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+    history.addEventListener("click", () => {
+      vi.runAllTicks();
+    }, { capture: true, once: true });
+
+    try {
+      fireEvent.click(history);
+    } finally {
+      vi.runAllTicks();
+      vi.useRealTimers();
+    }
+
+    expect(actions.onHistory).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("retires unconsumed selection authority at the native window boundary", async () => {
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+    openMenu();
+    const history = item("history");
+    const staleSelect = captureSelect(history);
+    history.addEventListener("click", (event) => event.preventDefault(), { once: true });
+
+    fireEvent.click(history);
+    act(() => dispatchUnadmittedSelection(history, staleSelect));
+
+    expect(actions.onHistory).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.click(history);
+    expect(actions.onHistory).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
   it.each([
     ["history", "onHistory"],
     ["name-version", "onNameVersion"],
@@ -325,7 +469,7 @@ describe("editor header More menu authority", () => {
     menuTrigger.focus();
 
     openMenu();
-    fireEvent.click(item(name));
+    await userEvent.click(item(name));
 
     expect(actions[callback]).toHaveBeenCalledOnce();
     expect(screen.queryByRole("menu")).toBeNull();
@@ -1304,5 +1448,426 @@ describe("editor header More menu authority", () => {
     fireEvent.click(item("delete"));
     expect(confirmDelete).toHaveBeenCalledTimes(2);
     expect(mutation).toHaveBeenCalledOnce();
+  });
+});
+
+describe("editor header Publish options directional focus", () => {
+  it("publishes a complete successor after the Strict callback-ref replay", async () => {
+    const props = headerProps(createSession(), createActions());
+    const composedPath = vi.spyOn(window.Event.prototype, "composedPath");
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    let reactPair: null | {
+      readonly nativeEvent: globalThis.KeyboardEvent;
+      readonly view: unknown;
+    } = null;
+    const view = await renderStrict(
+      <div
+        onKeyDown={(current) => {
+          reactPair = {
+            nativeEvent: current.nativeEvent,
+            view: current.view,
+          };
+        }}
+      >
+        {header(props)}
+      </div>,
+    );
+    const button = publishTrigger();
+    const ownerWindow = button.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Publish trigger has no owner window");
+    const ref = fiberFor(button).ref;
+    if (typeof ref !== "function") throw new Error("Publish trigger callback ref was not attached");
+    const publicationListeners = () => {
+      const addEventListener = vi.mocked(EventTarget.prototype.addEventListener);
+      return addEventListener.mock.calls.flatMap(
+        (call, index) =>
+          addEventListener.mock.contexts[index] === ownerWindow
+          && call[0] === "keydown"
+          && call[2] === true
+          && typeof call[1] === "function"
+            ? [call[1] as EventListener]
+            : [],
+      );
+    };
+    const listenerRemovals = (listener: EventListener) => {
+      const removeEventListener = vi.mocked(EventTarget.prototype.removeEventListener);
+      return removeEventListener.mock.calls.filter(
+        (call, index) =>
+          removeEventListener.mock.contexts[index] === ownerWindow
+          && call[0] === "keydown"
+          && call[1] === listener
+          && call[2] === true,
+      ).length;
+    };
+    const initialListeners = publicationListeners();
+    const predecessorListener = initialListeners.at(-1);
+    if (!predecessorListener) throw new Error("Publish Window listener was not attached");
+    const predecessorRemovals = listenerRemovals(predecessorListener);
+
+    act(() => {
+      ref(null);
+    });
+    expect(publicationListeners()).toHaveLength(initialListeners.length);
+    expect(listenerRemovals(predecessorListener)).toBe(predecessorRemovals + 1);
+    ownerWindow.addEventListener("keydown", predecessorListener, true);
+    button.focus();
+    const partial = publishArrow("ArrowDown");
+    ownerWindow.removeEventListener("keydown", predecessorListener, true);
+    expect(partial.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+
+    act(() => {
+      ref(button);
+    });
+    await waitFor(() =>
+      expect(publicationListeners()).toHaveLength(initialListeners.length + 1));
+    await act(async () => Promise.resolve());
+    const successorListener = publicationListeners().at(-1);
+    if (!successorListener) throw new Error("Publish successor listener was not attached");
+    expect(successorListener).not.toBe(predecessorListener);
+    ownerWindow.removeEventListener("keydown", successorListener, true);
+    button.ownerDocument.addEventListener("keydown", successorListener, true);
+    button.focus();
+    const wrongReceiver = publishArrow("ArrowDown");
+    button.ownerDocument.removeEventListener("keydown", successorListener, true);
+    ownerWindow.addEventListener("keydown", successorListener, true);
+    expect(wrongReceiver.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+
+    const observe = vi.spyOn(window.MutationObserver.prototype, "observe");
+    composedPath.mockClear();
+    preventDefault.mockClear();
+    let nativeDelivery: null | {
+      readonly receiver: EventTarget;
+      readonly currentTarget: EventTarget | null;
+      readonly eventPhase: number;
+      readonly path: readonly EventTarget[];
+      readonly view: Window | null;
+    } = null;
+    ownerWindow.addEventListener("keydown", function (current) {
+      const keyboard = current as globalThis.KeyboardEvent;
+      nativeDelivery = {
+        receiver: this,
+        currentTarget: current.currentTarget,
+        eventPhase: current.eventPhase,
+        path: current.composedPath(),
+        view: keyboard.view,
+      };
+    }, { capture: true, once: true });
+    button.focus();
+
+    const event = publishArrow("ArrowDown");
+    const pathCalls = () =>
+      composedPath.mock.contexts.filter((context) => context === event).length;
+    const preventionCalls = () =>
+      preventDefault.mock.contexts.filter((context) => context === event).length;
+
+    const expectedPath: EventTarget[] = [];
+    for (let current: Node | null = button; current; current = current.parentNode) {
+      expectedPath.push(current);
+      if (current === button.ownerDocument) break;
+    }
+    expect(nativeDelivery).not.toBeNull();
+    expect(ownerWindow).toBe(window);
+    expect(nativeDelivery!.receiver).not.toBe(ownerWindow);
+    expect(nativeDelivery!.currentTarget).toBe(nativeDelivery!.receiver);
+    expect(nativeDelivery!.eventPhase).toBe(window.Event.CAPTURING_PHASE);
+    expect(nativeDelivery!.path).toHaveLength(expectedPath.length + 1);
+    expect(
+      nativeDelivery!.path.slice(0, -1)
+        .findIndex((entry, index) => entry !== expectedPath[index]),
+    ).toBe(-1);
+    const pathTerminal = nativeDelivery!.path.at(-1);
+    expect(pathTerminal).toBe(nativeDelivery!.receiver);
+    expect(nativeDelivery!.view).toBe(event.view);
+    expect(Object.getPrototypeOf(event)).toBe(window.KeyboardEvent.prototype);
+    expect(event.isTrusted).toBe(true);
+    expect(reactPair).not.toBeNull();
+    expect(reactPair!.nativeEvent).toBe(event);
+    expect(reactPair!.view).toBe(event.view);
+    expect(pathCalls()).toBe(4);
+    expect(observe).toHaveBeenCalled();
+    expect(preventionCalls()).toBe(1);
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: "Gist or repository…" })).toHaveFocus());
+    expect(listenerRemovals(successorListener)).toBe(1);
+    const openListener = publicationListeners().at(-1);
+    if (!openListener || openListener === successorListener) {
+      throw new Error("Open Publish publication listener was not attached");
+    }
+    const openListenerRemovals = listenerRemovals(openListener);
+    await act(async () => view.root.unmount());
+    const viewIndex = views.findIndex((candidate) => candidate.root === view.root);
+    if (viewIndex >= 0) views.splice(viewIndex, 1);
+    view.host.remove();
+    expect(listenerRemovals(openListener)).toBe(openListenerRemovals + 1);
+  });
+
+  it("rejects a structural Window terminal before accepting the exact listener terminal", async () => {
+    const nativeComposedPath = window.Event.prototype.composedPath;
+    let terminal: EventTarget | null = null;
+    vi.spyOn(window.Event.prototype, "composedPath").mockImplementation(function (this: Event) {
+      const path = nativeComposedPath.call(this);
+      return terminal ? [...path.slice(0, -1), terminal] : path;
+    });
+    const props = headerProps(createSession(), createActions());
+    await renderStrict(header(props));
+    const button = publishTrigger();
+    const ownerWindow = button.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Publish trigger has no owner window");
+    const structuralTerminal = Object.create(
+      ownerWindow.Window.prototype,
+    ) as Window & typeof globalThis;
+    Object.defineProperties(structuralTerminal, {
+      window: { configurable: true, value: structuralTerminal },
+      self: { configurable: true, value: structuralTerminal },
+      document: { configurable: true, value: button.ownerDocument },
+      Window: { configurable: true, value: ownerWindow.Window },
+      Object: { configurable: true, value: ownerWindow.Object },
+      Event: { configurable: true, value: ownerWindow.Event },
+      KeyboardEvent: { configurable: true, value: ownerWindow.KeyboardEvent },
+    });
+    expect(Object.getPrototypeOf(structuralTerminal)).toBe(ownerWindow.Window.prototype);
+    expect(structuralTerminal.document).toBe(button.ownerDocument);
+    expect(structuralTerminal.Window).toBe(ownerWindow.Window);
+    expect(structuralTerminal.Object).toBe(ownerWindow.Object);
+    expect(structuralTerminal.Event).toBe(ownerWindow.Event);
+    expect(structuralTerminal.KeyboardEvent).toBe(ownerWindow.KeyboardEvent);
+    terminal = structuralTerminal;
+    button.focus();
+
+    const rejected = publishArrow("ArrowDown");
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(props.onPublish).not.toHaveBeenCalled();
+    expect(props.onDownload).not.toHaveBeenCalled();
+    terminal = null;
+    const accepted = publishArrow("ArrowDown");
+    expect(accepted.defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: "Gist or repository…" })).toHaveFocus());
+  });
+
+  it.each([
+    ["ArrowDown", "Gist or repository…"],
+    ["ArrowUp", "Share link…"],
+  ] as const)("opens an unlinked owner menu with %s at %s", async (key, destination) => {
+    const props = headerProps(createSession(), createActions());
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const dispatchEvent = vi.spyOn(window.EventTarget.prototype, "dispatchEvent");
+    const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
+    await renderStrict(header(props));
+    publishTrigger().focus();
+    focus.mockClear();
+
+    const event = publishArrow(key);
+
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: destination })).toHaveFocus());
+    const content = screen.getByRole("menu");
+    const autoFocusDeliveries = dispatchEvent.mock.calls.flatMap(
+      (args, index) =>
+        args[0] instanceof window.CustomEvent
+        && args[0].type === "focusScope.autoFocusOnMount"
+        && dispatchEvent.mock.contexts[index] === content
+          ? [args[0]]
+          : [],
+    );
+    expect(autoFocusDeliveries).toHaveLength(1);
+    expect(autoFocusDeliveries[0]!.target).toBe(content);
+    expect(autoFocusDeliveries[0]!.defaultPrevented).toBe(true);
+    expect(
+      preventDefault.mock.contexts.filter((context) => context === autoFocusDeliveries[0]),
+    ).toHaveLength(1);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(focus.mock.contexts[0]).toBe(screen.getByRole("menuitem", { name: destination }));
+    expect(props.onPublish).not.toHaveBeenCalled();
+    expect(props.onDownload).not.toHaveBeenCalled();
+    expect(props.onShare).not.toHaveBeenCalled();
+    expect(window.open).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["owner without GitHub", "owner", true],
+    ["editor", "editor", false],
+    ["viewer", "viewer", false],
+  ] as const)(
+    "skips the disabled first action for an unlinked %s",
+    async (_name, role, isOwner) => {
+      const props = headerProps(createSession(DOC.id, role), createActions(), {
+        isOwner,
+        githubConfigured: false,
+      });
+      await renderStrict(header(props));
+      publishTrigger().focus();
+
+      publishArrow("ArrowDown");
+
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: "Download Markdown" })).toHaveFocus());
+      expect(screen.getByRole("menuitem", { name: /Gist or repository/ }))
+        .toHaveAttribute("aria-disabled", "true");
+      expect(props.onPublish).not.toHaveBeenCalled();
+      expect(props.onDownload).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["owner", "owner", true, "Commit to GitHub…", "Change connection…"],
+    ["editor", "editor", false, "Commit to GitHub…", "Open on GitHub"],
+    ["viewer", "viewer", false, "Open on GitHub", "Open on GitHub"],
+  ] as const)(
+    "uses exact linked %s enabled endpoints",
+    async (_name, role, isOwner, first, last) => {
+      const doc = linkedDocument();
+      const props = headerProps(createSession(doc.id, role), createActions(), {
+        doc,
+        sync: syncStatus(),
+        isOwner,
+      });
+      const view = await renderStrict(header(props));
+      publishTrigger().focus();
+      publishArrow("ArrowDown");
+      await waitFor(() => expect(screen.getByRole("menuitem", { name: first })).toHaveFocus());
+      fireEvent.keyDown(screen.getByRole("menuitem", { name: first }), { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+
+      await view.render(header({ ...props }));
+      publishTrigger().focus();
+      publishArrow("ArrowUp");
+      await waitFor(() => expect(screen.getByRole("menuitem", { name: last })).toHaveFocus());
+
+      expect(props.onPublishNow).not.toHaveBeenCalled();
+      expect(props.onPull).not.toHaveBeenCalled();
+      expect(props.onSync).not.toHaveBeenCalled();
+      expect(props.onPublish).not.toHaveBeenCalled();
+      expect(window.open).not.toHaveBeenCalled();
+    },
+  );
+
+  it("skips an unreadable Pull row and chooses the optional last action", async () => {
+    const doc = linkedDocument();
+    const props = headerProps(createSession(doc.id, "editor"), createActions(), {
+      doc,
+      sync: syncStatus("remote-unreadable"),
+      isOwner: false,
+    });
+    await renderStrict(header(props));
+    publishTrigger().focus();
+
+    publishArrow("ArrowUp");
+
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: "Open on GitHub" })).toHaveFocus());
+    expect(screen.getByRole("menuitem", { name: "Pull latest from GitHub" }))
+      .toHaveAttribute("aria-disabled", "true");
+    expect(props.onPull).not.toHaveBeenCalled();
+    expect(props.onSync).not.toHaveBeenCalled();
+  });
+
+  it("does no work when a linked viewer has no enabled current action", async () => {
+    const doc = linkedDocument(null);
+    const props = headerProps(createSession(doc.id, "viewer"), createActions(), {
+      doc,
+      sync: syncStatus(),
+      isOwner: false,
+    });
+    await renderStrict(header(props));
+    publishTrigger().focus();
+
+    const event = publishArrow("ArrowDown");
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(props.onPublishNow).not.toHaveBeenCalled();
+    expect(props.onPull).not.toHaveBeenCalled();
+    expect(props.onSync).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["untrusted", {}, false],
+    ["Alt-modified", { altKey: true }, true],
+    ["Control-modified", { ctrlKey: true }, true],
+    ["Meta-modified", { metaKey: true }, true],
+    ["Shift-modified", { shiftKey: true }, true],
+    ["repeating", { repeat: true }, true],
+    ["composing", { isComposing: true }, true],
+  ] as const)("rejects %s ArrowDown before accepting a clean successor", async (
+    _name,
+    init,
+    trusted,
+  ) => {
+    const props = headerProps(createSession(), createActions());
+    await renderStrict(header(props));
+    publishTrigger().focus();
+
+    const rejected = publishArrow("ArrowDown", init, trusted);
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(screen.queryByRole("menu")).toBeNull();
+    const accepted = publishArrow("ArrowDown");
+    expect(accepted.defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole("menuitem", { name: "Gist or repository…" })).toHaveFocus());
+  });
+
+  it.each(["attribute", "placement"] as const)(
+    "rejects restored trigger %s history and recovers in a distinct visit",
+    async (mutation) => {
+      const props = headerProps(createSession(), createActions());
+      const view = await renderStrict(<div key="first">{header(props)}</div>);
+      const current = publishTrigger();
+      if (mutation === "attribute") {
+        current.setAttribute("aria-label", "Changed");
+        current.setAttribute("aria-label", "Publish options");
+      } else {
+        const parent = current.parentNode!;
+        const next = current.nextSibling;
+        current.remove();
+        parent.insertBefore(current, next);
+      }
+      current.focus();
+
+      const rejected = publishArrow("ArrowDown");
+
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      await view.render(<div key="second">{header(props)}</div>);
+      publishTrigger().focus();
+      publishArrow("ArrowDown");
+      await waitFor(() =>
+        expect(screen.getByRole("menuitem", { name: "Gist or repository…" })).toHaveFocus());
+    },
+  );
+
+  it("retains pointer, Enter, Space, item activation, Escape, and outside close", async () => {
+    const props = headerProps(createSession(), createActions());
+    await renderStrict(header(props, true));
+    const outside = screen.getByRole("button", { name: "Outside menu" });
+
+    fireEvent.pointerDown(publishTrigger(), {
+      bubbles: true,
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: "Download Markdown" }));
+    expect(props.onDownload).toHaveBeenCalledExactlyOnceWith("md", false);
+
+    publishTrigger().focus();
+    fireEvent.keyDown(publishTrigger(), { key: "Enter" });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    await waitFor(() => expect(publishTrigger()).toHaveFocus());
+
+    fireEvent.keyDown(publishTrigger(), { key: " " });
+    await waitFor(() => expect(screen.getByRole("menu")).toBeInTheDocument());
+    await waitForOutsideListener();
+    fireEvent.pointerDown(outside, { button: 0, pointerType: "mouse" });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 });

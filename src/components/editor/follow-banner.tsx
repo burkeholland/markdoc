@@ -88,9 +88,82 @@ interface FollowGrant {
   readonly generation: symbol;
   readonly publication: FollowPresentation;
   readonly committed: FollowDomSnapshot;
+  keyboard: FollowKeyboardBinding | null;
   actionClaimed: boolean;
   retired: boolean;
   readonly retire: () => void;
+}
+
+type FollowNativeGetter = (this: object) => unknown;
+type FollowEventField =
+  | "type"
+  | "target"
+  | "currentTarget"
+  | "eventPhase"
+  | "bubbles"
+  | "cancelable"
+  | "defaultPrevented"
+  | "cancelBubble";
+type FollowKeyboardField =
+  | "key"
+  | "repeat"
+  | "isComposing"
+  | "ctrlKey"
+  | "altKey"
+  | "metaKey"
+  | "shiftKey";
+
+interface FollowGetterAuthority<Field extends string> {
+  readonly getters: Readonly<Record<Field, FollowNativeGetter>>;
+  readonly isCurrent: () => boolean;
+}
+
+interface FollowMethodAuthority<Method> {
+  readonly method: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface FollowTrustedAuthority {
+  readonly getter: FollowNativeGetter;
+  readonly matches: (event: object) => boolean;
+  readonly read: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface FollowKeyboardAuthority {
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof Event;
+  readonly UIEvent: typeof UIEvent;
+  readonly KeyboardEvent: typeof KeyboardEvent;
+  readonly Node: typeof Node;
+  readonly event: FollowGetterAuthority<FollowEventField>["getters"];
+  readonly keyboard: FollowGetterAuthority<FollowKeyboardField>["getters"];
+  readonly view: FollowNativeGetter;
+  readonly composedPath: Event["composedPath"];
+  readonly preventDefault: Event["preventDefault"];
+  readonly addEventListener: EventTarget["addEventListener"];
+  readonly removeEventListener: EventTarget["removeEventListener"];
+  readonly trusted: FollowTrustedAuthority;
+  readonly apply: typeof Reflect.apply;
+  readonly prototypeOf: typeof Object.getPrototypeOf;
+  readonly isCurrent: () => boolean;
+}
+
+interface FollowKeyboardSnapshot {
+  readonly event: KeyboardEvent;
+  readonly target: EventTarget;
+  readonly path: readonly EventTarget[];
+  readonly phase: number;
+  readonly view: Window | null;
+  readonly trusted: boolean;
+}
+
+interface FollowKeyboardBinding {
+  readonly authority: FollowKeyboardAuthority;
+  readonly listener: EventListener;
+  active: boolean;
+  readonly release: () => void;
 }
 
 type FollowElementName = keyof FollowElements;
@@ -141,6 +214,316 @@ class ElementOwner<T extends Element> {
   };
 }
 
+function descriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current ||
+    current.configurable !== expected.configurable ||
+    current.enumerable !== expected.enumerable ||
+    ("value" in current) !== ("value" in expected) ||
+    ("writable" in current) !== ("writable" in expected) ||
+    ("get" in current) !== ("get" in expected) ||
+    ("set" in current) !== ("set" in expected)
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value && current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function captureGetters<const Fields extends readonly string[]>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  fields: Fields,
+): FollowGetterAuthority<Fields[number]> | null {
+  const entries: [Fields[number], FollowNativeGetter][] = [];
+  const descriptors: [Fields[number], PropertyDescriptor][] = [];
+  for (const field of fields) {
+    const descriptor = getOwnPropertyDescriptor(prototype, field);
+    if (!descriptor || typeof descriptor.get !== "function") return null;
+    entries.push([field, descriptor.get]);
+    descriptors.push([field, Object.freeze({ ...descriptor })]);
+  }
+  const getters = Object.freeze(
+    Object.fromEntries(entries),
+  ) as Readonly<Record<Fields[number], FollowNativeGetter>>;
+  return Object.freeze({
+    getters,
+    isCurrent: () =>
+      descriptors.every(([field, expected]) =>
+        descriptorsMatch(getOwnPropertyDescriptor(prototype, field), expected),
+      ),
+  });
+}
+
+function captureMethod<Method>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  name: PropertyKey,
+): FollowMethodAuthority<Method> | null {
+  const descriptor = getOwnPropertyDescriptor(prototype, name);
+  if (!descriptor || typeof descriptor.value !== "function") return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    method: descriptor.value as Method,
+    isCurrent: () =>
+      descriptorsMatch(getOwnPropertyDescriptor(prototype, name), expected),
+  });
+}
+
+function captureTrustedGetter(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+  probe: KeyboardEvent,
+): FollowTrustedAuthority | null {
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function"
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    descriptorsMatch(getOwnPropertyDescriptor(event, "isTrusted"), expected);
+  return Object.freeze({
+    getter: descriptor.get,
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as FollowNativeGetter, event, []) as boolean,
+    isCurrent: () => matches(probe),
+  });
+}
+
+function captureKeyboardAuthority(
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): FollowKeyboardAuthority | null {
+  const objectConstructor = ownerWindow.Object;
+  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+  const prototypeOf = objectConstructor.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const NodeConstructor = ownerWindow.Node;
+  const eventPrototype = EventConstructor.prototype;
+  const uiEventPrototype = UIEventConstructor.prototype;
+  const keyboardEventPrototype = KeyboardEventConstructor.prototype;
+  const eventTargetPrototype = ownerWindow.EventTarget.prototype;
+  const event = captureGetters(getOwnPropertyDescriptor, eventPrototype, [
+    "type",
+    "target",
+    "currentTarget",
+    "eventPhase",
+    "bubbles",
+    "cancelable",
+    "defaultPrevented",
+    "cancelBubble",
+  ] as const);
+  const keyboard = captureGetters(
+    getOwnPropertyDescriptor,
+    keyboardEventPrototype,
+    [
+      "key",
+      "repeat",
+      "isComposing",
+      "ctrlKey",
+      "altKey",
+      "metaKey",
+      "shiftKey",
+    ] as const,
+  );
+  const ui = captureGetters(getOwnPropertyDescriptor, uiEventPrototype, [
+    "view",
+  ] as const);
+  const composedPath = captureMethod<Event["composedPath"]>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "composedPath",
+  );
+  const preventDefault = captureMethod<Event["preventDefault"]>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "preventDefault",
+  );
+  const addEventListener = captureMethod<EventTarget["addEventListener"]>(
+    getOwnPropertyDescriptor,
+    eventTargetPrototype,
+    "addEventListener",
+  );
+  const removeEventListener = captureMethod<EventTarget["removeEventListener"]>(
+    getOwnPropertyDescriptor,
+    eventTargetPrototype,
+    "removeEventListener",
+  );
+  if (
+    !event ||
+    !keyboard ||
+    !ui ||
+    !composedPath ||
+    !preventDefault ||
+    !addEventListener ||
+    !removeEventListener
+  ) {
+    return null;
+  }
+  let probe: KeyboardEvent;
+  try {
+    probe = new KeyboardEventConstructor("follow-keyboard-probe");
+  } catch {
+    return null;
+  }
+  const trusted = captureTrustedGetter(getOwnPropertyDescriptor, apply, probe);
+  if (!trusted) return null;
+
+  const isCurrent = () =>
+    ownerDocument.defaultView === ownerWindow &&
+    ownerWindow.Object === objectConstructor &&
+    ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === prototypeOf &&
+    ownerWindow.Reflect.apply === apply &&
+    ownerWindow.Event === EventConstructor &&
+    ownerWindow.UIEvent === UIEventConstructor &&
+    ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+    ownerWindow.Node === NodeConstructor &&
+    ownerWindow.EventTarget.prototype === eventTargetPrototype &&
+    EventConstructor.prototype === eventPrototype &&
+    UIEventConstructor.prototype === uiEventPrototype &&
+    KeyboardEventConstructor.prototype === keyboardEventPrototype &&
+    prototypeOf(keyboardEventPrototype) === uiEventPrototype &&
+    prototypeOf(uiEventPrototype) === eventPrototype &&
+    event.isCurrent() &&
+    keyboard.isCurrent() &&
+    ui.isCurrent() &&
+    composedPath.isCurrent() &&
+    preventDefault.isCurrent() &&
+    addEventListener.isCurrent() &&
+    removeEventListener.isCurrent() &&
+    trusted.isCurrent();
+  if (!isCurrent()) return null;
+
+  return Object.freeze({
+    ownerDocument,
+    ownerWindow,
+    Event: EventConstructor,
+    UIEvent: UIEventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    Node: NodeConstructor,
+    event: event.getters,
+    keyboard: keyboard.getters,
+    view: ui.getters.view,
+    composedPath: composedPath.method,
+    preventDefault: preventDefault.method,
+    addEventListener: addEventListener.method,
+    removeEventListener: removeEventListener.method,
+    trusted,
+    apply,
+    prototypeOf,
+    isCurrent,
+  });
+}
+
+function nativeValue<Value>(
+  authority: FollowKeyboardAuthority,
+  getter: FollowNativeGetter,
+  event: Event,
+): Value {
+  return authority.apply(getter, event, []) as Value;
+}
+
+function captureEscapeSnapshot(
+  authority: FollowKeyboardAuthority,
+  event: Event,
+): FollowKeyboardSnapshot | null {
+  if (
+    !authority.isCurrent() ||
+    authority.prototypeOf(event) !== authority.KeyboardEvent.prototype ||
+    !authority.trusted.matches(event)
+  ) {
+    return null;
+  }
+  try {
+    const type = nativeValue<string>(authority, authority.event.type, event);
+    const target = nativeValue<EventTarget | null>(
+      authority,
+      authority.event.target,
+      event,
+    );
+    const currentTarget = nativeValue<EventTarget | null>(
+      authority,
+      authority.event.currentTarget,
+      event,
+    );
+    const phase = nativeValue<number>(
+      authority,
+      authority.event.eventPhase,
+      event,
+    );
+    const path = authority.apply(authority.composedPath, event, []) as EventTarget[];
+    const view = nativeValue<Window | null>(authority, authority.view, event);
+    const trusted = authority.trusted.read(event);
+    if (
+      type !== "keydown" ||
+      nativeValue<string>(authority, authority.keyboard.key, event) !== "Escape" ||
+      nativeValue<boolean>(authority, authority.keyboard.repeat, event) ||
+      nativeValue<boolean>(authority, authority.keyboard.isComposing, event) ||
+      nativeValue<boolean>(authority, authority.keyboard.ctrlKey, event) ||
+      nativeValue<boolean>(authority, authority.keyboard.altKey, event) ||
+      nativeValue<boolean>(authority, authority.keyboard.metaKey, event) ||
+      nativeValue<boolean>(authority, authority.keyboard.shiftKey, event) ||
+      !nativeValue<boolean>(authority, authority.event.bubbles, event) ||
+      !nativeValue<boolean>(authority, authority.event.cancelable, event) ||
+      nativeValue<boolean>(authority, authority.event.defaultPrevented, event) ||
+      nativeValue<boolean>(authority, authority.event.cancelBubble, event) ||
+      currentTarget !== authority.ownerDocument ||
+      (phase !== authority.Event.AT_TARGET &&
+        phase !== authority.Event.BUBBLING_PHASE) ||
+      !target ||
+      (target !== authority.ownerDocument &&
+        (!(target instanceof authority.Node) ||
+          target.ownerDocument !== authority.ownerDocument ||
+          !target.isConnected)) ||
+      (view !== null && view !== authority.ownerWindow) ||
+      path[0] !== target ||
+      path.filter((entry) => entry === authority.ownerDocument).length !== 1
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event: event as KeyboardEvent,
+      target,
+      path: Object.freeze([...path]),
+      phase,
+      view,
+      trusted,
+    });
+  } catch {
+    // Built-in getters throw for objects that only imitate a KeyboardEvent.
+    return null;
+  }
+}
+
+function escapeSnapshotMatches(
+  authority: FollowKeyboardAuthority,
+  snapshot: FollowKeyboardSnapshot,
+) {
+  const current = captureEscapeSnapshot(authority, snapshot.event);
+  return Boolean(
+    current &&
+      current.target === snapshot.target &&
+      current.phase === snapshot.phase &&
+      current.view === snapshot.view &&
+      current.trusted === snapshot.trusted &&
+      current.path.length === snapshot.path.length &&
+      current.path.every((entry, index) => entry === snapshot.path[index]),
+  );
+}
+
 function descendantsOf(element: Element): readonly Node[] {
   const nodes: Node[] = [];
   const collect = (node: Node) => {
@@ -161,11 +544,14 @@ class FollowMutationHistory {
   private readonly rootObserver: MutationObserver;
   private readonly placementObserver: MutationObserver;
 
-  constructor(private readonly committed: FollowDomSnapshot) {
+  constructor(
+    private readonly committed: FollowDomSnapshot,
+    private readonly onDirty: () => void,
+  ) {
     const ownerWindow = committed.elements.banner.ownerDocument.defaultView;
     if (!ownerWindow) throw new Error("The Follow banner has no owner window");
     this.rootObserver = new ownerWindow.MutationObserver((records) => {
-      if (records.length > 0) this.dirty = true;
+      if (records.length > 0) this.markDirty();
     });
     this.placementObserver = new ownerWindow.MutationObserver((records) => {
       this.recordPlacement(records);
@@ -179,6 +565,12 @@ class FollowMutationHistory {
     this.placementObserver.observe(committed.parent, { childList: true });
   }
 
+  private readonly markDirty = () => {
+    if (this.dirty) return;
+    this.dirty = true;
+    this.onDirty();
+  };
+
   private readonly recordPlacement = (records: readonly MutationRecord[]) => {
     const banner = this.committed.elements.banner;
     for (const record of records) {
@@ -186,14 +578,14 @@ class FollowMutationHistory {
         Array.from(record.addedNodes).includes(banner) ||
         Array.from(record.removedNodes).includes(banner)
       ) {
-        this.dirty = true;
+        this.markDirty();
         return;
       }
     }
   };
 
   readonly isPristine = () => {
-    if (this.rootObserver.takeRecords().length > 0) this.dirty = true;
+    if (this.rootObserver.takeRecords().length > 0) this.markDirty();
     this.recordPlacement(this.placementObserver.takeRecords());
     return !this.dirty;
   };
@@ -274,6 +666,8 @@ function createFollowPresentation(
 
   const clearGrant = (current: FollowGrant) => {
     current.retired = true;
+    current.keyboard?.release();
+    current.keyboard = null;
     if (cells.active.current === current) {
       cells.active.current = null;
       cells.active.revision++;
@@ -547,6 +941,7 @@ function createFollowPresentation(
       generation: Symbol("follow-authority"),
       publication: presentation,
       committed,
+      keyboard: null,
       actionClaimed: false,
       retired: false,
       retire: () => {
@@ -556,6 +951,103 @@ function createFollowPresentation(
       },
     };
     return current;
+  };
+
+  const handleEscape = (
+    current: FollowGrant,
+    binding: FollowKeyboardBinding,
+    event: Event,
+  ) => {
+    if (
+      !binding.active ||
+      !binding.authority.isCurrent() ||
+      current.retired ||
+      current.keyboard !== binding ||
+      current.publication !== presentation ||
+      cells.active.current !== current ||
+      phase !== "active" ||
+      current.actionClaimed ||
+      cells.claimedEvents.has(event)
+    ) {
+      if (binding.active && !binding.authority.isCurrent()) invalidate();
+      return;
+    }
+    const snapshot = captureEscapeSnapshot(binding.authority, event);
+    if (!snapshot) return;
+    const currentHistory = history;
+    if (
+      !currentHistory ||
+      !currentHistory.isPristine() ||
+      !exactDomIsCurrent(current.committed) ||
+      !liveFactsMatch()
+    ) {
+      invalidate();
+      return;
+    }
+
+    current.actionClaimed = true;
+    cells.claimedEvents.add(event);
+    if (
+      current.retired ||
+      current.keyboard !== binding ||
+      cells.active.current !== current ||
+      history !== currentHistory ||
+      !currentHistory.isPristine() ||
+      !escapeSnapshotMatches(binding.authority, snapshot) ||
+      !exactDomIsCurrent(current.committed) ||
+      !liveFactsMatch()
+    ) {
+      invalidate();
+      return;
+    }
+
+    invalidate();
+    binding.authority.apply(binding.authority.preventDefault, event, []);
+    try {
+      if (
+        !nativeValue<boolean>(
+          binding.authority,
+          binding.authority.event.defaultPrevented,
+          event,
+        )
+      ) {
+        return;
+      }
+    } catch {
+      return;
+    }
+    follow.call(session, null);
+  };
+
+  const bindEscape = (current: FollowGrant): FollowKeyboardBinding | null => {
+    const ownerDocument = current.committed.elements.banner.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    if (!ownerWindow) return null;
+    const keyboardAuthority = captureKeyboardAuthority(ownerDocument, ownerWindow);
+    if (!keyboardAuthority) return null;
+    const listener: EventListener = (event) => {
+      handleEscape(current, binding, event);
+    };
+    const binding: FollowKeyboardBinding = {
+      authority: keyboardAuthority,
+      listener,
+      active: true,
+      release: () => {
+        if (!binding.active) return;
+        binding.active = false;
+        keyboardAuthority.apply(
+          keyboardAuthority.removeEventListener,
+          ownerDocument,
+          ["keydown", listener, false],
+        );
+      },
+    };
+    keyboardAuthority.apply(
+      keyboardAuthority.addEventListener,
+      ownerDocument,
+      ["keydown", listener, false],
+    );
+    return binding;
   };
 
   const activate = (
@@ -576,6 +1068,7 @@ function createFollowPresentation(
     cells.active.current = current;
     cells.active.revision++;
     phase = "active";
+    current.keyboard = bindEscape(current);
   };
 
   const establishInitial = () => {
@@ -611,7 +1104,10 @@ function createFollowPresentation(
       invalidate();
       return;
     }
-    const currentHistory = new FollowMutationHistory(committed);
+    const currentHistory = new FollowMutationHistory(committed, () => {
+      if (history === currentHistory) invalidate();
+      else currentHistory.disconnect();
+    });
     if (
       !currentHistory.isPristine() ||
       Boolean(successor && !successor.history.isPristine()) ||
