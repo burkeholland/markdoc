@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
@@ -372,11 +373,21 @@ interface ImportResultAuthority {
 }
 
 type ImportResultActionKind = "open" | "retry";
+type ImportResultNavigationKey = "ArrowDown" | "ArrowUp" | "Home" | "End";
 
 interface ImportResultActionPublication {
   readonly identity: symbol;
   readonly publicationIdentity: symbol;
   readonly controlIdentity: symbol;
+  readonly kind: ImportResultActionKind;
+  readonly rowIndex: number | null;
+}
+
+interface ImportResultNavigationActionPublication {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly controlIdentity: symbol;
+  readonly actionIdentity: symbol;
   readonly kind: ImportResultActionKind;
   readonly rowIndex: number | null;
 }
@@ -388,6 +399,60 @@ interface ImportResultControlPublication<T extends HTMLElement> {
   readonly rowIndex: number | null;
   readonly element: T;
   readonly action: ImportResultActionPublication;
+  readonly navigationAction: ImportResultNavigationActionPublication;
+  readonly path: readonly EventTarget[];
+}
+
+type ImportResultReactKeyboardMethodName =
+  | "preventDefault"
+  | "stopPropagation"
+  | "isDefaultPrevented"
+  | "isPropagationStopped"
+  | "persist"
+  | "isPersistent";
+
+type ImportResultReactKeyboardMethod = (...args: never[]) => unknown;
+
+const IMPORT_RESULT_REACT_KEYBOARD_METHOD_NAMES = Object.freeze([
+  "preventDefault",
+  "stopPropagation",
+  "isDefaultPrevented",
+  "isPropagationStopped",
+  "persist",
+  "isPersistent",
+] satisfies ImportResultReactKeyboardMethodName[]);
+
+interface ImportResultReactKeyboardSnapshot {
+  readonly event: ReactKeyboardEvent<HTMLElement>;
+  readonly nativeEvent: Event;
+  readonly target: EventTarget;
+  readonly currentTarget: HTMLElement;
+  readonly phase: number;
+  readonly facts: ImportResultNativeKeyboardFacts;
+  readonly methods: Readonly<
+    Record<
+      ImportResultReactKeyboardMethodName,
+      ImportResultReactKeyboardMethod
+    >
+  >;
+}
+
+interface ImportResultNavigationNativeStage {
+  readonly nativeEvent: Event;
+  readonly receiver: EventTarget;
+  readonly facts: ImportResultNativeKeyboardFacts;
+  readonly control: ImportResultControlPublication<HTMLElement>;
+}
+
+interface ImportResultNavigationPair {
+  readonly publication: ImportResultPublication;
+  readonly action: ImportResultNavigationActionPublication;
+  readonly nativeEvent: Event;
+  readonly stage: ImportResultNavigationNativeStage;
+  readonly capture: ImportResultReactKeyboardSnapshot;
+  readonly sourceControl: ImportResultControlPublication<HTMLElement>;
+  readonly destinationControl: ImportResultControlPublication<HTMLElement>;
+  readonly key: ImportResultNavigationKey;
 }
 
 interface ImportResultRowPublication {
@@ -423,6 +488,8 @@ interface ImportResultPublication {
   readonly rows: readonly ImportResultRowPublication[];
   readonly ignored: HTMLParagraphElement | null;
   readonly retry: ImportResultControlPublication<HTMLButtonElement> | null;
+  readonly navigationControls: readonly ImportResultControlPublication<HTMLElement>[];
+  readonly keyboard: ImportResultKeyboardAuthority | null;
   readonly retire: () => boolean;
   readonly isRetired: () => boolean;
 }
@@ -476,7 +543,9 @@ interface ImportResultCells {
   readonly retiredPublications: WeakSet<ImportResultPublication>;
   readonly retiredRows: WeakSet<ImportResultRowPublication>;
   readonly retiredControls: WeakSet<ImportResultControlPublication<HTMLElement>>;
-  readonly retiredActions: WeakSet<ImportResultActionPublication>;
+  readonly retiredActions: WeakSet<
+    ImportResultActionPublication | ImportResultNavigationActionPublication
+  >;
   readonly claimedOpenPublications: WeakSet<ImportResultPublication>;
   readonly claimedRetryPublications: WeakSet<ImportResultPublication>;
   readonly claimedRows: WeakSet<ImportResultRowPublication>;
@@ -484,6 +553,12 @@ interface ImportResultCells {
   readonly claimedActions: WeakSet<ImportResultActionPublication>;
   readonly claimedReactEvents: WeakSet<object>;
   readonly claimedNativeEvents: WeakSet<Event>;
+  readonly attemptedNavigationReactEvents: WeakSet<object>;
+  readonly attemptedNavigationNativeEvents: WeakSet<object>;
+  readonly claimedNavigationReactEvents: WeakSet<object>;
+  readonly claimedNavigationNativeEvents: WeakSet<Event>;
+  readonly navigationAttempt: CurrentCell<object | null>;
+  readonly navigationDelivery: CurrentCell<symbol | null>;
 }
 
 interface RefReplay {
@@ -516,6 +591,13 @@ interface ImportResultPublicationRuntime {
   readonly releaseReplayGuard: () => void;
   readonly snapshot: () => ImportResultDomSnapshot | null;
   readonly rootPlacement: () => ImportResultPlacement | null;
+  readonly navigationCaptureIsReady: () => boolean;
+  readonly navigationStage: () => ImportResultNavigationNativeStage | null;
+  readonly setNavigationStage: (
+    stage: ImportResultNavigationNativeStage | null,
+  ) => void;
+  readonly navigationPair: () => ImportResultNavigationPair | null;
+  readonly setNavigationPair: (pair: ImportResultNavigationPair | null) => void;
 }
 
 interface ImportResultPublicationSet {
@@ -537,6 +619,16 @@ interface ImportResultPublicationSet {
   readonly onRetry: (
     row: ImportItemPublication | null,
     event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly onNavigateCapture: <T extends HTMLElement>(
+    row: ImportItemPublication | null,
+    kind: ImportResultActionKind,
+    event: ReactKeyboardEvent<T>,
+  ) => void;
+  readonly onNavigate: <T extends HTMLElement>(
+    row: ImportItemPublication | null,
+    kind: ImportResultActionKind,
+    event: ReactKeyboardEvent<T>,
   ) => void;
 }
 
@@ -764,6 +856,705 @@ function isEffectivelyEnabled(element: HTMLElement): boolean {
     }
   }
   return true;
+}
+
+interface ImportResultNativeKeyboardFacts {
+  readonly type: string;
+  readonly currentTarget: EventTarget | null;
+  readonly phase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly target: EventTarget | null;
+  readonly path: readonly EventTarget[];
+  readonly trusted: boolean;
+  readonly view: Window | null;
+  readonly detail: number;
+  readonly composed: boolean;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly composing: boolean;
+}
+
+interface ImportResultStableGetter<T> {
+  readonly read: (value: object) => T;
+  readonly isCurrent: () => boolean;
+}
+
+interface ImportResultStableMethod<Args extends readonly unknown[], Result> {
+  readonly invoke: (value: object, ...args: Args) => Result;
+  readonly isCurrent: () => boolean;
+}
+
+interface ImportResultUnforgeableGetter<T> {
+  readonly read: (value: object) => T;
+  readonly matches: (value: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface ImportResultKeyboardAuthority {
+  readonly capturingPhase: number;
+  readonly bubblingPhase: number;
+  readonly read: (event: object) => ImportResultNativeKeyboardFacts | null;
+  readonly ownDataMatches: (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => boolean;
+  readonly methodMatches: (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => boolean;
+  readonly applyMethod: (
+    method: ImportResultReactKeyboardMethod,
+    receiver: object,
+  ) => unknown;
+  readonly activeElement: () => Element | null | undefined;
+  readonly preventDefault: (event: Event) => boolean;
+  readonly defaultWasPrevented: (event: Event) => boolean;
+  readonly focus: (element: HTMLElement) => boolean;
+}
+
+interface ImportResultReactKeyboardEvent {
+  readonly _reactName?: unknown;
+  readonly isPersistent?: unknown;
+  readonly isDefaultPrevented?: unknown;
+  readonly isPropagationStopped?: unknown;
+  readonly persist?: unknown;
+  readonly preventDefault?: unknown;
+  readonly stopPropagation?: unknown;
+  readonly isComposing?: unknown;
+}
+
+function importResultDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  return Boolean(
+    current &&
+      current.configurable === expected.configurable &&
+      current.enumerable === expected.enumerable &&
+      current.get === expected.get &&
+      current.set === expected.set &&
+      current.value === expected.value &&
+      current.writable === expected.writable
+  );
+}
+
+function captureImportResultGetter<T>(
+  owner: object,
+  property: PropertyKey,
+  descriptorOf: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+): ImportResultStableGetter<T> | null {
+  const descriptor = descriptorOf(owner, property);
+  if (!descriptor?.get) return null;
+  const expected = Object.freeze({ ...descriptor });
+  const getter = descriptor.get;
+  return Object.freeze({
+    read: (value: object) => apply(getter, value, []) as T,
+    isCurrent: () =>
+      importResultDescriptorsMatch(descriptorOf(owner, property), expected),
+  });
+}
+
+function captureImportResultMethod<
+  Args extends readonly unknown[],
+  Result,
+>(
+  owner: object,
+  property: PropertyKey,
+  descriptorOf: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+): ImportResultStableMethod<Args, Result> | null {
+  const descriptor = descriptorOf(owner, property);
+  if (!descriptor || typeof descriptor.value !== "function") return null;
+  const expected = Object.freeze({ ...descriptor });
+  const method = descriptor.value;
+  return Object.freeze({
+    invoke: (value: object, ...args: Args) =>
+      apply(method, value, args) as Result,
+    isCurrent: () =>
+      importResultDescriptorsMatch(descriptorOf(owner, property), expected),
+  });
+}
+
+function captureImportResultUnforgeableGetter<T>(
+  owner: object,
+  property: PropertyKey,
+  descriptorOf: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+): ImportResultUnforgeableGetter<T> | null {
+  const descriptor = descriptorOf(owner, property);
+  if (!descriptor?.get || "value" in descriptor) return null;
+  const expected = Object.freeze({ ...descriptor });
+  const getter = descriptor.get;
+  return Object.freeze({
+    read: (value: object) => apply(getter, value, []) as T,
+    matches: (value: object) =>
+      importResultDescriptorsMatch(descriptorOf(value, property), expected),
+    isCurrent: () =>
+      importResultDescriptorsMatch(descriptorOf(owner, property), expected),
+  });
+}
+
+function captureImportResultKeyboardAuthority(
+  ownerWindow: Window & typeof globalThis,
+): ImportResultKeyboardAuthority | null {
+  const objectConstructor = ownerWindow.Object;
+  const reflectObject = ownerWindow.Reflect;
+  const eventConstructor = ownerWindow.Event;
+  const uiEventConstructor = ownerWindow.UIEvent;
+  const keyboardConstructor = ownerWindow.KeyboardEvent;
+  const documentConstructor = ownerWindow.Document;
+  const htmlElementConstructor = ownerWindow.HTMLElement;
+  const descriptorOf = objectConstructor.getOwnPropertyDescriptor;
+  const prototypeOf = objectConstructor.getPrototypeOf;
+  const apply = reflectObject.apply;
+  const eventPrototype = eventConstructor.prototype;
+  const uiEventPrototype = uiEventConstructor.prototype;
+  const keyboardPrototype = keyboardConstructor.prototype;
+  const documentPrototype = documentConstructor.prototype;
+  const htmlElementPrototype = htmlElementConstructor.prototype;
+  const objectPrototype = objectConstructor.prototype;
+  const getter = <T,>(owner: object, property: PropertyKey) =>
+    captureImportResultGetter<T>(owner, property, descriptorOf, apply);
+  const method = <Args extends readonly unknown[], Result>(
+    owner: object,
+    property: PropertyKey,
+  ) =>
+    captureImportResultMethod<Args, Result>(
+      owner,
+      property,
+      descriptorOf,
+      apply,
+    );
+  const type = getter<string>(eventPrototype, "type");
+  const currentTarget = getter<EventTarget | null>(
+    eventPrototype,
+    "currentTarget",
+  );
+  const phase = getter<number>(eventPrototype, "eventPhase");
+  const bubbles = getter<boolean>(eventPrototype, "bubbles");
+  const cancelable = getter<boolean>(eventPrototype, "cancelable");
+  const defaultPrevented = getter<boolean>(
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const cancelBubble = getter<boolean>(eventPrototype, "cancelBubble");
+  const target = getter<EventTarget | null>(eventPrototype, "target");
+  const composed = getter<boolean>(eventPrototype, "composed");
+  const composedPath = method<readonly [], EventTarget[]>(
+    eventPrototype,
+    "composedPath",
+  );
+  const preventDefault = method<readonly [], void>(
+    eventPrototype,
+    "preventDefault",
+  );
+  const stopPropagation = method<readonly [], void>(
+    eventPrototype,
+    "stopPropagation",
+  );
+  const stopImmediatePropagation = method<readonly [], void>(
+    eventPrototype,
+    "stopImmediatePropagation",
+  );
+  const view = getter<Window | null>(uiEventPrototype, "view");
+  const detail = getter<number>(uiEventPrototype, "detail");
+  const key = getter<string>(keyboardPrototype, "key");
+  const code = getter<string>(keyboardPrototype, "code");
+  const location = getter<number>(keyboardPrototype, "location");
+  const ctrlKey = getter<boolean>(keyboardPrototype, "ctrlKey");
+  const altKey = getter<boolean>(keyboardPrototype, "altKey");
+  const metaKey = getter<boolean>(keyboardPrototype, "metaKey");
+  const shiftKey = getter<boolean>(keyboardPrototype, "shiftKey");
+  const repeat = getter<boolean>(keyboardPrototype, "repeat");
+  const composing = getter<boolean>(keyboardPrototype, "isComposing");
+  const activeElement = getter<Element | null>(
+    documentPrototype,
+    "activeElement",
+  );
+  const focus = method<readonly [FocusOptions?], void>(
+    htmlElementPrototype,
+    "focus",
+  );
+  const isPrototypeOf = method<readonly [object], boolean>(
+    objectPrototype,
+    "isPrototypeOf",
+  );
+  let trustProbe: KeyboardEvent;
+  try {
+    trustProbe = new keyboardConstructor("import-result-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const trusted = captureImportResultUnforgeableGetter<boolean>(
+    trustProbe,
+    "isTrusted",
+    descriptorOf,
+    apply,
+  );
+  const getters = Object.freeze([
+    type,
+    currentTarget,
+    phase,
+    bubbles,
+    cancelable,
+    defaultPrevented,
+    cancelBubble,
+    target,
+    composed,
+    view,
+    detail,
+    key,
+    code,
+    location,
+    ctrlKey,
+    altKey,
+    metaKey,
+    shiftKey,
+    repeat,
+    composing,
+    activeElement,
+  ]);
+  const methods = Object.freeze([
+    composedPath,
+    preventDefault,
+    stopPropagation,
+    stopImmediatePropagation,
+    focus,
+    isPrototypeOf,
+  ]);
+  if (
+    getters.some((intrinsic) => !intrinsic || !intrinsic.isCurrent()) ||
+    methods.some((intrinsic) => !intrinsic || !intrinsic.isCurrent()) ||
+    !trusted ||
+    !trusted.isCurrent() ||
+    !type ||
+    !currentTarget ||
+    !phase ||
+    !bubbles ||
+    !cancelable ||
+    !defaultPrevented ||
+    !cancelBubble ||
+    !target ||
+    !composed ||
+    !composedPath ||
+    !preventDefault ||
+    !view ||
+    !detail ||
+    !key ||
+    !code ||
+    !location ||
+    !ctrlKey ||
+    !altKey ||
+    !metaKey ||
+    !shiftKey ||
+    !repeat ||
+    !composing ||
+    !activeElement ||
+    !focus ||
+    !isPrototypeOf
+  ) {
+    return null;
+  }
+  const realmIsCurrent = () =>
+    ownerWindow.Object === objectConstructor &&
+    ownerWindow.Reflect === reflectObject &&
+    ownerWindow.Event === eventConstructor &&
+    ownerWindow.UIEvent === uiEventConstructor &&
+    ownerWindow.KeyboardEvent === keyboardConstructor &&
+    ownerWindow.Document === documentConstructor &&
+    ownerWindow.HTMLElement === htmlElementConstructor &&
+    eventConstructor.prototype === eventPrototype &&
+    uiEventConstructor.prototype === uiEventPrototype &&
+    keyboardConstructor.prototype === keyboardPrototype &&
+    documentConstructor.prototype === documentPrototype &&
+    htmlElementConstructor.prototype === htmlElementPrototype &&
+    objectConstructor.prototype === objectPrototype &&
+    objectConstructor.getOwnPropertyDescriptor === descriptorOf &&
+    objectConstructor.getPrototypeOf === prototypeOf &&
+    reflectObject.apply === apply;
+  let historyIsClean = true;
+  const intrinsicsAreCurrent = () => {
+    if (!historyIsClean) return false;
+    historyIsClean =
+      realmIsCurrent() &&
+      getters.every((intrinsic) => intrinsic?.isCurrent() === true) &&
+      methods.every((intrinsic) => intrinsic?.isCurrent() === true) &&
+      trusted.isCurrent();
+    return historyIsClean;
+  };
+  const ownNativeMethodsAreClean = (event: object) =>
+    descriptorOf(event, "preventDefault") === undefined &&
+    descriptorOf(event, "stopPropagation") === undefined &&
+    descriptorOf(event, "stopImmediatePropagation") === undefined;
+
+  return Object.freeze({
+    capturingPhase: eventConstructor.CAPTURING_PHASE,
+    bubblingPhase: eventConstructor.BUBBLING_PHASE,
+    read: (event: object) => {
+      try {
+        if (
+          !intrinsicsAreCurrent() ||
+          !trusted.matches(event) ||
+          !isPrototypeOf.invoke(keyboardPrototype, event) ||
+          !ownNativeMethodsAreClean(event)
+        ) {
+          return null;
+        }
+        const isTrusted = trusted.read(event);
+        const eventView = view.read(event);
+        if (
+          isTrusted !== true ||
+          (eventView !== null && eventView !== ownerWindow)
+        ) {
+          return null;
+        }
+        return Object.freeze({
+          type: type.read(event),
+          currentTarget: currentTarget.read(event),
+          phase: phase.read(event),
+          bubbles: bubbles.read(event),
+          cancelable: cancelable.read(event),
+          defaultPrevented: defaultPrevented.read(event),
+          cancelBubble: cancelBubble.read(event),
+          target: target.read(event),
+          path: Object.freeze([...composedPath.invoke(event)]),
+          trusted: isTrusted,
+          view: eventView,
+          detail: detail.read(event),
+          composed: composed.read(event),
+          key: key.read(event),
+          code: code.read(event),
+          location: location.read(event),
+          ctrlKey: ctrlKey.read(event),
+          altKey: altKey.read(event),
+          metaKey: metaKey.read(event),
+          shiftKey: shiftKey.read(event),
+          repeat: repeat.read(event),
+          composing: composing.read(event),
+        });
+      } catch {
+        return null;
+      }
+    },
+    ownDataMatches: (
+      event: object,
+      property: PropertyKey,
+      value: unknown,
+    ) => {
+      if (!intrinsicsAreCurrent()) return false;
+      try {
+        const descriptor = descriptorOf(event, property);
+        return Boolean(
+          descriptor &&
+            "value" in descriptor &&
+            descriptor.value === value,
+        );
+      } catch {
+        return false;
+      }
+    },
+    methodMatches: (
+      event: object,
+      property: PropertyKey,
+      value: unknown,
+    ) => {
+      if (!intrinsicsAreCurrent() || typeof value !== "function") return false;
+      try {
+        let owner: object | null = event;
+        for (let depth = 0; owner && depth < 16; depth++) {
+          const descriptor = descriptorOf(owner, property);
+          if (descriptor) {
+            return "value" in descriptor && descriptor.value === value;
+          }
+          owner = prototypeOf(owner);
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    },
+    applyMethod: (
+      reactMethod: ImportResultReactKeyboardMethod,
+      receiver: object,
+    ) => {
+      if (!intrinsicsAreCurrent()) return undefined;
+      return apply(reactMethod, receiver, []);
+    },
+    activeElement: () => {
+      if (!intrinsicsAreCurrent()) return undefined;
+      try {
+        return activeElement.read(ownerWindow.document);
+      } catch {
+        return undefined;
+      }
+    },
+    preventDefault: (event: Event) => {
+      if (!intrinsicsAreCurrent()) return false;
+      try {
+        preventDefault.invoke(event);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    defaultWasPrevented: (event: Event) => {
+      if (!intrinsicsAreCurrent()) return false;
+      try {
+        return defaultPrevented.read(event);
+      } catch {
+        return false;
+      }
+    },
+    focus: (element: HTMLElement) => {
+      if (!intrinsicsAreCurrent()) return false;
+      try {
+        focus.invoke(element, { preventScroll: true });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
+}
+
+function isImportResultNavigationKey(
+  key: string,
+): key is ImportResultNavigationKey {
+  return (
+    key === "ArrowDown" ||
+    key === "ArrowUp" ||
+    key === "Home" ||
+    key === "End"
+  );
+}
+
+function captureImportResultEventPath(
+  element: HTMLElement,
+  ownerDocument: Document,
+): readonly EventTarget[] | null {
+  const path: EventTarget[] = [];
+  let current: Node | null = element;
+  while (current) {
+    path.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  if (path.at(-1) !== ownerDocument) return null;
+  return Object.freeze(path);
+}
+
+function importResultPathMatches(
+  path: readonly EventTarget[],
+  expected: readonly EventTarget[],
+  terminal: EventTarget,
+) {
+  return (
+    expected.length > 0 &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    path.at(-1) === terminal
+  );
+}
+
+function captureImportResultReactKeyboardEvent(
+  event: ReactKeyboardEvent<HTMLElement>,
+  nativeEvent: Event,
+  facts: ImportResultNativeKeyboardFacts,
+  source: HTMLElement,
+  ownerWindow: Window & typeof globalThis,
+  authority: ImportResultKeyboardAuthority,
+  expectedPhase: number,
+): ImportResultReactKeyboardSnapshot | null {
+  try {
+    const proof = event as ReactKeyboardEvent<HTMLElement> &
+      ImportResultReactKeyboardEvent;
+    const isDefaultPrevented = proof.isDefaultPrevented;
+    const isPropagationStopped = proof.isPropagationStopped;
+    const isPersistent = proof.isPersistent;
+    const persist = proof.persist;
+    const preventDefault = proof.preventDefault;
+    const stopPropagation = proof.stopPropagation;
+    if (
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      typeof isPersistent !== "function" ||
+      typeof persist !== "function" ||
+      typeof preventDefault !== "function" ||
+      typeof stopPropagation !== "function"
+    ) {
+      return null;
+    }
+    const methods = Object.freeze({
+      preventDefault: preventDefault as ImportResultReactKeyboardMethod,
+      stopPropagation: stopPropagation as ImportResultReactKeyboardMethod,
+      isDefaultPrevented:
+        isDefaultPrevented as ImportResultReactKeyboardMethod,
+      isPropagationStopped:
+        isPropagationStopped as ImportResultReactKeyboardMethod,
+      persist: persist as ImportResultReactKeyboardMethod,
+      isPersistent: isPersistent as ImportResultReactKeyboardMethod,
+    });
+    const snapshot: ImportResultReactKeyboardSnapshot = Object.freeze({
+      event,
+      nativeEvent,
+      target: event.target,
+      currentTarget: event.currentTarget,
+      phase: event.eventPhase,
+      facts,
+      methods,
+    });
+    const reactComposing = proof.isComposing;
+    return (
+      event.nativeEvent === nativeEvent &&
+      event.type === facts.type &&
+      event.type === "keydown" &&
+      event.currentTarget === source &&
+      event.target === source &&
+      event.eventPhase === facts.phase &&
+      event.eventPhase === expectedPhase &&
+      event.bubbles === facts.bubbles &&
+      event.cancelable === facts.cancelable &&
+      event.defaultPrevented === facts.defaultPrevented &&
+      event.isTrusted === facts.trusted &&
+      Object.is(event.view, facts.view) &&
+      event.key === facts.key &&
+      event.code === facts.code &&
+      event.location === facts.location &&
+      event.ctrlKey === facts.ctrlKey &&
+      event.altKey === facts.altKey &&
+      event.metaKey === facts.metaKey &&
+      event.shiftKey === facts.shiftKey &&
+      event.repeat === facts.repeat &&
+      (reactComposing === undefined || reactComposing === facts.composing) &&
+      importResultReactKeyboardPropertiesMatch(
+        event,
+        [
+          ["nativeEvent", nativeEvent],
+          ["type", event.type],
+          ["currentTarget", event.currentTarget],
+          ["target", event.target],
+          ["eventPhase", event.eventPhase],
+          ["bubbles", event.bubbles],
+          ["cancelable", event.cancelable],
+          ["defaultPrevented", event.defaultPrevented],
+          ["isTrusted", event.isTrusted],
+          ["view", event.view],
+          ["key", event.key],
+          ["code", event.code],
+          ["location", event.location],
+          ["ctrlKey", event.ctrlKey],
+          ["altKey", event.altKey],
+          ["metaKey", event.metaKey],
+          ["shiftKey", event.shiftKey],
+          ["repeat", event.repeat],
+        ],
+        authority,
+      ) &&
+      authority.ownDataMatches(
+        event,
+        "isDefaultPrevented",
+        isDefaultPrevented,
+      ) &&
+      authority.ownDataMatches(
+        event,
+        "isPropagationStopped",
+        isPropagationStopped,
+      ) &&
+      IMPORT_RESULT_REACT_KEYBOARD_METHOD_NAMES.every((name) =>
+        authority.methodMatches(event, name, methods[name])) &&
+      authority.applyMethod(methods.isDefaultPrevented, event) === false &&
+      authority.applyMethod(
+        methods.isPropagationStopped,
+        event,
+      ) === false &&
+      authority.applyMethod(methods.isPersistent, event) === true
+    )
+      ? snapshot
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function importResultReactKeyboardMethodsAreCurrent(
+  snapshot: ImportResultReactKeyboardSnapshot,
+  authority: ImportResultKeyboardAuthority,
+) {
+  return IMPORT_RESULT_REACT_KEYBOARD_METHOD_NAMES.every(
+    (name) =>
+      authority.methodMatches(
+        snapshot.event,
+        name,
+        snapshot.methods[name],
+      ) &&
+      (name !== "isDefaultPrevented" &&
+      name !== "isPropagationStopped"
+        ? true
+        : authority.ownDataMatches(
+            snapshot.event,
+            name,
+            snapshot.methods[name],
+          )),
+  );
+}
+
+function importResultReactKeyboardMethodsMatch(
+  capture: ImportResultReactKeyboardSnapshot,
+  bubble: ImportResultReactKeyboardSnapshot,
+) {
+  return IMPORT_RESULT_REACT_KEYBOARD_METHOD_NAMES.every(
+    (name) => capture.methods[name] === bubble.methods[name],
+  );
+}
+
+function importResultNativeKeyboardFactsMatch(
+  first: ImportResultNativeKeyboardFacts,
+  second: ImportResultNativeKeyboardFacts,
+) {
+  return (
+    first.type === second.type &&
+    first.bubbles === second.bubbles &&
+    first.cancelable === second.cancelable &&
+    first.defaultPrevented === second.defaultPrevented &&
+    first.cancelBubble === second.cancelBubble &&
+    first.target === second.target &&
+    first.trusted === second.trusted &&
+    first.view === second.view &&
+    first.detail === second.detail &&
+    first.composed === second.composed &&
+    first.key === second.key &&
+    first.code === second.code &&
+    first.location === second.location &&
+    first.ctrlKey === second.ctrlKey &&
+    first.altKey === second.altKey &&
+    first.metaKey === second.metaKey &&
+    first.shiftKey === second.shiftKey &&
+    first.repeat === second.repeat &&
+    first.composing === second.composing &&
+    first.path.length === second.path.length &&
+    first.path.every((entry, index) => entry === second.path[index])
+  );
+}
+
+function importResultReactKeyboardPropertiesMatch(
+  event: object,
+  entries: readonly (readonly [PropertyKey, unknown])[],
+  authority: ImportResultKeyboardAuthority,
+) {
+  return entries.every(([property, value]) =>
+    authority.ownDataMatches(event, property, value));
 }
 
 function createImportResultPublication(
@@ -1249,11 +2040,183 @@ function createImportResultPublication(
     return retryAction;
   };
 
+  const navigationOrderIsCurrent = (
+    publication: ImportResultPublication,
+  ) => {
+    const elements = publication.root.querySelectorAll<HTMLElement>(
+      '[data-testid="import-open"], [data-testid="import-row-retry"], [data-testid="import-retry"]',
+    );
+    return (
+      elements.length === publication.navigationControls.length &&
+      publication.navigationControls.every(
+        (control, index) => elements.item(index) === control.element,
+      ) &&
+      new Set(
+        publication.navigationControls.map(({ element }) => element),
+      ).size === publication.navigationControls.length
+    );
+  };
+
+  const navigationControlIsCurrent = (
+    publication: ImportResultPublication,
+    control: ImportResultControlPublication<HTMLElement>,
+    row: ImportItemPublication | null,
+    kind: ImportResultActionKind,
+  ) => {
+    const publishedRow =
+      row && items[row.index] === row
+        ? publication.rows[row.index]
+        : null;
+    const expected =
+      kind === "open"
+        ? publishedRow?.open
+        : row
+          ? publishedRow?.retry
+          : publication.retry;
+    const action = control.action;
+    const navigationAction = control.navigationAction;
+    return (
+      expected === control &&
+      publication.navigationControls.includes(control) &&
+      control.publicationIdentity === publication.identity &&
+      control.kind === kind &&
+      control.rowIndex === (row?.index ?? null) &&
+      action.publicationIdentity === publication.identity &&
+      action.controlIdentity === control.identity &&
+      action.kind === kind &&
+      action.rowIndex === (row?.index ?? null) &&
+      navigationAction.publicationIdentity === publication.identity &&
+      navigationAction.controlIdentity === control.identity &&
+      navigationAction.actionIdentity === action.identity &&
+      navigationAction.kind === kind &&
+      navigationAction.rowIndex === (row?.index ?? null) &&
+      !cells.retiredControls.has(control) &&
+      !cells.retiredActions.has(action) &&
+      !cells.retiredActions.has(navigationAction) &&
+      isEffectivelyEnabled(control.element)
+    );
+  };
+
+  const publishedNavigationControlIsCurrent = (
+    publication: ImportResultPublication,
+    control: ImportResultControlPublication<HTMLElement>,
+  ) => {
+    const row =
+      control.rowIndex === null
+        ? null
+        : items[control.rowIndex] ?? null;
+    return navigationControlIsCurrent(
+      publication,
+      control,
+      row,
+      control.kind,
+    );
+  };
+
+  const navigationDestination = (
+    publication: ImportResultPublication,
+    control: ImportResultControlPublication<HTMLElement>,
+    key: ImportResultNavigationKey,
+  ) => {
+    const enabled = publication.navigationControls.filter(
+      (candidate) => isEffectivelyEnabled(candidate.element),
+    );
+    const sourceIndex = enabled.indexOf(control);
+    if (sourceIndex < 0) return null;
+    let destinationIndex: number | null = null;
+    if (key === "ArrowDown" && sourceIndex + 1 < enabled.length) {
+      destinationIndex = sourceIndex + 1;
+    } else if (key === "ArrowUp" && sourceIndex > 0) {
+      destinationIndex = sourceIndex - 1;
+    } else if (key === "Home" && sourceIndex !== 0) {
+      destinationIndex = 0;
+    } else if (key === "End" && sourceIndex !== enabled.length - 1) {
+      destinationIndex = enabled.length - 1;
+    }
+    const destination =
+      destinationIndex === null ? null : enabled[destinationIndex];
+    return destination &&
+      destination !== control &&
+      publication.navigationControls.includes(destination) &&
+      isEffectivelyEnabled(destination.element)
+      ? destination
+      : null;
+  };
+
+  const navigationNativeFactsAreEligible = (
+    publication: ImportResultPublication,
+    control: ImportResultControlPublication<HTMLElement>,
+    facts: ImportResultNativeKeyboardFacts,
+    expectedPhase: number,
+  ) => {
+    const keyboard = publication.keyboard;
+    const ownerWindow = publication.ownerDocument.defaultView;
+    const terminal = facts.path.at(-1);
+    return Boolean(
+      keyboard &&
+        ownerWindow &&
+        terminal &&
+        facts.type === "keydown" &&
+        facts.phase === expectedPhase &&
+        facts.bubbles &&
+        facts.cancelable &&
+        !facts.defaultPrevented &&
+        !facts.cancelBubble &&
+        facts.detail === 0 &&
+        facts.code === facts.key &&
+        facts.location ===
+          ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_STANDARD &&
+        !facts.ctrlKey &&
+        !facts.altKey &&
+        !facts.metaKey &&
+        !facts.shiftKey &&
+        !facts.repeat &&
+        !facts.composing &&
+        facts.target === control.element &&
+        facts.currentTarget !== null &&
+        facts.path.includes(facts.currentTarget) &&
+        (facts.view === null || facts.view === ownerWindow) &&
+        importResultPathMatches(facts.path, control.path, terminal),
+    );
+  };
+
+  const navigationStageMatches = (
+    publication: ImportResultPublication,
+    stage: ImportResultNavigationNativeStage,
+    control: ImportResultControlPublication<HTMLElement>,
+    nativeEvent: Event,
+    facts: ImportResultNativeKeyboardFacts,
+  ) => {
+    const keyboard = publication.keyboard;
+    const terminal = stage.facts.path.at(-1);
+    return Boolean(
+      keyboard &&
+        terminal &&
+        stage.nativeEvent === nativeEvent &&
+        stage.control === control &&
+        stage.receiver === stage.facts.currentTarget &&
+        terminal === stage.receiver &&
+        stage.facts.phase === keyboard.capturingPhase &&
+        stage.facts.target === control.element &&
+        importResultPathMatches(
+          stage.facts.path,
+          control.path,
+          terminal,
+        ) &&
+        facts.path.at(-1) === terminal &&
+        importResultNativeKeyboardFactsMatch(stage.facts, facts),
+    );
+  };
+
   const createRuntime = (): ImportResultPublicationRuntime | null => {
     type Retirement = "element" | "layout" | "other";
     const root = rootOwner.element();
     const list = listOwner.element();
     const dialog = root?.parentElement;
+    const ownerWindow = root?.ownerDocument.defaultView as
+      | (Window & typeof globalThis)
+      | null
+      | undefined;
     const ignoredElement = ignoredOwner.element();
     const retryElement = retryOwner.element();
     const rootPlacement = root
@@ -1262,7 +2225,8 @@ function createImportResultPublication(
     if (
       !root ||
       !list ||
-      !(dialog instanceof HTMLDivElement) ||
+      !ownerWindow ||
+      !(dialog instanceof ownerWindow.HTMLDivElement) ||
       !rootPlacement ||
       rowOwners.some(
         ({ authority: row, itemOwner, openOwner, retryOwner }) =>
@@ -1283,19 +2247,38 @@ function createImportResultPublication(
       element: T,
     ): ImportResultControlPublication<T> => {
       const controlIdentity = Symbol(`import-result-${kind}-control`);
+      const action = Object.freeze({
+        identity: Symbol(`import-result-${kind}-action`),
+        publicationIdentity: identity,
+        controlIdentity,
+        kind,
+        rowIndex,
+      });
+      const path = captureImportResultEventPath(
+        element,
+        root.ownerDocument,
+      );
+      if (!path) {
+        throw new Error(
+          "Cannot publish an import result action without its owner-realm path",
+        );
+      }
       return Object.freeze({
         identity: controlIdentity,
         publicationIdentity: identity,
         kind,
         rowIndex,
         element,
-        action: Object.freeze({
-          identity: Symbol(`import-result-${kind}-action`),
+        action,
+        navigationAction: Object.freeze({
+          identity: Symbol(`import-result-${kind}-navigation-action`),
           publicationIdentity: identity,
           controlIdentity,
+          actionIdentity: action.identity,
           kind,
           rowIndex,
         }),
+        path,
       });
     };
     const publishedRows = Object.freeze(
@@ -1325,6 +2308,16 @@ function createImportResultPublication(
         });
       }),
     );
+    const publishedRetry =
+      retry && retryElement ? control("retry", null, retryElement) : null;
+    const navigationControls = Object.freeze([
+      ...publishedRows.flatMap((row) => [
+        ...(row.open ? [row.open] : []),
+        ...(row.retry ? [row.retry] : []),
+      ]),
+      ...(publishedRetry ? [publishedRetry] : []),
+    ] as ImportResultControlPublication<HTMLElement>[]);
+    const keyboard = captureImportResultKeyboardAuthority(ownerWindow);
     let retired = false;
     let retirement: Retirement | null = null;
     let established = false;
@@ -1336,6 +2329,10 @@ function createImportResultPublication(
     let replayRefs: RefReplay[] = [];
     let partialReplayOwners = new Set<ElementOwnerView>();
     let invalidReplay = false;
+    let navigationCaptureReady = false;
+    let navigationStage: ImportResultNavigationNativeStage | null = null;
+    let navigationPair: ImportResultNavigationPair | null = null;
+    let removeNavigationCapture: (() => void) | null = null;
     const pendingDialogAttributes = new Set(
       ["aria-labelledby", "aria-describedby", "style"].filter(
         (attribute) => dialog.getAttribute(attribute) === null,
@@ -1350,7 +2347,9 @@ function createImportResultPublication(
       list,
       rows: publishedRows,
       ignored: ignoredElement,
-      retry: retry && retryElement ? control("retry", null, retryElement) : null,
+      retry: publishedRetry,
+      navigationControls,
+      keyboard,
       retire: () => retire("other"),
       isRetired: () => retired,
     });
@@ -1421,21 +2420,29 @@ function createImportResultPublication(
       if (domObserver) recordMutations(domObserver.takeRecords());
       retired = true;
       retirement = reason;
+      navigationCaptureReady = false;
+      navigationStage = null;
+      navigationPair = null;
+      removeNavigationCapture?.();
+      removeNavigationCapture = null;
       cells.retiredPublications.add(publication);
       for (const row of publication.rows) {
         cells.retiredRows.add(row);
         if (row.open) {
           cells.retiredControls.add(row.open);
           cells.retiredActions.add(row.open.action);
+          cells.retiredActions.add(row.open.navigationAction);
         }
         if (row.retry) {
           cells.retiredControls.add(row.retry);
           cells.retiredActions.add(row.retry.action);
+          cells.retiredActions.add(row.retry.navigationAction);
         }
       }
       if (publication.retry) {
         cells.retiredControls.add(publication.retry);
         cells.retiredActions.add(publication.retry.action);
+        cells.retiredActions.add(publication.retry.navigationAction);
       }
       const wasActive = cells.active.current === publication;
       if (wasActive) {
@@ -1601,7 +2608,96 @@ function createImportResultPublication(
       releaseReplayGuard,
       snapshot: () => domSnapshot,
       rootPlacement: () => publishedRootPlacement,
+      navigationCaptureIsReady: () => navigationCaptureReady,
+      navigationStage: () => navigationStage,
+      setNavigationStage: (
+        stage: ImportResultNavigationNativeStage | null,
+      ) => {
+        navigationStage = stage;
+      },
+      navigationPair: () => navigationPair,
+      setNavigationPair: (pair: ImportResultNavigationPair | null) => {
+        navigationPair = pair;
+      },
     });
+    if (keyboard) {
+      const navigationKeyboard = keyboard;
+      const navigationOwnerWindow = ownerWindow;
+      function rememberImportResultNavigationNative(
+        this: EventTarget,
+        nativeEvent: Event,
+      ) {
+        if (
+          !navigationCaptureReady ||
+          retired ||
+          !established ||
+          cells.active.current !== publication ||
+          cells.navigationAttempt.current !== null ||
+          cells.navigationDelivery.current !== null
+        ) {
+          return;
+        }
+        navigationStage = null;
+        navigationPair = null;
+        const facts = navigationKeyboard.read(nativeEvent);
+        const sourceControl = facts
+          ? publication.navigationControls.find(
+              ({ element }) => element === facts.target,
+            )
+          : undefined;
+        const terminal = facts?.path.at(-1);
+        if (
+          !facts ||
+          !sourceControl ||
+          !terminal ||
+          !isImportResultNavigationKey(facts.key) ||
+          facts.type !== "keydown" ||
+          facts.phase !== navigationKeyboard.capturingPhase ||
+          facts.currentTarget !== this ||
+          terminal !== this ||
+          facts.target !== sourceControl.element ||
+          !importResultPathMatches(
+            facts.path,
+            sourceControl.path,
+            terminal,
+          )
+        ) {
+          return;
+        }
+        const stage = Object.freeze({
+          nativeEvent,
+          receiver: this,
+          facts,
+          control: sourceControl,
+        });
+        navigationStage = stage;
+        navigationOwnerWindow.queueMicrotask(() => {
+          if (
+            navigationStage === stage &&
+            navigationPair?.stage !== stage
+          ) {
+            navigationStage = null;
+          }
+        });
+      }
+      try {
+        navigationOwnerWindow.addEventListener(
+          "keydown",
+          rememberImportResultNavigationNative,
+          true,
+        );
+        navigationCaptureReady = true;
+        removeNavigationCapture = () => {
+          navigationOwnerWindow.removeEventListener(
+            "keydown",
+            rememberImportResultNavigationNative,
+            true,
+          );
+        };
+      } catch {
+        navigationCaptureReady = false;
+      }
+    }
     return runtime;
   };
 
@@ -1714,6 +2810,387 @@ function createImportResultPublication(
   ) => {
     claimRetry(row, event)?.();
   };
+  const onNavigateCapture = <T extends HTMLElement>(
+    row: ImportItemPublication | null,
+    kind: ImportResultActionKind,
+    event: ReactKeyboardEvent<T>,
+  ) => {
+    if (!event || typeof event !== "object") return;
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      cells.attemptedNavigationReactEvents.has(event) ||
+      cells.attemptedNavigationNativeEvents.has(nativeEvent)
+    ) {
+      return;
+    }
+    cells.attemptedNavigationReactEvents.add(event);
+    cells.attemptedNavigationNativeEvents.add(nativeEvent);
+    if (
+      cells.navigationAttempt.current !== null ||
+      cells.navigationDelivery.current !== null
+    ) {
+      return;
+    }
+    cells.navigationAttempt.current = nativeEvent;
+    try {
+      const runtime = currentRuntime;
+      const publication = runtime?.publication;
+      const publishedRow =
+        publication && row && items[row.index] === row
+          ? publication.rows[row.index]
+          : null;
+      const control =
+        kind === "open"
+          ? publishedRow?.open
+          : row
+            ? publishedRow?.retry
+            : publication?.retry;
+      const keyboard = publication?.keyboard;
+      const stage = runtime?.navigationStage();
+      if (
+        !runtime ||
+        !publication ||
+        !control ||
+        !keyboard ||
+        !stage ||
+        !runtime.navigationCaptureIsReady() ||
+        runtime.navigationPair() !== null ||
+        runtime.isRetired() ||
+        cells.retiredPublications.has(publication) ||
+        cells.active.current !== publication ||
+        publication.authority !== authority ||
+        publicationWasClaimed(publication) ||
+        cells.claimedNavigationReactEvents.has(event) ||
+        cells.claimedNavigationNativeEvents.has(nativeEvent as Event) ||
+        (row !== null &&
+          (publishedRow?.authority !== row ||
+            cells.retiredRows.has(publishedRow))) ||
+        !navigationControlIsCurrent(publication, control, row, kind) ||
+        !factsAreCurrent() ||
+        !exactDomIsCurrent() ||
+        !navigationOrderIsCurrent(publication) ||
+        !runtime.publishedDomMatches()
+      ) {
+        return;
+      }
+      const nativeFacts = keyboard.read(nativeEvent);
+      const destination =
+        nativeFacts && isImportResultNavigationKey(nativeFacts.key)
+          ? navigationDestination(publication, control, nativeFacts.key)
+          : null;
+      const capture =
+        nativeFacts && nativeEvent instanceof Event
+          ? captureImportResultReactKeyboardEvent(
+              event as ReactKeyboardEvent<HTMLElement>,
+              nativeEvent,
+              nativeFacts,
+              control.element,
+              publication.ownerDocument.defaultView as
+                Window & typeof globalThis,
+              keyboard,
+              keyboard.capturingPhase,
+            )
+          : null;
+      if (
+        !nativeFacts ||
+        !destination ||
+        !capture ||
+        !navigationNativeFactsAreEligible(
+          publication,
+          control,
+          nativeFacts,
+          keyboard.capturingPhase,
+        ) ||
+        !navigationStageMatches(
+          publication,
+          stage,
+          control,
+          nativeEvent as Event,
+          nativeFacts,
+        ) ||
+        cells.active.current !== publication ||
+        runtime.isRetired() ||
+        publicationWasClaimed(publication) ||
+        keyboard.activeElement() !== control.element ||
+        !navigationControlIsCurrent(publication, control, row, kind) ||
+        !publishedNavigationControlIsCurrent(
+          publication,
+          destination,
+        ) ||
+        !factsAreCurrent() ||
+        !exactDomIsCurrent() ||
+        !navigationOrderIsCurrent(publication) ||
+        !runtime.publishedDomMatches()
+      ) {
+        return;
+      }
+      const pair: ImportResultNavigationPair = Object.freeze({
+        publication,
+        action: control.navigationAction,
+        nativeEvent: nativeEvent as Event,
+        stage,
+        capture,
+        sourceControl: control,
+        destinationControl: destination,
+        key: nativeFacts.key as ImportResultNavigationKey,
+      });
+      runtime.setNavigationStage(null);
+      runtime.setNavigationPair(pair);
+      publication.ownerDocument.defaultView?.queueMicrotask(() => {
+        if (
+          runtime.navigationPair() === pair &&
+          !cells.claimedNavigationNativeEvents.has(pair.nativeEvent)
+        ) {
+          runtime.setNavigationPair(null);
+        }
+      });
+    } finally {
+      if (cells.navigationAttempt.current === nativeEvent) {
+        cells.navigationAttempt.current = null;
+      }
+    }
+  };
+
+  const completeNavigation = <T extends HTMLElement>(
+    row: ImportItemPublication | null,
+    kind: ImportResultActionKind,
+    event: ReactKeyboardEvent<T>,
+    nativeEvent: Event,
+  ) => {
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const pair = runtime?.navigationPair();
+    const publishedRow =
+      publication && row && items[row.index] === row
+        ? publication.rows[row.index]
+        : null;
+    const control =
+      kind === "open"
+        ? publishedRow?.open
+        : row
+          ? publishedRow?.retry
+          : publication?.retry;
+    const keyboard = publication?.keyboard;
+    if (
+      !runtime ||
+      !publication ||
+      !pair ||
+      !control ||
+      !keyboard ||
+      !runtime.navigationCaptureIsReady() ||
+      runtime.isRetired() ||
+      pair.publication !== publication ||
+      pair.nativeEvent !== nativeEvent ||
+      pair.capture.nativeEvent !== nativeEvent ||
+      pair.capture.event === event ||
+      pair.sourceControl !== control ||
+      pair.action !== control.navigationAction ||
+      cells.retiredPublications.has(publication) ||
+      cells.active.current !== publication ||
+      publication.authority !== authority ||
+      publicationWasClaimed(publication) ||
+      cells.claimedNavigationReactEvents.has(pair.capture.event) ||
+      cells.claimedNavigationReactEvents.has(event) ||
+      cells.claimedNavigationNativeEvents.has(nativeEvent) ||
+      (row !== null &&
+        (publishedRow?.authority !== row ||
+          cells.retiredRows.has(publishedRow))) ||
+      !navigationControlIsCurrent(publication, control, row, kind) ||
+      !publishedNavigationControlIsCurrent(
+        publication,
+        pair.destinationControl,
+      ) ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent() ||
+      !navigationOrderIsCurrent(publication) ||
+      !runtime.publishedDomMatches()
+    ) {
+      return;
+    }
+    const nativeFacts = keyboard.read(nativeEvent);
+    const bubble = nativeFacts
+      ? captureImportResultReactKeyboardEvent(
+          event as ReactKeyboardEvent<HTMLElement>,
+          nativeEvent,
+          nativeFacts,
+          control.element,
+          publication.ownerDocument.defaultView as Window & typeof globalThis,
+          keyboard,
+          keyboard.bubblingPhase,
+        )
+      : null;
+    const currentDestination =
+      nativeFacts && isImportResultNavigationKey(nativeFacts.key)
+        ? navigationDestination(publication, control, nativeFacts.key)
+        : null;
+    if (
+      !nativeFacts ||
+      !bubble ||
+      !currentDestination ||
+      currentDestination !== pair.destinationControl ||
+      nativeFacts.key !== pair.key ||
+      pair.capture.target !== bubble.target ||
+      pair.capture.currentTarget !== bubble.currentTarget ||
+      pair.capture.phase !== keyboard.capturingPhase ||
+      bubble.phase !== keyboard.bubblingPhase ||
+      !navigationNativeFactsAreEligible(
+        publication,
+        control,
+        nativeFacts,
+        keyboard.bubblingPhase,
+      ) ||
+      !importResultNativeKeyboardFactsMatch(
+        pair.capture.facts,
+        nativeFacts,
+      ) ||
+      !navigationStageMatches(
+        publication,
+        pair.stage,
+        control,
+        nativeEvent,
+        nativeFacts,
+      ) ||
+      !importResultReactKeyboardMethodsAreCurrent(
+        pair.capture,
+        keyboard,
+      ) ||
+      !importResultReactKeyboardMethodsAreCurrent(bubble, keyboard) ||
+      !importResultReactKeyboardMethodsMatch(pair.capture, bubble) ||
+      keyboard.applyMethod(
+        pair.capture.methods.isDefaultPrevented,
+        pair.capture.event,
+      ) !== false ||
+      keyboard.applyMethod(
+        pair.capture.methods.isPropagationStopped,
+        pair.capture.event,
+      ) !== false ||
+      keyboard.applyMethod(
+        bubble.methods.isDefaultPrevented,
+        bubble.event,
+      ) !== false ||
+      keyboard.applyMethod(
+        bubble.methods.isPropagationStopped,
+        bubble.event,
+      ) !== false ||
+      keyboard.activeElement() !== control.element ||
+      !factsAreCurrent() ||
+      !exactDomIsCurrent() ||
+      !navigationOrderIsCurrent(publication) ||
+      !runtime.publishedDomMatches()
+    ) {
+      return;
+    }
+    const action = pair.action;
+    if (
+      cells.navigationDelivery.current !== null ||
+      cells.active.current !== publication ||
+      cells.retiredControls.has(control) ||
+      cells.retiredActions.has(action) ||
+      !cells.attemptedNavigationReactEvents.has(pair.capture.event) ||
+      !cells.attemptedNavigationReactEvents.has(event) ||
+      !cells.attemptedNavigationNativeEvents.has(nativeEvent) ||
+      action.publicationIdentity !== publication.identity ||
+      action.controlIdentity !== control.identity ||
+      action.actionIdentity !== control.action.identity ||
+      action.kind !== control.kind ||
+      action.rowIndex !== control.rowIndex
+    ) {
+      return;
+    }
+    cells.claimedNavigationReactEvents.add(pair.capture.event);
+    cells.claimedNavigationReactEvents.add(event);
+    cells.claimedNavigationNativeEvents.add(nativeEvent);
+    cells.navigationDelivery.current = publication.identity;
+    try {
+      if (
+        runtime.navigationPair() !== pair ||
+        cells.active.current !== publication ||
+        runtime.isRetired() ||
+        publicationWasClaimed(publication) ||
+        keyboard.activeElement() !== control.element ||
+        !navigationControlIsCurrent(publication, control, row, kind) ||
+        !publishedNavigationControlIsCurrent(
+          publication,
+          pair.destinationControl,
+        ) ||
+        !factsAreCurrent() ||
+        !exactDomIsCurrent() ||
+        !navigationOrderIsCurrent(publication) ||
+        !runtime.publishedDomMatches() ||
+        !keyboard.preventDefault(nativeEvent) ||
+        !keyboard.defaultWasPrevented(nativeEvent)
+      ) {
+        return;
+      }
+      if (
+        cells.navigationDelivery.current !== publication.identity ||
+        runtime.navigationPair() !== pair ||
+        cells.active.current !== publication ||
+        runtime.isRetired() ||
+        publicationWasClaimed(publication) ||
+        keyboard.activeElement() !== control.element ||
+        !navigationControlIsCurrent(publication, control, row, kind) ||
+        !publishedNavigationControlIsCurrent(
+          publication,
+          pair.destinationControl,
+        ) ||
+        !factsAreCurrent() ||
+        !exactDomIsCurrent() ||
+        !navigationOrderIsCurrent(publication) ||
+        !runtime.publishedDomMatches()
+      ) {
+        return;
+      }
+      keyboard.focus(pair.destinationControl.element);
+    } finally {
+      if (cells.navigationDelivery.current === publication.identity) {
+        cells.navigationDelivery.current = null;
+      }
+    }
+  };
+
+  const onNavigate = <T extends HTMLElement>(
+    row: ImportItemPublication | null,
+    kind: ImportResultActionKind,
+    event: ReactKeyboardEvent<T>,
+  ) => {
+    if (!event || typeof event !== "object") return;
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !(nativeEvent instanceof Event) ||
+      cells.attemptedNavigationReactEvents.has(event) ||
+      !cells.attemptedNavigationNativeEvents.has(nativeEvent)
+    ) {
+      return;
+    }
+    cells.attemptedNavigationReactEvents.add(event);
+    if (
+      cells.navigationAttempt.current !== null ||
+      cells.navigationDelivery.current !== null
+    ) {
+      return;
+    }
+    cells.navigationAttempt.current = nativeEvent;
+    try {
+      completeNavigation(row, kind, event, nativeEvent);
+    } finally {
+      if (cells.navigationAttempt.current === nativeEvent) {
+        cells.navigationAttempt.current = null;
+      }
+    }
+  };
 
   return Object.freeze({
     captureRoot: rootOwner.capture,
@@ -1724,6 +3201,8 @@ function createImportResultPublication(
     establish,
     onOpen,
     onRetry,
+    onNavigateCapture,
+    onNavigate,
   });
 }
 
@@ -1743,7 +3222,9 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
     retiredPublications: new WeakSet<ImportResultPublication>(),
     retiredRows: new WeakSet<ImportResultRowPublication>(),
     retiredControls: new WeakSet<ImportResultControlPublication<HTMLElement>>(),
-    retiredActions: new WeakSet<ImportResultActionPublication>(),
+    retiredActions: new WeakSet<
+      ImportResultActionPublication | ImportResultNavigationActionPublication
+    >(),
     claimedOpenPublications: new WeakSet<ImportResultPublication>(),
     claimedRetryPublications: new WeakSet<ImportResultPublication>(),
     claimedRows: new WeakSet<ImportResultRowPublication>(),
@@ -1751,6 +3232,12 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
     claimedActions: new WeakSet<ImportResultActionPublication>(),
     claimedReactEvents: new WeakSet<object>(),
     claimedNativeEvents: new WeakSet<Event>(),
+    attemptedNavigationReactEvents: new WeakSet<object>(),
+    attemptedNavigationNativeEvents: new WeakSet<object>(),
+    claimedNavigationReactEvents: new WeakSet<object>(),
+    claimedNavigationNativeEvents: new WeakSet<Event>(),
+    navigationAttempt: new CurrentCell<object | null>(null),
+    navigationDelivery: new CurrentCell<symbol | null>(null),
   }));
   const [, setPublicationRevision] = useState(0);
   const requestPublicationSuccessor = useCallback(() => {
@@ -1787,6 +3274,8 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
     rows,
     onOpen,
     onRetry,
+    onNavigateCapture,
+    onNavigate,
   } = publication;
 
   return (
@@ -1826,6 +3315,12 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                       className="import-open"
                       data-testid="import-open"
                       onClick={(event: ReactMouseEvent<HTMLAnchorElement>) => onOpen(item, event)}
+                      onKeyDownCapture={(event: ReactKeyboardEvent<HTMLAnchorElement>) =>
+                        onNavigateCapture(item, "open", event)
+                      }
+                      onKeyDown={(event: ReactKeyboardEvent<HTMLAnchorElement>) =>
+                        onNavigate(item, "open", event)
+                      }
                     >
                       Open
                     </Link>
@@ -1838,6 +3333,12 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                       disabled={authority.busy}
                       data-testid="import-row-retry"
                       onClick={(event: ReactMouseEvent<HTMLButtonElement>) => onRetry(item, event)}
+                      onKeyDownCapture={(event: ReactKeyboardEvent<HTMLButtonElement>) =>
+                        onNavigateCapture(item, "retry", event)
+                      }
+                      onKeyDown={(event: ReactKeyboardEvent<HTMLButtonElement>) =>
+                        onNavigate(item, "retry", event)
+                      }
                     >
                       Retry {item.name}
                     </button>
@@ -1862,6 +3363,12 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                 disabled={authority.busy}
                 data-testid="import-retry"
                 onClick={(event: ReactMouseEvent<HTMLButtonElement>) => onRetry(null, event)}
+                onKeyDownCapture={(event: ReactKeyboardEvent<HTMLButtonElement>) =>
+                  onNavigateCapture(null, "retry", event)
+                }
+                onKeyDown={(event: ReactKeyboardEvent<HTMLButtonElement>) =>
+                  onNavigate(null, "retry", event)
+                }
               >
                 Retry failed
               </button>
