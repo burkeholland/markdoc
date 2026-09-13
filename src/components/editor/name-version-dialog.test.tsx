@@ -1392,6 +1392,177 @@ describe("NameVersionDialog keyboard action navigation", () => {
   });
 });
 
+describe("NameVersionDialog error wrapping", () => {
+  const failures = [
+    { kind: "unbroken", message: "V".repeat(256) },
+    { kind: "ordinary", message: `  ${"The version could not be named. Please use a different name. ".repeat(5)} ` },
+    { kind: "literal markup", message: '<button tabindex="0">Save</button> & <a href="/versions">Versions</a> <img src="invalid" />'.repeat(4) },
+  ];
+
+  function expectError(message: string) {
+    const error = screen.getByTestId("version-name-error");
+    expect(message.length).toBeGreaterThanOrEqual(240);
+    expect(error.tagName).toBe("DIV");
+    expect(error.textContent).toBe(message);
+    expect(error.children).toHaveLength(0);
+    expect(error.childNodes).toHaveLength(1);
+    expect(error.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(Object.fromEntries([...error.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      class: "text-sm text-danger wrap-anywhere",
+      role: "alert",
+      "data-testid": "version-name-error",
+    });
+    expect(error.parentElement).toBe(form());
+    expect(error).toBeVisible();
+    expect(error.tabIndex).toBe(-1);
+    expect(screen.getAllByRole("alert")).toEqual([error]);
+    return error;
+  }
+
+  it.each(failures)("preserves complete $kind naming failures without new controls", async ({ message }) => {
+    const pending = deferred<void>();
+    const onSubmit = vi.fn(() => pending.promise);
+    const onOpenChange = vi.fn();
+    renderStrict(<Harness editor={{}} documentId="doc-errors" onSubmit={onSubmit} onOpenChange={onOpenChange} />);
+    const controls = [...screen.getByRole("dialog").querySelectorAll<HTMLElement>("*")].filter((element) => element.tabIndex >= 0);
+    fireEvent.change(screen.getByTestId("version-name"), { target: { value: "Release candidate" } });
+    fireEvent.submit(form());
+    await act(async () => pending.reject(new ApiError(400, "Invalid request", [{ message }])));
+
+    expectError(message);
+    expect([...screen.getByRole("dialog").querySelectorAll<HTMLElement>("*")].filter((element) => element.tabIndex >= 0)).toEqual(controls);
+    expect(screen.getByTestId("version-name")).toHaveValue("Release candidate");
+    expect(screen.getByTestId("version-name")).toBeEnabled();
+    expect(screen.getByTestId("version-name-submit")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("replaces a wrapped failure and admits one explicit Save version before recovery", async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const retry = deferred<void>();
+    const onSubmit = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockReturnValueOnce(retry.promise);
+    const onOpenChange = vi.fn();
+    renderStrict(<Harness editor={{}} documentId="doc-errors" onSubmit={onSubmit} onOpenChange={onOpenChange} />);
+    fireEvent.change(screen.getByTestId("version-name"), { target: { value: "Release candidate" } });
+    fireEvent.submit(form());
+    await act(async () => first.reject(new ApiError(400, failures[0].message)));
+    const firstError = expectError(failures[0].message);
+
+    fireEvent.click(screen.getByTestId("version-name-submit"));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(firstError).not.toBeInTheDocument();
+    await act(async () => second.reject(new ApiError(400, failures[2].message)));
+    expectError(failures[2].message);
+    expect(screen.getByRole("dialog").textContent).not.toContain(failures[0].message);
+    expect(screen.getByTestId("version-name")).toHaveValue("Release candidate");
+
+    fireEvent.click(screen.getByTestId("version-name-submit"));
+    fireEvent.submit(form());
+    expect(onSubmit).toHaveBeenCalledTimes(3);
+    expect(onSubmit.mock.calls[2][0]).toMatchObject({ operationId: 3, title: "Release candidate", documentId: "doc-errors" });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("version-name")).toBeDisabled();
+    expect(screen.getByTestId("version-name-submit")).toBeDisabled();
+    await act(async () => retry.resolve());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("discards a wrapped failure on close and reopen", async () => {
+    const pending = deferred<void>();
+    const onSubmit = vi.fn(() => pending.promise);
+    const onOpenChange = vi.fn();
+    renderStrict(<Harness editor={{}} documentId="doc-errors" onSubmit={onSubmit} onOpenChange={onOpenChange} />);
+    fireEvent.change(screen.getByTestId("version-name"), { target: { value: "Old name" } });
+    fireEvent.submit(form());
+    await act(async () => pending.reject(new ApiError(400, failures[0].message)));
+    const error = expectError(failures[0].message);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Open version dialog" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(error).not.toBeInTheDocument();
+    expect(screen.getByTestId("version-name")).toHaveValue("");
+    expect(screen.getByTestId("version-name")).toBeEnabled();
+    expect(screen.getByTestId("version-name-submit")).toBeDisabled();
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("discards a wrapped failure on document change and only calls the current Save version", async () => {
+    const oldVisit: NameVersionVisit = { id: 1, editor: {}, documentId: "doc-old" };
+    const currentVisit: NameVersionVisit = { id: 2, editor: {}, documentId: "doc-current" };
+    const pending = deferred<void>();
+    const oldSubmit = vi.fn(() => pending.promise);
+    const oldClose = vi.fn();
+    const current = deferred<void>();
+    const currentSubmit = vi.fn(() => current.promise);
+    const currentClose = vi.fn();
+    const nextOperationId = vi.fn(() => 1);
+    const view = render(
+      <NameVersionDialog open visit={oldVisit} onSubmit={oldSubmit} onOpenChange={oldClose} nextOperationId={nextOperationId} />,
+    );
+    fireEvent.change(screen.getByTestId("version-name"), { target: { value: "Old name" } });
+    fireEvent.submit(form());
+    await act(async () => pending.reject(new ApiError(400, failures[0].message)));
+    expectError(failures[0].message);
+    view.rerender(
+      <NameVersionDialog open visit={currentVisit} onSubmit={currentSubmit} onOpenChange={currentClose} nextOperationId={nextOperationId} />,
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("version-name")).toHaveValue("");
+    fireEvent.change(screen.getByTestId("version-name"), { target: { value: "Current name" } });
+    fireEvent.click(screen.getByTestId("version-name-submit"));
+    expect(currentSubmit).toHaveBeenCalledExactlyOnceWith({
+      visit: currentVisit, editor: currentVisit.editor, documentId: "doc-current", operationId: 1, title: "Current name",
+    });
+    await act(async () => current.resolve());
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(currentClose).toHaveBeenCalledExactlyOnceWith(currentVisit, false);
+    expect(oldSubmit).toHaveBeenCalledOnce();
+    expect(oldClose).not.toHaveBeenCalled();
+  });
+
+  it("does no request, focus, mutation or scheduling work during settled passive inspection", async () => {
+    const pending = deferred<void>();
+    const onSubmit = vi.fn(() => pending.promise);
+    const onOpenChange = vi.fn();
+    renderStrict(<Harness editor={{}} documentId="doc-errors" onSubmit={onSubmit} onOpenChange={onOpenChange} />);
+    fireEvent.change(screen.getByTestId("version-name"), { target: { value: "Release candidate" } });
+    fireEvent.submit(form());
+    await act(async () => pending.reject(new ApiError(400, failures[0].message)));
+    await act(async () => {});
+    const active = document.activeElement;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const timeout = vi.spyOn(window, "setTimeout");
+    const interval = vi.spyOn(window, "setInterval");
+    const frame = vi.spyOn(window, "requestAnimationFrame");
+    const microtask = vi.spyOn(window, "queueMicrotask");
+    const observer = new MutationObserver(() => {});
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    try {
+      expectError(failures[0].message);
+      expectError(failures[0].message);
+      expect(document.activeElement).toBe(active);
+      expect(observer.takeRecords()).toHaveLength(0);
+      for (const effect of [focus, fetch, timeout, interval, frame, microtask, onOpenChange]) {
+        expect(effect).not.toHaveBeenCalled();
+      }
+      expect(onSubmit).toHaveBeenCalledOnce();
+    } finally {
+      observer.disconnect();
+    }
+  });
+});
+
 describe("NameVersionDialog save ownership", () => {
   it("takes one synchronous owner with the exact trimmed snapshot and closes once on current success", async () => {
     const pending = deferred<void>();

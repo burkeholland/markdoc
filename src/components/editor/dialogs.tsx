@@ -646,7 +646,7 @@ const IMAGE_URL_CLASS = "input flex-1";
 const IMAGE_UPLOAD_CLASS = "btn btn-outline shrink-0";
 const IMAGE_FILE_ACCEPT =
   "image/png,image/jpeg,image/gif,image/webp,image/svg+xml";
-const IMAGE_ERROR_CLASS = "text-sm text-danger";
+const IMAGE_ERROR_CLASS = "text-sm text-danger wrap-anywhere";
 const IMAGE_ALT_CLASS = "input";
 const IMAGE_PREVIEW_CLASS =
   "max-h-40 rounded-lg border border-line object-contain";
@@ -8439,7 +8439,7 @@ export const NameVersionDialog = memo(function NameVersionDialog({
             data-testid="version-name"
           />
           {error && (
-            <div className="text-sm text-danger" role="alert" data-testid="version-name-error">
+            <div className="text-sm text-danger wrap-anywhere" role="alert" data-testid="version-name-error">
               {error}
             </div>
           )}
