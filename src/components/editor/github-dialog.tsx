@@ -4840,7 +4840,6 @@ interface CommitActionKeyboardAuthority {
   readonly detail: CommitActionKeyboardGetter;
   readonly activeElement: CommitActionKeyboardGetter;
   readonly composedPath: Event["composedPath"];
-  readonly preventDefault: Event["preventDefault"];
   readonly focus: (this: HTMLElement, options?: FocusOptions) => void;
   readonly trusted: CommitActionKeyboardTrustAuthority;
   readonly terminal: CommitActionKeyboardTerminalRegistration;
@@ -4870,13 +4869,14 @@ interface CommitActionKeyboardEventSnapshot {
   readonly altKey: boolean;
   readonly metaKey: boolean;
   readonly shiftKey: boolean;
-  readonly view: Window;
+  readonly view: ReactKeyboardEvent<HTMLDivElement>["view"];
   readonly detail: number;
   readonly trusted: true;
   readonly terminal: CommitActionKeyboardTerminalProof;
 }
 
 interface CommitActionReactMethods {
+  readonly preventDefault: ReactKeyboardEvent<HTMLDivElement>["preventDefault"];
   readonly isDefaultPrevented: () => boolean;
   readonly isPropagationStopped: () => boolean;
 }
@@ -5269,7 +5269,7 @@ function captureCommitActionKeyboardTrust(
     );
   return Object.freeze({
     matches,
-    read: (event) =>
+    read: (event: object) =>
       apply(
         descriptor.get as CommitActionKeyboardGetter,
         event,
@@ -5388,7 +5388,7 @@ function createCommitActionKeyboardTerminal(
   const registration: CommitActionKeyboardTerminalRegistration =
     Object.freeze({
       proofFor,
-      claim: (proof) => {
+      claim: (proof: CommitActionKeyboardTerminalProof) => {
         if (
           proofFor(proof.nativeEvent) !== proof ||
           claimedEvents.has(proof.nativeEvent)
@@ -5493,7 +5493,7 @@ function captureCommitActionKeyboardAuthority(
       eventPrototype,
       "composedPath",
     );
-  const preventDefault =
+  const nativePreventDefault =
     captureCommitActionKeyboardMethod<Event["preventDefault"]>(
       getOwnPropertyDescriptor,
       eventPrototype,
@@ -5516,7 +5516,7 @@ function captureCommitActionKeyboardAuthority(
     !uiGetters ||
     !documentGetters ||
     !composedPath ||
-    !preventDefault ||
+    !nativePreventDefault ||
     !focus ||
     !addEventListener ||
     !removeEventListener
@@ -5563,7 +5563,7 @@ function captureCommitActionKeyboardAuthority(
         uiGetters.isCurrent() &&
         documentGetters.isCurrent() &&
         composedPath.isCurrent() &&
-        preventDefault.isCurrent() &&
+        nativePreventDefault.isCurrent() &&
         focus.isCurrent() &&
         addEventListener.isCurrent() &&
         removeEventListener.isCurrent() &&
@@ -5607,7 +5607,6 @@ function captureCommitActionKeyboardAuthority(
     detail: uiGetters.getters.detail,
     activeElement: documentGetters.getters.activeElement,
     composedPath: composedPath.method,
-    preventDefault: preventDefault.method,
     focus: focus.method,
     trusted,
     terminal,
@@ -5636,6 +5635,10 @@ function isCommitActionNavigationKey(
     key === "Home" ||
     key === "End"
   );
+}
+
+function commitActionKeyboardObjectsMatch(left: object, right: object) {
+  return left === right;
 }
 
 function captureCommitActionKeyboardEvent(
@@ -5741,7 +5744,9 @@ function captureCommitActionKeyboardEvent(
       authority.keyboard.shiftKey,
       nativeEvent,
     );
-    const view = commitActionKeyboardValue<Window | null>(
+    const view = commitActionKeyboardValue<
+      ReactKeyboardEvent<HTMLDivElement>["view"] | null
+    >(
       authority,
       authority.view,
       nativeEvent,
@@ -5778,15 +5783,15 @@ function captureCommitActionKeyboardEvent(
       defaultPrevented ||
       cancelBubble ||
       !isCommitActionNavigationKey(key) ||
-      code !== key ||
-      location !== authority.KeyboardEvent.DOM_KEY_LOCATION_STANDARD ||
       repeat ||
       composing ||
       ctrlKey ||
       altKey ||
       metaKey ||
       shiftKey ||
-      (view !== authority.ownerWindow && view !== terminal?.receiver) ||
+      (!commitActionKeyboardObjectsMatch(view, authority.ownerWindow) &&
+        (!terminal ||
+          !commitActionKeyboardObjectsMatch(view, terminal.receiver))) ||
       detail !== 0 ||
       trusted !== true ||
       !terminal
@@ -5886,16 +5891,22 @@ function captureCommitActionReactEvent(
 ): CommitActionReactSnapshot | null {
   try {
     const reactEvent = event as ReactKeyboardEvent<HTMLDivElement> & {
+      preventDefault?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
     };
+    const preventDefault = reactEvent.preventDefault;
     const isDefaultPrevented = reactEvent.isDefaultPrevented;
     const isPropagationStopped = reactEvent.isPropagationStopped;
     if (
+      typeof preventDefault !== "function" ||
       typeof isDefaultPrevented !== "function" ||
       typeof isPropagationStopped !== "function" ||
       authority.apply(isDefaultPrevented, event, []) !== false ||
       authority.apply(isPropagationStopped, event, []) !== false ||
+      reactEvent.preventDefault !== preventDefault ||
+      reactEvent.isDefaultPrevented !== isDefaultPrevented ||
+      reactEvent.isPropagationStopped !== isPropagationStopped ||
       event.nativeEvent !== native.event ||
       event.type !== native.type ||
       event.target !== native.target ||
@@ -5924,6 +5935,7 @@ function captureCommitActionReactEvent(
       currentTarget: bridge,
       phase: native.phase,
       methods: Object.freeze({
+        preventDefault,
         isDefaultPrevented,
         isPropagationStopped,
       }),
@@ -5936,29 +5948,43 @@ function captureCommitActionReactEvent(
 function commitActionReactSnapshotMatches(
   snapshot: CommitActionReactSnapshot,
   authority: CommitActionKeyboardAuthority,
+  currentTarget: HTMLDivElement | null,
 ) {
   try {
     const event = snapshot.event as ReactKeyboardEvent<HTMLDivElement> & {
+      preventDefault?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
     };
-    return (
+    if (
       event.nativeEvent === snapshot.nativeEvent &&
       event.target === snapshot.target &&
-      event.currentTarget === null &&
+      event.currentTarget === currentTarget &&
+      event.preventDefault === snapshot.methods.preventDefault &&
       event.isDefaultPrevented === snapshot.methods.isDefaultPrevented &&
-      event.isPropagationStopped === snapshot.methods.isPropagationStopped &&
-      authority.apply(
-        snapshot.methods.isDefaultPrevented,
-        snapshot.event,
-        [],
-      ) === false &&
-      authority.apply(
-        snapshot.methods.isPropagationStopped,
-        snapshot.event,
-        [],
-      ) === false
-    );
+      event.isPropagationStopped === snapshot.methods.isPropagationStopped
+    ) {
+      if (
+        authority.apply(
+          snapshot.methods.isDefaultPrevented,
+          snapshot.event,
+          [],
+        ) !== false ||
+        authority.apply(
+          snapshot.methods.isPropagationStopped,
+          snapshot.event,
+          [],
+        ) !== false
+      ) {
+        return false;
+      }
+      return (
+        event.preventDefault === snapshot.methods.preventDefault &&
+        event.isDefaultPrevented === snapshot.methods.isDefaultPrevented &&
+        event.isPropagationStopped === snapshot.methods.isPropagationStopped
+      );
+    }
+    return false;
   } catch {
     return false;
   }
@@ -8629,13 +8655,9 @@ function createCommitDialogRender(
         bubble.currentTarget !== pair.capture.currentTarget ||
         pair.capture.phase !== keyboard.Event.CAPTURING_PHASE ||
         bubble.phase !== keyboard.Event.BUBBLING_PHASE ||
-        bubble.methods.isDefaultPrevented !==
-          pair.capture.methods.isDefaultPrevented ||
-        bubble.methods.isPropagationStopped !==
-          pair.capture.methods.isPropagationStopped ||
         !commitActionKeyboardEventsMatch(pair.native, native, keyboard) ||
         native.terminal !== pair.terminal ||
-        !commitActionReactSnapshotMatches(pair.capture, keyboard) ||
+        !commitActionReactSnapshotMatches(pair.capture, keyboard, null) ||
         !actionNavigationIsCurrent(
           publication,
           keyboard,
@@ -8650,6 +8672,8 @@ function createCommitDialogRender(
       }
       if (
         !coordinator.navigationIsDelivering(publication) ||
+        !commitActionReactSnapshotMatches(pair.capture, keyboard, null) ||
+        !commitActionReactSnapshotMatches(bubble, keyboard, bridge) ||
         !actionNavigationIsCurrent(
           publication,
           keyboard,
@@ -8660,13 +8684,17 @@ function createCommitDialogRender(
       ) {
         return true;
       }
-      keyboard.apply(keyboard.preventDefault, native.event, []);
+      keyboard.apply(bubble.methods.preventDefault, bubble.event, []);
+      const currentBubbleDefaultQuery = bubble.event.isDefaultPrevented;
       if (
         commitActionKeyboardValue<boolean>(
           keyboard,
           keyboard.event.defaultPrevented,
           native.event,
         ) !== true ||
+        bubble.event.defaultPrevented !== true ||
+        typeof currentBubbleDefaultQuery !== "function" ||
+        keyboard.apply(currentBubbleDefaultQuery, bubble.event, []) !== true ||
         commitActionKeyboardValue<boolean>(
           keyboard,
           keyboard.event.cancelBubble,

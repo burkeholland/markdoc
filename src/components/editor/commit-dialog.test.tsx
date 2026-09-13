@@ -39,6 +39,7 @@ interface CommitBoundaryProps {
   boundary?: number;
   onBoundary?: () => void;
   onPassiveCleanup?: () => void;
+  onAncestorKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 }
 
 interface ControlledPointerEventInit extends MouseEventInit {
@@ -186,12 +187,13 @@ function CommitBoundary({
   boundary = 0,
   onBoundary,
   onPassiveCleanup,
+  onAncestorKeyDown,
 }: CommitBoundaryProps) {
   useLayoutEffect(() => {
     if (boundary > 0) onBoundary?.();
   }, [boundary, onBoundary]);
   useEffect(() => () => onPassiveCleanup?.(), [onPassiveCleanup, visit]);
-  return present ? (
+  const dialog = present ? (
     <CommitDialog
       open={open}
       onOpenChange={currentActions.onOpenChange}
@@ -200,6 +202,13 @@ function CommitBoundary({
       isOwner={isOwner}
     />
   ) : null;
+  return onAncestorKeyDown ? (
+    <div data-testid="commit-synthetic-ancestor" onKeyDown={onAncestorKeyDown}>
+      {dialog}
+    </div>
+  ) : (
+    dialog
+  );
 }
 
 function StrictCommitReplayProbe({
@@ -393,6 +402,12 @@ type CommitBridgeKeyHandler = (
   event: ReactKeyboardEvent<HTMLDivElement>,
 ) => void;
 
+interface CommitBoundaryKeyDelivery {
+  readonly nativeEvent: KeyboardEvent;
+  readonly captureEvent: ReactKeyboardEvent<HTMLDivElement>;
+  readonly bubbleEvent: ReactKeyboardEvent<HTMLDivElement>;
+}
+
 function dispatchCommitKeyWithBoundaryProbe(
   host: HTMLDivElement,
   target: HTMLButtonElement,
@@ -401,7 +416,7 @@ function dispatchCommitKeyWithBoundaryProbe(
     phase: "capture-before" | "capture-after" | "bubble-before",
     event: ReactKeyboardEvent<HTMLDivElement>,
   ) => void,
-) {
+): CommitBoundaryKeyDelivery {
   const bridge = commitBridge(host);
   const capture = reactProp<CommitBridgeKeyHandler>(
     bridge,
@@ -673,6 +688,23 @@ describe("CommitDialog action keyboard navigation", () => {
         "ArrowRight",
         (phase, event) => {
           if (phase === "capture-before" || phase === "bubble-before") {
+            Object.defineProperties(event, {
+              preventDefault: {
+                configurable: true,
+                writable: true,
+                value: event.preventDefault.bind(event),
+              },
+              isDefaultPrevented: {
+                configurable: true,
+                writable: true,
+                value: event.isDefaultPrevented.bind(event),
+              },
+              isPropagationStopped: {
+                configurable: true,
+                writable: true,
+                value: event.isPropagationStopped.bind(event),
+              },
+            });
             Object.setPrototypeOf(
               event,
               Object.create(Object.getPrototypeOf(event)),
@@ -690,15 +722,18 @@ describe("CommitDialog action keyboard navigation", () => {
       expect(delivery.bubbleEvent.nativeEvent).toBe(delivery.nativeEvent);
       expect(delivery.captureEvent.currentTarget).toBeNull();
       expect(delivery.bubbleEvent.currentTarget).toBeNull();
-      expect(delivery.captureEvent.isDefaultPrevented).toBe(
+      expect(delivery.captureEvent.preventDefault).not.toBe(
+        delivery.bubbleEvent.preventDefault,
+      );
+      expect(delivery.captureEvent.isDefaultPrevented).not.toBe(
         delivery.bubbleEvent.isDefaultPrevented,
       );
-      expect(delivery.captureEvent.isPropagationStopped).toBe(
+      expect(delivery.captureEvent.isPropagationStopped).not.toBe(
         delivery.bubbleEvent.isPropagationStopped,
       );
       expect(delivery.captureEvent.isDefaultPrevented()).toBe(false);
       expect(delivery.captureEvent.isPropagationStopped()).toBe(false);
-      expect(delivery.bubbleEvent.isDefaultPrevented()).toBe(false);
+      expect(delivery.bubbleEvent.isDefaultPrevented()).toBe(true);
       expect(delivery.bubbleEvent.isPropagationStopped()).toBe(false);
       expect(delivery.nativeEvent.defaultPrevented).toBe(true);
       expect(effects.preventDefault).toHaveBeenCalledTimes(1);
@@ -714,22 +749,23 @@ describe("CommitDialog action keyboard navigation", () => {
   });
 
   it.each([
-    ["capture", "isDefaultPrevented"],
-    ["bubble", "isPropagationStopped"],
+    "preventDefault",
+    "isDefaultPrevented",
+    "isPropagationStopped",
   ] as const)(
-    "rejects %s wrapper %s drift and admits a clean successor",
-    async (boundary, property) => {
+    "rejects capture wrapper %s drift and admits a clean successor",
+    async (property) => {
       const effects = trackCommitNavigationEffects(window);
       const current = actions();
       const doc = repoDocument(
-        `doc-${boundary}-${property}`,
+        `doc-capture-${property}`,
         "docs/wrapper-drift.md",
       );
       const { host, root } = createHost();
 
       try {
         await render(root, {
-          visit: `${boundary}-${property}`,
+          visit: `capture-${property}`,
           doc,
           actions: current,
         });
@@ -750,15 +786,12 @@ describe("CommitDialog action keyboard navigation", () => {
           cancel,
           "ArrowRight",
           (phase, event) => {
-            if (
-              (boundary === "capture" && phase === "capture-after") ||
-              (boundary === "bubble" && phase === "bubble-before")
-            ) {
-              Object.defineProperty(event, property, {
-                configurable: true,
-                value: vi.fn(() => false),
-              });
-            }
+          if (phase === "capture-after") {
+            Object.defineProperty(event, property, {
+              configurable: true,
+              value: vi.fn(() => false),
+            });
+          }
           },
         );
         expect(rejected.nativeEvent.defaultPrevented).toBe(false);
@@ -779,6 +812,114 @@ describe("CommitDialog action keyboard navigation", () => {
       }
     },
   );
+
+  it.each([
+    ["ArrowLeft", "Numpad4", "Commit", "Cancel"],
+    ["ArrowUp", "Numpad8", "Commit", "Cancel"],
+    ["ArrowRight", "Numpad6", "Cancel", "Commit"],
+    ["ArrowDown", "Numpad2", "Cancel", "Commit"],
+    ["Home", "Numpad7", "Commit", "Cancel"],
+    ["End", "Numpad1", "Cancel", "Commit"],
+  ] as const)(
+    "uses semantic %s from %s without rejecting its numpad code or location",
+    async (key, code, sourceName, destinationName) => {
+      const effects = trackCommitNavigationEffects(window);
+      const current = actions();
+      const doc = repoDocument(
+        `doc-numpad-${key}`,
+        `docs/numpad-${key}.md`,
+      );
+      const { host, root } = createHost();
+
+      try {
+        await render(root, { visit: `numpad-${key}`, doc, actions: current });
+        await flushPublication();
+        const cancel = screen.getByRole(
+          "button",
+          { name: "Cancel" },
+        ) as HTMLButtonElement;
+        const commit = screen.getByTestId(
+          "commit-submit",
+        ) as HTMLButtonElement;
+        const source = sourceName === "Cancel" ? cancel : commit;
+        const destination =
+          destinationName === "Cancel" ? cancel : commit;
+        source.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+
+        const event = dispatchCommitKey(source, key, {
+          code,
+          location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+        });
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focusCalls).toEqual([
+          { target: destination, options: { preventScroll: true } },
+        ]);
+        expect(destination).toHaveFocus();
+        expect(current.onCommit).not.toHaveBeenCalled();
+        expect(current.onOpenChange).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("prevents a same-root synthetic ancestor action before moving focus", async () => {
+    const effects = trackCommitNavigationEffects(window);
+    const current = actions();
+    const ancestorAction = vi.fn();
+    const ancestorDelivery = vi.fn(
+      (event: ReactKeyboardEvent<HTMLDivElement>) => {
+        if (!event.defaultPrevented || !event.isDefaultPrevented()) {
+          ancestorAction();
+        }
+      },
+    );
+    const doc = repoDocument(
+      "doc-synthetic-ancestor",
+      "docs/synthetic-ancestor.md",
+    );
+    const { host, root } = createHost();
+
+    try {
+      await render(root, {
+        visit: "synthetic-ancestor",
+        doc,
+        actions: current,
+        onAncestorKeyDown: ancestorDelivery,
+      });
+      await flushPublication();
+      const cancel = screen.getByRole(
+        "button",
+        { name: "Cancel" },
+      ) as HTMLButtonElement;
+      const commit = screen.getByTestId(
+        "commit-submit",
+      ) as HTMLButtonElement;
+      cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+
+      const event = dispatchCommitKey(cancel, "ArrowRight");
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(ancestorDelivery).toHaveBeenCalledTimes(1);
+      expect(ancestorAction).not.toHaveBeenCalled();
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).toHaveBeenCalledTimes(1);
+      expect(commit).toHaveFocus();
+      expect(current.onCommit).not.toHaveBeenCalled();
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 
   it("binds navigation to the listener's backing receiver, intrinsic currentTarget, and path terminal", async () => {
     const currentTargetDescriptor = Object.getOwnPropertyDescriptor(
@@ -965,11 +1106,6 @@ describe("CommitDialog action keyboard navigation", () => {
           source: cancel,
           key: "ArrowRight",
           init: { isComposing: true },
-        },
-        {
-          source: cancel,
-          key: "ArrowRight",
-          init: { code: "ArrowLeft" },
         },
         { source: cancel, key: "ArrowRight", trusted: false },
       ];
