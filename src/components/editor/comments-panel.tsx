@@ -11735,7 +11735,7 @@ function Composer<Result>({
                     data-locked={lockedRow ? "" : undefined}
                   >
                     {c.agent ? <AuthorAvatar id="agent:" name={c.name} size={20} /> : <Avatar name={c.name} src={c.image} size={20} />}
-                    <span className="min-w-0 flex-1 truncate text-[13px]">{nameOf(c)}</span>
+                    <span className="min-w-0 flex-1 truncate text-[13px]" title={nameOf(c)}>{nameOf(c)}</span>
                     {c.agent ? (
                       <span
                         className={cn("flex min-w-0 items-center gap-1 truncate text-xs", lockedRow ? "text-ink-3" : "text-ink-4")}
@@ -11745,7 +11745,7 @@ function Composer<Result>({
                         {c.own ? "your agent · not here yet" : lockedRow ? "owner only" : "agent"}
                       </span>
                     ) : (
-                      <span className="truncate text-xs text-ink-3">@{c.login}</span>
+                      <span className="truncate text-xs text-ink-3" title={`@${c.login}`}>@{c.login}</span>
                     )}
                   </li>
                 );
