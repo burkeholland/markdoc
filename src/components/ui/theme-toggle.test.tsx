@@ -899,13 +899,18 @@ describe("mounted theme controls", () => {
     "rolls back method drift caused by %s and admits a clean successor",
     (_name, stage, driftAt, expectedPrevented) => {
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const removeEventListener = vi.spyOn(window, "removeEventListener");
       const { host } = renderDirect(
         <StrictMode>
           <ThemePicker />
         </StrictMode>,
       );
       const storage = vi.spyOn(Storage.prototype, "setItem");
+      const root = picker(host);
       const system = option(host, "system");
+      const capture = reactProperty<ThemeGroupKeyDown>(root, "onKeyDownCapture");
+      const bubble = captureKeyDown(system);
+      const releasesBeforeAbort = removeEventListener.mock.calls.length;
       let queryCount = 0;
       const restore = interceptKeyDown(system, (original, event) => {
         if (stage === "query") {
@@ -936,16 +941,40 @@ describe("mounted theme controls", () => {
       expect(system).toHaveFocus();
       expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
       expect(focus).not.toHaveBeenCalled();
+      expect(removeEventListener).toHaveBeenCalledTimes(releasesBeforeAbort);
+      expect(reactProperty<ThemeGroupKeyDown>(root, "onKeyDownCapture")).toBe(capture);
+      expect(captureKeyDown(system)).toBe(bubble);
+
+      act(() => system.dispatchEvent(rejected));
+      expect(rejected.defaultPrevented).toBe(expectedPrevented);
+      expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY)).toHaveLength(0);
+      expect(focus).not.toHaveBeenCalled();
+      expect(removeEventListener).toHaveBeenCalledTimes(releasesBeforeAbort);
 
       const successor = option(host, "system");
+      let successorPreventions = 0;
+      const restoreSuccessor = interceptKeyDown(successor, (original, event) => {
+        const publicPreventDefault = event.preventDefault;
+        event.preventDefault = function countPublicPrevention(this: typeof event) {
+          successorPreventions += 1;
+          return Reflect.apply(publicPreventDefault, this, []);
+        };
+        original(event);
+      });
       successor.focus();
       focus.mockClear();
-      const accepted = dispatchKey(successor, "ArrowRight");
-      expect(accepted.defaultPrevented).toBe(true);
-      expect(option(host, "light")).toHaveFocus();
-      expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
-        .toEqual([[THEME_STORAGE_KEY, "light"]]);
-      expect(focus).toHaveBeenCalledOnce();
+      try {
+        const accepted = dispatchKey(successor, "ArrowRight");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(successorPreventions).toBe(1);
+        expect(option(host, "light")).toHaveFocus();
+        expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
+          .toEqual([[THEME_STORAGE_KEY, "light"]]);
+        expect(focus).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      } finally {
+        restoreSuccessor();
+      }
     },
   );
 
@@ -1575,6 +1604,7 @@ describe("mounted theme controls", () => {
   });
 
   it("keeps retained capture and bubble wrappers inert after cleanup and accepts a clean successor", () => {
+    const removeEventListener = vi.spyOn(window, "removeEventListener");
     const view = renderDirect(
       <StrictMode>
         <ThemePicker />
@@ -1602,7 +1632,9 @@ describe("mounted theme controls", () => {
     if (!captureWrapper || !bubbleWrapper) {
       throw new Error("The retained React keyboard wrappers were not observed");
     }
+    const releasesBeforeCleanup = removeEventListener.mock.calls.length;
     act(() => view.root.render(null));
+    expect(removeEventListener).toHaveBeenCalledTimes(releasesBeforeCleanup + 1);
     const effects = trackThemeEffects();
     const weakAccesses = [
       vi.spyOn(WeakMap.prototype, "get"),

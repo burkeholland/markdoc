@@ -2254,6 +2254,33 @@ function createPickerPresentation(
       && systemThemeMatches(expectedPrefersDark)
     );
   };
+  const publicationAllowsEventAbort = (
+    pairs: PickerPairingStore,
+    runtime: PublicationRuntime<PickerAuthority>,
+    publication: Publication<PickerAuthority>,
+    listener: PickerKeyListener,
+    pair: PickerKeyPair,
+  ) =>
+    pairingStore === pairs
+    && !pairs.isDisposed()
+    && currentRuntime === runtime
+    && runtime.publication === publication
+    && pair.publication === publication
+    && pair.action === pair.sourceRow.keyboardAction
+    && rowPresentations[pair.sourceRow.authority.index] === pair.sourceRow
+    && rowPresentations[pair.destinationRow.authority.index] === pair.destinationRow
+    && listener.retains(pair.windowProof, publication)
+    && movementIsCurrent(
+      runtime,
+      publication,
+      pair.sourceRow,
+      pair.destinationRow,
+      pair.source,
+      pair.destination,
+      pair.key,
+      preference,
+      pair.prefersDark,
+    );
   const onKeyDownCapture = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const pairs = pairingStore;
     if (!pairs || pairs.isDisposed()) return;
@@ -2668,13 +2695,19 @@ function createPickerPresentation(
       pairs.finish(nativeEvent, pair);
       if (delivery && claimed) {
         coordinator.finishDelivery(delivery);
-        if (!committed && currentRuntime === runtime) {
-          releaseKeyboard(publication);
-          runtime.retireForElement();
-          currentRuntime = null;
-          if (!successorRequested) {
-            successorRequested = true;
-            requestSuccessor();
+        if (!committed) {
+          pairs.invalidate(nativeEvent);
+          if (
+            currentRuntime === runtime
+            && !publicationAllowsEventAbort(pairs, runtime, publication, listener, pair)
+          ) {
+            releaseKeyboard(publication);
+            runtime.retireForElement();
+            currentRuntime = null;
+            if (!successorRequested) {
+              successorRequested = true;
+              requestSuccessor();
+            }
           }
         }
       }
