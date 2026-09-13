@@ -47,6 +47,8 @@ const SHARE_LINK_COPY_CLASS = "btn btn-sm btn-ghost shrink-0 gap-1.5";
 const AGENT_CARD_CLASS = "rounded-xl border border-violet-200 bg-violet-50/60 dark:border-violet-900 dark:bg-violet-950/30";
 const AGENT_TOGGLE_CLASS = "flex w-full items-center gap-3 rounded-xl p-3 text-left hover:bg-violet-100/60 dark:hover:bg-violet-900/30";
 const AGENT_PANEL_CLASS = "px-3 pb-3";
+const COLLABORATOR_LIST_LABEL = "People with access";
+const SHARE_REMOVE_PREVENT_SCROLL = Object.freeze({ preventScroll: true });
 
 type CollaboratorOwner = { login: string | null; name: string | null; image: string | null };
 type CollaboratorListState =
@@ -171,6 +173,7 @@ interface SharePresentation {
   readonly sourceAgentExpansion: ShareAgentExpansion | null;
   readonly agentExpanded: boolean;
   readonly agentPanelId: string;
+  readonly removeCollaborator: ShareRemoveCallbackIdentity;
 }
 
 interface CollaboratorRowElements {
@@ -218,6 +221,8 @@ interface SharePresentationRuntime {
   agentDirectionalStage: ShareDirectionalNativeStage | null;
   agentDirectionalPair: ShareDirectionalPair<SharePresentation, ShareAgentDirectionalAction> | null;
   removeAgentDirectionalCapture: (() => void) | null;
+  removeNavigation: ShareRemoveNavigationPublication | null;
+  removeNavigationPair: ShareRemoveNavigationPair | null;
   controlBindings: Set<ShareControlElementRole>;
   footer: HTMLDivElement | null;
   done: HTMLButtonElement | null;
@@ -246,6 +251,204 @@ interface ShareDirectionalTrustedAuthority {
   readonly read: (event: object) => boolean;
   readonly matches: (event: object) => boolean;
   readonly isCurrent: () => boolean;
+}
+
+type ShareRemoveCallback = (
+  context: PermissionContext,
+  documentId: string,
+  login: string,
+) => Promise<void>;
+
+interface ShareRemoveCallbackIdentity {
+  readonly kind: "remove-collaborator";
+}
+
+type ShareRemoveNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+type ShareRemoveNativeGetter = (this: object) => unknown;
+type ShareRemoveFocus = (this: HTMLElement, options?: FocusOptions) => void;
+
+interface ShareRemoveGetterAuthority<Field extends string> {
+  readonly getters: Readonly<Record<Field, ShareRemoveNativeGetter>>;
+  readonly isCurrent: () => boolean;
+}
+
+interface ShareRemoveMethodAuthority<Method> {
+  readonly method: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface ShareRemoveWindowMethod<Property extends "addEventListener" | "removeEventListener"> {
+  readonly value: Window[Property];
+  readonly isCurrent: () => boolean;
+}
+
+interface ShareRemoveTerminalProof {
+  readonly registration: ShareRemoveTerminalRegistration;
+  readonly nativeEvent: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface ShareRemoveTerminalRegistration {
+  readonly proofFor: (event: KeyboardEvent) => ShareRemoveTerminalProof | null;
+  readonly claim: (proof: ShareRemoveTerminalProof) => boolean;
+  readonly retains: (proof: ShareRemoveTerminalProof) => boolean;
+  readonly release: () => void;
+  readonly isCurrent: () => boolean;
+}
+
+type ShareRemoveEventField =
+  | "type"
+  | "target"
+  | "currentTarget"
+  | "eventPhase"
+  | "bubbles"
+  | "cancelable"
+  | "defaultPrevented"
+  | "cancelBubble"
+  | "composed";
+
+type ShareRemoveKeyField =
+  | "key"
+  | "code"
+  | "location"
+  | "repeat"
+  | "isComposing"
+  | "ctrlKey"
+  | "altKey"
+  | "metaKey"
+  | "shiftKey";
+
+interface ShareRemoveKeyboardAuthority {
+  readonly presentation: SharePresentation;
+  readonly list: HTMLUListElement;
+  readonly document: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof Event;
+  readonly UIEvent: typeof UIEvent;
+  readonly KeyboardEvent: typeof KeyboardEvent;
+  readonly Document: typeof Document;
+  readonly HTMLElement: typeof HTMLElement;
+  readonly event: ShareRemoveGetterAuthority<ShareRemoveEventField>["getters"];
+  readonly keyboard: ShareRemoveGetterAuthority<ShareRemoveKeyField>["getters"];
+  readonly view: ShareRemoveNativeGetter;
+  readonly detail: ShareRemoveNativeGetter;
+  readonly activeElement: ShareRemoveNativeGetter;
+  readonly composedPath: Event["composedPath"];
+  readonly focus: ShareRemoveFocus;
+  readonly trusted: ShareDirectionalTrustedAuthority;
+  readonly terminal: ShareRemoveTerminalRegistration;
+  readonly apply: typeof Reflect.apply;
+  readonly prototypeOf: typeof Object.getPrototypeOf;
+  readonly methodMatches: (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface ShareRemoveControlPublication {
+  readonly presentation: SharePresentation;
+  readonly visit: ShareVisit;
+  readonly permissionContext: PermissionContext;
+  readonly list: CollaboratorListPublication;
+  readonly row: CollaboratorPublication;
+  readonly element: HTMLButtonElement;
+  readonly callback: ShareRemoveCallbackIdentity;
+  readonly order: number;
+}
+
+interface ShareRemoveNavigationPublication {
+  readonly presentation: SharePresentation;
+  readonly visit: ShareVisit;
+  readonly permissionContext: PermissionContext;
+  readonly sourceList: CollaboratorListState;
+  readonly list: CollaboratorListPublication;
+  readonly listElement: HTMLUListElement;
+  readonly controls: readonly ShareRemoveControlPublication[];
+  readonly authority: ShareRemoveKeyboardAuthority;
+  readonly retire: () => void;
+  readonly isRetired: () => boolean;
+}
+
+interface ShareRemoveNativeSnapshot {
+  readonly event: KeyboardEvent;
+  readonly type: string;
+  readonly target: HTMLElement;
+  readonly currentTarget: EventTarget;
+  readonly phase: number;
+  readonly path: readonly EventTarget[];
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly composed: boolean;
+  readonly key: ShareRemoveNavigationKey;
+  readonly code: string;
+  readonly location: number;
+  readonly repeat: boolean;
+  readonly composing: boolean;
+  readonly ctrlKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly view: Window | EventTarget | null;
+  readonly detail: number;
+  readonly trusted: true;
+  readonly terminal: ShareRemoveTerminalProof;
+}
+
+interface ShareRemoveReactMethods {
+  readonly preventDefault: ReactKeyboardEvent<HTMLElement>["preventDefault"];
+  readonly stopPropagation: ReactKeyboardEvent<HTMLElement>["stopPropagation"];
+  readonly isDefaultPrevented: ReactKeyboardEvent<HTMLElement>["isDefaultPrevented"];
+  readonly isPropagationStopped: ReactKeyboardEvent<HTMLElement>["isPropagationStopped"];
+  readonly persist: ReactKeyboardEvent<HTMLElement>["persist"];
+}
+
+interface ShareRemoveReactSnapshot {
+  readonly event: ReactKeyboardEvent<HTMLElement>;
+  readonly prototype: object;
+  readonly nativeEvent: KeyboardEvent;
+  readonly target: HTMLElement;
+  readonly currentTarget: HTMLElement;
+  readonly phase: number;
+  readonly view: ReactKeyboardEvent<HTMLElement>["view"];
+  readonly methods: ShareRemoveReactMethods;
+}
+
+interface ShareRemoveNavigationPair {
+  readonly publication: ShareRemoveNavigationPublication;
+  readonly authority: ShareRemoveKeyboardAuthority;
+  readonly native: ShareRemoveNativeSnapshot;
+  readonly capture: ShareRemoveReactSnapshot;
+  readonly terminal: ShareRemoveTerminalProof;
+  readonly source: ShareRemoveControlPublication;
+  readonly destination: ShareRemoveControlPublication;
+  readonly key: ShareRemoveNavigationKey;
+  readonly movement: object;
+  readonly publicationClaim: object;
+  readonly visitClaim: object;
+  readonly sourceClaim: object;
+  readonly destinationClaim: object;
+  readonly wrapperClaim: object;
+  readonly nativeClaim: object;
+  readonly windowClaim: object;
+}
+
+interface ShareRemoveNavigationDelivery {
+  readonly pair: ShareRemoveNavigationPair;
+  readonly bubble: ShareRemoveReactSnapshot;
 }
 
 interface ShareDirectionalEventIntrinsics {
@@ -439,6 +642,7 @@ interface ShareLiveFacts {
   copyFeedback: ShareCopyFeedback | null;
   copyFallback: ShareCopyFallback | null;
   agentExpansion: ShareAgentExpansion | null;
+  removeCollaborator: ShareRemoveCallbackIdentity;
 }
 
 type ShareDomChange =
@@ -1390,6 +1594,1108 @@ function preventShareDirectionalEvent(
   }
 }
 
+function captureShareRemoveGetters<const Fields extends readonly string[]>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  fields: Fields,
+): ShareRemoveGetterAuthority<Fields[number]> | null {
+  const entries: [Fields[number], ShareRemoveNativeGetter][] = [];
+  const descriptors: [Fields[number], Readonly<PropertyDescriptor>][] = [];
+  for (const field of fields) {
+    const descriptor = getOwnPropertyDescriptor(prototype, field);
+    if (!descriptor || typeof descriptor.get !== "function") return null;
+    entries.push([field, descriptor.get as ShareRemoveNativeGetter]);
+    descriptors.push([field, Object.freeze({ ...descriptor })]);
+  }
+  const getters = Object.freeze(
+    Object.fromEntries(entries),
+  ) as Readonly<Record<Fields[number], ShareRemoveNativeGetter>>;
+  return Object.freeze({
+    getters,
+    isCurrent: () =>
+      descriptors.every(([field, descriptor]) =>
+        shareDirectionalDescriptorsMatch(
+          getOwnPropertyDescriptor(prototype, field),
+          descriptor,
+        )),
+  });
+}
+
+function captureShareRemoveMethod<Method>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  property: PropertyKey,
+): ShareRemoveMethodAuthority<Method> | null {
+  const descriptor = getOwnPropertyDescriptor(prototype, property);
+  if (!descriptor || typeof descriptor.value !== "function") return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    method: descriptor.value as Method,
+    isCurrent: () =>
+      shareDirectionalDescriptorsMatch(
+        getOwnPropertyDescriptor(prototype, property),
+        expected,
+      ),
+  });
+}
+
+function captureShareRemoveWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): ShareRemoveWindowMethod<Property> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(Object.freeze({
+      target,
+      descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+      prototype,
+    }));
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(ownerWindow, property, ownerWindow) as Window[Property];
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Reflect.get === reflectGet &&
+    path.every(({ target: entry, descriptor, prototype }) =>
+      getPrototypeOf(entry) === prototype &&
+      (descriptor
+        ? shareDirectionalDescriptorsMatch(
+            getOwnPropertyDescriptor(entry, property),
+            descriptor,
+          )
+        : getOwnPropertyDescriptor(entry, property) === undefined)) &&
+    reflectGet(ownerWindow, property, ownerWindow) === value;
+  return found && typeof value === "function" && isCurrent()
+    ? Object.freeze({ value, isCurrent })
+    : null;
+}
+
+function createShareRemoveTerminalRegistration(
+  ownerWindow: Window & typeof globalThis,
+  ownerDocument: Document,
+  KeyboardEventConstructor: typeof KeyboardEvent,
+  keyboardEventPrototype: object,
+  eventCurrentTarget: ShareRemoveNativeGetter,
+  eventPhase: ShareRemoveNativeGetter,
+  composedPath: Event["composedPath"],
+  addEventListener: ShareRemoveWindowMethod<"addEventListener">,
+  removeEventListener: ShareRemoveWindowMethod<"removeEventListener">,
+  apply: typeof Reflect.apply,
+  prototypeOf: typeof Object.getPrototypeOf,
+  intrinsicsAreCurrent: () => boolean,
+): ShareRemoveTerminalRegistration | null {
+  const proofs = new WeakMap<KeyboardEvent, ShareRemoveTerminalProof>();
+  const invalidEvents = new WeakSet<Event>();
+  const claimedEvents = new WeakSet<Event>();
+  let active = false;
+  let released = false;
+
+  const listener: EventListener = function rememberShareRemoveNative(
+    this: EventTarget,
+    event: Event,
+  ) {
+    if (
+      !active ||
+      released ||
+      !(event instanceof KeyboardEventConstructor) ||
+      prototypeOf(event) !== keyboardEventPrototype ||
+      invalidEvents.has(event) ||
+      !intrinsicsAreCurrent()
+    ) {
+      return;
+    }
+    if (proofs.has(event)) {
+      invalidEvents.add(event);
+      return;
+    }
+    try {
+      const currentTarget = apply(
+        eventCurrentTarget,
+        event,
+        [],
+      ) as EventTarget | null;
+      const phase = apply(eventPhase, event, []) as number;
+      const path = apply(composedPath, event, []) as EventTarget[];
+      const terminal = path.at(-1);
+      if (
+        currentTarget !== this ||
+        terminal !== this ||
+        phase !== ownerWindow.Event.CAPTURING_PHASE ||
+        path.at(-2) !== ownerDocument
+      ) {
+        invalidEvents.add(event);
+        return;
+      }
+      proofs.set(event, Object.freeze({
+        registration,
+        nativeEvent: event,
+        receiver: this,
+        currentTarget,
+        terminal,
+        path: Object.freeze([...path]),
+      }));
+    } catch {
+      invalidEvents.add(event);
+    }
+  };
+
+  const proofRemains = (proof: ShareRemoveTerminalProof) => {
+    if (
+      proofs.get(proof.nativeEvent) !== proof ||
+      !active ||
+      released ||
+      invalidEvents.has(proof.nativeEvent) ||
+      proof.registration !== registration ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      !intrinsicsAreCurrent()
+    ) {
+      return false;
+    }
+    try {
+      const path = apply(composedPath, proof.nativeEvent, []) as EventTarget[];
+      return (
+        path.length === proof.path.length &&
+        path.every((entry, index) => entry === proof.path[index]) &&
+        path.at(-2) === ownerDocument &&
+        path.at(-1) === proof.receiver
+      );
+    } catch {
+      invalidEvents.add(proof.nativeEvent);
+      return false;
+    }
+  };
+
+  const proofFor = (event: KeyboardEvent) => {
+    const proof = proofs.get(event);
+    return proof && !claimedEvents.has(event) && proofRemains(proof)
+      ? proof
+      : null;
+  };
+
+  const registration: ShareRemoveTerminalRegistration = Object.freeze({
+    proofFor,
+    claim: (proof: ShareRemoveTerminalProof) => {
+      if (
+        claimedEvents.has(proof.nativeEvent) ||
+        proofFor(proof.nativeEvent) !== proof
+      ) {
+        return false;
+      }
+      claimedEvents.add(proof.nativeEvent);
+      return true;
+    },
+    retains: proofRemains,
+    release: () => {
+      if (released) return;
+      released = true;
+      active = false;
+      try {
+        apply(removeEventListener.value, ownerWindow, [
+          "keydown",
+          listener,
+          true,
+        ]);
+      } catch {
+        // Cleanup cannot replace the retained owner-Window registration method.
+      }
+    },
+    isCurrent: () =>
+      active &&
+      !released &&
+      intrinsicsAreCurrent() &&
+      addEventListener.isCurrent() &&
+      removeEventListener.isCurrent(),
+  });
+
+  active = true;
+  try {
+    apply(addEventListener.value, ownerWindow, ["keydown", listener, true]);
+    if (registration.isCurrent()) return registration;
+    registration.release();
+    return null;
+  } catch {
+    active = false;
+    released = true;
+    return null;
+  }
+}
+
+function captureShareRemoveKeyboardAuthority(
+  presentation: SharePresentation,
+  list: HTMLUListElement,
+): ShareRemoveKeyboardAuthority | null {
+  const document = list.ownerDocument;
+  const ownerWindow = document.defaultView as
+    | (Window & typeof globalThis)
+    | null;
+  if (!ownerWindow || !list.isConnected) return null;
+  const objectConstructor = ownerWindow.Object;
+  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+  const prototypeOf = objectConstructor.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const DocumentConstructor = ownerWindow.Document;
+  const HTMLElementConstructor = ownerWindow.HTMLElement;
+  const eventPrototype = EventConstructor.prototype;
+  const uiEventPrototype = UIEventConstructor.prototype;
+  const keyboardEventPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = DocumentConstructor.prototype;
+  const htmlElementPrototype = HTMLElementConstructor.prototype;
+  const eventGetters = captureShareRemoveGetters(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    [
+      "type",
+      "target",
+      "currentTarget",
+      "eventPhase",
+      "bubbles",
+      "cancelable",
+      "defaultPrevented",
+      "cancelBubble",
+      "composed",
+    ] as const,
+  );
+  const keyboardGetters = captureShareRemoveGetters(
+    getOwnPropertyDescriptor,
+    keyboardEventPrototype,
+    [
+      "key",
+      "code",
+      "location",
+      "repeat",
+      "isComposing",
+      "ctrlKey",
+      "altKey",
+      "metaKey",
+      "shiftKey",
+    ] as const,
+  );
+  const uiGetters = captureShareRemoveGetters(
+    getOwnPropertyDescriptor,
+    uiEventPrototype,
+    ["view", "detail"] as const,
+  );
+  const documentGetters = captureShareRemoveGetters(
+    getOwnPropertyDescriptor,
+    documentPrototype,
+    ["activeElement"] as const,
+  );
+  const composedPath = captureShareRemoveMethod<Event["composedPath"]>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "composedPath",
+  );
+  const focus = captureShareRemoveMethod<ShareRemoveFocus>(
+    getOwnPropertyDescriptor,
+    htmlElementPrototype,
+    "focus",
+  );
+  const addEventListener = captureShareRemoveWindowMethod(
+    ownerWindow,
+    "addEventListener",
+  );
+  const removeEventListener = captureShareRemoveWindowMethod(
+    ownerWindow,
+    "removeEventListener",
+  );
+  const trusted = captureShareDirectionalTrustedAuthority(ownerWindow);
+  if (
+    !eventGetters ||
+    !keyboardGetters ||
+    !uiGetters ||
+    !documentGetters ||
+    !composedPath ||
+    !focus ||
+    !addEventListener ||
+    !removeEventListener ||
+    !trusted
+  ) {
+    return null;
+  }
+  let probe: KeyboardEvent;
+  try {
+    probe = new KeyboardEventConstructor("share-remove-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  let poisoned = false;
+  const intrinsicsAreCurrent = () => {
+    if (poisoned) return false;
+    try {
+      const current =
+        document.defaultView === ownerWindow &&
+        ownerWindow.Object === objectConstructor &&
+        ownerWindow.Object.getOwnPropertyDescriptor ===
+          getOwnPropertyDescriptor &&
+        ownerWindow.Object.getPrototypeOf === prototypeOf &&
+        ownerWindow.Reflect.apply === apply &&
+        ownerWindow.Event === EventConstructor &&
+        ownerWindow.UIEvent === UIEventConstructor &&
+        ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+        ownerWindow.Document === DocumentConstructor &&
+        ownerWindow.HTMLElement === HTMLElementConstructor &&
+        EventConstructor.prototype === eventPrototype &&
+        UIEventConstructor.prototype === uiEventPrototype &&
+        KeyboardEventConstructor.prototype === keyboardEventPrototype &&
+        DocumentConstructor.prototype === documentPrototype &&
+        HTMLElementConstructor.prototype === htmlElementPrototype &&
+        prototypeOf(probe) === keyboardEventPrototype &&
+        prototypeOf(keyboardEventPrototype) === uiEventPrototype &&
+        prototypeOf(uiEventPrototype) === eventPrototype &&
+        eventGetters.isCurrent() &&
+        keyboardGetters.isCurrent() &&
+        uiGetters.isCurrent() &&
+        documentGetters.isCurrent() &&
+        composedPath.isCurrent() &&
+        focus.isCurrent() &&
+        addEventListener.isCurrent() &&
+        removeEventListener.isCurrent() &&
+        trusted.isCurrent();
+      if (!current) poisoned = true;
+      return current;
+    } catch {
+      poisoned = true;
+      return false;
+    }
+  };
+  try {
+    if (!intrinsicsAreCurrent() || trusted.read(probe) !== false) return null;
+  } catch {
+    return null;
+  }
+  const terminal = createShareRemoveTerminalRegistration(
+    ownerWindow,
+    document,
+    KeyboardEventConstructor,
+    keyboardEventPrototype,
+    eventGetters.getters.currentTarget,
+    eventGetters.getters.eventPhase,
+    composedPath.method,
+    addEventListener,
+    removeEventListener,
+    apply,
+    prototypeOf,
+    intrinsicsAreCurrent,
+  );
+  if (!terminal) return null;
+  const methodMatches = (
+    event: object,
+    property: PropertyKey,
+    value: unknown,
+  ) => {
+    if (typeof value !== "function") return false;
+    try {
+      let owner: object | null = event;
+      while (owner) {
+        const descriptor = getOwnPropertyDescriptor(owner, property);
+        if (descriptor) {
+          return "value" in descriptor && descriptor.value === value;
+        }
+        owner = prototypeOf(owner) as object | null;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+  return Object.freeze({
+    presentation,
+    list,
+    document,
+    ownerWindow,
+    Event: EventConstructor,
+    UIEvent: UIEventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    Document: DocumentConstructor,
+    HTMLElement: HTMLElementConstructor,
+    event: eventGetters.getters,
+    keyboard: keyboardGetters.getters,
+    view: uiGetters.getters.view,
+    detail: uiGetters.getters.detail,
+    activeElement: documentGetters.getters.activeElement,
+    composedPath: composedPath.method,
+    focus: focus.method,
+    trusted,
+    terminal,
+    apply,
+    prototypeOf,
+    methodMatches,
+    isCurrent: () => intrinsicsAreCurrent() && terminal.isCurrent(),
+  });
+}
+
+function shareRemoveNativeValue<Value>(
+  authority: ShareRemoveKeyboardAuthority,
+  getter: ShareRemoveNativeGetter,
+  target: object,
+): Value {
+  return authority.apply(getter, target, []) as Value;
+}
+
+function shareRemoveNavigationKey(
+  key: string,
+): ShareRemoveNavigationKey | null {
+  return (
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "Home" ||
+    key === "End"
+  )
+    ? key
+    : null;
+}
+
+function shareRemovePathMatches(
+  path: readonly EventTarget[],
+  source: HTMLButtonElement,
+  ownerDocument: Document,
+  terminal: EventTarget,
+) {
+  const expected: EventTarget[] = [];
+  let current: Node | null = source;
+  while (current) {
+    expected.push(current);
+    if (current === ownerDocument) break;
+    current = current.parentNode;
+  }
+  return (
+    expected.at(-1) === ownerDocument &&
+    path.length === expected.length + 1 &&
+    expected.every((entry, index) => path[index] === entry) &&
+    path.at(-1) === terminal
+  );
+}
+
+function captureShareRemoveNativeEvent(
+  authority: ShareRemoveKeyboardAuthority,
+  nativeEvent: Event,
+  expectedPhase: number,
+): ShareRemoveNativeSnapshot | null {
+  if (
+    !authority.isCurrent() ||
+    authority.prototypeOf(nativeEvent) !== authority.KeyboardEvent.prototype ||
+    !authority.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const type = shareRemoveNativeValue<string>(
+      authority,
+      authority.event.type,
+      nativeEvent,
+    );
+    const target = shareRemoveNativeValue<EventTarget | null>(
+      authority,
+      authority.event.target,
+      nativeEvent,
+    );
+    const currentTarget = shareRemoveNativeValue<EventTarget | null>(
+      authority,
+      authority.event.currentTarget,
+      nativeEvent,
+    );
+    const phase = shareRemoveNativeValue<number>(
+      authority,
+      authority.event.eventPhase,
+      nativeEvent,
+    );
+    const bubbles = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.event.bubbles,
+      nativeEvent,
+    );
+    const cancelable = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.event.cancelable,
+      nativeEvent,
+    );
+    const defaultPrevented = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.event.defaultPrevented,
+      nativeEvent,
+    );
+    const cancelBubble = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.event.cancelBubble,
+      nativeEvent,
+    );
+    const composed = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.event.composed,
+      nativeEvent,
+    );
+    const key = shareRemoveNavigationKey(shareRemoveNativeValue<string>(
+      authority,
+      authority.keyboard.key,
+      nativeEvent,
+    ));
+    const code = shareRemoveNativeValue<string>(
+      authority,
+      authority.keyboard.code,
+      nativeEvent,
+    );
+    const location = shareRemoveNativeValue<number>(
+      authority,
+      authority.keyboard.location,
+      nativeEvent,
+    );
+    const repeat = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.keyboard.repeat,
+      nativeEvent,
+    );
+    const composing = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.keyboard.isComposing,
+      nativeEvent,
+    );
+    const ctrlKey = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.keyboard.ctrlKey,
+      nativeEvent,
+    );
+    const altKey = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.keyboard.altKey,
+      nativeEvent,
+    );
+    const metaKey = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.keyboard.metaKey,
+      nativeEvent,
+    );
+    const shiftKey = shareRemoveNativeValue<boolean>(
+      authority,
+      authority.keyboard.shiftKey,
+      nativeEvent,
+    );
+    const view = shareRemoveNativeValue<Window | EventTarget | null>(
+      authority,
+      authority.view,
+      nativeEvent,
+    );
+    const detail = shareRemoveNativeValue<number>(
+      authority,
+      authority.detail,
+      nativeEvent,
+    );
+    const activeElement = shareRemoveNativeValue<Element | null>(
+      authority,
+      authority.activeElement,
+      authority.document,
+    );
+    const path = authority.apply(
+      authority.composedPath,
+      nativeEvent,
+      [],
+    ) as EventTarget[];
+    const trusted = authority.trusted.read(nativeEvent);
+    const terminal = authority.terminal.proofFor(
+      nativeEvent as KeyboardEvent,
+    );
+    if (
+      type !== "keydown" ||
+      !(target instanceof authority.HTMLElement) ||
+      !(target instanceof authority.ownerWindow.HTMLButtonElement) ||
+      target.ownerDocument !== authority.document ||
+      activeElement !== target ||
+      !currentTarget ||
+      phase !== expectedPhase ||
+      !bubbles ||
+      !cancelable ||
+      defaultPrevented ||
+      cancelBubble ||
+      !key ||
+      repeat ||
+      composing ||
+      ctrlKey ||
+      altKey ||
+      metaKey ||
+      shiftKey ||
+      trusted !== true ||
+      !terminal ||
+      (view !== null &&
+        view !== authority.ownerWindow &&
+        view !== terminal.receiver) ||
+      !shareRemovePathMatches(
+        path,
+        target,
+        authority.document,
+        terminal.receiver,
+      ) ||
+      path.length !== terminal.path.length ||
+      path.some((entry, index) => entry !== terminal.path[index]) ||
+      !path.includes(authority.list) ||
+      !path.includes(currentTarget)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event: nativeEvent as KeyboardEvent,
+      type,
+      target,
+      currentTarget,
+      phase,
+      path: Object.freeze([...path]),
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      composed,
+      key,
+      code,
+      location,
+      repeat,
+      composing,
+      ctrlKey,
+      altKey,
+      metaKey,
+      shiftKey,
+      view,
+      detail,
+      trusted: true,
+      terminal,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function shareRemoveNativeEventsMatch(
+  capture: ShareRemoveNativeSnapshot,
+  bubble: ShareRemoveNativeSnapshot,
+  authority: ShareRemoveKeyboardAuthority,
+) {
+  return (
+    capture.event === bubble.event &&
+    capture.type === bubble.type &&
+    capture.target === bubble.target &&
+    capture.currentTarget === bubble.currentTarget &&
+    capture.phase === authority.Event.CAPTURING_PHASE &&
+    bubble.phase === authority.Event.BUBBLING_PHASE &&
+    capture.bubbles === bubble.bubbles &&
+    capture.cancelable === bubble.cancelable &&
+    capture.defaultPrevented === bubble.defaultPrevented &&
+    capture.cancelBubble === bubble.cancelBubble &&
+    capture.composed === bubble.composed &&
+    capture.key === bubble.key &&
+    capture.code === bubble.code &&
+    capture.location === bubble.location &&
+    capture.repeat === bubble.repeat &&
+    capture.composing === bubble.composing &&
+    capture.ctrlKey === bubble.ctrlKey &&
+    capture.altKey === bubble.altKey &&
+    capture.metaKey === bubble.metaKey &&
+    capture.shiftKey === bubble.shiftKey &&
+    capture.view === bubble.view &&
+    capture.detail === bubble.detail &&
+    capture.trusted === bubble.trusted &&
+    capture.terminal === bubble.terminal &&
+    capture.path.length === bubble.path.length &&
+    capture.path.every((entry, index) => entry === bubble.path[index])
+  );
+}
+
+function shareRemoveNativeSnapshotIsCurrent(
+  snapshot: ShareRemoveNativeSnapshot,
+  authority: ShareRemoveKeyboardAuthority,
+  expectedDefaultPrevented = snapshot.defaultPrevented,
+) {
+  try {
+    const path = authority.apply(
+      authority.composedPath,
+      snapshot.event,
+      [],
+    ) as EventTarget[];
+    return (
+      authority.isCurrent() &&
+      authority.prototypeOf(snapshot.event) ===
+        authority.KeyboardEvent.prototype &&
+      authority.trusted.matches(snapshot.event) &&
+      authority.trusted.read(snapshot.event) === snapshot.trusted &&
+      shareRemoveNativeValue(authority, authority.event.type, snapshot.event) ===
+        snapshot.type &&
+      shareRemoveNativeValue(authority, authority.event.target, snapshot.event) ===
+        snapshot.target &&
+      shareRemoveNativeValue(
+        authority,
+        authority.event.currentTarget,
+        snapshot.event,
+      ) === snapshot.currentTarget &&
+      shareRemoveNativeValue(
+        authority,
+        authority.event.eventPhase,
+        snapshot.event,
+      ) === snapshot.phase &&
+      shareRemoveNativeValue(
+        authority,
+        authority.event.bubbles,
+        snapshot.event,
+      ) === snapshot.bubbles &&
+      shareRemoveNativeValue(
+        authority,
+        authority.event.cancelable,
+        snapshot.event,
+      ) === snapshot.cancelable &&
+      shareRemoveNativeValue(
+        authority,
+        authority.event.defaultPrevented,
+        snapshot.event,
+      ) === expectedDefaultPrevented &&
+      shareRemoveNativeValue(
+        authority,
+        authority.event.cancelBubble,
+        snapshot.event,
+      ) === snapshot.cancelBubble &&
+      shareRemoveNativeValue(
+        authority,
+        authority.event.composed,
+        snapshot.event,
+      ) === snapshot.composed &&
+      shareRemoveNativeValue(
+        authority,
+        authority.keyboard.key,
+        snapshot.event,
+      ) === snapshot.key &&
+      shareRemoveNativeValue(
+        authority,
+        authority.keyboard.code,
+        snapshot.event,
+      ) === snapshot.code &&
+      shareRemoveNativeValue(
+        authority,
+        authority.keyboard.location,
+        snapshot.event,
+      ) === snapshot.location &&
+      shareRemoveNativeValue(
+        authority,
+        authority.keyboard.repeat,
+        snapshot.event,
+      ) === snapshot.repeat &&
+      shareRemoveNativeValue(
+        authority,
+        authority.keyboard.isComposing,
+        snapshot.event,
+      ) === snapshot.composing &&
+      shareRemoveNativeValue(
+        authority,
+        authority.keyboard.ctrlKey,
+        snapshot.event,
+      ) === snapshot.ctrlKey &&
+      shareRemoveNativeValue(
+        authority,
+        authority.keyboard.altKey,
+        snapshot.event,
+      ) === snapshot.altKey &&
+      shareRemoveNativeValue(
+        authority,
+        authority.keyboard.metaKey,
+        snapshot.event,
+      ) === snapshot.metaKey &&
+      shareRemoveNativeValue(
+        authority,
+        authority.keyboard.shiftKey,
+        snapshot.event,
+      ) === snapshot.shiftKey &&
+      shareRemoveNativeValue(authority, authority.view, snapshot.event) ===
+        snapshot.view &&
+      shareRemoveNativeValue(authority, authority.detail, snapshot.event) ===
+        snapshot.detail &&
+      path.length === snapshot.path.length &&
+      path.every((entry, index) => entry === snapshot.path[index]) &&
+      authority.terminal.retains(snapshot.terminal)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function captureShareRemoveReactEvent(
+  event: ReactKeyboardEvent<HTMLElement>,
+  authority: ShareRemoveKeyboardAuthority,
+  native: ShareRemoveNativeSnapshot,
+  currentTarget: HTMLElement,
+): ShareRemoveReactSnapshot | null {
+  try {
+    const proof = event as ReactKeyboardEvent<HTMLElement> & {
+      readonly isComposing?: boolean;
+      readonly preventDefault?: unknown;
+      readonly stopPropagation?: unknown;
+      readonly isDefaultPrevented?: unknown;
+      readonly isPropagationStopped?: unknown;
+      readonly persist?: unknown;
+    };
+    const prototype = authority.prototypeOf(event) as object | null;
+    const preventDefault = proof.preventDefault;
+    const stopPropagation = proof.stopPropagation;
+    const isDefaultPrevented = proof.isDefaultPrevented;
+    const isPropagationStopped = proof.isPropagationStopped;
+    const persist = proof.persist;
+    if (
+      !prototype ||
+      typeof preventDefault !== "function" ||
+      typeof stopPropagation !== "function" ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      typeof persist !== "function" ||
+      !authority.methodMatches(event, "preventDefault", preventDefault) ||
+      !authority.methodMatches(event, "stopPropagation", stopPropagation) ||
+      !authority.methodMatches(
+        event,
+        "isDefaultPrevented",
+        isDefaultPrevented,
+      ) ||
+      !authority.methodMatches(
+        event,
+        "isPropagationStopped",
+        isPropagationStopped,
+      ) ||
+      !authority.methodMatches(event, "persist", persist) ||
+      authority.apply(isDefaultPrevented, event, []) !== false ||
+      authority.apply(isPropagationStopped, event, []) !== false ||
+      event === (native.event as unknown) ||
+      event.nativeEvent !== native.event ||
+      event.type !== native.type ||
+      event.target !== native.target ||
+      event.currentTarget !== currentTarget ||
+      event.eventPhase !== native.phase ||
+      event.bubbles !== native.bubbles ||
+      event.cancelable !== native.cancelable ||
+      event.defaultPrevented !== native.defaultPrevented ||
+      event.isTrusted !== native.trusted ||
+      event.key !== native.key ||
+      event.code !== native.code ||
+      event.location !== native.location ||
+      event.repeat !== native.repeat ||
+      event.ctrlKey !== native.ctrlKey ||
+      event.altKey !== native.altKey ||
+      event.metaKey !== native.metaKey ||
+      event.shiftKey !== native.shiftKey ||
+      (proof.isComposing !== undefined &&
+        proof.isComposing !== native.composing) ||
+      (event.view !== null &&
+        !Object.is(event.view, authority.ownerWindow) &&
+        !Object.is(event.view, native.terminal.receiver)) ||
+      event.detail !== native.detail
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event,
+      prototype,
+      nativeEvent: native.event,
+      target: native.target,
+      currentTarget,
+      phase: native.phase,
+      view: event.view,
+      methods: Object.freeze({
+        preventDefault,
+        stopPropagation,
+        isDefaultPrevented,
+        isPropagationStopped,
+        persist,
+      }),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function shareRemoveReactSnapshotIsCurrent(
+  snapshot: ShareRemoveReactSnapshot,
+  authority: ShareRemoveKeyboardAuthority,
+  native: ShareRemoveNativeSnapshot,
+  currentTarget: HTMLElement | null,
+  expectedDefaultPrevented = false,
+) {
+  try {
+    const event = snapshot.event as ReactKeyboardEvent<HTMLElement> & {
+      readonly preventDefault?: unknown;
+      readonly stopPropagation?: unknown;
+      readonly isDefaultPrevented?: unknown;
+      readonly isPropagationStopped?: unknown;
+      readonly persist?: unknown;
+    };
+    return (
+      authority.prototypeOf(event) === snapshot.prototype &&
+      event.nativeEvent === snapshot.nativeEvent &&
+      event.nativeEvent === native.event &&
+      event.type === native.type &&
+      event.target === snapshot.target &&
+      event.target === native.target &&
+      event.currentTarget === currentTarget &&
+      event.eventPhase === snapshot.phase &&
+      event.bubbles === native.bubbles &&
+      event.cancelable === native.cancelable &&
+      event.defaultPrevented === expectedDefaultPrevented &&
+      event.isTrusted === native.trusted &&
+      event.key === native.key &&
+      event.code === native.code &&
+      event.location === native.location &&
+      event.repeat === native.repeat &&
+      event.ctrlKey === native.ctrlKey &&
+      event.altKey === native.altKey &&
+      event.metaKey === native.metaKey &&
+      event.shiftKey === native.shiftKey &&
+      event.view === snapshot.view &&
+      (event.view === null ||
+        Object.is(event.view, authority.ownerWindow) ||
+        Object.is(event.view, native.terminal.receiver)) &&
+      event.detail === native.detail &&
+      event.preventDefault === snapshot.methods.preventDefault &&
+      event.stopPropagation === snapshot.methods.stopPropagation &&
+      (expectedDefaultPrevented ||
+        event.isDefaultPrevented === snapshot.methods.isDefaultPrevented) &&
+      event.isPropagationStopped ===
+        snapshot.methods.isPropagationStopped &&
+      event.persist === snapshot.methods.persist &&
+      authority.methodMatches(
+        event,
+        "preventDefault",
+        snapshot.methods.preventDefault,
+      ) &&
+      authority.methodMatches(
+        event,
+        "stopPropagation",
+        snapshot.methods.stopPropagation,
+      ) &&
+      (expectedDefaultPrevented ||
+        authority.methodMatches(
+          event,
+          "isDefaultPrevented",
+          snapshot.methods.isDefaultPrevented,
+        )) &&
+      authority.methodMatches(
+        event,
+        "isPropagationStopped",
+        snapshot.methods.isPropagationStopped,
+      ) &&
+      authority.methodMatches(event, "persist", snapshot.methods.persist) &&
+      authority.apply(
+        event.isDefaultPrevented,
+        snapshot.event,
+        [],
+      ) === expectedDefaultPrevented &&
+      authority.apply(
+        snapshot.methods.isPropagationStopped,
+        snapshot.event,
+        [],
+      ) === false
+    );
+  } catch {
+    return false;
+  }
+}
+
+function shareRemoveDestination(
+  controls: readonly ShareRemoveControlPublication[],
+  source: ShareRemoveControlPublication,
+  key: ShareRemoveNavigationKey,
+) {
+  const sourceIndex = controls.indexOf(source);
+  if (sourceIndex < 0) return null;
+  let destinationIndex: number;
+  if (key === "ArrowLeft" || key === "ArrowUp") {
+    destinationIndex = Math.max(0, sourceIndex - 1);
+  } else if (key === "ArrowRight" || key === "ArrowDown") {
+    destinationIndex = Math.min(controls.length - 1, sourceIndex + 1);
+  } else {
+    destinationIndex = key === "Home" ? 0 : controls.length - 1;
+  }
+  return destinationIndex === sourceIndex
+    ? null
+    : controls[destinationIndex] ?? null;
+}
+
+function createShareRemoveNavigationPublication(
+  presentation: SharePresentation,
+  runtime: SharePresentationRuntime,
+): ShareRemoveNavigationPublication | null {
+  const list = runtime.list;
+  const visit = presentation.visit;
+  const context = presentation.permissionContext;
+  if (
+    !list ||
+    !visit ||
+    !context ||
+    !presentation.isOwner ||
+    presentation.list.status !== "loaded" ||
+    presentation.sourceList !== presentation.list.source ||
+    list.getAttribute("aria-label") !== COLLABORATOR_LIST_LABEL
+  ) {
+    return null;
+  }
+  const controls: ShareRemoveControlPublication[] = [];
+  for (const row of presentation.list.collaborators) {
+    const element = runtime.rows[row.index]?.remove;
+    if (
+      !element ||
+      row.pending ||
+      row.operation ||
+      element.disabled ||
+      !element.isConnected ||
+      element.parentElement !== runtime.rows[row.index]?.row
+    ) {
+      continue;
+    }
+    controls.push(Object.freeze({
+      presentation,
+      visit,
+      permissionContext: context,
+      list: presentation.list,
+      row,
+      element,
+      callback: presentation.removeCollaborator,
+      order: controls.length,
+    }));
+  }
+  if (controls.length === 0) return null;
+  const authority = captureShareRemoveKeyboardAuthority(presentation, list);
+  if (!authority) return null;
+  let retired = false;
+  const publication: ShareRemoveNavigationPublication = Object.freeze({
+    presentation,
+    visit,
+    permissionContext: context,
+    sourceList: presentation.list.source,
+    list: presentation.list,
+    listElement: list,
+    controls: Object.freeze(controls),
+    authority,
+    retire: () => {
+      if (retired) return;
+      retired = true;
+      authority.terminal.release();
+    },
+    isRetired: () => retired,
+  });
+  return publication;
+}
+
 function snapshotSharePlacement(node: Node, ownerDocument: Document): SharePlacementChain | null {
   const placements: SharePlacement[] = [];
   let current: Node | null = node;
@@ -1932,6 +3238,9 @@ export const ShareDialog = memo(function ShareDialog({
   onDocChange: (doc: DocumentDto) => void;
 }) {
   const [mount] = useState(() => Symbol("share-dialog"));
+  const [removeCallbackIdentity] = useState<ShareRemoveCallbackIdentity>(
+    () => Object.freeze({ kind: "remove-collaborator" }),
+  );
   const activePresentationRef = useRef<SharePresentation | null>(null);
   const presentationRuntimesRef = useRef(new WeakMap<SharePresentation, SharePresentationRuntime>());
   const presentationLineagesRef = useRef(new WeakMap<SharePresentation, SharePresentationLineage>());
@@ -1968,6 +3277,23 @@ export const ShareDialog = memo(function ShareDialog({
   const claimedNativeControlEventsRef = useRef(new WeakSet<Event>());
   const claimedDirectionalPairsRef = useRef(new WeakSet<object>());
   const claimedControlElementsRef = useRef(new WeakMap<HTMLButtonElement, object>());
+  const attemptedRemoveReactEventsRef = useRef(new WeakSet<object>());
+  const attemptedRemoveNativeEventsRef = useRef(new WeakSet<object>());
+  const claimedRemoveDeliveriesRef = useRef(new WeakSet<object>());
+  const claimedRemovePairsRef = useRef(new WeakSet<object>());
+  const claimedRemoveMovementsRef = useRef(new WeakSet<object>());
+  const claimedRemovePublicationClaimsRef = useRef(new WeakSet<object>());
+  const claimedRemoveVisitClaimsRef = useRef(new WeakSet<object>());
+  const claimedRemoveSourceClaimsRef = useRef(new WeakSet<object>());
+  const claimedRemoveDestinationClaimsRef = useRef(new WeakSet<object>());
+  const claimedRemoveWrapperClaimsRef = useRef(new WeakSet<object>());
+  const claimedRemoveNativeClaimsRef = useRef(new WeakSet<object>());
+  const claimedRemoveWindowClaimsRef = useRef(new WeakSet<object>());
+  const claimedRemoveReactWrappersRef = useRef(new WeakSet<object>());
+  const claimedRemoveNativeKeyEventsRef = useRef(new WeakSet<Event>());
+  const activeRemoveDeliveryRef = useRef<ShareRemoveNavigationDelivery | null>(
+    null,
+  );
   const selectedFallbacksRef = useRef(new WeakSet<ShareCopyFallback>());
   const [copyFeedback, setCopyFeedback] = useState<ShareCopyFeedback | null>(null);
   const [copyFallback, setCopyFallback] = useState<ShareCopyFallback | null>(null);
@@ -2181,54 +3507,66 @@ export const ShareDialog = memo(function ShareDialog({
     }
   };
 
-  const isCollaboratorPermissionCurrent = (operation: CollaboratorPermissionOperation) =>
-    permissionContext.current === operation.context && collaboratorPermissionOwners.current.get(operation.login) === operation;
+  const isCollaboratorPermissionCurrent = useCallback(
+    (operation: CollaboratorPermissionOperation) =>
+      permissionContext.current === operation.context &&
+      collaboratorPermissionOwners.current.get(operation.login) === operation,
+    [],
+  );
 
   const isLinkPermissionCurrent = (operation: LinkPermissionOperation) =>
     permissionContext.current === operation.context && linkPermissionOwner.current === operation;
 
-  const claimPermissionFeedback = (operation: PermissionOperation) => {
+  const claimPermissionFeedback = useCallback((operation: PermissionOperation) => {
     permissionFeedbackOwner.current = operation;
     setPermissionFeedbackOperation(operation);
     setActionError(null);
-  };
+  }, []);
 
-  const setPermissionError = (operation: PermissionOperation, message: string) => {
+  const setPermissionError = useCallback((operation: PermissionOperation, message: string) => {
     if (permissionContext.current === operation.context && permissionFeedbackOwner.current === operation) {
       setActionError({ operation, message });
     }
-  };
+  }, []);
 
-  const beginCollaboratorPermission = (
-    context: PermissionContext,
-    documentId: string,
-    login: string,
-    kind: CollaboratorPermissionOperation["kind"],
-  ) => {
-    if (
-      permissionContext.current !== context ||
-      context.documentId !== documentId ||
-      collaboratorPermissionOwners.current.has(login)
-    ) {
-      return null;
-    }
-    const operation = { context, documentId, login, kind };
-    collaboratorPermissionOwners.current.set(login, operation);
-    claimPermissionFeedback(operation);
-    setCollaboratorPermissionOperations((current) => new Map(current).set(login, operation));
-    return operation;
-  };
+  const beginCollaboratorPermission = useCallback(
+    (
+      context: PermissionContext,
+      documentId: string,
+      login: string,
+      kind: CollaboratorPermissionOperation["kind"],
+    ) => {
+      if (
+        permissionContext.current !== context ||
+        context.documentId !== documentId ||
+        collaboratorPermissionOwners.current.has(login)
+      ) {
+        return null;
+      }
+      const operation = { context, documentId, login, kind };
+      collaboratorPermissionOwners.current.set(login, operation);
+      claimPermissionFeedback(operation);
+      setCollaboratorPermissionOperations((current) =>
+        new Map(current).set(login, operation),
+      );
+      return operation;
+    },
+    [claimPermissionFeedback],
+  );
 
-  const finishCollaboratorPermission = (operation: CollaboratorPermissionOperation) => {
-    if (!isCollaboratorPermissionCurrent(operation)) return;
-    collaboratorPermissionOwners.current.delete(operation.login);
-    setCollaboratorPermissionOperations((current) => {
-      if (current.get(operation.login) !== operation) return current;
-      const next = new Map(current);
-      next.delete(operation.login);
-      return next;
-    });
-  };
+  const finishCollaboratorPermission = useCallback(
+    (operation: CollaboratorPermissionOperation) => {
+      if (!isCollaboratorPermissionCurrent(operation)) return;
+      collaboratorPermissionOwners.current.delete(operation.login);
+      setCollaboratorPermissionOperations((current) => {
+        if (current.get(operation.login) !== operation) return current;
+        const next = new Map(current);
+        next.delete(operation.login);
+        return next;
+      });
+    },
+    [isCollaboratorPermissionCurrent],
+  );
 
   const changeRole = async (
     context: PermissionContext,
@@ -2255,25 +3593,47 @@ export const ShareDialog = memo(function ShareDialog({
     }
   };
 
-  const remove = async (context: PermissionContext, documentId: string, login: string) => {
-    const operation = beginCollaboratorPermission(context, documentId, login, "remove");
-    if (!operation) return;
-    try {
-      await api.documents.removeCollaborator(operation.documentId, login);
-      if (!isCollaboratorPermissionCurrent(operation)) return;
-      setCollaboratorList((current) =>
-        current?.documentId === operation.documentId && current.status === "loaded"
-          ? { ...current, collaborators: current.collaborators.filter((x) => x.login !== login) }
-          : current,
+  const remove: ShareRemoveCallback = useCallback(
+    async (context: PermissionContext, documentId: string, login: string) => {
+      const operation = beginCollaboratorPermission(
+        context,
+        documentId,
+        login,
+        "remove",
       );
-    } catch (e) {
-      if (isCollaboratorPermissionCurrent(operation)) {
-        setPermissionError(operation, apiErrorText(e, "Could not remove collaborator"));
+      if (!operation) return;
+      try {
+        await api.documents.removeCollaborator(operation.documentId, login);
+        if (!isCollaboratorPermissionCurrent(operation)) return;
+        setCollaboratorList((current) =>
+          current?.documentId === operation.documentId &&
+          current.status === "loaded"
+            ? {
+                ...current,
+                collaborators: current.collaborators.filter(
+                  (collaborator) => collaborator.login !== login,
+                ),
+              }
+            : current,
+        );
+      } catch (error) {
+        if (isCollaboratorPermissionCurrent(operation)) {
+          setPermissionError(
+            operation,
+            apiErrorText(error, "Could not remove collaborator"),
+          );
+        }
+      } finally {
+        finishCollaboratorPermission(operation);
       }
-    } finally {
-      finishCollaboratorPermission(operation);
-    }
-  };
+    },
+    [
+      beginCollaboratorPermission,
+      finishCollaboratorPermission,
+      isCollaboratorPermissionCurrent,
+      setPermissionError,
+    ],
+  );
 
   const setLink = async (
     context: PermissionContext,
@@ -2353,6 +3713,7 @@ export const ShareDialog = memo(function ShareDialog({
     sourceAgentExpansion: agentExpansion,
     agentExpanded,
     agentPanelId,
+    removeCollaborator: removeCallbackIdentity,
   });
   const liveFacts = useMemo<ShareLiveFacts>(
     () => ({
@@ -2376,6 +3737,7 @@ export const ShareDialog = memo(function ShareDialog({
       copyFeedback,
       copyFallback,
       agentExpansion,
+      removeCollaborator: removeCallbackIdentity,
     }),
     [
       actionError,
@@ -2397,6 +3759,7 @@ export const ShareDialog = memo(function ShareDialog({
       open,
       origin,
       permissionFeedbackOperation,
+      removeCallbackIdentity,
       role,
     ],
   );
@@ -2453,6 +3816,8 @@ export const ShareDialog = memo(function ShareDialog({
         agentDirectionalStage: null,
         agentDirectionalPair: null,
         removeAgentDirectionalCapture: null,
+        removeNavigation: null,
+        removeNavigationPair: null,
         controlBindings: new Set(),
         footer: null,
         done: null,
@@ -2548,6 +3913,9 @@ export const ShareDialog = memo(function ShareDialog({
       runtime.agentDirectionalPair = null;
       runtime.removeAgentDirectionalCapture?.();
       runtime.removeAgentDirectionalCapture = null;
+      runtime.removeNavigationPair = null;
+      runtime.removeNavigation?.retire();
+      runtime.removeNavigation = null;
       clearShareCloseProvenance(runtime);
       runtime.removeCloseCapture?.();
       runtime.removeCloseCapture = null;
@@ -2768,6 +4136,7 @@ export const ShareDialog = memo(function ShareDialog({
         live.agentExpansion.expanded,
       ) !== candidate.agentExpanded ||
       !candidate.agentPanelId ||
+      live.removeCollaborator !== candidate.removeCollaborator ||
       !linkPermissionOperationIsCurrent(linkPermissionOwner.current, candidate.linkPermissionOwner) ||
       !linkPermissionOperationIsCurrent(live.linkPermissionOperation, candidate.linkPermissionOperation) ||
       live.permissionFeedbackOwner !== candidate.permissionFeedbackOwner?.source &&
@@ -2954,6 +4323,7 @@ export const ShareDialog = memo(function ShareDialog({
         !list.isConnected ||
         list.parentElement !== people ||
         people.children.item(1) !== list ||
+        list.getAttribute("aria-label") !== COLLABORATOR_LIST_LABEL ||
         !(editorLink instanceof ownerWindow.HTMLDivElement) ||
         editorLink.parentElement !== people ||
         people.children.item(2) !== editorLink ||
@@ -3813,6 +5183,437 @@ export const ShareDialog = memo(function ShareDialog({
     return action;
   };
 
+  const removeNavigationIsCurrent = (
+    candidate: SharePresentation,
+    publication: ShareRemoveNavigationPublication,
+    source: ShareRemoveControlPublication,
+    destination: ShareRemoveControlPublication,
+    key: ShareRemoveNavigationKey,
+  ) => {
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    const authority = publication.authority;
+    if (
+      !runtime ||
+      runtime.removeNavigation !== publication ||
+      publication.presentation !== candidate ||
+      publication.visit !== candidate.visit ||
+      publication.permissionContext !== candidate.permissionContext ||
+      publication.sourceList !== candidate.sourceList ||
+      publication.list !== candidate.list ||
+      publication.listElement !== runtime.list ||
+      publication.listElement.getAttribute("aria-label") !==
+        COLLABORATOR_LIST_LABEL ||
+      publication.isRetired() ||
+      authority.presentation !== candidate ||
+      authority.list !== publication.listElement ||
+      authority.document !== publication.listElement.ownerDocument ||
+      authority.ownerWindow !== authority.document.defaultView ||
+      !authority.isCurrent() ||
+      !candidate.open ||
+      !candidate.isOwner ||
+      candidate.busy ||
+      candidate.list.status !== "loaded" ||
+      candidate.removeCollaborator !== publication.controls[0]?.callback ||
+      !publication.controls.includes(source) ||
+      !publication.controls.includes(destination) ||
+      source === destination ||
+      source.presentation !== candidate ||
+      destination.presentation !== candidate ||
+      source.visit !== candidate.visit ||
+      destination.visit !== candidate.visit ||
+      source.permissionContext !== candidate.permissionContext ||
+      destination.permissionContext !== candidate.permissionContext ||
+      source.list !== candidate.list ||
+      destination.list !== candidate.list ||
+      source.callback !== candidate.removeCollaborator ||
+      destination.callback !== candidate.removeCollaborator ||
+      source.element === destination.element ||
+      source.element.ownerDocument !== authority.document ||
+      destination.element.ownerDocument !== authority.document ||
+      source.element.disabled ||
+      destination.element.disabled ||
+      source.row.pending ||
+      destination.row.pending ||
+      source.row.operation ||
+      destination.row.operation ||
+      candidate.list.collaborators[source.row.index] !== source.row ||
+      candidate.list.collaborators[destination.row.index] !== destination.row ||
+      runtime.rows[source.row.index]?.remove !== source.element ||
+      runtime.rows[destination.row.index]?.remove !== destination.element ||
+      source.element.parentElement !== runtime.rows[source.row.index]?.row ||
+      destination.element.parentElement !==
+        runtime.rows[destination.row.index]?.row ||
+      shareRemoveDestination(publication.controls, source, key) !== destination
+    ) {
+      return false;
+    }
+    const currentList = candidate.list;
+    if (currentList.status !== "loaded") return false;
+    const expectedControls = currentList.collaborators.flatMap((row) => {
+      const element = runtime.rows[row.index]?.remove;
+      return (
+        element &&
+        !row.pending &&
+        !row.operation &&
+        !element.disabled &&
+        element.isConnected
+      )
+        ? [element]
+        : [];
+    });
+    if (
+      expectedControls.length !== publication.controls.length ||
+      publication.controls.some((control, index) =>
+        control.order !== index ||
+        control.presentation !== candidate ||
+        control.visit !== candidate.visit ||
+        control.permissionContext !== candidate.permissionContext ||
+        control.list !== candidate.list ||
+        control.row !== currentList.collaborators[control.row.index] ||
+        control.element !== expectedControls[index] ||
+        control.element !== runtime.rows[control.row.index]?.remove ||
+        control.callback !== candidate.removeCollaborator ||
+        control.element.getAttribute("aria-label") !==
+          `Remove ${control.row.login}` ||
+        control.element.type !== "button" ||
+        control.element.disabled ||
+        !control.element.isConnected)
+    ) {
+      return false;
+    }
+    try {
+      return (
+        shareRemoveNativeValue<Element | null>(
+          authority,
+          authority.activeElement,
+          authority.document,
+        ) === source.element &&
+        presentationIsCurrent(candidate)
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const captureRemoveNavigation = (
+    sourcePresentation: SharePresentation,
+    event: ReactKeyboardEvent<HTMLUListElement>,
+  ) => {
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      activeRemoveDeliveryRef.current ||
+      attemptedRemoveReactEventsRef.current.has(event) ||
+      attemptedRemoveNativeEventsRef.current.has(nativeEvent)
+    ) {
+      return;
+    }
+    attemptedRemoveReactEventsRef.current.add(event);
+    attemptedRemoveNativeEventsRef.current.add(nativeEvent);
+    const candidate = currentPresentation(sourcePresentation);
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    const publication = runtime?.removeNavigation;
+    const authority = publication?.authority;
+    if (
+      !runtime ||
+      !publication ||
+      !authority ||
+      runtime.removeNavigationPair ||
+      event.currentTarget !== publication.listElement
+    ) {
+      return;
+    }
+    const native = captureShareRemoveNativeEvent(
+      authority,
+      nativeEvent as Event,
+      authority.Event.CAPTURING_PHASE,
+    );
+    const capture = native
+      ? captureShareRemoveReactEvent(
+          event as ReactKeyboardEvent<HTMLElement>,
+          authority,
+          native,
+          publication.listElement,
+        )
+      : null;
+    const source = native
+      ? publication.controls.find(
+          (control) => control.element === native.target,
+        )
+      : undefined;
+    const destination =
+      source && native
+        ? shareRemoveDestination(publication.controls, source, native.key)
+        : null;
+    if (
+      !native ||
+      !capture ||
+      !source ||
+      !destination ||
+      native.terminal !== authority.terminal.proofFor(native.event) ||
+      !shareRemoveNativeSnapshotIsCurrent(native, authority) ||
+      !removeNavigationIsCurrent(
+        candidate,
+        publication,
+        source,
+        destination,
+        native.key,
+      )
+    ) {
+      return;
+    }
+    const pair: ShareRemoveNavigationPair = Object.freeze({
+      publication,
+      authority,
+      native,
+      capture,
+      terminal: native.terminal,
+      source,
+      destination,
+      key: native.key,
+      movement: Object.freeze({
+        publication,
+        source,
+        destination,
+        key: native.key,
+      }),
+      publicationClaim: Object.freeze({ publication }),
+      visitClaim: Object.freeze({
+        visit: publication.visit,
+        permissionContext: publication.permissionContext,
+      }),
+      sourceClaim: Object.freeze({ source }),
+      destinationClaim: Object.freeze({ destination }),
+      wrapperClaim: Object.freeze({ capture: event }),
+      nativeClaim: Object.freeze({ nativeEvent }),
+      windowClaim: Object.freeze({
+        registration: authority.terminal,
+        proof: native.terminal,
+        receiver: native.terminal.receiver,
+      }),
+    });
+    runtime.removeNavigationPair = pair;
+    authority.ownerWindow.queueMicrotask(() => {
+      if (runtime.removeNavigationPair === pair) {
+        runtime.removeNavigationPair = null;
+      }
+    });
+  };
+
+  const completeRemoveNavigation = (
+    sourcePresentation: SharePresentation,
+    row: CollaboratorPublication,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const candidate = currentPresentation(sourcePresentation);
+    const runtime = presentationRuntimesRef.current.get(candidate);
+    const pair = runtime?.removeNavigationPair;
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !runtime ||
+      !pair ||
+      !nativeEvent ||
+      typeof nativeEvent !== "object" ||
+      pair.native.event !== nativeEvent ||
+      activeRemoveDeliveryRef.current ||
+      attemptedRemoveReactEventsRef.current.has(event) ||
+      !attemptedRemoveNativeEventsRef.current.has(nativeEvent)
+    ) {
+      return;
+    }
+    attemptedRemoveReactEventsRef.current.add(event);
+    runtime.removeNavigationPair = null;
+    const {
+      publication,
+      authority,
+      source,
+      destination,
+      key,
+    } = pair;
+    const currentElement = runtime.rows[row.index]?.remove;
+    const native = captureShareRemoveNativeEvent(
+      authority,
+      nativeEvent as Event,
+      authority.Event.BUBBLING_PHASE,
+    );
+    const bubble =
+      native && currentElement
+        ? captureShareRemoveReactEvent(
+            event as ReactKeyboardEvent<HTMLElement>,
+            authority,
+            native,
+            currentElement,
+          )
+        : null;
+    if (
+      !currentElement ||
+      !native ||
+      !bubble ||
+      bubble.event === pair.capture.event ||
+      pair.publication !== publication ||
+      pair.authority !== authority ||
+      pair.terminal !== native.terminal ||
+      source.row !== row ||
+      source.element !== currentElement ||
+      source.callback !== candidate.removeCollaborator ||
+      event.currentTarget !== currentElement ||
+      pair.capture.currentTarget !== publication.listElement ||
+      bubble.currentTarget !== source.element ||
+      pair.capture.phase !== authority.Event.CAPTURING_PHASE ||
+      bubble.phase !== authority.Event.BUBBLING_PHASE ||
+      !shareRemoveNativeEventsMatch(pair.native, native, authority) ||
+      !shareRemoveReactSnapshotIsCurrent(
+        pair.capture,
+        authority,
+        pair.native,
+        null,
+      ) ||
+      !shareRemoveReactSnapshotIsCurrent(
+        bubble,
+        authority,
+        native,
+        currentElement,
+      ) ||
+      !shareRemoveNativeSnapshotIsCurrent(native, authority) ||
+      !removeNavigationIsCurrent(
+        candidate,
+        publication,
+        source,
+        destination,
+        key,
+      )
+    ) {
+      return;
+    }
+    const delivery: ShareRemoveNavigationDelivery = Object.freeze({
+      pair,
+      bubble,
+    });
+    if (
+      claimedRemoveDeliveriesRef.current.has(delivery) ||
+      claimedRemovePairsRef.current.has(pair) ||
+      claimedRemoveMovementsRef.current.has(pair.movement) ||
+      claimedRemovePublicationClaimsRef.current.has(pair.publicationClaim) ||
+      claimedRemoveVisitClaimsRef.current.has(pair.visitClaim) ||
+      claimedRemoveSourceClaimsRef.current.has(pair.sourceClaim) ||
+      claimedRemoveDestinationClaimsRef.current.has(pair.destinationClaim) ||
+      claimedRemoveWrapperClaimsRef.current.has(pair.wrapperClaim) ||
+      claimedRemoveNativeClaimsRef.current.has(pair.nativeClaim) ||
+      claimedRemoveWindowClaimsRef.current.has(pair.windowClaim) ||
+      claimedRemoveReactWrappersRef.current.has(pair.capture.event) ||
+      claimedRemoveReactWrappersRef.current.has(event) ||
+      claimedRemoveNativeKeyEventsRef.current.has(native.event) ||
+      !authority.terminal.claim(pair.terminal)
+    ) {
+      return;
+    }
+    claimedRemoveDeliveriesRef.current.add(delivery);
+    claimedRemovePairsRef.current.add(pair);
+    claimedRemoveMovementsRef.current.add(pair.movement);
+    claimedRemovePublicationClaimsRef.current.add(pair.publicationClaim);
+    claimedRemoveVisitClaimsRef.current.add(pair.visitClaim);
+    claimedRemoveSourceClaimsRef.current.add(pair.sourceClaim);
+    claimedRemoveDestinationClaimsRef.current.add(pair.destinationClaim);
+    claimedRemoveWrapperClaimsRef.current.add(pair.wrapperClaim);
+    claimedRemoveNativeClaimsRef.current.add(pair.nativeClaim);
+    claimedRemoveWindowClaimsRef.current.add(pair.windowClaim);
+    claimedRemoveReactWrappersRef.current.add(pair.capture.event);
+    claimedRemoveReactWrappersRef.current.add(event);
+    claimedRemoveNativeKeyEventsRef.current.add(native.event);
+    activeRemoveDeliveryRef.current = delivery;
+    try {
+      if (
+        activeRemoveDeliveryRef.current !== delivery ||
+        !claimedRemoveDeliveriesRef.current.has(delivery) ||
+        !claimedRemovePairsRef.current.has(pair) ||
+        !claimedRemoveMovementsRef.current.has(pair.movement) ||
+        !claimedRemovePublicationClaimsRef.current.has(
+          pair.publicationClaim,
+        ) ||
+        !claimedRemoveVisitClaimsRef.current.has(pair.visitClaim) ||
+        !claimedRemoveSourceClaimsRef.current.has(pair.sourceClaim) ||
+        !claimedRemoveDestinationClaimsRef.current.has(
+          pair.destinationClaim,
+        ) ||
+        !claimedRemoveWrapperClaimsRef.current.has(pair.wrapperClaim) ||
+        !claimedRemoveNativeClaimsRef.current.has(pair.nativeClaim) ||
+        !claimedRemoveWindowClaimsRef.current.has(pair.windowClaim) ||
+        !authority.terminal.retains(pair.terminal) ||
+        !shareRemoveReactSnapshotIsCurrent(
+          pair.capture,
+          authority,
+          pair.native,
+          null,
+        ) ||
+        !shareRemoveReactSnapshotIsCurrent(
+          bubble,
+          authority,
+          native,
+          currentElement,
+        ) ||
+        !shareRemoveNativeSnapshotIsCurrent(native, authority) ||
+        !removeNavigationIsCurrent(
+          candidate,
+          publication,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return;
+      }
+      authority.apply(
+        bubble.methods.preventDefault,
+        bubble.event,
+        [],
+      );
+      if (
+        activeRemoveDeliveryRef.current !== delivery ||
+        event.preventDefault !== bubble.methods.preventDefault ||
+        event.isPropagationStopped !==
+          bubble.methods.isPropagationStopped ||
+        !shareRemoveNativeSnapshotIsCurrent(native, authority, true) ||
+        !shareRemoveReactSnapshotIsCurrent(
+          bubble,
+          authority,
+          native,
+          currentElement,
+          true,
+        ) ||
+        !authority.terminal.retains(pair.terminal) ||
+        !removeNavigationIsCurrent(
+          candidate,
+          publication,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return;
+      }
+      authority.apply(authority.focus, destination.element, [
+        SHARE_REMOVE_PREVENT_SCROLL,
+      ]);
+    } catch {
+      return;
+    } finally {
+      if (activeRemoveDeliveryRef.current === delivery) {
+        activeRemoveDeliveryRef.current = null;
+      }
+    }
+  };
+
   const startPresentationObservation = useCallback((runtime: SharePresentationRuntime) => {
     const ownerWindow = runtime.root?.ownerDocument.defaultView;
     if (!ownerWindow || !runtime.dialog || !runtime.overlay || !runtime.portalParent) return false;
@@ -4014,6 +5815,19 @@ export const ShareDialog = memo(function ShareDialog({
       runtime.active = true;
       runtime.published = true;
       activePresentationRef.current = candidate;
+      const expectedRemoveControls =
+        candidate.isOwner && candidate.list.status === "loaded"
+          ? candidate.list.collaborators.filter((row) => !row.pending && !row.operation).length
+          : 0;
+      const removeNavigation = expectedRemoveControls > 0
+        ? createShareRemoveNavigationPublication(candidate, runtime)
+        : null;
+      if (expectedRemoveControls > 0 && !removeNavigation) {
+        retireCopyHandoff(candidate);
+        retirePresentationLineage(candidate);
+        return null;
+      }
+      runtime.removeNavigation = removeNavigation;
       if (!startCloseCapture(candidate, runtime)) {
         retireCopyHandoff(candidate);
         retirePresentationLineage(candidate);
@@ -4418,6 +6232,10 @@ export const ShareDialog = memo(function ShareDialog({
           <ul
             ref={(element) => bindElement(presentation, "list", element)}
             className="flex flex-col divide-y divide-line rounded-xl border border-line"
+            aria-label={COLLABORATOR_LIST_LABEL}
+            onKeyDownCapture={(event) => {
+              captureRemoveNavigation(presentation, event);
+            }}
           >
             {(presentation.list.status === "none" || presentation.list.status === "loading") && (
               <li
@@ -4528,6 +6346,13 @@ export const ShareDialog = memo(function ShareDialog({
                           const accepted = claimRemove(presentation, collaborator, event.currentTarget);
                           if (!accepted || accepted.login !== login) return;
                           void remove(accepted.context, accepted.documentId, accepted.login);
+                        }}
+                        onKeyDown={(event) => {
+                          completeRemoveNavigation(
+                            presentation,
+                            collaborator,
+                            event,
+                          );
                         }}
                         aria-label={`Remove ${collaborator.login}`}
                         disabled={collaborator.pending}
