@@ -5642,7 +5642,7 @@ interface VersionDiffWindowProof {
   readonly identity: symbol;
   readonly publication: VersionDiffPublication;
   readonly nativeEvent: globalThis.KeyboardEvent;
-  readonly source: HTMLButtonElement;
+  readonly source: HTMLElement;
   readonly receiver: EventTarget;
   readonly currentTarget: EventTarget;
   readonly terminal: EventTarget;
@@ -5705,6 +5705,76 @@ interface VersionDiffActionDelivery {
   readonly snapshot: VersionDiffNativeKeyboardFacts;
 }
 
+interface VersionDiffBoundaryMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
+  readonly isDefaultPrevented: (...args: never[]) => unknown;
+  readonly isPropagationStopped: (...args: never[]) => unknown;
+}
+
+interface VersionDiffBoundaryDelivery {
+  readonly publication: VersionDiffBoundaryPublication;
+  readonly wrapper: KeyboardEvent<HTMLDivElement>;
+  readonly methods: VersionDiffBoundaryMethods;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly listener: VersionDiffWindowProof;
+  readonly key: VersionDiffNavigationKey;
+  readonly snapshot: VersionDiffNativeKeyboardFacts;
+  readonly destination: HTMLElement;
+  readonly destinationIndex: number;
+  readonly setActive: (index: number) => void;
+  readonly requestSuccessor: () => void;
+}
+
+interface VersionDiffBoundaryAttempt {
+  readonly identity: symbol;
+  reentered: boolean;
+}
+
+interface VersionDiffBoundaryClaim {
+  readonly identity: symbol;
+  readonly publication: VersionDiffPublication;
+  readonly capture: VersionDiffBoundaryDelivery;
+  readonly bubble: VersionDiffBoundaryDelivery;
+  readonly listener: VersionDiffWindowProof;
+}
+
+interface VersionDiffBoundaryPairing {
+  readonly begin: (
+    nativeEvent: globalThis.KeyboardEvent,
+  ) => VersionDiffBoundaryAttempt | null;
+  readonly attemptIsCurrent: (
+    nativeEvent: globalThis.KeyboardEvent,
+    attempt: VersionDiffBoundaryAttempt,
+  ) => boolean;
+  readonly finish: (
+    nativeEvent: globalThis.KeyboardEvent,
+    attempt: VersionDiffBoundaryAttempt,
+  ) => void;
+  readonly remember: (
+    delivery: VersionDiffBoundaryDelivery,
+    publication: VersionDiffPublication,
+  ) => boolean;
+  readonly captureFor: (
+    nativeEvent: globalThis.KeyboardEvent,
+    publication: VersionDiffPublication,
+  ) => VersionDiffBoundaryDelivery | null;
+  readonly canClaim: (
+    capture: VersionDiffBoundaryDelivery,
+    bubble: VersionDiffBoundaryDelivery,
+    publication: VersionDiffPublication,
+  ) => boolean;
+  readonly claim: (
+    capture: VersionDiffBoundaryDelivery,
+    bubble: VersionDiffBoundaryDelivery,
+    publication: VersionDiffPublication,
+  ) => VersionDiffBoundaryClaim | null;
+  readonly retains: (
+    claim: VersionDiffBoundaryClaim,
+    publication: VersionDiffPublication,
+  ) => boolean;
+  readonly release: (publication: VersionDiffPublication) => void;
+}
+
 interface VersionDiffPublication {
   readonly identity: symbol;
   readonly authority: VersionDiffAuthority;
@@ -5725,6 +5795,23 @@ interface VersionDiffPublication {
   readonly placement: VersionDiffPlacement;
   readonly keyboard: VersionDiffKeyboardIntrinsics | null;
   readonly keyListener: VersionDiffKeyListener | null;
+  readonly boundaryPairing: VersionDiffBoundaryPairing | null;
+}
+
+interface VersionDiffBoundaryPublication extends VersionDiffPublication {
+  readonly keyboard: VersionDiffKeyboardIntrinsics;
+  readonly keyListener: VersionDiffKeyListener;
+  readonly boundaryPairing: VersionDiffBoundaryPairing;
+}
+
+function versionDiffHasBoundaryPublication(
+  publication: VersionDiffPublication,
+): publication is VersionDiffBoundaryPublication {
+  return (
+    publication.keyboard !== null &&
+    publication.keyListener !== null &&
+    publication.boundaryPairing !== null
+  );
 }
 
 interface VersionDiffElementOwnerView {
@@ -5775,6 +5862,9 @@ interface VersionDiffPublicationSet {
   readonly captureHunks: readonly ((element: HTMLElement | null) => void)[];
   readonly root: () => HTMLDivElement | null;
   readonly establish: () => (() => void) | undefined;
+  readonly onBoundaryKeyCapture: (
+    event: KeyboardEvent<HTMLDivElement>,
+  ) => void;
   readonly onBoundaryKey: (event: KeyboardEvent<HTMLDivElement>) => void;
   readonly onActionGroupKeyDownCapture: (
     event: KeyboardEvent<HTMLDivElement>,
@@ -5869,18 +5959,37 @@ class VersionDiffCoordinator {
     event: object,
     nativeEvent: globalThis.KeyboardEvent,
   ) {
-    if (
-      !this.isCurrent(publication) ||
-      this.#claimedPublications.has(publication) ||
-      this.#claimedEvents.has(event) ||
-      this.#claimedEvents.has(nativeEvent)
-    ) {
-      return false;
-    }
+    if (!this.canClaimKeyboard(publication, event, nativeEvent)) return false;
     this.#claimedPublications.add(publication);
     this.#claimedEvents.add(event);
     this.#claimedEvents.add(nativeEvent);
     return true;
+  }
+
+  canClaimKeyboard(
+    publication: VersionDiffPublication,
+    event: object,
+    nativeEvent: globalThis.KeyboardEvent,
+  ) {
+    return (
+      this.isCurrent(publication) &&
+      !this.#claimedPublications.has(publication) &&
+      !this.#claimedEvents.has(event) &&
+      !this.#claimedEvents.has(nativeEvent)
+    );
+  }
+
+  retainsKeyboard(
+    publication: VersionDiffPublication,
+    event: object,
+    nativeEvent: globalThis.KeyboardEvent,
+  ) {
+    return (
+      this.isCurrent(publication) &&
+      this.#claimedPublications.has(publication) &&
+      this.#claimedEvents.has(event) &&
+      this.#claimedEvents.has(nativeEvent)
+    );
   }
 
   claimActionKeyboard(
@@ -6743,23 +6852,6 @@ function captureVersionDiffEventPath(
   return Object.freeze(path);
 }
 
-function versionDiffPathEndsAtOwnerWindow(
-  path: readonly EventTarget[],
-  ownerDocument: Document,
-) {
-  const expected = ownerDocument.defaultView;
-  const terminal = path[path.length - 1];
-  return (
-    terminal === expected ||
-    (typeof terminal === "object" &&
-      terminal !== null &&
-      "document" in terminal &&
-      terminal.document === ownerDocument &&
-      "window" in terminal &&
-      terminal.window === terminal)
-  );
-}
-
 function isVersionDiffActionNavigationKey(
   key: string,
 ): key is VersionDiffActionNavigationKey {
@@ -6828,9 +6920,34 @@ function versionDiffNativeCrossPhaseFactsMatch(
   );
 }
 
-function versionDiffActionPathMatches(
+function versionDiffBoundaryNativeFactsMatch(
+  left: VersionDiffNativeKeyboardFacts,
+  right: VersionDiffNativeKeyboardFacts,
+) {
+  return (
+    left.type === right.type &&
+    left.bubbles === right.bubbles &&
+    left.cancelable === right.cancelable &&
+    left.target === right.target &&
+    left.path.length === right.path.length &&
+    left.path.every((entry, index) => entry === right.path[index]) &&
+    left.isTrusted === right.isTrusted &&
+    left.view === right.view &&
+    left.key === right.key &&
+    left.code === right.code &&
+    left.location === right.location &&
+    left.ctrlKey === right.ctrlKey &&
+    left.altKey === right.altKey &&
+    left.metaKey === right.metaKey &&
+    left.shiftKey === right.shiftKey &&
+    left.repeat === right.repeat &&
+    left.isComposing === right.isComposing
+  );
+}
+
+function versionDiffListenerPathMatches(
   path: readonly EventTarget[],
-  source: HTMLButtonElement,
+  source: HTMLElement,
   ownerDocument: Document,
   terminal: EventTarget,
 ) {
@@ -6881,18 +6998,23 @@ function createVersionDiffKeyListener(
     const action = current.actions.find(
       (candidate) => candidate.element === snapshot?.target,
     );
+    const source =
+      action?.element ?? (snapshot?.target === current.root ? current.root : null);
     const terminal = snapshot?.path.at(-1);
     if (
       !snapshot ||
-      !action ||
+      !source ||
       !terminal ||
       snapshot.currentTarget !== this ||
       terminal !== this ||
       snapshot.phase !== keyboard.capturingPhase ||
       snapshot.type !== "keydown" ||
-      !versionDiffActionPathMatches(
+      (snapshot.view !== null &&
+        snapshot.view !== current.ownerWindow &&
+        snapshot.view !== this) ||
+      !versionDiffListenerPathMatches(
         snapshot.path,
-        action.element,
+        source,
         current.ownerDocument,
         this,
       )
@@ -6905,7 +7027,7 @@ function createVersionDiffKeyListener(
         identity: Symbol("version-diff-window-proof"),
         publication: current,
         nativeEvent,
-        source: action.element,
+        source,
         receiver: this,
         currentTarget: this,
         terminal,
@@ -6936,9 +7058,20 @@ function createVersionDiffKeyListener(
       return null;
     }
     const snapshot = keyboard.read(event);
-    return snapshot &&
-      versionDiffNativeCrossPhaseFactsMatch(proof.snapshot, snapshot) &&
-      versionDiffActionPathMatches(
+    if (!snapshot) return null;
+    const cancellationMatches =
+      proof.source === current.root
+        ? proof.snapshot.defaultPrevented === false &&
+          proof.snapshot.cancelBubble === false &&
+          snapshot.cancelBubble === false
+        : proof.snapshot.defaultPrevented === snapshot.defaultPrevented &&
+          proof.snapshot.cancelBubble === snapshot.cancelBubble;
+    return cancellationMatches &&
+      versionDiffBoundaryNativeFactsMatch(proof.snapshot, snapshot) &&
+      (snapshot.view === null ||
+        snapshot.view === current.ownerWindow ||
+        snapshot.view === proof.receiver) &&
+      versionDiffListenerPathMatches(
         snapshot.path,
         proof.source,
         current.ownerDocument,
@@ -7200,7 +7333,7 @@ function readVersionDiffActionDelivery(
       snapshot.view !== listener.receiver) ||
     snapshot.target !== action.element ||
     listener.source !== action.element ||
-    !versionDiffActionPathMatches(
+    !versionDiffListenerPathMatches(
       snapshot.path,
       action.element,
       publication.ownerDocument,
@@ -7246,6 +7379,317 @@ function readVersionDiffActionDelivery(
     key: snapshot.key,
     snapshot,
   });
+}
+
+function readVersionDiffBoundaryMethods(
+  event: KeyboardEvent<HTMLDivElement>,
+): VersionDiffBoundaryMethods | null {
+  try {
+    const methods = Object.freeze({
+      preventDefault: event.preventDefault,
+      isDefaultPrevented: event.isDefaultPrevented,
+      isPropagationStopped: event.isPropagationStopped,
+    });
+    return Object.values(methods).every(
+      (method) => typeof method === "function",
+    )
+      ? methods
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function versionDiffBoundaryMethodsAreCurrent(
+  delivery: VersionDiffBoundaryDelivery,
+  defaultQuery: (...args: never[]) => unknown =
+    delivery.methods.isDefaultPrevented,
+) {
+  try {
+    return (
+      delivery.wrapper.preventDefault === delivery.methods.preventDefault &&
+      delivery.wrapper.isDefaultPrevented === defaultQuery &&
+      delivery.wrapper.isPropagationStopped ===
+        delivery.methods.isPropagationStopped
+    );
+  } catch {
+    return false;
+  }
+}
+
+function versionDiffBoundaryWrapperMatches(
+  event: KeyboardEvent<HTMLDivElement>,
+  nativeEvent: globalThis.KeyboardEvent,
+  snapshot: VersionDiffNativeKeyboardFacts,
+  root: HTMLDivElement,
+) {
+  const reactEvent = event as KeyboardEvent<HTMLDivElement> & {
+    readonly isComposing?: boolean;
+  };
+  try {
+    return (
+      event !== (nativeEvent as unknown) &&
+      event.nativeEvent === nativeEvent &&
+      event.currentTarget === root &&
+      event.target === root &&
+      event.type === snapshot.type &&
+      event.eventPhase === snapshot.phase &&
+      event.bubbles === snapshot.bubbles &&
+      event.cancelable === snapshot.cancelable &&
+      event.defaultPrevented === snapshot.defaultPrevented &&
+      event.isTrusted === snapshot.isTrusted &&
+      event.key === snapshot.key &&
+      event.code === snapshot.code &&
+      event.location === snapshot.location &&
+      event.ctrlKey === snapshot.ctrlKey &&
+      event.altKey === snapshot.altKey &&
+      event.metaKey === snapshot.metaKey &&
+      event.shiftKey === snapshot.shiftKey &&
+      event.repeat === snapshot.repeat &&
+      (reactEvent.isComposing === undefined ||
+        reactEvent.isComposing === snapshot.isComposing) &&
+      Object.is(event.view, snapshot.view)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function readVersionDiffBoundaryDelivery(
+  event: KeyboardEvent<HTMLDivElement>,
+  publication: VersionDiffBoundaryPublication,
+  expectedPhase: number,
+): VersionDiffBoundaryDelivery | null {
+  if (!event || typeof event !== "object") return null;
+  const keyboard = publication.keyboard;
+  const keyListener = publication.keyListener;
+  let nativeEvent: globalThis.KeyboardEvent;
+  try {
+    nativeEvent = event.nativeEvent;
+  } catch {
+    return null;
+  }
+  if (
+    !keyboard ||
+    !keyListener ||
+    !nativeEvent ||
+    keyboard.getPrototypeOf(nativeEvent) !== keyboard.keyboardPrototype
+  ) {
+    return null;
+  }
+  const listener = keyListener.proofFor(nativeEvent, publication);
+  const snapshot = listener ? keyboard.read(nativeEvent) : null;
+  const methods = snapshot ? readVersionDiffBoundaryMethods(event) : null;
+  if (
+    !listener ||
+    !snapshot ||
+    !methods ||
+    listener.source !== publication.root ||
+    snapshot.target !== publication.root ||
+    snapshot.currentTarget === null ||
+    !snapshot.path.includes(snapshot.currentTarget) ||
+    snapshot.path.filter((entry) => entry === snapshot.currentTarget).length !==
+      1 ||
+    !versionDiffListenerPathMatches(
+      snapshot.path,
+      publication.root,
+      publication.ownerDocument,
+      listener.receiver,
+    ) ||
+    snapshot.type !== "keydown" ||
+    snapshot.phase !== expectedPhase ||
+    !snapshot.bubbles ||
+    !snapshot.cancelable ||
+    snapshot.defaultPrevented ||
+    snapshot.cancelBubble ||
+    !snapshot.isTrusted ||
+    snapshot.ctrlKey ||
+    snapshot.altKey ||
+    snapshot.metaKey ||
+    snapshot.shiftKey ||
+    snapshot.repeat ||
+    snapshot.isComposing ||
+    (snapshot.key !== "Home" && snapshot.key !== "End") ||
+    !versionDiffBoundaryWrapperMatches(
+      event,
+      nativeEvent,
+      snapshot,
+      publication.root,
+    )
+  ) {
+    return null;
+  }
+  const destinationIndex =
+    snapshot.key === "Home" ? 0 : publication.authority.hunks.length - 1;
+  const destination = publication.hunks[destinationIndex];
+  if (
+    destinationIndex < 0 ||
+    !destination ||
+    !destination.isConnected ||
+    destination.ownerDocument !== publication.ownerDocument ||
+    !publication.body.contains(destination)
+  ) {
+    return null;
+  }
+  return Object.freeze<VersionDiffBoundaryDelivery>({
+    publication,
+    wrapper: event,
+    methods,
+    nativeEvent,
+    listener,
+    key: snapshot.key,
+    snapshot,
+    destination,
+    destinationIndex,
+    setActive: publication.authority.setActive,
+    requestSuccessor: publication.authority.requestSuccessor,
+  });
+}
+
+function versionDiffBoundaryCapturesMatch(
+  left: VersionDiffBoundaryDelivery,
+  right: VersionDiffBoundaryDelivery,
+) {
+  return (
+    left.publication === right.publication &&
+    left.wrapper === right.wrapper &&
+    left.methods.preventDefault === right.methods.preventDefault &&
+    left.methods.isDefaultPrevented === right.methods.isDefaultPrevented &&
+    left.methods.isPropagationStopped ===
+      right.methods.isPropagationStopped &&
+    left.nativeEvent === right.nativeEvent &&
+    left.listener === right.listener &&
+    left.key === right.key &&
+    left.destination === right.destination &&
+    left.destinationIndex === right.destinationIndex &&
+    left.setActive === right.setActive &&
+    left.requestSuccessor === right.requestSuccessor &&
+    left.snapshot.phase === right.snapshot.phase &&
+    versionDiffNativeStableFactsMatch(left.snapshot, right.snapshot)
+  );
+}
+
+function versionDiffBoundaryDeliveriesPair(
+  capture: VersionDiffBoundaryDelivery,
+  bubble: VersionDiffBoundaryDelivery,
+) {
+  return (
+    capture.publication === bubble.publication &&
+    capture.nativeEvent === bubble.nativeEvent &&
+    capture.listener === bubble.listener &&
+    capture.key === bubble.key &&
+    capture.destination === bubble.destination &&
+    capture.destinationIndex === bubble.destinationIndex &&
+    capture.setActive === bubble.setActive &&
+    capture.requestSuccessor === bubble.requestSuccessor &&
+    versionDiffNativeCrossPhaseFactsMatch(capture.snapshot, bubble.snapshot)
+  );
+}
+
+function createVersionDiffBoundaryPairing(): VersionDiffBoundaryPairing {
+  const captures = new WeakMap<
+    globalThis.KeyboardEvent,
+    VersionDiffBoundaryDelivery
+  >();
+  const attempts = new WeakMap<
+    globalThis.KeyboardEvent,
+    VersionDiffBoundaryAttempt
+  >();
+  const claimedEvents = new WeakSet<globalThis.KeyboardEvent>();
+  const claims = new WeakSet<VersionDiffBoundaryClaim>();
+  let owner: VersionDiffPublication | null = null;
+  let released = false;
+  let activeAttempt: VersionDiffBoundaryAttempt | null = null;
+
+  const owns = (publication: VersionDiffPublication) =>
+    !released && (owner === null || owner === publication);
+  const canClaim = (
+    capture: VersionDiffBoundaryDelivery,
+    bubble: VersionDiffBoundaryDelivery,
+    publication: VersionDiffPublication,
+  ) =>
+    owns(publication) &&
+    capture.publication === publication &&
+    bubble.publication === publication &&
+    captures.get(bubble.nativeEvent) === capture &&
+    !claimedEvents.has(bubble.nativeEvent) &&
+    versionDiffBoundaryDeliveriesPair(capture, bubble);
+
+  const pairing: VersionDiffBoundaryPairing = {
+    begin: (nativeEvent) => {
+      if (released || claimedEvents.has(nativeEvent)) return null;
+      if (activeAttempt) {
+        activeAttempt.reentered = true;
+        return null;
+      }
+      const active = attempts.get(nativeEvent);
+      if (active) {
+        active.reentered = true;
+        return null;
+      }
+      const attempt = {
+        identity: Symbol("version-diff-boundary-attempt"),
+        reentered: false,
+      };
+      attempts.set(nativeEvent, attempt);
+      activeAttempt = attempt;
+      return attempt;
+    },
+    attemptIsCurrent: (nativeEvent, attempt) =>
+      !released &&
+      attempts.get(nativeEvent) === attempt &&
+      !attempt.reentered,
+    finish: (nativeEvent, attempt) => {
+      if (attempts.get(nativeEvent) === attempt) attempts.delete(nativeEvent);
+      if (activeAttempt === attempt) activeAttempt = null;
+    },
+    remember: (delivery, publication) => {
+      if (!owns(publication) || delivery.publication !== publication) {
+        return false;
+      }
+      owner ??= publication;
+      const current = captures.get(delivery.nativeEvent);
+      if (current) return versionDiffBoundaryCapturesMatch(current, delivery);
+      captures.set(delivery.nativeEvent, delivery);
+      return true;
+    },
+    captureFor: (nativeEvent, publication) => {
+      if (!owns(publication)) return null;
+      const capture = captures.get(nativeEvent);
+      return capture && capture.publication === publication ? capture : null;
+    },
+    canClaim,
+    claim: (capture, bubble, publication) => {
+      if (!canClaim(capture, bubble, publication)) return null;
+      owner ??= publication;
+      captures.delete(bubble.nativeEvent);
+      claimedEvents.add(bubble.nativeEvent);
+      const claim = Object.freeze({
+        identity: Symbol("version-diff-boundary-claim"),
+        publication,
+        capture,
+        bubble,
+        listener: bubble.listener,
+      });
+      claims.add(claim);
+      return claim;
+    },
+    retains: (claim, publication) =>
+      owns(publication) &&
+      owner === publication &&
+      claims.has(claim) &&
+      claim.publication === publication &&
+      claim.capture.publication === publication &&
+      claim.bubble.publication === publication &&
+      claim.listener === claim.bubble.listener &&
+      claimedEvents.has(claim.bubble.nativeEvent),
+    release: (publication) => {
+      if (released || (owner !== null && owner !== publication)) return;
+      owner = publication;
+      released = true;
+    },
+  };
+  return Object.freeze(pairing);
 }
 
 function createVersionDiffPublication(
@@ -7450,6 +7894,9 @@ function createVersionDiffPublication(
     const keyListener = keyboard
       ? createVersionDiffKeyListener(keyboard)
       : null;
+    const boundaryPairing = keyboard
+      ? createVersionDiffBoundaryPairing()
+      : null;
     const domGuard = createVersionDiffDomGuard(root, placement);
     if (!domGuard) return null;
     const identity = Symbol("version-diff-publication");
@@ -7516,6 +7963,7 @@ function createVersionDiffPublication(
       placement,
       keyboard,
       keyListener,
+      boundaryPairing,
     });
     let retired = false;
     let retirement: Retirement | null = null;
@@ -7528,6 +7976,7 @@ function createVersionDiffPublication(
       retired = true;
       retirement = reason;
       publication.keyListener?.release(publication);
+      publication.boundaryPairing?.release(publication);
       coordinator.retire(publication);
       if (currentRuntime?.publication === publication) currentRuntime = null;
       queueMicrotask(() => {
@@ -7592,9 +8041,12 @@ function createVersionDiffPublication(
         });
         if (
           !publication.keyListener ||
+          !publication.boundaryPairing ||
           !coordinator.publish(publication) ||
           !publication.keyListener.activate(publication)
         ) {
+          publication.keyListener?.release(publication);
+          publication.boundaryPairing?.release(publication);
           domGuard.release();
           return false;
         }
@@ -7672,100 +8124,170 @@ function createVersionDiffPublication(
     return runtime;
   };
 
-  const keyboardFacts = (
-    publication: VersionDiffPublication,
-    event: KeyboardEvent<HTMLDivElement>,
-  ) => {
-    if (!event || typeof event !== "object") return null;
-    const keyboard = publication.keyboard;
-    const nativeEvent = event.nativeEvent;
-    const reactEvent = event as KeyboardEvent<HTMLDivElement> & {
-      _reactName?: unknown;
-      isDefaultPrevented?: unknown;
-      isPropagationStopped?: unknown;
-      persist?: unknown;
-      isComposing?: unknown;
+  const currentBoundaryPublication =
+    (): VersionDiffBoundaryPublication | null => {
+      const runtime = currentRuntime;
+      const publication = runtime?.publication;
+      if (
+        !runtime ||
+        !publication ||
+        runtime.isRetired() ||
+        publication.authority !== authority ||
+        !versionDiffHasBoundaryPublication(publication) ||
+        !publication.keyboard.isCurrent() ||
+        !coordinator.isCurrent(publication) ||
+        !versionDiffAuthorityIsCurrent(authority) ||
+        !exactDomIsCurrent() ||
+        !runtime.historyIsClean() ||
+        !runtime.publishedDomMatches()
+      ) {
+        return null;
+      }
+      return publication;
     };
-    if (!keyboard || !nativeEvent || typeof nativeEvent !== "object") {
-      return null;
-    }
-    const nativeFacts = keyboard.read(nativeEvent);
-    if (!nativeFacts) return null;
-    const {
-      key,
-      ctrlKey,
-      altKey,
-      metaKey,
-      shiftKey,
-      repeat,
-      isComposing,
-      target,
-      path,
-    } = nativeFacts;
-    if (key !== "Home" && key !== "End") return null;
+  const boundaryDeliveryIsCurrent = (
+    delivery: VersionDiffBoundaryDelivery,
+    expectedPhase: number,
+    defaultPrevented: boolean,
+    defaultQuery: (...args: never[]) => unknown =
+      delivery.methods.isDefaultPrevented,
+  ) => {
+    const publication = currentBoundaryPublication();
     if (
-      nativeFacts.view !== publication.ownerWindow ||
-      nativeFacts.type !== "keydown" ||
-      nativeFacts.phase === publication.ownerWindow.Event.NONE ||
-      !nativeFacts.bubbles ||
-      !nativeFacts.cancelable ||
-      nativeFacts.defaultPrevented ||
-      nativeFacts.cancelBubble ||
-      nativeFacts.isTrusted !== true ||
-      ctrlKey ||
-      altKey ||
-      metaKey ||
-      shiftKey ||
-      repeat ||
-      isComposing ||
-      target !== publication.root ||
-      path.length !== publication.rootPath.length + 1 ||
-      publication.rootPath.some((entry, index) => entry !== path[index]) ||
-      !versionDiffPathEndsAtOwnerWindow(path, publication.ownerDocument) ||
-      event.type !== "keydown" ||
-      !event.bubbles ||
-      !event.cancelable ||
-      event.currentTarget !== publication.root ||
-      event.target !== target ||
-      event.key !== key ||
-      event.ctrlKey !== ctrlKey ||
-      event.altKey !== altKey ||
-      event.metaKey !== metaKey ||
-      event.shiftKey !== shiftKey ||
-      event.repeat !== repeat ||
-      (reactEvent.isComposing !== undefined &&
-        reactEvent.isComposing !== isComposing) ||
-      event.defaultPrevented ||
-      reactEvent._reactName !== "onKeyDown" ||
-      typeof reactEvent.isDefaultPrevented !== "function" ||
-      reactEvent.isDefaultPrevented() ||
-      typeof reactEvent.isPropagationStopped !== "function" ||
-      reactEvent.isPropagationStopped() ||
-      typeof reactEvent.persist !== "function" ||
-      keyboard.activeElement() !== publication.root
+      !publication ||
+      delivery.publication !== publication ||
+      delivery.listener.source !== publication.root ||
+      delivery.listener.nativeEvent !== delivery.nativeEvent ||
+      delivery.key !== delivery.snapshot.key ||
+      delivery.setActive !== authority.setActive ||
+      delivery.requestSuccessor !== authority.requestSuccessor ||
+      delivery.destinationIndex !==
+        (delivery.key === "Home" ? 0 : authority.hunks.length - 1) ||
+      delivery.destination !== publication.hunks[delivery.destinationIndex] ||
+      delivery.destination !== hunkOwners[delivery.destinationIndex]?.element() ||
+      !delivery.destination.isConnected ||
+      delivery.destination.ownerDocument !== publication.ownerDocument ||
+      !publication.body.contains(delivery.destination) ||
+      publication.keyboard.activeElement() !== publication.root ||
+      publication.keyListener.proofFor(
+        delivery.nativeEvent,
+        publication,
+      ) !== delivery.listener ||
+      !versionDiffBoundaryMethodsAreCurrent(delivery, defaultQuery)
     ) {
-      return null;
+      return false;
     }
-    const destinationIndex =
-      key === "Home" ? 0 : publication.authority.hunks.length - 1;
-    const destination = publication.hunks[destinationIndex];
+    const snapshot = publication.keyboard.read(delivery.nativeEvent);
+    return (
+      !!snapshot &&
+      snapshot.phase === expectedPhase &&
+      snapshot.defaultPrevented === defaultPrevented &&
+      !snapshot.cancelBubble &&
+      versionDiffBoundaryNativeFactsMatch(delivery.snapshot, snapshot) &&
+      versionDiffBoundaryWrapperMatches(
+        delivery.wrapper,
+        delivery.nativeEvent,
+        snapshot,
+        publication.root,
+      )
+    );
+  };
+  const boundaryPairIsCurrent = (
+    capture: VersionDiffBoundaryDelivery,
+    bubble: VersionDiffBoundaryDelivery,
+  ) => {
+    const publication = currentBoundaryPublication();
+    return (
+      !!publication &&
+      publication.boundaryPairing.captureFor(
+        bubble.nativeEvent,
+        publication,
+      ) === capture &&
+      capture.snapshot.phase === publication.keyboard.capturingPhase &&
+      bubble.snapshot.phase === publication.keyboard.bubblingPhase &&
+      versionDiffBoundaryDeliveriesPair(capture, bubble) &&
+      versionDiffBoundaryMethodsAreCurrent(capture)
+    );
+  };
+  const invokeBoundaryQuery = (
+    delivery: VersionDiffBoundaryDelivery,
+    query: (...args: never[]) => unknown,
+    expected: boolean,
+    attempt: VersionDiffBoundaryAttempt,
+    defaultPrevented: boolean,
+    defaultQuery: (...args: never[]) => unknown =
+      delivery.methods.isDefaultPrevented,
+  ) => {
+    const publication = currentBoundaryPublication();
+    if (!publication) return false;
+    let result: unknown;
+    try {
+      result = publication.keyboard.apply(query, delivery.wrapper, []);
+    } catch {
+      return false;
+    }
+    return (
+      result === expected &&
+      publication.boundaryPairing.attemptIsCurrent(
+        delivery.nativeEvent,
+        attempt,
+      ) &&
+      boundaryDeliveryIsCurrent(
+        delivery,
+        delivery.snapshot.phase,
+        defaultPrevented,
+        defaultQuery,
+      )
+    );
+  };
+  const onBoundaryKeyCapture = (event: KeyboardEvent<HTMLDivElement>) => {
+    const publication = currentBoundaryPublication();
+    if (!publication) return;
+    const delivery = readVersionDiffBoundaryDelivery(
+      event,
+      publication,
+      publication.keyboard.capturingPhase,
+    );
     if (
-      destinationIndex < 0 ||
-      !destination ||
-      destination !== hunkOwners[destinationIndex]?.element() ||
-      !destination.isConnected ||
-      destination.ownerDocument !== publication.ownerDocument ||
-      !publication.body.contains(destination)
+      !delivery ||
+      !boundaryDeliveryIsCurrent(
+        delivery,
+        publication.keyboard.capturingPhase,
+        false,
+      )
     ) {
-      return null;
+      return;
     }
-    return Object.freeze({
-      publicationIdentity: publication.identity,
-      nativeEvent,
-      key: key as VersionDiffNavigationKey,
-      destination,
-      destinationIndex,
-    });
+    const attempt = publication.boundaryPairing.begin(delivery.nativeEvent);
+    if (!attempt) return;
+    try {
+      if (
+        !invokeBoundaryQuery(
+          delivery,
+          delivery.methods.isDefaultPrevented,
+          false,
+          attempt,
+          false,
+        ) ||
+        !invokeBoundaryQuery(
+          delivery,
+          delivery.methods.isPropagationStopped,
+          false,
+          attempt,
+          false,
+        ) ||
+        !publication.boundaryPairing.attemptIsCurrent(
+          delivery.nativeEvent,
+          attempt,
+        ) ||
+        currentBoundaryPublication() !== publication
+      ) {
+        return;
+      }
+      publication.boundaryPairing.remember(delivery, publication);
+    } finally {
+      publication.boundaryPairing.finish(delivery.nativeEvent, attempt);
+    }
   };
 
   let capturedActionGroup: VersionDiffActionDelivery | null = null;
@@ -8096,51 +8618,178 @@ function createVersionDiffPublication(
   };
 
   const onBoundaryKey = (event: KeyboardEvent<HTMLDivElement>) => {
-    const runtime = currentRuntime;
-    const publication = runtime?.publication;
+    const publication = currentBoundaryPublication();
+    if (!publication) return;
+    const delivery = readVersionDiffBoundaryDelivery(
+      event,
+      publication,
+      publication.keyboard.bubblingPhase,
+    );
+    const capture = delivery
+      ? publication.boundaryPairing.captureFor(
+          delivery.nativeEvent,
+          publication,
+        )
+      : null;
     if (
-      !runtime ||
-      !publication ||
-      runtime.isRetired() ||
-      publication.authority !== authority ||
-      !coordinator.isCurrent(publication) ||
-      !versionDiffAuthorityIsCurrent(authority) ||
-      !exactDomIsCurrent() ||
-      !runtime.historyIsClean() ||
-      !runtime.publishedDomMatches()
+      !delivery ||
+      !capture ||
+      !boundaryPairIsCurrent(capture, delivery) ||
+      !boundaryDeliveryIsCurrent(
+        delivery,
+        publication.keyboard.bubblingPhase,
+        false,
+      )
     ) {
       return;
     }
-    const facts = keyboardFacts(publication, event);
-    if (
-      !facts ||
-      facts.publicationIdentity !== publication.identity ||
-      !coordinator.claimKeyboard(publication, event, facts.nativeEvent)
-    ) {
-      return;
+    const attempt = publication.boundaryPairing.begin(delivery.nativeEvent);
+    if (!attempt) return;
+    try {
+      if (
+        !invokeBoundaryQuery(
+          delivery,
+          delivery.methods.isDefaultPrevented,
+          false,
+          attempt,
+          false,
+        ) ||
+        !boundaryPairIsCurrent(capture, delivery) ||
+        !invokeBoundaryQuery(
+          delivery,
+          delivery.methods.isPropagationStopped,
+          false,
+          attempt,
+          false,
+        ) ||
+        !boundaryPairIsCurrent(capture, delivery)
+      ) {
+        return;
+      }
+
+      try {
+        publication.keyboard.apply(
+          delivery.methods.preventDefault,
+          delivery.wrapper,
+          [],
+        );
+      } catch {
+        return;
+      }
+      let currentDefaultQuery: (...args: never[]) => unknown;
+      try {
+        currentDefaultQuery = delivery.wrapper.isDefaultPrevented;
+      } catch {
+        return;
+      }
+      if (
+        typeof currentDefaultQuery !== "function" ||
+        !publication.boundaryPairing.attemptIsCurrent(
+          delivery.nativeEvent,
+          attempt,
+        ) ||
+        currentBoundaryPublication() !== publication ||
+        !boundaryPairIsCurrent(capture, delivery) ||
+        !boundaryDeliveryIsCurrent(
+          delivery,
+          publication.keyboard.bubblingPhase,
+          true,
+          currentDefaultQuery,
+        ) ||
+        !publication.keyboard.defaultWasPrevented(delivery.nativeEvent) ||
+        !invokeBoundaryQuery(
+          delivery,
+          currentDefaultQuery,
+          true,
+          attempt,
+          true,
+          currentDefaultQuery,
+        ) ||
+        !boundaryPairIsCurrent(capture, delivery) ||
+        !invokeBoundaryQuery(
+          delivery,
+          delivery.methods.isPropagationStopped,
+          false,
+          attempt,
+          true,
+          currentDefaultQuery,
+        ) ||
+        !boundaryPairIsCurrent(capture, delivery) ||
+        !publication.boundaryPairing.canClaim(
+          capture,
+          delivery,
+          publication,
+        ) ||
+        !coordinator.canClaimKeyboard(
+          publication,
+          delivery.wrapper,
+          delivery.nativeEvent,
+        ) ||
+        !publication.keyListener.claim(delivery.listener, publication)
+      ) {
+        return;
+      }
+      const claim = publication.boundaryPairing.claim(
+        capture,
+        delivery,
+        publication,
+      );
+      if (
+        !claim ||
+        !coordinator.claimKeyboard(
+          publication,
+          delivery.wrapper,
+          delivery.nativeEvent,
+        )
+      ) {
+        return;
+      }
+      const readyForEffect = () =>
+        publication.boundaryPairing.attemptIsCurrent(
+          delivery.nativeEvent,
+          attempt,
+        ) &&
+        currentBoundaryPublication() === publication &&
+        versionDiffBoundaryMethodsAreCurrent(
+          capture,
+          capture.methods.isDefaultPrevented,
+        ) &&
+        boundaryDeliveryIsCurrent(
+          delivery,
+          publication.keyboard.bubblingPhase,
+          true,
+          currentDefaultQuery,
+        ) &&
+        publication.boundaryPairing.retains(claim, publication) &&
+        publication.keyListener.retains(delivery.listener, publication) &&
+        coordinator.retainsKeyboard(
+          publication,
+          delivery.wrapper,
+          delivery.nativeEvent,
+        ) &&
+        delivery.setActive === authority.setActive &&
+        delivery.requestSuccessor === authority.requestSuccessor &&
+        delivery.destination === publication.hunks[delivery.destinationIndex] &&
+        delivery.destination ===
+          hunkOwners[delivery.destinationIndex]?.element() &&
+        publication.keyboard.activeElement() === publication.root;
+
+      if (!readyForEffect()) return;
+      if (delivery.destinationIndex !== authority.active) {
+        delivery.setActive(delivery.destinationIndex);
+        if (
+          !readyForEffect() ||
+          !publication.keyboard.reveal(delivery.destination) ||
+          !readyForEffect()
+        ) {
+          return;
+        }
+      }
+      if (!readyForEffect()) return;
+      delivery.requestSuccessor();
+    } finally {
+      publication.boundaryPairing.finish(delivery.nativeEvent, attempt);
     }
-    const keyboard = publication.keyboard;
-    if (
-      !keyboard ||
-      !keyboard.preventDefault(facts.nativeEvent) ||
-      !keyboard.defaultWasPrevented(facts.nativeEvent) ||
-      runtime.isRetired() ||
-      !coordinator.isCurrent(publication) ||
-      !versionDiffAuthorityIsCurrent(authority) ||
-      !exactDomIsCurrent() ||
-      !runtime.historyIsClean() ||
-      !runtime.publishedDomMatches() ||
-      keyboard.activeElement() !== publication.root ||
-      publication.hunks[facts.destinationIndex] !== facts.destination ||
-      hunkOwners[facts.destinationIndex]?.element() !== facts.destination
-    ) {
-      return;
-    }
-    if (facts.destinationIndex !== authority.active) {
-      authority.setActive(facts.destinationIndex);
-      if (!keyboard.reveal(facts.destination)) return;
-    }
-    authority.requestSuccessor();
   };
 
   return Object.freeze({
@@ -8153,6 +8802,7 @@ function createVersionDiffPublication(
     captureHunks: Object.freeze(hunkOwners.map((owner) => owner.capture)),
     root: rootOwner.element as () => HTMLDivElement | null,
     establish,
+    onBoundaryKeyCapture,
     onBoundaryKey,
     onActionGroupKeyDownCapture,
     onActionGroupKeyDown,
@@ -8292,18 +8942,37 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
   }, []);
   useLayoutEffect(() => diffPublication.establish(), [diffPublication]);
 
+  const onKeyDownCapture = (e: React.KeyboardEvent) => {
+    let key: string;
+    try {
+      key = e.key;
+    } catch {
+      return;
+    }
+    if (key === "Home" || key === "End") {
+      diffPublication.onBoundaryKeyCapture(
+        e as KeyboardEvent<HTMLDivElement>,
+      );
+    }
+  };
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Home" || e.key === "End") {
+    let key: string;
+    try {
+      key = e.key;
+    } catch {
+      return;
+    }
+    if (key === "Home" || key === "End") {
       diffPublication.onBoundaryKey(
         e as KeyboardEvent<HTMLDivElement>,
       );
       return;
     }
-    if (e.target instanceof HTMLElement && /^(input|textarea|button)$/i.test(e.target.tagName) && e.key !== "[" && e.key !== "]") return;
-    if (e.key === "]") {
+    if (e.target instanceof HTMLElement && /^(input|textarea|button)$/i.test(e.target.tagName) && key !== "[" && key !== "]") return;
+    if (key === "]") {
       e.preventDefault();
       goTo(active + 1);
-    } else if (e.key === "[") {
+    } else if (key === "[") {
       e.preventDefault();
       goTo(active - 1);
     }
@@ -8317,7 +8986,14 @@ export function VersionDiffView({ session, preview }: { session: CollabSession; 
   const rangeNumbers = useMemo(() => (range ?? []).map((v) => v.number).sort((a, b) => a - b), [range]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col outline-none" data-testid="version-diff" ref={captureRoot} tabIndex={0} onKeyDown={onKeyDown}>
+    <div
+      className="flex h-full min-h-0 flex-col outline-none"
+      data-testid="version-diff"
+      ref={captureRoot}
+      tabIndex={0}
+      onKeyDownCapture={onKeyDownCapture}
+      onKeyDown={onKeyDown}
+    >
       <div
         ref={diffPublication.captureHeader}
         className="flex min-h-12 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-6 py-2"

@@ -278,7 +278,7 @@ interface PanelPublication {
   keyboard: FormKeyboardAuthority | null;
   keyboardPair: FormKeyboardPair | null;
   rowKeyboard: RowKeyboardAuthority | null;
-  rowKeyboardPair: RowKeyboardPair | null;
+  rowKeyboardPairs: RowKeyboardPairStore | null;
   keyboardSuspended: boolean;
   keyboardLayoutReplayAvailable: boolean;
   keyboardReplay: FormKeyboardRefReplay | null;
@@ -560,12 +560,22 @@ type RowKeyboardEventSnapshot = Readonly<{
   terminal: FormKeyboardTerminalProof;
 }>;
 
+type RowKeyboardPublicMethod = (...args: never[]) => unknown;
+
+/**
+ * Only the public React methods this route actually needs: prevention plus the
+ * two public cancellation queries. Optional wrapper methods (`stopPropagation`,
+ * `persist`, `isPersistent`) are never required, retained, or compared.
+ */
 type RowKeyboardReactMethods = Readonly<{
-  preventDefault: ReactKeyboardEvent<HTMLElement>["preventDefault"];
-  stopPropagation: ReactKeyboardEvent<HTMLElement>["stopPropagation"];
-  isDefaultPrevented: () => boolean;
-  isPropagationStopped: () => boolean;
-  persist: () => void;
+  preventDefault: RowKeyboardPublicMethod;
+  isDefaultPrevented: RowKeyboardPublicMethod;
+  isPropagationStopped: RowKeyboardPublicMethod;
+}>;
+
+type RowKeyboardReactExpectation = Readonly<{
+  defaultPrevented: boolean;
+  retainedDefaultQuery: boolean;
 }>;
 
 type RowKeyboardReactSnapshot = Readonly<{
@@ -602,6 +612,21 @@ type RowKeyboardPair = Readonly<{
 type RowKeyboardDelivery = Readonly<{
   pair: RowKeyboardPair;
   bubble: RowKeyboardReactSnapshot;
+}>;
+
+/**
+ * Publication-local weak pairing for one row-action keydown. The capture pair
+ * is reachable only through the exact native event, so it survives any number
+ * of nested browser microtask checkpoints between the two React phases and
+ * disappears with the event itself. Retirement and cleanup replace the store
+ * and revoke every later read.
+ */
+type RowKeyboardPairStore = Readonly<{
+  publish: (event: KeyboardEvent, pair: RowKeyboardPair) => boolean;
+  read: (event: KeyboardEvent) => RowKeyboardPair | null;
+  consume: (event: KeyboardEvent, pair: RowKeyboardPair) => boolean;
+  revoke: () => void;
+  isCurrent: () => boolean;
 }>;
 
 type PanelReplay = Readonly<{
@@ -642,6 +667,7 @@ class PanelPublicationCoordinator {
   readonly #claimedRowKeyboardReactEvents = new WeakSet<object>();
   readonly #claimedRowKeyboardNativeEvents = new WeakSet<Event>();
   #rowKeyboardDelivery: RowKeyboardDelivery | null = null;
+  #rowKeyboardFenced = false;
   readonly #recentlyIntroduced = new WeakSet<HTMLElement>();
 
   constructor(mount: MountGeneration) {
@@ -673,7 +699,8 @@ class PanelPublicationCoordinator {
           publication.keyboardPair = null;
           publication.rowKeyboard?.terminal.release();
           publication.rowKeyboard = null;
-          publication.rowKeyboardPair = null;
+          publication.rowKeyboardPairs?.revoke();
+          publication.rowKeyboardPairs = null;
           publication.rowPublications = [];
           for (const row of publication.rows) row.publication = null;
           publication.keyboardReplay = null;
@@ -1066,7 +1093,8 @@ class PanelPublicationCoordinator {
     candidate.keyboardPair = null;
     candidate.rowKeyboard?.terminal.release();
     candidate.rowKeyboard = null;
-    candidate.rowKeyboardPair = null;
+    candidate.rowKeyboardPairs?.revoke();
+    candidate.rowKeyboardPairs = null;
     candidate.rowPublications = [];
     for (const row of candidate.rows) row.publication = null;
     const wasCurrent = this.#current === candidate;
@@ -1227,9 +1255,29 @@ class PanelPublicationCoordinator {
     candidate.keyboardPair = null;
   }
 
+  rowKeyboardIsFenced() {
+    return this.#rowKeyboardFenced;
+  }
+
+  /**
+   * Runs one row-action keyboard attempt with every public wrapper query and
+   * prevention call fenced: any reentrant capture or bubble attempt raised from
+   * inside a public method sees the fence and performs no work.
+   */
+  fenceRowKeyboard(operation: () => void) {
+    if (this.#rowKeyboardFenced) return;
+    this.#rowKeyboardFenced = true;
+    try {
+      operation();
+    } finally {
+      this.#rowKeyboardFenced = false;
+    }
+  }
+
   prepareRowKeyboardCapture(event: object, nativeEvent: object) {
     if (
       this.#rowKeyboardDelivery ||
+      this.#rowKeyboardFenced ||
       this.#attemptedRowKeyboardReactEvents.has(event) ||
       this.#attemptedRowKeyboardNativeEvents.has(nativeEvent)
     ) {
@@ -1243,6 +1291,7 @@ class PanelPublicationCoordinator {
   prepareRowKeyboardBubble(event: object, nativeEvent: object) {
     if (
       this.#rowKeyboardDelivery ||
+      this.#rowKeyboardFenced ||
       this.#attemptedRowKeyboardReactEvents.has(event) ||
       !this.#attemptedRowKeyboardNativeEvents.has(nativeEvent)
     ) {
@@ -3663,6 +3712,42 @@ function rowKeyboardSnapshotRemainsExact(
   }
 }
 
+function createRowKeyboardPairStore(): RowKeyboardPairStore {
+  // Closure-local: the only strong reference to a pair is this map, and the
+  // only key is the exact native event. No timer, microtask, poll, global, or
+  // stale event slot keeps a pair alive.
+  let pairs: WeakMap<KeyboardEvent, RowKeyboardPair> | null = new WeakMap();
+  return Object.freeze({
+    publish: (event: KeyboardEvent, pair: RowKeyboardPair) => {
+      if (!pairs || pairs.has(event)) return false;
+      pairs.set(event, pair);
+      return true;
+    },
+    read: (event: KeyboardEvent) => pairs?.get(event) ?? null,
+    consume: (event: KeyboardEvent, pair: RowKeyboardPair) => {
+      if (!pairs || pairs.get(event) !== pair) return false;
+      pairs.delete(event);
+      return true;
+    },
+    revoke: () => {
+      pairs = null;
+    },
+    isCurrent: () => pairs !== null,
+  });
+}
+
+function rowKeyboardPublicMethod(value: unknown): RowKeyboardPublicMethod | null {
+  return typeof value === "function"
+    ? (value as RowKeyboardPublicMethod)
+    : null;
+}
+
+const ROW_KEYBOARD_PRISTINE_EXPECTATION: RowKeyboardReactExpectation =
+  Object.freeze({ defaultPrevented: false, retainedDefaultQuery: true });
+
+const ROW_KEYBOARD_PREVENTED_EXPECTATION: RowKeyboardReactExpectation =
+  Object.freeze({ defaultPrevented: true, retainedDefaultQuery: false });
+
 function captureRowKeyboardReactEvent(
   event: ReactKeyboardEvent<HTMLElement>,
   authority: RowKeyboardAuthority,
@@ -3670,31 +3755,29 @@ function captureRowKeyboardReactEvent(
   currentTarget: HTMLElement,
 ): RowKeyboardReactSnapshot | null {
   try {
+    // Public wrapper authority only: ordinary public reads, no descriptors,
+    // prototypes, private fields, or structural resemblance.
     const reactEvent = event as ReactKeyboardEvent<HTMLElement> & {
       preventDefault?: unknown;
-      stopPropagation?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
-      persist?: unknown;
     };
-    const preventDefault = reactEvent.preventDefault;
-    const stopPropagation = reactEvent.stopPropagation;
-    const isDefaultPrevented = reactEvent.isDefaultPrevented;
-    const isPropagationStopped = reactEvent.isPropagationStopped;
-    const persist = reactEvent.persist;
+    const preventDefault = rowKeyboardPublicMethod(reactEvent.preventDefault);
+    const isDefaultPrevented = rowKeyboardPublicMethod(
+      reactEvent.isDefaultPrevented,
+    );
+    const isPropagationStopped = rowKeyboardPublicMethod(
+      reactEvent.isPropagationStopped,
+    );
     if (
-      typeof preventDefault !== "function" ||
-      typeof stopPropagation !== "function" ||
-      typeof isDefaultPrevented !== "function" ||
-      typeof isPropagationStopped !== "function" ||
-      typeof persist !== "function" ||
+      !preventDefault ||
+      !isDefaultPrevented ||
+      !isPropagationStopped ||
       authority.apply(isDefaultPrevented, event, []) !== false ||
       authority.apply(isPropagationStopped, event, []) !== false ||
       reactEvent.preventDefault !== preventDefault ||
-      reactEvent.stopPropagation !== stopPropagation ||
       reactEvent.isDefaultPrevented !== isDefaultPrevented ||
       reactEvent.isPropagationStopped !== isPropagationStopped ||
-      reactEvent.persist !== persist ||
       event.nativeEvent !== native.event ||
       event.type !== native.type ||
       event.target !== native.target ||
@@ -3731,10 +3814,8 @@ function captureRowKeyboardReactEvent(
       view: event.view,
       methods: Object.freeze({
         preventDefault,
-        stopPropagation,
         isDefaultPrevented,
         isPropagationStopped,
-        persist,
       }),
     });
   } catch {
@@ -3747,16 +3828,32 @@ function rowKeyboardReactSnapshotMatches(
   authority: RowKeyboardAuthority,
   native: RowKeyboardEventSnapshot,
   currentTarget: HTMLElement | null,
+  expectation: RowKeyboardReactExpectation = ROW_KEYBOARD_PRISTINE_EXPECTATION,
 ) {
   try {
     const event = snapshot.event as ReactKeyboardEvent<HTMLElement> & {
       preventDefault?: unknown;
-      stopPropagation?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
-      persist?: unknown;
     };
+    const preventDefault = rowKeyboardPublicMethod(event.preventDefault);
+    const isPropagationStopped = rowKeyboardPublicMethod(
+      event.isPropagationStopped,
+    );
+    // React 19 replaces this public query when prevention succeeds: after a
+    // prevention call, authenticate and invoke the current query instead of
+    // demanding the pre-call identity.
+    const isDefaultPrevented = rowKeyboardPublicMethod(
+      event.isDefaultPrevented,
+    );
     if (
+      !preventDefault ||
+      !isDefaultPrevented ||
+      !isPropagationStopped ||
+      preventDefault !== snapshot.methods.preventDefault ||
+      isPropagationStopped !== snapshot.methods.isPropagationStopped ||
+      (expectation.retainedDefaultQuery &&
+        isDefaultPrevented !== snapshot.methods.isDefaultPrevented) ||
       event.nativeEvent !== snapshot.nativeEvent ||
       event.nativeEvent !== native.event ||
       event.type !== native.type ||
@@ -3767,7 +3864,7 @@ function rowKeyboardReactSnapshotMatches(
       event.eventPhase !== native.phase ||
       event.bubbles !== native.bubbles ||
       event.cancelable !== native.cancelable ||
-      event.defaultPrevented !== native.defaultPrevented ||
+      event.defaultPrevented !== expectation.defaultPrevented ||
       event.isTrusted !== native.trusted ||
       event.key !== native.key ||
       event.code !== native.code ||
@@ -3785,31 +3882,16 @@ function rowKeyboardReactSnapshotMatches(
           native.terminal.receiver,
         )) ||
       event.detail !== native.detail ||
-      event.preventDefault !== snapshot.methods.preventDefault ||
-      event.stopPropagation !== snapshot.methods.stopPropagation ||
-      event.isDefaultPrevented !== snapshot.methods.isDefaultPrevented ||
-      event.isPropagationStopped !==
-        snapshot.methods.isPropagationStopped ||
-      event.persist !== snapshot.methods.persist ||
-      authority.apply(
-        snapshot.methods.isDefaultPrevented,
-        snapshot.event,
-        [],
-      ) !== false ||
-      authority.apply(
-        snapshot.methods.isPropagationStopped,
-        snapshot.event,
-        [],
-      ) !== false
+      authority.apply(isDefaultPrevented, snapshot.event, []) !==
+        expectation.defaultPrevented ||
+      authority.apply(isPropagationStopped, snapshot.event, []) !== false
     ) {
       return false;
     }
     return (
       event.preventDefault === snapshot.methods.preventDefault &&
-      event.stopPropagation === snapshot.methods.stopPropagation &&
-      event.isDefaultPrevented === snapshot.methods.isDefaultPrevented &&
       event.isPropagationStopped === snapshot.methods.isPropagationStopped &&
-      event.persist === snapshot.methods.persist
+      event.isDefaultPrevented === isDefaultPrevented
     );
   } catch {
     return false;
@@ -3913,7 +3995,7 @@ function createPanelPublication(presentation: PanelPresentation): PanelPublicati
     keyboard: null,
     keyboardPair: null,
     rowKeyboard: null,
-    rowKeyboardPair: null,
+    rowKeyboardPairs: createRowKeyboardPairStore(),
     keyboardSuspended: false,
     keyboardLayoutReplayAvailable: false,
     keyboardReplay: null,
@@ -5282,105 +5364,130 @@ export function WebhooksPanel() {
     } catch {
       return;
     }
+    const pairs = candidate.rowKeyboardPairs;
     if (
       !nativeEvent ||
       typeof nativeEvent !== "object" ||
-      candidate.rowKeyboardPair ||
+      !pairs ||
+      !pairs.isCurrent() ||
+      pairs.read(nativeEvent as KeyboardEvent) !== null ||
+      publicationCoordinator.rowKeyboardIsFenced() ||
       !publicationCoordinator.prepareRowKeyboardCapture(event, nativeEvent)
     ) {
       return;
     }
-    const authority = candidate.rowKeyboard;
-    const elements = candidate.rows[row.index];
-    const published = elements?.publication;
-    const root = elements?.root.element;
-    if (
-      !authority ||
-      !published ||
-      !root ||
-      published.facts !== row ||
-      candidate.rowPublications[row.index] !== published
-    ) {
-      return;
-    }
-    const native = captureRowKeyboardEvent(
-      authority,
-      nativeEvent as Event,
-      authority.Event.CAPTURING_PHASE,
-    );
-    const capture = native
-      ? captureRowKeyboardReactEvent(
-          event as ReactKeyboardEvent<HTMLElement>,
-          authority,
-          native,
-          root,
-        )
-      : null;
-    const source = native
-      ? published.actions.find(({ element }) => element === native.target)
-      : undefined;
-    const destination =
-      source && native
-        ? rowKeyboardDestination(published, source, native.key)
-        : null;
-    if (
-      !native ||
-      !capture ||
-      !source ||
-      !destination ||
-      native.terminal !== authority.terminal.proofFor(native.event) ||
-      !rowKeyboardSnapshotRemainsExact(native, authority) ||
-      !rowNavigationIsCurrent(
-        candidate,
-        authority,
-        published,
-        source,
-        destination,
-        native.key,
-      )
-    ) {
-      return;
-    }
-    const pair: RowKeyboardPair = Object.freeze({
-      publication: candidate,
-      authority,
-      row: published,
-      native,
-      capture,
-      terminal: native.terminal,
-      source,
-      destination,
-      key: native.key,
-      movement: Object.freeze({
-        panel: candidate,
-        row: published,
-        source,
-        destination,
-        key: native.key,
-      }),
-      publicationClaim: Object.freeze({ publication: candidate }),
-      rowClaim: Object.freeze({ row: published }),
-      movementClaim: Object.freeze({
-        row: published,
-        source,
-        destination,
-        key: native.key,
-      }),
-      wrapperClaim: Object.freeze({ capture: event }),
-      nativeClaim: Object.freeze({ nativeEvent }),
-      windowClaim: Object.freeze({
-        registration: authority.terminal,
-        proof: native.terminal,
-        receiver: native.terminal.receiver,
-      }),
-      sourceClaim: Object.freeze({ source }),
-      destinationClaim: Object.freeze({ destination }),
-    });
-    candidate.rowKeyboardPair = pair;
-    authority.ownerWindow.queueMicrotask(() => {
-      if (candidate.rowKeyboardPair === pair) {
-        candidate.rowKeyboardPair = null;
+    const store: RowKeyboardPairStore = pairs;
+    publicationCoordinator.fenceRowKeyboard(() => {
+      const authority = candidate.rowKeyboard;
+      const elements = candidate.rows[row.index];
+      const published = elements?.publication;
+      const root = elements?.root.element;
+      if (
+        !authority ||
+        !published ||
+        !root ||
+        published.facts !== row ||
+        candidate.rowPublications[row.index] !== published
+      ) {
+        return;
       }
+      const native = captureRowKeyboardEvent(
+        authority,
+        nativeEvent as Event,
+        authority.Event.CAPTURING_PHASE,
+      );
+      // The row-capture wrapper is authenticated on its own, at its actual
+      // capture phase and row currentTarget.
+      const capture = native
+        ? captureRowKeyboardReactEvent(
+            event as ReactKeyboardEvent<HTMLElement>,
+            authority,
+            native,
+            root,
+          )
+        : null;
+      const source = native
+        ? published.actions.find(({ element }) => element === native.target)
+        : undefined;
+      const destination =
+        source && native
+          ? rowKeyboardDestination(published, source, native.key)
+          : null;
+      if (
+        !native ||
+        !capture ||
+        !source ||
+        !destination ||
+        native.terminal !== authority.terminal.proofFor(native.event) ||
+        !rowKeyboardSnapshotRemainsExact(native, authority) ||
+        !rowKeyboardReactSnapshotMatches(capture, authority, native, root) ||
+        !rowNavigationIsCurrent(
+          candidate,
+          authority,
+          published,
+          source,
+          destination,
+          native.key,
+        )
+      ) {
+        return;
+      }
+      const pair: RowKeyboardPair = Object.freeze({
+        publication: candidate,
+        authority,
+        row: published,
+        native,
+        capture,
+        terminal: native.terminal,
+        source,
+        destination,
+        key: native.key,
+        movement: Object.freeze({
+          panel: candidate,
+          row: published,
+          source,
+          destination,
+          key: native.key,
+        }),
+        publicationClaim: Object.freeze({ publication: candidate }),
+        rowClaim: Object.freeze({ row: published }),
+        movementClaim: Object.freeze({
+          row: published,
+          source,
+          destination,
+          key: native.key,
+        }),
+        wrapperClaim: Object.freeze({ capture: event }),
+        nativeClaim: Object.freeze({ nativeEvent }),
+        windowClaim: Object.freeze({
+          registration: authority.terminal,
+          proof: native.terminal,
+          receiver: native.terminal.receiver,
+        }),
+        sourceClaim: Object.freeze({ source }),
+        destinationClaim: Object.freeze({ destination }),
+      });
+      if (
+        candidate.rowKeyboardPairs !== store ||
+        !store.isCurrent() ||
+        store.read(native.event) !== null ||
+        candidate.rowKeyboard !== authority ||
+        !authority.terminal.isCurrent() ||
+        native.terminal !== authority.terminal.proofFor(native.event) ||
+        !rowKeyboardSnapshotRemainsExact(native, authority) ||
+        !rowKeyboardReactSnapshotMatches(capture, authority, native, root) ||
+        !rowNavigationIsCurrent(
+          candidate,
+          authority,
+          published,
+          source,
+          destination,
+          native.key,
+        )
+      ) {
+        return;
+      }
+      store.publish(native.event, pair);
     });
   };
 
@@ -5391,7 +5498,7 @@ export function WebhooksPanel() {
     owner: ElementSlot<HTMLButtonElement>,
     event: ReactKeyboardEvent<HTMLButtonElement>,
   ) => {
-    const pair = candidate.rowKeyboardPair;
+    const pairs = candidate.rowKeyboardPairs;
     let nativeEvent: unknown;
     try {
       nativeEvent = event.nativeEvent;
@@ -5399,152 +5506,179 @@ export function WebhooksPanel() {
       return;
     }
     if (
-      !pair ||
       !nativeEvent ||
       typeof nativeEvent !== "object" ||
-      pair.native.event !== nativeEvent ||
+      !pairs ||
+      !pairs.isCurrent() ||
+      publicationCoordinator.rowKeyboardIsFenced()
+    ) {
+      return;
+    }
+    // The only route back to the capture pair is the exact native event, so a
+    // wrong-source, crossed, replayed, or retired attempt reads nothing.
+    const pending = pairs.read(nativeEvent as KeyboardEvent);
+    if (
+      !pending ||
+      pending.publication !== candidate ||
+      pending.native.event !== nativeEvent ||
+      pending.capture.event === event ||
       !publicationCoordinator.prepareRowKeyboardBubble(event, nativeEvent)
     ) {
       return;
     }
-    candidate.rowKeyboardPair = null;
-    const {
-      authority,
-      row: published,
-      source,
-      destination,
-      key,
-    } = pair;
-    let delivery: RowKeyboardDelivery | null = null;
-    try {
-      const currentElement = owner.element;
-      const native = captureRowKeyboardEvent(
+    const store: RowKeyboardPairStore = pairs;
+    const pair: RowKeyboardPair = pending;
+    publicationCoordinator.fenceRowKeyboard(() => {
+      const {
         authority,
-        nativeEvent as Event,
-        authority.Event.BUBBLING_PHASE,
-      );
-      const bubble =
-        native && currentElement
-          ? captureRowKeyboardReactEvent(
-              event as ReactKeyboardEvent<HTMLElement>,
-              authority,
-              native,
-              currentElement,
-            )
-          : null;
-      if (
-        !currentElement ||
-        !native ||
-        !bubble ||
-        bubble.event === pair.capture.event ||
-        pair.publication !== candidate ||
-        published.facts !== row ||
-        source.facts !== action ||
-        source.owner !== owner ||
-        source.element !== currentElement ||
-        event.currentTarget !== currentElement ||
-        pair.capture.currentTarget !== published.root ||
-        bubble.currentTarget !== source.element ||
-        pair.capture.phase !== authority.Event.CAPTURING_PHASE ||
-        bubble.phase !== authority.Event.BUBBLING_PHASE ||
-        native.terminal !== pair.terminal ||
-        !rowKeyboardEventsMatch(pair.native, native, authority) ||
-        !rowKeyboardReactSnapshotMatches(
-          pair.capture,
+        row: published,
+        source,
+        destination,
+        key,
+      } = pair;
+      let delivery: RowKeyboardDelivery | null = null;
+      try {
+        const element = owner.element;
+        const nativeCandidate = captureRowKeyboardEvent(
           authority,
-          pair.native,
-          null,
-        ) ||
-        !rowKeyboardReactSnapshotMatches(
-          bubble,
-          authority,
-          native,
-          currentElement,
-        ) ||
-        !rowKeyboardSnapshotRemainsExact(native, authority) ||
-        !rowNavigationIsCurrent(
-          candidate,
-          authority,
-          published,
-          source,
-          destination,
-          key,
-        )
-      ) {
+          nativeEvent as Event,
+          authority.Event.BUBBLING_PHASE,
+        );
+        // The action-bubble wrapper is authenticated on its own, at its actual
+        // bubbling phase and action currentTarget.
+        const bubbleCandidate =
+          nativeCandidate && element
+            ? captureRowKeyboardReactEvent(
+                event as ReactKeyboardEvent<HTMLElement>,
+                authority,
+                nativeCandidate,
+                element,
+              )
+            : null;
+        if (
+          !element ||
+          !nativeCandidate ||
+          !bubbleCandidate ||
+          bubbleCandidate.event === pair.capture.event ||
+          nativeCandidate.terminal !== pair.terminal ||
+          nativeCandidate.terminal !==
+            authority.terminal.proofFor(nativeCandidate.event) ||
+          !rowKeyboardEventsMatch(pair.native, nativeCandidate, authority)
+        ) {
+          return;
+        }
+        const currentElement: HTMLButtonElement = element;
+        const native: RowKeyboardEventSnapshot = nativeCandidate;
+        const bubble: RowKeyboardReactSnapshot = bubbleCandidate;
+        /**
+         * One complete re-read of every authority this move depends on: store,
+         * claim, publication, row order/operation/eligibility, source focus,
+         * permanent DOM and placement history, destination, action identities,
+         * owner-Window listener proof, wrapper identities, and the required
+         * public methods. It runs again after every public invocation.
+         */
+        const deliveryIsCurrent = (
+          expectation: RowKeyboardReactExpectation,
+          claimed: boolean,
+          consumed: boolean,
+        ) => {
+          try {
+            return (
+              publicationCoordinator.rowKeyboardIsFenced() &&
+              candidate.rowKeyboardPairs === store &&
+              store.isCurrent() &&
+              store.read(native.event) === (consumed ? null : pair) &&
+              (!claimed ||
+                (delivery !== null &&
+                  publicationCoordinator.rowKeyboardNavigationIsDelivering(
+                    delivery,
+                  ))) &&
+              pair.publication === candidate &&
+              pair.authority === authority &&
+              pair.row === published &&
+              pair.source === source &&
+              pair.destination === destination &&
+              pair.key === key &&
+              pair.terminal === native.terminal &&
+              pair.native.event === native.event &&
+              pair.capture.nativeEvent === native.event &&
+              bubble.nativeEvent === native.event &&
+              published.facts === row &&
+              source.facts === action &&
+              source.owner === owner &&
+              source.element === currentElement &&
+              owner.element === currentElement &&
+              event.currentTarget === currentElement &&
+              pair.capture.currentTarget === published.root &&
+              bubble.currentTarget === currentElement &&
+              pair.capture.phase === authority.Event.CAPTURING_PHASE &&
+              bubble.phase === authority.Event.BUBBLING_PHASE &&
+              authority.terminal.isCurrent() &&
+              native.terminal.registration === authority.terminal &&
+              native.terminal.nativeEvent === native.event &&
+              native.terminal.receiver === native.terminal.currentTarget &&
+              native.terminal.receiver === native.terminal.terminal &&
+              rowKeyboardEventsMatch(pair.native, native, authority) &&
+              rowKeyboardSnapshotRemainsExact(
+                native,
+                authority,
+                expectation.defaultPrevented,
+              ) &&
+              rowKeyboardReactSnapshotMatches(
+                pair.capture,
+                authority,
+                pair.native,
+                null,
+              ) &&
+              rowKeyboardReactSnapshotMatches(
+                bubble,
+                authority,
+                native,
+                currentElement,
+                expectation,
+              ) &&
+              rowNavigationIsCurrent(
+                candidate,
+                authority,
+                published,
+                source,
+                destination,
+                key,
+              )
+            );
+          } catch {
+            return false;
+          }
+        };
+        if (!deliveryIsCurrent(ROW_KEYBOARD_PRISTINE_EXPECTATION, false, false)) {
+          return;
+        }
+        delivery = Object.freeze({ pair, bubble });
+        if (
+          !publicationCoordinator.claimRowKeyboardNavigation(delivery) ||
+          !deliveryIsCurrent(ROW_KEYBOARD_PRISTINE_EXPECTATION, true, false) ||
+          // Atomic: only a fully authenticated rightful bubble takes the pair,
+          // and it takes it before any public effect.
+          !store.consume(native.event, pair) ||
+          !deliveryIsCurrent(ROW_KEYBOARD_PRISTINE_EXPECTATION, true, true)
+        ) {
+          return;
+        }
+        authority.apply(bubble.methods.preventDefault, bubble.event, []);
+        if (!deliveryIsCurrent(ROW_KEYBOARD_PREVENTED_EXPECTATION, true, true)) {
+          return;
+        }
+        authority.apply(authority.focus, destination.element, [
+          { preventScroll: true },
+        ]);
+      } catch {
         return;
+      } finally {
+        if (delivery) {
+          publicationCoordinator.finishRowKeyboardNavigation(delivery);
+        }
       }
-      delivery = Object.freeze({ pair, bubble });
-      if (!publicationCoordinator.claimRowKeyboardNavigation(delivery)) {
-        return;
-      }
-      if (
-        !publicationCoordinator.rowKeyboardNavigationIsDelivering(delivery) ||
-        !rowKeyboardReactSnapshotMatches(
-          pair.capture,
-          authority,
-          pair.native,
-          null,
-        ) ||
-        !rowKeyboardReactSnapshotMatches(
-          bubble,
-          authority,
-          native,
-          currentElement,
-        ) ||
-        !rowKeyboardSnapshotRemainsExact(native, authority) ||
-        !rowNavigationIsCurrent(
-          candidate,
-          authority,
-          published,
-          source,
-          destination,
-          key,
-        )
-      ) {
-        return;
-      }
-      authority.apply(bubble.methods.preventDefault, bubble.event, []);
-      const currentDefaultQuery = bubble.event.isDefaultPrevented;
-      const currentPropagationQuery = bubble.event.isPropagationStopped;
-      if (
-        rowKeyboardNativeValue<boolean>(
-          authority,
-          authority.event.defaultPrevented,
-          native.event,
-        ) !== true ||
-        rowKeyboardNativeValue<boolean>(
-          authority,
-          authority.event.cancelBubble,
-          native.event,
-        ) !== false ||
-        bubble.event.defaultPrevented !== true ||
-        typeof currentDefaultQuery !== "function" ||
-        typeof currentPropagationQuery !== "function" ||
-        authority.apply(currentDefaultQuery, bubble.event, []) !== true ||
-        authority.apply(currentPropagationQuery, bubble.event, []) !== false ||
-        !rowKeyboardSnapshotRemainsExact(native, authority, true) ||
-        !publicationCoordinator.rowKeyboardNavigationIsDelivering(delivery) ||
-        !rowNavigationIsCurrent(
-          candidate,
-          authority,
-          published,
-          source,
-          destination,
-          key,
-        )
-      ) {
-        return;
-      }
-      authority.apply(authority.focus, destination.element, [
-        { preventScroll: true },
-      ]);
-    } catch {
-      return;
-    } finally {
-      if (delivery) {
-        publicationCoordinator.finishRowKeyboardNavigation(delivery);
-      }
-    }
+    });
   };
 
   useLayoutEffect(() => {
