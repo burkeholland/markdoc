@@ -406,6 +406,28 @@ function exposeKeyboardScalarThroughGetter(
   });
 }
 
+function exposeKeyboardMethodThroughAccessor(
+  event: ReactKeyboardEvent<HTMLElement>,
+  property:
+    | "preventDefault"
+    | "isDefaultPrevented"
+    | "isPropagationStopped",
+) {
+  const descriptor = Object.getOwnPropertyDescriptor(event, property);
+  if (descriptor && (!("value" in descriptor) || !descriptor.configurable)) {
+    throw new Error(`${property} was not configurable public data`);
+  }
+  let value = event[property];
+  Object.defineProperty(event, property, {
+    configurable: true,
+    enumerable: descriptor?.enumerable ?? true,
+    get: () => value,
+    set: (next) => {
+      value = next;
+    },
+  });
+}
+
 function connectedButton(label = "Other") {
   const button = document.createElement("button");
   button.type = "button";
@@ -2597,6 +2619,10 @@ describe("notification strip row action navigation", () => {
 
   it.each([
     ["Open", "ArrowLeft"],
+    ["Open", "ArrowUp"],
+    ["Open", "ArrowDown"],
+    ["Open", "Home"],
+    ["Open", "End"],
     ["Mark as read", "ArrowRight"],
     ["Mark as read", "ArrowDown"],
     ["Mark as read", "End"],
@@ -2634,11 +2660,13 @@ describe("notification strip row action navigation", () => {
   );
 
   it.each([
-    ["ArrowDown", "Numpad2", 3],
-    ["End", "Numpad1", 3],
+    ["ArrowUp", "Numpad8", 3, 0],
+    ["ArrowDown", "Numpad2", 3, 2],
+    ["Home", "Numpad7", 3, 0],
+    ["End", "Numpad1", 3, 2],
   ] as const)(
-    "preserves Open-control vertical %s browsing for numeric-keypad input",
-    (key, code, location) => {
+    "preserves Open-control primary-list %s browsing for numeric-keypad input",
+    (key, code, location, destinationIndex) => {
       const router = createRouter(`vertical-row-action-${key}`);
       const view = createStrictView(
         router,
@@ -2656,42 +2684,202 @@ describe("notification strip row action navigation", () => {
 
       expect(result.allowed).toBe(false);
       expect(result.event.defaultPrevented).toBe(true);
-      expect(controls[2]).toHaveFocus();
+      expect(controls[destinationIndex]).toHaveFocus();
       expect(captureActions(1, view.host).dismissButton).not.toHaveFocus();
       expect(store.markNotificationRead).not.toHaveBeenCalled();
       expect(router.push).not.toHaveBeenCalled();
     },
   );
 
-  it("authenticates independent public capture and bubble wrappers before using only bubble prevention", () => {
+  it("authenticates independent wrapper prototypes and methods through React 19 prevention", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const router = createRouter("independent-row-wrappers");
-    const view = createStrictView(router, snapshot([ITEM]));
-    const actions = captureActions(0, view.host);
     const capturePreventDefault = vi.fn();
-    const bubblePreventDefault = vi.fn();
     let captureWrapper: ReactKeyboardEvent<HTMLLIElement> | null = null;
     let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    let captureMethods: readonly unknown[] = [];
+    let bubbleMethods: readonly unknown[] = [];
+    let postPreventionDefaultQuery: unknown;
+    let captureDefaultQueries = 0;
+    let capturePropagationQueries = 0;
+    let bubbleDefaultQueries = 0;
+    let bubblePropagationQueries = 0;
+    try {
+      const view = createStrictView(router, snapshot([ITEM]));
+      const actions = captureActions(0, view.host);
+      const restoreCapture = interceptKeyDownCapture(
+        actions.item,
+        (original, event) => {
+          captureWrapper = event;
+          Object.setPrototypeOf(event, Object.freeze({ phase: "capture" }));
+          event.preventDefault = capturePreventDefault;
+          event.isDefaultPrevented = function captureDefaultQuery() {
+            captureDefaultQueries += 1;
+            return false;
+          };
+          event.isPropagationStopped =
+            function capturePropagationQuery() {
+              capturePropagationQueries += 1;
+              return false;
+            };
+            exposeKeyboardScalarThroughGetter(event, "key");
+            const surface = event as unknown as Record<string, unknown>;
+          Reflect.deleteProperty(surface, "_reactName");
+          surface.persist = null;
+          surface.isPersistent = "ignored";
+          surface.stopPropagation = undefined;
+          captureMethods = [
+            event.preventDefault,
+            event.isDefaultPrevented,
+            event.isPropagationStopped,
+          ];
+          original(event);
+        },
+      );
+      const restoreBubble = interceptKeyDown(
+        actions.openButton,
+        (original, event) => {
+          bubbleWrapper = event;
+          const nativePreventDefault = event.preventDefault;
+          const nativeDefaultQuery = event.isDefaultPrevented;
+          const nativePropagationQuery = event.isPropagationStopped;
+          Object.setPrototypeOf(event, Object.freeze({ phase: "bubble" }));
+          event.preventDefault = function bubblePrevention() {
+            nativePreventDefault.call(event);
+            postPreventionDefaultQuery = event.isDefaultPrevented;
+          };
+          event.isDefaultPrevented = function bubbleDefaultQuery() {
+            bubbleDefaultQueries += 1;
+            return nativeDefaultQuery.call(event);
+          };
+          event.isPropagationStopped =
+            function bubblePropagationQuery() {
+              bubblePropagationQueries += 1;
+              return nativePropagationQuery.call(event);
+            };
+          exposeKeyboardScalarThroughGetter(event, "key");
+          const surface = event as unknown as Record<string, unknown>;
+          surface._reactName = 17;
+          surface.persist = undefined;
+          surface.isPersistent = null;
+          surface.stopPropagation = "ignored";
+          bubbleMethods = [
+            event.preventDefault,
+            event.isDefaultPrevented,
+            event.isPropagationStopped,
+          ];
+          original(event);
+        },
+      );
+      actions.openButton.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      try {
+        const result = dispatchTrustedKey(
+          actions.openButton,
+          "ArrowRight",
+          {},
+          false,
+        );
+
+        expect({
+          allowed: result.allowed,
+          defaultPrevented: result.event.defaultPrevented,
+          captureDefaultQueries,
+          capturePropagationQueries,
+          bubbleDefaultQueries,
+          bubblePropagationQueries,
+        }).toEqual({
+          allowed: false,
+          defaultPrevented: true,
+          captureDefaultQueries: 4,
+          capturePropagationQueries: 4,
+          bubbleDefaultQueries: 3,
+          bubblePropagationQueries: 4,
+        });
+      } finally {
+        restoreBubble();
+        restoreCapture();
+      }
+
+      expect(actions.dismissButton).toHaveFocus();
+      expect(captureWrapper).not.toBe(bubbleWrapper);
+      if (!captureWrapper || !bubbleWrapper) {
+        throw new Error("Both React phase wrappers were required");
+      }
+      expect(Object.getPrototypeOf(captureWrapper)).not.toBe(
+        Object.getPrototypeOf(bubbleWrapper),
+      );
+      expect(captureMethods).not.toEqual(bubbleMethods);
+      expect(capturePreventDefault).not.toHaveBeenCalled();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(postPreventionDefaultQuery).not.toBe(bubbleMethods[1]);
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it("accepts exact scalar and method wrapper values exposed through public accessors", () => {
+    const router = createRouter("row-wrapper-accessors");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const actions = captureActions(0, view.host);
+    const calls = {
+      captureDefault: 0,
+      capturePropagation: 0,
+      bubbleDefault: 0,
+      bubblePropagation: 0,
+      prevention: 0,
+    };
     const restoreCapture = interceptKeyDownCapture(
       actions.item,
       (original, event) => {
-        captureWrapper = event;
-        const originalPreventDefault = event.preventDefault;
-        event.preventDefault = function capturePrevention() {
-          capturePreventDefault();
-          originalPreventDefault.call(event);
+        const defaultQuery = event.isDefaultPrevented;
+        const propagationQuery = event.isPropagationStopped;
+        event.isDefaultPrevented = function captureAccessorDefault() {
+          calls.captureDefault += 1;
+          return defaultQuery.call(event);
         };
+        event.isPropagationStopped = function captureAccessorPropagation() {
+          calls.capturePropagation += 1;
+          return propagationQuery.call(event);
+        };
+        exposeKeyboardScalarThroughGetter(event, "key");
+        exposeKeyboardMethodThroughAccessor(event, "preventDefault");
+        exposeKeyboardMethodThroughAccessor(event, "isDefaultPrevented");
+        exposeKeyboardMethodThroughAccessor(event, "isPropagationStopped");
         original(event);
       },
     );
     const restoreBubble = interceptKeyDown(
       actions.openButton,
       (original, event) => {
-        bubbleWrapper = event;
-        const originalPreventDefault = event.preventDefault;
-        event.preventDefault = function bubblePrevention() {
-          bubblePreventDefault();
-          originalPreventDefault.call(event);
+        const prevention = event.preventDefault;
+        const defaultQuery = event.isDefaultPrevented;
+        const propagationQuery = event.isPropagationStopped;
+        event.preventDefault = function bubbleAccessorPrevention() {
+          calls.prevention += 1;
+          prevention.call(event);
         };
+        event.isDefaultPrevented = function bubbleAccessorDefault() {
+          calls.bubbleDefault += 1;
+          return defaultQuery.call(event);
+        };
+        event.isPropagationStopped = function bubbleAccessorPropagation() {
+          calls.bubblePropagation += 1;
+          return propagationQuery.call(event);
+        };
+        exposeKeyboardScalarThroughGetter(event, "key");
+        exposeKeyboardMethodThroughAccessor(event, "preventDefault");
+        exposeKeyboardMethodThroughAccessor(event, "isDefaultPrevented");
+        exposeKeyboardMethodThroughAccessor(event, "isPropagationStopped");
         original(event);
       },
     );
@@ -2704,11 +2892,18 @@ describe("notification strip row action navigation", () => {
         false,
       );
 
-      expect(result.allowed).toBe(false);
+      expect({ allowed: result.allowed, prevented: result.event.defaultPrevented, calls }).toEqual({
+        allowed: false,
+        prevented: true,
+        calls: {
+          captureDefault: 4,
+          capturePropagation: 4,
+          bubbleDefault: 3,
+          bubblePropagation: 4,
+          prevention: 1,
+        },
+      });
       expect(actions.dismissButton).toHaveFocus();
-      expect(captureWrapper).not.toBe(bubbleWrapper);
-      expect(capturePreventDefault).not.toHaveBeenCalled();
-      expect(bubblePreventDefault).toHaveBeenCalledOnce();
       expect(store.markNotificationRead).not.toHaveBeenCalled();
       expect(router.push).not.toHaveBeenCalled();
     } finally {
@@ -2717,41 +2912,121 @@ describe("notification strip row action navigation", () => {
     }
   });
 
-  it("accepts exact scalar wrapper values exposed through non-data descriptors", () => {
-    const router = createRouter("row-wrapper-accessors");
-    const view = createStrictView(router, snapshot([ITEM]));
-    const actions = captureActions(0, view.host);
-    const restoreCapture = interceptKeyDownCapture(
-      actions.item,
-      (original, event) => {
-        exposeKeyboardScalarThroughGetter(event, "key");
-        original(event);
-      },
-    );
-    const restoreBubble = interceptKeyDown(
-      actions.openButton,
-      (original, event) => {
-        exposeKeyboardScalarThroughGetter(event, "key");
-        original(event);
-      },
-    );
+  it("fences capture and bubble query reentry, recursion, and exact-wrapper replay", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const router = createRouter("row-query-reentry");
+    const nested: ReturnType<typeof dispatchTrustedKeyDuringPublicCall>[] = [];
+    let outerNative: KeyboardEvent | null = null;
+    let captureQueried = false;
+    let bubbleQueried = false;
+    const replay: {
+      captureWrapper: ReactKeyboardEvent<HTMLLIElement> | null;
+      bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null;
+      captureHandler: CapturedActions["rowKeyDownCapture"] | null;
+      bubbleHandler: KeyHandler | null;
+    } = {
+      captureWrapper: null,
+      bubbleWrapper: null,
+      captureHandler: null,
+      bubbleHandler: null,
+    };
     try {
-      actions.openButton.focus();
-      const result = dispatchTrustedKey(
-        actions.openButton,
-        "ArrowRight",
-        {},
-        false,
+      const view = createStrictView(router, snapshot([ITEM]));
+      const actions = captureActions(0, view.host);
+      const restoreCapture = interceptKeyDownCapture(
+        actions.item,
+        (original, event) => {
+          if (!outerNative) outerNative = event.nativeEvent;
+          if (event.nativeEvent === outerNative && !replay.captureWrapper) {
+            replay.captureWrapper = event;
+            replay.captureHandler = original;
+            const defaultQuery = event.isDefaultPrevented;
+            event.isDefaultPrevented = function captureReentryQuery() {
+              if (!captureQueried) {
+                captureQueried = true;
+                original(event);
+                nested.push(dispatchTrustedKeyDuringPublicCall(
+                  actions.openButton,
+                  "ArrowRight",
+                ));
+              }
+              return defaultQuery.call(event);
+            };
+          }
+          original(event);
+        },
       );
+      const restoreBubble = interceptKeyDown(
+        actions.openButton,
+        (original, event) => {
+          if (event.nativeEvent === outerNative && !replay.bubbleWrapper) {
+            replay.bubbleWrapper = event;
+            replay.bubbleHandler = original;
+            const propagationQuery = event.isPropagationStopped;
+            event.isPropagationStopped = function bubbleReentryQuery() {
+              if (!bubbleQueried) {
+                bubbleQueried = true;
+                original(event);
+                nested.push(dispatchTrustedKeyDuringPublicCall(
+                  actions.openButton,
+                  "ArrowRight",
+                ));
+              }
+              return propagationQuery.call(event);
+            };
+          }
+          original(event);
+        },
+      );
+      actions.openButton.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      try {
+        const outer = dispatchTrustedKey(
+          actions.openButton,
+          "ArrowRight",
+          {},
+          false,
+        );
+        expect(outer.allowed).toBe(false);
+        expect(outer.event.defaultPrevented).toBe(true);
+      } finally {
+        restoreBubble();
+        restoreCapture();
+      }
 
-      expect(result.allowed).toBe(false);
-      expect(result.event.defaultPrevented).toBe(true);
+      expect(captureQueried).toBe(true);
+      expect(bubbleQueried).toBe(true);
+      expect(nested).toHaveLength(2);
+      nested.forEach(({ allowed, event }) => {
+        expect(allowed).toBe(true);
+        expect(event.defaultPrevented).toBe(false);
+      });
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(actions.dismissButton).toHaveFocus();
+
+      const captureWrapper = replay.captureWrapper;
+      const bubbleWrapper = replay.bubbleWrapper;
+      const captureHandler = replay.captureHandler;
+      const bubbleHandler = replay.bubbleHandler;
+      if (!captureWrapper || !bubbleWrapper || !captureHandler || !bubbleHandler) {
+        throw new Error("The exact phase wrappers were not retained");
+      }
+      captureHandler(captureWrapper);
+      bubbleHandler(bubbleWrapper);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
       expect(actions.dismissButton).toHaveFocus();
       expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
       expect(router.push).not.toHaveBeenCalled();
     } finally {
-      restoreBubble();
-      restoreCapture();
+      preventDefault.mockRestore();
+      focus.mockRestore();
     }
   });
 
@@ -2825,6 +3100,186 @@ describe("notification strip row action navigation", () => {
     expect(store.markNotificationRead).not.toHaveBeenCalled();
     expect(router.push).not.toHaveBeenCalled();
   });
+
+  it("preserves the rightful pair across crossed, wrong-row, drifting, reentrant, and replayed bubbles", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const router = createRouter("row-pair-recovery");
+    let captureWrapper: ReactKeyboardEvent<HTMLLIElement> | null = null;
+    let reentryCount = 0;
+    try {
+      const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+      const first = captureActions(0, view.host);
+      const second = captureActions(1, view.host);
+      const restoreCapture = interceptKeyDownCapture(
+        first.item,
+        (original, event) => {
+          captureWrapper = event;
+          original(new Proxy(event, {
+            get(target, property, receiver) {
+              if (property === "currentTarget") return second.item;
+              return Reflect.get(target, property, receiver);
+            },
+          }));
+          const retainedPreventDefault = event.preventDefault;
+          const retainedDefaultQuery = event.isDefaultPrevented;
+          event.isDefaultPrevented = function driftingCaptureQuery() {
+            event.preventDefault = vi.fn();
+            return false;
+          };
+          original(event);
+          event.preventDefault = retainedPreventDefault;
+          event.isDefaultPrevented = retainedDefaultQuery;
+          original(event);
+        },
+      );
+      const restoreBubble = interceptKeyDown(
+        first.openButton,
+        (original, event) => {
+          second.keyDown(event);
+          if (captureWrapper) {
+            original(
+              captureWrapper as unknown as ReactKeyboardEvent<HTMLButtonElement>,
+            );
+          }
+          const retainedPreventDefault = event.preventDefault;
+          const retainedDefaultQuery = event.isDefaultPrevented;
+          event.isDefaultPrevented = function driftingBubbleQuery() {
+            event.preventDefault = vi.fn();
+            return false;
+          };
+          original(event);
+          event.preventDefault = retainedPreventDefault;
+          event.isDefaultPrevented = retainedDefaultQuery;
+
+          const retainedPropagationQuery = event.isPropagationStopped;
+          const keyDescriptor = Object.getOwnPropertyDescriptor(event, "key");
+          if (!keyDescriptor || !("value" in keyDescriptor)) {
+            throw new Error("The bubble wrapper key was not public data");
+          }
+          event.isPropagationStopped = function driftingPropagationQuery() {
+            Object.defineProperty(event, "key", {
+              ...keyDescriptor,
+              value: "End",
+            });
+            return false;
+          };
+          original(event);
+          Object.defineProperty(event, "key", keyDescriptor);
+          event.isPropagationStopped = retainedPropagationQuery;
+
+          event.preventDefault = function reentrantPrevention() {
+            reentryCount += 1;
+            original(event);
+            retainedPreventDefault.call(event);
+          };
+          original(event);
+          original(event);
+        },
+      );
+      first.openButton.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      try {
+        const result = dispatchTrustedKey(
+          first.openButton,
+          "ArrowRight",
+          {},
+          false,
+        );
+        expect(result.allowed).toBe(false);
+        expect(result.event.defaultPrevented).toBe(true);
+      } finally {
+        restoreBubble();
+        restoreCapture();
+      }
+
+      expect(reentryCount).toBe(1);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(first.dismissButton).toHaveFocus();
+      expect(second.openButton).not.toHaveFocus();
+      expect(second.dismissButton).not.toHaveFocus();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it.each(["query", "prevention"] as const)(
+    "rejects throwing public %s and accepts a distinct clean successor",
+    (failure) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const router = createRouter(`throwing-row-${failure}`);
+      try {
+        const view = createStrictView(router, snapshot([ITEM]));
+        const actions = captureActions(0, view.host);
+        let attacked = false;
+        const restore = interceptKeyDown(
+          actions.openButton,
+          (original, event) => {
+            if (!attacked) {
+              attacked = true;
+              if (failure === "query") {
+                event.isDefaultPrevented = function throwingQuery() {
+                  throw new Error("query failed");
+                };
+              } else {
+                event.preventDefault = function throwingPrevention() {
+                  throw new Error("prevention failed");
+                };
+              }
+            }
+            original(event);
+          },
+        );
+        actions.openButton.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        try {
+          const rejected = dispatchTrustedKey(
+            actions.openButton,
+            "ArrowRight",
+            {},
+            false,
+          );
+          expect(rejected.allowed).toBe(true);
+          expect(rejected.event.defaultPrevented).toBe(false);
+          expect(actions.openButton).toHaveFocus();
+          expect(preventDefault).not.toHaveBeenCalled();
+          expect(focus).not.toHaveBeenCalled();
+        } finally {
+          restore();
+        }
+
+        const recovered = dispatchTrustedKey(
+          actions.openButton,
+          "ArrowRight",
+          {},
+          false,
+        );
+        expect(recovered.allowed).toBe(false);
+        expect(recovered.event.defaultPrevented).toBe(true);
+        expect(actions.dismissButton).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(store.markNotificationRead).not.toHaveBeenCalled();
+        expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+      } finally {
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
 
   it("accepts the exact public owner Window and rejects a structural wrapper lookalike", () => {
     const router = createRouter("row-window-proof");
@@ -2940,6 +3395,104 @@ describe("notification strip row action navigation", () => {
     expect(router.push).not.toHaveBeenCalled();
   });
 
+  it.each(["canceled", "stopped"] as const)(
+    "rejects native %s row input without consuming a clean successor",
+    (state) => {
+      const router = createRouter(`row-native-${state}`);
+      const view = createStrictView(router, snapshot([ITEM]));
+      const actions = captureActions(0, view.host);
+      const restore = interceptKeyDownCapture(
+        actions.item,
+        (original, event) => {
+          if (state === "canceled") {
+            event.nativeEvent.preventDefault();
+          } else {
+            event.nativeEvent.stopPropagation();
+          }
+          original(event);
+        },
+      );
+      actions.openButton.focus();
+      try {
+        const rejected = dispatchTrustedKey(
+          actions.openButton,
+          "ArrowRight",
+          {},
+          false,
+        );
+        expect(rejected.allowed).toBe(state !== "canceled");
+        expect(rejected.event.defaultPrevented).toBe(state === "canceled");
+        expect(actions.openButton).toHaveFocus();
+      } finally {
+        restore();
+      }
+
+      const recovered = dispatchTrustedKey(
+        actions.openButton,
+        "ArrowRight",
+        {},
+        false,
+      );
+      expect(recovered.allowed).toBe(false);
+      expect(recovered.event.defaultPrevented).toBe(true);
+      expect(actions.dismissButton).toHaveFocus();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    },
+  );
+
+  it("revokes a staged row pair across nested microtasks and cleanup before a clean mount recovers", async () => {
+    const router = createRouter("row-delivery-cleanup");
+    const current = snapshot([ITEM]);
+    const view = createStrictView(router, current);
+    const stale = captureActions(0, view.host);
+    let stagedBubble: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    const restore = interceptKeyDown(stale.openButton, (_original, event) => {
+      stagedBubble = event;
+    });
+    stale.openButton.focus();
+    const incomplete = dispatchTrustedKey(
+      stale.openButton,
+      "ArrowRight",
+      {},
+      false,
+    );
+    restore();
+    expect(incomplete.allowed).toBe(true);
+    expect(incomplete.event.defaultPrevented).toBe(false);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    if (!stagedBubble) throw new Error("The staged bubble wrapper was not captured");
+    stale.keyDown(stagedBubble);
+    expect(stale.openButton).toHaveFocus();
+
+    await act(async () => {
+      view.root.unmount();
+      await Promise.resolve();
+    });
+    const index = directViews.indexOf(view);
+    if (index >= 0) directViews.splice(index, 1);
+    stale.keyDown(stagedBubble);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    const successor = createStrictView(router, current);
+    const actions = captureActions(0, successor.host);
+    const accepted = dispatchTrustedKey(
+      actions.openButton,
+      "ArrowRight",
+    );
+    expect(accepted.allowed).toBe(false);
+    expect(accepted.event.defaultPrevented).toBe(true);
+    expect(actions.dismissButton).toHaveFocus();
+    view.host.remove();
+  });
+
   it("retires restored DOM history and recovers only through a complete successor", async () => {
     const router = createRouter("restored-row-action-dom");
     const view = createStrictGenerationView(router, snapshot([ITEM, ITEM_TWO], 2));
@@ -3012,6 +3565,12 @@ describe("notification strip row action navigation", () => {
     }
     expect(store.markNotificationRead).not.toHaveBeenCalled();
     expect(router.push).not.toHaveBeenCalled();
+
+    click(actions.open);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(
+      `/d/${ITEM.documentId}?thread=${ITEM.refId}`,
+    );
   });
 
   it("removes every Strict Mode Window capture listener on retirement", async () => {
