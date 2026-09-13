@@ -4223,7 +4223,7 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
        onClick={() => closeControlVisit(controlVisit)}>Close token management</button>}
       </div>
       <p className="text-xs leading-5 text-ink-3">Existing secrets cannot be shown again. Rename changes only the name; replace creates a new secret.</p>
-      {error && <p role="alert" aria-atomic="true" className="text-sm text-danger">{error}</p>}
+      {error && <p role="alert" aria-atomic="true" className="wrap-anywhere text-sm text-danger">{error}</p>}
       {conflictName && <p className="text-sm text-ink-2" data-testid="token-conflict">
         {matching ? `The matching token "${matching.name}" is in Your tokens below. Rename, replace or revoke it, or choose a different name for a separate token.`
           : "That name is reserved by an existing token, but it could not be matched to this list. Retry the list or open all your tokens in a signed-in browser session; do not create another until the scope and account are clear."}
@@ -4240,7 +4240,7 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
       <section className="min-w-0 rounded-xl border border-line bg-surface" aria-label="Your tokens">
         <h2 className="border-b border-line px-3 py-2 text-sm font-semibold text-ink">Your tokens</h2>
         {loadError ? <div className="p-3 text-sm">
-          <p role="alert" aria-atomic="true" className="text-danger">{loadError.message}</p>
+          <p role="alert" aria-atomic="true" className="wrap-anywhere text-danger">{loadError.message}</p>
           <p className="mt-1 text-ink-3">{loadError.permission ? "Token management requires your signed-in browser session, not an agent or embedded session." : "The list could not be loaded. This does not mean you have no tokens."}</p>
           <button type="button" className="btn btn-outline btn-sm mt-2" onClick={() => void load()}>Retry token list</button>
         </div> : tokens === null ? <p className="p-3 text-sm text-ink-3">Loading tokens...</p>
@@ -4331,7 +4331,7 @@ function TokenManager({ origin, userLogin, next, documentId, embedded, onClose }
                {documentChooserCandidate.buttonLabel}
              </button>}
            </div>}
-           {documentError && <><p role="alert" aria-atomic="true" className="text-sm text-danger">{documentError}</p>
+           {documentError && <><p role="alert" aria-atomic="true" className="wrap-anywhere text-sm text-danger">{documentError}</p>
            </>}
            {documents !== null && (documents.length === 0 ? <p className="text-xs text-ink-3">No documents yet.</p>
                   : documents.map((d) => <label key={d.id} className="flex items-start gap-2 text-sm text-ink-2">
