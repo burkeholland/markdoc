@@ -1344,6 +1344,510 @@ describe("GitHubPicker metadata titles", () => {
   });
 });
 
+describe("GitHubPicker wrapped failures", () => {
+  const listSurfaces = ["gist", "repo", "branch", "file"] as const;
+  type ListSurface = (typeof listSurfaces)[number];
+  type Surface = ListSurface | "action";
+  const surfaces: Surface[] = [...listSurfaces, "action"];
+  const unbroken = "provider-reason-".repeat(20);
+  const messages = [
+    { kind: "unbroken", message: unbroken },
+    { kind: "ordinary", message: "GitHub could not complete this request. Please try again." },
+    { kind: "literal markup", message: `<a href="literal">Not a link</a><img src="literal">${unbroken}` },
+    { kind: "whitespace", message: ` \t First reason\n\n${unbroken}\t last reason \n ` },
+    { kind: "whitespace only", message: " \t \n  " },
+  ];
+  const alertClass = "rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40";
+  const effects = [gists, repos, branches, files, importDocument, linkDocument, signIn];
+  const callCounts = () => effects.map((effect) => effect.mock.calls.length);
+  const errorId = (surface: Surface) => surface === "action" ? "github-action-error" : `${surface}-load-error`;
+
+  function source(surface: Surface) {
+    switch (surface) {
+      case "gist": return gists;
+      case "repo": return repos;
+      case "branch": return branches;
+      case "file": return files;
+      case "action": return importDocument;
+    }
+  }
+
+  function prefix(surface: Surface, repo = currentRepo, branch = "main") {
+    switch (surface) {
+      case "gist": return "Could not load gists. ";
+      case "repo": return "Could not load repositories. ";
+      case "branch": return `Could not load branches for ${repo.fullName}. `;
+      case "file": return `Could not load files from ${repo.fullName} on ${branch}. `;
+      case "action": return "";
+    }
+  }
+
+  async function openSurface(surface: Surface) {
+    const view = renderPicker();
+    if (surface !== "gist") await screen.findByTestId("gist-item");
+    if (surface === "repo") fireEvent.click(screen.getByTestId("picker-tab-repo"));
+    if (surface === "branch" || surface === "file") {
+      await selectRepository();
+      await screen.findByTestId(surface === "branch" ? "repo-file" : "branch-select");
+    }
+    if (surface === "action") fireEvent.click(screen.getByTestId("gist-item"));
+    await screen.findByTestId(errorId(surface));
+    await act(async () => {});
+    return view;
+  }
+
+  function expectFailure(surface: Surface, message: string, repo = currentRepo, branch = "main") {
+    const alert = screen.getByTestId(errorId(surface));
+    expect(alert.tagName).toBe("DIV");
+    expect(Object.fromEntries([...alert.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      class: `${alertClass}${surface === "action" ? " wrap-anywhere" : ""}`,
+      role: "alert",
+      "aria-atomic": "true",
+      "data-testid": errorId(surface),
+    });
+    const text = surface === "action" ? alert : alert.firstElementChild;
+    if (!(text instanceof HTMLDivElement)) throw new Error("Picker failure text must remain in its existing div");
+    expect(text.textContent).toBe(prefix(surface, repo, branch) + message);
+    expect(text.childNodes).toHaveLength(1);
+    expect(text.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(text.children).toHaveLength(0);
+    expect(text.tabIndex).toBe(-1);
+    expect(alert.tabIndex).toBe(-1);
+    expect(alert).toBeVisible();
+    if (surface === "action") {
+      const picker = screen.getByTestId("github-picker");
+      expect(alert.parentElement).toBe(picker);
+      expect(picker.children.item(1)).toBe(alert);
+      expect(picker.children).toHaveLength(3);
+      expect(alert.querySelectorAll("button")).toHaveLength(0);
+    } else {
+      expect(text.getAttributeNames()).toEqual(["class"]);
+      expect(text.className).toBe("wrap-anywhere");
+      const retry = within(alert).getByRole("button", { name: "Retry" });
+      expect([...alert.children].map((element) => element.tagName)).toEqual(["DIV", "BUTTON"]);
+      expect(alert.childNodes).toHaveLength(2);
+      expect(text.nextElementSibling).toBe(retry);
+      expect(retry.parentElement).toBe(alert);
+      expect(Object.fromEntries([...retry.attributes].map(({ name, value }) => [name, value]))).toEqual({
+        type: "button",
+        class: "btn btn-outline btn-sm mt-2 gap-1.5",
+      });
+      expect(retry.textContent).toBe("Retry");
+      expect(retry.childNodes).toHaveLength(1);
+      expect(retry.children).toHaveLength(0);
+      expect(retry).toBeEnabled();
+      expect(screen.getAllByRole("button", { name: "Retry" })).toEqual([retry]);
+      expect(alert.parentElement).toBe(screen.getByTestId(`${surface}-list`));
+      expect(alert.parentElement?.querySelector(".animate-spin")).toBeNull();
+    }
+    expect(alert.querySelectorAll("a, input, select, textarea, [tabindex], [contenteditable], [title]")).toHaveLength(0);
+    return { alert, text };
+  }
+
+  function holdListAttempt(surface: ListSurface) {
+    const pending = deferred<void>();
+    switch (surface) {
+      case "gist":
+        gists.mockImplementationOnce(async () => { await pending.promise; return { gists: [] }; });
+        break;
+      case "repo":
+        repos.mockImplementationOnce(async () => { await pending.promise; return { repos: [currentRepo] }; });
+        break;
+      case "branch":
+        branches.mockImplementationOnce(async () => { await pending.promise; return { branches: [] }; });
+        break;
+      case "file":
+        files.mockImplementationOnce(async () => { await pending.promise; return { files: [repoFile("recovered.md")] }; });
+        break;
+    }
+    return pending;
+  }
+
+  function savedClick(button: HTMLButtonElement) {
+    const handler = reactProp<PickerClickHandler>(button, "onClick");
+    return () => directPickerClick(handler, button);
+  }
+
+  function expectRetired(click: () => void) {
+    const before = callCounts();
+    act(click);
+    expect(callCounts()).toEqual(before);
+  }
+
+  it.each(surfaces.flatMap((surface) => messages.map((message) => ({ surface, ...message }))))(
+    "keeps $kind $surface failures complete and passive in the existing message div",
+    async ({ surface, message }) => {
+      expect(unbroken.length).toBeGreaterThanOrEqual(240);
+      expect(unbroken).not.toMatch(/\s/);
+      source(surface).mockRejectedValueOnce(new Error(message));
+      await openSurface(surface);
+      const { alert, text } = expectFailure(surface, message);
+      expect(screen.getAllByRole("alert")).toEqual([alert]);
+      expect(source(surface)).toHaveBeenCalledOnce();
+      expect(linkDocument).not.toHaveBeenCalled();
+      expect(signIn).not.toHaveBeenCalled();
+      if (surface === "action") {
+        expect(importDocument).toHaveBeenCalledExactlyOnceWith({
+          source: "gist", gistId: "gist-current", filename: "current.md",
+        });
+        expect(screen.getByTestId("gist-item")).toBeEnabled();
+      } else {
+        expect(importDocument).not.toHaveBeenCalled();
+      }
+      if (surface === "branch") expect(screen.getByTestId("repo-file")).toBeEnabled();
+      if (surface === "file") expect(screen.getByTestId("branch-select")).toHaveValue("main");
+
+      const picker = screen.getByTestId("github-picker");
+      const controls = [...picker.querySelectorAll<HTMLElement>("*")].filter((element) => element.tabIndex >= 0);
+      const focus = screen.getByTestId(`picker-tab-${surface === "gist" || surface === "action" ? "gist" : "repo"}`);
+      act(() => focus.focus());
+      const counts = callCounts();
+      const observer = new MutationObserver(() => {});
+      observer.observe(picker, { subtree: true, childList: true, attributes: true, characterData: true });
+      const spies = [
+        vi.spyOn(HTMLElement.prototype, "focus"),
+        vi.spyOn(globalThis, "setTimeout"),
+        vi.spyOn(globalThis, "setInterval"),
+        vi.spyOn(window, "requestAnimationFrame"),
+        vi.spyOn(globalThis, "queueMicrotask"),
+        vi.spyOn(globalThis, "fetch"),
+      ];
+      try {
+        expectFailure(surface, message);
+        expectFailure(surface, message);
+        fireEvent.mouseOver(text);
+        fireEvent.mouseMove(text);
+        fireEvent.mouseOut(text);
+        expect(observer.takeRecords()).toHaveLength(0);
+        expect(callCounts()).toEqual(counts);
+        for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+        expect(document.activeElement).toBe(focus);
+        expect([...picker.querySelectorAll<HTMLElement>("*")].filter((element) => element.tabIndex >= 0)).toEqual(controls);
+        expect(screen.queryByRole("tooltip")).toBeNull();
+      } finally {
+        observer.disconnect();
+        vi.restoreAllMocks();
+      }
+    },
+  );
+
+  it.each(listSurfaces)("replaces repeated %s failures in the same div and admits one current Retry to recovery", async (surface) => {
+    source(surface).mockRejectedValueOnce(new Error(unbroken));
+    const view = await openSurface(surface);
+    const original = expectFailure(surface, unbroken);
+    const retry = screen.getByRole<HTMLButtonElement>("button", { name: "Retry" });
+    const retired = savedClick(retry);
+    const repeated = holdListAttempt(surface);
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    expect(source(surface)).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBe(retry);
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveAttribute("aria-busy", "true");
+    expect(retry.querySelectorAll(".animate-spin")).toHaveLength(1);
+    expect(original.text.textContent).toBe(prefix(surface) + unbroken);
+    await act(async () => {
+      repeated.reject(new Error(messages[2].message));
+      await Promise.allSettled([repeated.promise]);
+    });
+    const replacement = expectFailure(surface, messages[2].message);
+    expect(replacement.alert).toBe(original.alert);
+    expect(replacement.text).toBe(original.text);
+    expect(screen.getByRole("button", { name: "Retry" })).toBe(retry);
+    expectRetired(retired);
+
+    const recovered = holdListAttempt(surface);
+    const retiredReplacement = savedClick(retry);
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    expect(source(surface)).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      recovered.resolve();
+      await recovered.promise;
+    });
+    expect(screen.queryByTestId(errorId(surface))).toBeNull();
+    expect(original.alert).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expectRetired(retiredReplacement);
+    if (surface === "gist") expect(screen.getByText("No Markdown gists found.")).toBeInTheDocument();
+    if (surface === "repo") expect(screen.getByTestId("repo-item")).toBeEnabled();
+    if (surface === "branch") {
+      expect(screen.getByTestId("branch-empty")).toHaveTextContent("No branches found.");
+      expect(screen.getByTestId("repo-file")).toBeEnabled();
+    }
+    if (surface === "file") {
+      expect(screen.getByText("recovered.md")).toBeInTheDocument();
+      expect(screen.getByTestId("branch-select")).toHaveValue("main");
+    }
+    view.unmount();
+    expectRetired(retired);
+    expectRetired(retiredReplacement);
+    expect(importDocument).not.toHaveBeenCalled();
+    expect(linkDocument).not.toHaveBeenCalled();
+  });
+
+  it.each(listSurfaces)("retires hidden %s Retry handlers while retaining the cached failure on tab return", async (surface) => {
+    source(surface).mockRejectedValueOnce(new Error(unbroken));
+    const view = await openSurface(surface);
+    const original = expectFailure(surface, unbroken);
+    const retired = savedClick(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }));
+    fireEvent.click(screen.getByTestId(`picker-tab-${surface === "gist" ? "repo" : "gist"}`));
+    await screen.findByTestId(surface === "gist" ? "repo-item" : "gist-item");
+    expect(original.alert).not.toBeInTheDocument();
+    expect(screen.queryByTestId(errorId(surface))).toBeNull();
+    expectRetired(retired);
+    fireEvent.click(screen.getByTestId(`picker-tab-${surface === "gist" ? "gist" : "repo"}`));
+    expectFailure(surface, unbroken);
+    expect(source(surface)).toHaveBeenCalledOnce();
+    expectRetired(retired);
+    const recovered = holdListAttempt(surface);
+    const current = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(current);
+    fireEvent.click(current);
+    expect(source(surface)).toHaveBeenCalledTimes(2);
+    await act(async () => { recovered.resolve(); await recovered.promise; });
+    expect(screen.queryByTestId(errorId(surface))).toBeNull();
+    view.unmount();
+    expectRetired(retired);
+  });
+
+  it.each(["branch", "file"] as const)("replaces %s reasons and retires Retry when choosing another repository", async (surface) => {
+    const nextRepo = repository("replacement", "release");
+    repos.mockResolvedValue({ repos: [currentRepo, nextRepo] });
+    source(surface).mockRejectedValueOnce(new Error(unbroken)).mockRejectedValueOnce(new Error(messages[3].message));
+    await openSurface(surface);
+    const original = expectFailure(surface, unbroken);
+    const retired = savedClick(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: /Repositories/ }));
+    expect(original.alert).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTitle(nextRepo.fullName));
+    await screen.findByTestId(errorId(surface));
+    await act(async () => {});
+    expectFailure(surface, messages[3].message, nextRepo, "release");
+    expectRetired(retired);
+    const recovered = holdListAttempt(surface);
+    const current = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(current);
+    fireEvent.click(current);
+    expect(source(surface).mock.calls).toEqual(surface === "branch"
+      ? [["octo", "current"], ["octo", "replacement"], ["octo", "replacement"]]
+      : [["octo", "current", "main"], ["octo", "replacement", "release"], ["octo", "replacement", "release"]]);
+    await act(async () => { recovered.resolve(); await recovered.promise; });
+    expect(screen.queryByTestId(errorId(surface))).toBeNull();
+    expectRetired(retired);
+    expect(repos).toHaveBeenCalledOnce();
+  });
+
+  it("replaces file failure text and retires its Retry when the branch changes", async () => {
+    branches.mockResolvedValue({ branches: ["main", "release"] });
+    files.mockRejectedValueOnce(new Error(unbroken)).mockRejectedValueOnce(new Error(messages[2].message));
+    await openSurface("file");
+    const original = expectFailure("file", unbroken);
+    const retired = savedClick(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }));
+    fireEvent.change(screen.getByTestId("branch-select"), { target: { value: "release" } });
+    await screen.findByTestId("file-load-error");
+    await act(async () => {});
+    expectFailure("file", messages[2].message, currentRepo, "release");
+    expect(original.alert).not.toBeInTheDocument();
+    expectRetired(retired);
+    const recovered = holdListAttempt("file");
+    const current = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(current);
+    fireEvent.click(current);
+    expect(files.mock.calls).toEqual([
+      ["octo", "current", "main"], ["octo", "current", "release"], ["octo", "current", "release"],
+    ]);
+    await act(async () => { recovered.resolve(); await recovered.promise; });
+    expect(screen.queryByTestId("file-load-error")).toBeNull();
+    expect(screen.getByTestId("branch-select")).toHaveValue("release");
+    expect(screen.getByText("recovered.md")).toBeInTheDocument();
+    expectRetired(retired);
+  });
+
+  it("keeps wrapped action feedback separate from list recovery and clears repeated action errors on success", async () => {
+    importDocument.mockRejectedValueOnce(new Error(unbroken));
+    repos.mockRejectedValueOnce(new Error(messages[2].message));
+    const onImported = vi.fn();
+    const view = render(<GitHubPicker mode="import" githubAvailable githubConfigured onImported={onImported} />);
+    fireEvent.click(await screen.findByTestId("gist-item"));
+    await screen.findByTestId("github-action-error");
+    const original = expectFailure("action", unbroken);
+    const retired = savedClick(screen.getByTestId<HTMLButtonElement>("gist-item"));
+    fireEvent.click(screen.getByTestId("picker-tab-repo"));
+    await screen.findByTestId("repo-load-error");
+    expectFailure("repo", messages[2].message);
+    expect(expectFailure("action", unbroken).alert).toBe(original.alert);
+    expectRetired(retired);
+    const recovered = holdListAttempt("repo");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await act(async () => { recovered.resolve(); await recovered.promise; });
+    expect(screen.queryByTestId("repo-load-error")).toBeNull();
+    expect(expectFailure("action", unbroken).alert).toBe(original.alert);
+    fireEvent.click(screen.getByTestId("picker-tab-gist"));
+    expectRetired(retired);
+    const repeated = deferred<{ document: { id: string; title: string } }>();
+    importDocument.mockReturnValueOnce(repeated.promise);
+    const row = screen.getByTestId("gist-item");
+    fireEvent.click(row);
+    fireEvent.click(row);
+    expect(importDocument).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    expect(original.alert).not.toBeInTheDocument();
+    await act(async () => {
+      repeated.reject(new Error(messages[3].message));
+      await Promise.allSettled([repeated.promise]);
+    });
+    expectFailure("action", messages[3].message);
+    const retiredRepeated = savedClick(screen.getByTestId<HTMLButtonElement>("gist-item"));
+    const success = deferred<{ document: { id: string; title: string } }>();
+    importDocument.mockReturnValueOnce(success.promise);
+    fireEvent.click(row);
+    fireEvent.click(row);
+    expect(importDocument).toHaveBeenCalledTimes(3);
+    expect(row).toBeDisabled();
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    await act(async () => {
+      success.resolve({ document: { id: "wrapped-recovery", title: "Recovered" } });
+      await success.promise;
+    });
+    expect(onImported).toHaveBeenCalledExactlyOnceWith("wrapped-recovery");
+    expect(row).toBeEnabled();
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    expectRetired(retiredRepeated);
+    view.unmount();
+    expectRetired(retired);
+    expectRetired(retiredRepeated);
+    expect(linkDocument).not.toHaveBeenCalled();
+  });
+
+  it("retires wrapped document failures and actions without letting an old success replace current feedback", async () => {
+    const firstDoc = documentDto("doc-first", "First");
+    const currentDoc = documentDto("doc-second", "Second");
+    const oldRequest = deferred<{ document: DocumentDto }>();
+    const currentRequest = deferred<{ document: DocumentDto }>();
+    const success = deferred<{ document: DocumentDto }>();
+    const onLinked = vi.fn();
+    linkDocument.mockRejectedValueOnce(new Error(unbroken))
+      .mockReturnValueOnce(oldRequest.promise)
+      .mockReturnValueOnce(currentRequest.promise)
+      .mockReturnValueOnce(success.promise);
+    const view = render(<GitHubPicker mode="link" doc={firstDoc} githubAvailable githubConfigured onLinked={onLinked} />);
+    fireEvent.click(screen.getByTestId("gist-create"));
+    await screen.findByTestId("github-action-error");
+    const original = expectFailure("action", unbroken);
+    const oldButton = screen.getByTestId<HTMLButtonElement>("gist-create");
+    const retired = savedClick(oldButton);
+    fireEvent.click(oldButton);
+    fireEvent.click(oldButton);
+    expect(linkDocument).toHaveBeenCalledTimes(2);
+    expect(original.alert).not.toBeInTheDocument();
+    view.rerender(<GitHubPicker mode="link" doc={currentDoc} githubAvailable githubConfigured onLinked={onLinked} />);
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    expectRetired(retired);
+    const current = screen.getByTestId<HTMLButtonElement>("gist-create");
+    fireEvent.click(current);
+    fireEvent.click(current);
+    expect(linkDocument).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      currentRequest.reject(new Error(messages[2].message));
+      await Promise.allSettled([currentRequest.promise]);
+    });
+    const feedback = expectFailure("action", messages[2].message);
+    await act(async () => {
+      oldRequest.resolve({ document: { ...firstDoc, storage: "gist", gistId: "old", gistFile: "first.md" } });
+      await oldRequest.promise;
+    });
+    expect(expectFailure("action", messages[2].message).alert).toBe(feedback.alert);
+    expect(onLinked).not.toHaveBeenCalled();
+    expectRetired(retired);
+    const retiredCurrent = savedClick(current);
+    fireEvent.click(current);
+    fireEvent.click(current);
+    expect(linkDocument.mock.calls.map(([id]) => id)).toEqual([firstDoc.id, firstDoc.id, currentDoc.id, currentDoc.id]);
+    expect(current).toBeDisabled();
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    const linked = { ...currentDoc, storage: "gist" as const, gistId: "current", gistFile: "second.md" };
+    await act(async () => { success.resolve({ document: linked }); await success.promise; });
+    expect(onLinked).toHaveBeenCalledExactlyOnceWith(linked);
+    expect(current).toBeEnabled();
+    expectRetired(retiredCurrent);
+    view.unmount();
+    expectRetired(retired);
+    expectRetired(retiredCurrent);
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    expect(importDocument).not.toHaveBeenCalled();
+  });
+
+  it.each(surfaces)("retires visible %s failures and their controls on removal before a fresh picker recovers", async (surface) => {
+    source(surface).mockRejectedValueOnce(new Error(unbroken)).mockRejectedValueOnce(new Error(messages[1].message));
+    const view = await openSurface(surface);
+    const original = expectFailure(surface, unbroken);
+    const retired = savedClick(surface === "action"
+      ? screen.getByTestId<HTMLButtonElement>("gist-item")
+      : screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }));
+    view.unmount();
+    expect(original.alert).not.toBeInTheDocument();
+    expect(screen.queryByTestId(errorId(surface))).toBeNull();
+    expectRetired(retired);
+    const fresh = await openSurface(surface);
+    expectFailure(surface, messages[1].message);
+    expect(screen.getByTestId("github-picker").textContent).not.toContain(unbroken);
+    expectRetired(retired);
+    const pending = surface === "action" ? deferred<void>() : holdListAttempt(surface);
+    if (surface === "action") {
+      importDocument.mockImplementationOnce(async () => {
+        await pending.promise;
+        return { document: { id: "fresh-import", title: "Fresh" } };
+      });
+    }
+    const current = surface === "action"
+      ? screen.getByTestId("gist-item")
+      : screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(current);
+    fireEvent.click(current);
+    expect(source(surface)).toHaveBeenCalledTimes(3);
+    await act(async () => { pending.resolve(); await pending.promise; });
+    expect(screen.queryByTestId(errorId(surface))).toBeNull();
+    expectRetired(retired);
+    fresh.unmount();
+  });
+
+  it("clears visible action feedback on document replacement and permits only the current document action", async () => {
+    const firstDoc = documentDto("doc-first", "First");
+    const currentDoc = documentDto("doc-second", "Second");
+    linkDocument.mockRejectedValueOnce(new Error(unbroken)).mockRejectedValueOnce(new Error(messages[1].message));
+    const onLinked = vi.fn();
+    const view = render(<GitHubPicker mode="link" doc={firstDoc} githubAvailable githubConfigured onLinked={onLinked} />);
+    fireEvent.click(screen.getByTestId("gist-create"));
+    await screen.findByTestId("github-action-error");
+    const original = expectFailure("action", unbroken);
+    const retired = savedClick(screen.getByTestId<HTMLButtonElement>("gist-create"));
+    view.rerender(<GitHubPicker mode="link" doc={currentDoc} githubAvailable githubConfigured onLinked={onLinked} />);
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    expect(original.alert).not.toBeInTheDocument();
+    expectRetired(retired);
+    const current = screen.getByTestId("gist-create");
+    fireEvent.click(current);
+    fireEvent.click(current);
+    expect(linkDocument.mock.calls.map(([id]) => id)).toEqual([firstDoc.id, currentDoc.id]);
+    await screen.findByTestId("github-action-error");
+    expectFailure("action", messages[1].message);
+    expect(screen.getByTestId("github-picker").textContent).not.toContain(unbroken);
+    expectRetired(retired);
+    expect(current).toBeEnabled();
+    expect(onLinked).not.toHaveBeenCalled();
+    view.unmount();
+    expect(screen.queryByTestId("github-action-error")).toBeNull();
+    expectRetired(retired);
+  });
+
+  it("compiles the installed wrapping utility without claiming browser line-break coverage", async () => {
+    const { compile } = await import("tailwindcss");
+    const { build } = await compile("@tailwind utilities;");
+    expect(build(["wrap-anywhere"])).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+  });
+});
+
 describe("GitHubPicker list recovery", () => {
   it("replaces a gist failure with its API reason and one guarded retry that reaches the empty state", async () => {
     const retry = deferred<{ gists: Gist[] }>();
