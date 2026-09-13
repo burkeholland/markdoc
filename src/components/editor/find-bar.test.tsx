@@ -3198,6 +3198,480 @@ describe("FindBar first-row action navigation", () => {
     });
   }
 
+  describe("public-accessor authentication", () => {
+    const PUBLIC_FIELDS = [
+      "nativeEvent", "type", "target", "currentTarget", "eventPhase", "bubbles",
+      "cancelable", "defaultPrevented", "key", "code", "location", "altKey",
+      "ctrlKey", "metaKey", "shiftKey", "repeat", "view", "preventDefault",
+      "isDefaultPrevented", "isPropagationStopped",
+    ] as const;
+    type PublicField = typeof PUBLIC_FIELDS[number];
+    type Phase = "capture" | "bubble";
+    type Placement = "own" | "inherited";
+
+    function accessorWrapper<T extends HTMLElement>(
+      original: ReactKeyboardEvent<T>,
+      placement: Placement,
+    ) {
+      const values: Record<string, unknown> = Object.fromEntries(PUBLIC_FIELDS.map((key) => [key, original[key]]));
+      const reads: Partial<Record<PublicField, number>> = {};
+      const preventions: { receiver: unknown; args: unknown[] }[] = [];
+      const initialTarget = original.currentTarget;
+      const nativeEvent = original.nativeEvent;
+      const prevent = original.preventDefault;
+      const hooks: {
+        read: ((key: PublicField, value: unknown) => unknown) | null;
+      } = { read: null };
+      values.preventDefault = function (this: unknown, ...args: unknown[]) {
+        preventions.push({ receiver: this, args });
+        Reflect.apply(prevent, original, args);
+        values.defaultPrevented = true;
+        values.isDefaultPrevented = () => true;
+      };
+      values.isDefaultPrevented = () => values.defaultPrevented === true;
+      values.isPropagationStopped = () => false;
+      const properties = Object.create(null) as object;
+      const wrapper = (placement === "own" ? properties : Object.create(properties)) as ReactKeyboardEvent<T>;
+      for (const key of PUBLIC_FIELDS) {
+        Object.defineProperty(properties, key, {
+          configurable: true,
+          get() {
+            reads[key] = (reads[key] ?? 0) + 1;
+            const value = key === "currentTarget" && values[key] === initialTarget
+              ? original.currentTarget
+              : values[key];
+            return hooks.read ? hooks.read(key, value) : value;
+          },
+        });
+      }
+      let forbiddenReads = 0;
+      for (const key of [
+        "persist", "stopPropagation", "isPersistent", "_reactName", "_targetInst", "constructor",
+      ]) {
+        Object.defineProperty(wrapper, key, {
+          get() {
+            forbiddenReads += 1;
+            throw new Error(`Unsupported private/optional read: ${key}`);
+          },
+        });
+      }
+      return {
+        event: wrapper, nativeEvent, values, reads, hooks, preventions,
+        forbiddenReads: () => forbiddenReads,
+      };
+    }
+
+    type AccessorWrapper = ReturnType<typeof accessorWrapper>;
+
+    function interceptAccessors(
+      view: ReturnType<typeof renderActionBar>,
+      placement: Placement,
+      configure?: (
+        phase: Phase,
+        wrapper: AccessorWrapper,
+        wrappers: Partial<Record<Phase, AccessorWrapper>>,
+        deliver: () => void,
+      ) => void,
+    ) {
+      const wrappers: Partial<Record<Phase, AccessorWrapper>> = {};
+      const restoreCapture = interceptReactProp<NativeBarKeyHandler>(
+        view.element<HTMLDivElement>("find-actions"), "onKeyDownCapture", (current, event) => {
+          const wrapper = accessorWrapper(event, placement);
+          wrappers.capture = wrapper;
+          const deliver = () => current(wrapper.event);
+          configure?.("capture", wrapper, wrappers, deliver);
+          deliver();
+        },
+      );
+      const restoreBubble = interceptReactProp<ActionKeyHandler>(
+        view.action("find-prev"), "onKeyDown", (current, event) => {
+          const wrapper = accessorWrapper(event, placement);
+          wrappers.bubble = wrapper;
+          const deliver = () => current(wrapper.event);
+          configure?.("bubble", wrapper, wrappers, deliver);
+          deliver();
+        },
+      );
+      return {
+        wrappers,
+        restore() {
+          restoreBubble();
+          restoreCapture();
+        },
+      };
+    }
+
+    function expectOneAccessorMove(
+      delivery: ReturnType<typeof interceptAccessors>,
+      focus: ReturnType<typeof trackActionFocus>,
+      destination: HTMLButtonElement,
+    ) {
+      const { capture, bubble } = delivery.wrappers;
+      expect(capture).toBeDefined();
+      expect(bubble).toBeDefined();
+      // Keep assertion-library constructor probes outside the guarded public-wrapper contract.
+      expect(capture?.event === bubble?.event).toBe(false);
+      for (const wrapper of [capture, bubble]) {
+        for (const key of PUBLIC_FIELDS) expect(wrapper?.reads[key], key).toBeGreaterThan(0);
+        expect(wrapper?.forbiddenReads()).toBe(0);
+      }
+      expect(capture?.preventions).toHaveLength(0);
+      expect(bubble?.preventions).toHaveLength(1);
+      expect(bubble?.preventions[0]?.receiver === bubble?.event).toBe(true);
+      expect(bubble?.preventions[0]?.args).toEqual([]);
+      expect(focus.moves()).toEqual([{ element: destination, options: { preventScroll: true } }]);
+      expect(document.activeElement).toBe(destination);
+    }
+
+    it.each(["own", "inherited"] as const)(
+      "accepts independent wrappers with every required public field as an %s accessor",
+      async (placement) => {
+        const s = session("owner", `actions-accessors-${placement}`);
+        const focus = trackActionFocus();
+        const callbacks = silentCallbacks();
+        const methods = ["setFind", "stepFind", "replaceActive", "replaceAll"] as const;
+        const work = methods.map((method) => vi.spyOn(s, method));
+        const storage = vi.spyOn(Storage.prototype, "setItem");
+        const fetch = vi.fn();
+        vi.stubGlobal("fetch", fetch);
+        const view = renderActionBar(s, callbacks);
+        await act(async () => {});
+        const delivery = interceptAccessors(view, placement);
+        focus.reset();
+        try {
+          const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(native.defaultPrevented).toBe(true);
+          expectOneAccessorMove(delivery, focus, view.action("find-next"));
+          for (const spy of work) expect(spy).not.toHaveBeenCalled();
+          expect(storage).not.toHaveBeenCalled();
+          expect(fetch).not.toHaveBeenCalled();
+          expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+          expect(callbacks.onReveal).not.toHaveBeenCalled();
+          expect(callbacks.onClose).not.toHaveBeenCalled();
+          expect(s.ytext.toString()).toBe(TEXT);
+        } finally {
+          delivery.restore();
+        }
+      },
+    );
+
+    const INVALID_ACCESSORS = (["capture", "bubble"] as const).flatMap((phase) =>
+      (["nativeEvent", "currentTarget", "key", "preventDefault"] as const).flatMap((field) =>
+        (["throwing", "wrong"] as const).map((fault) => ({ phase, field, fault }))));
+
+    it.each(INVALID_ACCESSORS)(
+      "rejects a $fault $phase $field accessor, then accepts a stable accessor successor",
+      async ({ phase, field, fault }) => {
+        const s = session("owner", "actions-invalid-accessor");
+        const focus = trackActionFocus();
+        const callbacks = silentCallbacks();
+        const view = renderActionBar(s, callbacks);
+        await act(async () => {});
+        let badReads = 0;
+        const delivery = interceptAccessors(view, "inherited", (currentPhase, wrapper) => {
+          if (currentPhase !== phase) return;
+          wrapper.hooks.read = (key, value) => {
+            if (key !== field) return value;
+            badReads += 1;
+            if (fault === "throwing") throw new Error("Public accessor refused");
+            return field === "nativeEvent" ? {} : field === "key" ? "ArrowLeft" : null;
+          };
+        });
+        focus.reset();
+        try {
+          const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(badReads).toBeGreaterThan(0);
+          expect(native.defaultPrevented).toBe(false);
+          expect(delivery.wrappers.capture?.preventions).toHaveLength(0);
+          expect(delivery.wrappers.bubble?.preventions).toHaveLength(0);
+          expect(focus.moves()).toHaveLength(0);
+        } finally {
+          delivery.restore();
+        }
+        renderActionSuccessor(view, s, callbacks, "accessor-successor");
+        await act(async () => {});
+        const successor = interceptAccessors(view, "own");
+        focus.reset();
+        try {
+          dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expectOneAccessorMove(successor, focus, view.action("find-next"));
+        } finally {
+          successor.restore();
+        }
+        expect(callbacks.onReveal).not.toHaveBeenCalled();
+        expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+        expect(callbacks.onClose).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["nativeEvent", "key", "isDefaultPrevented", "preventDefault"] as const)(
+      "excludes both routes before a reentrant %s accessor is read",
+      async (field) => {
+        const s = session("owner", "actions-reentrant-accessor");
+        const focus = trackActionFocus();
+        const view = renderActionBar(s, silentCallbacks());
+        await act(async () => {});
+        const entries = { capture: 0, bubble: 0 };
+        const delivery = interceptAccessors(view, "own", (phase, wrapper, _wrappers, deliver) => {
+          wrapper.hooks.read = (key, value) => {
+            if (key === field && entries[phase] === 0) {
+              entries[phase] += 1;
+              deliver();
+              expect(wrapper.preventions).toHaveLength(0);
+              expect(focus.moves()).toHaveLength(0);
+            }
+            return value;
+          };
+        });
+        focus.reset();
+        try {
+          dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(entries).toEqual({ capture: 1, bubble: 1 });
+          expectOneAccessorMove(delivery, focus, view.action("find-next"));
+        } finally {
+          delivery.restore();
+        }
+      },
+    );
+
+    const METHOD_DRIFTS = (["pre-claim", "post-prevention"] as const).flatMap((stage) =>
+      (["capture", "bubble"] as const).flatMap((phase) =>
+        (["accessor", "query"] as const).flatMap((callback) =>
+          (["preventDefault", "isDefaultPrevented", "isPropagationStopped"] as const)
+            .map((method) => ({ stage, phase, callback, method })))));
+
+    it.each(METHOD_DRIFTS)(
+      "rejects $stage $phase $callback cross-wrapper public method drift of $method",
+      async ({ stage, phase, callback, method }) => {
+        const s = session("owner", "actions-accessor-cross-drift");
+        const focus = trackActionFocus();
+        const callbacks = silentCallbacks();
+        const view = renderActionBar(s, callbacks);
+        await act(async () => {});
+        const replacement = vi.fn(() => false);
+        let changed = false;
+        const delivery = interceptAccessors(view, "inherited", (currentPhase, wrapper, wrappers) => {
+          if (currentPhase !== phase) return;
+          const mutate = () => {
+            const other = wrappers[phase === "capture" ? "bubble" : "capture"];
+            if (!other || changed || wrapper.nativeEvent.defaultPrevented !== (stage === "post-prevention")) return;
+            changed = true;
+            other.values[method] = replacement;
+          };
+          if (callback === "accessor") {
+            wrapper.hooks.read = (key, value) => {
+              if (key === "key") mutate();
+              return value;
+            };
+          } else {
+            wrapper.values.isPropagationStopped = () => {
+              mutate();
+              return false;
+            };
+          }
+        });
+        focus.reset();
+        try {
+          const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(changed).toBe(true);
+          expect(native.defaultPrevented).toBe(stage === "post-prevention");
+          expect(delivery.wrappers.bubble?.preventions).toHaveLength(stage === "post-prevention" ? 1 : 0);
+          expect(replacement).not.toHaveBeenCalled();
+          expect(focus.moves()).toHaveLength(0);
+          expect(callbacks.onReveal).not.toHaveBeenCalled();
+          expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+          expect(callbacks.onClose).not.toHaveBeenCalled();
+        } finally {
+          delivery.restore();
+        }
+        renderActionSuccessor(view, s, callbacks, "no-drift");
+        await act(async () => {});
+        const successor = interceptAccessors(view, "inherited");
+        focus.reset();
+        try {
+          dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expectOneAccessorMove(successor, focus, view.action("find-next"));
+        } finally {
+          successor.restore();
+        }
+      },
+    );
+
+    it.each(["capture at prevention", "bubble scalar getter", "bubble query getter"] as const)(
+      "does not adopt a later or cross-phase default query from %s",
+      async (drift) => {
+        const s = session("owner", "actions-default-query-accessor");
+        const focus = trackActionFocus();
+        const view = renderActionBar(s, silentCallbacks());
+        await act(async () => {});
+        const replacement = vi.fn(() => drift !== "capture at prevention");
+        let changed = false;
+        let queryReadsAfterPrevention = 0;
+        const delivery = interceptAccessors(view, "own", (phase, wrapper, wrappers) => {
+          if (phase !== "bubble") return;
+          const prevent = wrapper.values.preventDefault as () => void;
+          wrapper.values.preventDefault = function (this: unknown) {
+            Reflect.apply(prevent, this, []);
+            if (drift === "capture at prevention" && wrappers.capture) {
+              wrappers.capture.values.isDefaultPrevented = replacement;
+              changed = true;
+            }
+          };
+          wrapper.hooks.read = (key, value) => {
+            if (!wrapper.nativeEvent.defaultPrevented) return value;
+            if (key === "isDefaultPrevented") queryReadsAfterPrevention += 1;
+            if (!changed && (
+              (drift === "bubble scalar getter" && key === "key") ||
+              (drift === "bubble query getter" && key === "isDefaultPrevented" && queryReadsAfterPrevention === 2)
+            )) {
+              changed = true;
+              wrapper.values.isDefaultPrevented = replacement;
+              if (key === "isDefaultPrevented") return replacement;
+            }
+            return value;
+          };
+        });
+        focus.reset();
+        try {
+          const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(changed).toBe(true);
+          expect(native.defaultPrevented).toBe(true);
+          expect(delivery.wrappers.bubble?.preventions).toHaveLength(1);
+          expect(queryReadsAfterPrevention).toBeGreaterThan(0);
+          expect(replacement).not.toHaveBeenCalled();
+          expect(focus.moves()).toHaveLength(0);
+        } finally {
+          delivery.restore();
+        }
+      },
+    );
+
+    it.each(["capture", "bubble"] as const)(
+      "never calls the replaced propagation method after the %s default predicate returns",
+      async (phase) => {
+        const s = session("owner", "actions-self-query-drift");
+        const focus = trackActionFocus();
+        const view = renderActionBar(s, silentCallbacks());
+        await act(async () => {});
+        const replaced = vi.fn(() => false);
+        const replacement = vi.fn(() => false);
+        let changed = false;
+        const delivery = interceptAccessors(view, "own", (currentPhase, wrapper) => {
+          if (currentPhase !== phase) return;
+          wrapper.values.isPropagationStopped = replaced;
+          wrapper.values.isDefaultPrevented = () => {
+            changed = true;
+            wrapper.values.isPropagationStopped = replacement;
+            return false;
+          };
+        });
+        focus.reset();
+        try {
+          const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(changed).toBe(true);
+          expect(native.defaultPrevented).toBe(false);
+          expect(replaced).not.toHaveBeenCalled();
+          expect(replacement).not.toHaveBeenCalled();
+          expect(focus.moves()).toHaveLength(0);
+        } finally {
+          delivery.restore();
+        }
+      },
+    );
+
+    it.each((["pre-claim", "post-prevention"] as const).flatMap((stage) =>
+      (["find state", "focus", "restored DOM"] as const).map((drift) => ({ stage, drift }))))(
+      "rejects $stage $drift changes from final public accessor reads after the DOM walk",
+      async ({ stage, drift }) => {
+        const s = session("owner", "actions-final-accessor");
+        const focus = trackActionFocus();
+        const view = renderActionBar(s, silentCallbacks());
+        await act(async () => {});
+        const source = view.action("find-prev");
+        const destination = view.action("find-next");
+        const lastPublished = view.action("replace-all");
+        const find = s.find;
+        const attributes = Object.getOwnPropertyDescriptor(Element.prototype, "attributes")?.get;
+        if (!attributes) throw new Error("The realm publishes no attributes getter");
+        let armed = false;
+        let changed = false;
+        const delivery = interceptAccessors(view, "inherited", (phase, wrapper) => {
+          if (phase !== "bubble") return;
+          Object.defineProperty(lastPublished, "attributes", {
+            configurable: true,
+            get(this: Element) {
+              if (wrapper.nativeEvent.defaultPrevented === (stage === "post-prevention")) armed = true;
+              return Reflect.apply(attributes, this, []);
+            },
+          });
+          wrapper.hooks.read = (key, value) => {
+            if (key !== "preventDefault" || !armed || changed) return value;
+            changed = true;
+            if (drift === "find state") {
+              if (!find) throw new Error("No published find state");
+              s.find = { ...find };
+            } else if (drift === "focus") {
+              view.element<HTMLInputElement>("find-input").focus();
+            } else {
+              const parent = destination.parentNode;
+              const next = destination.nextSibling;
+              if (!parent) throw new Error("No destination parent");
+              destination.remove();
+              parent.insertBefore(destination, next);
+            }
+            return value;
+          };
+        });
+        focus.reset();
+        try {
+          const native = dispatchActionKey(source, "ArrowRight");
+          expect(armed).toBe(true);
+          expect(changed).toBe(true);
+          expect(native.defaultPrevented).toBe(stage === "post-prevention");
+          expect(delivery.wrappers.bubble?.preventions).toHaveLength(stage === "post-prevention" ? 1 : 0);
+          expect(focus.moves()).toHaveLength(0);
+        } finally {
+          delivery.restore();
+          Reflect.deleteProperty(lastPublished, "attributes");
+          s.find = find;
+        }
+      },
+    );
+
+    it("keeps the same native dispatch usable after malformed accessor capture", async () => {
+      const s = session("owner", "actions-malformed-accessor");
+      const focus = trackActionFocus();
+      const view = renderActionBar(s, silentCallbacks());
+      await act(async () => {});
+      let malformedReads = 0;
+      const restore = interceptReactProp<NativeBarKeyHandler>(
+        view.element<HTMLDivElement>("find-actions"), "onKeyDownCapture", (current, event) => {
+          const malformed = accessorWrapper(event, "inherited");
+          malformed.hooks.read = (key, value) => {
+            if (key === "eventPhase") {
+              malformedReads += 1;
+              return 3;
+            }
+            return value;
+          };
+          current(malformed.event);
+          expect(malformed.preventions).toHaveLength(0);
+          current(event);
+        },
+      );
+      focus.reset();
+      try {
+        const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+        expect(malformedReads).toBeGreaterThan(0);
+        expect(native.defaultPrevented).toBe(true);
+        expect(focus.moves()).toHaveLength(1);
+        expect(document.activeElement).toBe(view.action("find-next"));
+      } finally {
+        restore();
+      }
+    });
+  });
+
   it.each(["phase", "target", "key", "view", "method"] as const)(
     "keeps the rightful pair through malformed %s capture, crossed, throwing, duplicate, and reentrant attempts",
     async (malformedField) => {
@@ -3307,7 +3781,7 @@ describe("FindBar first-row action navigation", () => {
       const event = dispatchActionKey(source, "ArrowRight");
 
       expect(malformedPrevent).not.toHaveBeenCalled();
-      expect((thrown.error as Error | null)?.message).toBe("currentTarget is gone");
+      expect(thrown.error).toBeNull();
       expect(reentered).toEqual(["reentrant"]);
       expect(event.defaultPrevented).toBe(true);
       expect(focus.moves()).toHaveLength(1);
@@ -4017,9 +4491,9 @@ describe("FindBar first-row action navigation", () => {
       const native: { event: Event | null } = { event: null };
       let preventedCalls = 0;
       let mutated = false;
+      let delivering = false;
 
-      // The accepted predicate keeps answering `false`, and only replaces a retained method on its
-      // last reading — the one the old order invoked after it had finished re-reading the wrappers.
+      // Count only the handler's query, not React's subsequent dispatch propagation check.
       const installPredicate = (wrapper: object) => {
         const original = (wrapper as { isPropagationStopped: AnyPredicate })
           .isPropagationStopped;
@@ -4028,10 +4502,10 @@ describe("FindBar first-row action navigation", () => {
           writable: true,
           value: function (this: unknown, ...args: unknown[]) {
             const stopped = original.apply(this, args);
-            if (native.event?.defaultPrevented === true) {
+            if (delivering && native.event?.defaultPrevented === true) {
               preventedCalls += 1;
               const target = wrappers.capture;
-              if (preventedCalls === 2 && !mutated && target) {
+              if (preventedCalls === 1 && !mutated && target) {
                 mutated = true;
                 Object.defineProperty(target, "preventDefault", {
                   configurable: true,
@@ -4051,7 +4525,12 @@ describe("FindBar first-row action navigation", () => {
           wrappers.capture = event;
           native.event = event.nativeEvent;
           if (predicatePhase === "capture") installPredicate(event);
-          current(event);
+          delivering = true;
+          try {
+            current(event);
+          } finally {
+            delivering = false;
+          }
         },
       );
       const restoreBubble = interceptReactProp<ActionKeyHandler>(
@@ -4059,7 +4538,12 @@ describe("FindBar first-row action navigation", () => {
         "onKeyDown",
         (current, event) => {
           if (predicatePhase === "bubble") installPredicate(event);
-          current(event);
+          delivering = true;
+          try {
+            current(event);
+          } finally {
+            delivering = false;
+          }
         },
       );
       focus.reset();
@@ -4067,7 +4551,7 @@ describe("FindBar first-row action navigation", () => {
       try {
         const event = dispatchActionKey(source, "ArrowRight");
 
-        expect(preventedCalls).toBeGreaterThanOrEqual(2);
+        expect(preventedCalls).toBe(1);
         expect(mutated).toBe(true);
         expect(event.defaultPrevented).toBe(true);
         expect(focus.moves()).toHaveLength(0);

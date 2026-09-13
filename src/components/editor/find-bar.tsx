@@ -685,11 +685,6 @@ interface FindActionIntrinsics {
   readonly addEventListener: FindActionMember<Window["addEventListener"]>;
   readonly removeEventListener: FindActionMember<Window["removeEventListener"]>;
   readonly isCurrent: () => boolean;
-  readonly methodMatches: (
-    value: object,
-    property: PropertyKey,
-    method: unknown,
-  ) => boolean;
   readonly ownValue: (value: object, property: PropertyKey) => unknown;
   readonly read: (method: AnyFunction, receiver: object) => unknown;
   readonly invoke: (method: AnyFunction, receiver: object) => boolean;
@@ -849,7 +844,7 @@ interface FindActionKeyDelivery {
   readonly bubble: FindActionReactSnapshot;
 }
 
-/** The exact React predicate identities a mutation-capable phase invoked, for the gate to re-read. */
+/** The exact React predicate identities authenticated in the callback-capable phase. */
 interface FindActionReactPredicateReading {
   readonly snapshot: FindActionReactSnapshot;
   readonly defaultPrevented: boolean;
@@ -873,7 +868,7 @@ type FindActionGateStage = "pre-claim" | "final";
 interface FindActionAttempt {
   readonly phase: "capture" | "bubble";
   readonly event: object;
-  readonly nativeEvent: object;
+  readonly nativeEvent: object | null;
 }
 
 interface FindActionCommittedEntry {
@@ -1806,10 +1801,6 @@ function captureFindActionIntrinsics(view: Window): FindActionIntrinsics | null 
       addEventListener,
       removeEventListener,
       isCurrent,
-      methodMatches: (value: object, property: PropertyKey, method: unknown) => {
-        if (!isCurrent() || typeof method !== "function") return false;
-        return ownValue(value, property) === method;
-      },
       ownValue,
       read: (method: AnyFunction, receiver: object) => {
         if (!isCurrent()) return undefined;
@@ -2201,7 +2192,6 @@ function captureFindActionReactIdentity(
   currentTarget: HTMLElement,
   proof: FindActionWindowProof,
 ): FindActionReactSnapshot | null {
-  const intrinsics = nav.intrinsics;
   try {
     const preventDefault = event.preventDefault as unknown;
     const isDefaultPrevented = event.isDefaultPrevented as unknown;
@@ -2211,35 +2201,11 @@ function captureFindActionReactIdentity(
       typeof preventDefault !== "function" ||
       typeof isDefaultPrevented !== "function" ||
       typeof isPropagationStopped !== "function" ||
-      !intrinsics.methodMatches(event, "preventDefault", preventDefault) ||
-      !intrinsics.methodMatches(event, "isDefaultPrevented", isDefaultPrevented) ||
-      !intrinsics.methodMatches(
-        event,
-        "isPropagationStopped",
-        isPropagationStopped,
-      ) ||
-      (event as unknown) === nativeEvent ||
-      (event.nativeEvent as unknown) !== nativeEvent ||
-      event.type !== facts.type ||
-      (event.target as unknown) !== facts.target ||
-      (event.currentTarget as unknown) !== currentTarget ||
-      event.eventPhase !== facts.eventPhase ||
-      event.bubbles !== facts.bubbles ||
-      event.cancelable !== facts.cancelable ||
-      event.defaultPrevented !== facts.defaultPrevented ||
-      event.key !== facts.key ||
-      event.code !== facts.code ||
-      event.location !== facts.location ||
-      event.altKey !== facts.altKey ||
-      event.ctrlKey !== facts.ctrlKey ||
-      event.metaKey !== facts.metaKey ||
-      event.shiftKey !== facts.shiftKey ||
-      event.repeat !== facts.repeat ||
-      !findActionViewIsOwned(view, nav, proof)
+      (event as unknown) === nativeEvent
     ) {
       return null;
     }
-    return FIND_ACTION_FREEZE({
+    const snapshot: FindActionReactSnapshot = FIND_ACTION_FREEZE({
       event,
       nativeEvent,
       target: facts.target as EventTarget,
@@ -2252,48 +2218,50 @@ function captureFindActionReactIdentity(
         isPropagationStopped: isPropagationStopped as AnyFunction,
       }),
     });
+    return findActionReactIsExact(snapshot, nav, facts, proof, currentTarget, false)
+      ? snapshot
+      : null;
   } catch {
     return null;
   }
 }
 
-function captureFindActionReactKey(
-  event: KeyboardEvent<HTMLElement>,
-  nav: FindActionRuntimeView,
-  facts: FindNativeKeyboardFacts,
-  nativeEvent: object,
-  currentTarget: HTMLElement,
-  proof: FindActionWindowProof,
-): FindActionReactSnapshot | null {
-  const snapshot = captureFindActionReactIdentity(
-    event, nav, facts, nativeEvent, currentTarget, proof,
-  );
-  return snapshot && readFindActionReactPredicates(snapshot, nav, false)
-    ? snapshot
-    : null;
+function findActionReactMethodsAreExact(
+  snapshot: FindActionReactSnapshot,
+  defaultQuery = snapshot.methods.isDefaultPrevented,
+) {
+  try {
+    const event = snapshot.event;
+    return (
+      event.isDefaultPrevented === defaultQuery &&
+      event.isPropagationStopped === snapshot.methods.isPropagationStopped &&
+      event.preventDefault === snapshot.methods.preventDefault
+    );
+  } catch {
+    return false;
+  }
 }
 
-function findActionReactRemainsExact(
+/** Public reads may call getters. Only call this while the action route is excluded. */
+function findActionReactIsExact(
   snapshot: FindActionReactSnapshot,
   nav: FindActionRuntimeView,
   facts: FindNativeKeyboardFacts,
   proof: FindActionWindowProof,
   currentTarget: HTMLElement | null,
   defaultPrevented = false,
+  defaultQuery = snapshot.methods.isDefaultPrevented,
 ) {
-  const intrinsics = nav.intrinsics;
   try {
     const event = snapshot.event;
-    const methods = snapshot.methods;
-    const currentIsDefaultPrevented = event.isDefaultPrevented as unknown;
     return (
       (event.nativeEvent as unknown) === snapshot.nativeEvent &&
       event.type === facts.type &&
       (event.target as unknown) === snapshot.target &&
-      (event.target as unknown) === facts.target &&
+      snapshot.target === facts.target &&
       (event.currentTarget as unknown) === currentTarget &&
       event.eventPhase === snapshot.phase &&
-      event.eventPhase === facts.eventPhase &&
+      snapshot.phase === facts.eventPhase &&
       event.bubbles === facts.bubbles &&
       event.cancelable === facts.cancelable &&
       event.defaultPrevented === defaultPrevented &&
@@ -2306,26 +2274,8 @@ function findActionReactRemainsExact(
       event.shiftKey === facts.shiftKey &&
       event.repeat === facts.repeat &&
       FIND_ACTION_IS(event.view as unknown, snapshot.view) &&
-      findActionViewIsOwned(event.view as unknown, nav, proof) &&
-      (event.preventDefault as unknown) === methods.preventDefault &&
-      (event.isPropagationStopped as unknown) === methods.isPropagationStopped &&
-      intrinsics.methodMatches(event, "preventDefault", methods.preventDefault) &&
-      intrinsics.methodMatches(
-        event,
-        "isPropagationStopped",
-        methods.isPropagationStopped,
-      ) &&
-      typeof currentIsDefaultPrevented === "function" &&
-      intrinsics.methodMatches(
-        event,
-        "isDefaultPrevented",
-        currentIsDefaultPrevented,
-      ) &&
-      (defaultPrevented
-        ? intrinsics.read(currentIsDefaultPrevented as AnyFunction, event) === true
-        : currentIsDefaultPrevented === methods.isDefaultPrevented &&
-          intrinsics.read(methods.isDefaultPrevented, event) === false) &&
-      intrinsics.read(methods.isPropagationStopped, event) === false
+      findActionViewIsOwned(snapshot.view, nav, proof) &&
+      findActionReactMethodsAreExact(snapshot, defaultQuery)
     );
   } catch {
     return false;
@@ -2333,95 +2283,39 @@ function findActionReactRemainsExact(
 }
 
 /**
- * The one place either authenticated React predicate is invoked. Both predicates can hand control to
- * page code, so every wrapper reading happens here, in the mutation-capable phase, and the exact
- * invoked identities are frozen for the callback-free gate to re-read by descriptor afterwards.
+ * Revalidate every participating wrapper between public calls, and read the exact next callable
+ * last. A default-query callback must not leave a replaced propagation query to be invoked.
  */
 function readFindActionReactPredicates(
   snapshot: FindActionReactSnapshot,
   nav: FindActionRuntimeView,
   defaultPrevented: boolean,
+  defaultQuery: AnyFunction,
+  revalidate: () => boolean,
 ): FindActionReactPredicateReading | null {
   const intrinsics = nav.intrinsics;
   try {
-    const event = snapshot.event as unknown as object;
+    const event = snapshot.event;
     const methods = snapshot.methods;
-    const isDefaultPrevented = intrinsics.ownValue(event, "isDefaultPrevented");
-    const isPropagationStopped = intrinsics.ownValue(event, "isPropagationStopped");
     if (
-      typeof isDefaultPrevented !== "function" ||
-      isPropagationStopped !== methods.isPropagationStopped ||
-      (!defaultPrevented && isDefaultPrevented !== methods.isDefaultPrevented) ||
-      intrinsics.read(isDefaultPrevented as AnyFunction, event) !== defaultPrevented ||
-      intrinsics.read(methods.isPropagationStopped, event) !== false
+      !revalidate() ||
+      event.isDefaultPrevented !== defaultQuery ||
+      intrinsics.read(defaultQuery, event) !== defaultPrevented ||
+      !revalidate() ||
+      event.isPropagationStopped !== methods.isPropagationStopped ||
+      intrinsics.read(methods.isPropagationStopped, event) !== false ||
+      !revalidate()
     ) {
       return null;
     }
     return FIND_ACTION_FREEZE({
       snapshot,
       defaultPrevented,
-      isDefaultPrevented: isDefaultPrevented as AnyFunction,
+      isDefaultPrevented: defaultQuery,
       isPropagationStopped: methods.isPropagationStopped,
     });
   } catch {
     return null;
-  }
-}
-
-/**
- * The callback-free wrapper authentication. Every React property is read from its own data
- * descriptor through the authenticated intrinsic, so neither an overridable accessor nor a React
- * predicate can run here: the two predicates were already invoked by
- * {@link readFindActionReactPredicates}, and the identities they resolved to are re-read by
- * descriptor now, after all predicate calls, so a predicate that replaced its own or the other
- * phase's retained method while returning the accepted boolean no longer escapes revalidation.
- */
-function findActionReactIsFinal(
-  snapshot: FindActionReactSnapshot,
-  nav: FindActionRuntimeView,
-  facts: FindNativeKeyboardFacts,
-  proof: FindActionWindowProof,
-  currentTarget: HTMLElement | null,
-  defaultPrevented: boolean,
-  reading: FindActionReactPredicateReading | null,
-) {
-  const intrinsics = nav.intrinsics;
-  try {
-    const event = snapshot.event as unknown as object;
-    const methods = snapshot.methods;
-    const read = (property: PropertyKey) => intrinsics.ownValue(event, property);
-    return (
-      !!reading &&
-      reading.snapshot === snapshot &&
-      reading.defaultPrevented === defaultPrevented &&
-      reading.isPropagationStopped === methods.isPropagationStopped &&
-      (defaultPrevented || reading.isDefaultPrevented === methods.isDefaultPrevented) &&
-      read("isDefaultPrevented") === reading.isDefaultPrevented &&
-      read("isPropagationStopped") === reading.isPropagationStopped &&
-      read("nativeEvent") === snapshot.nativeEvent &&
-      read("type") === facts.type &&
-      read("target") === snapshot.target &&
-      snapshot.target === facts.target &&
-      read("currentTarget") === currentTarget &&
-      read("eventPhase") === snapshot.phase &&
-      snapshot.phase === facts.eventPhase &&
-      read("bubbles") === facts.bubbles &&
-      read("cancelable") === facts.cancelable &&
-      read("defaultPrevented") === defaultPrevented &&
-      read("key") === facts.key &&
-      read("code") === facts.code &&
-      read("location") === facts.location &&
-      read("altKey") === facts.altKey &&
-      read("ctrlKey") === facts.ctrlKey &&
-      read("metaKey") === facts.metaKey &&
-      read("shiftKey") === facts.shiftKey &&
-      read("repeat") === facts.repeat &&
-      FIND_ACTION_IS(read("view"), snapshot.view) &&
-      findActionViewIsOwned(snapshot.view, nav, proof) &&
-      read("preventDefault") === methods.preventDefault
-    );
-  } catch {
-    return false;
   }
 }
 
@@ -3406,33 +3300,43 @@ function createFindBarPublication({
     );
   };
 
-  /**
-   * The public wrapper reads and both authenticated React predicates, for both phases. Every
-   * predicate call of a phase happens here, before that phase's callback-free gate re-reads the
-   * retained properties and method identities by descriptor.
-   */
+  const firstRowReactIsExact = (
+    pair: FindActionKeyPair,
+    bubble: FindActionReactSnapshot,
+    nav: FindActionRuntimeView,
+    facts: FindNativeKeyboardFacts,
+    prevented: boolean,
+    bubbleDefaultQuery: AnyFunction,
+  ) =>
+    findActionReactIsExact(pair.capture, nav, pair.facts, pair.proof, null) &&
+    findActionReactIsExact(
+      bubble, nav, facts, pair.proof, pair.movement.source, prevented, bubbleDefaultQuery,
+    ) &&
+    // Scalar getters on either wrapper may have changed the other wrapper's methods.
+    findActionReactMethodsAreExact(pair.capture) &&
+    findActionReactMethodsAreExact(bubble, bubbleDefaultQuery);
+
   const readFirstRowPredicates = (
     pair: FindActionKeyPair,
     bubble: FindActionReactSnapshot,
     nav: FindActionRuntimeView,
     facts: FindNativeKeyboardFacts,
     prevented: boolean,
+    bubbleDefaultQuery: AnyFunction,
+    attempt: FindActionAttempt,
   ): FindActionPredicateReadings | null => {
-    if (
-      !findActionReactRemainsExact(pair.capture, nav, pair.facts, pair.proof, null) ||
-      !findActionReactRemainsExact(
-        bubble,
-        nav,
-        facts,
-        pair.proof,
-        pair.movement.source,
-        prevented,
-      )
-    ) {
-      return null;
-    }
-    const capture = readFindActionReactPredicates(pair.capture, nav, false);
-    const bubbleReading = readFindActionReactPredicates(bubble, nav, prevented);
+    const revalidate = () =>
+      firstRowAttemptIsCurrent(attempt) &&
+      firstRowReactIsExact(pair, bubble, nav, facts, prevented, bubbleDefaultQuery) &&
+      firstRowAttemptIsCurrent(attempt);
+    const capture = readFindActionReactPredicates(
+      pair.capture, nav, false, pair.capture.methods.isDefaultPrevented, revalidate,
+    );
+    const bubbleReading = capture
+      ? readFindActionReactPredicates(
+          bubble, nav, prevented, bubbleDefaultQuery, revalidate,
+        )
+      : null;
     return capture && bubbleReading
       ? FIND_ACTION_FREEZE({ capture, bubble: bubbleReading })
       : null;
@@ -3443,12 +3347,12 @@ function createFindBarPublication({
    * owner-realm focus. Every mutation-capable query of the phase — the React predicates, `matches()`
    * and `querySelectorAll()`, the committed re-read through public node state, the published DOM
    * walk, the live session pass, the native facts read whose composed path the realm copies through
-   * a replaceable iterator, and the observer drain — has already finished, in that order.
+   * a replaceable iterator, final public wrapper reads, and the observer drain — has finished.
    *
    * This gate makes no public property read, invokes no predicate, dispatches through no mutable
    * prototype method or iterator, and reads no facts again. It works in one order: internal identity
-   * first, then the live authority re-derived from the session's own data slots, then the retained
-   * React wrappers re-read by descriptor, then native and DOM state through authenticated
+   * first, then the live authority re-derived from the session's own data slots, then native and DOM
+   * state through authenticated
    * owner-realm getters, then its own claim and permanent history state through retained collection
    * intrinsics. Any drift the last query caused rejects the attempt; a pre-claim rejection leaves the
    * rightful pair pending for the same exact native event.
@@ -3492,26 +3396,14 @@ function createFindBarPublication({
     }
     // 2. The live authority, from backing slots only — never the public pass that just ran.
     if (!liveAuthorityIsExact(publication, intrinsics)) return false;
-    // 3. The retained React wrappers, re-read by descriptor after the last predicate call of all.
+    // 3. Frozen predicate receipts only. Public wrappers were re-read before the retained drain.
     if (
-      !findActionReactIsFinal(
-        pair.capture,
-        nav,
-        pair.facts,
-        pair.proof,
-        null,
-        false,
-        readings.capture,
-      ) ||
-      !findActionReactIsFinal(
-        bubble,
-        nav,
-        facts,
-        pair.proof,
-        movement.source,
-        prevented,
-        readings.bubble,
-      )
+      readings.capture.defaultPrevented !== false ||
+      readings.capture.isDefaultPrevented !== pair.capture.methods.isDefaultPrevented ||
+      readings.capture.isPropagationStopped !== pair.capture.methods.isPropagationStopped ||
+      readings.bubble.defaultPrevented !== prevented ||
+      (!prevented && readings.bubble.isDefaultPrevented !== bubble.methods.isDefaultPrevented) ||
+      readings.bubble.isPropagationStopped !== bubble.methods.isPropagationStopped
     ) {
       return false;
     }
@@ -3583,29 +3475,46 @@ function createFindBarPublication({
    */
   const beginFirstRowAttempt = (
     phase: FindActionAttempt["phase"],
-    event: object,
-    nativeEvent: object,
+    event: KeyboardEvent<HTMLElement>,
   ): FindActionAttempt | null => {
     if (
       cells.activeActionAttempt.current ||
       cells.activeActionDelivery.current ||
       findActionTokenIsClaimed(cells.actionAttemptReactEvents, event) ||
-      findActionTokenIsClaimed(cells.actionAttemptNativeEvents, nativeEvent) ||
-      findActionTokenIsClaimed(cells.claimedActionTokens, event) ||
-      findActionTokenIsClaimed(cells.claimedActionTokens, nativeEvent)
+      findActionTokenIsClaimed(cells.claimedActionTokens, event)
     ) {
       return null;
     }
-    const attempt: FindActionAttempt = FIND_ACTION_FREEZE({ phase, event, nativeEvent });
-    cells.activeActionAttempt.current = attempt;
+    // Exclude the route before even nativeEvent is read: that public field may be a getter.
+    const entering: FindActionAttempt = FIND_ACTION_FREEZE({ phase, event, nativeEvent: null });
+    cells.activeActionAttempt.current = entering;
     findActionClaimToken(cells.actionAttemptReactEvents, event);
-    findActionClaimToken(cells.actionAttemptNativeEvents, nativeEvent);
-    return attempt;
+    let admitted = false;
+    try {
+      const nativeEvent: unknown = event.nativeEvent;
+      if (
+        !nativeEvent ||
+        typeof nativeEvent !== "object" ||
+        cells.activeActionAttempt.current !== entering ||
+        findActionTokenIsClaimed(cells.actionAttemptNativeEvents, nativeEvent) ||
+        findActionTokenIsClaimed(cells.claimedActionTokens, nativeEvent)
+      ) return null;
+      const attempt: FindActionAttempt = FIND_ACTION_FREEZE({ phase, event, nativeEvent });
+      cells.activeActionAttempt.current = attempt;
+      findActionClaimToken(cells.actionAttemptNativeEvents, nativeEvent);
+      admitted = true;
+      return attempt;
+    } catch {
+      return null;
+    } finally {
+      if (!admitted) endFirstRowAttempt(entering);
+    }
   };
 
   const firstRowAttemptIsCurrent = (attempt: FindActionAttempt) =>
     cells.activeActionAttempt.current === attempt &&
     findActionTokenIsClaimed(cells.actionAttemptReactEvents, attempt.event) &&
+    attempt.nativeEvent !== null &&
     findActionTokenIsClaimed(cells.actionAttemptNativeEvents, attempt.nativeEvent);
 
   const endFirstRowAttempt = (attempt: FindActionAttempt) => {
@@ -3613,7 +3522,9 @@ function createFindBarPublication({
       cells.activeActionAttempt.current = null;
     }
     findActionReleaseToken(cells.actionAttemptReactEvents, attempt.event);
-    findActionReleaseToken(cells.actionAttemptNativeEvents, attempt.nativeEvent);
+    if (attempt.nativeEvent) {
+      findActionReleaseToken(cells.actionAttemptNativeEvents, attempt.nativeEvent);
+    }
   };
 
   /** Internal frozen data, built without a spread so no array iterator page code owns is consulted. */
@@ -3815,20 +3726,14 @@ function createFindBarPublication({
   };
 
   const captureFirstRowNavigation = (event: KeyboardEvent<HTMLDivElement>) => {
-    let nativeEvent: unknown;
-    try {
-      nativeEvent = event.nativeEvent;
-    } catch {
-      return;
-    }
-    if (!nativeEvent || typeof nativeEvent !== "object") return;
-    if (findActionWeakHas(cells.actionPairs, nativeEvent)) return;
-    const attempt = beginFirstRowAttempt("capture", event, nativeEvent);
+    const attempt = beginFirstRowAttempt("capture", event);
     if (!attempt) return;
+    const nativeEvent = attempt.nativeEvent;
     let unclaimedProof: FindActionWindowProof | null = null;
     let unclaimedPublication: FindBarPublication | null = null;
     let unclaimedListener: FindActionKeyListener | null = null;
     try {
+      if (!nativeEvent || findActionWeakHas(cells.actionPairs, nativeEvent)) return;
       const runtime = currentRuntime;
       const publication = runtime?.publication;
       const nav = runtime?.nav ?? null;
@@ -3842,8 +3747,7 @@ function createFindBarPublication({
         !row ||
         runtime.isRetired() ||
         !nav.isCurrent() ||
-        nav.root !== root ||
-        event.currentTarget !== row
+        nav.root !== root
       ) {
         return;
       }
@@ -3864,7 +3768,15 @@ function createFindBarPublication({
         unclaimedPublication = publication;
         unclaimedListener = nav.listener;
       }
-      const readings = capture ? readFindActionReactPredicates(capture, nav, false) : null;
+      const revalidate = () => !!capture && !!proof &&
+        firstRowAttemptIsCurrent(attempt) &&
+        findActionReactIsExact(capture, nav, facts, proof, row) &&
+        firstRowAttemptIsCurrent(attempt);
+      const readings = capture
+        ? readFindActionReactPredicates(
+            capture, nav, false, capture.methods.isDefaultPrevented, revalidate,
+          )
+        : null;
       const resolved = readings
         ? resolveFirstRowMovement(publication, facts.target, facts.key)
         : null;
@@ -3916,7 +3828,15 @@ function createFindBarPublication({
       });
       if (
         !firstRowMovementIsCurrent(runtime, publication, facts, movement) ||
-        !runtime.publishedDomMatches()
+        !runtime.publishedDomMatches() ||
+        !revalidate() ||
+        !runtime.drainObservedMutations() ||
+        !runtime.domHistoryIsRetained() ||
+        !liveAuthorityIsExact(publication, nav.intrinsics) ||
+        !nav.listener.holds(proof, publication) ||
+        nav.intrinsics.documentActiveElement(nav.ownerDocument) !== movement.source ||
+        nav.intrinsics.eventDefaultPrevented(nativeEvent) !== false ||
+        nav.intrinsics.propagationStopped(nativeEvent)
       ) {
         return;
       }
@@ -3960,7 +3880,7 @@ function createFindBarPublication({
       unclaimedListener = null;
     } finally {
       endFirstRowAttempt(attempt);
-      if (unclaimedProof && unclaimedPublication && unclaimedListener) {
+      if (unclaimedProof && unclaimedPublication && unclaimedListener && nativeEvent) {
         unclaimedListener.releaseUnclaimed(
           unclaimedProof,
           unclaimedPublication,
@@ -3974,18 +3894,13 @@ function createFindBarPublication({
     control: FindControlPublication,
     event: KeyboardEvent<HTMLButtonElement>,
   ) => {
-    let nativeEvent: unknown;
-    try {
-      nativeEvent = event.nativeEvent;
-    } catch {
-      return;
-    }
-    if (!nativeEvent || typeof nativeEvent !== "object") return;
-    const pair = findActionWeakGet(cells.actionPairs, nativeEvent);
-    if (!pair || pair.nativeEvent !== nativeEvent || !firstRowPairIsPending(pair)) return;
-    const attempt = beginFirstRowAttempt("bubble", event, nativeEvent);
+    const attempt = beginFirstRowAttempt("bubble", event);
     if (!attempt) return;
     try {
+      const nativeEvent = attempt.nativeEvent;
+      if (!nativeEvent) return;
+      const pair = findActionWeakGet(cells.actionPairs, nativeEvent);
+      if (!pair || pair.nativeEvent !== nativeEvent || !firstRowPairIsPending(pair)) return;
       // A. The rightful source bubble authenticates without consuming anything: the pending pair
       // stays in the WeakMap and in this publication's key set until the callback-free gate passes.
       const runtime = currentRuntime;
@@ -3998,15 +3913,14 @@ function createFindBarPublication({
         runtime.isRetired() ||
         !nav.isCurrent() ||
         pair.publication !== publication ||
-        pair.movement.sourceControl !== control ||
-        event.currentTarget !== pair.movement.source
+        pair.movement.sourceControl !== control
       ) {
         return;
       }
       const facts = nav.facts(nativeEvent);
       const proof = facts ? nav.listener.proofFor(nativeEvent, publication) : null;
       const bubble = facts && proof
-        ? captureFindActionReactKey(
+        ? captureFindActionReactIdentity(
             event,
             nav,
             facts,
@@ -4034,8 +3948,10 @@ function createFindBarPublication({
       // B. Every callback-capable pre-claim query runs here and finishes here, in this order: both
       // React predicates and public method identities, current movement and committed-row facts, the
       // exact listener proof, exact native facts, one final published-DOM walk, and the live authority
-      // probe last. The retained observer drain then records whatever those operations queued.
-      const readings = readFirstRowPredicates(pair, bubble, nav, facts, false);
+      // probe. Public wrapper getters are then revalidated before the retained observer drain.
+      const readings = readFirstRowPredicates(
+        pair, bubble, nav, facts, false, bubble.methods.isDefaultPrevented, attempt,
+      );
       const commitment = readings
         ? firstRowMovementIsCurrent(runtime, publication, facts, pair.movement)
         : null;
@@ -4050,7 +3966,10 @@ function createFindBarPublication({
       const current = proofRetained ? nav.facts(nativeEvent) : null;
       const domRetained = !!current && runtime.publishedDomMatches();
       const liveRetained = domRetained && probeLiveAuthority();
-      const drained = liveRetained && runtime.drainObservedMutations();
+      const wrappersRetained = liveRetained && !!current && firstRowReactIsExact(
+        pair, bubble, nav, current, false, bubble.methods.isDefaultPrevented,
+      );
+      const drained = wrappersRetained && runtime.drainObservedMutations();
       // C. Callback-free: nothing below can hand control to page code, so a pre-claim query that
       // mutated a wrapper, the live authority, the publication, or the DOM is rejected here — with
       // only this removable attempt cleared and the rightful pair still pending for this event.
@@ -4082,6 +4001,14 @@ function createFindBarPublication({
       try {
         // E. The single public effect: the exact bubble wrapper's own `preventDefault`, once.
         if (!nav.intrinsics.invoke(bubble.methods.preventDefault, bubble.event)) return;
+        // Only this prevented object may acquire React's new query, before any other public call.
+        let bubbleDefaultQuery: unknown;
+        try {
+          bubbleDefaultQuery = bubble.event.isDefaultPrevented;
+        } catch {
+          return;
+        }
+        if (typeof bubbleDefaultQuery !== "function") return;
         const prevented = nav.facts(nativeEvent);
         if (
           !prevented ||
@@ -4095,8 +4022,10 @@ function createFindBarPublication({
         }
         // F. Every callback-capable post-effect query, in the same order and for the last time:
         // wrappers, movement, listener proof, native facts, one final DOM walk, then live authority.
-        // Only the retained mutation drain and callback-free exact gate follow.
-        const finalReadings = readFirstRowPredicates(pair, bubble, nav, prevented, true);
+        // Public wrapper getters finish this phase; only the retained drain and internal gate follow.
+        const finalReadings = readFirstRowPredicates(
+          pair, bubble, nav, prevented, true, bubbleDefaultQuery as AnyFunction, attempt,
+        );
         const committed = finalReadings
           ? firstRowMovementIsCurrent(runtime, publication, prevented, pair.movement)
           : null;
@@ -4111,7 +4040,10 @@ function createFindBarPublication({
         const finalFacts = finalProofRetained ? nav.facts(nativeEvent) : null;
         const finalDomRetained = !!finalFacts && runtime.publishedDomMatches();
         const finalLiveRetained = finalDomRetained && probeLiveAuthority();
-        const finalDrained = finalLiveRetained && runtime.drainObservedMutations();
+        const finalWrappersRetained = finalLiveRetained && !!finalFacts && firstRowReactIsExact(
+          pair, bubble, nav, finalFacts, true, bubbleDefaultQuery as AnyFunction,
+        );
+        const finalDrained = finalWrappersRetained && runtime.drainObservedMutations();
         // G. Immediately before owner-realm focus, and after nothing that can call page code.
         if (
           !finalReadings ||
@@ -4225,8 +4157,7 @@ function createFindBarPublication({
             ownerDocument,
             root: publishedRoot,
             facts: readActionFacts,
-            // The mutation-capable entry check keeps the full shared validation; it runs before the
-            // first wrapper descriptor read of a delivery and never again.
+            // Keep full shared validation in the callback-capable entry phase, outside the gate.
             isCurrent: () =>
               keyboardIntrinsicsAreCurrent() &&
               keyboardDescriptorIsCurrent() &&
