@@ -3681,7 +3681,7 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                       </span>
                       {item.title && item.title !== item.name && <span className="truncate text-xs text-ink-4" title={item.name}>{item.name}</span>}
                     </div>
-                    {item.error && <div className="mt-0.5 text-xs text-red-600">{item.error}</div>}
+                    {item.error && <div className="mt-0.5 text-xs text-red-600 wrap-anywhere">{item.error}</div>}
                     {item.warnings.map((w, j) => (
                       <div key={j} className="import-warning" data-testid="import-warning">
                         <AlertTriangle size={12} /> {w}
