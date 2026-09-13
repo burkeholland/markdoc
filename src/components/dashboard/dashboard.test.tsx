@@ -1937,6 +1937,8 @@ function registerTrashKeyboardProvenanceTests() {
         "purge-button",
       );
       successorRestore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
       const accepted = dispatchTrashKey(
         successorRestore,
         "ArrowRight",
