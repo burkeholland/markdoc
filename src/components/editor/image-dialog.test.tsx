@@ -616,11 +616,11 @@ describe("ImageDialog upload lifecycle", () => {
     const input = screen.getByTestId("image-file") as HTMLInputElement;
 
     choose(new File(["failed"], "failed.png", { type: "image/png" }));
-    let value = "failed-selection";
     Object.defineProperty(input, "value", {
       configurable: true,
-      get: () => value,
+      get: () => "failed-selection",
       set: () => {
+        Reflect.deleteProperty(input, "value");
         throw new Error("File reset failed");
       },
     });
@@ -631,14 +631,11 @@ describe("ImageDialog upload lifecycle", () => {
 
     expect(screen.getByRole("alert")).toHaveTextContent("File reset failed");
     expect(screen.getByTestId("image-upload")).toBeEnabled();
-    await act(async () => {});
-    delete (input as unknown as { value?: string }).value;
-    value = "";
 
     const retryFile = new File(["retry"], "retry.webp", {
       type: "image/webp",
     });
-    choose(retryFile);
+    await chooseFromCommittedSuccessor(retryFile, input);
     expect(onUpload).toHaveBeenCalledTimes(2);
     expect(onUpload).toHaveBeenLastCalledWith(retryFile);
     await act(async () => {
@@ -1597,10 +1594,13 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       "/api/assets/concurrent",
     );
     expect(screen.getByTestId("image-alt")).toHaveValue("Concurrent Alt");
-    expect(screen.getByRole("button", { name: "Cancel" })).toBe(
-      committedCancel,
-    );
-    fireEvent.click(committedCancel);
+    await act(async () => {});
+    const currentCancel = screen.getByRole("button", {
+      name: "Cancel",
+    }) as HTMLButtonElement;
+    expect(currentCancel).toBe(committedCancel);
+    expect(currentCancel).toBeEnabled();
+    fireEvent.click(currentCancel);
 
     expect(committedClose).toHaveBeenCalledOnce();
     expect(committedClose).toHaveBeenCalledWith(false);
