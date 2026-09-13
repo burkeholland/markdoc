@@ -294,9 +294,12 @@ type TokenRenameEventField =
   | "bubbles"
   | "cancelable"
   | "defaultPrevented"
-  | "cancelBubble";
+  | "cancelBubble"
+  | "composed";
 type TokenRenameKeyboardField =
   | "key"
+  | "code"
+  | "location"
   | "repeat"
   | "isComposing"
   | "ctrlKey"
@@ -333,6 +336,7 @@ interface TokenRenameKeyboardAuthority {
   readonly event: TokenRenameGetterAuthority<TokenRenameEventField>["getters"];
   readonly keyboard: TokenRenameGetterAuthority<TokenRenameKeyboardField>["getters"];
   readonly view: TokenRenameNativeGetter;
+  readonly detail: TokenRenameNativeGetter;
   readonly activeElement: TokenRenameNativeGetter;
   readonly composedPath: Event["composedPath"];
   readonly preventDefault: Event["preventDefault"];
@@ -343,6 +347,22 @@ interface TokenRenameKeyboardAuthority {
   readonly apply: typeof Reflect.apply;
   readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
   readonly prototypeOf: typeof Object.getPrototypeOf;
+  readonly isCurrent: () => boolean;
+}
+
+interface TokenRowKeyboardTerminalProof {
+  readonly registration: TokenRowKeyboardTerminalRegistration;
+  readonly nativeEvent: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface TokenRowKeyboardTerminalRegistration {
+  readonly proofFor: (event: KeyboardEvent) => TokenRowKeyboardTerminalProof | null;
+  readonly claim: (proof: TokenRowKeyboardTerminalProof) => boolean;
+  readonly release: () => void;
   readonly isCurrent: () => boolean;
 }
 
@@ -727,12 +747,15 @@ function captureTokenRenameKeyboardAuthority(
     "cancelable",
     "defaultPrevented",
     "cancelBubble",
+    "composed",
   ] as const);
   const keyboard = captureTokenRenameGetters(
     getOwnPropertyDescriptor,
     keyboardEventPrototype,
     [
       "key",
+      "code",
+      "location",
       "repeat",
       "isComposing",
       "ctrlKey",
@@ -743,6 +766,7 @@ function captureTokenRenameKeyboardAuthority(
   );
   const ui = captureTokenRenameGetters(getOwnPropertyDescriptor, uiEventPrototype, [
     "view",
+    "detail",
   ] as const);
   const document = captureTokenRenameGetters(
     getOwnPropertyDescriptor,
@@ -841,6 +865,7 @@ function captureTokenRenameKeyboardAuthority(
     event: event.getters,
     keyboard: keyboard.getters,
     view: ui.getters.view,
+    detail: ui.getters.detail,
     activeElement: document.getters.activeElement,
     composedPath: composedPath.method,
     preventDefault: preventDefault.method,
@@ -853,6 +878,154 @@ function captureTokenRenameKeyboardAuthority(
     prototypeOf,
     isCurrent,
   });
+}
+
+function createTokenRowKeyboardTerminalRegistration(
+  authority: TokenRenameKeyboardAuthority,
+): TokenRowKeyboardTerminalRegistration | null {
+  const proofs = new WeakMap<KeyboardEvent, TokenRowKeyboardTerminalProof>();
+  const invalidEvents = new WeakSet<Event>();
+  const claimedEvents = new WeakSet<Event>();
+  let active = false;
+  let released = false;
+  let poisoned = false;
+  const intrinsicsAreCurrent = () => {
+    if (poisoned) return false;
+    try {
+      const current = authority.isCurrent();
+      if (!current) poisoned = true;
+      return current;
+    } catch {
+      poisoned = true;
+      return false;
+    }
+  };
+
+  const listener: EventListener = function (this: EventTarget, event: Event) {
+    if (
+      !active
+      || released
+      || authority.prototypeOf(event) !== authority.KeyboardEvent.prototype
+      || invalidEvents.has(event)
+      || !intrinsicsAreCurrent()
+    ) {
+      return;
+    }
+    if (proofs.has(event as KeyboardEvent)) {
+      invalidEvents.add(event);
+      return;
+    }
+    try {
+      const currentTarget = authority.apply(
+        authority.event.currentTarget,
+        event,
+        [],
+      ) as EventTarget | null;
+      const phase = authority.apply(
+        authority.event.eventPhase,
+        event,
+        [],
+      ) as number;
+      const path = authority.apply(authority.composedPath, event, []) as EventTarget[];
+      const terminal = path.at(-1);
+      if (
+        currentTarget !== this
+        || terminal !== this
+        || phase !== authority.Event.CAPTURING_PHASE
+        || path.at(-2) !== authority.ownerDocument
+      ) {
+        invalidEvents.add(event);
+        return;
+      }
+      proofs.set(
+        event as KeyboardEvent,
+        Object.freeze({
+          registration,
+          nativeEvent: event as KeyboardEvent,
+          receiver: this,
+          currentTarget,
+          terminal,
+          path: Object.freeze([...path]),
+        }),
+      );
+    } catch {
+      invalidEvents.add(event);
+    }
+  };
+
+  const proofFor = (event: KeyboardEvent) => {
+    const proof = proofs.get(event);
+    if (
+      !proof
+      || !active
+      || released
+      || claimedEvents.has(event)
+      || invalidEvents.has(event)
+      || proof.registration !== registration
+      || proof.nativeEvent !== event
+      || proof.receiver !== proof.currentTarget
+      || proof.receiver !== proof.terminal
+      || !intrinsicsAreCurrent()
+    ) {
+      return null;
+    }
+    try {
+      const path = authority.apply(authority.composedPath, event, []) as EventTarget[];
+      return path.length === proof.path.length
+        && path.every((entry, index) => entry === proof.path[index])
+        && path.at(-2) === authority.ownerDocument
+        && path.at(-1) === proof.receiver
+        ? proof
+        : null;
+    } catch {
+      invalidEvents.add(event);
+      return null;
+    }
+  };
+
+  const registration: TokenRowKeyboardTerminalRegistration = Object.freeze({
+    proofFor,
+    claim: (proof: TokenRowKeyboardTerminalProof) => {
+      if (
+        claimedEvents.has(proof.nativeEvent)
+        || proofFor(proof.nativeEvent) !== proof
+      ) {
+        return false;
+      }
+      claimedEvents.add(proof.nativeEvent);
+      return true;
+    },
+    release: () => {
+      if (released) return;
+      released = true;
+      active = false;
+      authority.apply(
+        authority.removeEventListener,
+        authority.ownerWindow,
+        ["keydown", listener, true],
+      );
+    },
+    isCurrent: () =>
+      active
+      && !released
+      && intrinsicsAreCurrent(),
+  });
+
+  active = true;
+  try {
+    authority.apply(
+      authority.addEventListener,
+      authority.ownerWindow,
+      ["keydown", listener, true],
+    );
+    if (registration.isCurrent()) return registration;
+    registration.release();
+    return null;
+  } catch {
+    active = false;
+    released = true;
+    return null;
+  }
 }
 
 function tokenRenameNativeValue<Value>(
@@ -4409,6 +4582,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   type RenameDraft = Readonly<{ visit: RenameVisit; value: string }>;
   type RowActionKind = "rename" | "replace" | "revoke" | "cancel" | "save";
   type RowActionFacts = Readonly<{ kind: RowActionKind; eligible: boolean }>;
+  type RowNavigationRole = "rename" | "replace" | "revoke";
   type RenameNavigationRole = "save" | "cancel";
   type TokenSnapshot = Readonly<{
     source: ApiTokenDto;
@@ -4455,6 +4629,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     renameLabel: string;
     replaceLabel: string;
     revokeLabel: string;
+    actionsLabel: string;
     switchLabelId: string;
     switchHelpId: string;
     rowClassName: string;
@@ -4545,6 +4720,95 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     ownerIdentity: symbol;
     action: RowActionFacts;
     element: HTMLButtonElement;
+  }>;
+  type RowNavigationControl = Readonly<{
+    identity: symbol;
+    role: RowNavigationRole;
+    index: number;
+    order: 0 | 1 | 2;
+    ownerIdentity: symbol;
+    action: RowActionFacts;
+    element: HTMLButtonElement;
+  }>;
+  type RowNavigationNativeSnapshot = Readonly<{
+    event: KeyboardEvent;
+    type: string;
+    target: HTMLButtonElement;
+    currentTarget: EventTarget;
+    phase: number;
+    path: readonly EventTarget[];
+    bubbles: boolean;
+    cancelable: boolean;
+    defaultPrevented: false;
+    cancelBubble: false;
+    composed: boolean;
+    key: TokenRenameNavigationKey;
+    code: string;
+    location: number;
+    repeat: false;
+    composing: false;
+    ctrlKey: false;
+    altKey: false;
+    metaKey: false;
+    shiftKey: false;
+    view: Window | EventTarget | null;
+    detail: number;
+    trusted: true;
+    terminal: TokenRowKeyboardTerminalProof;
+  }>;
+  type RowNavigationReactMethods = Readonly<{
+    preventDefault: ReactKeyboardEvent<HTMLElement>["preventDefault"];
+    isDefaultPrevented: ReactKeyboardEvent<HTMLElement>["isDefaultPrevented"];
+    isPropagationStopped: ReactKeyboardEvent<HTMLElement>["isPropagationStopped"];
+  }>;
+  type RowNavigationReactSnapshot = Readonly<{
+    event: ReactKeyboardEvent<HTMLElement>;
+    nativeEvent: KeyboardEvent;
+    target: HTMLButtonElement;
+    currentTarget: HTMLElement;
+    phase: number;
+    view: unknown;
+    methods: RowNavigationReactMethods;
+  }>;
+  interface RowNavigationAuthority {
+    readonly identity: symbol;
+    readonly mount: symbol;
+    readonly panel: TokenPanelAuthority;
+    readonly candidate: RowCandidate;
+    readonly commit: RowCommit;
+    readonly token: TokenSnapshot;
+    readonly callback: RowFacts["onAction"];
+    readonly group: HTMLDivElement;
+    readonly controls: readonly RowNavigationControl[];
+    readonly ownerDocument: Document;
+    readonly keyboard: TokenRenameKeyboardAuthority;
+    readonly terminal: TokenRowKeyboardTerminalRegistration;
+    readonly dom: SecretNoticeDomSnapshot;
+    readonly placement: readonly SecretNoticePlacement[];
+    readonly history: TokenRenameMutationHistory;
+    retired: boolean;
+  }
+  type PendingRowNavigation = Readonly<{
+    authority: RowNavigationAuthority;
+    native: RowNavigationNativeSnapshot;
+    capture: RowNavigationReactSnapshot;
+    terminal: TokenRowKeyboardTerminalProof;
+    source: RowNavigationControl;
+    destination: RowNavigationControl;
+    key: TokenRenameNavigationKey;
+    movement: object;
+    commitClaim: object;
+    actionSetClaim: object;
+    movementClaim: object;
+    wrapperClaim: object;
+    nativeClaim: object;
+    windowClaim: object;
+    sourceClaim: object;
+    destinationClaim: object;
+  }>;
+  type RowNavigationDelivery = Readonly<{
+    pair: PendingRowNavigation;
+    bubble: RowNavigationReactSnapshot;
   }>;
   type RenameNavigationReactMethods = Readonly<{
     preventDefault: (...args: never[]) => unknown;
@@ -4646,6 +4910,25 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   const [renameDraft, setRenameDraft] = useState<RenameDraft | null>(null);
   const activeMount = useRef<symbol | null>(null);
   const activeCommit = useRef<RowCommit | null>(null);
+  const activeRowNavigation = useRef<RowNavigationAuthority | null>(null);
+  const pendingRowNavigation = useRef<PendingRowNavigation | null>(null);
+  const rowNavigationDelivery = useRef<RowNavigationDelivery | null>(null);
+  const attemptedRowReactEvents = useRef(new WeakSet<object>());
+  const attemptedRowNativeEvents = useRef(new WeakSet<object>());
+  const claimedRowDeliveries = useRef(new WeakSet<object>());
+  const claimedRowPairs = useRef(new WeakSet<object>());
+  const claimedRowMovements = useRef(new WeakSet<object>());
+  const claimedRowCommits = useRef(new WeakSet<object>());
+  const claimedRowActionSets = useRef(new WeakSet<object>());
+  const claimedRowMovementClaims = useRef(new WeakSet<object>());
+  const claimedRowWrapperClaims = useRef(new WeakSet<object>());
+  const claimedRowNativeClaims = useRef(new WeakSet<object>());
+  const claimedRowWindowClaims = useRef(new WeakSet<object>());
+  const claimedRowSourceClaims = useRef(new WeakSet<object>());
+  const claimedRowDestinationClaims = useRef(new WeakSet<object>());
+  const claimedRowReactEvents = useRef(new WeakSet<object>());
+  const claimedRowNativeEvents = useRef(new WeakSet<object>());
+  const claimedRowTerminalProofs = useRef(new WeakSet<object>());
   const claimedEvents = useRef(new WeakSet<object>());
   const consumedCommits = useRef(new WeakSet<RowCommit>());
   const dispatchingCommits = useRef(new WeakSet<RowCommit>());
@@ -4716,6 +4999,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     renameLabel: `Rename ${t.name}`,
     replaceLabel: `Replace ${t.name}`,
     revokeLabel: `Revoke ${t.name}`,
+    actionsLabel: `${t.name} token actions`,
     switchLabelId: `token-${t.id}-may-ask-label`,
     switchHelpId: `token-${t.id}-may-ask-help`,
     rowClassName: cn("flex min-w-0 flex-col gap-2 p-3", matching && "ring-2 ring-inset ring-accent"),
@@ -4747,6 +5031,22 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     switchError: slot<HTMLParagraphElement>("switchError"),
   });
 
+  const retireRowNavigation = (authority: RowNavigationAuthority) => {
+    if (!authority.retired) {
+      authority.retired = true;
+      authority.terminal.release();
+      authority.history.disconnect();
+    }
+    if (activeRowNavigation.current === authority) {
+      activeRowNavigation.current = null;
+    }
+    if (pendingRowNavigation.current?.authority === authority) {
+      pendingRowNavigation.current = null;
+    }
+    if (rowNavigationDelivery.current?.pair.authority === authority) {
+      rowNavigationDelivery.current = null;
+    }
+  };
   const retireRenameEscape = (authority: RenameEscapeAuthority) => {
     if (!authority.retired) {
       authority.retired = true;
@@ -4771,6 +5071,8 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
   const retireCandidate = (value: RowCandidate) => {
     const commit = activeCommit.current;
     if (commit?.candidate !== value) return;
+    const rowNavigation = activeRowNavigation.current;
+    if (rowNavigation?.commit === commit) retireRowNavigation(rowNavigation);
     const renameEscape = activeRenameEscape.current;
     if (renameEscape?.commit === commit) retireRenameEscape(renameEscape);
     activeCommit.current = null;
@@ -5061,6 +5363,8 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         || !value.revoke
         || !commit.actions?.isConnected
         || commit.actions.parentElement !== commit.row
+        || commit.actions.getAttribute("role") !== "group"
+        || commit.actions.getAttribute("aria-label") !== value.actionsLabel
         || commit.actions.children.length !== 3
         || commit.actions.children.item(0) !== commit.rename
         || commit.actions.children.item(1) !== commit.replace
@@ -5475,6 +5779,930 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
         ) === false;
     } catch {
       return false;
+    }
+  };
+  const rowNavigationControlIsCurrent = (
+    authority: RowNavigationAuthority,
+    control: RowNavigationControl,
+  ) => {
+    const owner = authority.candidate[control.role];
+    const element = authority.commit[control.role];
+    const action = authority.commit.facts[control.role];
+    return authority.controls[control.index] === control
+      && control.ownerIdentity === owner.identity
+      && control.action === action
+      && control.action.eligible
+      && control.element === element
+      && owner.element === element
+      && element?.ownerDocument === authority.ownerDocument
+      && element.parentElement === authority.group
+      && authority.group.children.item(control.order) === element
+      && !element.disabled
+      && element.getAttribute("aria-disabled") !== "true";
+  };
+  const rowNavigationAuthorityIsCurrent = (authority: RowNavigationAuthority) => {
+    const commit = currentCommit(authority.candidate);
+    if (
+      activeRowNavigation.current !== authority
+      || authority.retired
+      || authority.mount !== mount
+      || authority.panel !== panel
+      || authority.panel !== authority.commit.facts.panel
+      || !Object.isFrozen(authority.panel)
+      || authority.panel.update !== api.tokens.update
+      || authority.candidate !== candidate
+      || commit !== authority.commit
+      || commit.facts.token !== authority.token
+      || commit.facts.onAction !== authority.callback
+      || commit.actions !== authority.group
+      || authority.group.ownerDocument !== authority.ownerDocument
+      || authority.ownerDocument.defaultView !== authority.keyboard.ownerWindow
+      || !Object.isFrozen(authority.controls)
+      || authority.controls.length === 0
+      || !authority.keyboard.isCurrent()
+      || !authority.terminal.isCurrent()
+      || !authority.history.isPristine()
+      || !secretNoticeDomMatches(authority.dom)
+      || !secretNoticePlacementMatches(
+        commit.row,
+        authority.ownerDocument,
+        authority.placement,
+      )
+      || !domIsExact(commit)
+    ) {
+      return false;
+    }
+    const enabled = ([
+      ["rename", 0],
+      ["replace", 1],
+      ["revoke", 2],
+    ] as const).filter(([role]) => commit.facts[role]?.eligible);
+    return authority.controls.length === enabled.length
+      && authority.controls.every((control, index) => {
+        const expected = enabled[index];
+        return Boolean(
+          expected
+          && control.role === expected[0]
+          && control.order === expected[1]
+          && control.index === index
+          && Object.isFrozen(control)
+          && rowNavigationControlIsCurrent(authority, control),
+        );
+      })
+      && new Set(authority.controls.map(({ element }) => element)).size
+        === authority.controls.length;
+  };
+  const rowNavigationDestination = (
+    authority: RowNavigationAuthority,
+    source: RowNavigationControl,
+    key: TokenRenameNavigationKey,
+  ) => {
+    if (!rowNavigationControlIsCurrent(authority, source)) return null;
+    let destinationIndex: number | null = null;
+    if (
+      (key === "ArrowLeft" || key === "ArrowUp")
+      && source.index > 0
+    ) {
+      destinationIndex = source.index - 1;
+    } else if (
+      (key === "ArrowRight" || key === "ArrowDown")
+      && source.index + 1 < authority.controls.length
+    ) {
+      destinationIndex = source.index + 1;
+    } else if (key === "Home" && source.index !== 0) {
+      destinationIndex = 0;
+    } else if (
+      key === "End"
+      && source.index !== authority.controls.length - 1
+    ) {
+      destinationIndex = authority.controls.length - 1;
+    }
+    const destination = destinationIndex === null
+      ? null
+      : authority.controls[destinationIndex] ?? null;
+    return destination && rowNavigationControlIsCurrent(authority, destination)
+      ? destination
+      : null;
+  };
+  const rowMovementIsCurrent = (
+    authority: RowNavigationAuthority,
+    source: RowNavigationControl,
+    destination: RowNavigationControl,
+    key: TokenRenameNavigationKey,
+  ) => {
+    try {
+      return rowNavigationDelivery.current === null
+        && rowNavigationAuthorityIsCurrent(authority)
+        && source !== destination
+        && rowNavigationDestination(authority, source, key) === destination
+        && authority.keyboard.apply(
+          authority.keyboard.activeElement,
+          authority.ownerDocument,
+          [],
+        ) === source.element;
+    } catch {
+      return false;
+    }
+  };
+  const captureRowNavigationNative = (
+    authority: RowNavigationAuthority,
+    event: Event,
+    expectedPhase: number,
+  ): RowNavigationNativeSnapshot | null => {
+    if (
+      !rowNavigationAuthorityIsCurrent(authority)
+      || authority.keyboard.prototypeOf(event)
+        !== authority.keyboard.KeyboardEvent.prototype
+      || !authority.keyboard.trusted.matches(event)
+    ) {
+      return null;
+    }
+    try {
+      const native = authority.keyboard;
+      const type = tokenRenameNativeValue<string>(native, native.event.type, event);
+      const target = tokenRenameNativeValue<EventTarget | null>(
+        native,
+        native.event.target,
+        event,
+      );
+      const currentTarget = tokenRenameNativeValue<EventTarget | null>(
+        native,
+        native.event.currentTarget,
+        event,
+      );
+      const phase = tokenRenameNativeValue<number>(
+        native,
+        native.event.eventPhase,
+        event,
+      );
+      const bubbles = tokenRenameNativeValue<boolean>(
+        native,
+        native.event.bubbles,
+        event,
+      );
+      const cancelable = tokenRenameNativeValue<boolean>(
+        native,
+        native.event.cancelable,
+        event,
+      );
+      const defaultPrevented = tokenRenameNativeValue<boolean>(
+        native,
+        native.event.defaultPrevented,
+        event,
+      );
+      const cancelBubble = tokenRenameNativeValue<boolean>(
+        native,
+        native.event.cancelBubble,
+        event,
+      );
+      const composed = tokenRenameNativeValue<boolean>(
+        native,
+        native.event.composed,
+        event,
+      );
+      const key = tokenRenameNativeValue<string>(
+        native,
+        native.keyboard.key,
+        event,
+      );
+      const code = tokenRenameNativeValue<string>(
+        native,
+        native.keyboard.code,
+        event,
+      );
+      const location = tokenRenameNativeValue<number>(
+        native,
+        native.keyboard.location,
+        event,
+      );
+      const repeat = tokenRenameNativeValue<boolean>(
+        native,
+        native.keyboard.repeat,
+        event,
+      );
+      const composing = tokenRenameNativeValue<boolean>(
+        native,
+        native.keyboard.isComposing,
+        event,
+      );
+      const ctrlKey = tokenRenameNativeValue<boolean>(
+        native,
+        native.keyboard.ctrlKey,
+        event,
+      );
+      const altKey = tokenRenameNativeValue<boolean>(
+        native,
+        native.keyboard.altKey,
+        event,
+      );
+      const metaKey = tokenRenameNativeValue<boolean>(
+        native,
+        native.keyboard.metaKey,
+        event,
+      );
+      const shiftKey = tokenRenameNativeValue<boolean>(
+        native,
+        native.keyboard.shiftKey,
+        event,
+      );
+      const view = tokenRenameNativeValue<Window | EventTarget | null>(
+        native,
+        native.view,
+        event,
+      );
+      const detail = tokenRenameNativeValue<number>(native, native.detail, event);
+      const activeElement = native.apply(
+        native.activeElement,
+        authority.ownerDocument,
+        [],
+      ) as Element | null;
+      const path = native.apply(native.composedPath, event, []) as EventTarget[];
+      const trusted = native.trusted.read(event);
+      const terminal = authority.terminal.proofFor(event as KeyboardEvent);
+      if (
+        type !== "keydown"
+        || !(target instanceof native.HTMLElement)
+        || target.tagName !== "BUTTON"
+        || target.ownerDocument !== authority.ownerDocument
+        || activeElement !== target
+        || !currentTarget
+        || phase !== expectedPhase
+        || !bubbles
+        || !cancelable
+        || !composed
+        || defaultPrevented
+        || cancelBubble
+        || !isTokenRenameNavigationKey(key)
+        || repeat
+        || composing
+        || ctrlKey
+        || altKey
+        || metaKey
+        || shiftKey
+        || trusted !== true
+        || !terminal
+        || (view !== null
+          && view !== authority.keyboard.ownerWindow
+          && view !== terminal.receiver)
+      ) {
+        return null;
+      }
+      const expectedPath: EventTarget[] = [];
+      let node: Node | null = target;
+      while (node) {
+        expectedPath.push(node);
+        if (node === authority.ownerDocument) break;
+        node = node.parentNode;
+      }
+      expectedPath.push(terminal.receiver);
+      if (
+        expectedPath.at(-2) !== authority.ownerDocument
+        || path.length !== expectedPath.length
+        || path.some((entry, index) => entry !== expectedPath[index])
+        || path.length !== terminal.path.length
+        || path.some((entry, index) => entry !== terminal.path[index])
+        || terminal.receiver !== terminal.currentTarget
+        || terminal.receiver !== terminal.terminal
+        || !path.includes(currentTarget)
+        || !path.includes(authority.commit.row)
+        || !path.includes(authority.group)
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        event: event as KeyboardEvent,
+        type,
+        target: target as HTMLButtonElement,
+        currentTarget,
+        phase,
+        path: Object.freeze([...path]),
+        bubbles,
+        cancelable,
+        defaultPrevented: false,
+        cancelBubble: false,
+        composed,
+        key,
+        code,
+        location,
+        repeat: false,
+        composing: false,
+        ctrlKey: false,
+        altKey: false,
+        metaKey: false,
+        shiftKey: false,
+        view,
+        detail,
+        trusted: true,
+        terminal,
+      });
+    } catch {
+      return null;
+    }
+  };
+  const rowNavigationNativeSnapshotsMatch = (
+    capture: RowNavigationNativeSnapshot,
+    bubble: RowNavigationNativeSnapshot,
+    authority: RowNavigationAuthority,
+  ) => capture.event === bubble.event
+    && capture.type === bubble.type
+    && capture.target === bubble.target
+    && capture.currentTarget === bubble.currentTarget
+    && capture.phase === authority.keyboard.Event.CAPTURING_PHASE
+    && bubble.phase === authority.keyboard.Event.BUBBLING_PHASE
+    && capture.bubbles === bubble.bubbles
+    && capture.cancelable === bubble.cancelable
+    && capture.defaultPrevented === bubble.defaultPrevented
+    && capture.cancelBubble === bubble.cancelBubble
+    && capture.composed === bubble.composed
+    && capture.key === bubble.key
+    && capture.code === bubble.code
+    && capture.location === bubble.location
+    && capture.repeat === bubble.repeat
+    && capture.composing === bubble.composing
+    && capture.ctrlKey === bubble.ctrlKey
+    && capture.altKey === bubble.altKey
+    && capture.metaKey === bubble.metaKey
+    && capture.shiftKey === bubble.shiftKey
+    && capture.view === bubble.view
+    && capture.detail === bubble.detail
+    && capture.trusted === bubble.trusted
+    && capture.terminal === bubble.terminal
+    && capture.path.length === bubble.path.length
+    && capture.path.every((entry, index) => entry === bubble.path[index]);
+  const rowNavigationNativeSnapshotIsCurrent = (
+    snapshot: RowNavigationNativeSnapshot,
+    authority: RowNavigationAuthority,
+    expectedDefaultPrevented = false,
+  ) => {
+    try {
+      const native = authority.keyboard;
+      const path = native.apply(
+        native.composedPath,
+        snapshot.event,
+        [],
+      ) as EventTarget[];
+      return rowNavigationAuthorityIsCurrent(authority)
+        && native.prototypeOf(snapshot.event) === native.KeyboardEvent.prototype
+        && native.trusted.matches(snapshot.event)
+        && native.trusted.read(snapshot.event) === snapshot.trusted
+        && tokenRenameNativeValue(native, native.event.type, snapshot.event)
+          === snapshot.type
+        && tokenRenameNativeValue(native, native.event.target, snapshot.event)
+          === snapshot.target
+        && tokenRenameNativeValue(
+          native,
+          native.event.currentTarget,
+          snapshot.event,
+        ) === snapshot.currentTarget
+        && tokenRenameNativeValue(
+          native,
+          native.event.eventPhase,
+          snapshot.event,
+        ) === snapshot.phase
+        && tokenRenameNativeValue(native, native.event.bubbles, snapshot.event)
+          === snapshot.bubbles
+        && tokenRenameNativeValue(native, native.event.cancelable, snapshot.event)
+          === snapshot.cancelable
+        && tokenRenameNativeValue(
+          native,
+          native.event.defaultPrevented,
+          snapshot.event,
+        ) === expectedDefaultPrevented
+        && tokenRenameNativeValue(
+          native,
+          native.event.cancelBubble,
+          snapshot.event,
+        ) === snapshot.cancelBubble
+        && tokenRenameNativeValue(native, native.event.composed, snapshot.event)
+          === snapshot.composed
+        && tokenRenameNativeValue(native, native.keyboard.key, snapshot.event)
+          === snapshot.key
+        && tokenRenameNativeValue(native, native.keyboard.code, snapshot.event)
+          === snapshot.code
+        && tokenRenameNativeValue(
+          native,
+          native.keyboard.location,
+          snapshot.event,
+        ) === snapshot.location
+        && tokenRenameNativeValue(native, native.keyboard.repeat, snapshot.event)
+          === snapshot.repeat
+        && tokenRenameNativeValue(
+          native,
+          native.keyboard.isComposing,
+          snapshot.event,
+        ) === snapshot.composing
+        && tokenRenameNativeValue(native, native.keyboard.ctrlKey, snapshot.event)
+          === snapshot.ctrlKey
+        && tokenRenameNativeValue(native, native.keyboard.altKey, snapshot.event)
+          === snapshot.altKey
+        && tokenRenameNativeValue(native, native.keyboard.metaKey, snapshot.event)
+          === snapshot.metaKey
+        && tokenRenameNativeValue(native, native.keyboard.shiftKey, snapshot.event)
+          === snapshot.shiftKey
+        && tokenRenameNativeValue(native, native.view, snapshot.event)
+          === snapshot.view
+        && tokenRenameNativeValue(native, native.detail, snapshot.event)
+          === snapshot.detail
+        && path.length === snapshot.path.length
+        && path.every((entry, index) => entry === snapshot.path[index])
+        && path.at(-1) === snapshot.terminal.receiver
+        && snapshot.terminal.registration === authority.terminal
+        && snapshot.terminal.nativeEvent === snapshot.event
+        && snapshot.terminal.receiver === snapshot.terminal.currentTarget
+        && snapshot.terminal.receiver === snapshot.terminal.terminal;
+    } catch {
+      return false;
+    }
+  };
+  const captureRowNavigationReact = (
+    event: ReactKeyboardEvent<HTMLElement>,
+    authority: RowNavigationAuthority,
+    native: RowNavigationNativeSnapshot,
+    currentTarget: HTMLElement,
+  ): RowNavigationReactSnapshot | null => {
+    try {
+      const reactEvent = event as ReactKeyboardEvent<HTMLElement> & {
+        preventDefault?: unknown;
+        isDefaultPrevented?: unknown;
+        isPropagationStopped?: unknown;
+      };
+      const preventDefault = reactEvent.preventDefault;
+      const isDefaultPrevented = reactEvent.isDefaultPrevented;
+      const isPropagationStopped = reactEvent.isPropagationStopped;
+      const view: unknown = event.view;
+      if (
+        typeof preventDefault !== "function"
+        || typeof isDefaultPrevented !== "function"
+        || typeof isPropagationStopped !== "function"
+        || authority.keyboard.apply(isDefaultPrevented, event, []) !== false
+        || authority.keyboard.apply(isPropagationStopped, event, []) !== false
+        || reactEvent.preventDefault !== preventDefault
+        || reactEvent.isDefaultPrevented !== isDefaultPrevented
+        || reactEvent.isPropagationStopped !== isPropagationStopped
+        || event.nativeEvent !== native.event
+        || event.type !== native.type
+        || event.target !== native.target
+        || event.currentTarget !== currentTarget
+        || event.eventPhase !== native.phase
+        || event.bubbles !== native.bubbles
+        || event.cancelable !== native.cancelable
+        || event.defaultPrevented !== false
+        || event.isTrusted !== native.trusted
+        || event.key !== native.key
+        || event.code !== native.code
+        || event.location !== native.location
+        || event.repeat !== native.repeat
+        || event.ctrlKey !== native.ctrlKey
+        || event.altKey !== native.altKey
+        || event.metaKey !== native.metaKey
+        || event.shiftKey !== native.shiftKey
+        || (view !== null
+          && view !== authority.keyboard.ownerWindow
+          && view !== native.terminal.receiver)
+        || event.detail !== native.detail
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        event,
+        nativeEvent: native.event,
+        target: native.target,
+        currentTarget,
+        phase: native.phase,
+        view,
+        methods: Object.freeze({
+          preventDefault,
+          isDefaultPrevented,
+          isPropagationStopped,
+        }),
+      });
+    } catch {
+      return null;
+    }
+  };
+  const rowNavigationReactSnapshotIsCurrent = (
+    snapshot: RowNavigationReactSnapshot,
+    authority: RowNavigationAuthority,
+    native: RowNavigationNativeSnapshot,
+    currentTarget: HTMLElement | null,
+  ) => {
+    try {
+      const event = snapshot.event as ReactKeyboardEvent<HTMLElement> & {
+        preventDefault?: unknown;
+        isDefaultPrevented?: unknown;
+        isPropagationStopped?: unknown;
+      };
+      const view: unknown = event.view;
+      return event.nativeEvent === snapshot.nativeEvent
+        && event.nativeEvent === native.event
+        && event.type === native.type
+        && event.target === snapshot.target
+        && event.target === native.target
+        && event.currentTarget === currentTarget
+        && event.eventPhase === snapshot.phase
+        && event.eventPhase === native.phase
+        && event.bubbles === native.bubbles
+        && event.cancelable === native.cancelable
+        && event.defaultPrevented === false
+        && event.isTrusted === native.trusted
+        && event.key === native.key
+        && event.code === native.code
+        && event.location === native.location
+        && event.repeat === native.repeat
+        && event.ctrlKey === native.ctrlKey
+        && event.altKey === native.altKey
+        && event.metaKey === native.metaKey
+        && event.shiftKey === native.shiftKey
+        && view === snapshot.view
+        && (view === null
+          || view === authority.keyboard.ownerWindow
+          || view === native.terminal.receiver)
+        && event.detail === native.detail
+        && event.preventDefault === snapshot.methods.preventDefault
+        && event.isDefaultPrevented === snapshot.methods.isDefaultPrevented
+        && event.isPropagationStopped === snapshot.methods.isPropagationStopped
+        && authority.keyboard.apply(
+          snapshot.methods.isDefaultPrevented,
+          event,
+          [],
+        ) === false
+        && authority.keyboard.apply(
+          snapshot.methods.isPropagationStopped,
+          event,
+          [],
+        ) === false;
+    } catch {
+      return false;
+    }
+  };
+  const claimRowNavigation = (delivery: RowNavigationDelivery) => {
+    const { pair, bubble } = delivery;
+    const nativeEvent = pair.native.event;
+    if (
+      rowNavigationDelivery.current
+      || !rowMovementIsCurrent(
+        pair.authority,
+        pair.source,
+        pair.destination,
+        pair.key,
+      )
+      || claimedRowDeliveries.current.has(delivery)
+      || claimedRowPairs.current.has(pair)
+      || claimedRowMovements.current.has(pair.movement)
+      || claimedRowCommits.current.has(pair.commitClaim)
+      || claimedRowActionSets.current.has(pair.actionSetClaim)
+      || claimedRowMovementClaims.current.has(pair.movementClaim)
+      || claimedRowWrapperClaims.current.has(pair.wrapperClaim)
+      || claimedRowNativeClaims.current.has(pair.nativeClaim)
+      || claimedRowWindowClaims.current.has(pair.windowClaim)
+      || claimedRowSourceClaims.current.has(pair.sourceClaim)
+      || claimedRowDestinationClaims.current.has(pair.destinationClaim)
+      || claimedRowReactEvents.current.has(pair.capture.event)
+      || claimedRowReactEvents.current.has(bubble.event)
+      || claimedRowNativeEvents.current.has(nativeEvent)
+      || claimedRowTerminalProofs.current.has(pair.terminal)
+      || !attemptedRowReactEvents.current.has(pair.capture.event)
+      || !attemptedRowReactEvents.current.has(bubble.event)
+      || !attemptedRowNativeEvents.current.has(nativeEvent)
+      || !pair.authority.terminal.claim(pair.terminal)
+    ) {
+      return false;
+    }
+    claimedRowDeliveries.current.add(delivery);
+    claimedRowPairs.current.add(pair);
+    claimedRowMovements.current.add(pair.movement);
+    claimedRowCommits.current.add(pair.commitClaim);
+    claimedRowActionSets.current.add(pair.actionSetClaim);
+    claimedRowMovementClaims.current.add(pair.movementClaim);
+    claimedRowWrapperClaims.current.add(pair.wrapperClaim);
+    claimedRowNativeClaims.current.add(pair.nativeClaim);
+    claimedRowWindowClaims.current.add(pair.windowClaim);
+    claimedRowSourceClaims.current.add(pair.sourceClaim);
+    claimedRowDestinationClaims.current.add(pair.destinationClaim);
+    claimedRowReactEvents.current.add(pair.capture.event);
+    claimedRowReactEvents.current.add(bubble.event);
+    claimedRowNativeEvents.current.add(nativeEvent);
+    claimedRowTerminalProofs.current.add(pair.terminal);
+    rowNavigationDelivery.current = delivery;
+    return true;
+  };
+  const stageRowNavigation = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !nativeEvent
+      || typeof nativeEvent !== "object"
+      || pendingRowNavigation.current
+      || rowNavigationDelivery.current
+      || attemptedRowReactEvents.current.has(event)
+      || attemptedRowNativeEvents.current.has(nativeEvent)
+    ) {
+      return;
+    }
+    attemptedRowReactEvents.current.add(event);
+    attemptedRowNativeEvents.current.add(nativeEvent);
+    const authority = activeRowNavigation.current;
+    if (!authority || event.currentTarget !== authority.group) return;
+    const native = captureRowNavigationNative(
+      authority,
+      nativeEvent as Event,
+      authority.keyboard.Event.CAPTURING_PHASE,
+    );
+    const capture = native
+      ? captureRowNavigationReact(event, authority, native, authority.group)
+      : null;
+    const source = native
+      ? authority.controls.find(({ element }) => element === native.target)
+      : undefined;
+    const destination = source && native
+      ? rowNavigationDestination(authority, source, native.key)
+      : null;
+    if (
+      !native
+      || !capture
+      || !source
+      || !destination
+      || native.terminal !== authority.terminal.proofFor(native.event)
+      || !rowNavigationNativeSnapshotIsCurrent(native, authority)
+      || !rowMovementIsCurrent(
+        authority,
+        source,
+        destination,
+        native.key,
+      )
+    ) {
+      return;
+    }
+    const pair = Object.freeze<PendingRowNavigation>({
+      authority,
+      native,
+      capture,
+      terminal: native.terminal,
+      source,
+      destination,
+      key: native.key,
+      movement: Object.freeze({
+        authority,
+        commit: authority.commit,
+        controls: authority.controls,
+        source,
+        destination,
+        key: native.key,
+      }),
+      commitClaim: Object.freeze({ commit: authority.commit }),
+      actionSetClaim: Object.freeze({ controls: authority.controls }),
+      movementClaim: Object.freeze({
+        source,
+        destination,
+        key: native.key,
+      }),
+      wrapperClaim: Object.freeze({ capture: event }),
+      nativeClaim: Object.freeze({ nativeEvent }),
+      windowClaim: Object.freeze({
+        registration: authority.terminal,
+        proof: native.terminal,
+        receiver: native.terminal.receiver,
+      }),
+      sourceClaim: Object.freeze({ source }),
+      destinationClaim: Object.freeze({ destination }),
+    });
+    pendingRowNavigation.current = pair;
+    queueMicrotask(() => {
+      if (pendingRowNavigation.current === pair) {
+        pendingRowNavigation.current = null;
+      }
+    });
+  };
+  const deliverRowNavigation = (
+    role: RowNavigationRole,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const pair = pendingRowNavigation.current;
+    let nativeEvent: unknown;
+    try {
+      nativeEvent = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !pair
+      || !nativeEvent
+      || typeof nativeEvent !== "object"
+      || pair.native.event !== nativeEvent
+      || pair.source.role !== role
+      || rowNavigationDelivery.current
+      || attemptedRowReactEvents.current.has(event)
+      || !attemptedRowNativeEvents.current.has(nativeEvent)
+    ) {
+      return;
+    }
+    attemptedRowReactEvents.current.add(event);
+    pendingRowNavigation.current = null;
+    const { authority, source, destination, key } = pair;
+    let delivery: RowNavigationDelivery | null = null;
+    try {
+      const native = captureRowNavigationNative(
+        authority,
+        nativeEvent as Event,
+        authority.keyboard.Event.BUBBLING_PHASE,
+      );
+      const bubble = native
+        ? captureRowNavigationReact(event, authority, native, source.element)
+        : null;
+      if (
+        !native
+        || !bubble
+        || bubble.event === pair.capture.event
+        || event.currentTarget !== source.element
+        || pair.capture.currentTarget !== authority.group
+        || pair.capture.phase !== authority.keyboard.Event.CAPTURING_PHASE
+        || bubble.phase !== authority.keyboard.Event.BUBBLING_PHASE
+        || native.terminal !== pair.terminal
+        || !rowNavigationNativeSnapshotsMatch(pair.native, native, authority)
+        || !rowNavigationReactSnapshotIsCurrent(
+          pair.capture,
+          authority,
+          pair.native,
+          null,
+        )
+        || !rowNavigationReactSnapshotIsCurrent(
+          bubble,
+          authority,
+          native,
+          source.element,
+        )
+        || !rowNavigationNativeSnapshotIsCurrent(native, authority)
+        || !rowMovementIsCurrent(
+          authority,
+          source,
+          destination,
+          key,
+        )
+      ) {
+        return;
+      }
+      delivery = Object.freeze({ pair, bubble });
+      if (!claimRowNavigation(delivery)) return;
+      if (
+        rowNavigationDelivery.current !== delivery
+        || !rowNavigationReactSnapshotIsCurrent(
+          pair.capture,
+          authority,
+          pair.native,
+          null,
+        )
+        || !rowNavigationReactSnapshotIsCurrent(
+          bubble,
+          authority,
+          native,
+          source.element,
+        )
+        || !rowNavigationNativeSnapshotIsCurrent(native, authority)
+        || !rowNavigationAuthorityIsCurrent(authority)
+        || rowNavigationDestination(authority, source, key) !== destination
+        || authority.keyboard.apply(
+          authority.keyboard.activeElement,
+          authority.ownerDocument,
+          [],
+        ) !== source.element
+      ) {
+        return;
+      }
+      authority.keyboard.apply(
+        bubble.methods.preventDefault,
+        bubble.event,
+        [],
+      );
+      const currentDefaultQuery = bubble.event.isDefaultPrevented;
+      const currentPropagationQuery = bubble.event.isPropagationStopped;
+      if (
+        tokenRenameNativeValue<boolean>(
+          authority.keyboard,
+          authority.keyboard.event.defaultPrevented,
+          native.event,
+        ) !== true
+        || tokenRenameNativeValue<boolean>(
+          authority.keyboard,
+          authority.keyboard.event.cancelBubble,
+          native.event,
+        ) !== false
+        || bubble.event.defaultPrevented !== true
+        || typeof currentDefaultQuery !== "function"
+        || typeof currentPropagationQuery !== "function"
+        || authority.keyboard.apply(
+          currentDefaultQuery,
+          bubble.event,
+          [],
+        ) !== true
+        || authority.keyboard.apply(
+          currentPropagationQuery,
+          bubble.event,
+          [],
+        ) !== false
+        || !rowNavigationNativeSnapshotIsCurrent(native, authority, true)
+        || rowNavigationDelivery.current !== delivery
+        || !rowNavigationAuthorityIsCurrent(authority)
+        || rowNavigationDestination(authority, source, key) !== destination
+        || authority.keyboard.apply(
+          authority.keyboard.activeElement,
+          authority.ownerDocument,
+          [],
+        ) !== source.element
+      ) {
+        return;
+      }
+      authority.keyboard.apply(
+        authority.keyboard.focus,
+        destination.element,
+        [TOKEN_RENAME_PREVENT_SCROLL],
+      );
+    } catch {
+      return;
+    } finally {
+      if (delivery && rowNavigationDelivery.current === delivery) {
+        rowNavigationDelivery.current = null;
+      }
+    }
+  };
+  const establishRowNavigation = (commit: RowCommit) => {
+    const group = commit.actions;
+    const ownerWindow = commit.ownerDocument.defaultView;
+    if (
+      !group
+      || !commit.facts.actionsVisible
+      || !ownerWindow?.MutationObserver
+      || activeCommit.current !== commit
+      || !factsAreCurrent(commit.facts)
+      || !domIsExact(commit)
+    ) {
+      return;
+    }
+    const placement = snapshotSecretNoticePlacement(commit.row);
+    const keyboard = captureTokenRenameKeyboardAuthority(
+      commit.ownerDocument,
+      ownerWindow,
+    );
+    if (!placement || !keyboard) return;
+    const terminal = createTokenRowKeyboardTerminalRegistration(keyboard);
+    if (!terminal) return;
+    const entries = ([
+      ["rename", 0],
+      ["replace", 1],
+      ["revoke", 2],
+    ] as const).filter(([role]) => commit.facts[role]?.eligible);
+    const controls = entries.flatMap(([role, order], index) => {
+      const element = commit[role];
+      const action = commit.facts[role];
+      return element && action
+        ? [Object.freeze<RowNavigationControl>({
+            identity: Symbol(`token-row-${role}-navigation`),
+            role,
+            index,
+            order,
+            ownerIdentity: candidate[role].identity,
+            action,
+            element,
+          })]
+        : [];
+    });
+    if (controls.length !== entries.length || controls.length === 0) {
+      terminal.release();
+      return;
+    }
+    const history = new TokenRenameMutationHistory(
+      ownerWindow,
+      commit.row,
+      placement,
+      null,
+    );
+    const authority: RowNavigationAuthority = {
+      identity: Symbol("token-row-action-navigation"),
+      mount,
+      panel: commit.facts.panel,
+      candidate,
+      commit,
+      token: commit.facts.token,
+      callback: commit.facts.onAction,
+      group,
+      controls: Object.freeze(controls),
+      ownerDocument: commit.ownerDocument,
+      keyboard,
+      terminal,
+      dom: snapshotSecretNoticeDom(commit.row),
+      placement,
+      history,
+      retired: false,
+    };
+    Object.seal(authority);
+    const previous = activeRowNavigation.current;
+    if (previous) retireRowNavigation(previous);
+    activeRowNavigation.current = authority;
+    if (!rowNavigationAuthorityIsCurrent(authority)) {
+      retireRowNavigation(authority);
     }
   };
   const renameAuthorityIsCurrent = (authority: RenameEscapeAuthority) => {
@@ -6207,10 +7435,10 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       controlledInputUpdate.current = null;
     }
     activeCommit.current = commit;
+    establishRowNavigation(commit);
     establishRenameEscape(commit, settlingInput);
     return commit;
   };
-  // eslint-disable-next-line react-hooks/refs -- TokenRenameLayoutBoundary invokes this cycle only from its layout effect.
   const renameLayoutCycle = Object.freeze<TokenRenameLayoutCycle>({
     setup: () => recoverRenameLayout(candidate),
     cleanup: () => retireRenameLayout(candidate),
@@ -6226,6 +7454,8 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       if (current?.facts.mount === mount) retireCandidate(current.candidate);
       const renameEscape = activeRenameEscape.current;
       if (renameEscape?.mount === mount) retireRenameEscape(renameEscape);
+      const rowNavigation = activeRowNavigation.current;
+      if (rowNavigation?.mount === mount) retireRowNavigation(rowNavigation);
       const replay = renameRefReplay.current;
       if (replay?.candidate.facts.mount === mount) quarantineRenameRefReplay(replay);
       controlledInputUpdate.current = null;
@@ -6235,6 +7465,8 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       if (saveOwner.current?.mount === mount) saveOwner.current = null;
       if (returnFocus.current?.mount === mount) returnFocus.current = null;
     };
+  // The teardown owns the complete lifetime of this immutable mount identity.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mount]);
   useLayoutEffect(() => {
     const commit = recoverRenameLayout(candidate);
@@ -6307,8 +7539,10 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       <p ref={(element) => bindElement(candidate.metadata, element)} className="text-xs text-ink-3">{facts.metadata}</p>
       {facts.mismatchText && <p ref={(element) => bindElement(candidate.mismatch, element)} className="text-xs text-ink-2">{facts.mismatchText}</p>}
       {facts.expiredText && <p ref={(element) => bindElement(candidate.expired, element)} className="text-xs text-ink-3">{facts.expiredText}</p>}
-      {facts.actionsVisible && <div ref={(element) => bindElement(candidate.actions, element)} className="flex flex-wrap gap-2">
+      {facts.actionsVisible && <div ref={(element) => bindElement(candidate.actions, element)} className="flex flex-wrap gap-2"
+        role="group" aria-label={facts.actionsLabel} onKeyDownCapture={stageRowNavigation}>
         <button ref={(element) => bindElement(candidate.rename, element)} type="button" className="btn btn-outline btn-sm"
+          onKeyDown={(event) => deliverRowNavigation("rename", event)}
           disabled={!facts.rename?.eligible} onClick={(event) => {
             const commit = claimClick(event, "rename", true);
             if (!commit) return;
@@ -6320,6 +7554,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
             setRenameDraft(Object.freeze({ visit, value: commit.facts.token.name }));
           }} aria-label={facts.renameLabel}>Rename</button>
         <button ref={(element) => bindElement(candidate.replace, element)} type="button" className="btn btn-outline btn-sm"
+          onKeyDown={(event) => deliverRowNavigation("replace", event)}
           disabled={!facts.replace?.eligible} onClick={(event) => {
             const commit = claimClick(event, "replace", false);
             if (!commit) return;
@@ -6330,6 +7565,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
             }
           }} aria-label={facts.replaceLabel}>Replace</button>
         <button ref={(element) => bindElement(candidate.revoke, element)} type="button" className="btn btn-outline btn-sm text-danger"
+          onKeyDown={(event) => deliverRowNavigation("revoke", event)}
           disabled={!facts.revoke?.eligible} onClick={(event) => {
             const commit = claimClick(event, "revoke", false);
             if (!commit) return;
