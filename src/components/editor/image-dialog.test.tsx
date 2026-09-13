@@ -19,6 +19,7 @@ import { flushSync } from "react-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { compile } from "tailwindcss";
 import { ApiError } from "@/lib/api";
 import { ImageDialog } from "./dialogs";
 
@@ -286,6 +287,179 @@ afterEach(async () => {
   }
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("ImageDialog error wrapping", () => {
+  const failures = [
+    { kind: "unbroken", message: "U".repeat(256) },
+    { kind: "ordinary", message: `  ${"The image could not be uploaded. Please choose another file. ".repeat(5)} ` },
+    { kind: "literal markup", message: '<button tabindex="0">Retry</button> & <a href="/upload">Upload</a> <img src="invalid" />'.repeat(4) },
+  ];
+
+  function expectError(message: string) {
+    const error = screen.getByTestId("image-upload-error");
+    expect(message.length).toBeGreaterThanOrEqual(240);
+    expect(error.tagName).toBe("DIV");
+    expect(error.textContent).toBe(message);
+    expect(error.children).toHaveLength(0);
+    expect(error.childNodes).toHaveLength(1);
+    expect(error.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(Object.fromEntries([...error.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      class: "text-sm text-danger wrap-anywhere",
+      role: "alert",
+      "data-testid": "image-upload-error",
+    });
+    expect(error.parentElement).toBe(imageForm());
+    expect(error).toBeVisible();
+    expect(error.tabIndex).toBe(-1);
+    expect(screen.getAllByRole("alert")).toEqual([error]);
+    return error;
+  }
+
+  it.each(failures)("preserves complete $kind upload failures without new controls", async ({ message }) => {
+    const pending = deferred<UploadResult>();
+    const onUpload = vi.fn(() => pending.promise);
+    const onSubmit = vi.fn();
+    await renderStrictRoot(<Harness onUpload={onUpload} onSubmit={onSubmit} />);
+    const controls = [...dialogContent().querySelectorAll<HTMLElement>("*")].filter((element) => element.tabIndex >= 0);
+    const file = new File(["image"], "photo.png", { type: "image/png" });
+    choose(file);
+    await act(async () => pending.reject(new ApiError(400, "Invalid request", [{ message }])));
+
+    expectError(message);
+    expect([...dialogContent().querySelectorAll<HTMLElement>("*")].filter((element) => element.tabIndex >= 0)).toEqual(controls);
+    expect(screen.getByTestId("image-file")).toHaveValue("");
+    expect(screen.getByTestId("image-file")).toBeEnabled();
+    expect(screen.getByTestId("image-upload")).toBeEnabled();
+    expect(screen.getByTestId("image-submit")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Close" })).toBeEnabled();
+    expect(onUpload).toHaveBeenCalledExactlyOnceWith(file);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("replaces a wrapped failure, admits one explicit upload retry and recovers the preview", async () => {
+    const first = deferred<UploadResult>();
+    const second = deferred<UploadResult>();
+    const retry = deferred<UploadResult>();
+    const onUpload = vi.fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockReturnValueOnce(retry.promise);
+    const onSubmit = vi.fn();
+    await renderStrictRoot(<Harness onUpload={onUpload} onSubmit={onSubmit} />);
+    choose(new File(["first"], "first.png", { type: "image/png" }));
+    await act(async () => first.reject(new ApiError(400, failures[0].message)));
+    const firstError = expectError(failures[0].message);
+
+    choose(new File(["second"], "second.png", { type: "image/png" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(firstError).not.toBeInTheDocument();
+    await act(async () => second.reject(new ApiError(400, failures[2].message)));
+    expectError(failures[2].message);
+    expect(dialogContent().textContent).not.toContain(failures[0].message);
+
+    const file = new File(["retry"], "retry.png", { type: "image/png" });
+    choose(file);
+    choose(file);
+    expect(onUpload).toHaveBeenCalledTimes(3);
+    expect(onUpload).toHaveBeenLastCalledWith(file);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("image-upload")).toBeDisabled();
+    await act(async () => retry.resolve({ url: "/api/assets/retry", alt: "Uploaded image" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/retry");
+    expect(screen.getByTestId("image-alt")).toHaveValue("Uploaded image");
+    expect(screen.getByRole("presentation")).toHaveAttribute("src", "/api/assets/retry");
+    expect(screen.getByTestId("image-upload")).toBeEnabled();
+    expect(screen.getByTestId("image-submit")).toBeEnabled();
+    fireEvent.submit(imageForm());
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledExactlyOnceWith("/api/assets/retry", "Uploaded image"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("discards a wrapped failure on close and reopen", async () => {
+    const pending = deferred<UploadResult>();
+    const onUpload = vi.fn(() => pending.promise);
+    const onSubmit = vi.fn();
+    await renderStrictRoot(<Harness onUpload={onUpload} onSubmit={onSubmit} />);
+    choose(new File(["image"], "photo.png", { type: "image/png" }));
+    await act(async () => pending.reject(new ApiError(400, failures[0].message)));
+    const error = expectError(failures[0].message);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Open image dialog" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(error).not.toBeInTheDocument();
+    expect(screen.getByTestId("image-url")).toHaveValue("");
+    expect(screen.getByTestId("image-alt")).toHaveValue("");
+    expect(screen.getByTestId("image-upload")).toBeEnabled();
+    expect(onUpload).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("discards a wrapped failure when document callbacks change and only calls the current upload", async () => {
+    const pending = deferred<UploadResult>();
+    const oldUpload = vi.fn(() => pending.promise);
+    const oldSubmit = vi.fn();
+    const current = deferred<UploadResult>();
+    const currentUpload = vi.fn(() => current.promise);
+    const currentSubmit = vi.fn();
+    const view = await renderStrictRoot(<Harness onUpload={oldUpload} onSubmit={oldSubmit} />);
+    choose(new File(["old"], "old.png", { type: "image/png" }));
+    await act(async () => pending.reject(new ApiError(400, failures[0].message)));
+    expectError(failures[0].message);
+    await view.render(<Harness onUpload={currentUpload} onSubmit={currentSubmit} />);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("image-url")).toHaveValue("");
+    const file = new File(["current"], "current.png", { type: "image/png" });
+    choose(file);
+    expect(currentUpload).toHaveBeenCalledExactlyOnceWith(file);
+    await act(async () => current.resolve({ url: "/api/assets/current" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/current");
+    expect(oldUpload).toHaveBeenCalledOnce();
+    expect(oldSubmit).not.toHaveBeenCalled();
+    expect(currentSubmit).not.toHaveBeenCalled();
+  });
+
+  it("does no request, focus, mutation or scheduling work during settled passive inspection", async () => {
+    const pending = deferred<UploadResult>();
+    const onUpload = vi.fn(() => pending.promise);
+    const onSubmit = vi.fn();
+    await renderStrictRoot(<Harness onUpload={onUpload} onSubmit={onSubmit} />);
+    choose(new File(["image"], "photo.png", { type: "image/png" }));
+    await act(async () => pending.reject(new ApiError(400, failures[0].message)));
+    await act(async () => {});
+    const active = document.activeElement;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const timeout = vi.spyOn(window, "setTimeout");
+    const interval = vi.spyOn(window, "setInterval");
+    const frame = vi.spyOn(window, "requestAnimationFrame");
+    const microtask = vi.spyOn(window, "queueMicrotask");
+    const observer = new MutationObserver(() => {});
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    try {
+      expectError(failures[0].message);
+      expectError(failures[0].message);
+      expect(document.activeElement).toBe(active);
+      expect(observer.takeRecords()).toHaveLength(0);
+      for (const effect of [focus, fetch, timeout, interval, frame, microtask, onSubmit]) {
+        expect(effect).not.toHaveBeenCalled();
+      }
+      expect(onUpload).toHaveBeenCalledOnce();
+    } finally {
+      observer.disconnect();
+    }
+  });
+
+  it("emits anywhere overflow wrapping for both error surfaces from installed Tailwind", async () => {
+    const { build } = await compile("@tailwind utilities;");
+    const css = build(["wrap-anywhere"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).not.toMatch(/word-break:|text-overflow:|overflow:\s*(hidden|auto|scroll)/);
+  });
 });
 
 describe("ImageDialog upload lifecycle", () => {
