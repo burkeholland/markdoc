@@ -1056,6 +1056,279 @@ describe("CommentsPanel", () => {
     vi.unstubAllGlobals();
   });
 
+  describe("native author titles", () => {
+    const names = [
+      `Human ${"long display name ".repeat(14)}<b title="quoted">"A" & 'one'</b>`,
+      `Agent ${"another display name ".repeat(12)}<img src="literal">"B" & 'two'`,
+    ];
+    const authorClass = "truncate text-[13px] font-semibold text-ink";
+    const authorSpans = (container: HTMLElement) =>
+      Array.from(container.querySelectorAll<HTMLSpanElement>("span.truncate.text-ink"));
+
+    function expectAuthor(span: HTMLSpanElement, name: string) {
+      expect(span.tagName).toBe("SPAN");
+      expect(span.textContent).toBe(name);
+      expect(span.getAttribute("title")).toBe(name);
+      expect(span.className).toBe(authorClass);
+      expect(span.getAttributeNames().sort()).toEqual(["class", "title"]);
+      expect(span.children).toHaveLength(0);
+      expect(span.childNodes).toHaveLength(name ? 1 : 0);
+      expect(span.tabIndex).toBe(-1);
+    }
+
+    function namedSession(docId: string, reverse = false) {
+      const fixture = reviewSession(docId);
+      const human = makeCollabUser("alice", names[0]);
+      const agent = makeCollabUser("agent:alice:Reviewer", names[1]);
+      const author = reverse ? agent : human;
+      const replier = reverse ? human : agent;
+      fixture.session.ytext.insert(0, "Alpha beta gamma.");
+      const threadId = fixture.session.comments.add({ from: 0, to: 5, body: "Comment body.", author });
+      const replyId = fixture.session.comments.reply(threadId, "Reply body.", replier)!;
+      const suggestionId = fixture.session.suggestions.propose({ from: 11, to: 16, insert: "GAMMA" }, author);
+      return { ...fixture, author, replier, threadId, replyId, suggestionId };
+    }
+
+    it.each([false, true])("preserves human/agent presentation and passive hover across all three sites (reversed: %s)", async (reverse) => {
+      const fixture = namedSession(`author-hover-${reverse}`, reverse);
+      session = fixture.session;
+      const onReveal = vi.fn();
+      const onClose = vi.fn();
+      const onToast = vi.fn();
+      const view = render(<CommentsPanel session={session} onClose={onClose} onReveal={onReveal} onToast={onToast} />);
+      await act(async () => {});
+      for (const name of names) expect(name.length).toBeGreaterThanOrEqual(200);
+
+      function expectAvatar(span: HTMLSpanElement, name: string, agent: boolean, size: number) {
+        const avatar = span.parentElement!.parentElement!.previousElementSibling!;
+        expect(avatar).toHaveAttribute("title", agent ? `${name} (agent)` : name);
+        expect(avatar).toHaveStyle({ width: `${size}px`, height: `${size}px` });
+        expect(avatar.querySelector("svg") !== null).toBe(agent);
+        expect(avatar.classList.contains("avatar")).toBe(!agent);
+        expect(span.nextElementSibling).toHaveAttribute("data-testid", "comment-timestamp");
+        expect(span.nextElementSibling).toHaveClass("shrink-0 text-xs text-ink-4", { exact: true });
+        expect(span.nextElementSibling).toHaveTextContent("just now");
+      }
+
+      function expectPassiveHover(spans: HTMLSpanElement[]) {
+        const selection = window.getSelection()!;
+        const range = document.createRange();
+        range.selectNodeContents(spans[0]);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        const selected = [selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset];
+        const activeElement = document.activeElement;
+        const markup = view.container.innerHTML;
+        const controls = Array.from(view.container.querySelectorAll("button, input, textarea, a, [role], [tabindex]"));
+        const network = [api.documents.collaborators, api.documents.reviews, api.documents.comment, api.documents.createRequest, api.tokens.list];
+        const networkCounts = network.map((request) => vi.mocked(request).mock.calls.length);
+        const update = vi.fn();
+        const selectionChange = vi.fn();
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const fetch = vi.spyOn(globalThis, "fetch");
+        const activeComment = vi.spyOn(fixture.session, "setActiveComment");
+        const activeSuggestion = vi.spyOn(fixture.session, "setActiveSuggestion");
+        const observer = new MutationObserver(() => {});
+        observer.observe(view.container, { subtree: true, childList: true, attributes: true, characterData: true });
+        fixture.session.ydoc.on("update", update);
+        document.addEventListener("selectionchange", selectionChange);
+        try {
+          // Keep the hover-only measurement synchronous, after React's async setup.
+          for (const span of spans) {
+            fireEvent.pointerOver(span);
+            fireEvent.mouseOver(span);
+            fireEvent.mouseMove(span);
+            fireEvent.mouseOut(span);
+            fireEvent.pointerOut(span);
+          }
+          expect(observer.takeRecords()).toHaveLength(0);
+          expect(view.container.innerHTML).toBe(markup);
+          expect(Array.from(view.container.querySelectorAll("button, input, textarea, a, [role], [tabindex]"))).toEqual(controls);
+          expect(screen.queryByRole("tooltip")).toBeNull();
+          expect(update).not.toHaveBeenCalled();
+          expect(focus).not.toHaveBeenCalled();
+          expect(fetch).not.toHaveBeenCalled();
+          expect(activeComment).not.toHaveBeenCalled();
+          expect(activeSuggestion).not.toHaveBeenCalled();
+          expect(onReveal).not.toHaveBeenCalled();
+          expect(onClose).not.toHaveBeenCalled();
+          expect(onToast).not.toHaveBeenCalled();
+          expect(network.map((request) => vi.mocked(request).mock.calls.length)).toEqual(networkCounts);
+          expect(document.activeElement).toBe(activeElement);
+          expect([selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset]).toEqual(selected);
+          expect(selectionChange).not.toHaveBeenCalled();
+        } finally {
+          observer.disconnect();
+          fixture.session.ydoc.off("update", update);
+          document.removeEventListener("selectionchange", selectionChange);
+          focus.mockRestore();
+          fetch.mockRestore();
+          activeComment.mockRestore();
+          activeSuggestion.mockRestore();
+          selection.removeAllRanges();
+        }
+      }
+
+      const commentAuthors = authorSpans(view.container);
+      expect(commentAuthors).toHaveLength(2);
+      expectAuthor(commentAuthors[0], fixture.author.name);
+      expectAuthor(commentAuthors[1], fixture.replier.name);
+      expectAvatar(commentAuthors[0], fixture.author.name, reverse, 28);
+      expectAvatar(commentAuthors[1], fixture.replier.name, !reverse, 24);
+      expect(screen.getByTestId("comment-thread")).toHaveAttribute("role", "article");
+      expect(screen.getByTestId("comment-thread")).toHaveAttribute("tabindex", "0");
+      expect(screen.getByTestId("comment-thread")).toHaveAttribute("aria-label", `Comment by ${fixture.author.name}`);
+      expect(screen.getByTestId("comment-quote")).toHaveAttribute("title", "Alpha");
+      expect(screen.getByText("Comment body.")).toBeVisible();
+      expect(screen.getByText("Reply body.")).toBeVisible();
+      expect(screen.queryByTestId("comment-edited")).toBeNull();
+      expect(screen.getByRole("button", { name: "Reply" })).toBeEnabled();
+      expectPassiveHover(commentAuthors);
+
+      fireEvent.click(screen.getByTestId("comments-tab-suggestions"));
+      await act(async () => {});
+      const reviewAuthors = authorSpans(view.container);
+      expect(reviewAuthors).toHaveLength(1);
+      expectAuthor(reviewAuthors[0], fixture.author.name);
+      expectAvatar(reviewAuthors[0], fixture.author.name, reverse, 28);
+      expect(screen.getByTestId("suggestion-before").textContent).toBe("gamma");
+      expect(screen.getByTestId("suggestion-after").textContent).toBe("GAMMA");
+      expect(screen.getByTestId("suggestion-accept")).toBeEnabled();
+      expect(screen.getByTestId("suggestion-reject")).toBeEnabled();
+      expectPassiveHover(reviewAuthors);
+
+      const decide = vi.spyOn(session, "reviewSuggestion");
+      await act(async () => fireEvent.click(screen.getByTestId("suggestion-reject")));
+      expect(decide).toHaveBeenCalledExactlyOnceWith("reject", fixture.suggestionId);
+      expect(screen.queryByTestId("suggestion-card")).toBeNull();
+      expect(authorSpans(view.container)).toHaveLength(0);
+      expect(session.ytext.toString()).toBe("Alpha beta gamma.");
+    });
+
+    it("keeps exact titles beside edited, request and resolved presentation", async () => {
+      const fixture = namedSession("author-states");
+      session = fixture.session;
+      const request: AgentRequestMirror = {
+        id: "author-request", status: "open", mode: "suggest", instruction: "Review this",
+        claimedBy: null, result: null, userId: "alice", threadId: fixture.threadId, updatedAt: Date.now(),
+      };
+      session.meta.set("agentRequests", { [request.id]: request });
+      const view = render(suggestionPanel(session));
+      await act(async () => {});
+      const timestampMarkup = screen.getAllByTestId("comment-timestamp").map((element) => element.outerHTML);
+      const requestMarkup = screen.getByTestId("comment-request-chip").outerHTML;
+      await act(async () => {
+        fixture.session.comments.editBody(fixture.threadId, "Edited comment body.");
+        fixture.session.comments.editBody(fixture.threadId, "Edited reply body.", fixture.replyId);
+      });
+      expect(screen.getByText("Edited comment body.")).toBeVisible();
+      expect(screen.getByText("Edited reply body.")).toBeVisible();
+      const thread = session.comments.get(fixture.threadId)!;
+      const edited = screen.getAllByTestId("comment-edited");
+      expect(edited).toHaveLength(2);
+      for (const [index, at] of [thread.editedAt!, thread.replies[0].editedAt!].entries()) {
+        expect(edited[index]).toHaveTextContent("(edited)");
+        expect(edited[index]).toHaveAttribute("title", `Edited ${new Date(at).toLocaleString()}`);
+      }
+      await act(async () => fixture.session.comments.setResolved(fixture.threadId, true, fixture.user));
+      fireEvent.click(screen.getByTestId("comments-tab-resolved"));
+      const spans = authorSpans(view.container);
+      expect(spans).toHaveLength(2);
+      expectAuthor(spans[0], fixture.author.name);
+      expectAuthor(spans[1], fixture.replier.name);
+      expect(screen.getAllByTestId("comment-edited")).toHaveLength(2);
+      expect(screen.getByTestId("comment-resolved-state")).toHaveTextContent("Resolved");
+      expect(screen.getByTestId("comment-thread")).toHaveClass("bg-surface/80");
+      expect(screen.getByRole("button", { name: "Re-open" })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: "Reply" })).toBeNull();
+      expect(screen.getAllByTestId("comment-timestamp").map((element) => element.outerHTML)).toEqual(timestampMarkup);
+      expect(screen.getByTestId("comment-request-chip").outerHTML).toBe(requestMarkup);
+    });
+
+    it.each(["open", "suggestions"] as const)("shows only current titles after model changes, same-ID replacements, empty names, document changes and removal in %s", async (tab) => {
+      const fixture = namedSession(`author-updates-${tab}`);
+      session = fixture.session;
+      const panel = (current: CollabSession) => (
+        <CommentsPanel session={current} onClose={() => {}} onReveal={() => {}} focusTab={{ tab, nonce: 1 }} />
+      );
+      const view = render(panel(session));
+      await act(async () => {});
+      const expectedNames = tab === "open" ? [names[0], names[1]] : [names[0]];
+      const expectNames = (values: string[]) => {
+        const spans = authorSpans(view.container);
+        expect(spans).toHaveLength(values.length);
+        for (const [index, value] of values.entries()) expectAuthor(spans[index], value);
+      };
+      expectNames(expectedNames);
+      const stored = session.comments.ymap.get(fixture.threadId)!;
+      const replies = stored.get("replies") as Y.Array<Record<string, unknown>>;
+      await act(async () => {
+        fixture.session.ydoc.transact(() => {
+          stored.set("authorName", names[1]);
+          const reply = replies.get(0);
+          replies.delete(0, 1);
+          replies.insert(0, [{ ...reply, authorName: names[0] }]);
+          for (const [id, suggestion] of fixture.session.suggestions.ymap) {
+            fixture.session.suggestions.ymap.set(id, { ...suggestion, authorName: names[1] });
+          }
+        });
+      });
+      expectNames(tab === "open" ? [names[1], names[0]] : [names[1]]);
+      expect(session.comments.get(fixture.threadId)!.replies[0].id).toBe(fixture.replyId);
+      expect(session.suggestions.groups()[0].id).toBe(fixture.suggestionId);
+
+      await act(async () => {
+        fixture.session.ydoc.transact(() => {
+          const replacement = stored.clone();
+          replacement.set("authorName", "");
+          fixture.session.comments.ymap.set(fixture.threadId, replacement);
+          const currentReplies = replacement.get("replies") as Y.Array<Record<string, unknown>>;
+          const reply = currentReplies.get(0);
+          currentReplies.delete(0, 1);
+          currentReplies.insert(0, [{ ...reply, authorName: "" }]);
+          for (const [id, suggestion] of fixture.session.suggestions.ymap) {
+            fixture.session.suggestions.ymap.set(id, { ...suggestion, authorName: "" });
+          }
+        });
+      });
+      expectNames(tab === "open" ? ["", ""] : [""]);
+
+      const replacement = reviewSession(`author-next-document-${tab}`).session;
+      auxiliarySessions.push(replacement);
+      Y.applyUpdate(replacement.ydoc, Y.encodeStateAsUpdate(session.ydoc));
+      const currentThread = replacement.comments.ymap.get(fixture.threadId)!;
+      replacement.ydoc.transact(() => {
+        currentThread.set("authorName", names[0]);
+        const currentReplies = currentThread.get("replies") as Y.Array<Record<string, unknown>>;
+        const reply = currentReplies.get(0);
+        currentReplies.delete(0, 1);
+        currentReplies.insert(0, [{ ...reply, authorName: names[1] }]);
+        for (const [id, suggestion] of replacement.suggestions.ymap) {
+          replacement.suggestions.ymap.set(id, { ...suggestion, authorName: names[0] });
+        }
+      });
+      view.rerender(panel(replacement));
+      await act(async () => {});
+      expectNames(expectedNames);
+      await act(async () => {
+        fixture.session.comments.ymap.get(fixture.threadId)!.set("authorName", "Retired author");
+        for (const [id, suggestion] of fixture.session.suggestions.ymap) {
+          fixture.session.suggestions.ymap.set(id, { ...suggestion, authorName: "Retired reviewer" });
+        }
+      });
+      expectNames(expectedNames);
+      expect(view.container.querySelector('[title^="Retired"]')).toBeNull();
+      await act(async () => replacement.comments.deleteReply(fixture.threadId, fixture.replyId));
+      expectNames([names[0]]);
+      await act(async () => {
+        replacement.comments.remove(fixture.threadId);
+        replacement.suggestions.ymap.clear();
+      });
+      expectNames([]);
+      expect(view.container.querySelector('[title=""]')).toBeNull();
+    });
+  });
+
   it("uses the canonical session undo action and restores pending reply controls", async () => {
     const user = makeCollabUser("alice", "Alice");
     session = new CollabSession({

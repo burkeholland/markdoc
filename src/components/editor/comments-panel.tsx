@@ -12159,7 +12159,7 @@ const ThreadCard = memo(function ThreadCard({
         <AuthorAvatar id={thread.authorId} name={thread.authorName} src={thread.authorAvatar} size={28} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-            <span className="truncate text-[13px] font-semibold text-ink">{thread.authorName}</span>
+            <span className="truncate text-[13px] font-semibold text-ink" title={thread.authorName}>{thread.authorName}</span>
             <span className="shrink-0 text-xs text-ink-4" data-testid="comment-timestamp">
               {relativeTime(thread.createdAt)}
             </span>
@@ -12327,7 +12327,7 @@ const ThreadCard = memo(function ThreadCard({
                   <AuthorAvatar id={r.authorId} name={r.authorName} src={r.authorAvatar} size={24} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline gap-2">
-                      <span className="truncate text-[13px] font-semibold text-ink">{r.authorName}</span>
+                      <span className="truncate text-[13px] font-semibold text-ink" title={r.authorName}>{r.authorName}</span>
                       <span className="shrink-0 text-xs text-ink-4" data-testid="comment-timestamp">
                         {relativeTime(r.createdAt)}
                       </span>
@@ -12476,7 +12476,7 @@ function SuggestionCard({ s, session, active, onReveal, onToast }: { s: Suggesti
         <AuthorAvatar id={s.authorId} name={s.authorName} src={s.authorAvatar} size={28} />
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
-            <span className="truncate text-[13px] font-semibold text-ink">{s.authorName}</span>
+            <span className="truncate text-[13px] font-semibold text-ink" title={s.authorName}>{s.authorName}</span>
             <span className="shrink-0 text-xs text-ink-4" data-testid="comment-timestamp">
               {relativeTime(s.createdAt)}
             </span>
