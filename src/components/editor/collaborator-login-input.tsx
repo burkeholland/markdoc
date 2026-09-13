@@ -1297,7 +1297,7 @@ function createInputPublication(
       const fallback = portrait?.children.item(0);
       const image = portrait?.children.item(1);
       const name =
-        candidate.name === null ? null : row?.children.item(1);
+        candidate.name ? row?.children.item(1) : null;
       const login = row?.lastElementChild;
       return (
         candidate.index === index &&
@@ -1355,10 +1355,12 @@ function createInputPublication(
         image.className ===
             "h-full w-full object-cover" &&
         image.getAttribute("referrerpolicy") === "no-referrer" &&
-        (candidate.name === null ||
+        (!candidate.name ||
           (name instanceof ownerWindow.HTMLSpanElement &&
+            name.title === candidate.name &&
             name.textContent === candidate.name)) &&
         login instanceof ownerWindow.HTMLSpanElement &&
+        login.title === `@${candidate.login}` &&
         login.textContent === `@${candidate.login}`
       );
     });
@@ -4566,11 +4568,15 @@ export function CollaboratorLoginInput({
                   />
                 </span>
                 {candidate.name && (
-                  <span className="min-w-0 truncate text-[13px] text-ink">
+                  <span
+                    className="min-w-0 truncate text-[13px] text-ink"
+                    title={candidate.name}
+                  >
                     {candidate.name}
                   </span>
                 )}
                 <span
+                  title={`@${candidate.login}`}
                   className={cn(
                     "min-w-0 truncate",
                     candidate.name
