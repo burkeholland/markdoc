@@ -13,6 +13,28 @@ import {
 import { createRoot, type Root } from "react-dom/client";
 import type * as Y from "yjs";
 
+const ownerRealmRead = vi.hoisted(() => {
+  const descriptor = Object.getOwnPropertyDescriptor(Document.prototype, "activeElement");
+  const read = descriptor?.get;
+  if (!descriptor || !read) throw new Error("The owner realm publishes no activeElement getter");
+  const apply = Reflect.apply;
+  const boundary: { enter: (() => (() => void) | undefined) | null } = { enter: null };
+  // Install before keyboard trust captures the getter. Its native browser implementation cannot
+  // call the page's Boolean binding, but jsdom's JavaScript implementation does.
+  Object.defineProperty(Document.prototype, "activeElement", {
+    ...descriptor,
+    get(this: Document) {
+      const leave = boundary.enter?.();
+      try {
+        return apply(read, this, []) as Element | null;
+      } finally {
+        leave?.();
+      }
+    },
+  });
+  return boundary;
+});
+
 // A CollabSession normally opens a WebSocket through Hocuspocus; stand in a provider that only
 // supplies the awareness instance so the find model can drive the bar offline (as session-find.test.ts).
 vi.mock("@hocuspocus/provider", async () => {
@@ -80,6 +102,7 @@ const session = (role: "owner" | "viewer", docId?: string) => {
 };
 
 afterEach(() => {
+  ownerRealmRead.enter = null;
   for (const root of directRoots) {
     act(() => root.unmount());
   }
@@ -3168,7 +3191,9 @@ describe("FindBar first-row action navigation", () => {
     });
   }
 
-  it("keeps the rightful pair through crossed, malformed, throwing, duplicate, and reentrant attempts", async () => {
+  it.each(["phase", "target", "key", "view", "method"] as const)(
+    "keeps the rightful pair through malformed %s capture, crossed, throwing, duplicate, and reentrant attempts",
+    async (malformedField) => {
     const s = session("owner", "actions-rejected-attempts");
     const focus = trackActionFocus();
     const setFind = vi.spyOn(s, "setFind");
@@ -3192,7 +3217,6 @@ describe("FindBar first-row action navigation", () => {
       "onKeyDownCapture",
       (current, event) => {
         const native = event.nativeEvent;
-        // A capture attempt wearing the bubbling phase: malformed, and never the rightful pair.
         const malformed = {
           nativeEvent: native,
           currentTarget: row,
@@ -3209,7 +3233,7 @@ describe("FindBar first-row action navigation", () => {
           bubbles: true,
           cancelable: true,
           defaultPrevented: false,
-          eventPhase: 3,
+          eventPhase: 1,
           isTrusted: true,
           view: null,
           preventDefault: malformedPrevent,
@@ -3217,6 +3241,15 @@ describe("FindBar first-row action navigation", () => {
           isDefaultPrevented: () => false,
           isPropagationStopped: () => false,
         } as unknown as ReactKeyboardEvent<HTMLDivElement>;
+        const malformedValues = {
+          phase: ["eventPhase", 3],
+          target: ["target", crossed],
+          key: ["key", "ArrowLeft"],
+          view: ["view", undefined],
+          method: ["preventDefault", 7],
+        } as const;
+        const [property, value] = malformedValues[malformedField];
+        Object.defineProperty(malformed, property, { configurable: true, value });
         current(malformed);
         crossedBubble(event as unknown as ReactKeyboardEvent<HTMLButtonElement>);
         current(event);
@@ -3254,7 +3287,8 @@ describe("FindBar first-row action navigation", () => {
             }
             return elementMatches.call(this, selector) as boolean;
           },
-        });
+          },
+        );
         reentrantArmed = true;
         current(event);
         current(event);
@@ -3493,13 +3527,16 @@ describe("FindBar first-row action navigation", () => {
     const retained: { preventDefault: unknown } = { preventDefault: null };
     let delivering = false;
     let drifted = false;
-    let walks = 0;
+    const walks = { preClaim: 0, postPrevention: 0 };
 
     Object.defineProperty(lastPublished, "attributes", {
       configurable: true,
       get(this: Element) {
         const event = held.event;
-        if (delivering && event && !event.nativeEvent.defaultPrevented) walks += 1;
+        if (delivering && event) {
+          if (event.nativeEvent.defaultPrevented) walks.postPrevention += 1;
+          else walks.preClaim += 1;
+        }
         if (delivering && !drifted && event && !event.nativeEvent.defaultPrevented) {
           drifted = true;
           retained.preventDefault = event.preventDefault;
@@ -3521,7 +3558,7 @@ describe("FindBar first-row action navigation", () => {
         try {
           current(event);
           expect(drifted).toBe(true);
-          expect(walks).toBe(1);
+          expect(walks).toEqual({ preClaim: 1, postPrevention: 0 });
           expect(event.nativeEvent.defaultPrevented).toBe(false);
           expect(focus.moves()).toHaveLength(0);
           // Nothing was consumed: put the exact prevention back and let the rightful bubble of the
@@ -3543,7 +3580,7 @@ describe("FindBar first-row action navigation", () => {
       const event = dispatchActionKey(source, "ArrowRight");
 
       expect(drifted).toBe(true);
-      expect(walks).toBe(3);
+      expect(walks).toEqual({ preClaim: 2, postPrevention: 1 });
       expect(event.defaultPrevented).toBe(true);
       expect(focus.moves()).toHaveLength(1);
       expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
@@ -4235,13 +4272,20 @@ describe("FindBar first-row action navigation", () => {
     let probing = false;
     let poisonCalls = 0;
     let sabotaged = false;
+    let nativeReads = 0;
+    const poisonTrace: {
+      first: { operation: string; receiver: unknown; phase: string; error: Error } | null;
+    } = { first: null };
 
     // Called only if the claim boundary looks a mutating collection method or the `size` accessor up
     // on a prototype page code owns, or coerces through the mutable global `Boolean`: such a call is
     // both counted and allowed to rewrite what the delivery may still do, so a consumed pair with no
     // effect would be impossible to miss.
-    const sabotage = () => {
+    const sabotage = (operation: string, receiver: unknown) => {
       poisonCalls += 1;
+      if (!probing && !poisonTrace.first) {
+        poisonTrace.first = { operation, receiver, phase: `pre-claim pass ${pass}`, error: new Error("First poisoned call") };
+      }
       if (probing || sabotaged) return;
       sabotaged = true;
       destination.disabled = true;
@@ -4254,7 +4298,7 @@ describe("FindBar first-row action navigation", () => {
           writable: true,
           enumerable: false,
           value: function (this: unknown, ...args: unknown[]) {
-            if (armed) sabotage();
+            if (armed) sabotage(entry.property, this);
             return Reflect.apply(entry.value, this, args);
           },
         });
@@ -4263,12 +4307,12 @@ describe("FindBar first-row action navigation", () => {
         configurable: true,
         enumerable: false,
         get: function (this: Set<unknown>) {
-          if (armed) sabotage();
+          if (armed) sabotage("Set.size", this);
           return Reflect.apply(readSize, this, []) as number;
         },
       });
       const poisonedBoolean = function (value?: unknown) {
-        if (armed) sabotage();
+        if (armed) sabotage("Boolean", globalThis);
         return exactBoolean(value);
       };
       poisonedBoolean.prototype = exactBoolean.prototype;
@@ -4285,6 +4329,15 @@ describe("FindBar first-row action navigation", () => {
       }
       Object.defineProperty(Set.prototype, "size", exactSize);
       Object.defineProperty(globalThis, "Boolean", exactBooleanBinding);
+    };
+
+    ownerRealmRead.enter = () => {
+      if (!armed) return;
+      const poisonedBinding = Object.getOwnPropertyDescriptor(globalThis, "Boolean");
+      if (!poisonedBinding) throw new Error("The Boolean poison binding is missing");
+      nativeReads += 1;
+      Object.defineProperty(globalThis, "Boolean", exactBooleanBinding);
+      return () => Object.defineProperty(globalThis, "Boolean", poisonedBinding);
     };
 
     Object.defineProperty(lastPublished, "attributes", {
@@ -4380,7 +4433,11 @@ describe("FindBar first-row action navigation", () => {
       const event = dispatchActionKey(source, "ArrowRight");
 
       expect(installed).toBe(true);
-      expect(poisonCalls).toBe(0);
+      expect(nativeReads).toBe(1);
+      const trace = poisonTrace.first;
+      expect(poisonCalls, trace
+        ? `${trace.operation} on ${Object.prototype.toString.call(trace.receiver)} in ${trace.phase}\n${trace.error.stack}`
+        : undefined).toBe(0);
       expect(sabotaged).toBe(false);
       expect(destination.disabled).toBe(false);
       expect(s.find).toBe(publishedFind);
@@ -4390,6 +4447,7 @@ describe("FindBar first-row action navigation", () => {
       expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
       expect(document.activeElement).toBe(destination);
     } finally {
+      ownerRealmRead.enter = null;
       restore();
       unpoison();
       Reflect.deleteProperty(lastPublished, "attributes");

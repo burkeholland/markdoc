@@ -2193,7 +2193,7 @@ function findActionViewIsOwned(
   );
 }
 
-function captureFindActionReactKey(
+function captureFindActionReactIdentity(
   event: KeyboardEvent<HTMLElement>,
   nav: FindActionRuntimeView,
   facts: FindNativeKeyboardFacts,
@@ -2218,8 +2218,6 @@ function captureFindActionReactKey(
         "isPropagationStopped",
         isPropagationStopped,
       ) ||
-      intrinsics.read(isDefaultPrevented as AnyFunction, event) !== false ||
-      intrinsics.read(isPropagationStopped as AnyFunction, event) !== false ||
       (event as unknown) === nativeEvent ||
       (event.nativeEvent as unknown) !== nativeEvent ||
       event.type !== facts.type ||
@@ -2257,6 +2255,22 @@ function captureFindActionReactKey(
   } catch {
     return null;
   }
+}
+
+function captureFindActionReactKey(
+  event: KeyboardEvent<HTMLElement>,
+  nav: FindActionRuntimeView,
+  facts: FindNativeKeyboardFacts,
+  nativeEvent: object,
+  currentTarget: HTMLElement,
+  proof: FindActionWindowProof,
+): FindActionReactSnapshot | null {
+  const snapshot = captureFindActionReactIdentity(
+    event, nav, facts, nativeEvent, currentTarget, proof,
+  );
+  return snapshot && readFindActionReactPredicates(snapshot, nav, false)
+    ? snapshot
+    : null;
 }
 
 function findActionReactRemainsExact(
@@ -3834,18 +3848,25 @@ function createFindBarPublication({
         return;
       }
       const facts = nav.facts(nativeEvent);
-      if (!facts || facts.type !== "keydown" || !isFindActionKey(facts.key)) return;
+      if (
+        !facts ||
+        facts.type !== "keydown" ||
+        !isFindActionKey(facts.key) ||
+        facts.eventPhase !== FIND_ACTION_CAPTURING_PHASE
+      ) return;
       const proof = nav.listener.proofFor(nativeEvent, publication);
-      if (proof) {
+      const capture = proof
+        ? captureFindActionReactIdentity(event, nav, facts, nativeEvent, row, proof)
+        : null;
+      // Only the exact row delivery may release unused proof; a malformed attempt leaves it intact.
+      if (proof && capture) {
         unclaimedProof = proof;
         unclaimedPublication = publication;
         unclaimedListener = nav.listener;
       }
-      const resolved = proof
+      const readings = capture ? readFindActionReactPredicates(capture, nav, false) : null;
+      const resolved = readings
         ? resolveFirstRowMovement(publication, facts.target, facts.key)
-        : null;
-      const capture = proof
-        ? captureFindActionReactKey(event, nav, facts, nativeEvent, row, proof)
         : null;
       const terminal = facts.path[facts.path.length - 1];
       const nativeCurrentTarget = facts.currentTarget;
@@ -3853,6 +3874,7 @@ function createFindBarPublication({
         !proof ||
         !resolved ||
         !capture ||
+        !readings ||
         facts.eventPhase !== FIND_ACTION_CAPTURING_PHASE ||
         !facts.bubbles ||
         !facts.cancelable ||
