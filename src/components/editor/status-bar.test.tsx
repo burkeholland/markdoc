@@ -1058,6 +1058,221 @@ describe("status bar top-level keyboard navigation", () => {
     }
   });
 
+  it("keeps the rightful pair through wrong-target, reentrant, and duplicate capture attempts", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    let rootCapture: ((event: ReactKeyboardEvent<HTMLElement>) => void) | null =
+      null;
+    let rootBubble: ((event: ReactKeyboardEvent<HTMLElement>) => void) | null =
+      null;
+    let captureEvent: ReactKeyboardEvent<HTMLElement> | null = null;
+    let bubbleEvent: ReactKeyboardEvent<HTMLElement> | null = null;
+    let reentered = false;
+    let duplicateAttempts = 0;
+    try {
+      await renderDirect(
+        <StrictMode>
+          <NavigationEventProbe
+            onCapture={(event) => {
+              captureEvent = event;
+              const capture = rootCapture;
+              if (!capture)
+                throw new Error("Status bar capture handler was unavailable");
+              capture(event);
+              const nativeEventDescriptor = Object.getOwnPropertyDescriptor(
+                event,
+                "nativeEvent",
+              );
+              if (!nativeEventDescriptor)
+                throw new Error("React native event slot was unavailable");
+              const nativeEvent = event.nativeEvent;
+              Object.defineProperty(event, "nativeEvent", {
+                configurable: true,
+                enumerable: nativeEventDescriptor.enumerable,
+                get() {
+                  Object.defineProperty(
+                    event,
+                    "nativeEvent",
+                    nativeEventDescriptor,
+                  );
+                  reentered = true;
+                  capture(event);
+                  return nativeEvent;
+                },
+              });
+              capture(event);
+            }}
+            onBubble={(event) => {
+              bubbleEvent = event;
+            }}
+          >
+            <StatusBar {...statusProps(current)} />
+          </NavigationEventProbe>
+        </StrictMode>,
+      );
+      const root = screen.getByTestId("status-bar");
+      rootCapture = reactHandler(root, "onKeyDownCapture");
+      rootBubble = reactHandler(root, "onKeyDown");
+      const source = statusControls()[1]!;
+      const destination = statusControls()[2]!;
+      source.addEventListener("keydown", () => {
+        const capture = rootCapture;
+        const retainedEvent = captureEvent;
+        if (!capture || !retainedEvent)
+          throw new Error("React capture attempt was unavailable");
+        capture(retainedEvent);
+        capture(retainedEvent);
+        duplicateAttempts += 2;
+      }, { capture: true, once: true });
+      source.focus();
+      focus.mockClear();
+      const event = menuKey(source, "ArrowRight");
+
+      act(() => {
+        source.dispatchEvent(event);
+      });
+
+      expect(reentered).toBe(true);
+      expect(duplicateAttempts).toBe(2);
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(
+        preventDefault.mock.contexts.filter((context) => context === event),
+      ).toHaveLength(1);
+      const capture = captureEvent;
+      const bubble = bubbleEvent;
+      const captureHandler = rootCapture;
+      const bubbleHandler = rootBubble;
+      if (!capture || !bubble || !captureHandler || !bubbleHandler)
+        throw new Error("Retained navigation pair was unavailable");
+      source.focus();
+      focus.mockClear();
+      await act(async () => {
+        captureHandler(capture);
+        bubbleHandler(bubble);
+        source.dispatchEvent(event);
+        await Promise.resolve();
+      });
+      expect(focus).not.toHaveBeenCalled();
+      expect(
+        preventDefault.mock.contexts.filter((context) => context === event),
+      ).toHaveLength(1);
+
+      const cleanSource = statusControls()[1]!;
+      const cleanDestination = statusControls()[2]!;
+      cleanSource.focus();
+      focus.mockClear();
+      const clean = menuKey(cleanSource, "ArrowRight");
+      act(() => {
+        cleanSource.dispatchEvent(clean);
+      });
+      expect(clean.defaultPrevented).toBe(true);
+      expect(cleanDestination).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    } finally {
+      focus.mockRestore();
+      preventDefault.mockRestore();
+    }
+  });
+
+  it.each(["throwing native-event read", "prevent-method drift"] as const)(
+    "keeps the rightful pair pending after a %s capture attempt",
+    async (failure) => {
+      useExactWindowListenerRealm();
+      const current = callbacks();
+      let rootCapture:
+        | ((event: ReactKeyboardEvent<HTMLElement>) => void)
+        | null = null;
+      let attempted = false;
+      await renderDirect(
+        <StrictMode>
+          <NavigationEventProbe onCapture={(event) => {
+            const capture = rootCapture;
+            if (!capture)
+              throw new Error("Status bar capture handler was unavailable");
+            capture(event);
+            if (failure === "throwing native-event read") {
+              const descriptor = Object.getOwnPropertyDescriptor(
+                event,
+                "nativeEvent",
+              );
+              if (!descriptor)
+                throw new Error("React native event slot was unavailable");
+              const nativeEvent = event.nativeEvent;
+              let reads = 0;
+              let threw = false;
+              Object.defineProperty(event, "nativeEvent", {
+                configurable: true,
+                enumerable: descriptor.enumerable,
+                get() {
+                  reads += 1;
+                  if (reads === 3) {
+                    Object.defineProperty(event, "nativeEvent", descriptor);
+                    threw = true;
+                    throw new Error("capture read failed");
+                  }
+                  return nativeEvent;
+                },
+              });
+              try {
+                expect(() => capture(event)).not.toThrow();
+              } finally {
+                Object.defineProperty(event, "nativeEvent", descriptor);
+              }
+              expect(threw).toBe(true);
+            } else {
+              const descriptor = Object.getOwnPropertyDescriptor(
+                event,
+                "preventDefault",
+              );
+              const preventDefault = event.preventDefault;
+              if (typeof preventDefault !== "function")
+                throw new Error("React preventDefault method was unavailable");
+              Object.defineProperty(event, "preventDefault", {
+                configurable: true,
+                value: vi.fn(),
+              });
+              try {
+                capture(event);
+              } finally {
+                if (descriptor) {
+                  Object.defineProperty(event, "preventDefault", descriptor);
+                } else {
+                  Reflect.deleteProperty(event, "preventDefault");
+                }
+              }
+              expect(event.preventDefault).toBe(preventDefault);
+            }
+            attempted = true;
+            expect(event.defaultPrevented).toBe(false);
+            expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+          }}>
+            <StatusBar {...statusProps(current)} />
+          </NavigationEventProbe>
+        </StrictMode>,
+      );
+      const root = screen.getByTestId("status-bar");
+      rootCapture = reactHandler(root, "onKeyDownCapture");
+      const source = statusControls()[1]!;
+      const destination = statusControls()[2]!;
+      source.focus();
+      const event = menuKey(source, "ArrowRight");
+
+      act(() => {
+        source.dispatchEvent(event);
+      });
+
+      expect(attempted).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    },
+  );
+
   it("keeps a rightful bubble pending after crossed, wrong-source, and drifted attempts", async () => {
     useExactWindowListenerRealm();
     const current = callbacks();
@@ -1644,6 +1859,19 @@ describe("status bar top-level keyboard navigation", () => {
       expect(afterCleanup.defaultPrevented).toBe(false);
       expect(focus).not.toHaveBeenCalled();
       expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+
+      await renderStatus(statusProps(current));
+      const cleanSource = statusControls()[1]!;
+      const cleanDestination = statusControls()[2]!;
+      cleanSource.focus();
+      focus.mockClear();
+      const clean = menuKey(cleanSource, "ArrowRight");
+      act(() => {
+        cleanSource.dispatchEvent(clean);
+      });
+      expect(clean.defaultPrevented).toBe(true);
+      expect(cleanDestination).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
     } finally {
       focus.mockRestore();
     }

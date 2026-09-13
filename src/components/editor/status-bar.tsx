@@ -4115,20 +4115,15 @@ function stageStatusBarNavigation(
         false,
       )
       || !validateGeneration(generation)
-    ) {
-      if (phase === "capture")
-        consumeStatusBarNavigationDelivery(generation, delivery);
+    )
       return;
-    }
     if (phase === "capture") {
       if (
         delivery.capture
         || delivery.bubble
         || delivery.delegationTarget
-      ) {
-        consumeStatusBarNavigationDelivery(generation, delivery);
+      )
         return;
-      }
       delivery.capture = snapshot;
       delivery.delegationTarget = delegationTarget;
       return;
@@ -4147,8 +4142,6 @@ function stageStatusBarNavigation(
     if (generation.actions.has("top-level-navigation")) {
       retireClaimedStatusBarNavigation(generation);
       consumed = true;
-    } else if (phase === "capture") {
-      consumeStatusBarNavigationDelivery(generation, delivery);
     }
   } finally {
     if (ownsBubbleAttempt) {
