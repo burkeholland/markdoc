@@ -1557,7 +1557,11 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     const pendingClose = vi.fn();
     const onSubmit = vi.fn();
     const upload = deferred<UploadResult>();
-    const onUpload = vi.fn(() => upload.promise);
+    const retry = deferred<UploadResult>();
+    const onUpload = vi
+      .fn()
+      .mockReturnValueOnce(upload.promise)
+      .mockReturnValueOnce(retry.promise);
     const never = new Promise<never>(() => {});
     const pendingRender = vi.fn();
     const pendingCommit = vi.fn();
@@ -1603,6 +1607,11 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     await renderStrictRoot(<ConcurrentHarness />);
     choose(new File(["current"], "current.png", { type: "image/png" }));
     expect(onUpload).toHaveBeenCalledOnce();
+    const committedInput = screen.getByTestId(
+      "image-file",
+    ) as HTMLInputElement;
+    expect(committedInput).toBeDisabled();
+    setInputValue(committedInput, "current-selection");
     const committedCancel = screen.getByRole("button", {
       name: "Cancel",
     }) as HTMLButtonElement;
@@ -1613,26 +1622,49 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       committedCancel,
     );
     await act(async () => {
-      upload.resolve({ url: "/api/assets/concurrent", alt: "Concurrent Alt" });
-      await upload.promise;
+      upload.reject(new Error("Concurrent upload failed"));
+      await upload.promise.catch(() => undefined);
+      expect(committedInput).toBeDisabled();
+      expect(committedInput).toHaveValue("");
+      expect(screen.getByRole("button", { name: "Cancel" })).toBe(
+        committedCancel,
+      );
+      fireEvent.click(committedCancel);
+      expect(committedClose).toHaveBeenCalledOnce();
+      expect(committedClose).toHaveBeenCalledWith(false);
+      expect(pendingClose).not.toHaveBeenCalled();
+      expect(pendingCommit).not.toHaveBeenCalled();
     });
     await waitFor(() => {
-      expect(screen.getByTestId("image-url")).toHaveValue(
-        "/api/assets/concurrent",
+      expect(screen.getByTestId("image-upload-error")).toHaveTextContent(
+        "Concurrent upload failed",
       );
-      expect(screen.getByTestId("image-alt")).toHaveValue("Concurrent Alt");
     });
     expect(pendingRender).toHaveBeenCalled();
     expect(pendingCommit).not.toHaveBeenCalled();
-    const currentCancel = screen.getByRole("button", {
-      name: "Cancel",
-    }) as HTMLButtonElement;
-    expect(currentCancel).toBe(committedCancel);
-    expect(currentCancel).toBeEnabled();
-    fireEvent.click(currentCancel);
+    expect(screen.getByTestId("image-file")).toBe(committedInput);
+    expect(committedInput).toBeEnabled();
+    expect(committedInput).toHaveValue("");
 
+    const retryFile = new File(["retry"], "retry.png", {
+      type: "image/png",
+    });
+    await chooseFromCommittedSuccessor(retryFile, committedInput);
+    expect(onUpload).toHaveBeenCalledTimes(2);
+    expect(onUpload).toHaveBeenLastCalledWith(retryFile);
+    await act(async () => {
+      retry.resolve({ url: "/api/assets/retry", alt: "Retry Alt" });
+      await retry.promise;
+    });
+    await act(async () => {
+      upload.resolve({ url: "/api/assets/stale", alt: "Stale Alt" });
+      await Promise.resolve();
+    });
+    expect(onUpload).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/retry");
+    expect(screen.getByTestId("image-alt")).toHaveValue("Retry Alt");
+    expect(screen.queryByRole("alert")).toBeNull();
     expect(committedClose).toHaveBeenCalledOnce();
-    expect(committedClose).toHaveBeenCalledWith(false);
     expect(pendingClose).not.toHaveBeenCalled();
     expect(pendingCommit).not.toHaveBeenCalled();
   });
