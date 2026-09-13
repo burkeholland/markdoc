@@ -3563,14 +3563,14 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
         <div ref={captureContent}>
           {presentation.listError && (
             <div ref={captureListError} className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
-              <div>{presentation.listError}</div>
+              <div className="wrap-anywhere">{presentation.listError}</div>
               <button ref={captureRetry} type="button" className="btn btn-outline btn-sm mt-2 gap-1.5" onClick={retry} disabled={presentation.retrying || presentation.refreshing}>
                 {presentation.retrying && <Loader2 size={13} className="animate-spin" />}
                 {presentation.retrying ? "Retrying…" : "Retry"}
               </button>
             </div>
           )}
-          {presentation.error && <div ref={capturePageError} className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40">{presentation.error}</div>}
+          {presentation.error && <div ref={capturePageError} className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger dark:bg-red-950/40 wrap-anywhere">{presentation.error}</div>}
           {presentation.contentMode === "loading" ? (
             <div className="flex justify-center py-10">
               <Spinner />
