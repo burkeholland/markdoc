@@ -7166,6 +7166,12 @@ type RequestModeReactKeyboardMethodName =
 
 type RequestModeReactKeyboardMethod = (...args: never[]) => unknown;
 
+function isRequestModeReactKeyboardMethod(
+  value: unknown,
+): value is RequestModeReactKeyboardMethod {
+  return typeof value === "function";
+}
+
 interface RequestModeNativeKeyboardFacts {
   readonly type: string;
   readonly target: EventTarget | null;
@@ -7723,7 +7729,10 @@ function captureRequestModeKeyboardAuthority(
     trusted: trusted!,
     isCurrent,
     requestModeIsCurrent,
-    applyMethod: (method, receiver) => {
+    applyMethod: (
+      method: RequestModeReactKeyboardMethod,
+      receiver: object,
+    ) => {
       if (!requestModeIsCurrent()) return Object.freeze({ called: false });
       try {
         return Object.freeze({
@@ -7734,7 +7743,9 @@ function captureRequestModeKeyboardAuthority(
         return Object.freeze({ called: false });
       }
     },
-    registerRequestMode: (listener) => {
+    registerRequestMode: (
+      listener: (this: EventTarget, event: Event) => void,
+    ) => {
       if (!requestModeIsCurrent()) return null;
       let active = true;
       try {
@@ -8197,9 +8208,9 @@ function readRequestModeReactKeyboardMethods(
     const preventDefault = event.preventDefault;
     const isDefaultPrevented = event.isDefaultPrevented;
     const isPropagationStopped = event.isPropagationStopped;
-    return typeof preventDefault === "function" &&
-      typeof isDefaultPrevented === "function" &&
-      typeof isPropagationStopped === "function"
+    return isRequestModeReactKeyboardMethod(preventDefault) &&
+      isRequestModeReactKeyboardMethod(isDefaultPrevented) &&
+      isRequestModeReactKeyboardMethod(isPropagationStopped)
       ? Object.freeze({
           preventDefault,
           isDefaultPrevented,
@@ -8643,8 +8654,13 @@ function createRequestModeRuntime(
     keyboardCaptureIsReady: () => keyboardCaptureReady,
     keyboardListenerIsCurrent: () =>
       keyboardRegistration?.isCurrent() === true,
-    keyboardStage: (event) => keyboardStages?.get(event) ?? null,
-    pairKeyboard: (event, stage, pair) => {
+    keyboardStage: (event: globalThis.KeyboardEvent) =>
+      keyboardStages?.get(event) ?? null,
+    pairKeyboard: (
+      event: globalThis.KeyboardEvent,
+      stage: RequestModeKeyboardWindowStage,
+      pair: RequestModeKeyboardPair,
+    ) => {
       const stages = keyboardStages;
       const pairs = keyboardPairs;
       if (
@@ -8659,8 +8675,12 @@ function createRequestModeRuntime(
       pairs.set(event, pair);
       return true;
     },
-    keyboardPair: (event) => keyboardPairs?.get(event) ?? null,
-    consumeKeyboardPair: (event, pair) => {
+    keyboardPair: (event: globalThis.KeyboardEvent) =>
+      keyboardPairs?.get(event) ?? null,
+    consumeKeyboardPair: (
+      event: globalThis.KeyboardEvent,
+      pair: RequestModeKeyboardPair,
+    ) => {
       const pairs = keyboardPairs;
       if (!pairs || pairs.get(event) !== pair) return false;
       return pairs.delete(event);
