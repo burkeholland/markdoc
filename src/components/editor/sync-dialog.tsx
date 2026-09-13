@@ -932,10 +932,6 @@ function syncReactKeyPairMatches(
     capture.snapshot.eventPhase === authority.capturingPhase &&
     bubble.snapshot.eventPhase === authority.bubblingPhase &&
     syncKeyboardStableFactsMatch(capture.snapshot, bubble.snapshot) &&
-    capture.cancellation.isDefaultPrevented ===
-      bubble.cancellation.isDefaultPrevented &&
-    capture.cancellation.isPropagationStopped ===
-      bubble.cancellation.isPropagationStopped &&
     syncKeyboardPathMatches(
       capture.snapshot.path,
       capture.control.element,

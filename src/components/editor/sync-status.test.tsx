@@ -1447,37 +1447,84 @@ describe("Sync dialog keyboard navigation", () => {
     expect(actions.compare).not.toHaveBeenCalled();
   });
 
-  it("authenticates distinct React capture and bubble wrappers for one native key event", () => {
+  it("authenticates distinct React wrappers with distinct prototypes and cancellation methods for one native key event", () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     mountStrictSync();
     const source = syncChoice("sync-merge");
     const destination = syncChoice("sync-keep-mine");
     const handlers = syncKeyHandlers(source);
     const wrappers: ReactKeyboardEvent<HTMLButtonElement>[] = [];
+    const prototypes: object[] = [];
+    const cancellationMethods: Array<{
+      isDefaultPrevented: () => boolean;
+      isPropagationStopped: () => boolean;
+    }> = [];
+    const authenticate = (
+      wrapper: ReactKeyboardEvent<HTMLButtonElement>,
+      handler: SyncKeyHandler,
+    ) => {
+      const prototype = Object.create(Object.getPrototypeOf(wrapper));
+      const methods = {
+        isDefaultPrevented: vi.fn(() => false),
+        isPropagationStopped: vi.fn(() => false),
+      };
+      Object.defineProperties(prototype, {
+        isDefaultPrevented: {
+          configurable: true,
+          value: methods.isDefaultPrevented,
+        },
+        isPropagationStopped: {
+          configurable: true,
+          value: methods.isPropagationStopped,
+        },
+      });
+      if (
+        !Reflect.deleteProperty(wrapper, "isDefaultPrevented") ||
+        !Reflect.deleteProperty(wrapper, "isPropagationStopped")
+      ) {
+        throw new Error(
+          "Unable to place cancellation methods on the wrapper prototype",
+        );
+      }
+      Object.setPrototypeOf(wrapper, prototype);
+      wrappers.push(wrapper);
+      prototypes.push(prototype);
+      cancellationMethods.push(methods);
+      handler(wrapper);
+    };
     source.focus();
     focus.mockClear();
     const event = syncKeyEvent(source, "ArrowRight");
 
     withSyncKeyHandlers(source, event, {
-      capture: (wrapper) => {
-        wrappers.push(wrapper);
-        handlers.capture(wrapper);
-      },
-      bubble: (wrapper) => {
-        wrappers.push(wrapper);
-        handlers.bubble(wrapper);
-      },
+      capture: (wrapper) => authenticate(wrapper, handlers.capture),
+      bubble: (wrapper) => authenticate(wrapper, handlers.bubble),
     });
 
     expect(wrappers).toHaveLength(2);
     expect(wrappers[0]).not.toBe(wrappers[1]);
+    expect(prototypes[0]).not.toBe(prototypes[1]);
+    expect(Object.getPrototypeOf(wrappers[0]!)).toBe(prototypes[0]);
+    expect(Object.getPrototypeOf(wrappers[1]!)).toBe(prototypes[1]);
     expect(wrappers[0]?.nativeEvent).toBe(event);
     expect(wrappers[1]?.nativeEvent).toBe(event);
+    expect(cancellationMethods[0]?.isDefaultPrevented).not.toBe(
+      cancellationMethods[1]?.isDefaultPrevented,
+    );
+    expect(cancellationMethods[0]?.isPropagationStopped).not.toBe(
+      cancellationMethods[1]?.isPropagationStopped,
+    );
     expect(wrappers[0]?.isDefaultPrevented).toBe(
-      wrappers[1]?.isDefaultPrevented,
+      cancellationMethods[0]?.isDefaultPrevented,
+    );
+    expect(wrappers[1]?.isDefaultPrevented).toBe(
+      cancellationMethods[1]?.isDefaultPrevented,
     );
     expect(wrappers[0]?.isPropagationStopped).toBe(
-      wrappers[1]?.isPropagationStopped,
+      cancellationMethods[0]?.isPropagationStopped,
+    );
+    expect(wrappers[1]?.isPropagationStopped).toBe(
+      cancellationMethods[1]?.isPropagationStopped,
     );
     expect(event.defaultPrevented).toBe(true);
     expect(focus).toHaveBeenCalledExactlyOnceWith({
@@ -1490,7 +1537,7 @@ describe("Sync dialog keyboard navigation", () => {
     "isDefaultPrevented",
     "isPropagationStopped",
   ] as const)(
-    "rejects %s identity drift between React phases and then recovers",
+    "rejects captured-wrapper %s identity drift between React phases and then recovers",
     (property) => {
       const preventDefault = vi.spyOn(
         Event.prototype,
@@ -1505,11 +1552,20 @@ describe("Sync dialog keyboard navigation", () => {
       focus.mockClear();
       preventDefault.mockClear();
       const rejected = syncKeyEvent(source, "ArrowRight");
+      let captureWrapper:
+        | ReactKeyboardEvent<HTMLButtonElement>
+        | null = null;
 
       withSyncKeyHandlers(source, rejected, {
-        capture: handlers.capture,
+        capture: (wrapper) => {
+          captureWrapper = wrapper;
+          handlers.capture(wrapper);
+        },
         bubble: (wrapper) => {
-          Object.defineProperty(wrapper, property, {
+          if (!captureWrapper) {
+            throw new Error("The capture wrapper was not observed");
+          }
+          Object.defineProperty(captureWrapper, property, {
             configurable: true,
             value: () => false,
           });
