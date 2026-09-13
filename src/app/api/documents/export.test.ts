@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
+import { describe, expect, it, beforeAll, beforeEach, vi } from "vitest";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -18,19 +18,33 @@ let actor: { id: string; login: string; name: string; image: null } | null = nul
 vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) }));
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 
+const { renderPdf } = vi.hoisted(() => ({
+  renderPdf: vi.fn<(html: string) => Promise<Uint8Array>>(),
+}));
+// The real Chromium renderer runs in pdf.test.ts's single-worker project; this file verifies the route contract.
+vi.mock("@/server/export/pdf", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/export/pdf")>();
+  return { ...actual, renderPdf };
+});
+
 const { getDb, schema } = await import("@/server/db");
 const { createDocument, setDocumentText } = await import("@/server/documents");
 const { putAsset } = await import("@/server/assets");
-const { closePdfBrowser } = await import("@/server/export/pdf");
+const { PdfUnavailableError } = await import("@/server/export/pdf");
 const { renderDocumentHtml } = await import("@/server/export/html");
 const { GET } = await import("./[id]/export/route");
 const { GET: assetGET } = await import("../assets/[id]/route");
 const { GET: healthGET } = await import("../health/route");
 
 const MARKDOWN = "# Export Me\n\nA paragraph with **bold**.\n\n- [ ] task\n";
+const PDF_BYTES = Uint8Array.from(Buffer.from("%PDF-1.7\nmock\n", "latin1"));
 
 describe("GET /api/documents/[id]/export", () => {
   let docId: string;
+
+  beforeEach(() => {
+    renderPdf.mockReset().mockRejectedValue(new Error("PDF renderer mock was not configured"));
+  });
 
   beforeAll(async () => {
     const db = await getDb();
@@ -38,10 +52,6 @@ describe("GET /api/documents/[id]/export", () => {
     actor = { id: user.id, login: "eve", name: "Eve", image: null };
     const doc = await createDocument({ ownerId: user.id, title: "Export Me", content: MARKDOWN });
     docId = doc.id;
-  });
-
-  afterAll(async () => {
-    await closePdfBrowser();
   });
 
   const call = (query = "") => GET(new Request(`http://localhost:3700/api/documents/${docId}/export${query}`), { params: Promise.resolve({ id: docId }) });
@@ -217,16 +227,46 @@ describe("GET /api/documents/[id]/export", () => {
   });
 
   it("returns a PDF for format=pdf", async () => {
+    renderPdf.mockResolvedValueOnce(PDF_BYTES);
+
     const res = await call("?format=pdf&download=1");
-    if (res.status === 503) {
-      console.warn("Skipping PDF assertion: Chromium could not be launched in this environment.");
-      expect(await res.json()).toEqual({ error: "PDF export is unavailable on this server" });
-      return;
-    }
+
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toBe("application/pdf");
     expect(res.headers.get("Content-Disposition")).toBe('attachment; filename="Export Me.pdf"');
     const bytes = new Uint8Array(await res.arrayBuffer());
     expect(Buffer.from(bytes.subarray(0, 5)).toString("latin1")).toBe("%PDF-");
-  }, 60_000);
+    expect(renderPdf).toHaveBeenCalledOnce();
+    expect(renderPdf).toHaveBeenCalledWith(expect.stringContaining("<title>Export Me</title>"));
+  });
+
+  it("returns the explicit unavailable response only for a Chromium launch failure", async () => {
+    const launchError = new Error("test Chromium launch failure");
+    renderPdf.mockRejectedValueOnce(new PdfUnavailableError(launchError));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await call("?format=pdf");
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "PDF export is unavailable on this server" });
+      expect(error).toHaveBeenCalledWith("PDF export unavailable:", launchError);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("keeps unexpected PDF renderer failures visible as route errors", async () => {
+    const pageError = new Error("test page.pdf failure");
+    renderPdf.mockRejectedValueOnce(pageError);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await call("?format=pdf");
+
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "Unexpected error" });
+      expect(error).toHaveBeenCalledWith(pageError);
+    } finally {
+      error.mockRestore();
+    }
+  });
 });
