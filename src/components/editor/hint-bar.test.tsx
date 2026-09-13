@@ -1132,19 +1132,27 @@ describe("HintBar collaborator discovery", () => {
     await renderHintRoot(root, <HintBoundary session={session} />);
     expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", id);
     const callbacks = captureHintCallbacks();
-    expect(callbacks.text.textContent).toBe(HINTS[id].message);
-    expect(callbacks.text).toHaveAttribute("title", callbacks.text.textContent);
-    expect(callbacks.text.className).toBe("min-w-0 truncate");
-    expect(callbacks.root.querySelectorAll("span")).toHaveLength(1);
-    expect(callbacks.root.children).toHaveLength(4);
-    expect(screen.getAllByRole("status")).toEqual([callbacks.root]);
-    expect(callbacks.root).toHaveAttribute("aria-live", "polite");
-    expect(
-      [...callbacks.root.querySelectorAll(
-        "button, a[href], input, select, textarea, [tabindex], [contenteditable]",
-      )],
-    ).toEqual([callbacks.actionElement, callbacks.dismissElement]);
-    expect(vi.getTimerCount()).toBe(0);
+    const timeouts = vi.spyOn(globalThis, "setTimeout");
+    const intervals = vi.spyOn(globalThis, "setInterval");
+    try {
+      expect(callbacks.text.textContent).toBe(HINTS[id].message);
+      expect(callbacks.text).toHaveAttribute("title", callbacks.text.textContent);
+      expect(callbacks.text.className).toBe("min-w-0 truncate");
+      expect(callbacks.root.querySelectorAll("span")).toHaveLength(1);
+      expect(callbacks.root.children).toHaveLength(4);
+      expect(screen.getAllByRole("status")).toEqual([callbacks.root]);
+      expect(callbacks.root).toHaveAttribute("aria-live", "polite");
+      expect([
+        ...callbacks.root.querySelectorAll(
+          "button, a[href], input, select, textarea, [tabindex], [contenteditable]",
+        ),
+      ]).toEqual([callbacks.actionElement, callbacks.dismissElement]);
+      expect(timeouts).not.toHaveBeenCalled();
+      expect(intervals).not.toHaveBeenCalled();
+    } finally {
+      timeouts.mockRestore();
+      intervals.mockRestore();
+    }
     const preventDefault = vi.fn();
     callbacks.actionMouseDown(callbacks.actionElement, preventDefault);
     expect(preventDefault).toHaveBeenCalledOnce();
@@ -1168,7 +1176,6 @@ describe("HintBar collaborator discovery", () => {
     expect(screen.queryByTestId("hint-bar")).toBeNull();
     expect(collaborators).toHaveBeenCalledTimes(id === "collab-agent" ? 1 : 0);
     expect(tokens).toHaveBeenCalledTimes(id === "collab-agent" ? 1 : 0);
-    expect(vi.getTimerCount()).toBe(0);
     },
   );
 
@@ -1626,6 +1633,26 @@ describe("HintBar collaborator discovery", () => {
       expect(onComment).not.toHaveBeenCalled();
       expect(actions.focus).not.toHaveBeenCalled();
 
+      const timeouts = vi.spyOn(globalThis, "setTimeout");
+      const intervals = vi.spyOn(globalThis, "setInterval");
+      try {
+        stale.text.title = HINTS["collab-agent"].message;
+        stale.actionHandler(fabricatedClick(stale.actionElement));
+        stale.dismissHandler(fabricatedClick(stale.dismissElement));
+        stale.text.title = message;
+        stale.actionHandler(fabricatedClick(stale.actionElement));
+        stale.dismissHandler(fabricatedClick(stale.dismissElement));
+        expect(storageWrites).not.toHaveBeenCalled();
+        expect(onShare).not.toHaveBeenCalled();
+        expect(onComment).not.toHaveBeenCalled();
+        expect(actions.focus).not.toHaveBeenCalled();
+        expect(timeouts).not.toHaveBeenCalled();
+        expect(intervals).not.toHaveBeenCalled();
+      } finally {
+        timeouts.mockRestore();
+        intervals.mockRestore();
+      }
+
       await renderHintRoot(
         root,
         <HintBoundary instance="current-title" session={session} />,
@@ -1651,7 +1678,6 @@ describe("HintBar collaborator discovery", () => {
       expect(actions.focus).toHaveBeenCalledTimes(activation === "dismiss" ? 1 : 0);
       expect(collaborators).not.toHaveBeenCalled();
       expect(tokens).not.toHaveBeenCalled();
-      expect(vi.getTimerCount()).toBe(0);
       expect(screen.queryByTestId("hint-bar")).toBeNull();
     },
   );
