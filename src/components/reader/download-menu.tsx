@@ -1033,7 +1033,6 @@ function downloadReactCancellationMatches(
   event: ReactKeyboardEvent<HTMLElement>,
   expected: DownloadReactCancellation,
   keyboard: DownloadKeyboardIntrinsics,
-  defaultPrevented = false,
 ): boolean {
   try {
     const preventDefault = event.preventDefault;
@@ -1055,9 +1054,28 @@ function downloadReactCancellationMatches(
         "isPropagationStopped",
         isPropagationStopped,
       ) &&
-      keyboard.apply(isDefaultPrevented, event, []) ===
-        defaultPrevented &&
+      keyboard.apply(isDefaultPrevented, event, []) === false &&
       keyboard.apply(isPropagationStopped, event, []) === false
+    );
+  } catch {
+    return false;
+  }
+}
+
+function downloadReactDefaultPrevented(
+  event: ReactKeyboardEvent<HTMLElement>,
+  keyboard: DownloadKeyboardIntrinsics,
+): boolean {
+  try {
+    const isDefaultPrevented = event.isDefaultPrevented;
+    return (
+      keyboard.isCurrent() &&
+      keyboard.methodMatches(
+        event,
+        "isDefaultPrevented",
+        isDefaultPrevented,
+      ) &&
+      keyboard.apply(isDefaultPrevented, event, []) === true
     );
   } catch {
     return false;
@@ -2222,12 +2240,7 @@ function createDownloadPublication({
           [],
         ) ||
         bubble.event.defaultPrevented !== true ||
-        !downloadReactCancellationMatches(
-          bubble.event,
-          bubble.cancellation,
-          keyboard,
-          true,
-        ) ||
+        !downloadReactDefaultPrevented(bubble.event, keyboard) ||
         !publication.keyListener.retains(
           bubble.listenerProof,
           publication,
