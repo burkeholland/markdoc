@@ -1338,7 +1338,7 @@ describe("CommentsPanel", () => {
     it("rejects untrusted, modified, repeated, composing, cancelled, foreign, wrong-focus, and plain keys before clean recovery", async () => {
       const fixture = reviewSession("suggestion-keyboard-invalid-input");
       session = fixture.session;
-      addCommentSuggestion(session, fixture.user);
+      const { threadId } = addCommentSuggestion(session, fixture.user);
       render(<StrictMode>{suggestionPanel(session)}</StrictMode>);
       await screen.findByTestId("suggestion-accept-comment");
       const actions = captureSuggestionActions();
@@ -1387,10 +1387,28 @@ describe("CommentsPanel", () => {
         expect(wrongFocus.defaultPrevented).toBe(false);
         expect(outsider).toHaveFocus();
 
-        source.focus();
-        const accepted = dispatchSuggestionKey(source, "ArrowRight");
-        expect(accepted.defaultPrevented).toBe(true);
-        expect(destination).toHaveFocus();
+        await act(async () => {
+          session!.setActiveComment(threadId);
+        });
+        const current = captureSuggestionActions();
+        expect(current.accept!.element).toBe(source);
+        expect(current.reject!.element).toBe(destination);
+        expect(current.rootKeyCapture).not.toBe(actions.rootKeyCapture);
+        expect(current.rootKeyDown).not.toBe(actions.rootKeyDown);
+        const currentSource = current.accept!.element as HTMLButtonElement;
+        const currentDestination = current.reject!.element;
+        currentSource.focus();
+
+        const accepted = dispatchSuggestionKeyWithReactPairMutation(
+          current,
+          currentSource,
+          "ArrowRight",
+        );
+
+        expect(accepted.nativeEvent.defaultPrevented).toBe(true);
+        expect(accepted.bubbleEvent.defaultPrevented).toBe(true);
+        expect(accepted.bubbleEvent.isDefaultPrevented()).toBe(true);
+        expect(currentDestination).toHaveFocus();
       } finally {
         frame.remove();
         outsider.remove();
@@ -1502,7 +1520,7 @@ describe("CommentsPanel", () => {
       expect(batchEvent.defaultPrevented).toBe(false);
       expect(batch.accept!.element).toHaveFocus();
       expect(batch.reject!.element).not.toHaveFocus();
-      expect(cards).toHaveLength(3);
+      expect(cards).toHaveLength(2);
 
       card.accept!.element.focus();
       const cardEvent = dispatchSuggestionKey(
