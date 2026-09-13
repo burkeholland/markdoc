@@ -4164,7 +4164,7 @@ describe("Settings → Webhooks: exact committed controls", () => {
 
     function rowNavigationInit(
       key: CreateNavigationKey,
-      code = key,
+      code: string = key,
       location = 0,
     ): KeyboardEventInit {
       return { key, code, location };
