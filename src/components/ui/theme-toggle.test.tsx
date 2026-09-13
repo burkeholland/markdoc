@@ -1068,7 +1068,10 @@ describe("mounted theme controls", () => {
     let eventLocalReceiver: EventTarget | null = null;
     let eventPathTerminal: EventTarget | null = null;
     const observeReceiver = function (this: EventTarget, event: Event) {
-      eventLocalReceiver = this;
+      if (event.currentTarget !== this) {
+        throw new Error("The public current target did not match the Window receiver");
+      }
+      eventLocalReceiver = event.currentTarget;
       eventPathTerminal = event.composedPath().at(-1) ?? null;
     };
     ownerWindow.addEventListener("keydown", observeReceiver, true);
