@@ -16,7 +16,7 @@ import {
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { CollabSession } from "@/editor/collab/session";
-import { HINTS_STORAGE_KEY, readHintsRecord } from "@/lib/hints";
+import { HINTS, HINTS_STORAGE_KEY, readHintsRecord } from "@/lib/hints";
 import type { EditorActions } from "./actions";
 
 const collaborators = vi.fn();
@@ -902,7 +902,16 @@ describe("HintBar collaborator discovery", () => {
       "collab-agent",
     );
 
+    const hint = captureHint();
+    expect(hint.text.textContent).toBe(HINTS["collab-agent"].message);
+    expect(hint.text).toHaveAttribute("title", hint.text.textContent);
+    const storageWrites = vi.spyOn(Storage.prototype, "setItem");
     pointerActivate(screen.getByTestId("hint-dismiss"));
+    pointerActivate(hint.dismissElement);
+    expect(storageWrites).toHaveBeenCalledOnce();
+    expect(actions.focus).not.toHaveBeenCalled();
+    expect(onShare).not.toHaveBeenCalled();
+    expect(onComment).not.toHaveBeenCalled();
     expect(screen.queryByTestId("hint-bar")).not.toBeInTheDocument();
     expect(readHintsRecord(window.localStorage).dismissed).toEqual([
       "collab-agent",
@@ -1111,7 +1120,7 @@ describe("HintBar collaborator discovery", () => {
       destination: "comment",
     },
   ] as const)(
-    "claims the current $id Action once before its exact destination",
+    "claims the current $id Action once with its complete title before its exact destination",
     async ({ id, dismissed, session, destination }) => {
       window.localStorage.setItem(
         HINTS_STORAGE_KEY,
@@ -1123,6 +1132,27 @@ describe("HintBar collaborator discovery", () => {
     await renderHintRoot(root, <HintBoundary session={session} />);
     expect(screen.getByTestId("hint-bar")).toHaveAttribute("data-hint", id);
     const callbacks = captureHintCallbacks();
+    const timeouts = vi.spyOn(globalThis, "setTimeout");
+    const intervals = vi.spyOn(globalThis, "setInterval");
+    try {
+      expect(callbacks.text.textContent).toBe(HINTS[id].message);
+      expect(callbacks.text).toHaveAttribute("title", callbacks.text.textContent);
+      expect(callbacks.text.className).toBe("min-w-0 truncate");
+      expect(callbacks.root.querySelectorAll("span")).toHaveLength(1);
+      expect(callbacks.root.children).toHaveLength(4);
+      expect(screen.getAllByRole("status")).toEqual([callbacks.root]);
+      expect(callbacks.root).toHaveAttribute("aria-live", "polite");
+      expect([
+        ...callbacks.root.querySelectorAll(
+          "button, a[href], input, select, textarea, [tabindex], [contenteditable]",
+        ),
+      ]).toEqual([callbacks.actionElement, callbacks.dismissElement]);
+      expect(timeouts).not.toHaveBeenCalled();
+      expect(intervals).not.toHaveBeenCalled();
+    } finally {
+      timeouts.mockRestore();
+      intervals.mockRestore();
+    }
     const preventDefault = vi.fn();
     callbacks.actionMouseDown(callbacks.actionElement, preventDefault);
     expect(preventDefault).toHaveBeenCalledOnce();
@@ -1144,6 +1174,8 @@ describe("HintBar collaborator discovery", () => {
         destination === "comment" ? 1 : 0,
       );
     expect(screen.queryByTestId("hint-bar")).toBeNull();
+    expect(collaborators).toHaveBeenCalledTimes(id === "collab-agent" ? 1 : 0);
+    expect(tokens).toHaveBeenCalledTimes(id === "collab-agent" ? 1 : 0);
     },
   );
 
@@ -1170,6 +1202,8 @@ describe("HintBar collaborator discovery", () => {
           />,
         );
       const callbacks = captureHintCallbacks();
+      expect(callbacks.text.textContent).toBe(HINTS["mention-copilot"].message);
+      expect(callbacks.text).toHaveAttribute("title", callbacks.text.textContent);
       if (focusInside) screen.getByTestId("hint-dismiss").focus();
       else outside.focus();
 
@@ -1183,6 +1217,8 @@ describe("HintBar collaborator discovery", () => {
       expect(actions.focus).toHaveBeenCalledTimes(focusInside ? 1 : 0);
       expect(onShare).not.toHaveBeenCalled();
       expect(onComment).not.toHaveBeenCalled();
+      expect(collaborators).not.toHaveBeenCalled();
+      expect(tokens).not.toHaveBeenCalled();
     } finally {
       outside.remove();
     }
@@ -1485,7 +1521,7 @@ describe("HintBar collaborator discovery", () => {
     ["dismissal record", false],
     ["shown hint", true],
   ] as const)(
-    "retires A before an exact $0 replacement is published",
+    "retires A before an exact $0 replacement with the current title is published",
     async (_replacement, replaceShownHint) => {
       window.localStorage.setItem(
         HINTS_STORAGE_KEY,
@@ -1506,6 +1542,9 @@ describe("HintBar collaborator discovery", () => {
         "mention-copilot",
       );
       const stale = captureHintCallbacks();
+      const previousMessage = HINTS["mention-copilot"].message;
+      expect(stale.text.textContent).toBe(previousMessage);
+      expect(stale.text).toHaveAttribute("title", previousMessage);
 
       window.localStorage.setItem(
         HINTS_STORAGE_KEY,
@@ -1538,6 +1577,13 @@ describe("HintBar collaborator discovery", () => {
         replaceShownHint ? "collab-agent" : "mention-copilot",
       );
       const current = captureHintCallbacks();
+      const currentMessage =
+        HINTS[replaceShownHint ? "collab-agent" : "mention-copilot"].message;
+      expect(current.text.textContent).toBe(currentMessage);
+      expect(current.text).toHaveAttribute("title", currentMessage);
+      if (replaceShownHint) {
+        expect(current.text).not.toHaveAttribute("title", previousMessage);
+      }
       act(() => {
         stale.action();
         current.action();
@@ -1548,6 +1594,91 @@ describe("HintBar collaborator discovery", () => {
       expect(onShare).toHaveBeenCalledTimes(replaceShownHint ? 1 : 0);
       expect(onComment).toHaveBeenCalledTimes(replaceShownHint ? 0 : 1);
       expect(actions.focus).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["action", "dismiss"] as const)(
+    "rejects a mismatched title for %s and admits a clean successor once",
+    async (activation) => {
+      window.localStorage.setItem(
+        HINTS_STORAGE_KEY,
+        JSON.stringify({ dismissed: ["collab-agent"], agentSeen: false }),
+      );
+      const session = fakeSession(`title-${activation}`, { threads: 1 });
+      const root = createHintRoot();
+      await renderHintRoot(
+        root,
+        <HintBoundary instance="stale-title" session={session} />,
+      );
+      const stale = captureHintCallbacks();
+      const message = HINTS["mention-copilot"].message;
+      expect(stale.text).toHaveAttribute("title", message);
+      const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+
+      stale.text.title = HINTS["collab-agent"].message;
+      stale.dismissElement.focus();
+      act(() => stale[activation]());
+      expect(storageWrites).not.toHaveBeenCalled();
+      expect(onShare).not.toHaveBeenCalled();
+      expect(onComment).not.toHaveBeenCalled();
+      expect(actions.focus).not.toHaveBeenCalled();
+
+      stale.text.title = message;
+      act(() => {
+        stale.action();
+        stale.dismiss();
+      });
+      expect(storageWrites).not.toHaveBeenCalled();
+      expect(onShare).not.toHaveBeenCalled();
+      expect(onComment).not.toHaveBeenCalled();
+      expect(actions.focus).not.toHaveBeenCalled();
+
+      const timeouts = vi.spyOn(globalThis, "setTimeout");
+      const intervals = vi.spyOn(globalThis, "setInterval");
+      try {
+        stale.text.title = HINTS["collab-agent"].message;
+        stale.actionHandler(fabricatedClick(stale.actionElement));
+        stale.dismissHandler(fabricatedClick(stale.dismissElement));
+        stale.text.title = message;
+        stale.actionHandler(fabricatedClick(stale.actionElement));
+        stale.dismissHandler(fabricatedClick(stale.dismissElement));
+        expect(storageWrites).not.toHaveBeenCalled();
+        expect(onShare).not.toHaveBeenCalled();
+        expect(onComment).not.toHaveBeenCalled();
+        expect(actions.focus).not.toHaveBeenCalled();
+        expect(timeouts).not.toHaveBeenCalled();
+        expect(intervals).not.toHaveBeenCalled();
+      } finally {
+        timeouts.mockRestore();
+        intervals.mockRestore();
+      }
+
+      await renderHintRoot(
+        root,
+        <HintBoundary instance="current-title" session={session} />,
+      );
+      const current = captureHintCallbacks();
+      expect(current.root).not.toBe(stale.root);
+      expect(current.text.textContent).toBe(message);
+      expect(current.text).toHaveAttribute("title", message);
+      current.dismissElement.focus();
+      act(() => {
+        stale.action();
+        stale.dismiss();
+        current[activation]();
+        current[activation]();
+      });
+      expect(storageWrites).toHaveBeenCalledOnce();
+      expect(readHintsRecord(window.localStorage).dismissed).toEqual([
+        "collab-agent",
+        "mention-copilot",
+      ]);
+      expect(onShare).not.toHaveBeenCalled();
+      expect(onComment).toHaveBeenCalledTimes(activation === "action" ? 1 : 0);
+      expect(actions.focus).toHaveBeenCalledTimes(activation === "dismiss" ? 1 : 0);
+      expect(collaborators).not.toHaveBeenCalled();
+      expect(tokens).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("hint-bar")).toBeNull();
     },
   );
 

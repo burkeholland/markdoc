@@ -864,6 +864,7 @@ function hintElementsAreCurrent(
     text.className !== HINT_TEXT_CLASS ||
     text.children.length !== 0 ||
     text.textContent !== render.message ||
+    text.getAttribute("title") !== render.message ||
     action.parentElement !== root ||
     action.tagName !== "BUTTON" ||
     action.getAttribute("type") !== "button" ||
@@ -3202,7 +3203,7 @@ function PublishedHintBar({
         className={HINT_ICON_CLASS}
         aria-hidden
       />
-      <span ref={captureText} className={HINT_TEXT_CLASS}>
+      <span ref={captureText} className={HINT_TEXT_CLASS} title={copy.message}>
         {copy.message}
       </span>
       <button
