@@ -6252,7 +6252,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                               />
                             ) : (
                               <div className="flex items-center gap-1.5">
-                                <span className="truncate text-[13px] font-medium text-ink">{row.title ?? KIND_LABEL[row.kind]}</span>
+                                <span className="truncate text-[13px] font-medium text-ink" title={row.title ?? KIND_LABEL[row.kind]}>{row.title ?? KIND_LABEL[row.kind]}</span>
                                 {row.title && (
                                   <span
                                     className="shrink-0 rounded border border-line px-1 text-[10px] font-medium uppercase tracking-wide text-ink-3"

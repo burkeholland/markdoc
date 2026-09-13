@@ -12,6 +12,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import type { CollabSession } from "@/editor/collab/session";
 import type { VersionSummary } from "@/lib/api";
+import { formatDateTime, relativeTime } from "@/lib/utils";
 
 const versions = vi.fn();
 const version = vi.fn();
@@ -7556,6 +7557,210 @@ describe("VersionsPanel · manual refresh authority", () => {
       }
     },
   );
+});
+
+describe("VersionsPanel - native version name titles", () => {
+  it("keeps long, distinct names literal and hover inert before selection and comparison", async () => {
+    const docId = "native-version-titles";
+    const prefix = "Release candidate ".repeat(12);
+    const newer = {
+      ...named,
+      id: "title-newer",
+      number: 2,
+      title: `${prefix}<img src=x onerror="alert('x')"> & final`,
+      commitSha: "1234567890abcdef1234567890abcdef12345678",
+    };
+    const older = { ...named, id: "title-older", title: `${prefix}<b>Earlier</b> & "draft"` };
+    const rows = [newer, older];
+    const onPreview = vi.fn();
+    const onClose = vi.fn();
+    versions.mockResolvedValueOnce({ versions: rows });
+    version.mockImplementation(async (_docId: string, id: string) =>
+      contentResult(id === newer.id ? newer : older, id === newer.id ? "# Newer" : "# Older"),
+    );
+    render(<VersionsPanel session={session(docId)} onClose={onClose} onPreview={onPreview} refreshKey={0} />);
+
+    const items = await screen.findAllByTestId("version-item");
+    expect(items).toHaveLength(2);
+    for (const [index, row] of rows.entries()) {
+      const span = within(items[index]).getByText(row.title);
+      expect(row.title.length).toBeGreaterThanOrEqual(200);
+      expect(span.tagName).toBe("SPAN");
+      expect(span.textContent).toBe(row.title);
+      expect(span).toHaveAttribute("title", row.title);
+      expect(span.getAttributeNames().sort()).toEqual(["class", "title"]);
+      expect(span.className).toBe("truncate text-[13px] font-medium text-ink");
+      expect(span.childElementCount).toBe(0);
+      expect(span.tabIndex).toBe(-1);
+      expect(within(items[index]).getByTestId("version-kind")).toHaveTextContent(/^Named$/);
+      expect(within(items[index]).getByRole("checkbox", { name: `Compare v${row.number}` })).not.toBeChecked();
+      expect(within(items[index]).getByRole("button")).toHaveAccessibleName(
+        `${row.title}Named v${row.number}· ${relativeTime(row.createdAt)}· Alice${row.commitSha?.slice(0, 7) ?? ""}`,
+      );
+      expect(within(items[index]).getByTitle(formatDateTime(row.createdAt))).toHaveTextContent(
+        `· ${relativeTime(row.createdAt)}`,
+      );
+    }
+    expect(screen.getByTitle(newer.commitSha)).toHaveTextContent(newer.commitSha.slice(0, 7));
+    expect(screen.getByTestId("versions-panel").querySelectorAll("img, b, script")).toHaveLength(0);
+
+    const focused = document.activeElement;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const animationFrame = vi.spyOn(window, "requestAnimationFrame");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    await act(async () => {
+      for (const row of rows) {
+        const span = screen.getByTitle(row.title);
+        fireEvent.pointerOver(span);
+        fireEvent.mouseOver(span);
+        fireEvent.mouseMove(span);
+        fireEvent.mouseOut(span);
+        fireEvent.pointerOut(span);
+      }
+    });
+    expect(versions).toHaveBeenCalledExactlyOnceWith(docId);
+    for (const effect of [
+      version, renameVersion, restoreVersion, copyVersion, push, pendingNotice,
+      onPreview, onClose, focus, timeout, interval, animationFrame, fetch,
+    ]) {
+      expect(effect).not.toHaveBeenCalled();
+    }
+    expect(document.activeElement).toBe(focused);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("version-item")).toHaveLength(2);
+    for (const spy of [focus, timeout, interval, animationFrame, fetch]) spy.mockRestore();
+
+    fireEvent.click(screen.getByTitle(newer.title));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledExactlyOnceWith({ version: newer, content: "# Newer" }));
+    expect(version).toHaveBeenCalledExactlyOnceWith(docId, newer.id);
+    expect(screen.getByRole("button", { name: "Restore" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Rename" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Copy as new doc" })).toHaveAttribute(
+      "title", "Copy this version as a new document",
+    );
+    onPreview.mockClear();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v1" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Compare v2" }));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledExactlyOnceWith({
+      version: newer,
+      content: "# Newer",
+      base: { version: older, content: "# Older" },
+      range: [newer],
+    }));
+    expect(version).toHaveBeenCalledTimes(2);
+    expect(version).toHaveBeenNthCalledWith(2, docId, older.id);
+    for (const row of rows) expect(screen.getByTitle(row.title).textContent).toBe(row.title);
+  });
+
+  it("uses every current kind label for null titles but preserves empty text and title", async () => {
+    const cases: { kind: VersionSummary["kind"]; title: string | null; label: string }[] = [
+      { kind: "auto", title: null, label: "Autosaved" },
+      { kind: "named", title: null, label: "Named version" },
+      { kind: "publish", title: null, label: "Published" },
+      { kind: "restore", title: null, label: "Restored" },
+      { kind: "import", title: null, label: "Imported" },
+      { kind: "named", title: "", label: "" },
+    ];
+    versions.mockResolvedValueOnce({
+      versions: cases.map(({ kind, title }, index) => ({
+        ...named, id: `title-fallback-${index}`, number: index + 1, kind, title,
+      })),
+    });
+    render(<VersionsPanel session={session("native-title-fallbacks")} onClose={vi.fn()} onPreview={vi.fn()} refreshKey={0} />);
+
+    const items = await screen.findAllByTestId("version-item");
+    expect(items).toHaveLength(cases.length);
+    for (const [index, { kind, label }] of cases.entries()) {
+      const span = items[index].querySelector("span.truncate");
+      expect(span).toHaveAttribute("title", label);
+      expect(span?.textContent).toBe(label);
+      expect(items[index]).toHaveAttribute("data-version-kind", kind);
+      expect(within(items[index]).queryByTestId("version-kind")).not.toBeInTheDocument();
+      expect(within(items[index]).getByRole("checkbox", { name: `Compare v${index + 1}` })).not.toBeChecked();
+    }
+  });
+
+  it("removes the title with the rename span and replaces it after one accepted rename", async () => {
+    const docId = "native-title-rename";
+    const current = { ...named, title: "Original version name" };
+    const renamed = { ...current, title: 'Renamed <version> & "final"' };
+    versions.mockReset()
+      .mockResolvedValueOnce({ versions: [current] })
+      .mockResolvedValueOnce({ versions: [renamed] });
+    version.mockResolvedValueOnce(contentResult(current, "# Draft"));
+    renameVersion.mockResolvedValueOnce({ ok: true });
+    const onPreview = vi.fn();
+    render(<VersionsPanel session={session(docId)} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+
+    const oldSpan = await screen.findByTitle(current.title);
+    fireEvent.click(oldSpan);
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    const input = screen.getByTestId("version-rename-input");
+    expect(oldSpan).not.toBeInTheDocument();
+    expect(screen.queryByTitle(current.title)).not.toBeInTheDocument();
+    expect(input).not.toHaveAttribute("title");
+    expect(input).toHaveValue(current.title);
+    fireEvent.change(input, { target: { value: renamed.title } });
+    act(() => {
+      fireEvent.keyDown(input, { key: "Enter" });
+      fireEvent.blur(input);
+    });
+    expect((await screen.findByTitle(renamed.title)).textContent).toBe(renamed.title);
+    expect(screen.queryByTitle(current.title)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("version-rename-input")).not.toBeInTheDocument();
+    expect(renameVersion).toHaveBeenCalledExactlyOnceWith(docId, current.id, renamed.title);
+    expect(versions).toHaveBeenCalledTimes(2);
+    expect(version).toHaveBeenCalledExactlyOnceWith(docId, current.id);
+    expect(onPreview).toHaveBeenCalledExactlyOnceWith({ version: current, content: "# Draft" });
+  });
+
+  it("updates current list titles and removes old document titles even when row IDs are reused", async () => {
+    const current = { ...named, title: "Before list replacement" };
+    const updated = { ...current, title: "After list replacement" };
+    const otherDocument = { ...current, title: "Other document version" };
+    versions.mockReset()
+      .mockResolvedValueOnce({ versions: [current] })
+      .mockResolvedValueOnce({ versions: [updated] })
+      .mockResolvedValueOnce({ versions: [otherDocument] });
+    const props = { session: session("native-title-list"), onClose: vi.fn(), onPreview: vi.fn(), refreshKey: 0 };
+    const { rerender } = render(<VersionsPanel {...props} />);
+    await screen.findByTitle(current.title);
+
+    rerender(<VersionsPanel {...props} refreshKey={1} />);
+    expect((await screen.findByTitle(updated.title)).textContent).toBe(updated.title);
+    expect(screen.queryByTitle(current.title)).not.toBeInTheDocument();
+    rerender(<VersionsPanel {...props} session={session("native-title-other-document")} refreshKey={1} />);
+    expect((await screen.findByTitle(otherDocument.title)).textContent).toBe(otherDocument.title);
+    expect(screen.queryByTitle(updated.title)).not.toBeInTheDocument();
+    expect(screen.queryByTitle(current.title)).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("version-item")).toHaveLength(1);
+    expect(versions).toHaveBeenCalledTimes(3);
+    expect(versions).toHaveBeenNthCalledWith(1, "native-title-list");
+    expect(versions).toHaveBeenNthCalledWith(2, "native-title-list");
+    expect(versions).toHaveBeenNthCalledWith(3, "native-title-other-document");
+    expect(version).not.toHaveBeenCalled();
+    expect(renameVersion).not.toHaveBeenCalled();
+  });
+
+  it("keeps readonly version titles without exposing rename or restore", async () => {
+    const docId = "native-title-readonly";
+    const readonlySession = { docId, role: "viewer" } as unknown as CollabSession;
+    const onPreview = vi.fn();
+    render(<VersionsPanel session={readonlySession} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
+
+    fireEvent.click(await screen.findByTitle(named.title!));
+    await waitFor(() => expect(onPreview).toHaveBeenCalledOnce());
+    expect(screen.getByTitle(named.title!).textContent).toBe(named.title);
+    expect(screen.queryByRole("button", { name: "Rename" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Restore" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy as new doc" })).toBeEnabled();
+    expect(version).toHaveBeenCalledExactlyOnceWith(docId, named.id);
+    expect(renameVersion).not.toHaveBeenCalled();
+    expect(restoreVersion).not.toHaveBeenCalled();
+  });
 });
 
 describe("VersionsPanel · rename a version", () => {
