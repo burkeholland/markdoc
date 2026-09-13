@@ -1260,7 +1260,13 @@ describe("Settings → Agents: token rename control navigation", () => {
     },
   );
 
-  it("accepts distinct exact React wrappers around one native key event", async () => {
+  it.each([
+    ["present on both wrappers", null],
+    ["absent from the capture wrapper", "capture-absent"],
+    ["absent from the bubble wrapper", "bubble-absent"],
+    ["mutated on the capture wrapper", "capture-mutated"],
+    ["mutated on the bubble wrapper", "bubble-mutated"],
+  ] as const)("accepts distinct exact React wrappers with _reactName %s", async (_, variation) => {
     const preventDefault = vi.spyOn(window.Event.prototype, "preventDefault");
     const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
     const rename = await showStrictRename();
@@ -1278,10 +1284,20 @@ describe("Settings → Agents: token rename control navigation", () => {
       const nativeEvent = event as KeyboardEvent;
       const capture = renameNavigationReactWrapper(nativeEvent, save, save);
       const bubble = renameNavigationReactWrapper(nativeEvent, rename.form, save);
+      const captureRecord = capture as unknown as Record<string, unknown>;
+      const bubbleRecord = bubble as unknown as Record<string, unknown>;
       captureWrapper = capture;
       bubbleWrapper = bubble;
+      if (variation === "capture-absent") {
+        Reflect.deleteProperty(captureRecord, "_reactName");
+      }
+      if (variation === "bubble-absent") {
+        Reflect.deleteProperty(bubbleRecord, "_reactName");
+      }
       stage(capture);
+      if (variation === "capture-mutated") captureRecord._reactName = "onClick";
       deliver(bubble);
+      if (variation === "bubble-mutated") bubbleRecord._reactName = "onClick";
       setReactEventCurrentTarget(capture, null);
       setReactEventCurrentTarget(bubble, null);
     }, { once: true });

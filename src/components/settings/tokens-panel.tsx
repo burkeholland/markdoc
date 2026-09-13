@@ -5380,8 +5380,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
     const eventPhase = ownValue("eventPhase");
     try {
       if (
-        ownValue("_reactName") !== "onKeyDown"
-        || ownValue("type") !== "keydown"
+        ownValue("type") !== "keydown"
         || ownValue("key") !== snapshot.key
         || ownValue("currentTarget") !== currentTarget
         || ownValue("target") !== snapshot.target
@@ -5439,8 +5438,7 @@ function TokenRow({ panel, token: t, documentId, matching, disabled, replacement
       return TOKEN_RENAME_REACT_MISSING;
     };
     try {
-      return ownValue("_reactName") === "onKeyDown"
-        && ownValue("type") === "keydown"
+      return ownValue("type") === "keydown"
         && ownValue("key") === snapshot.key
         && ownValue("currentTarget") === null
         && ownValue("target") === snapshot.target
