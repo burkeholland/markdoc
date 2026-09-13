@@ -1338,45 +1338,63 @@ describe("CommentsPanel", () => {
     it("rejects untrusted, modified, repeated, composing, cancelled, foreign, wrong-focus, and plain keys before clean recovery", async () => {
       const fixture = reviewSession("suggestion-keyboard-invalid-input");
       session = fixture.session;
-      const { threadId } = addCommentSuggestion(session, fixture.user);
-      render(<StrictMode>{suggestionPanel(session)}</StrictMode>);
-      await screen.findByTestId("suggestion-accept-comment");
-      const actions = captureSuggestionActions();
-      const source = actions.accept!.element as HTMLButtonElement;
-      const destination = actions.reject!.element;
-      const outsider = document.createElement("button");
-      document.body.append(outsider);
-      const rejected = [
-        suggestionKeyboardEvent(source, "ArrowRight", {}, false),
-        suggestionKeyboardEvent(source, "ArrowRight", { ctrlKey: true }),
-        suggestionKeyboardEvent(source, "ArrowRight", { metaKey: true }),
-        suggestionKeyboardEvent(source, "ArrowRight", { altKey: true }),
-        suggestionKeyboardEvent(source, "ArrowRight", { shiftKey: true }),
-        suggestionKeyboardEvent(source, "ArrowRight", { repeat: true }),
-        suggestionKeyboardEvent(source, "ArrowRight", { isComposing: true }),
-        suggestionKeyboardEvent(source, "Enter"),
-        suggestionKeyboardEvent(source, " "),
-        suggestionKeyboardEvent(source, "Tab"),
-      ];
-      const cancelled = suggestionKeyboardEvent(source, "ArrowRight");
-      cancelled.preventDefault();
-      rejected.push(cancelled);
-      const frame = document.createElement("iframe");
-      document.body.append(frame);
-      const foreignWindow = frame.contentWindow;
-      if (!foreignWindow) throw new Error("The foreign frame has no window");
-      const foreign = new foreignWindow.KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        code: "ArrowRight",
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        view: suggestionEventView(foreignWindow.document, foreignWindow),
+      addCommentSuggestion(session, fixture.user);
+      const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
+        Element.prototype,
+        "scrollIntoView",
+      );
+      const scrollIntoView = vi.fn(() => {
+        throw new Error("Suggestion keyboard navigation must not scroll");
       });
-      markRequestModeEventTrusted(foreign);
-      rejected.push(foreign);
-
+      Object.defineProperty(Element.prototype, "scrollIntoView", {
+        configurable: true,
+        writable: true,
+        value: scrollIntoView,
+      });
+      let frame: HTMLIFrameElement | null = null;
+      let outsider: HTMLButtonElement | null = null;
       try {
+        const rendered = render(
+          <StrictMode>{suggestionPanel(session)}</StrictMode>,
+        );
+        await screen.findByTestId("suggestion-accept-comment");
+        const actions = captureSuggestionActions();
+        const source = actions.accept!.element as HTMLButtonElement;
+        const destination = actions.reject!.element;
+        outsider = document.createElement("button");
+        document.body.append(outsider);
+        const rejected = [
+          suggestionKeyboardEvent(source, "ArrowRight", {}, false),
+          suggestionKeyboardEvent(source, "ArrowRight", { ctrlKey: true }),
+          suggestionKeyboardEvent(source, "ArrowRight", { metaKey: true }),
+          suggestionKeyboardEvent(source, "ArrowRight", { altKey: true }),
+          suggestionKeyboardEvent(source, "ArrowRight", { shiftKey: true }),
+          suggestionKeyboardEvent(source, "ArrowRight", { repeat: true }),
+          suggestionKeyboardEvent(source, "ArrowRight", {
+            isComposing: true,
+          }),
+          suggestionKeyboardEvent(source, "Enter"),
+          suggestionKeyboardEvent(source, " "),
+          suggestionKeyboardEvent(source, "Tab"),
+        ];
+        const cancelled = suggestionKeyboardEvent(source, "ArrowRight");
+        cancelled.preventDefault();
+        rejected.push(cancelled);
+        frame = document.createElement("iframe");
+        document.body.append(frame);
+        const foreignWindow = frame.contentWindow;
+        if (!foreignWindow) throw new Error("The foreign frame has no window");
+        const foreign = new foreignWindow.KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          code: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: suggestionEventView(foreignWindow.document, foreignWindow),
+        });
+        markRequestModeEventTrusted(foreign);
+        rejected.push(foreign);
+
         for (const event of rejected) {
           source.focus();
           act(() => source.dispatchEvent(event));
@@ -1386,15 +1404,19 @@ describe("CommentsPanel", () => {
         const wrongFocus = dispatchSuggestionKey(source, "ArrowRight");
         expect(wrongFocus.defaultPrevented).toBe(false);
         expect(outsider).toHaveFocus();
+        expect(scrollIntoView).not.toHaveBeenCalled();
 
         await act(async () => {
-          session!.setActiveComment(threadId);
+          rendered.rerender(
+            <StrictMode>{suggestionPanel(session)}</StrictMode>,
+          );
         });
         const current = captureSuggestionActions();
         expect(current.accept!.element).toBe(source);
         expect(current.reject!.element).toBe(destination);
         expect(current.rootKeyCapture).not.toBe(actions.rootKeyCapture);
         expect(current.rootKeyDown).not.toBe(actions.rootKeyDown);
+        expect(scrollIntoView).not.toHaveBeenCalled();
         const currentSource = current.accept!.element as HTMLButtonElement;
         const currentDestination = current.reject!.element;
         currentSource.focus();
@@ -1409,9 +1431,19 @@ describe("CommentsPanel", () => {
         expect(accepted.bubbleEvent.defaultPrevented).toBe(true);
         expect(accepted.bubbleEvent.isDefaultPrevented()).toBe(true);
         expect(currentDestination).toHaveFocus();
+        expect(scrollIntoView).not.toHaveBeenCalled();
       } finally {
-        frame.remove();
-        outsider.remove();
+        frame?.remove();
+        outsider?.remove();
+        if (scrollIntoViewDescriptor) {
+          Object.defineProperty(
+            Element.prototype,
+            "scrollIntoView",
+            scrollIntoViewDescriptor,
+          );
+        } else {
+          Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+        }
       }
     });
 
