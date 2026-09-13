@@ -13,6 +13,9 @@ import {
 import { flushSync } from "react-dom";
 import { createRoot, hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { compile } from "tailwindcss";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DocumentSummaryDto, SearchResultDto } from "@/lib/api";
 import type { PendingNotice } from "@/lib/notice";
@@ -7425,6 +7428,417 @@ describe("dashboard shortcut ownership", () => {
       host.remove();
       focusOwner.remove();
     }
+  });
+});
+
+describe.each(["search", "trash"] as const)("dashboard %s failure-message wrapping", (surface) => {
+  it.each([
+    { name: "300-character unbroken reason", reason: "x".repeat(300) },
+    { name: "ordinary reason", reason: "Service temporarily unavailable" },
+    { name: "literal HTML, quotes and whitespace", reason: ' \t<strong title="reason">"Unavailable" & \'retry\'</strong>\n  Try again.  ' },
+    { name: "whitespace-only reason", reason: " \t\n  " },
+  ])("keeps the $name exact beside a single usable Retry through replacement and recovery", async ({ reason }) => {
+    const replacement = `Replacement-${"y".repeat(280)}`;
+    const failedRetry = deferred<SearchResponse>();
+    const recovery = deferred<SearchResponse>();
+    const requests = surface === "search" ? searchDocuments : listDocuments;
+    if (surface === "search") {
+      searchDocuments
+        .mockRejectedValueOnce(new ApiError(503, reason))
+        .mockReturnValueOnce(failedRetry.promise)
+        .mockReturnValueOnce(recovery.promise);
+    } else {
+      listDocuments
+        .mockResolvedValueOnce({ documents: [trashedDoc("cached", "Cached trash row")] })
+        .mockRejectedValueOnce(new ApiError(503, reason))
+        .mockReturnValueOnce(failedRetry.promise)
+        .mockReturnValueOnce(recovery.promise);
+    }
+    renderDashboard();
+    if (surface === "search") {
+      await dispatchSearchAction(() => {
+        fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+      });
+      await settleSearch();
+    } else {
+      openTrash();
+      await act(async () => {});
+      leaveTrash();
+      openTrash();
+      await act(async () => {});
+    }
+
+    const alert = screen.getByTestId(`${surface}-error`);
+    const message = alert.firstElementChild;
+    const retry = within(alert).getByRole("button", { name: "Retry" });
+    const initialHandler = captureReactHandler(retry, "onClick");
+    const initialCount = surface === "search" ? 1 : 2;
+    const note = surface === "trash" ? screen.getByTestId("trash-note").outerHTML : null;
+    const expected = surface === "search"
+      ? `Content search failed: ${reason}. Showing title matches only.`
+      : reason;
+    expect(requests).toHaveBeenCalledTimes(initialCount);
+    expect(alert.className).toBe("mb-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40");
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).toHaveAttribute("aria-atomic", "true");
+    expect(message?.tagName).toBe("SPAN");
+    expect(message?.className).toBe("min-w-0 flex-1 wrap-anywhere");
+    expect(message?.getAttributeNames()).toEqual(["class"]);
+    expect(message?.children).toHaveLength(0);
+    expect(message?.textContent).toBe(expected);
+    expect(alert.textContent).toBe(`${expected}Retry`);
+    expect(Array.from(alert.children)).toEqual([message, retry]);
+    expect(alert.querySelectorAll("button, a, input, select, textarea, [tabindex], [contenteditable]")).toHaveLength(1);
+    expect(alert.querySelector("[title], [style]")).toBeNull();
+    expect(alert.className).not.toMatch(/truncate|line-clamp|overflow-|break-all/);
+    expect(retry.className).toBe(surface === "search" ? "btn btn-sm btn-outline shrink-0" : "btn btn-sm btn-outline shrink-0 gap-1.5");
+    expect(retry).toHaveAttribute("type", "button");
+    expect(retry).toBeEnabled();
+    expect(retry).not.toHaveAttribute("aria-busy");
+
+    await dispatchSearchAction(() => {
+      retry.click();
+      retry.click();
+    });
+    expect(requests).toHaveBeenCalledTimes(initialCount + 1);
+    if (surface === "search") {
+      expect(searchDocuments.mock.calls[1][0]).toBe("alpha");
+      expect(within(screen.getByTestId("document-list")).getAllByRole("link")).toHaveLength(1);
+      expect(screen.getByRole("link", { name: /Alpha planning/ })).toBeInTheDocument();
+    } else {
+      expect(listDocuments).toHaveBeenLastCalledWith({ trash: true });
+      expect(screen.getAllByTestId("trash-card")).toHaveLength(1);
+      expect(screen.getByText("Cached trash row")).toBeInTheDocument();
+      expect(screen.getByTestId("trash-note").outerHTML).toBe(note);
+      expect(trashButton("Cached trash row", "restore-button")).toBeEnabled();
+      expect(trashButton("Cached trash row", "purge-button")).toBeEnabled();
+      expect(screen.getByTestId("trash-view")).toHaveAttribute("aria-busy", "true");
+      expect(alert.compareDocumentPosition(screen.getByTestId("trash-list")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    expect(alert.firstElementChild).toBe(message);
+    expect(message?.textContent).toBe(expected);
+    expect(alert.textContent).toBe(`${expected}Retrying…`);
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveAttribute("aria-busy", "true");
+    expect(Array.from(alert.children)).toEqual([message, retry]);
+
+    await act(async () => {
+      failedRetry.reject(new ApiError(503, replacement));
+      await Promise.allSettled([failedRetry.promise]);
+    });
+    const replacementText = surface === "search"
+      ? `Content search failed: ${replacement}. Showing title matches only.`
+      : replacement;
+    expect(screen.getByTestId(`${surface}-error`)).toBe(alert);
+    expect(alert.firstElementChild).toBe(message);
+    expect(message?.textContent).toBe(replacementText);
+    expect(message?.children).toHaveLength(0);
+    expect(alert.textContent).toBe(`${replacementText}Retry`);
+    expect(retry).toBeEnabled();
+    expect(retry).not.toHaveAttribute("aria-busy");
+    const currentHandler = captureReactHandler(retry, "onClick");
+    let replayEvent: unknown;
+    const restore = interceptReactHandler(retry, "onClick", (original, event) => {
+      replayEvent = event;
+      const beforeStale = requests.mock.calls.length;
+      initialHandler(event);
+      expect(requests).toHaveBeenCalledTimes(beforeStale);
+      original(event);
+    });
+    try {
+      await dispatchSearchAction(() => {
+        retry.click();
+        retry.click();
+      });
+    } finally {
+      restore();
+    }
+    expect(requests).toHaveBeenCalledTimes(initialCount + 2);
+    expect(message?.textContent).toBe(replacementText);
+    expect(retry).toBeDisabled();
+    await act(async () => {
+      recovery.resolve({ query: "alpha", documents: [result("recovered", "Recovered document", "Recovered alpha content")] });
+      await recovery.promise;
+    });
+    expect(screen.queryByTestId(`${surface}-error`)).toBeNull();
+    expect(alert).not.toBeInTheDocument();
+    expect(screen.getByText("Recovered document")).toBeInTheDocument();
+    const markup = document.body.innerHTML;
+    act(() => {
+      initialHandler(replayEvent);
+      currentHandler(replayEvent);
+      retry.click();
+    });
+    expect(requests).toHaveBeenCalledTimes(initialCount + 2);
+    expect(document.body.innerHTML).toBe(markup);
+    if (surface === "search") {
+      expect(searchDocuments.mock.calls[2][0]).toBe("alpha");
+      expect(within(screen.getByTestId("document-list")).getAllByRole("link")).toHaveLength(1);
+      expect(screen.getByTestId("search-snippet").textContent).toBe("Recovered alpha content");
+      expect(listDocuments).not.toHaveBeenCalled();
+    } else {
+      expect(screen.getAllByTestId("trash-card")).toHaveLength(1);
+      expect(screen.queryByText("Cached trash row")).toBeNull();
+      expect(screen.getByTestId("trash-note").outerHTML).toBe(note);
+      expect(screen.getByTestId("trash-view")).not.toHaveAttribute("aria-busy");
+      expect(searchDocuments).not.toHaveBeenCalled();
+    }
+    expect(restoreDocument).not.toHaveBeenCalled();
+    expect(purgeDocument).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    expect(router.refresh).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "min-w-0 flex-1",
+    "min-w-0 flex-1 break-all",
+    "min-w-0 flex-1 wrap-anywhere extra",
+  ])("keeps the exact message-class guard strict against %s", async (className) => {
+    const requests = surface === "search" ? searchDocuments : listDocuments;
+    searchDocuments.mockRejectedValueOnce(new ApiError(503, "s".repeat(300)));
+    listDocuments.mockRejectedValueOnce(new ApiError(503, "t".repeat(300)));
+    renderDashboard();
+    if (surface === "search") {
+      await dispatchSearchAction(() => {
+        fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+      });
+      await settleSearch();
+    } else {
+      openTrash();
+      await act(async () => {});
+    }
+    const alert = screen.getByTestId(`${surface}-error`);
+    const retry = within(alert).getByRole("button", { name: "Retry" });
+    expect(alert.firstElementChild?.className).toBe("min-w-0 flex-1 wrap-anywhere");
+    alert.firstElementChild!.className = className;
+    await dispatchSearchAction(() => retry.click());
+    expect(requests).toHaveBeenCalledTimes(1);
+    expect(restoreDocument).not.toHaveBeenCalled();
+    expect(purgeDocument).not.toHaveBeenCalled();
+  });
+
+  it("preserves empty-reason formatting and omission", async () => {
+    searchDocuments.mockRejectedValueOnce(new ApiError(503, ""));
+    listDocuments.mockRejectedValueOnce(new ApiError(503, ""));
+    renderDashboard();
+    if (surface === "search") {
+      await dispatchSearchAction(() => {
+        fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+      });
+      await settleSearch();
+      expect(screen.getByTestId("search-error").textContent).toBe("Content search failed: . Showing title matches only.Retry");
+    } else {
+      openTrash();
+      await act(async () => {});
+      expect(screen.queryByTestId("trash-error")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    }
+  });
+});
+
+describe("dashboard failure-message wrapping lifetimes", () => {
+  it("compiles the installed wrap-anywhere utility without break-all", async () => {
+    const theme = readFileSync(createRequire(import.meta.url).resolve("tailwindcss/theme.css"), "utf8");
+    const { build } = await compile(`${theme}\n@tailwind utilities;`);
+    const css = build(["wrap-anywhere", "min-w-0", "flex-1", "shrink-0"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).toMatch(/\.min-w-0\s*\{\s*min-width:\s*0px;\s*\}/);
+    expect(css).toMatch(/\.flex-1\s*\{\s*flex:\s*1;\s*\}/);
+    expect(css).toMatch(/\.shrink-0\s*\{\s*flex-shrink:\s*0;\s*\}/);
+    expect(css).not.toMatch(/word-break:\s*break-all|overflow:\s*(auto|scroll|hidden)|text-overflow:\s*ellipsis/);
+  });
+
+  it.each([
+    { boundary: "query", settlement: "success" },
+    { boundary: "query", settlement: "failure" },
+    { boundary: "user", settlement: "success" },
+    { boundary: "user", settlement: "failure" },
+  ])("retires long search errors across a $boundary change before stale $settlement", async ({ boundary, settlement }) => {
+    const oldReason = "old-search-".repeat(30);
+    const currentReason = "current-search-".repeat(20);
+    const stale = deferred<SearchResponse>();
+    const recovery = deferred<SearchResponse>();
+    searchDocuments
+      .mockRejectedValueOnce(new ApiError(503, oldReason))
+      .mockReturnValueOnce(stale.promise)
+      .mockRejectedValueOnce(new ApiError(503, currentReason))
+      .mockReturnValueOnce(recovery.promise);
+    const view = renderDashboard();
+    const search = screen.getByRole("textbox", { name: "Search documents" });
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "alpha" } });
+    });
+    await settleSearch();
+    const oldRetry = within(screen.getByTestId("search-error")).getByRole("button", { name: "Retry" });
+    const staleHandler = captureReactHandler(oldRetry, "onClick");
+    await dispatchSearchAction(() => oldRetry.click());
+    expect(searchDocuments).toHaveBeenCalledTimes(2);
+    const currentQuery = boundary === "query" ? "notes" : "alpha";
+    if (boundary === "query") {
+      await dispatchSearchAction(() => fireEvent.change(search, { target: { value: currentQuery } }));
+    } else {
+      view.rerender(<Dashboard user={{ ...USER, id: "replacement-owner", login: "replacement-owner" }} documents={DOCUMENTS} githubAvailable githubConfigured />);
+    }
+    expect(screen.queryByTestId("search-error")).toBeNull();
+    expect(searchDocuments.mock.calls[1][1]?.signal?.aborted).toBe(true);
+    await settleSearch();
+    const alert = screen.getByTestId("search-error");
+    const currentText = `Content search failed: ${currentReason}. Showing title matches only.`;
+    expect(alert.firstElementChild?.textContent).toBe(currentText);
+    await act(async () => {
+      if (settlement === "success") {
+        stale.resolve({ query: "alpha", documents: [result("obsolete", "Obsolete content", oldReason)] });
+      } else {
+        stale.reject(new ApiError(503, oldReason));
+      }
+      await Promise.allSettled([stale.promise]);
+    });
+    expect(alert.firstElementChild?.textContent).toBe(currentText);
+    expect(screen.queryByText("Obsolete content")).toBeNull();
+    const retry = within(alert).getByRole("button", { name: "Retry" });
+    const restore = interceptReactHandler(retry, "onClick", (original, event) => {
+      staleHandler(event);
+      expect(searchDocuments).toHaveBeenCalledTimes(3);
+      original(event);
+    });
+    try {
+      await dispatchSearchAction(() => {
+        retry.click();
+        retry.click();
+      });
+    } finally {
+      restore();
+    }
+    expect(searchDocuments).toHaveBeenCalledTimes(4);
+    expect(searchDocuments.mock.calls[3][0]).toBe(currentQuery);
+    expect(within(screen.getByTestId("document-list")).getAllByRole("link")).toHaveLength(1);
+    await act(async () => {
+      recovery.resolve({ query: currentQuery, documents: [] });
+      await recovery.promise;
+    });
+    expect(screen.queryByTestId("search-error")).toBeNull();
+    expect(screen.getByText(`No matches for "${currentQuery}"`)).toBeInTheDocument();
+  });
+
+  it("retires the old search Retry on a filter change while keeping the current reason and filtered recovery", async () => {
+    const reason = "filter-error-".repeat(25);
+    const recovery = deferred<SearchResponse>();
+    searchDocuments.mockRejectedValueOnce(new ApiError(503, reason)).mockReturnValueOnce(recovery.promise);
+    renderDashboard();
+    await dispatchSearchAction(() => {
+      fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
+    });
+    await settleSearch();
+    const oldRetry = within(screen.getByTestId("search-error")).getByRole("button", { name: "Retry" });
+    const staleHandler = captureReactHandler(oldRetry, "onClick");
+    fireEvent.click(screen.getByTestId("filter-shared"));
+    const alert = screen.getByTestId("search-error");
+    expect(alert.firstElementChild?.textContent).toBe(`Content search failed: ${reason}. Showing title matches only.`);
+    expect(screen.getByText('No title matches for "alpha"')).toBeInTheDocument();
+    expect(screen.queryByTestId("document-list")).toBeNull();
+    const retry = within(alert).getByRole("button", { name: "Retry" });
+    const restore = interceptReactHandler(retry, "onClick", (original, event) => {
+      staleHandler(event);
+      expect(searchDocuments).toHaveBeenCalledTimes(1);
+      original(event);
+    });
+    try {
+      await dispatchSearchAction(() => {
+        retry.click();
+        retry.click();
+      });
+    } finally {
+      restore();
+    }
+    expect(searchDocuments).toHaveBeenCalledTimes(2);
+    expect(searchDocuments.mock.calls[1][0]).toBe("alpha");
+    expect(screen.getByTestId("filter-shared")).toHaveAttribute("aria-pressed", "true");
+    await act(async () => {
+      recovery.resolve({
+        query: "alpha",
+        documents: [
+          result("owned", "Owned result", "Owned alpha"),
+          { ...result("shared", "Shared result", "Shared alpha"), ownerId: "other-owner", role: "viewer" },
+        ],
+      });
+      await recovery.promise;
+    });
+    expect(screen.queryByTestId("search-error")).toBeNull();
+    expect(screen.queryByText("Owned result")).toBeNull();
+    expect(screen.getByText("Shared result")).toBeInTheDocument();
+    expect(within(screen.getByTestId("document-list")).getAllByRole("link")).toHaveLength(1);
+  });
+
+  it.each(["success", "failure"] as const)("retires long Trash errors and Retry callbacks across visits before stale %s", async (settlement) => {
+    const oldReason = "old-trash-".repeat(30);
+    const currentReason = "current-trash-".repeat(20);
+    const stale = deferred<ListResponse>();
+    const recovery = deferred<ListResponse>();
+    listDocuments
+      .mockResolvedValueOnce({ documents: [trashedDoc("cached", "Cached trash row")] })
+      .mockRejectedValueOnce(new ApiError(503, oldReason))
+      .mockReturnValueOnce(stale.promise)
+      .mockRejectedValueOnce(new ApiError(503, currentReason))
+      .mockReturnValueOnce(recovery.promise);
+    renderDashboard();
+    openTrash();
+    await act(async () => {});
+    leaveTrash();
+    openTrash();
+    await act(async () => {});
+    const oldAlert = screen.getByTestId("trash-error");
+    const oldRetry = within(oldAlert).getByRole("button", { name: "Retry" });
+    const staleHandler = captureReactHandler(oldRetry, "onClick");
+    fireEvent.click(oldRetry);
+    expect(listDocuments).toHaveBeenCalledTimes(3);
+    leaveTrash();
+    expect(screen.queryByTestId("trash-error")).toBeNull();
+    openTrash();
+    await act(async () => {});
+    const alert = screen.getByTestId("trash-error");
+    expect(alert).not.toBe(oldAlert);
+    expect(alert.firstElementChild?.textContent).toBe(currentReason);
+    await act(async () => {
+      if (settlement === "success") {
+        stale.resolve({ documents: [trashedDoc("obsolete", "Obsolete trash row")] });
+      } else {
+        stale.reject(new ApiError(503, oldReason));
+      }
+      await Promise.allSettled([stale.promise]);
+    });
+    expect(alert.firstElementChild?.textContent).toBe(currentReason);
+    expect(screen.queryByText("Obsolete trash row")).toBeNull();
+    const retry = within(alert).getByRole("button", { name: "Retry" });
+    const restore = interceptReactHandler(retry, "onClick", (original, event) => {
+      const beforeStale = listDocuments.mock.calls.length;
+      staleHandler(event);
+      expect(listDocuments).toHaveBeenCalledTimes(beforeStale);
+      original(event);
+    });
+    try {
+      await dispatchSearchAction(() => {
+        retry.click();
+        retry.click();
+      });
+    } finally {
+      restore();
+    }
+    expect(listDocuments).toHaveBeenCalledTimes(5);
+    expect(listDocuments).toHaveBeenLastCalledWith({ trash: true });
+    expect(screen.getByText("Cached trash row")).toBeInTheDocument();
+    expect(screen.getAllByTestId("trash-card")).toHaveLength(1);
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveAttribute("aria-busy", "true");
+    await act(async () => {
+      recovery.resolve({ documents: [] });
+      await recovery.promise;
+    });
+    expect(screen.queryByTestId("trash-error")).toBeNull();
+    expect(screen.queryByTestId("trash-list")).toBeNull();
+    expect(screen.getByText("The trash is empty")).toBeInTheDocument();
+    expect(restoreDocument).not.toHaveBeenCalled();
+    expect(purgeDocument).not.toHaveBeenCalled();
+    expect(router.refresh).not.toHaveBeenCalled();
   });
 });
 
