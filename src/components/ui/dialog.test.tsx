@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import {
   StrictMode,
   useEffect,
@@ -15,6 +17,7 @@ import { flushSync } from "react-dom";
 import { renderToString } from "react-dom/server";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { compile } from "tailwindcss";
 import { Dialog, DialogClose, DialogContent, DialogTrigger } from "./dialog";
 import { lazyOnFirstUse } from "@/components/editor/lazy-on-first-use";
 
@@ -1971,6 +1974,208 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(dialog()).toHaveAccessibleName("Exact title");
     expect(dialog()).toHaveAccessibleDescription("Exact title");
     expect(screen.getByTestId("first-body-control")).toHaveFocus();
+  });
+});
+
+describe("DialogContent header wrapping", () => {
+  const textCases = [
+    { kind: "unbroken", title: "T".repeat(256), description: "D".repeat(320) },
+    {
+      kind: "multiword",
+      title: "An ordinary dialog title with several words",
+      description: "An explanation that keeps every word while wrapping beside the Close button.",
+    },
+    {
+      kind: "literal markup",
+      title: '<button tabindex="0">Not a control</button> & <em>not emphasis</em>',
+      description: '<a href="/not-a-link">Plain text</a> & <img src="not-an-image" />',
+    },
+  ];
+  const variants = [{ size: "normal", wide: false }, { size: "wide", wide: true }];
+  const body = <><input data-testid="wrapping-input" autoFocus /><button type="button">Continue</button></>;
+
+  function expectHeader(titleText: string, descriptionText: string | undefined, wide: boolean) {
+    const content = dialog();
+    const heading = screen.getByRole("heading", { level: 2, name: titleText });
+    const description = content.querySelector("p");
+    const group = heading.parentElement;
+    const currentHeader = header();
+    const close = closeButton();
+    if (!description || !group) throw new Error("The dialog title group was not rendered");
+
+    expect(content).toHaveAccessibleName(titleText);
+    expect(content).toHaveAccessibleDescription(descriptionText ?? titleText);
+    expect(content.className).toBe(`dialog animate-fade-in${wide ? " w-[min(94vw,760px)]" : ""}`);
+    expect(heading.id).not.toBe("");
+    expect(description.id).not.toBe("");
+    expect(heading.id).not.toBe(description.id);
+    expect(content).toHaveAttribute("aria-labelledby", heading.id);
+    expect(content).toHaveAttribute("aria-describedby", description.id);
+    expect(document.getElementById(heading.id)).toBe(heading);
+    expect(document.getElementById(description.id)).toBe(description);
+    expect(currentHeader.className).toBe("mb-4 flex items-start justify-between gap-4");
+    expect(currentHeader).toHaveAttribute("data-focus-skip");
+    expect(group.className).toBe("min-w-0");
+    expect(heading.className).toBe("text-lg font-semibold text-ink wrap-anywhere");
+    expect(description.className).toBe(
+      descriptionText !== undefined ? "mt-1 text-sm text-ink-3 wrap-anywhere" : "sr-only",
+    );
+    if (descriptionText !== undefined) expect(description).toBeVisible();
+    expect(heading.textContent).toBe(titleText);
+    expect(description.textContent).toBe(descriptionText ?? titleText);
+    expect(heading.children).toHaveLength(0);
+    expect(description.children).toHaveLength(0);
+    expect(heading.childNodes).toHaveLength(1);
+    expect(description.childNodes).toHaveLength(descriptionText === "" ? 0 : 1);
+    expect([...group.childNodes]).toEqual([heading, description]);
+    expect([...currentHeader.childNodes]).toEqual([group, close]);
+    expect([...content.childNodes]).toEqual([
+      currentHeader, screen.getByTestId("wrapping-input"), screen.getByRole("button", { name: "Continue" }),
+    ]);
+    expect(close.className).toBe("icon-btn -mr-2 -mt-1 h-8 w-8 shrink-0");
+    expect(close).toHaveAccessibleName("Close");
+    expect(close).toBeEnabled();
+    expect(close).toHaveAttribute("type", "button");
+    expect([...content.querySelectorAll<HTMLElement>("*")].filter((element) => element.tabIndex >= 0)).toEqual([
+      close, screen.getByTestId("wrapping-input"), screen.getByRole("button", { name: "Continue" }),
+    ]);
+    return { content, heading, description, group, close };
+  }
+
+  it.each(variants.flatMap((variant) => textCases.map((text) => ({ ...variant, ...text }))))(
+    "preserves complete $kind text and header topology in $size dialogs",
+    ({ title, description, wide }) => {
+      renderDirect(
+        <StrictMode>
+          <Dialog defaultOpen><DialogContent title={title} description={description} wide={wide}>{body}</DialogContent></Dialog>
+        </StrictMode>,
+      );
+      expectHeader(title, description, wide);
+      expect(screen.getByTestId("wrapping-input")).toHaveFocus();
+    },
+  );
+
+  it.each(variants.flatMap((variant) => [
+    { ...variant, kind: "missing", description: undefined },
+    { ...variant, kind: "empty", description: "" },
+  ]))("preserves a $kind description in $size dialogs", ({ wide, description }) => {
+    const title = textCases[0].title;
+    renderDirect(
+      <StrictMode>
+        <Dialog defaultOpen><DialogContent title={title} description={description} wide={wide}>{body}</DialogContent></Dialog>
+      </StrictMode>,
+    );
+    expectHeader(title, description, wide);
+  });
+
+  it.each(variants)(
+    "keeps names, Radix references and current dismissal through replacement and reopen in $size dialogs",
+    async ({ wide }) => {
+      const onClosed = vi.fn();
+      const onOpenChange = vi.fn();
+      const tree = (text: { title: string; description?: string }) => (
+        <StrictMode>
+          <Dialog onOpenChange={onOpenChange}>
+            <DialogTrigger>Open dialog</DialogTrigger>
+            <DialogContent {...text} wide={wide} onClosed={onClosed}>{body}</DialogContent>
+          </Dialog>
+        </StrictMode>
+      );
+      const view = renderDirect(tree(textCases[0]));
+      const opener = screen.getByRole("button", { name: "Open dialog" });
+      act(() => opener.focus());
+      fireEvent.click(opener);
+      const initial = expectHeader(textCases[0].title, textCases[0].description, wide);
+      const titleId = initial.heading.id;
+      const descriptionId = initial.description.id;
+      const initialClick = captureClick(initial.close);
+
+      for (const text of [
+        textCases[2], textCases[1],
+        { title: textCases[0].title, description: undefined },
+        { title: textCases[0].title, description: "" },
+        textCases[0],
+      ]) {
+        act(() => view.root.render(tree(text)));
+        const current = expectHeader(text.title, text.description, wide);
+        expect(current.content).toBe(initial.content);
+        expect(current.heading.id).toBe(titleId);
+        expect(current.description.id).toBe(descriptionId);
+        invokeFromCurrentNativePath(initialClick, current.close);
+        expect(onClosed).not.toHaveBeenCalled();
+        expect(onOpenChange.mock.calls).toEqual([[true]]);
+        expect(screen.getByTestId("wrapping-input")).toHaveFocus();
+      }
+
+      const retiredClose = closeButton();
+      const retiredClick = captureClick(retiredClose);
+      fireEvent.click(retiredClose);
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(onClosed).toHaveBeenCalledOnce();
+      expect(onOpenChange.mock.calls).toEqual([[true], [false]]);
+      expect(opener).toHaveFocus();
+
+      fireEvent.click(opener);
+      const reopened = expectHeader(textCases[0].title, textCases[0].description, wide);
+      expect(reopened.content).not.toBe(initial.content);
+      expect(reopened.heading.id).toBe(titleId);
+      expect(reopened.description.id).toBe(descriptionId);
+      invokeFromCurrentNativePath(retiredClick, reopened.close);
+      act(() => retiredClick(fabricatedClick(retiredClose)));
+      expect(onClosed).toHaveBeenCalledOnce();
+      expect(onOpenChange.mock.calls).toEqual([[true], [false], [true]]);
+      expect(screen.getByTestId("wrapping-input")).toHaveFocus();
+
+      fireEvent.keyDown(screen.getByTestId("wrapping-input"), { key: "Escape", code: "Escape" });
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(onClosed).toHaveBeenCalledTimes(2);
+      expect(onOpenChange.mock.calls).toEqual([[true], [false], [true], [false]]);
+      expect(opener).toHaveFocus();
+    },
+  );
+
+  it("does not schedule work, fetch or mutate DOM during passive header inspection", async () => {
+    const { title, description } = textCases[0];
+    renderDirect(
+      <StrictMode>
+        <Dialog defaultOpen><DialogContent title={title} description={description}>{body}</DialogContent></Dialog>
+      </StrictMode>,
+    );
+    await flushTasks();
+    const timeout = vi.spyOn(window, "setTimeout");
+    const interval = vi.spyOn(window, "setInterval");
+    const frame = vi.spyOn(window, "requestAnimationFrame");
+    const microtask = vi.spyOn(window, "queueMicrotask");
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const observer = new MutationObserver(() => {});
+    observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+    try {
+      expectHeader(title, description, false);
+      expectHeader(title, description, false);
+      expect(observer.takeRecords()).toHaveLength(0);
+      expect(timeout).not.toHaveBeenCalled();
+      expect(interval).not.toHaveBeenCalled();
+      expect(frame).not.toHaveBeenCalled();
+      expect(microtask).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      observer.disconnect();
+    }
+  });
+
+  it("emits anywhere wrapping, zero minimum width and unchanged Close sizing from installed Tailwind", async () => {
+    const theme = readFileSync(createRequire(import.meta.url).resolve("tailwindcss/theme.css"), "utf8");
+    const { build } = await compile(`${theme}\n@tailwind utilities;`);
+    const css = build(["wrap-anywhere", "min-w-0", "shrink-0", "h-8", "w-8"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).toMatch(/\.min-w-0\s*\{\s*min-width:\s*0px;\s*\}/);
+    expect(css).toMatch(/\.shrink-0\s*\{\s*flex-shrink:\s*0;\s*\}/);
+    expect(css).toContain("--spacing: 0.25rem;");
+    expect(css).toMatch(/\.h-8\s*\{\s*height:\s*calc\(var\(--spacing\) \* 8\);\s*\}/);
+    expect(css).toMatch(/\.w-8\s*\{\s*width:\s*calc\(var\(--spacing\) \* 8\);\s*\}/);
+    expect(css).not.toMatch(/word-break:|text-overflow:|overflow:\s*(hidden|auto|scroll)/);
   });
 });
 

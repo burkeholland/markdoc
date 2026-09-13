@@ -11,8 +11,9 @@ import { cn } from "@/lib/utils";
 
 const OVERLAY_CLASS_NAME = "dialog-overlay animate-fade-in";
 const HEADER_CLASS_NAME = "mb-4 flex items-start justify-between gap-4";
-const TITLE_CLASS_NAME = "text-lg font-semibold text-ink";
-const DESCRIPTION_CLASS_NAME = "mt-1 text-sm text-ink-3";
+const TITLE_GROUP_CLASS_NAME = "min-w-0";
+const TITLE_CLASS_NAME = "text-lg font-semibold text-ink wrap-anywhere";
+const DESCRIPTION_CLASS_NAME = "mt-1 text-sm text-ink-3 wrap-anywhere";
 const HIDDEN_DESCRIPTION_CLASS_NAME = "sr-only";
 const CLOSE_CLASS_NAME = "icon-btn -mr-2 -mt-1 h-8 w-8 shrink-0";
 
@@ -1485,6 +1486,7 @@ function staticTopologyMatches(
     && header.childNodes.length === 2
     && titleGroup instanceof view.HTMLDivElement
     && header.firstElementChild === titleGroup
+    && titleGroup.getAttribute("class") === TITLE_GROUP_CLASS_NAME
     && titleGroup.children.length === 2
     && titleGroup.childNodes.length === 2
     && titleGroup.firstElementChild === title
@@ -3363,7 +3365,7 @@ export function DialogContent({
             className={HEADER_CLASS_NAME}
             data-focus-skip
           >
-            <div>
+            <div className={TITLE_GROUP_CLASS_NAME}>
               <RadixDialog.Title
                 ref={captureTitle}
                 className={TITLE_CLASS_NAME}
