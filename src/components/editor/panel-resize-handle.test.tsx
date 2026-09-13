@@ -27,6 +27,13 @@ type HandlePointer = (event: ReactPointerEvent<HTMLDivElement>) => void;
 type HandleKeyboard = (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 type HandleDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => void;
 type HandleRef<T extends HTMLElement> = (element: T | null) => void;
+type TestKeyboardMethod = (this: object) => unknown;
+
+interface TestKeyboardMethods {
+  readonly preventDefault: TestKeyboardMethod;
+  readonly isDefaultPrevented: TestKeyboardMethod;
+  readonly isPropagationStopped: TestKeyboardMethod;
+}
 
 interface HandleHandlers {
   readonly pointerDown: HandlePointer;
@@ -540,35 +547,107 @@ describe("PanelResizeHandle", () => {
     },
   );
 
-  it("retains exact public methods and prevents once before one callback", () => {
+  it("authenticates phase-local wrappers, prototypes, and public methods", () => {
     const onResize = vi.fn();
     const view = strictView({ onResize });
     const handle = currentHandle(view.host);
-    let retainedPrevent: ((this: object) => unknown) | null = null;
-    const prevent = vi.fn(function (this: object) {
-      if (!retainedPrevent) throw new Error("No public preventDefault was retained");
-      return Reflect.apply(retainedPrevent, this, []);
-    });
-    const install = (event: unknown) => {
+    const originals: {
+      capture: TestKeyboardMethods | null;
+      bubble: TestKeyboardMethods | null;
+    } = { capture: null, bubble: null };
+    const prototypes: { capture: object | null; bubble: object | null } = {
+      capture: null,
+      bubble: null,
+    };
+    const phaseMethods = {
+      capture: {
+        preventDefault: vi.fn(function (this: object) {
+          return Reflect.apply(originals.capture!.preventDefault, this, []);
+        }),
+        isDefaultPrevented: vi.fn(function (this: object) {
+          return Reflect.apply(
+            originals.capture!.isDefaultPrevented,
+            this,
+            [],
+          );
+        }),
+        isPropagationStopped: vi.fn(function (this: object) {
+          return Reflect.apply(
+            originals.capture!.isPropagationStopped,
+            this,
+            [],
+          );
+        }),
+      },
+      bubble: {
+        preventDefault: vi.fn(function (this: object) {
+          return Reflect.apply(originals.bubble!.preventDefault, this, []);
+        }),
+        isDefaultPrevented: vi.fn(function (this: object) {
+          return Reflect.apply(
+            originals.bubble!.isDefaultPrevented,
+            this,
+            [],
+          );
+        }),
+        isPropagationStopped: vi.fn(function (this: object) {
+          return Reflect.apply(
+            originals.bubble!.isPropagationStopped,
+            this,
+            [],
+          );
+        }),
+      },
+    } satisfies Record<"capture" | "bubble", TestKeyboardMethods>;
+    const install = (
+      phase: "capture" | "bubble",
+      event: unknown,
+    ) => {
       const wrapper = event as Record<PropertyKey, unknown>;
-      if (!retainedPrevent) {
-        if (typeof wrapper.preventDefault !== "function") {
-          throw new Error("React preventDefault was unavailable");
-        }
-        retainedPrevent = wrapper.preventDefault as (this: object) => unknown;
+      const preventDefault = wrapper.preventDefault;
+      const isDefaultPrevented = wrapper.isDefaultPrevented;
+      const isPropagationStopped = wrapper.isPropagationStopped;
+      if (
+        typeof preventDefault !== "function"
+        || typeof isDefaultPrevented !== "function"
+        || typeof isPropagationStopped !== "function"
+      ) {
+        throw new Error("React public keyboard methods were unavailable");
       }
-      Object.defineProperty(wrapper, "preventDefault", {
-        configurable: true,
-        enumerable: true,
-        writable: true,
-        value: prevent,
+      originals[phase] = {
+        preventDefault: preventDefault as TestKeyboardMethod,
+        isDefaultPrevented: isDefaultPrevented as TestKeyboardMethod,
+        isPropagationStopped: isPropagationStopped as TestKeyboardMethod,
+      };
+      const prototype = Object.create(Object.getPrototypeOf(wrapper)) as object;
+      prototypes[phase] = prototype;
+      Object.setPrototypeOf(wrapper, prototype);
+      Object.defineProperties(wrapper, {
+        preventDefault: {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: phaseMethods[phase].preventDefault,
+        },
+        isDefaultPrevented: {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: phaseMethods[phase].isDefaultPrevented,
+        },
+        isPropagationStopped: {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: phaseMethods[phase].isPropagationStopped,
+        },
       });
     };
     const stopCapture = intercept<HandleKeyboard>(
       handle,
       "onKeyDownCapture",
       (current, event) => {
-        install(event);
+        install("capture", event);
         current(event as ReactKeyboardEvent<HTMLDivElement>);
       },
     );
@@ -576,7 +655,7 @@ describe("PanelResizeHandle", () => {
       handle,
       "onKeyDown",
       (current, event) => {
-        install(event);
+        install("bubble", event);
         current(event as ReactKeyboardEvent<HTMLDivElement>);
       },
     );
@@ -586,7 +665,15 @@ describe("PanelResizeHandle", () => {
     stopCapture();
 
     expect(event.defaultPrevented).toBe(true);
-    expect(prevent).toHaveBeenCalledOnce();
+    expect(prototypes.capture).not.toBe(prototypes.bubble);
+    expect(phaseMethods.capture.preventDefault)
+      .not.toBe(phaseMethods.bubble.preventDefault);
+    expect(phaseMethods.capture.isDefaultPrevented)
+      .not.toBe(phaseMethods.bubble.isDefaultPrevented);
+    expect(phaseMethods.capture.isPropagationStopped)
+      .not.toBe(phaseMethods.bubble.isPropagationStopped);
+    expect(phaseMethods.capture.preventDefault).not.toHaveBeenCalled();
+    expect(phaseMethods.bubble.preventDefault).toHaveBeenCalledOnce();
     expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
   });
 
@@ -1309,7 +1396,7 @@ describe("PanelResizeHandle", () => {
     expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
   });
 
-  it("rejects required public method drift without poisoning the next pair", () => {
+  it("rejects phase-local public method drift without poisoning the next pair", () => {
     const onResize = vi.fn();
     const view = strictView({ onResize });
     const handle = currentHandle(view.host);
@@ -1317,13 +1404,13 @@ describe("PanelResizeHandle", () => {
       handle,
       "onKeyDown",
       (current, event) => {
+        current(event as ReactKeyboardEvent<HTMLDivElement>);
         Object.defineProperty(event as object, "isPropagationStopped", {
           configurable: true,
           enumerable: true,
           writable: true,
           value: vi.fn(() => false),
         });
-        current(event as ReactKeyboardEvent<HTMLDivElement>);
       },
     );
 
@@ -1399,6 +1486,143 @@ describe("PanelResizeHandle", () => {
     expect(accepted.defaultPrevented).toBe(true);
     expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
   });
+
+  it.each([
+    ["post-prevention default", "ArrowLeft", "resize"],
+    ["capture propagation", "Enter", "reset"],
+  ] as const)(
+    "rejects %s late-query drift for %s and admits a clean successor",
+    (variant, key, effect) => {
+      const onResize = vi.fn();
+      const onReset = vi.fn();
+      const view = strictView({ onResize, onReset });
+      const handle = currentHandle(view.host);
+      let captureWrapper: Record<PropertyKey, unknown> | null = null;
+      let bubbleWrapper: Record<PropertyKey, unknown> | null = null;
+      let retainedBubblePrevent: TestKeyboardMethod | null = null;
+      let retainedCapturePropagation: TestKeyboardMethod | null = null;
+      const prevent = vi.fn(function (this: object) {
+        if (!retainedBubblePrevent || !bubbleWrapper) {
+          throw new Error("The retained bubble prevention was unavailable");
+        }
+        const result = Reflect.apply(retainedBubblePrevent, this, []);
+        if (variant === "post-prevention default") {
+          const currentDefault = bubbleWrapper.isDefaultPrevented;
+          if (typeof currentDefault !== "function") {
+            throw new Error("The post-prevention default query was unavailable");
+          }
+          Object.defineProperty(bubbleWrapper, "isDefaultPrevented", {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: function (this: object) {
+              const current = Reflect.apply(currentDefault, this, []);
+              if (!captureWrapper) {
+                throw new Error("The capture wrapper was unavailable");
+              }
+              Object.defineProperty(captureWrapper, "isDefaultPrevented", {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: vi.fn(() => false),
+              });
+              return current;
+            },
+          });
+        }
+        return result;
+      });
+      const capturePropagation = vi.fn(function (this: object) {
+        if (!retainedCapturePropagation || !captureWrapper) {
+          throw new Error("The retained capture propagation was unavailable");
+        }
+        const current = Reflect.apply(retainedCapturePropagation, this, []);
+        const nativeEvent = captureWrapper.nativeEvent;
+        if (
+          variant === "capture propagation"
+          && nativeEvent instanceof Event
+          && nativeEvent.defaultPrevented
+        ) {
+          if (!bubbleWrapper) {
+            throw new Error("The bubble wrapper was unavailable");
+          }
+          Object.defineProperty(bubbleWrapper, "isPropagationStopped", {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: vi.fn(() => false),
+          });
+        }
+        return current;
+      });
+      const stopCapture = intercept<HandleKeyboard>(
+        handle,
+        "onKeyDownCapture",
+        (current, event) => {
+          captureWrapper = event as Record<PropertyKey, unknown>;
+          if (variant === "capture propagation") {
+            const method = captureWrapper.isPropagationStopped;
+            if (typeof method !== "function") {
+              throw new Error("React capture propagation was unavailable");
+            }
+            retainedCapturePropagation = method as TestKeyboardMethod;
+            Object.defineProperty(
+              captureWrapper,
+              "isPropagationStopped",
+              {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: capturePropagation,
+              },
+            );
+          }
+          current(event as ReactKeyboardEvent<HTMLDivElement>);
+        },
+      );
+      const stopBubble = intercept<HandleKeyboard>(
+        handle,
+        "onKeyDown",
+        (current, event) => {
+          bubbleWrapper = event as Record<PropertyKey, unknown>;
+          const method = bubbleWrapper.preventDefault;
+          if (typeof method !== "function") {
+            throw new Error("React bubble prevention was unavailable");
+          }
+          retainedBubblePrevent = method as TestKeyboardMethod;
+          Object.defineProperty(bubbleWrapper, "preventDefault", {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value: prevent,
+          });
+          current(event as ReactKeyboardEvent<HTMLDivElement>);
+        },
+      );
+
+      const rejected = keyDown(handle, key);
+      stopBubble();
+      stopCapture();
+
+      expect(prevent).toHaveBeenCalledOnce();
+      expect(rejected.defaultPrevented).toBe(true);
+      expect(onResize).not.toHaveBeenCalled();
+      expect(onReset).not.toHaveBeenCalled();
+      act(() => handle.dispatchEvent(rejected));
+      expect(onResize).not.toHaveBeenCalled();
+      expect(onReset).not.toHaveBeenCalled();
+
+      const accepted = keyDown(handle, key);
+      expect(accepted.defaultPrevented).toBe(true);
+      if (effect === "resize") {
+        expect(onResize).toHaveBeenCalledExactlyOnceWith(356);
+        expect(onReset).not.toHaveBeenCalled();
+      } else {
+        expect(onReset).toHaveBeenCalledOnce();
+        expect(onResize).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it("rejects a replayed native event after exactly one callback", () => {
     const onResize = vi.fn();

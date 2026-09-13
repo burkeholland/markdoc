@@ -817,7 +817,6 @@ function readHandleKeyboardReactProof(
   handle: HTMLDivElement,
   phase: number,
   intrinsics: HandleKeyboardIntrinsics,
-  expectedMethods?: HandleKeyboardReactMethods,
 ): HandleKeyboardReactProof | null {
   try {
     const publicValue = (property: PropertyKey) =>
@@ -837,6 +836,15 @@ function readHandleKeyboardReactProof(
       isDefaultPrevented,
       isPropagationStopped,
     });
+    const methodsAreCurrent = () =>
+      publicValue("preventDefault") === methods.preventDefault
+      && publicValue("isDefaultPrevented") === methods.isDefaultPrevented
+      && publicValue("isPropagationStopped") ===
+        methods.isPropagationStopped;
+    const cancellationIsCurrent = () =>
+      publicValue("defaultPrevented") === false
+      && intrinsics.eventDefaultPrevented.read(native.event) === false
+      && intrinsics.eventCancelBubble.read(native.event) === false;
     const composing = publicValue("isComposing");
     const view = publicValue("view");
     if (
@@ -866,18 +874,22 @@ function readHandleKeyboardReactProof(
         view !== intrinsics.ownerWindow &&
         view !== native.path.at(-1)
       ) ||
-      intrinsics.apply(isDefaultPrevented, event, []) !== false ||
-      intrinsics.apply(isPropagationStopped, event, []) !== false ||
-      (
-        expectedMethods &&
-        (
-          methods.preventDefault !== expectedMethods.preventDefault ||
-          methods.isDefaultPrevented !==
-            expectedMethods.isDefaultPrevented ||
-          methods.isPropagationStopped !==
-            expectedMethods.isPropagationStopped
-        )
-      )
+      !methodsAreCurrent() ||
+      !cancellationIsCurrent()
+    ) {
+      return null;
+    }
+    if (
+      intrinsics.apply(isDefaultPrevented, event, []) !== false
+      || !methodsAreCurrent()
+      || !cancellationIsCurrent()
+    ) {
+      return null;
+    }
+    if (
+      intrinsics.apply(isPropagationStopped, event, []) !== false
+      || !methodsAreCurrent()
+      || !cancellationIsCurrent()
     ) {
       return null;
     }
@@ -899,7 +911,6 @@ function readHandleKeyboardReactProof(
 function handleKeyboardReactProofIsCurrent(
   proof: HandleKeyboardReactProof,
   native: HandleKeyboardNativeProof,
-  intrinsics: HandleKeyboardIntrinsics,
   defaultPrevented: boolean,
   currentIsDefaultPrevented: HandleKeyboardMethod,
 ) {
@@ -937,14 +948,7 @@ function handleKeyboardReactProofIsCurrent(
       publicValue("preventDefault") === proof.methods.preventDefault &&
       publicValue("isDefaultPrevented") === currentIsDefaultPrevented &&
       publicValue("isPropagationStopped") ===
-        proof.methods.isPropagationStopped &&
-      intrinsics.apply(currentIsDefaultPrevented, event, []) ===
-        defaultPrevented &&
-      intrinsics.apply(
-        proof.methods.isPropagationStopped,
-        event,
-        [],
-      ) === false
+        proof.methods.isPropagationStopped
     );
   } catch {
     return false;
@@ -1527,7 +1531,6 @@ function createHandleKeyboardRuntime({
       handleKeyboardReactProofIsCurrent(
         proof,
         pair.native,
-        intrinsics,
         expectedDefaultPrevented,
         expectedIsDefaultPrevented,
       ),
@@ -1564,6 +1567,7 @@ function createHandleKeyboardRuntime({
     pair: HandleKeyboardPair,
     windowProof: HandleKeyboardWindowProof,
     beforePrevention: boolean,
+    bubbleIsDefaultPrevented: HandleKeyboardMethod,
   ) => {
     const { native, action, capture, bubble } = pair;
     if (!capture || !bubble) return false;
@@ -1596,20 +1600,11 @@ function createHandleKeyboardRuntime({
         && reactFieldsMatch(
           bubble,
           !beforePrevention,
-          beforePrevention
-            ? bubble.methods.isDefaultPrevented
-            : (
-              bubble.event as unknown as Record<PropertyKey, unknown>
-            ).isDefaultPrevented as HandleKeyboardMethod
+          bubbleIsDefaultPrevented,
         )
         && capture.event !== bubble.event
         && capture.nativeEvent === native.event
         && bubble.nativeEvent === native.event
-        && capture.methods.preventDefault === bubble.methods.preventDefault
-        && capture.methods.isDefaultPrevented
-          === bubble.methods.isDefaultPrevented
-        && capture.methods.isPropagationStopped
-          === bubble.methods.isPropagationStopped
         && windowProof.event === native.event
         && windowProof.listener === onWindowBubble
         && windowProof.addEventListener === intrinsics.addWindowEventListener
@@ -1634,6 +1629,39 @@ function createHandleKeyboardRuntime({
           bubble.event,
           native.event,
           windowProof,
+        )
+      );
+    } catch {
+      return false;
+    }
+  };
+  const queryReactProof = (
+    pair: HandleKeyboardPair,
+    windowProof: HandleKeyboardWindowProof,
+    proof: HandleKeyboardReactProof,
+    method: HandleKeyboardMethod,
+    expected: boolean,
+    beforePrevention: boolean,
+    bubbleIsDefaultPrevented: HandleKeyboardMethod,
+  ) => {
+    if (
+      !pairIsCurrent(
+        pair,
+        windowProof,
+        beforePrevention,
+        bubbleIsDefaultPrevented,
+      )
+    ) {
+      return false;
+    }
+    try {
+      return (
+        intrinsics.apply(method, proof.event, []) === expected
+        && pairIsCurrent(
+          pair,
+          windowProof,
+          beforePrevention,
+          bubbleIsDefaultPrevented,
         )
       );
     } catch {
@@ -1716,7 +1744,6 @@ function createHandleKeyboardRuntime({
         handle,
         placement.window.Event.BUBBLING_PHASE,
         intrinsics,
-        pair.capture.methods,
       );
       if (proof) pair.bubble = proof;
     } finally {
@@ -1955,7 +1982,48 @@ function createHandleKeyboardRuntime({
       pair.consumed = true;
       pair.finalizing = true;
       finalizing = true;
-      if (!pairIsCurrent(pair, proof, true)) return;
+      const initialBubbleDefault = bubble.methods.isDefaultPrevented;
+      if (
+        !pairIsCurrent(pair, proof, true, initialBubbleDefault)
+        || !queryReactProof(
+          pair,
+          proof,
+          capture,
+          capture.methods.isDefaultPrevented,
+          false,
+          true,
+          initialBubbleDefault,
+        )
+        || !queryReactProof(
+          pair,
+          proof,
+          capture,
+          capture.methods.isPropagationStopped,
+          false,
+          true,
+          initialBubbleDefault,
+        )
+        || !queryReactProof(
+          pair,
+          proof,
+          bubble,
+          initialBubbleDefault,
+          false,
+          true,
+          initialBubbleDefault,
+        )
+        || !queryReactProof(
+          pair,
+          proof,
+          bubble,
+          bubble.methods.isPropagationStopped,
+          false,
+          true,
+          initialBubbleDefault,
+        )
+      ) {
+        return;
+      }
       intrinsics.apply(
         bubble.methods.preventDefault,
         bubble.event,
@@ -1966,29 +2034,44 @@ function createHandleKeyboardRuntime({
       ).isDefaultPrevented;
       if (
         !handleKeyboardMethod(currentIsDefaultPrevented)
-        || currentIsDefaultPrevented
-          === bubble.methods.isDefaultPrevented
-        || intrinsics.apply(
+        || !pairIsCurrent(pair, proof, false, currentIsDefaultPrevented)
+        || !queryReactProof(
+          pair,
+          proof,
+          bubble,
           currentIsDefaultPrevented,
-          bubble.event,
-          [],
-        ) !== true
-        || intrinsics.apply(
+          true,
+          false,
+          currentIsDefaultPrevented,
+        )
+        || !queryReactProof(
+          pair,
+          proof,
+          capture,
           capture.methods.isDefaultPrevented,
-          capture.event,
-          [],
-        ) !== false
-        || intrinsics.apply(
+          false,
+          false,
+          currentIsDefaultPrevented,
+        )
+        || !queryReactProof(
+          pair,
+          proof,
+          capture,
           capture.methods.isPropagationStopped,
-          capture.event,
-          [],
-        ) !== false
-        || intrinsics.apply(
+          false,
+          false,
+          currentIsDefaultPrevented,
+        )
+        || !queryReactProof(
+          pair,
+          proof,
+          bubble,
           bubble.methods.isPropagationStopped,
-          bubble.event,
-          [],
-        ) !== false
-        || !pairIsCurrent(pair, proof, false)
+          false,
+          false,
+          currentIsDefaultPrevented,
+        )
+        || !pairIsCurrent(pair, proof, false, currentIsDefaultPrevented)
       ) {
         return;
       }
