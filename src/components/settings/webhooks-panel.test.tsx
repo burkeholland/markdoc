@@ -448,6 +448,60 @@ function dispatchKeyboardToHandler(
   }
 }
 
+function dispatchKeyboardWithReactPairMutation(
+  form: HTMLFormElement,
+  target: HTMLElement,
+  mutations: {
+    captureAfter?: (event: ReactKeyboardEvent<HTMLFormElement>) => void;
+    bubbleBefore?: (event: ReactKeyboardEvent<HTMLFormElement>) => void;
+  } = {},
+  init: KeyboardEventInit = {},
+) {
+  const propsKey = Object.keys(form).find((key) =>
+    key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the form");
+  const properties = form as unknown as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const props = properties[propsKey];
+  const capture = props?.onKeyDownCapture;
+  const bubble = props?.onKeyDown;
+  if (
+    !props ||
+    typeof capture !== "function" ||
+    typeof bubble !== "function"
+  ) {
+    throw new Error("The form has no complete keyboard delivery pair");
+  }
+  let captureEvent: ReactKeyboardEvent<HTMLFormElement> | null = null;
+  let bubbleEvent: ReactKeyboardEvent<HTMLFormElement> | null = null;
+  const wrapped = {
+    ...props,
+    onKeyDownCapture: (event: ReactKeyboardEvent<HTMLFormElement>) => {
+      captureEvent = event;
+      (capture as KeyDownHandler)(event);
+      mutations.captureAfter?.(event);
+    },
+    onKeyDown: (event: ReactKeyboardEvent<HTMLFormElement>) => {
+      bubbleEvent = event;
+      mutations.bubbleBefore?.(event);
+      (bubble as KeyDownHandler)(event);
+    },
+  };
+  properties[propsKey] = wrapped;
+  let nativeEvent: KeyboardEvent;
+  try {
+    nativeEvent = dispatchKeyboardEvent(target, init);
+  } finally {
+    if (properties[propsKey] === wrapped) properties[propsKey] = props;
+  }
+  if (!captureEvent || !bubbleEvent) {
+    throw new Error("React did not deliver both keyboard phases");
+  }
+  return { nativeEvent, captureEvent, bubbleEvent };
+}
+
 interface DirectView {
   host: HTMLDivElement;
   root: Root;
@@ -2982,6 +3036,339 @@ describe("Settings → Webhooks: exact committed controls", () => {
     function navigationInit(key: CreateNavigationKey): KeyboardEventInit {
       return { key, code: key };
     }
+
+    it("authenticates distinct React capture and bubble wrappers over one native event", async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        trackCreateNavigationEffects,
+      );
+      const effects = view.setup;
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+        target: { value: "https://receiver.example/react-pair" },
+      });
+      await settle();
+
+      const form = within(view.host)
+        .getByTestId("webhook-form") as HTMLFormElement;
+      const create = within(view.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      const cancel = within(view.host)
+        .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+      create.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      effects.focusCalls.length = 0;
+
+      const delivery = dispatchKeyboardWithReactPairMutation(
+        form,
+        create,
+        {},
+        navigationInit("ArrowRight"),
+      );
+
+      expect(delivery.captureEvent).not.toBe(delivery.bubbleEvent);
+      expect(delivery.captureEvent.nativeEvent).toBe(delivery.nativeEvent);
+      expect(delivery.bubbleEvent.nativeEvent).toBe(delivery.nativeEvent);
+      expect(delivery.captureEvent.isDefaultPrevented).toBe(
+        delivery.bubbleEvent.isDefaultPrevented,
+      );
+      expect(delivery.captureEvent.isPropagationStopped).toBe(
+        delivery.bubbleEvent.isPropagationStopped,
+      );
+      expect(Reflect.apply(
+        delivery.captureEvent.isDefaultPrevented,
+        delivery.captureEvent,
+        [],
+      )).toBe(false);
+      expect(Reflect.apply(
+        delivery.captureEvent.isPropagationStopped,
+        delivery.captureEvent,
+        [],
+      )).toBe(false);
+      expect(Reflect.apply(
+        delivery.bubbleEvent.isDefaultPrevented,
+        delivery.bubbleEvent,
+        [],
+      )).toBe(false);
+      expect(Reflect.apply(
+        delivery.bubbleEvent.isPropagationStopped,
+        delivery.bubbleEvent,
+        [],
+      )).toBe(false);
+      expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).toHaveBeenCalledTimes(1);
+      expect(effects.focusCalls).toEqual([{
+        target: cancel,
+        options: { preventScroll: true },
+      }]);
+      expect(cancel).toHaveFocus();
+    });
+
+    it.each([
+      ["capture", "isDefaultPrevented"],
+      ["capture", "isPropagationStopped"],
+      ["bubble", "isDefaultPrevented"],
+      ["bubble", "isPropagationStopped"],
+    ] as const)(
+      "rejects %s-wrapper %s identity drift and admits a clean delivery",
+      async (phase, property) => {
+        fetchMock.mockImplementation(() =>
+          Promise.resolve(response({ webhooks: [] })));
+        const view = renderKeyboardDirect(
+          <StrictMode><WebhooksPanel /></StrictMode>,
+          trackCreateNavigationEffects,
+        );
+        const effects = view.setup;
+        await within(view.host).findByTestId("webhooks-empty");
+        await settle();
+        fireEvent.click(within(view.host).getByTestId("webhook-add"));
+        fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+          target: { value: "https://receiver.example/method-drift" },
+        });
+        await settle();
+
+        const form = within(view.host)
+          .getByTestId("webhook-form") as HTMLFormElement;
+        const create = within(view.host)
+          .getByTestId("webhook-create") as HTMLButtonElement;
+        const cancel = within(view.host)
+          .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+        const replacement = vi.fn(() => false);
+        create.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+
+        const rejected = dispatchKeyboardWithReactPairMutation(
+          form,
+          create,
+          phase === "capture"
+            ? {
+                captureAfter: (event) => {
+                  Object.defineProperty(event, property, {
+                    configurable: true,
+                    value: replacement,
+                  });
+                },
+              }
+            : {
+                bubbleBefore: (event) => {
+                  const original = event[property];
+                  let reads = 0;
+                  Object.defineProperty(event, property, {
+                    configurable: true,
+                    get: () => {
+                      reads += 1;
+                      return reads === 1 ? original : replacement;
+                    },
+                  });
+                },
+              },
+          navigationInit("ArrowRight"),
+        ).nativeEvent;
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(effects.preventDefault).not.toHaveBeenCalled();
+        expect(effects.focus).not.toHaveBeenCalled();
+        expect(create).toHaveFocus();
+
+        const accepted = dispatchKeyboardEvent(
+          create,
+          navigationInit("ArrowRight"),
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focus).toHaveBeenCalledTimes(1);
+        expect(cancel).toHaveFocus();
+      },
+    );
+
+    it("binds accepted delivery to the event-local backing receiver, currentTarget, and path terminal", async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(response({ webhooks: [] })));
+      const view = renderKeyboardDirect(
+        <StrictMode><WebhooksPanel /></StrictMode>,
+        (ownerWindow) => {
+          const effects = trackCreateNavigationEffects(ownerWindow);
+          const currentTargetDescriptor = Object.getOwnPropertyDescriptor(
+            ownerWindow.Event.prototype,
+            "currentTarget",
+          );
+          const composedPath = ownerWindow.Event.prototype.composedPath;
+          if (typeof currentTargetDescriptor?.get !== "function") {
+            throw new Error("Event.currentTarget has no intrinsic getter");
+          }
+          const observations: Array<{
+            receiver: EventTarget;
+            currentTarget: EventTarget | null;
+            terminal: EventTarget | undefined;
+          }> = [];
+          ownerWindow.addEventListener(
+            "keydown",
+            function (this: EventTarget, event: Event) {
+              observations.push({
+                receiver: this,
+                currentTarget: Reflect.apply(
+                  currentTargetDescriptor.get!,
+                  event,
+                  [],
+                ) as EventTarget | null,
+                terminal: (
+                  Reflect.apply(composedPath, event, []) as EventTarget[]
+                ).at(-1),
+              });
+            },
+            true,
+          );
+          const implementationSymbol = Object.getOwnPropertySymbols(
+            ownerWindow.document,
+          ).find((symbol) => String(symbol) === "Symbol(impl)");
+          const backingReceiver = implementationSymbol
+            ? (
+                ownerWindow.document as unknown as Record<
+                  symbol,
+                  { _globalObject: EventTarget }
+                >
+              )[implementationSymbol]._globalObject
+            : ownerWindow;
+          return { ...effects, observations, backingReceiver };
+        },
+      );
+      const effects = view.setup;
+      await within(view.host).findByTestId("webhooks-empty");
+      await settle();
+      fireEvent.click(within(view.host).getByTestId("webhook-add"));
+      fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+        target: { value: "https://receiver.example/window-receiver" },
+      });
+      await settle();
+
+      const create = within(view.host)
+        .getByTestId("webhook-create") as HTMLButtonElement;
+      create.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      const event = dispatchKeyboardEvent(
+        create,
+        navigationInit("ArrowRight"),
+      );
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(effects.observations).toHaveLength(1);
+      const [observation] = effects.observations;
+      expect(observation!.receiver).toBe(effects.backingReceiver);
+      expect(observation!.currentTarget).toBe(observation!.receiver);
+      expect(observation!.terminal).toBe(observation!.receiver);
+      expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+      expect(effects.focus).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["same-prototype", "structural"] as const)(
+      "rejects a %s Window-shaped path terminal without inferring native authority",
+      async (kind) => {
+        fetchMock.mockImplementation(() =>
+          Promise.resolve(response({ webhooks: [] })));
+        const view = renderKeyboardDirect(
+          <StrictMode><WebhooksPanel /></StrictMode>,
+          (ownerWindow) => {
+            const effects = trackCreateNavigationEffects(ownerWindow);
+            const nativePath = ownerWindow.Event.prototype.composedPath;
+            const lookalike = Object.create(
+              kind === "same-prototype"
+                ? ownerWindow.Window.prototype
+                : null,
+            ) as Window & Record<string, unknown>;
+            Object.defineProperties(lookalike, {
+              document: {
+                configurable: true,
+                value: ownerWindow.document,
+              },
+              window: { configurable: true, value: lookalike },
+              self: { configurable: true, value: lookalike },
+              Window: { configurable: true, value: ownerWindow.Window },
+              Event: { configurable: true, value: ownerWindow.Event },
+              KeyboardEvent: {
+                configurable: true,
+                value: ownerWindow.KeyboardEvent,
+              },
+              Node: { configurable: true, value: ownerWindow.Node },
+              Object: { configurable: true, value: ownerWindow.Object },
+              Reflect: { configurable: true, value: ownerWindow.Reflect },
+            });
+            let spoofTerminal = true;
+            vi.spyOn(
+              ownerWindow.Event.prototype,
+              "composedPath",
+            ).mockImplementation(function (this: Event) {
+              const actual = Reflect.apply(nativePath, this, []) as EventTarget[];
+              return spoofTerminal && actual.length >= 1
+                ? [...actual.slice(0, -1), lookalike]
+                : actual;
+            });
+            return {
+              ...effects,
+              lookalike,
+              acceptNativeTerminal: () => {
+                spoofTerminal = false;
+              },
+            };
+          },
+        );
+        const effects = view.setup;
+        await within(view.host).findByTestId("webhooks-empty");
+        await settle();
+        fireEvent.click(within(view.host).getByTestId("webhook-add"));
+        fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+          target: { value: "https://receiver.example/window-lookalike" },
+        });
+        await settle();
+
+        const create = within(view.host)
+          .getByTestId("webhook-create") as HTMLButtonElement;
+        const cancel = within(view.host)
+          .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+        expect(effects.lookalike).not.toBe(
+          create.ownerDocument.defaultView,
+        );
+        expect(effects.lookalike.document).toBe(create.ownerDocument);
+        expect(effects.lookalike.KeyboardEvent).toBe(
+          create.ownerDocument.defaultView?.KeyboardEvent,
+        );
+        if (kind === "same-prototype") {
+          expect(Object.getPrototypeOf(effects.lookalike)).toBe(
+            create.ownerDocument.defaultView?.Window.prototype,
+          );
+        }
+        create.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+
+        const rejected = dispatchKeyboardEvent(
+          create,
+          navigationInit("ArrowRight"),
+        );
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(effects.preventDefault).not.toHaveBeenCalled();
+        expect(effects.focus).not.toHaveBeenCalled();
+        expect(create).toHaveFocus();
+
+        effects.acceptNativeTerminal();
+        const accepted = dispatchKeyboardEvent(
+          create,
+          navigationInit("ArrowRight"),
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focus).toHaveBeenCalledTimes(1);
+        expect(cancel).toHaveFocus();
+      },
+    );
 
     it.each([
       ["Create", "Cancel", "ArrowRight"],
