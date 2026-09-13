@@ -1485,6 +1485,8 @@ function captureActivityKeyboardAuthority(
     activeElement,
     documentView,
     focus,
+    windowListen,
+    windowUnlisten,
     listen,
     unlisten,
     trusted,
