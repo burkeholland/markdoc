@@ -2230,6 +2230,11 @@ function createHintPublication(
           keyboard.KeyboardEvent.prototype ||
         seenNativeKeys.has(nativeEvent)
       ) {
+        const delivery = nativeKeyDeliveries.get(nativeEvent);
+        if (delivery) {
+          delivery.captureInvalid = true;
+          delivery.bubbleInvalid = true;
+        }
         return;
       }
       seenNativeKeys.add(nativeEvent);
@@ -2310,13 +2315,6 @@ function createHintPublication(
           bubbleRootEvent: null,
         };
         nativeKeyDeliveries.set(nativeEvent, delivery);
-        queueMicrotask(() => {
-          queueMicrotask(() => {
-            if (nativeKeyDeliveries.get(nativeEvent) === delivery) {
-              nativeKeyDeliveries.delete(nativeEvent);
-            }
-          });
-        });
       } catch {
         nativeKeyDeliveries.delete(nativeEvent);
       }
@@ -2353,70 +2351,80 @@ function createHintPublication(
       const carried = hintWrapperNativeEvent(event);
       const delivery = carried ? nativeKeyDeliveries.get(carried) : undefined;
       if (!delivery || delivery.snapshot.publication !== publication) return;
-      const expectedMethods =
-        phase === "capture" ? delivery.captureMethods : delivery.bubbleMethods;
-      const facts = exactHintReactKey(
-        event,
-        publication,
-        delivery.snapshot.source.element,
-        rootElement,
-        phase,
-        delivery.snapshot.receiver,
-        expectedMethods ?? undefined,
-      );
-      const controlsNow = liveNavigationControls();
-      if (
-        !facts ||
-        !controlsNow ||
-        !publicationOwnsCurrentDom() ||
-        delivery.snapshot.source.element !==
-          controlsNow[delivery.snapshot.source.kind === "primary" ? 0 : 1]
-            .element
-      ) {
-        invalidateKeyDelivery(delivery, phase);
-        return;
-      }
-      if (phase === "capture") {
+      try {
+        const expectedMethods =
+          phase === "capture" ? delivery.captureMethods : delivery.bubbleMethods;
+        const facts = exactHintReactKey(
+          event,
+          publication,
+          delivery.snapshot.source.element,
+          rootElement,
+          phase,
+          delivery.snapshot.receiver,
+          expectedMethods ?? undefined,
+        );
+        const controlsNow = liveNavigationControls();
         if (
-          delivery.captureInvalid ||
-          delivery.captureRootCount !== 0 ||
-          delivery.captureRootEvent !== null ||
-          delivery.captureControlCount !== 0 ||
-          delivery.captureControlEvent !== null ||
-          delivery.delegationTarget !== null ||
-          facts.delegationTarget === rootElement ||
-          !delivery.snapshot.path.includes(facts.delegationTarget)
+          !facts ||
+          !controlsNow ||
+          !publicationOwnsCurrentDom() ||
+          delivery.snapshot.source.element !==
+            controlsNow[delivery.snapshot.source.kind === "primary" ? 0 : 1]
+              .element
         ) {
-          delivery.captureInvalid = true;
+          invalidateKeyDelivery(delivery, phase);
           return;
         }
-        delivery.captureRootCount = 1;
-        delivery.captureRootEvent = event;
-        delivery.captureMethods = facts.methods;
-        delivery.delegationTarget = facts.delegationTarget;
-        return;
+        if (phase === "capture") {
+          if (
+            delivery.captureInvalid ||
+            delivery.captureRootCount !== 0 ||
+            delivery.captureRootEvent !== null ||
+            delivery.captureControlCount !== 0 ||
+            delivery.captureControlEvent !== null ||
+            delivery.delegationTarget !== null ||
+            facts.delegationTarget === rootElement ||
+            !delivery.snapshot.path.includes(facts.delegationTarget)
+          ) {
+            delivery.captureInvalid = true;
+            return;
+          }
+          delivery.captureRootCount = 1;
+          delivery.captureRootEvent = event;
+          delivery.captureMethods = facts.methods;
+          delivery.delegationTarget = facts.delegationTarget;
+          return;
+        }
+        if (
+          delivery.captureInvalid ||
+          delivery.bubbleInvalid ||
+          !delivery.delegationTarget ||
+          delivery.delegationTarget !== facts.delegationTarget ||
+          delivery.captureRootCount !== 1 ||
+          !delivery.captureRootEvent ||
+          delivery.captureControlCount !== 1 ||
+          delivery.captureControlEvent !== delivery.captureRootEvent ||
+          delivery.bubbleControlCount !== 1 ||
+          delivery.bubbleControlEvent !==
+            (event as ReactKeyboardEvent<HTMLElement>) ||
+          delivery.bubbleRootCount !== 0 ||
+          delivery.bubbleRootEvent !== null
+        ) {
+          delivery.bubbleInvalid = true;
+          return;
+        }
+        delivery.bubbleRootCount = 1;
+        delivery.bubbleRootEvent = event;
+        finalizeNavigation(facts.nativeEvent);
+      } finally {
+        if (phase === "bubble") {
+          delivery.captureInvalid = true;
+          delivery.bubbleInvalid = true;
+          if (nativeKeyDeliveries.get(carried) === delivery) {
+            nativeKeyDeliveries.delete(carried);
+          }
+        }
       }
-      if (
-        delivery.captureInvalid ||
-        delivery.bubbleInvalid ||
-        !delivery.delegationTarget ||
-        delivery.delegationTarget !== facts.delegationTarget ||
-        delivery.captureRootCount !== 1 ||
-        !delivery.captureRootEvent ||
-        delivery.captureControlCount !== 1 ||
-        delivery.captureControlEvent !== delivery.captureRootEvent ||
-        delivery.bubbleControlCount !== 1 ||
-        delivery.bubbleControlEvent !==
-          (event as ReactKeyboardEvent<HTMLElement>) ||
-        delivery.bubbleRootCount !== 0 ||
-        delivery.bubbleRootEvent !== null
-      ) {
-        delivery.bubbleInvalid = true;
-        return;
-      }
-      delivery.bubbleRootCount = 1;
-      delivery.bubbleRootEvent = event;
-      finalizeNavigation(facts.nativeEvent);
     };
 
     const stageHintControlKey = (
@@ -2614,7 +2622,6 @@ function createHintPublication(
         cells.claimedMovements.add(movement);
         delivery.captureInvalid = true;
         delivery.bubbleInvalid = true;
-        nativeKeyDeliveries.delete(nativeEvent);
         if (
           !publicationOwnsCurrentDom() ||
           keyboard.activeElement.read(ownerDocument) !==
@@ -2661,7 +2668,6 @@ function createHintPublication(
       } catch {
         delivery.captureInvalid = true;
         delivery.bubbleInvalid = true;
-        nativeKeyDeliveries.delete(nativeEvent);
       }
     }
 

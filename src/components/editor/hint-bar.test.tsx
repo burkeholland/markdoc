@@ -2003,7 +2003,7 @@ describe("HintBar collaborator discovery", () => {
   );
 
   it.skipIf(process.env.HINTBAR_CHROMIUM !== "1")(
-    "keeps trusted Chromium pointer, Enter, and Space activation live across capture microtask checkpoints",
+    "keeps trusted Chromium activation and navigation live across capture microtask checkpoints",
     async () => {
       vi.useRealTimers();
       const [{ chromium }, harness] = await Promise.all([
@@ -2068,6 +2068,123 @@ describe("HintBar collaborator discovery", () => {
           );
           await page.close();
         }
+
+        const navigationPage = await createPage();
+        const navigationBefore = await navigationPage.evaluate(() => {
+          const events = (
+            window as unknown as {
+              __hintEvents: string[];
+            }
+          ).__hintEvents;
+          const hint = document.querySelector<HTMLElement>(
+            "[data-testid='hint-bar']",
+          );
+          const action = document.querySelector<HTMLButtonElement>(
+            "[data-testid='hint-action']",
+          );
+          const dismiss = document.querySelector<HTMLButtonElement>(
+            "[data-testid='hint-dismiss']",
+          );
+          if (!hint || !action || !dismiss) {
+            throw new Error("The public Hint controls are not mounted");
+          }
+          action.focus();
+          events.length = 0;
+          window.setTimeout = new Proxy(window.setTimeout, {
+            apply(target, receiver, args) {
+              events.push("navigation:timer");
+              return Reflect.apply(target, receiver, args);
+            },
+          });
+          Storage.prototype.setItem = new Proxy(Storage.prototype.setItem, {
+            apply(target, receiver, args) {
+              events.push("navigation:storage");
+              return Reflect.apply(target, receiver, args);
+            },
+          });
+          dismiss.addEventListener(
+            "focus",
+            () => events.push("navigation:dismiss-focus"),
+            { once: true },
+          );
+          document.addEventListener(
+            "keydown",
+            (event) => {
+              if (event.target === action && event.key === "ArrowRight") {
+                events.push(
+                  `navigation:public-bubble:${
+                    event.defaultPrevented ? "prevented" : "unprevented"
+                  }`,
+                );
+              }
+            },
+            { once: true },
+          );
+          return {
+            hint: hint.getAttribute("data-hint"),
+            storage: localStorage.getItem("markdoc:hints"),
+            scroll: [
+              window.scrollX,
+              window.scrollY,
+              hint.scrollLeft,
+              hint.scrollTop,
+            ],
+          };
+        });
+
+        await navigationPage.keyboard.press("ArrowRight");
+
+        const navigationAfter = await navigationPage.evaluate(() => {
+          const events = (
+            window as unknown as {
+              __hintEvents: string[];
+            }
+          ).__hintEvents.slice();
+          const hint = document.querySelector<HTMLElement>(
+            "[data-testid='hint-bar']",
+          );
+          const dismiss = document.querySelector<HTMLButtonElement>(
+            "[data-testid='hint-dismiss']",
+          );
+          return {
+            events,
+            dismissFocused: document.activeElement === dismiss,
+            hint: hint?.getAttribute("data-hint") ?? null,
+            storage: localStorage.getItem("markdoc:hints"),
+            scroll: hint
+              ? [
+                  window.scrollX,
+                  window.scrollY,
+                  hint.scrollLeft,
+                  hint.scrollTop,
+                ]
+              : null,
+          };
+        });
+        expect(navigationAfter.dismissFocused).toBe(true);
+        expect(navigationAfter.events).toContain(
+          "navigation:public-bubble:prevented",
+        );
+        expect(navigationAfter.events).not.toContain(
+          "navigation:public-bubble:unprevented",
+        );
+        expect(navigationAfter.events).not.toContain("comment");
+        expect(navigationAfter.events).not.toContain("share");
+        expect(navigationAfter.events).not.toContain("focus");
+        expect(navigationAfter.events).not.toContain("navigation:storage");
+        expect(navigationAfter.events).not.toContain("navigation:timer");
+        expect(navigationAfter.hint).toBe(navigationBefore.hint);
+        expect(navigationAfter.storage).toBe(navigationBefore.storage);
+        expect(navigationAfter.scroll).toEqual(navigationBefore.scroll);
+        const captureCheckpoint = navigationAfter.events.indexOf(
+          "keydown:document-microtask",
+        );
+        const acceptedMovement = navigationAfter.events.indexOf(
+          "navigation:dismiss-focus",
+        );
+        expect(captureCheckpoint).toBeGreaterThanOrEqual(0);
+        expect(acceptedMovement).toBeGreaterThan(captureCheckpoint);
+        await navigationPage.close();
 
         for (const activation of ["pointer", "Enter", " "] as const) {
           const page = await createPage();
@@ -2526,6 +2643,58 @@ describe("HintBar collaborator discovery", () => {
       ]).toEqual(scrollBefore);
     },
   );
+
+  it("retains a trusted delivery through a capture microtask checkpoint until terminal bubble", async () => {
+    const comment = vi.fn();
+    const { hint } = await mountStrictNavigation(
+      "capture-microtask-lifetime",
+      comment,
+    );
+    const queued: VoidFunction[] = [];
+    const nativeQueueMicrotask = globalThis.queueMicrotask;
+    const queueMicrotaskSpy = vi
+      .spyOn(globalThis, "queueMicrotask")
+      .mockImplementation((callback) => queued.push(callback));
+    const order: string[] = [];
+    const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+    hint.actionElement.focus();
+    hint.dismissElement.addEventListener(
+      "focus",
+      () => order.push("movement"),
+      { once: true },
+    );
+    document.addEventListener(
+      "keydown",
+      () => {
+        for (;;) {
+          const callback = queued.shift();
+          if (!callback) break;
+          callback();
+        }
+        order.push("capture-checkpoint");
+      },
+      { capture: true, once: true },
+    );
+    const event = hintKeyboardEvent(hint.actionElement, "ArrowRight");
+
+    try {
+      act(() => hint.actionElement.dispatchEvent(event));
+    } finally {
+      queueMicrotaskSpy.mockRestore();
+      for (const callback of queued.splice(0)) {
+        nativeQueueMicrotask(callback);
+      }
+    }
+    await flushPromises();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(hint.dismissElement).toHaveFocus();
+    expect(order).toEqual(["capture-checkpoint", "movement"]);
+    expect(storageWrites).not.toHaveBeenCalled();
+    expect(comment).not.toHaveBeenCalled();
+    expect(onShare).not.toHaveBeenCalled();
+    expect(actions.focus).not.toHaveBeenCalled();
+  });
 
   it.each([
     ["ArrowLeft", "primary"],
