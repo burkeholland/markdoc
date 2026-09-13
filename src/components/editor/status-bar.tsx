@@ -456,6 +456,8 @@ interface StatusBarNavigationDelivery {
   delegationTarget: EventTarget | null;
   capture: StatusBarNavigationReactSnapshot | null;
   bubble: StatusBarNavigationReactSnapshot | null;
+  bubbleAttempting: boolean;
+  bubbleReentered: boolean;
   invalid: boolean;
 }
 
@@ -2906,7 +2908,11 @@ function recordNativeEvent(
     publication.extended = true;
   } else {
     queueMicrotask(() => {
-      if (!publication.extended) publication.expired = true;
+      if (
+        !publication.extended
+        && !generation.navigationDeliveries.has(event)
+      )
+        publication.expired = true;
     });
   }
   armStatsMutationFromNative(generation, publication);
@@ -3641,6 +3647,8 @@ function captureStatusBarNavigationNative(
     delegationTarget: null,
     capture: null,
     bubble: null,
+    bubbleAttempting: false,
+    bubbleReentered: false,
     invalid: false,
   });
 }
@@ -3819,6 +3827,25 @@ function statusBarNavigationReactMethodsAreCurrent(
   }
 }
 
+function consumeStatusBarNavigationDelivery(
+  generation: StatusBarGeneration,
+  delivery: StatusBarNavigationDelivery,
+) {
+  if (
+    generation.navigationDeliveries.get(delivery.native.event) !== delivery
+  )
+    return false;
+  generation.navigationDeliveries.delete(delivery.native.event);
+  delivery.native.expired = true;
+  delivery.invalid = true;
+  return true;
+}
+
+function retireClaimedStatusBarNavigation(generation: StatusBarGeneration) {
+  generation.actions.delete("top-level-navigation");
+  retireGeneration(generation);
+}
+
 function finalizeStatusBarNavigation(
   generation: StatusBarGeneration,
   delivery: StatusBarNavigationDelivery,
@@ -3848,10 +3875,6 @@ function finalizeStatusBarNavigation(
     || delivery.native.claimed
     || capture.publication.claimed
     || bubble.publication.claimed
-    || generation.manager.directionalNativeEvents.has(delivery.native.event)
-    || generation.manager.directionalReactEvents.has(capture.event)
-    || generation.manager.directionalReactEvents.has(bubble.event)
-    || generation.manager.directionalDestinations.has(destination)
     || keyboard.activeElement.read(generation.ownerDocument)
       !== delivery.source.control
     || !statusBarNavigationNativeIsCurrent(
@@ -3884,15 +3907,24 @@ function finalizeStatusBarNavigation(
       bubble.event,
       [],
     ) !== false
+    || delivery.bubbleReentered
     || !validateGeneration(generation)
     || !arraysAreIdentical(
       enabledStatusBarTopLevelControls(generation) ?? [],
       controls,
     )
   )
-    return;
+    return false;
 
-  delivery.invalid = true;
+  const replayed = (
+    generation.manager.directionalNativeEvents.has(delivery.native.event)
+    || generation.manager.directionalReactEvents.has(capture.event)
+    || generation.manager.directionalReactEvents.has(bubble.event)
+    || generation.manager.directionalDestinations.has(destination)
+  );
+  if (!consumeStatusBarNavigationDelivery(generation, delivery)) return false;
+  if (replayed) return true;
+
   delivery.source.claimed = true;
   destination.claimed = true;
   delivery.native.claimed = true;
@@ -3935,12 +3967,14 @@ function finalizeStatusBarNavigation(
       bubble.event,
       [],
     ) !== false
-  )
-    return;
+    || !validateGeneration(generation)
+  ) {
+    retireClaimedStatusBarNavigation(generation);
+    return true;
+  }
 
   keyboard.apply(bubble.methods.preventDefault, bubble.event, []);
   const publicCancellationQuery = bubble.event.isDefaultPrevented;
-  const postPreventionControls = enabledStatusBarTopLevelControls(generation);
   if (
     typeof publicCancellationQuery !== "function"
     || bubble.event.preventDefault !== bubble.methods.preventDefault
@@ -3949,6 +3983,42 @@ function finalizeStatusBarNavigation(
     || capture.event.preventDefault !== capture.methods.preventDefault
     || capture.event.isDefaultPrevented !== capture.methods.isDefaultPrevented
     || capture.event.isPropagationStopped
+      !== capture.methods.isPropagationStopped
+  ) {
+    retireClaimedStatusBarNavigation(generation);
+    return true;
+  }
+  const publiclyPrevented = keyboard.apply(
+    publicCancellationQuery,
+    bubble.event,
+    [],
+  );
+  const publiclyPropagationStopped = keyboard.apply(
+    bubble.methods.isPropagationStopped,
+    bubble.event,
+    [],
+  );
+  const postPreventionControls = enabledStatusBarTopLevelControls(generation);
+  if (
+    publiclyPrevented !== true
+    || publiclyPropagationStopped !== false
+    || bubble.event.preventDefault !== bubble.methods.preventDefault
+    || bubble.event.isDefaultPrevented !== publicCancellationQuery
+    || bubble.event.isPropagationStopped
+      !== bubble.methods.isPropagationStopped
+    || bubble.publication.preventDefault !== bubble.methods.preventDefault
+    || bubble.publication.isDefaultPrevented
+      !== bubble.methods.isDefaultPrevented
+    || bubble.publication.isPropagationStopped
+      !== bubble.methods.isPropagationStopped
+    || capture.event.preventDefault !== capture.methods.preventDefault
+    || capture.event.isDefaultPrevented !== capture.methods.isDefaultPrevented
+    || capture.event.isPropagationStopped
+      !== capture.methods.isPropagationStopped
+    || capture.publication.preventDefault !== capture.methods.preventDefault
+    || capture.publication.isDefaultPrevented
+      !== capture.methods.isDefaultPrevented
+    || capture.publication.isPropagationStopped
       !== capture.methods.isPropagationStopped
     || bubble.event.defaultPrevented !== true
     || delivery.native.event.defaultPrevented !== true
@@ -3959,12 +4029,6 @@ function finalizeStatusBarNavigation(
     || bubble.event.location !== bubble.location
     || !Object.is(bubble.event.view, bubble.view)
     || keyboard.eventDefaultPrevented.read(delivery.native.event) !== true
-    || keyboard.apply(publicCancellationQuery, bubble.event, []) !== true
-    || keyboard.apply(
-      bubble.methods.isPropagationStopped,
-      bubble.event,
-      [],
-    ) !== false
     || keyboard.activeElement.read(generation.ownerDocument)
       !== delivery.source.control
     || !postPreventionControls
@@ -3981,11 +4045,15 @@ function finalizeStatusBarNavigation(
       true,
       true,
     )
-  )
-    return;
+    || !validateGeneration(generation)
+  ) {
+    retireClaimedStatusBarNavigation(generation);
+    return true;
+  }
   keyboard.focus.call(destination.control, { preventScroll: true });
   generation.manager.successorRequested = true;
   generation.manager.requestSuccessor();
+  return true;
 }
 
 function stageStatusBarNavigation(
@@ -3996,8 +4064,27 @@ function stageStatusBarNavigation(
   const generation = manager.active;
   if (!generation) return;
   const delivery = generation.navigationDeliveries.get(event.nativeEvent);
-  if (!delivery || delivery.invalid) return;
+  if (!delivery) {
+    if (
+      generation.actions.has("top-level-navigation")
+      && generation.manager.directionalNativeEvents.has(event.nativeEvent)
+    )
+      retireClaimedStatusBarNavigation(generation);
+    return;
+  }
+  if (delivery.invalid) return;
+  if (phase === "bubble" && delivery.bubbleAttempting) {
+    delivery.bubbleReentered = true;
+    return;
+  }
+  let ownsBubbleAttempt = false;
+  let consumed = false;
   try {
+    if (phase === "bubble") {
+      delivery.bubbleAttempting = true;
+      delivery.bubbleReentered = false;
+      ownsBubbleAttempt = true;
+    }
     const keyboard = generation.keyboardAuthority;
     const delegationTarget = keyboard?.eventCurrentTarget.read(
       delivery.native.event,
@@ -4029,7 +4116,8 @@ function stageStatusBarNavigation(
       )
       || !validateGeneration(generation)
     ) {
-      delivery.invalid = true;
+      if (phase === "capture")
+        consumeStatusBarNavigationDelivery(generation, delivery);
       return;
     }
     if (phase === "capture") {
@@ -4038,7 +4126,7 @@ function stageStatusBarNavigation(
         || delivery.bubble
         || delivery.delegationTarget
       ) {
-        delivery.invalid = true;
+        consumeStatusBarNavigationDelivery(generation, delivery);
         return;
       }
       delivery.capture = snapshot;
@@ -4050,20 +4138,28 @@ function stageStatusBarNavigation(
       || delivery.bubble
       || delivery.delegationTarget !== delegationTarget
       || delivery.capture.event === event
-    ) {
-      delivery.invalid = true;
-      return;
-    }
-    delivery.bubble = snapshot;
-    finalizeStatusBarNavigation(generation, delivery);
-  } catch {
-    delivery.invalid = true;
-  } finally {
-    if (
-      phase === "bubble"
-      && generation.navigationDeliveries.get(event.nativeEvent) === delivery
+      || delivery.bubbleReentered
     )
-      generation.navigationDeliveries.delete(event.nativeEvent);
+      return;
+    delivery.bubble = snapshot;
+    consumed = finalizeStatusBarNavigation(generation, delivery);
+  } catch {
+    if (generation.actions.has("top-level-navigation")) {
+      retireClaimedStatusBarNavigation(generation);
+      consumed = true;
+    } else if (phase === "capture") {
+      consumeStatusBarNavigationDelivery(generation, delivery);
+    }
+  } finally {
+    if (ownsBubbleAttempt) {
+      if (
+        !consumed
+        && generation.navigationDeliveries.get(event.nativeEvent) === delivery
+      )
+        delivery.bubble = null;
+      delivery.bubbleAttempting = false;
+      delivery.bubbleReentered = false;
+    }
   }
 }
 

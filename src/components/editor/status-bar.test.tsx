@@ -682,6 +682,22 @@ function LayoutReplayProbe({ inspect }: { inspect: () => void }) {
   return null;
 }
 
+function NavigationEventProbe({
+  children,
+  onCapture,
+  onBubble,
+}: {
+  children: ReactNode;
+  onCapture?: (event: ReactKeyboardEvent<HTMLElement>) => void;
+  onBubble?: (event: ReactKeyboardEvent<HTMLElement>) => void;
+}) {
+  return (
+    <div onKeyDownCapture={onCapture} onKeyDown={onBubble}>
+      {children}
+    </div>
+  );
+}
+
 function UnrelatedPresencePopover() {
   return (
     <Popover>
@@ -1002,6 +1018,303 @@ describe("status bar top-level keyboard navigation", () => {
     }
   });
 
+  it("keeps the exact pair through one and nested capture-to-bubble microtask checkpoints", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    const queuedMicrotasks: VoidFunction[] = [];
+    const queue = vi.spyOn(globalThis, "queueMicrotask").mockImplementation(
+      (callback) => queuedMicrotasks.push(callback),
+    );
+    try {
+      await renderStatus(statusProps(current));
+      const source = statusControls()[1]!;
+      const destination = statusControls()[2]!;
+      let checkpoints = 0;
+      source.addEventListener("keydown", () => {
+        const expiry = queuedMicrotasks.shift();
+        if (!expiry) throw new Error("Navigation expiry was not queued");
+        expiry();
+        checkpoints += 1;
+        queueMicrotask(expiry);
+        const nestedExpiry = queuedMicrotasks.shift();
+        if (!nestedExpiry) throw new Error("Nested navigation expiry was not queued");
+        nestedExpiry();
+        checkpoints += 1;
+      }, { capture: true, once: true });
+      source.focus();
+      const event = menuKey(source, "ArrowRight");
+
+      act(() => {
+        source.dispatchEvent(event);
+      });
+
+      expect(checkpoints).toBe(2);
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    } finally {
+      while (queuedMicrotasks.length) queuedMicrotasks.shift()!();
+      queue.mockRestore();
+    }
+  });
+
+  it("keeps a rightful bubble pending after crossed, wrong-source, and drifted attempts", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    let captureEvent: ReactKeyboardEvent<HTMLElement> | null = null;
+    await renderDirect(
+      <StrictMode>
+        <NavigationEventProbe onCapture={(event) => {
+          captureEvent = event;
+        }}>
+          <StatusBar {...statusProps(current)} />
+        </NavigationEventProbe>
+      </StrictMode>,
+    );
+    const root = screen.getByTestId("status-bar");
+    const source = statusControls()[1]!;
+    const destination = statusControls()[2]!;
+    const complete = reactHandler<
+      (event: ReactKeyboardEvent<HTMLElement>) => void
+    >(root, "onKeyDown");
+    source.addEventListener("keydown", () => {
+      if (!captureEvent) throw new Error("React capture wrapper was unavailable");
+      complete(captureEvent);
+      const target = captureEvent.target;
+      const preventDefault = captureEvent.preventDefault;
+      Object.defineProperty(captureEvent, "target", {
+        configurable: true,
+        value: destination,
+      });
+      Object.defineProperty(captureEvent, "preventDefault", {
+        configurable: true,
+        value: vi.fn(),
+      });
+      complete(captureEvent);
+      Object.defineProperty(captureEvent, "target", {
+        configurable: true,
+        value: target,
+      });
+      Object.defineProperty(captureEvent, "preventDefault", {
+        configurable: true,
+        value: preventDefault,
+      });
+    }, { capture: true, once: true });
+    source.focus();
+    const event = menuKey(source, "ArrowRight");
+
+    act(() => {
+      source.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(destination).toHaveFocus();
+    expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+  });
+
+  it.each([
+    "prevent-method drift",
+    "cancellation-query mutation",
+    "cancellation-query reentry",
+  ] as const)(
+    "retires %s after cancellation and accepts a distinct clean successor",
+    async (failure) => {
+      useExactWindowListenerRealm();
+      const current = callbacks();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      let sampledBubble: ReactKeyboardEvent<HTMLElement> | null = null;
+      let prototype: object | null = null;
+      let preventDefaultDescriptor: PropertyDescriptor | undefined;
+      try {
+        await renderDirect(
+          <StrictMode>
+            <NavigationEventProbe onBubble={(event) => {
+              sampledBubble = event;
+            }}>
+              <StatusBar {...statusProps(current)} />
+            </NavigationEventProbe>
+          </StrictMode>,
+        );
+        const source = statusControls()[2]!;
+        source.focus();
+        act(() => {
+          source.dispatchEvent(menuKey(source, "Tab"));
+        });
+        if (!sampledBubble)
+          throw new Error("React bubble wrapper was unavailable");
+        prototype = Object.getPrototypeOf(sampledBubble);
+        preventDefaultDescriptor = Object.getOwnPropertyDescriptor(
+          prototype,
+          "preventDefault",
+        );
+        if (
+          !preventDefaultDescriptor
+          || typeof preventDefaultDescriptor.value !== "function"
+        )
+          throw new Error("React preventDefault method was unavailable");
+        const retainedPreventDefault = preventDefaultDescriptor.value as (
+          this: ReactKeyboardEvent<HTMLElement>,
+        ) => void;
+        const root = screen.getByTestId("status-bar");
+        const complete = reactHandler<
+          (event: ReactKeyboardEvent<HTMLElement>) => void
+        >(root, "onKeyDown");
+        const destination = statusControls()[3]!;
+        const parent = destination.parentNode;
+        const next = destination.nextSibling;
+        if (!parent) throw new Error("Navigation destination was detached");
+        let rejected: KeyboardEvent | null = null;
+        let failureApplied = false;
+        Object.defineProperty(prototype, "preventDefault", {
+          ...preventDefaultDescriptor,
+          value: function (this: ReactKeyboardEvent<HTMLElement>) {
+            Reflect.apply(retainedPreventDefault, this, []);
+            if (this.nativeEvent !== rejected) return;
+            if (failure === "prevent-method drift") {
+              Object.defineProperty(this, "isPropagationStopped", {
+                configurable: true,
+                value: () => false,
+              });
+              return;
+            }
+            const retainedQuery = this.isDefaultPrevented;
+            Object.defineProperty(this, "isDefaultPrevented", {
+              configurable: true,
+              value: function (this: ReactKeyboardEvent<HTMLElement>) {
+                const prevented = Reflect.apply(retainedQuery, this, []);
+                if (!failureApplied) {
+                  failureApplied = true;
+                  if (failure === "cancellation-query mutation") {
+                    parent.removeChild(destination);
+                    parent.insertBefore(destination, next);
+                  } else {
+                    complete(this);
+                  }
+                }
+                return prevented;
+              },
+            });
+          },
+        });
+        source.focus();
+        focus.mockClear();
+        rejected = menuKey(source, "ArrowRight");
+
+        act(() => {
+          source.dispatchEvent(rejected!);
+        });
+
+        expect(rejected.defaultPrevented).toBe(true);
+        expect(source).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        Object.defineProperty(
+          prototype,
+          "preventDefault",
+          preventDefaultDescriptor,
+        );
+        await nextTask();
+        const cleanSource = statusControls()[2]!;
+        const cleanDestination = statusControls()[3]!;
+        cleanSource.focus();
+        focus.mockClear();
+        const clean = menuKey(cleanSource, "ArrowRight");
+        act(() => {
+          cleanSource.dispatchEvent(clean);
+        });
+        expect(clean.defaultPrevented).toBe(true);
+        expect(cleanDestination).toHaveFocus();
+        expect(focus).toHaveBeenCalledOnce();
+        expect(failure === "prevent-method drift" || failureApplied).toBe(true);
+        expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+      } finally {
+        if (prototype && preventDefaultDescriptor) {
+          Object.defineProperty(
+            prototype,
+            "preventDefault",
+            preventDefaultDescriptor,
+          );
+        }
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it("retires a post-claim pre-effect failure, rejects replay, and recovers", async () => {
+    useExactWindowListenerRealm();
+    const current = callbacks();
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const documentPrototype = Document.prototype;
+    const activeElementDescriptor = Object.getOwnPropertyDescriptor(
+      documentPrototype,
+      "activeElement",
+    );
+    if (!activeElementDescriptor?.get)
+      throw new Error("Document activeElement getter was unavailable");
+    const readActiveElement = activeElementDescriptor.get;
+    let armed = false;
+    let failed = false;
+    let reads = 0;
+    Object.defineProperty(documentPrototype, "activeElement", {
+      ...activeElementDescriptor,
+      get: function (this: Document) {
+        const active = Reflect.apply(readActiveElement, this, []);
+        if (armed) {
+          reads += 1;
+          if (reads === 5) {
+            failed = true;
+            return this.body;
+          }
+        }
+        return active;
+      },
+    });
+    try {
+      await renderStatus(statusProps(current));
+      const source = statusControls()[2]!;
+      source.focus();
+      focus.mockClear();
+      armed = true;
+      const rejected = menuKey(source, "ArrowRight");
+
+      act(() => {
+        source.dispatchEvent(rejected);
+      });
+
+      armed = false;
+      expect(failed).toBe(true);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      await nextTask();
+      focus.mockClear();
+      act(() => {
+        source.dispatchEvent(rejected);
+      });
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      const cleanSource = statusControls()[2]!;
+      const cleanDestination = statusControls()[3]!;
+      cleanSource.focus();
+      focus.mockClear();
+      const clean = menuKey(cleanSource, "ArrowRight");
+      act(() => {
+        cleanSource.dispatchEvent(clean);
+      });
+      expect(clean.defaultPrevented).toBe(true);
+      expect(cleanDestination).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(allCallbackCounts([current])).toEqual([0, 0, 0, 0, 0, 0]);
+    } finally {
+      Object.defineProperty(
+        documentPrototype,
+        "activeElement",
+        activeElementDescriptor,
+      );
+      focus.mockRestore();
+    }
+  });
+
   it("covers every accepted desktop source and destination in committed order", async () => {
     useExactWindowListenerRealm();
     const current = callbacks();
@@ -1297,12 +1610,33 @@ describe("status bar top-level keyboard navigation", () => {
       expect(focus).toHaveBeenCalledOnce();
 
       await act(async () => {
+        await Promise.resolve();
+      });
+      const pendingSource = statusControls()[1]!;
+      pendingSource.focus();
+      focus.mockClear();
+      pendingSource.addEventListener("keydown", (pending) => {
+        pending.stopPropagation();
+      }, { capture: true, once: true });
+      const pending = menuKey(pendingSource, "ArrowRight");
+      act(() => {
+        pendingSource.dispatchEvent(pending);
+      });
+      expect(pending.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => {
         view.root.unmount();
         await Promise.resolve();
       });
       view.host.remove();
       directViews.splice(directViews.indexOf(view), 1);
       focus.mockClear();
+      act(() => {
+        pendingSource.dispatchEvent(pending);
+      });
+      expect(pending.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
       const afterCleanup = menuKey(source, "ArrowLeft");
       act(() => {
         source.dispatchEvent(afterCleanup);
