@@ -37,12 +37,14 @@ function Harness({
   onSubmit,
   onOpenChange = vi.fn(),
   nextOperationId,
+  onAncestorKeyDown,
 }: {
   editor: object;
   documentId: string;
   onSubmit: (owner: NameVersionSaveOwner) => Promise<void>;
   onOpenChange?: (open: boolean) => void;
   nextOperationId?: () => number;
+  onAncestorKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 }) {
   const visitSequence = useRef(1);
   const operationSequence = useRef(0);
@@ -54,7 +56,7 @@ function Harness({
     setOpen(nextOpen);
   };
   return (
-    <>
+    <div onKeyDown={onAncestorKeyDown}>
       <button
         type="button"
         onClick={() => {
@@ -73,7 +75,7 @@ function Harness({
         }
         onSubmit={onSubmit}
       />
-    </>
+    </div>
   );
 }
 
@@ -116,6 +118,50 @@ function renderStrict(
   return view;
 }
 
+function withGlobalDocument<Result>(
+  ownerDocument: Document,
+  run: () => Result,
+): Result {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "document");
+  if (!descriptor?.configurable) {
+    throw new Error("The global document cannot be temporarily replaced");
+  }
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    enumerable: descriptor.enumerable,
+    writable: true,
+    value: ownerDocument,
+  });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(globalThis, "document", descriptor);
+  }
+}
+
+function jsdomEventImplementation(event: Event) {
+  const implementationSymbol = Object.getOwnPropertySymbols(event).find(
+    (symbol) => String(symbol) === "Symbol(impl)",
+  );
+  const implementation = implementationSymbol
+    ? (
+        event as unknown as Record<
+          symbol,
+          {
+            code: string;
+            isTrusted: boolean;
+            location: number;
+            view: unknown;
+          }
+        >
+      )[implementationSymbol]
+    : null;
+  if (!implementation) {
+    throw new Error("The jsdom event implementation slot was unavailable");
+  }
+  return implementation;
+}
+
 function markJsdomEventTrusted(event: Event) {
   const implementation = Object.getOwnPropertySymbols(event)
     .map(
@@ -145,22 +191,8 @@ function markJsdomEventTrusted(event: Event) {
   }
 }
 
-function setJsdomEventView(event: Event, ownerWindow: Window) {
-  const implementationSymbol = Object.getOwnPropertySymbols(event).find(
-    (symbol) => String(symbol) === "Symbol(impl)",
-  );
-  const implementation = implementationSymbol
-    ? (
-        event as unknown as Record<
-          symbol,
-          { view: Window | null }
-        >
-      )[implementationSymbol]
-    : null;
-  if (!implementation) {
-    throw new Error("Unable to set jsdom's internal event view slot");
-  }
-  implementation.view = ownerWindow;
+function setJsdomEventView(event: Event, view: unknown) {
+  jsdomEventImplementation(event).view = view;
 }
 
 type NavigationKey =
@@ -182,6 +214,7 @@ function trustedKey(
   target: HTMLElement,
   init: KeyboardEventInit,
   trusted = true,
+  eventView?: unknown,
 ) {
   const ownerWindow = target.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("The key target has no owner window");
@@ -190,7 +223,7 @@ function trustedKey(
     cancelable: true,
     ...init,
   });
-  setJsdomEventView(event, ownerWindow);
+  setJsdomEventView(event, eventView ?? ownerWindow);
   if (trusted) markJsdomEventTrusted(event);
   fireEvent(target, event);
   return event;
@@ -286,9 +319,11 @@ function directActions(host: HTMLElement) {
   const input = scope.getByTestId("version-name") as HTMLInputElement;
   const formElement = save.closest("form");
   const boundary = cancel.parentElement;
+  const ownerWindow = host.ownerDocument.defaultView;
   if (
-    !(formElement instanceof HTMLFormElement) ||
-    !(boundary instanceof HTMLDivElement)
+    !ownerWindow ||
+    !(formElement instanceof ownerWindow.HTMLFormElement) ||
+    !(boundary instanceof ownerWindow.HTMLDivElement)
   ) {
     throw new Error("The version form boundary is incomplete");
   }
@@ -307,15 +342,21 @@ afterEach(() => {
 
 describe("NameVersionDialog keyboard action navigation", () => {
   it.each([
-    ["Cancel", "Save version", "ArrowRight"],
-    ["Cancel", "Save version", "ArrowDown"],
-    ["Cancel", "Save version", "End"],
-    ["Save version", "Cancel", "ArrowLeft"],
-    ["Save version", "Cancel", "ArrowUp"],
-    ["Save version", "Cancel", "Home"],
+    ["Cancel", "Save version", "ArrowRight", "ArrowRight", 0],
+    ["Cancel", "Save version", "ArrowDown", "ArrowDown", 0],
+    ["Cancel", "Save version", "End", "End", 0],
+    ["Save version", "Cancel", "ArrowLeft", "ArrowLeft", 0],
+    ["Save version", "Cancel", "ArrowUp", "ArrowUp", 0],
+    ["Save version", "Cancel", "Home", "Home", 0],
+    ["Save version", "Cancel", "ArrowLeft", "Numpad4", 3],
+    ["Save version", "Cancel", "ArrowUp", "Numpad8", 3],
+    ["Cancel", "Save version", "ArrowRight", "Numpad6", 3],
+    ["Cancel", "Save version", "ArrowDown", "Numpad2", 3],
+    ["Save version", "Cancel", "Home", "Numpad7", 3],
+    ["Cancel", "Save version", "End", "Numpad1", 3],
   ] as const)(
-    "moves from %s to %s with %s once without form or scroll work",
-    (sourceName, destinationName, key) => {
+    "moves from %s to %s with %s (%s, location %i) once without form or scroll work",
+    (sourceName, destinationName, key, code, location) => {
       const effects = trackNavigationEffects(window);
       const onSubmit = vi.fn(async () => undefined);
       const onOpenChange = vi.fn();
@@ -350,7 +391,10 @@ describe("NameVersionDialog keyboard action navigation", () => {
       effects.preventDefault.mockClear();
       effects.focus.mockClear();
       effects.focusCalls.length = 0;
-      const event = trustedKey(source, navigationInit(key));
+      const event = trustedKey(
+        source,
+        navigationInit(key, { code, location }),
+      );
 
       expect(event.defaultPrevented).toBe(true);
       expect(effects.preventDefault).toHaveBeenCalledOnce();
@@ -408,18 +452,27 @@ describe("NameVersionDialog keyboard action navigation", () => {
     fireEvent.change(actions.input, { target: { value: "Ready" } });
     actions = directActions(view.host);
     const edges = [
-      [actions.cancel, "ArrowLeft"],
-      [actions.cancel, "ArrowUp"],
-      [actions.cancel, "Home"],
-      [actions.save, "ArrowRight"],
-      [actions.save, "ArrowDown"],
-      [actions.save, "End"],
+      [actions.cancel, "ArrowLeft", "ArrowLeft", 0],
+      [actions.cancel, "ArrowUp", "ArrowUp", 0],
+      [actions.cancel, "Home", "Home", 0],
+      [actions.save, "ArrowRight", "ArrowRight", 0],
+      [actions.save, "ArrowDown", "ArrowDown", 0],
+      [actions.save, "End", "End", 0],
+      [actions.cancel, "ArrowLeft", "Numpad4", 3],
+      [actions.cancel, "ArrowUp", "Numpad8", 3],
+      [actions.cancel, "Home", "Numpad7", 3],
+      [actions.save, "ArrowRight", "Numpad6", 3],
+      [actions.save, "ArrowDown", "Numpad2", 3],
+      [actions.save, "End", "Numpad1", 3],
     ] as const;
-    for (const [source, key] of edges) {
+    for (const [source, key, code, location] of edges) {
       source.focus();
       effects.preventDefault.mockClear();
       effects.focus.mockClear();
-      const event = trustedKey(source, navigationInit(key));
+      const event = trustedKey(
+        source,
+        navigationInit(key, { code, location }),
+      );
       expect(event.defaultPrevented, key).toBe(false);
       expect(effects.preventDefault, key).not.toHaveBeenCalled();
       expect(effects.focus, key).not.toHaveBeenCalled();
@@ -502,6 +555,56 @@ describe("NameVersionDialog keyboard action navigation", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
+  it("publishes prevention to a real same-root synthetic ancestor without activating it", () => {
+    const effects = trackNavigationEffects(window);
+    const ancestorAction = vi.fn();
+    const observations: Array<{
+      defaultPrevented: boolean;
+      syntheticDefaultPrevented: boolean;
+    }> = [];
+    const view = renderStrict(
+      <Harness
+        editor={{}}
+        documentId="doc-ancestor-prevention"
+        onSubmit={async () => undefined}
+        onAncestorKeyDown={(event) => {
+          const syntheticDefaultPrevented = event.isDefaultPrevented();
+          observations.push({
+            defaultPrevented: event.defaultPrevented,
+            syntheticDefaultPrevented,
+          });
+          if (!event.defaultPrevented && !syntheticDefaultPrevented) {
+            ancestorAction();
+          }
+        }}
+      />,
+    );
+    fireEvent.change(directActions(view.host).input, {
+      target: { value: "Ready" },
+    });
+    const actions = directActions(view.host);
+    actions.cancel.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+
+    const event = trustedKey(
+      actions.cancel,
+      navigationInit("ArrowRight"),
+    );
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(observations).toEqual([
+      {
+        defaultPrevented: true,
+        syntheticDefaultPrevented: true,
+      },
+    ]);
+    expect(ancestorAction).not.toHaveBeenCalled();
+    expect(effects.preventDefault).toHaveBeenCalledOnce();
+    expect(effects.focus).toHaveBeenCalledOnce();
+    expect(actions.save).toHaveFocus();
+  });
+
   it("accepts distinct phase wrappers with different prototypes and cancellation methods", () => {
     const effects = trackNavigationEffects(window);
     const view = renderStrict(
@@ -522,6 +625,26 @@ describe("NameVersionDialog keyboard action navigation", () => {
     const capturePropagation = vi.fn(() => false);
     const bubbleDefault = vi.fn(() => false);
     const bubblePropagation = vi.fn(() => false);
+    const capturePrevent = vi.fn(function (
+      this: ReactKeyboardEvent<HTMLDivElement>,
+    ) {
+      this.nativeEvent.preventDefault();
+    });
+    const bubblePrevent = vi.fn(function (
+      this: ReactKeyboardEvent<HTMLDivElement>,
+    ) {
+      this.nativeEvent.preventDefault();
+      Object.defineProperties(this, {
+        defaultPrevented: {
+          configurable: true,
+          value: true,
+        },
+        isDefaultPrevented: {
+          configurable: true,
+          value: () => true,
+        },
+      });
+    });
     let captureEvent: ReactKeyboardEvent<HTMLDivElement> | null = null;
     let bubbleEvent: ReactKeyboardEvent<HTMLDivElement> | null = null;
     actions.cancel.focus();
@@ -536,6 +659,10 @@ describe("NameVersionDialog keyboard action navigation", () => {
           captureEvent = reactEvent;
           Object.setPrototypeOf(reactEvent, capturePrototype);
           Object.defineProperties(reactEvent, {
+            preventDefault: {
+              configurable: true,
+              value: capturePrevent,
+            },
             isDefaultPrevented: {
               configurable: true,
               value: captureDefault,
@@ -551,6 +678,10 @@ describe("NameVersionDialog keyboard action navigation", () => {
           bubbleEvent = reactEvent;
           Object.setPrototypeOf(reactEvent, bubblePrototype);
           Object.defineProperties(reactEvent, {
+            preventDefault: {
+              configurable: true,
+              value: bubblePrevent,
+            },
             isDefaultPrevented: {
               configurable: true,
               value: bubbleDefault,
@@ -572,6 +703,10 @@ describe("NameVersionDialog keyboard action navigation", () => {
     expect(Object.getPrototypeOf(bubbleEvent)).toBe(bubblePrototype);
     expect(captureDefault).not.toBe(bubbleDefault);
     expect(capturePropagation).not.toBe(bubblePropagation);
+    expect(capturePrevent).not.toBe(bubblePrevent);
+    expect(capturePrevent).not.toHaveBeenCalled();
+    expect(bubblePrevent).toHaveBeenCalledOnce();
+    expect(bubblePrevent.mock.contexts[0]).toBe(bubbleEvent);
     expect(captureDefault).toHaveBeenCalled();
     expect(capturePropagation).toHaveBeenCalled();
     expect(bubbleDefault).toHaveBeenCalled();
@@ -588,8 +723,10 @@ describe("NameVersionDialog keyboard action navigation", () => {
   });
 
   it.each([
+    ["capture", "preventDefault"],
     ["capture", "isDefaultPrevented"],
     ["capture", "isPropagationStopped"],
+    ["bubble", "preventDefault"],
     ["bubble", "isDefaultPrevented"],
     ["bubble", "isPropagationStopped"],
   ] as const)(
@@ -651,6 +788,64 @@ describe("NameVersionDialog keyboard action navigation", () => {
       const accepted = trustedKey(
         actions.cancel,
         navigationInit("ArrowRight"),
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(effects.preventDefault).toHaveBeenCalledOnce();
+      expect(effects.focus).toHaveBeenCalledOnce();
+      expect(actions.save).toHaveFocus();
+    },
+  );
+
+  it.each(["code", "location"] as const)(
+    "rejects native %s drift between phase deliveries and accepts a clean successor",
+    (property) => {
+      const effects = trackNavigationEffects(window);
+      const view = renderStrict(
+        <Harness
+          editor={{}}
+          documentId="doc-native-key-drift"
+          onSubmit={async () => undefined}
+        />,
+      );
+      fireEvent.change(directActions(view.host).input, {
+        target: { value: "Ready" },
+      });
+      const actions = directActions(view.host);
+      const current = reactHandlers(actions.boundary);
+      actions.cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+
+      const rejected = withReactHandlers(
+        actions.boundary,
+        {
+          capture: (event) => {
+            current.capture(event);
+            const implementation = jsdomEventImplementation(
+              event.nativeEvent,
+            );
+            if (property === "code") {
+              implementation.code = "Numpad6";
+            } else {
+              implementation.location = 3;
+            }
+          },
+          bubble: current.bubble,
+        },
+        () =>
+          trustedKey(actions.cancel, navigationInit("ArrowRight")),
+      );
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(effects.preventDefault).not.toHaveBeenCalled();
+      expect(effects.focus).not.toHaveBeenCalled();
+      expect(actions.cancel).toHaveFocus();
+
+      const accepted = trustedKey(
+        actions.cancel,
+        navigationInit("ArrowRight", {
+          code: "Numpad6",
+          location: 3,
+        }),
       );
       expect(accepted.defaultPrevented).toBe(true);
       expect(effects.preventDefault).toHaveBeenCalledOnce();
@@ -721,6 +916,74 @@ describe("NameVersionDialog keyboard action navigation", () => {
     expect(actions.save).toHaveFocus();
   });
 
+  it("prevents but refuses focus when the post-prevention query reenters", () => {
+    const effects = trackNavigationEffects(window);
+    const view = renderStrict(
+      <Harness
+        editor={{}}
+        documentId="doc-post-prevention-reentrancy"
+        onSubmit={async () => undefined}
+      />,
+    );
+    fireEvent.change(directActions(view.host).input, {
+      target: { value: "Ready" },
+    });
+    let actions = directActions(view.host);
+    const current = reactHandlers(actions.boundary);
+    actions.cancel.focus();
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+
+    const prevented = withReactHandlers(
+      actions.boundary,
+      {
+        capture: current.capture,
+        bubble: (event) => {
+          const reactPreventDefault = event.preventDefault;
+          Object.defineProperty(event, "preventDefault", {
+            configurable: true,
+            value: function (
+              this: ReactKeyboardEvent<HTMLDivElement>,
+            ) {
+              Reflect.apply(reactPreventDefault, this, []);
+              Object.defineProperty(this, "isDefaultPrevented", {
+                configurable: true,
+                value: function (
+                  this: ReactKeyboardEvent<HTMLDivElement>,
+                ) {
+                  Object.defineProperty(this, "defaultPrevented", {
+                    configurable: true,
+                    value: false,
+                  });
+                  return true;
+                },
+              });
+            },
+          });
+          current.bubble(event);
+        },
+      },
+      () =>
+        trustedKey(actions.cancel, navigationInit("ArrowRight")),
+    );
+    expect(prevented.defaultPrevented).toBe(true);
+    expect(effects.preventDefault).toHaveBeenCalledOnce();
+    expect(effects.focus).not.toHaveBeenCalled();
+    expect(actions.cancel).toHaveFocus();
+
+    actions = directActions(view.host);
+    effects.preventDefault.mockClear();
+    effects.focus.mockClear();
+    const accepted = trustedKey(
+      actions.cancel,
+      navigationInit("ArrowRight"),
+    );
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(effects.preventDefault).toHaveBeenCalledOnce();
+    expect(effects.focus).toHaveBeenCalledOnce();
+    expect(actions.save).toHaveFocus();
+  });
+
   it("binds authority to the event-local Window receiver and rejects structural terminals", () => {
     const ownerWindow = window;
     const nativePath = ownerWindow.Event.prototype.composedPath;
@@ -779,6 +1042,101 @@ describe("NameVersionDialog keyboard action navigation", () => {
     expect(observations[0]?.terminal).toBe(observations[0]?.receiver);
     expect(effects.preventDefault).toHaveBeenCalledOnce();
     expect(effects.focus).toHaveBeenCalledOnce();
+  });
+
+  it("accepts a foreign owner facade and its proven backing receiver but rejects a lookalike view", () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const ownerDocument = frame.contentDocument;
+    const ownerWindow = frame.contentWindow;
+    if (!ownerDocument || !ownerWindow) {
+      frame.remove();
+      throw new Error("The foreign keyboard realm was unavailable");
+    }
+    const documentImplementationSymbol = Object.getOwnPropertySymbols(
+      ownerDocument,
+    ).find((symbol) => String(symbol) === "Symbol(impl)");
+    const backingReceiver = documentImplementationSymbol
+      ? (
+          ownerDocument as unknown as Record<
+            symbol,
+            { _globalObject: EventTarget }
+          >
+        )[documentImplementationSymbol]._globalObject
+      : null;
+    if (!backingReceiver || backingReceiver === ownerWindow) {
+      frame.remove();
+      throw new Error("The foreign Window backing receiver was unavailable");
+    }
+    const lookalike = Object.create(
+      ownerWindow.Window.prototype,
+    ) as Window & Record<string, unknown>;
+    Object.defineProperties(lookalike, {
+      document: { configurable: true, value: ownerDocument },
+      window: { configurable: true, value: lookalike },
+      self: { configurable: true, value: lookalike },
+      Event: { configurable: true, value: ownerWindow.Event },
+      KeyboardEvent: {
+        configurable: true,
+        value: ownerWindow.KeyboardEvent,
+      },
+      Object: { configurable: true, value: ownerWindow.Object },
+      Reflect: { configurable: true, value: ownerWindow.Reflect },
+    });
+
+    withGlobalDocument(ownerDocument, () => {
+      const effects = trackNavigationEffects(ownerWindow);
+      const view = renderStrict(
+        <Harness
+          editor={{}}
+          documentId="doc-foreign-window-proof"
+          onSubmit={async () => undefined}
+        />,
+        ownerDocument,
+      );
+      fireEvent.change(directActions(view.host).input, {
+        target: { value: "Ready" },
+      });
+      let actions = directActions(view.host);
+      actions.cancel.focus();
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+
+      const facade = trustedKey(
+        actions.cancel,
+        navigationInit("ArrowRight"),
+        true,
+        ownerWindow,
+      );
+      expect(facade.defaultPrevented).toBe(true);
+      expect(actions.save).toHaveFocus();
+
+      actions = directActions(view.host);
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      const backing = trustedKey(
+        actions.save,
+        navigationInit("ArrowLeft"),
+        true,
+        backingReceiver,
+      );
+      expect(backing.defaultPrevented).toBe(true);
+      expect(actions.cancel).toHaveFocus();
+
+      actions = directActions(view.host);
+      effects.preventDefault.mockClear();
+      effects.focus.mockClear();
+      const structural = trustedKey(
+        actions.cancel,
+        navigationInit("ArrowRight"),
+        true,
+        lookalike,
+      );
+      expect(structural.defaultPrevented).toBe(false);
+      expect(effects.preventDefault).not.toHaveBeenCalled();
+      expect(effects.focus).not.toHaveBeenCalled();
+      expect(actions.cancel).toHaveFocus();
+    });
   });
 
   it("rejects a Window-shaped path terminal and recovers on a clean event", () => {

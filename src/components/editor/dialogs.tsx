@@ -5919,6 +5919,7 @@ type NameVersionEventField =
 type NameVersionKeyField =
   | "key"
   | "code"
+  | "location"
   | "repeat"
   | "isComposing"
   | "ctrlKey"
@@ -5933,7 +5934,8 @@ type NameVersionGetterAuthority<Field extends string> = Readonly<{
 
 type NameVersionViewIdentity =
   | ReactKeyboardEvent<HTMLDivElement>["view"]
-  | Window;
+  | Window
+  | EventTarget;
 
 type NameVersionMethodAuthority<Method> = Readonly<{
   method: Method;
@@ -6012,6 +6014,7 @@ type NameVersionNativeSnapshot = Readonly<{
   cancelBubble: boolean;
   key: NameVersionNavigationKey;
   code: string;
+  location: number;
   repeat: boolean;
   composing: boolean;
   ctrlKey: boolean;
@@ -6023,6 +6026,7 @@ type NameVersionNativeSnapshot = Readonly<{
 }>;
 
 type NameVersionReactCancellation = Readonly<{
+  preventDefault: ReactKeyboardEvent<HTMLDivElement>["preventDefault"];
   isDefaultPrevented: () => boolean;
   isPropagationStopped: () => boolean;
 }>;
@@ -6439,6 +6443,7 @@ function captureNameVersionKeyboardAuthority(
     [
       "key",
       "code",
+      "location",
       "repeat",
       "isComposing",
       "ctrlKey",
@@ -6791,6 +6796,7 @@ function captureNameVersionNativeEvent(
   authority: NameVersionKeyboardAuthority,
   nativeEvent: Event,
   expectedPhase: number,
+  expectedDefaultPrevented = false,
 ): NameVersionNativeSnapshot | null {
   if (
     !authority.isCurrent() ||
@@ -6850,6 +6856,11 @@ function captureNameVersionNativeEvent(
       authority.keyboard.code,
       nativeEvent,
     );
+    const location = nameVersionNativeValue<number>(
+      authority,
+      authority.keyboard.location,
+      nativeEvent,
+    );
     const repeat = nameVersionNativeValue<boolean>(
       authority,
       authority.keyboard.repeat,
@@ -6880,7 +6891,7 @@ function captureNameVersionNativeEvent(
       authority.keyboard.shiftKey,
       nativeEvent,
     );
-    const view = nameVersionNativeValue<Window | null>(
+    const view = nameVersionNativeValue<NameVersionViewIdentity | null>(
       authority,
       authority.view,
       nativeEvent,
@@ -6909,19 +6920,18 @@ function captureNameVersionNativeEvent(
       phase !== expectedPhase ||
       !bubbles ||
       !cancelable ||
-      defaultPrevented ||
+      defaultPrevented !== expectedDefaultPrevented ||
       cancelBubble ||
       !isNameVersionNavigationKey(key) ||
-      code !== key ||
       repeat ||
       composing ||
       ctrlKey ||
       altKey ||
       metaKey ||
       shiftKey ||
-      view !== authority.ownerWindow ||
       trusted !== true ||
       !terminal ||
+      (view !== authority.ownerWindow && view !== terminal.receiver) ||
       !authority.form.isConnected ||
       !authority.boundary.isConnected ||
       authority.boundary.parentElement !== authority.form
@@ -6964,6 +6974,7 @@ function captureNameVersionNativeEvent(
       cancelBubble,
       key,
       code,
+      location,
       repeat,
       composing,
       ctrlKey,
@@ -6986,7 +6997,29 @@ function nameVersionNativeEventMatches(
     authority,
     expected.event,
     expected.phase,
+    expected.defaultPrevented,
   );
+  return nameVersionNativeSnapshotsMatch(current, expected);
+}
+
+function nameVersionNativeEventPreventedMatches(
+  authority: NameVersionKeyboardAuthority,
+  expected: NameVersionNativeSnapshot,
+) {
+  const current = captureNameVersionNativeEvent(
+    authority,
+    expected.event,
+    expected.phase,
+    true,
+  );
+  return nameVersionNativeSnapshotsMatch(current, expected, true);
+}
+
+function nameVersionNativeSnapshotsMatch(
+  current: NameVersionNativeSnapshot | null,
+  expected: NameVersionNativeSnapshot,
+  expectedDefaultPrevented = expected.defaultPrevented,
+) {
   return Boolean(
     current &&
       current.type === expected.type &&
@@ -6995,10 +7028,11 @@ function nameVersionNativeEventMatches(
       current.phase === expected.phase &&
       current.bubbles === expected.bubbles &&
       current.cancelable === expected.cancelable &&
-      current.defaultPrevented === expected.defaultPrevented &&
+      current.defaultPrevented === expectedDefaultPrevented &&
       current.cancelBubble === expected.cancelBubble &&
       current.key === expected.key &&
       current.code === expected.code &&
+      current.location === expected.location &&
       current.repeat === expected.repeat &&
       current.composing === expected.composing &&
       current.ctrlKey === expected.ctrlKey &&
@@ -7018,16 +7052,32 @@ function captureNameVersionReactCancellation(
 ): NameVersionReactCancellation | null {
   try {
     const reactEvent = event as ReactKeyboardEvent<HTMLDivElement> & {
+      preventDefault?: unknown;
       isDefaultPrevented?: unknown;
       isPropagationStopped?: unknown;
     };
+    const preventDefault = reactEvent.preventDefault;
     const isDefaultPrevented = reactEvent.isDefaultPrevented;
     const isPropagationStopped = reactEvent.isPropagationStopped;
-    return typeof isDefaultPrevented === "function" &&
+    const defaultPrevented =
+      typeof isDefaultPrevented === "function" &&
+      authority.apply(isDefaultPrevented, event, []);
+    const propagationStopped =
       typeof isPropagationStopped === "function" &&
-      authority.apply(isDefaultPrevented, event, []) === false &&
-      authority.apply(isPropagationStopped, event, []) === false
-      ? Object.freeze({ isDefaultPrevented, isPropagationStopped })
+      authority.apply(isPropagationStopped, event, []);
+    return typeof preventDefault === "function" &&
+      typeof isDefaultPrevented === "function" &&
+      typeof isPropagationStopped === "function" &&
+      defaultPrevented === false &&
+      propagationStopped === false &&
+      reactEvent.preventDefault === preventDefault &&
+      reactEvent.isDefaultPrevented === isDefaultPrevented &&
+      reactEvent.isPropagationStopped === isPropagationStopped
+      ? Object.freeze({
+          preventDefault,
+          isDefaultPrevented,
+          isPropagationStopped,
+        })
       : null;
   } catch {
     return null;
@@ -7044,11 +7094,30 @@ function nameVersionReactCancellationMatches(
   );
   return Boolean(
     current &&
+      current.preventDefault === snapshot.cancellation.preventDefault &&
       current.isDefaultPrevented ===
         snapshot.cancellation.isDefaultPrevented &&
       current.isPropagationStopped ===
         snapshot.cancellation.isPropagationStopped,
   );
+}
+
+function nameVersionReactPreventionMatches(
+  snapshot: NameVersionReactSnapshot,
+  authority: NameVersionKeyboardAuthority,
+) {
+  try {
+    const isDefaultPrevented = snapshot.event.isDefaultPrevented;
+    return (
+      snapshot.event.defaultPrevented === true &&
+      typeof isDefaultPrevented === "function" &&
+      authority.apply(isDefaultPrevented, snapshot.event, []) === true &&
+      snapshot.event.defaultPrevented === true &&
+      snapshot.event.isDefaultPrevented === isDefaultPrevented
+    );
+  } catch {
+    return false;
+  }
 }
 
 function captureNameVersionReactEvent(
@@ -7073,6 +7142,7 @@ function captureNameVersionReactEvent(
       event.isTrusted === true &&
       event.key === native.key &&
       event.code === native.code &&
+      event.location === native.location &&
       event.repeat === native.repeat &&
       event.ctrlKey === native.ctrlKey &&
       event.altKey === native.altKey &&
@@ -7110,6 +7180,7 @@ function nameVersionReactEventMatches(
     event.isTrusted === true &&
     event.key === native.key &&
     event.code === native.code &&
+    event.location === native.location &&
     event.repeat === native.repeat &&
     event.ctrlKey === native.ctrlKey &&
     event.altKey === native.altKey &&
@@ -7138,6 +7209,7 @@ function nameVersionDeliveriesMatch(
     capture.cancelBubble === bubble.cancelBubble &&
     capture.key === bubble.key &&
     capture.code === bubble.code &&
+    capture.location === bubble.location &&
     capture.repeat === bubble.repeat &&
     capture.composing === bubble.composing &&
     capture.ctrlKey === bubble.ctrlKey &&
@@ -7556,6 +7628,38 @@ class NameVersionNavigationCoordinator {
     );
   }
 
+  preventionIsCurrent(
+    movement: NameVersionMovement,
+    factsAreCurrent: () => boolean,
+  ) {
+    const { establishment, pair, authority, native, bubble } = movement;
+    const stateIsCurrent = () =>
+      this.#current === establishment &&
+      !establishment.released &&
+      establishment.claimedPair === pair &&
+      establishment.pair === pair &&
+      this.#claimedPublications.has(establishment.publication) &&
+      this.#claimedActions.has(movement.sourceAction) &&
+      this.#claimedActions.has(movement.destinationAction) &&
+      this.#claimedWrappers.has(pair.capture.event) &&
+      this.#claimedWrappers.has(bubble.event) &&
+      this.#claimedNativeEvents.has(native.event) &&
+      this.#claimedPairs.has(pair) &&
+      authority.intrinsicsAreCurrent() &&
+      authority.terminal.owns(native.terminal) &&
+      nameVersionNativeEventPreventedMatches(authority, native) &&
+      factsAreCurrent() &&
+      nameVersionPublicationDomIsExact(
+        establishment.publication,
+        establishment,
+      );
+    return (
+      stateIsCurrent() &&
+      nameVersionReactPreventionMatches(bubble, authority) &&
+      stateIsCurrent()
+    );
+  }
+
   discard(publication: NameVersionFormPublication) {
     if (
       this.#current?.publication === publication &&
@@ -7782,10 +7886,18 @@ export const NameVersionDialog = memo(function NameVersionDialog({
         return;
       }
       movement.authority.apply(
-        movement.authority.preventDefault,
-        movement.native.event,
+        movement.bubble.cancellation.preventDefault,
+        movement.bubble.event,
         [],
       );
+      if (
+        !navigationCoordinator.preventionIsCurrent(
+          movement,
+          navigationFactsAreCurrent,
+        )
+      ) {
+        return;
+      }
       movement.authority.apply(
         movement.authority.focus,
         movement.destination,
