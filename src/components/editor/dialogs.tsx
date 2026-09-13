@@ -1,6 +1,17 @@
 "use client";
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefCallback,
+} from "react";
 import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
 import { gridCell, type GridCell } from "@/lib/a11y";
 import { apiErrorText } from "@/lib/api";
@@ -5825,6 +5836,1768 @@ export interface NameVersionSaveOwner {
   title: string;
 }
 
+type NameVersionNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+type NameVersionActionFacts = Readonly<{
+  kind: "cancel" | "save";
+  eligible: boolean;
+}>;
+
+type NameVersionPresentation = Readonly<{
+  mount: symbol;
+  revision: number;
+  open: boolean;
+  visit: NameVersionVisit;
+  title: string;
+  trimmedTitle: string;
+  busy: boolean;
+  error: string | null;
+  saveOwner: NameVersionSaveOwner | null;
+  onOpenChange: (visit: NameVersionVisit, open: boolean) => void;
+  nextOperationId: () => number;
+  onSubmit: (owner: NameVersionSaveOwner) => Promise<void>;
+  actions: readonly [
+    cancel: NameVersionActionFacts,
+    save: NameVersionActionFacts,
+  ];
+}>;
+
+interface NameVersionElementSlot<T extends HTMLElement> {
+  element: T | null;
+  revision: number;
+  binding: RefCallback<T> | null;
+}
+
+function nameVersionElementSlot<T extends HTMLElement>(): NameVersionElementSlot<T> {
+  return {
+    element: null,
+    revision: 0,
+    binding: null,
+  };
+}
+
+type NameVersionDomSnapshot = Readonly<{
+  node: Node;
+  nodeValue: string | null;
+  attributes: readonly (readonly [string, string])[] | null;
+  children: readonly NameVersionDomSnapshot[];
+}>;
+
+type NameVersionPlacementLink = Readonly<{
+  node: Node;
+  parent: Node;
+  previousSibling: Node | null;
+  nextSibling: Node | null;
+}>;
+
+type NameVersionPlacement = Readonly<{
+  document: Document;
+  links: readonly NameVersionPlacementLink[];
+}>;
+
+type NameVersionDomGuard = Readonly<{
+  isClean: () => boolean;
+  release: () => void;
+}>;
+
+type NameVersionNativeGetter = (this: object) => unknown;
+type NameVersionEventField =
+  | "type"
+  | "target"
+  | "currentTarget"
+  | "eventPhase"
+  | "bubbles"
+  | "cancelable"
+  | "defaultPrevented"
+  | "cancelBubble";
+type NameVersionKeyField =
+  | "key"
+  | "code"
+  | "repeat"
+  | "isComposing"
+  | "ctrlKey"
+  | "altKey"
+  | "metaKey"
+  | "shiftKey";
+
+type NameVersionGetterAuthority<Field extends string> = Readonly<{
+  getters: Readonly<Record<Field, NameVersionNativeGetter>>;
+  isCurrent: () => boolean;
+}>;
+
+type NameVersionViewIdentity =
+  | ReactKeyboardEvent<HTMLDivElement>["view"]
+  | Window;
+
+type NameVersionMethodAuthority<Method> = Readonly<{
+  method: Method;
+  isCurrent: () => boolean;
+}>;
+
+type NameVersionWindowMethod<Method> = Readonly<{
+  value: Method;
+  isCurrent: () => boolean;
+}>;
+
+type NameVersionTrustedAuthority = Readonly<{
+  matches: (event: object) => boolean;
+  read: (event: object) => boolean;
+  isCurrent: () => boolean;
+}>;
+
+type NameVersionTerminalProof = Readonly<{
+  registration: NameVersionTerminalRegistration;
+  nativeEvent: KeyboardEvent;
+  receiver: EventTarget;
+  currentTarget: EventTarget;
+  terminal: EventTarget;
+  path: readonly EventTarget[];
+}>;
+
+type NameVersionTerminalRegistration = Readonly<{
+  proofFor: (event: KeyboardEvent) => NameVersionTerminalProof | null;
+  claim: (proof: NameVersionTerminalProof) => boolean;
+  owns: (proof: NameVersionTerminalProof) => boolean;
+  release: () => void;
+  isCurrent: () => boolean;
+}>;
+
+type NameVersionFocus = (
+  this: HTMLElement,
+  options?: FocusOptions,
+) => void;
+
+type NameVersionKeyboardAuthority = Readonly<{
+  form: HTMLFormElement;
+  boundary: HTMLDivElement;
+  document: Document;
+  ownerWindow: Window & typeof globalThis;
+  targets: readonly HTMLButtonElement[];
+  Event: typeof Event;
+  UIEvent: typeof UIEvent;
+  KeyboardEvent: typeof KeyboardEvent;
+  Document: typeof Document;
+  HTMLElement: typeof HTMLElement;
+  event: NameVersionGetterAuthority<NameVersionEventField>["getters"];
+  keyboard: NameVersionGetterAuthority<NameVersionKeyField>["getters"];
+  view: NameVersionNativeGetter;
+  activeElement: NameVersionNativeGetter;
+  composedPath: Event["composedPath"];
+  preventDefault: Event["preventDefault"];
+  focus: NameVersionFocus;
+  trusted: NameVersionTrustedAuthority;
+  terminal: NameVersionTerminalRegistration;
+  apply: typeof Reflect.apply;
+  prototypeOf: typeof Object.getPrototypeOf;
+  intrinsicsAreCurrent: () => boolean;
+  isCurrent: () => boolean;
+}>;
+
+type NameVersionNativeSnapshot = Readonly<{
+  event: KeyboardEvent;
+  type: string;
+  target: HTMLButtonElement;
+  currentTarget: EventTarget;
+  phase: number;
+  path: readonly EventTarget[];
+  bubbles: boolean;
+  cancelable: boolean;
+  defaultPrevented: boolean;
+  cancelBubble: boolean;
+  key: NameVersionNavigationKey;
+  code: string;
+  repeat: boolean;
+  composing: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  view: NameVersionViewIdentity;
+  terminal: NameVersionTerminalProof;
+}>;
+
+type NameVersionReactCancellation = Readonly<{
+  isDefaultPrevented: () => boolean;
+  isPropagationStopped: () => boolean;
+}>;
+
+type NameVersionReactSnapshot = Readonly<{
+  event: ReactKeyboardEvent<HTMLDivElement>;
+  currentTarget: HTMLDivElement;
+  eventPhase: number;
+  cancellation: NameVersionReactCancellation;
+}>;
+
+type NameVersionDeliveryPair = Readonly<{
+  publication: NameVersionFormPublication;
+  establishment: NameVersionEstablishment;
+  native: NameVersionNativeSnapshot;
+  capture: NameVersionReactSnapshot;
+}>;
+
+type NameVersionRefOwner = Readonly<{
+  element: HTMLElement | null;
+  revision: number;
+}>;
+
+type NameVersionRefSnapshot = Readonly<{
+  owner: NameVersionRefOwner;
+  element: HTMLElement;
+  revision: number;
+}>;
+
+interface NameVersionEstablishment {
+  readonly publication: NameVersionFormPublication;
+  readonly form: HTMLFormElement;
+  readonly boundary: HTMLDivElement;
+  readonly input: HTMLInputElement;
+  readonly cancel: HTMLButtonElement;
+  readonly save: HTMLButtonElement;
+  readonly refs: readonly NameVersionRefSnapshot[];
+  readonly dom: NameVersionDomSnapshot;
+  readonly placement: NameVersionPlacement;
+  readonly guard: NameVersionDomGuard;
+  readonly keyboard: NameVersionKeyboardAuthority;
+  pair: NameVersionDeliveryPair | null;
+  claimedPair: NameVersionDeliveryPair | null;
+  released: boolean;
+}
+
+type NameVersionMovement = Readonly<{
+  establishment: NameVersionEstablishment;
+  pair: NameVersionDeliveryPair;
+  authority: NameVersionKeyboardAuthority;
+  native: NameVersionNativeSnapshot;
+  bubble: NameVersionReactSnapshot;
+  sourceAction: NameVersionActionFacts;
+  destinationAction: NameVersionActionFacts;
+  source: HTMLButtonElement;
+  destination: HTMLButtonElement;
+}>;
+
+interface NameVersionFormPublication {
+  readonly presentation: NameVersionPresentation;
+  readonly form: NameVersionElementSlot<HTMLFormElement>;
+  readonly input: NameVersionElementSlot<HTMLInputElement>;
+  readonly boundary: NameVersionElementSlot<HTMLDivElement>;
+  readonly cancel: NameVersionElementSlot<HTMLButtonElement>;
+  readonly save: NameVersionElementSlot<HTMLButtonElement>;
+}
+
+function nameVersionDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current ||
+    current.configurable !== expected.configurable ||
+    current.enumerable !== expected.enumerable ||
+    ("value" in current) !== ("value" in expected) ||
+    ("writable" in current) !== ("writable" in expected) ||
+    ("get" in current) !== ("get" in expected) ||
+    ("set" in current) !== ("set" in expected)
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value && current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function captureNameVersionGetters<const Fields extends readonly string[]>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  fields: Fields,
+): NameVersionGetterAuthority<Fields[number]> | null {
+  const entries: [Fields[number], NameVersionNativeGetter][] = [];
+  const descriptors: [Fields[number], Readonly<PropertyDescriptor>][] = [];
+  for (const field of fields) {
+    const descriptor = getOwnPropertyDescriptor(prototype, field);
+    if (!descriptor || typeof descriptor.get !== "function") return null;
+    entries.push([field, descriptor.get]);
+    descriptors.push([field, Object.freeze({ ...descriptor })]);
+  }
+  const getters = Object.freeze(
+    Object.fromEntries(entries),
+  ) as Readonly<Record<Fields[number], NameVersionNativeGetter>>;
+  return Object.freeze({
+    getters,
+    isCurrent: () =>
+      descriptors.every(([field, expected]) =>
+        nameVersionDescriptorsMatch(
+          getOwnPropertyDescriptor(prototype, field),
+          expected,
+        )),
+  });
+}
+
+function captureNameVersionMethod<Method>(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  prototype: object,
+  name: PropertyKey,
+): NameVersionMethodAuthority<Method> | null {
+  const descriptor = getOwnPropertyDescriptor(prototype, name);
+  if (!descriptor || typeof descriptor.value !== "function") return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    method: descriptor.value as Method,
+    isCurrent: () =>
+      nameVersionDescriptorsMatch(
+        getOwnPropertyDescriptor(prototype, name),
+        expected,
+      ),
+  });
+}
+
+function captureNameVersionWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): NameVersionWindowMethod<Window[Property]> | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(Object.freeze({
+      target,
+      descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+      prototype,
+    }));
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(
+    ownerWindow,
+    property,
+    ownerWindow,
+  ) as Window[Property];
+  if (!found || typeof value !== "function") return null;
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Reflect.get === reflectGet &&
+    path.every(({ target: entry, descriptor, prototype }) =>
+      getPrototypeOf(entry) === prototype &&
+      (descriptor
+        ? nameVersionDescriptorsMatch(
+            getOwnPropertyDescriptor(entry, property),
+            descriptor,
+          )
+        : getOwnPropertyDescriptor(entry, property) === undefined)) &&
+    reflectGet(ownerWindow, property, ownerWindow) === value;
+  return isCurrent() ? Object.freeze({ value, isCurrent }) : null;
+}
+
+function captureNameVersionTrustedAuthority(
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+  probe: KeyboardEvent,
+): NameVersionTrustedAuthority | null {
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    descriptor.enumerable !== true ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    nameVersionDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event) =>
+      apply(
+        descriptor.get as NameVersionNativeGetter,
+        event,
+        [],
+      ) as boolean,
+    isCurrent: () => matches(probe),
+  });
+}
+
+function createNameVersionTerminalRegistration(
+  ownerWindow: Window & typeof globalThis,
+  ownerDocument: Document,
+  KeyboardEventConstructor: typeof KeyboardEvent,
+  keyboardEventPrototype: object,
+  eventCurrentTarget: NameVersionNativeGetter,
+  eventPhase: NameVersionNativeGetter,
+  composedPath: Event["composedPath"],
+  addEventListener: NameVersionWindowMethod<Window["addEventListener"]>,
+  removeEventListener: NameVersionWindowMethod<Window["removeEventListener"]>,
+  apply: typeof Reflect.apply,
+  prototypeOf: typeof Object.getPrototypeOf,
+  intrinsicsAreCurrent: () => boolean,
+): NameVersionTerminalRegistration | null {
+  const proofs = new WeakMap<KeyboardEvent, NameVersionTerminalProof>();
+  const invalidEvents = new WeakSet<Event>();
+  let claimed: NameVersionTerminalProof | null = null;
+  let active = false;
+  let released = false;
+
+  const listener: EventListener = function (
+    this: EventTarget,
+    event: Event,
+  ) {
+    if (
+      !active ||
+      released ||
+      !(event instanceof KeyboardEventConstructor) ||
+      prototypeOf(event) !== keyboardEventPrototype ||
+      invalidEvents.has(event) ||
+      !intrinsicsAreCurrent()
+    ) {
+      return;
+    }
+    if (proofs.has(event)) {
+      invalidEvents.add(event);
+      return;
+    }
+    try {
+      const currentTarget = apply(
+        eventCurrentTarget,
+        event,
+        [],
+      ) as EventTarget | null;
+      const phase = apply(eventPhase, event, []) as number;
+      const path = apply(composedPath, event, []) as EventTarget[];
+      const terminal = path.at(-1);
+      if (
+        currentTarget !== this ||
+        terminal !== this ||
+        phase !== ownerWindow.Event.CAPTURING_PHASE ||
+        path.at(-2) !== ownerDocument
+      ) {
+        invalidEvents.add(event);
+        return;
+      }
+      proofs.set(event, Object.freeze({
+        registration,
+        nativeEvent: event,
+        receiver: this,
+        currentTarget,
+        terminal,
+        path: Object.freeze([...path]),
+      }));
+    } catch {
+      invalidEvents.add(event);
+    }
+  };
+
+  const proofFor = (event: KeyboardEvent) => {
+    const proof = proofs.get(event);
+    if (
+      !proof ||
+      !active ||
+      released ||
+      (claimed !== null && claimed !== proof) ||
+      invalidEvents.has(event) ||
+      proof.registration !== registration ||
+      proof.nativeEvent !== event ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      !intrinsicsAreCurrent()
+    ) {
+      return null;
+    }
+    try {
+      const path = apply(composedPath, event, []) as EventTarget[];
+      return path.length === proof.path.length &&
+        path.every((entry, index) => entry === proof.path[index]) &&
+        path.at(-2) === ownerDocument &&
+        path.at(-1) === proof.receiver
+        ? proof
+        : null;
+    } catch {
+      invalidEvents.add(event);
+      return null;
+    }
+  };
+
+  const registration: NameVersionTerminalRegistration = Object.freeze({
+    proofFor,
+    claim: (proof) => {
+      if (claimed || proofFor(proof.nativeEvent) !== proof) return false;
+      claimed = proof;
+      return true;
+    },
+    owns: (proof) =>
+      claimed === proof && proofFor(proof.nativeEvent) === proof,
+    release: () => {
+      if (released) return;
+      released = true;
+      active = false;
+      apply(removeEventListener.value, ownerWindow, [
+        "keydown",
+        listener,
+        true,
+      ]);
+    },
+    isCurrent: () =>
+      active &&
+      !released &&
+      intrinsicsAreCurrent() &&
+      addEventListener.isCurrent() &&
+      removeEventListener.isCurrent(),
+  });
+
+  active = true;
+  try {
+    apply(addEventListener.value, ownerWindow, [
+      "keydown",
+      listener,
+      true,
+    ]);
+    if (registration.isCurrent()) return registration;
+    registration.release();
+    return null;
+  } catch {
+    active = false;
+    released = true;
+    return null;
+  }
+}
+
+function captureNameVersionKeyboardAuthority(
+  publication: NameVersionFormPublication,
+): NameVersionKeyboardAuthority | null {
+  const form = publication.form.element;
+  const boundary = publication.boundary.element;
+  const cancel = publication.cancel.element;
+  const save = publication.save.element;
+  const document = form?.ownerDocument;
+  const ownerWindow = document?.defaultView;
+  if (
+    !form ||
+    !boundary ||
+    !cancel ||
+    !save ||
+    !document ||
+    !ownerWindow ||
+    boundary.ownerDocument !== document ||
+    cancel.ownerDocument !== document ||
+    save.ownerDocument !== document
+  ) {
+    return null;
+  }
+
+  const objectConstructor = ownerWindow.Object;
+  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+  const prototypeOf = objectConstructor.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const EventConstructor = ownerWindow.Event;
+  const UIEventConstructor = ownerWindow.UIEvent;
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const DocumentConstructor = ownerWindow.Document;
+  const HTMLElementConstructor = ownerWindow.HTMLElement;
+  const eventPrototype = EventConstructor.prototype;
+  const uiEventPrototype = UIEventConstructor.prototype;
+  const keyboardEventPrototype = KeyboardEventConstructor.prototype;
+  const documentPrototype = DocumentConstructor.prototype;
+  const eventGetters = captureNameVersionGetters(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    [
+      "type",
+      "target",
+      "currentTarget",
+      "eventPhase",
+      "bubbles",
+      "cancelable",
+      "defaultPrevented",
+      "cancelBubble",
+    ] as const,
+  );
+  const keyboardGetters = captureNameVersionGetters(
+    getOwnPropertyDescriptor,
+    keyboardEventPrototype,
+    [
+      "key",
+      "code",
+      "repeat",
+      "isComposing",
+      "ctrlKey",
+      "altKey",
+      "metaKey",
+      "shiftKey",
+    ] as const,
+  );
+  const uiGetters = captureNameVersionGetters(
+    getOwnPropertyDescriptor,
+    uiEventPrototype,
+    ["view"] as const,
+  );
+  const documentGetters = captureNameVersionGetters(
+    getOwnPropertyDescriptor,
+    documentPrototype,
+    ["activeElement"] as const,
+  );
+  const composedPath = captureNameVersionMethod<Event["composedPath"]>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "composedPath",
+  );
+  const preventDefault = captureNameVersionMethod<Event["preventDefault"]>(
+    getOwnPropertyDescriptor,
+    eventPrototype,
+    "preventDefault",
+  );
+  const focus = captureNameVersionMethod<NameVersionFocus>(
+    getOwnPropertyDescriptor,
+    HTMLElementConstructor.prototype,
+    "focus",
+  );
+  const addEventListener = captureNameVersionWindowMethod(
+    ownerWindow,
+    "addEventListener",
+  );
+  const removeEventListener = captureNameVersionWindowMethod(
+    ownerWindow,
+    "removeEventListener",
+  );
+  if (
+    !eventGetters ||
+    !keyboardGetters ||
+    !uiGetters ||
+    !documentGetters ||
+    !composedPath ||
+    !preventDefault ||
+    !focus ||
+    !addEventListener ||
+    !removeEventListener
+  ) {
+    return null;
+  }
+
+  let probe: KeyboardEvent;
+  try {
+    probe = new KeyboardEventConstructor("name-version-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const trusted = captureNameVersionTrustedAuthority(
+    getOwnPropertyDescriptor,
+    apply,
+    probe,
+  );
+  if (!trusted) return null;
+
+  const intrinsicsAreCurrent = () => {
+    try {
+      return (
+        document.defaultView === ownerWindow &&
+        ownerWindow.Object === objectConstructor &&
+        ownerWindow.Object.getOwnPropertyDescriptor ===
+          getOwnPropertyDescriptor &&
+        ownerWindow.Object.getPrototypeOf === prototypeOf &&
+        ownerWindow.Reflect.apply === apply &&
+        ownerWindow.Event === EventConstructor &&
+        ownerWindow.UIEvent === UIEventConstructor &&
+        ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+        ownerWindow.Document === DocumentConstructor &&
+        ownerWindow.HTMLElement === HTMLElementConstructor &&
+        EventConstructor.prototype === eventPrototype &&
+        UIEventConstructor.prototype === uiEventPrototype &&
+        KeyboardEventConstructor.prototype === keyboardEventPrototype &&
+        DocumentConstructor.prototype === documentPrototype &&
+        prototypeOf(probe) === keyboardEventPrototype &&
+        prototypeOf(keyboardEventPrototype) === uiEventPrototype &&
+        prototypeOf(uiEventPrototype) === eventPrototype &&
+        eventGetters.isCurrent() &&
+        keyboardGetters.isCurrent() &&
+        uiGetters.isCurrent() &&
+        documentGetters.isCurrent() &&
+        composedPath.isCurrent() &&
+        preventDefault.isCurrent() &&
+        focus.isCurrent() &&
+        addEventListener.isCurrent() &&
+        removeEventListener.isCurrent() &&
+        trusted.isCurrent()
+      );
+    } catch {
+      return false;
+    }
+  };
+  try {
+    if (!intrinsicsAreCurrent() || trusted.read(probe) !== false) return null;
+  } catch {
+    return null;
+  }
+
+  const terminal = createNameVersionTerminalRegistration(
+    ownerWindow,
+    document,
+    KeyboardEventConstructor,
+    keyboardEventPrototype,
+    eventGetters.getters.currentTarget,
+    eventGetters.getters.eventPhase,
+    composedPath.method,
+    addEventListener,
+    removeEventListener,
+    apply,
+    prototypeOf,
+    intrinsicsAreCurrent,
+  );
+  if (!terminal) return null;
+  return Object.freeze({
+    form,
+    boundary,
+    document,
+    ownerWindow,
+    targets: Object.freeze([cancel, save]),
+    Event: EventConstructor,
+    UIEvent: UIEventConstructor,
+    KeyboardEvent: KeyboardEventConstructor,
+    Document: DocumentConstructor,
+    HTMLElement: HTMLElementConstructor,
+    event: eventGetters.getters,
+    keyboard: keyboardGetters.getters,
+    view: uiGetters.getters.view,
+    activeElement: documentGetters.getters.activeElement,
+    composedPath: composedPath.method,
+    preventDefault: preventDefault.method,
+    focus: focus.method,
+    trusted,
+    terminal,
+    apply,
+    prototypeOf,
+    intrinsicsAreCurrent,
+    isCurrent: () => intrinsicsAreCurrent() && terminal.isCurrent(),
+  });
+}
+
+function nameVersionAttributes(
+  node: Node,
+): readonly (readonly [string, string])[] | null {
+  if (node.nodeType !== 1) return null;
+  return Object.freeze(
+    [...(node as Element).attributes]
+      .map(({ name, value }) => Object.freeze([name, value] as const))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+}
+
+function snapshotNameVersionDom(node: Node): NameVersionDomSnapshot {
+  return Object.freeze({
+    node,
+    nodeValue: node.nodeValue,
+    attributes: nameVersionAttributes(node),
+    children: Object.freeze(
+      [...node.childNodes].map(snapshotNameVersionDom),
+    ),
+  });
+}
+
+function nameVersionDomMatches(snapshot: NameVersionDomSnapshot): boolean {
+  if (snapshot.node.nodeValue !== snapshot.nodeValue) return false;
+  const attributes = nameVersionAttributes(snapshot.node);
+  if (attributes === null || snapshot.attributes === null) {
+    if (attributes !== snapshot.attributes) return false;
+  } else if (
+    attributes.length !== snapshot.attributes.length ||
+    attributes.some(([name, value], index) => {
+      const expected = snapshot.attributes?.[index];
+      return !expected || expected[0] !== name || expected[1] !== value;
+    })
+  ) {
+    return false;
+  }
+  return (
+    snapshot.node.childNodes.length === snapshot.children.length &&
+    snapshot.children.every(
+      (child, index) =>
+        snapshot.node.childNodes.item(index) === child.node &&
+        nameVersionDomMatches(child),
+    )
+  );
+}
+
+function captureNameVersionPlacement(
+  root: HTMLElement,
+): NameVersionPlacement | null {
+  const document = root.ownerDocument;
+  if (!root.isConnected) return null;
+  const links: NameVersionPlacementLink[] = [];
+  let node: Node = root;
+  while (node !== document) {
+    const parent = node.parentNode;
+    if (!parent) return null;
+    links.push(Object.freeze({
+      node,
+      parent,
+      previousSibling: node.previousSibling,
+      nextSibling: node.nextSibling,
+    }));
+    node = parent;
+  }
+  return links.length === 0
+    ? null
+    : Object.freeze({
+        document,
+        links: Object.freeze(links),
+      });
+}
+
+function nameVersionPlacementMatches(
+  root: HTMLElement,
+  placement: NameVersionPlacement,
+) {
+  return (
+    root.ownerDocument === placement.document &&
+    root.isConnected &&
+    placement.links[0]?.node === root &&
+    placement.links.every((link) =>
+      link.node.isConnected &&
+      link.node.parentNode === link.parent &&
+      link.node.previousSibling === link.previousSibling &&
+      link.node.nextSibling === link.nextSibling) &&
+    placement.links.at(-1)?.parent === placement.document
+  );
+}
+
+function createNameVersionDomGuard(
+  root: HTMLElement,
+  placement: NameVersionPlacement,
+): NameVersionDomGuard | null {
+  const MutationObserverConstructor =
+    placement.document.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  let released = false;
+  const pendingRecords: MutationRecord[] = [];
+  const observer = new MutationObserverConstructor((records) => {
+    pendingRecords.push(...records);
+  });
+  const takeRecords = () => {
+    const records = [...pendingRecords, ...observer.takeRecords()];
+    pendingRecords.length = 0;
+    return records;
+  };
+  const recordChanges = (records: readonly MutationRecord[]) => {
+    if (changed) return;
+    changed = records.some((record) => {
+      if (record.target === root || root.contains(record.target)) return true;
+      if (record.type !== "childList") return false;
+      return placement.links.some((link) =>
+        record.target === link.parent &&
+        [...record.addedNodes, ...record.removedNodes].includes(link.node));
+    });
+  };
+  const exactReactInputRecords = (records: readonly MutationRecord[]) => {
+    if (records.length === 0) return true;
+    const ownerWindow = placement.document.defaultView;
+    if (!ownerWindow) return false;
+    for (let index = 0; index < records.length;) {
+      const nameStart = records[index];
+      const possibleType = records[index + 1];
+      const hasTypeReset =
+        possibleType?.type === "attributes" &&
+        possibleType.attributeName === "type" &&
+        possibleType.target === nameStart?.target;
+      const nameEnd = records[index + (hasTypeReset ? 2 : 1)];
+      if (
+        nameStart?.type !== "attributes" ||
+        nameStart.attributeName !== "name" ||
+        nameStart.oldValue !== null ||
+        !(nameStart.target instanceof ownerWindow.HTMLInputElement) ||
+        !root.contains(nameStart.target) ||
+        nameEnd?.type !== "attributes" ||
+        nameEnd.attributeName !== "name" ||
+        nameEnd.target !== nameStart.target ||
+        nameEnd.oldValue !== "" ||
+        nameStart.target.hasAttribute("name") ||
+        (hasTypeReset &&
+          possibleType.oldValue !==
+            nameStart.target.getAttribute("type"))
+      ) {
+        return false;
+      }
+      index += hasTypeReset ? 3 : 2;
+    }
+    return true;
+  };
+  observer.observe(root, {
+    attributes: true,
+    attributeOldValue: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  for (const parent of new Set(placement.links.map((link) => link.parent))) {
+    observer.observe(parent, { childList: true });
+  }
+  return Object.freeze({
+    isClean: () => {
+      const records = takeRecords();
+      if (!exactReactInputRecords(records)) recordChanges(records);
+      return !released && !changed;
+    },
+    release: () => {
+      if (released) return;
+      recordChanges(takeRecords());
+      released = true;
+      observer.disconnect();
+    },
+  });
+}
+
+function isNameVersionNavigationKey(
+  key: string,
+): key is NameVersionNavigationKey {
+  return (
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "Home" ||
+    key === "End"
+  );
+}
+
+function nameVersionNativeValue<Value>(
+  authority: NameVersionKeyboardAuthority,
+  getter: NameVersionNativeGetter,
+  target: object,
+): Value {
+  return authority.apply(getter, target, []) as Value;
+}
+
+function captureNameVersionNativeEvent(
+  authority: NameVersionKeyboardAuthority,
+  nativeEvent: Event,
+  expectedPhase: number,
+): NameVersionNativeSnapshot | null {
+  if (
+    !authority.isCurrent() ||
+    authority.prototypeOf(nativeEvent) !== authority.KeyboardEvent.prototype ||
+    !authority.trusted.matches(nativeEvent)
+  ) {
+    return null;
+  }
+  try {
+    const type = nameVersionNativeValue<string>(
+      authority,
+      authority.event.type,
+      nativeEvent,
+    );
+    const target = nameVersionNativeValue<EventTarget | null>(
+      authority,
+      authority.event.target,
+      nativeEvent,
+    );
+    const currentTarget = nameVersionNativeValue<EventTarget | null>(
+      authority,
+      authority.event.currentTarget,
+      nativeEvent,
+    );
+    const phase = nameVersionNativeValue<number>(
+      authority,
+      authority.event.eventPhase,
+      nativeEvent,
+    );
+    const bubbles = nameVersionNativeValue<boolean>(
+      authority,
+      authority.event.bubbles,
+      nativeEvent,
+    );
+    const cancelable = nameVersionNativeValue<boolean>(
+      authority,
+      authority.event.cancelable,
+      nativeEvent,
+    );
+    const defaultPrevented = nameVersionNativeValue<boolean>(
+      authority,
+      authority.event.defaultPrevented,
+      nativeEvent,
+    );
+    const cancelBubble = nameVersionNativeValue<boolean>(
+      authority,
+      authority.event.cancelBubble,
+      nativeEvent,
+    );
+    const key = nameVersionNativeValue<string>(
+      authority,
+      authority.keyboard.key,
+      nativeEvent,
+    );
+    const code = nameVersionNativeValue<string>(
+      authority,
+      authority.keyboard.code,
+      nativeEvent,
+    );
+    const repeat = nameVersionNativeValue<boolean>(
+      authority,
+      authority.keyboard.repeat,
+      nativeEvent,
+    );
+    const composing = nameVersionNativeValue<boolean>(
+      authority,
+      authority.keyboard.isComposing,
+      nativeEvent,
+    );
+    const ctrlKey = nameVersionNativeValue<boolean>(
+      authority,
+      authority.keyboard.ctrlKey,
+      nativeEvent,
+    );
+    const altKey = nameVersionNativeValue<boolean>(
+      authority,
+      authority.keyboard.altKey,
+      nativeEvent,
+    );
+    const metaKey = nameVersionNativeValue<boolean>(
+      authority,
+      authority.keyboard.metaKey,
+      nativeEvent,
+    );
+    const shiftKey = nameVersionNativeValue<boolean>(
+      authority,
+      authority.keyboard.shiftKey,
+      nativeEvent,
+    );
+    const view = nameVersionNativeValue<Window | null>(
+      authority,
+      authority.view,
+      nativeEvent,
+    );
+    const activeElement = nameVersionNativeValue<Element | null>(
+      authority,
+      authority.activeElement,
+      authority.document,
+    );
+    const path = authority.apply(
+      authority.composedPath,
+      nativeEvent,
+      [],
+    ) as EventTarget[];
+    const trusted = authority.trusted.read(nativeEvent);
+    const terminal = authority.terminal.proofFor(
+      nativeEvent as KeyboardEvent,
+    );
+    if (
+      type !== "keydown" ||
+      !(target instanceof authority.ownerWindow.HTMLButtonElement) ||
+      target.ownerDocument !== authority.document ||
+      !authority.targets.includes(target) ||
+      activeElement !== target ||
+      !currentTarget ||
+      phase !== expectedPhase ||
+      !bubbles ||
+      !cancelable ||
+      defaultPrevented ||
+      cancelBubble ||
+      !isNameVersionNavigationKey(key) ||
+      code !== key ||
+      repeat ||
+      composing ||
+      ctrlKey ||
+      altKey ||
+      metaKey ||
+      shiftKey ||
+      view !== authority.ownerWindow ||
+      trusted !== true ||
+      !terminal ||
+      !authority.form.isConnected ||
+      !authority.boundary.isConnected ||
+      authority.boundary.parentElement !== authority.form
+    ) {
+      return null;
+    }
+
+    const expectedPath: EventTarget[] = [];
+    let node: Node | null = target;
+    while (node) {
+      expectedPath.push(node);
+      if (node === authority.document) break;
+      node = node.parentNode;
+    }
+    expectedPath.push(terminal.receiver);
+    if (
+      expectedPath.at(-2) !== authority.document ||
+      path.length !== expectedPath.length ||
+      path.some((entry, index) => entry !== expectedPath[index]) ||
+      path.length !== terminal.path.length ||
+      path.some((entry, index) => entry !== terminal.path[index]) ||
+      terminal.receiver !== terminal.currentTarget ||
+      terminal.receiver !== terminal.terminal ||
+      !path.includes(authority.form) ||
+      !path.includes(authority.boundary) ||
+      !path.includes(currentTarget)
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event: nativeEvent as KeyboardEvent,
+      type,
+      target,
+      currentTarget,
+      phase,
+      path: Object.freeze([...path]),
+      bubbles,
+      cancelable,
+      defaultPrevented,
+      cancelBubble,
+      key,
+      code,
+      repeat,
+      composing,
+      ctrlKey,
+      altKey,
+      metaKey,
+      shiftKey,
+      view,
+      terminal,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function nameVersionNativeEventMatches(
+  authority: NameVersionKeyboardAuthority,
+  expected: NameVersionNativeSnapshot,
+) {
+  const current = captureNameVersionNativeEvent(
+    authority,
+    expected.event,
+    expected.phase,
+  );
+  return Boolean(
+    current &&
+      current.type === expected.type &&
+      current.target === expected.target &&
+      current.currentTarget === expected.currentTarget &&
+      current.phase === expected.phase &&
+      current.bubbles === expected.bubbles &&
+      current.cancelable === expected.cancelable &&
+      current.defaultPrevented === expected.defaultPrevented &&
+      current.cancelBubble === expected.cancelBubble &&
+      current.key === expected.key &&
+      current.code === expected.code &&
+      current.repeat === expected.repeat &&
+      current.composing === expected.composing &&
+      current.ctrlKey === expected.ctrlKey &&
+      current.altKey === expected.altKey &&
+      current.metaKey === expected.metaKey &&
+      current.shiftKey === expected.shiftKey &&
+      current.view === expected.view &&
+      current.terminal === expected.terminal &&
+      current.path.length === expected.path.length &&
+      current.path.every((entry, index) => entry === expected.path[index]),
+  );
+}
+
+function captureNameVersionReactCancellation(
+  event: ReactKeyboardEvent<HTMLDivElement>,
+  authority: NameVersionKeyboardAuthority,
+): NameVersionReactCancellation | null {
+  try {
+    const reactEvent = event as ReactKeyboardEvent<HTMLDivElement> & {
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+    };
+    const isDefaultPrevented = reactEvent.isDefaultPrevented;
+    const isPropagationStopped = reactEvent.isPropagationStopped;
+    return typeof isDefaultPrevented === "function" &&
+      typeof isPropagationStopped === "function" &&
+      authority.apply(isDefaultPrevented, event, []) === false &&
+      authority.apply(isPropagationStopped, event, []) === false
+      ? Object.freeze({ isDefaultPrevented, isPropagationStopped })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function nameVersionReactCancellationMatches(
+  snapshot: NameVersionReactSnapshot,
+  authority: NameVersionKeyboardAuthority,
+) {
+  const current = captureNameVersionReactCancellation(
+    snapshot.event,
+    authority,
+  );
+  return Boolean(
+    current &&
+      current.isDefaultPrevented ===
+        snapshot.cancellation.isDefaultPrevented &&
+      current.isPropagationStopped ===
+        snapshot.cancellation.isPropagationStopped,
+  );
+}
+
+function captureNameVersionReactEvent(
+  event: ReactKeyboardEvent<HTMLDivElement>,
+  authority: NameVersionKeyboardAuthority,
+  native: NameVersionNativeSnapshot,
+): NameVersionReactSnapshot | null {
+  try {
+    const cancellation = captureNameVersionReactCancellation(
+      event,
+      authority,
+    );
+    return cancellation &&
+      event.nativeEvent === native.event &&
+      event.type === native.type &&
+      event.target === native.target &&
+      event.currentTarget === authority.boundary &&
+      event.eventPhase === native.phase &&
+      event.bubbles === native.bubbles &&
+      event.cancelable === native.cancelable &&
+      event.defaultPrevented === native.defaultPrevented &&
+      event.isTrusted === true &&
+      event.key === native.key &&
+      event.code === native.code &&
+      event.repeat === native.repeat &&
+      event.ctrlKey === native.ctrlKey &&
+      event.altKey === native.altKey &&
+      event.metaKey === native.metaKey &&
+      event.shiftKey === native.shiftKey &&
+      event.view === native.view
+      ? Object.freeze({
+          event,
+          currentTarget: authority.boundary,
+          eventPhase: native.phase,
+          cancellation,
+        })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function nameVersionReactEventMatches(
+  snapshot: NameVersionReactSnapshot,
+  authority: NameVersionKeyboardAuthority,
+  native: NameVersionNativeSnapshot,
+) {
+  const event = snapshot.event;
+  return (
+    snapshot.currentTarget === authority.boundary &&
+    snapshot.eventPhase === native.phase &&
+    event.nativeEvent === native.event &&
+    event.type === native.type &&
+    event.target === native.target &&
+    event.eventPhase === native.phase &&
+    event.bubbles === native.bubbles &&
+    event.cancelable === native.cancelable &&
+    event.defaultPrevented === native.defaultPrevented &&
+    event.isTrusted === true &&
+    event.key === native.key &&
+    event.code === native.code &&
+    event.repeat === native.repeat &&
+    event.ctrlKey === native.ctrlKey &&
+    event.altKey === native.altKey &&
+    event.metaKey === native.metaKey &&
+    event.shiftKey === native.shiftKey &&
+    event.view === native.view &&
+    nameVersionReactCancellationMatches(snapshot, authority)
+  );
+}
+
+function nameVersionDeliveriesMatch(
+  capture: NameVersionNativeSnapshot,
+  bubble: NameVersionNativeSnapshot,
+  authority: NameVersionKeyboardAuthority,
+) {
+  return (
+    capture.event === bubble.event &&
+    capture.type === bubble.type &&
+    capture.target === bubble.target &&
+    capture.currentTarget === bubble.currentTarget &&
+    capture.phase === authority.Event.CAPTURING_PHASE &&
+    bubble.phase === authority.Event.BUBBLING_PHASE &&
+    capture.bubbles === bubble.bubbles &&
+    capture.cancelable === bubble.cancelable &&
+    capture.defaultPrevented === bubble.defaultPrevented &&
+    capture.cancelBubble === bubble.cancelBubble &&
+    capture.key === bubble.key &&
+    capture.code === bubble.code &&
+    capture.repeat === bubble.repeat &&
+    capture.composing === bubble.composing &&
+    capture.ctrlKey === bubble.ctrlKey &&
+    capture.altKey === bubble.altKey &&
+    capture.metaKey === bubble.metaKey &&
+    capture.shiftKey === bubble.shiftKey &&
+    capture.view === bubble.view &&
+    capture.terminal === bubble.terminal &&
+    capture.path.length === bubble.path.length &&
+    capture.path.every((entry, index) => entry === bubble.path[index])
+  );
+}
+
+function nameVersionPublicationRefs(
+  publication: NameVersionFormPublication,
+): readonly NameVersionRefOwner[] {
+  return [
+    publication.form,
+    publication.input,
+    publication.boundary,
+    publication.cancel,
+    publication.save,
+  ];
+}
+
+function nameVersionPublicationDomIsExact(
+  publication: NameVersionFormPublication,
+  establishment?: NameVersionEstablishment,
+) {
+  const form = publication.form.element;
+  const input = publication.input.element;
+  const boundary = publication.boundary.element;
+  const cancel = publication.cancel.element;
+  const save = publication.save.element;
+  const facts = publication.presentation;
+  if (
+    !form ||
+    !input ||
+    !boundary ||
+    !cancel ||
+    !save ||
+    !form.isConnected ||
+    input.ownerDocument !== form.ownerDocument ||
+    boundary.ownerDocument !== form.ownerDocument ||
+    cancel.ownerDocument !== form.ownerDocument ||
+    save.ownerDocument !== form.ownerDocument ||
+    input.parentElement !== form ||
+    boundary.parentElement !== form ||
+    cancel.parentElement !== boundary ||
+    save.parentElement !== boundary ||
+    boundary.children.length !== 2 ||
+    boundary.children.item(0) !== cancel ||
+    boundary.children.item(1) !== save ||
+    cancel.form !== form ||
+    save.form !== form ||
+    cancel.type !== "button" ||
+    save.type !== "submit" ||
+    cancel.disabled !== !facts.actions[0].eligible ||
+    save.disabled !== !facts.actions[1].eligible ||
+    input.disabled !== facts.busy ||
+    input.value !== facts.title ||
+    input.dataset.testid !== "version-name" ||
+    save.dataset.testid !== "version-name-submit" ||
+    cancel.textContent?.trim() !== "Cancel" ||
+    save.textContent?.trim() !== "Save version"
+  ) {
+    return false;
+  }
+  if (!establishment) return true;
+  return (
+    establishment.publication === publication &&
+    establishment.form === form &&
+    establishment.input === input &&
+    establishment.boundary === boundary &&
+    establishment.cancel === cancel &&
+    establishment.save === save &&
+    establishment.refs.length === 5 &&
+    establishment.refs.every(
+      ({ owner, element, revision }, index) =>
+        nameVersionPublicationRefs(publication)[index] === owner &&
+        owner.element === element &&
+        owner.revision === revision,
+    ) &&
+    establishment.guard.isClean() &&
+    nameVersionPlacementMatches(form, establishment.placement) &&
+    nameVersionDomMatches(establishment.dom)
+  );
+}
+
+class NameVersionNavigationCoordinator {
+  #current: NameVersionEstablishment | null = null;
+  readonly #claimedPublications = new WeakSet<NameVersionFormPublication>();
+  readonly #claimedActions = new WeakSet<NameVersionActionFacts>();
+  readonly #claimedWrappers = new WeakSet<object>();
+  readonly #claimedNativeEvents = new WeakSet<Event>();
+  readonly #claimedPairs = new WeakSet<NameVersionDeliveryPair>();
+
+  invalidate(publication: NameVersionFormPublication) {
+    if (this.#current?.publication === publication) {
+      this.#release(this.#current);
+    }
+  }
+
+  establish(
+    publication: NameVersionFormPublication,
+    factsAreCurrent: () => boolean,
+  ): (() => void) | undefined {
+    const previous = this.#current;
+    if (previous) this.#release(previous);
+    if (
+      this.#claimedPublications.has(publication) ||
+      !factsAreCurrent() ||
+      !nameVersionPublicationDomIsExact(publication)
+    ) {
+      return undefined;
+    }
+    const form = publication.form.element;
+    const boundary = publication.boundary.element;
+    const input = publication.input.element;
+    const cancel = publication.cancel.element;
+    const save = publication.save.element;
+    if (!form || !boundary || !input || !cancel || !save) return undefined;
+    const placement = captureNameVersionPlacement(form);
+    if (!placement) return undefined;
+    const guard = createNameVersionDomGuard(form, placement);
+    if (!guard) return undefined;
+    const keyboard = captureNameVersionKeyboardAuthority(publication);
+    if (!keyboard) {
+      guard.release();
+      return undefined;
+    }
+    const establishment: NameVersionEstablishment = {
+      publication,
+      form,
+      boundary,
+      input,
+      cancel,
+      save,
+      refs: Object.freeze(
+        nameVersionPublicationRefs(publication).map((owner) =>
+          Object.freeze({
+            owner,
+            element: owner.element!,
+            revision: owner.revision,
+          })),
+      ),
+      dom: snapshotNameVersionDom(form),
+      placement,
+      guard,
+      keyboard,
+      pair: null,
+      claimedPair: null,
+      released: false,
+    };
+    if (
+      !factsAreCurrent() ||
+      !nameVersionPublicationDomIsExact(publication, establishment)
+    ) {
+      keyboard.terminal.release();
+      guard.release();
+      return undefined;
+    }
+    this.#current = establishment;
+    return () => {
+      if (this.#current === establishment) this.#release(establishment);
+    };
+  }
+
+  publishCapture(
+    publication: NameVersionFormPublication,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+    factsAreCurrent: () => boolean,
+  ) {
+    const establishment = this.#current;
+    if (!establishment || establishment.publication !== publication) return;
+    const pending = establishment.pair;
+    if (pending && pending.native.event !== event.nativeEvent) {
+      try {
+        const authority = pending.establishment.keyboard;
+        const phase = nameVersionNativeValue<number>(
+          authority,
+          authority.event.eventPhase,
+          pending.native.event,
+        );
+        const currentTarget = nameVersionNativeValue<EventTarget | null>(
+          authority,
+          authority.event.currentTarget,
+          pending.native.event,
+        );
+        if (phase === authority.Event.NONE && currentTarget === null) {
+          establishment.pair = null;
+        }
+      } catch {
+        return;
+      }
+    }
+    if (
+      establishment.pair ||
+      establishment.claimedPair ||
+      establishment.released ||
+      !factsAreCurrent() ||
+      !nameVersionPublicationDomIsExact(publication, establishment)
+    ) {
+      return;
+    }
+    const authority = establishment.keyboard;
+    const native = captureNameVersionNativeEvent(
+      authority,
+      event.nativeEvent,
+      authority.Event.CAPTURING_PHASE,
+    );
+    const capture = native
+      ? captureNameVersionReactEvent(event, authority, native)
+      : null;
+    if (
+      !native ||
+      !capture ||
+      this.#current !== establishment ||
+      establishment.released ||
+      !factsAreCurrent() ||
+      !nameVersionPublicationDomIsExact(publication, establishment)
+    ) {
+      return;
+    }
+    establishment.pair = Object.freeze({
+      publication,
+      establishment,
+      native,
+      capture,
+    });
+  }
+
+  claimMovement(
+    publication: NameVersionFormPublication,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+    factsAreCurrent: () => boolean,
+  ): NameVersionMovement | null {
+    const establishment = this.#current;
+    const pair = establishment?.pair;
+    if (
+      !establishment ||
+      !pair ||
+      establishment.publication !== publication ||
+      pair.publication !== publication ||
+      pair.establishment !== establishment ||
+      pair.capture.event === event ||
+      pair.native.event !== event.nativeEvent ||
+      establishment.claimedPair ||
+      establishment.released
+    ) {
+      return null;
+    }
+    const authority = establishment.keyboard;
+    const bubbleNative = captureNameVersionNativeEvent(
+      authority,
+      event.nativeEvent,
+      authority.Event.BUBBLING_PHASE,
+    );
+    const bubble = bubbleNative
+      ? captureNameVersionReactEvent(event, authority, bubbleNative)
+      : null;
+    if (
+      !bubbleNative ||
+      !bubble ||
+      !nameVersionDeliveriesMatch(pair.native, bubbleNative, authority) ||
+      !nameVersionReactEventMatches(pair.capture, authority, pair.native) ||
+      !nameVersionReactEventMatches(bubble, authority, bubbleNative) ||
+      !factsAreCurrent() ||
+      !nameVersionPublicationDomIsExact(publication, establishment)
+    ) {
+      return null;
+    }
+
+    const actions = publication.presentation.actions;
+    const elements = [establishment.cancel, establishment.save] as const;
+    const sourceIndex = elements.findIndex(
+      (element) => element === bubbleNative.target,
+    );
+    const enabled = (index: number) => {
+      const action = actions[index];
+      const element = elements[index];
+      return Boolean(
+        action?.eligible &&
+        element &&
+        !element.disabled &&
+        element.isConnected,
+      );
+    };
+    if (sourceIndex < 0 || !enabled(sourceIndex)) return null;
+
+    let destinationIndex: number | null = null;
+    if (
+      bubbleNative.key === "ArrowLeft" ||
+      bubbleNative.key === "ArrowUp"
+    ) {
+      for (let index = sourceIndex - 1; index >= 0; index -= 1) {
+        if (enabled(index)) {
+          destinationIndex = index;
+          break;
+        }
+      }
+    } else if (
+      bubbleNative.key === "ArrowRight" ||
+      bubbleNative.key === "ArrowDown"
+    ) {
+      for (
+        let index = sourceIndex + 1;
+        index < elements.length;
+        index += 1
+      ) {
+        if (enabled(index)) {
+          destinationIndex = index;
+          break;
+        }
+      }
+    } else if (bubbleNative.key === "Home") {
+      destinationIndex = elements.findIndex((_, index) => enabled(index));
+    } else {
+      for (let index = elements.length - 1; index >= 0; index -= 1) {
+        if (enabled(index)) {
+          destinationIndex = index;
+          break;
+        }
+      }
+    }
+    if (
+      destinationIndex === null ||
+      destinationIndex < 0 ||
+      destinationIndex === sourceIndex
+    ) {
+      return null;
+    }
+    const source = elements[sourceIndex];
+    const destination = elements[destinationIndex];
+    const sourceAction = actions[sourceIndex];
+    const destinationAction = actions[destinationIndex];
+    if (
+      !source ||
+      !destination ||
+      !sourceAction ||
+      !destinationAction ||
+      source === destination ||
+      this.#current !== establishment ||
+      establishment.pair !== pair ||
+      bubbleNative.target !== source ||
+      !enabled(sourceIndex) ||
+      !enabled(destinationIndex) ||
+      !nameVersionNativeEventMatches(authority, bubbleNative) ||
+      !nameVersionReactEventMatches(pair.capture, authority, pair.native) ||
+      !nameVersionReactEventMatches(bubble, authority, bubbleNative) ||
+      !factsAreCurrent() ||
+      !nameVersionPublicationDomIsExact(publication, establishment) ||
+      this.#claimedPublications.has(publication) ||
+      this.#claimedActions.has(sourceAction) ||
+      this.#claimedActions.has(destinationAction) ||
+      this.#claimedWrappers.has(pair.capture.event) ||
+      this.#claimedWrappers.has(bubble.event) ||
+      this.#claimedNativeEvents.has(bubbleNative.event) ||
+      this.#claimedPairs.has(pair) ||
+      !authority.terminal.claim(bubbleNative.terminal)
+    ) {
+      return null;
+    }
+
+    this.#claimedPublications.add(publication);
+    this.#claimedActions.add(sourceAction);
+    this.#claimedActions.add(destinationAction);
+    this.#claimedWrappers.add(pair.capture.event);
+    this.#claimedWrappers.add(bubble.event);
+    this.#claimedNativeEvents.add(bubbleNative.event);
+    this.#claimedPairs.add(pair);
+    establishment.claimedPair = pair;
+    return Object.freeze({
+      establishment,
+      pair,
+      authority,
+      native: bubbleNative,
+      bubble,
+      sourceAction,
+      destinationAction,
+      source,
+      destination,
+    });
+  }
+
+  effectsAreCurrent(
+    movement: NameVersionMovement,
+    factsAreCurrent: () => boolean,
+  ) {
+    const { establishment, pair, authority, native, bubble } = movement;
+    const stateIsCurrent = () =>
+      this.#current === establishment &&
+      !establishment.released &&
+      establishment.claimedPair === pair &&
+      establishment.pair === pair &&
+      this.#claimedPublications.has(establishment.publication) &&
+      this.#claimedActions.has(movement.sourceAction) &&
+      this.#claimedActions.has(movement.destinationAction) &&
+      this.#claimedWrappers.has(pair.capture.event) &&
+      this.#claimedWrappers.has(bubble.event) &&
+      this.#claimedNativeEvents.has(native.event) &&
+      this.#claimedPairs.has(pair) &&
+      authority.intrinsicsAreCurrent() &&
+      authority.terminal.owns(native.terminal) &&
+      nameVersionNativeEventMatches(authority, native) &&
+      factsAreCurrent() &&
+      nameVersionPublicationDomIsExact(
+        establishment.publication,
+        establishment,
+      );
+    return (
+      stateIsCurrent() &&
+      nameVersionReactCancellationMatches(pair.capture, authority) &&
+      nameVersionReactCancellationMatches(bubble, authority) &&
+      stateIsCurrent()
+    );
+  }
+
+  discard(publication: NameVersionFormPublication) {
+    if (
+      this.#current?.publication === publication &&
+      !this.#current.claimedPair
+    ) {
+      this.#current.pair = null;
+    }
+  }
+
+  finish(movement: NameVersionMovement) {
+    if (this.#current === movement.establishment) {
+      this.#release(movement.establishment);
+    }
+  }
+
+  #release(establishment: NameVersionEstablishment) {
+    if (establishment.released) return;
+    establishment.released = true;
+    establishment.pair = null;
+    establishment.keyboard.terminal.release();
+    establishment.guard.release();
+    if (this.#current === establishment) this.#current = null;
+  }
+}
+
+const NAME_VERSION_PREVENT_SCROLL = Object.freeze({
+  preventScroll: true,
+});
+
+function createNameVersionFormPublication(
+  presentation: NameVersionPresentation,
+): NameVersionFormPublication {
+  return Object.freeze({
+    presentation,
+    form: nameVersionElementSlot<HTMLFormElement>(),
+    input: nameVersionElementSlot<HTMLInputElement>(),
+    boundary: nameVersionElementSlot<HTMLDivElement>(),
+    cancel: nameVersionElementSlot<HTMLButtonElement>(),
+    save: nameVersionElementSlot<HTMLButtonElement>(),
+  });
+}
+
 export const NameVersionDialog = memo(function NameVersionDialog({
   open,
   visit,
@@ -5843,16 +7616,28 @@ export const NameVersionDialog = memo(function NameVersionDialog({
   const [error, setError] = useState<string | null>(null);
   const activeVisit = useRef<NameVersionVisit | null>(null);
   const activeSave = useRef<NameVersionSaveOwner | null>(null);
+  const [saveOwner, setSaveOwner] = useState<NameVersionSaveOwner | null>(null);
+  const [navigationMount] = useState(() =>
+    Symbol("name-version-navigation"));
+  const [publicationRevision, setPublicationRevision] = useState(0);
+  const [navigationCoordinator] = useState(
+    () => new NameVersionNavigationCoordinator(),
+  );
+  const requestPublicationSuccessor = useCallback(() => {
+    setPublicationRevision((revision) => revision + 1);
+  }, []);
   useLayoutEffect(() => {
     if (open) {
       activeVisit.current = visit;
       activeSave.current = null;
+      setSaveOwner(null);
       setTitle("");
       setError(null);
       setBusy(false);
     } else if (activeVisit.current === visit) {
       activeVisit.current = null;
       activeSave.current = null;
+      setSaveOwner(null);
     }
     return () => {
       if (activeVisit.current === visit) {
@@ -5866,27 +7651,171 @@ export const NameVersionDialog = memo(function NameVersionDialog({
     if (!nextOpen && activeVisit.current === visit) {
       activeVisit.current = null;
       activeSave.current = null;
+      setSaveOwner(null);
     }
     onOpenChange(visit, nextOpen);
+  };
+  const presentation = useMemo<NameVersionPresentation>(() => {
+    const trimmedTitle = title.trim();
+    return Object.freeze({
+      mount: navigationMount,
+      revision: publicationRevision,
+      open,
+      visit,
+      title,
+      trimmedTitle,
+      busy,
+      error,
+      saveOwner,
+      onOpenChange,
+      nextOperationId,
+      onSubmit,
+      actions: Object.freeze([
+        Object.freeze({ kind: "cancel" as const, eligible: open }),
+        Object.freeze({
+          kind: "save" as const,
+          eligible: open && !busy && trimmedTitle.length > 0,
+        }),
+      ] as const),
+    });
+  }, [
+    busy,
+    error,
+    navigationMount,
+    nextOperationId,
+    onOpenChange,
+    onSubmit,
+    open,
+    publicationRevision,
+    saveOwner,
+    title,
+    visit,
+  ]);
+  const navigationFactsAreCurrent = useCallback(
+    () =>
+      presentation.mount === navigationMount &&
+      presentation.revision === publicationRevision &&
+      presentation.open === open &&
+      presentation.open &&
+      presentation.visit === visit &&
+      presentation.title === title &&
+      presentation.trimmedTitle === title.trim() &&
+      presentation.busy === busy &&
+      presentation.error === error &&
+      presentation.saveOwner === saveOwner &&
+      activeSave.current === saveOwner &&
+      presentation.onOpenChange === onOpenChange &&
+      presentation.nextOperationId === nextOperationId &&
+      presentation.onSubmit === onSubmit &&
+      activeVisit.current === visit,
+    [
+      busy,
+      error,
+      navigationMount,
+      nextOperationId,
+      onOpenChange,
+      onSubmit,
+      open,
+      presentation,
+      publicationRevision,
+      saveOwner,
+      title,
+      visit,
+    ],
+  );
+  const formPublication = useMemo(
+    () => createNameVersionFormPublication(presentation),
+    [presentation],
+  );
+  const bindNavigationElement = <T extends HTMLElement>(
+    candidate: NameVersionFormPublication,
+    owner: NameVersionElementSlot<T>,
+  ): RefCallback<T> => {
+    owner.binding ??= (element) => {
+      if (owner.element === element) return;
+      owner.element = element;
+      owner.revision += 1;
+      navigationCoordinator.invalidate(candidate);
+    };
+    return owner.binding;
+  };
+  useLayoutEffect(
+    () =>
+      navigationCoordinator.establish(
+        formPublication,
+        navigationFactsAreCurrent,
+      ),
+    [
+      formPublication,
+      navigationCoordinator,
+      navigationFactsAreCurrent,
+    ],
+  );
+  const onNavigationKeyDownCapture = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    navigationCoordinator.publishCapture(
+      formPublication,
+      event,
+      navigationFactsAreCurrent,
+    );
+  };
+  const onNavigationKeyDown = (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    const movement = navigationCoordinator.claimMovement(
+      formPublication,
+      event,
+      navigationFactsAreCurrent,
+    );
+    if (!movement) {
+      navigationCoordinator.discard(formPublication);
+      return;
+    }
+    try {
+      if (
+        !navigationCoordinator.effectsAreCurrent(
+          movement,
+          navigationFactsAreCurrent,
+        )
+      ) {
+        return;
+      }
+      movement.authority.apply(
+        movement.authority.preventDefault,
+        movement.native.event,
+        [],
+      );
+      movement.authority.apply(
+        movement.authority.focus,
+        movement.destination,
+        [NAME_VERSION_PREVENT_SCROLL],
+      );
+    } finally {
+      navigationCoordinator.finish(movement);
+      requestPublicationSuccessor();
+    }
   };
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent title="Name this version" description="Named versions stay easy to find in the history.">
         <form
+          ref={bindNavigationElement(formPublication, formPublication.form)}
           className="flex flex-col gap-3"
           onSubmit={async (e) => {
             e.preventDefault();
             const currentVisit = activeVisit.current;
             const submittedTitle = title.trim();
             if (!currentVisit || activeSave.current || !submittedTitle) return;
-            const owner = {
+            const owner = Object.freeze({
               visit: currentVisit,
               editor: currentVisit.editor,
               documentId: currentVisit.documentId,
               operationId: nextOperationId(),
               title: submittedTitle,
-            };
+            });
             activeSave.current = owner;
+            setSaveOwner(owner);
             setError(null);
             setBusy(true);
             try {
@@ -5897,12 +7826,14 @@ export const NameVersionDialog = memo(function NameVersionDialog({
             } finally {
               if (ownsSave(owner)) {
                 activeSave.current = null;
+                setSaveOwner(null);
                 setBusy(false);
               }
             }
           }}
         >
           <input
+            ref={bindNavigationElement(formPublication, formPublication.input)}
             className="input"
             placeholder="e.g. Draft sent for review"
             value={title}
@@ -5923,11 +7854,36 @@ export const NameVersionDialog = memo(function NameVersionDialog({
               Closing this dialog does not cancel the version already being saved.
             </div>
           )}
-          <div className="flex justify-end gap-2">
-            <button type="button" className="btn btn-ghost" onClick={() => setOpen(false)}>
+          <div
+            ref={bindNavigationElement(
+              formPublication,
+              formPublication.boundary,
+            )}
+            className="flex justify-end gap-2"
+            onKeyDownCapture={onNavigationKeyDownCapture}
+            onKeyDown={onNavigationKeyDown}
+          >
+            <button
+              ref={bindNavigationElement(
+                formPublication,
+                formPublication.cancel,
+              )}
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => setOpen(false)}
+            >
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary" disabled={busy || !title.trim()} data-testid="version-name-submit">
+            <button
+              ref={bindNavigationElement(
+                formPublication,
+                formPublication.save,
+              )}
+              type="submit"
+              className="btn btn-primary"
+              disabled={busy || !title.trim()}
+              data-testid="version-name-submit"
+            >
               Save version
             </button>
           </div>
