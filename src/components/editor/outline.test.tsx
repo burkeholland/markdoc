@@ -160,6 +160,144 @@ describe("OutlinePanel active heading reveal", () => {
     return target.binding.getHeadings();
   }
 
+  describe("heading titles", () => {
+    const longText = "A long outline heading. ".repeat(10).trim();
+    const specialText = '<img src="heading"> & <em>literal</em> \'quotes\'';
+
+    it.each([
+      ["long", `# ${longText}`, longText],
+      ["blank", "#", "Untitled"],
+      ["special-character", `# \`${specialText}\``, specialText],
+    ])("uses the full %s heading text for the native title and accessible name", (_, source, text) => {
+      const headings = loadHeadings(session, source);
+      session.localCursor.rich = headings[0].from;
+      render(<OutlinePanel session={session} open onToggle={() => {}} onSelect={() => {}} />);
+
+      expect(longText.length).toBeGreaterThanOrEqual(200);
+      const nav = screen.getByRole("navigation", { name: "Document outline" });
+      const button = within(nav).getByRole<HTMLButtonElement>("button", { name: text });
+      const label = button.querySelector("span.truncate");
+      expect(button).toHaveAttribute("title", text);
+      expect(button).toHaveAccessibleName(text);
+      expect(button.textContent).toBe(text);
+      expect(label?.textContent).toBe(text);
+      expect(label?.childElementCount).toBe(0);
+      expect(button.querySelectorAll("*")).toHaveLength(2);
+      expect(button).toHaveClass("truncate", "font-medium", "text-accent");
+      expect(button).toHaveAttribute("aria-current", "location");
+      expect(button).toHaveStyle({ paddingLeft: "24px" });
+      expect(button.tabIndex).toBe(0);
+      expect(within(nav).getAllByRole("listitem")).toHaveLength(1);
+      expect(within(nav).getAllByRole("button")).toEqual([button]);
+    });
+
+    it("keeps hover passive and preserves heading selection, keyboard navigation and collapse", () => {
+      const headings = loadHeadings();
+      session.localCursor.rich = headings[0].from;
+      const onSelect = vi.fn();
+      const onToggle = vi.fn();
+      render(
+        <>
+          <button type="button">Editor control</button>
+          <OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />
+        </>,
+      );
+      const nav = screen.getByRole("navigation", { name: "Document outline" });
+      const buttons = within(nav).getAllByRole<HTMLButtonElement>("button");
+      const editorControl = screen.getByRole("button", { name: "Editor control" });
+      editorControl.focus();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const fetch = vi.spyOn(globalThis, "fetch");
+      const xhrOpen = vi.spyOn(XMLHttpRequest.prototype, "open");
+      const timeout = vi.spyOn(globalThis, "setTimeout");
+      const interval = vi.spyOn(globalThis, "setInterval");
+      const animationFrame = vi.spyOn(window, "requestAnimationFrame");
+      const html = nav.outerHTML;
+
+      fireEvent.pointerOver(buttons[0]);
+      fireEvent.mouseOver(buttons[0]);
+      fireEvent.pointerMove(buttons[0]);
+      fireEvent.mouseMove(buttons[0]);
+      fireEvent.pointerOut(buttons[0]);
+      fireEvent.mouseOut(buttons[0]);
+
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(onToggle).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(editorControl).toHaveFocus();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(xhrOpen).not.toHaveBeenCalled();
+      expect(timeout).not.toHaveBeenCalled();
+      expect(interval).not.toHaveBeenCalled();
+      expect(animationFrame).not.toHaveBeenCalled();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(nav.outerHTML).toBe(html);
+      expect(within(nav).getAllByRole("listitem")).toHaveLength(3);
+      expect(buttons.filter((button) => button.tabIndex === 0)).toEqual([buttons[0]]);
+      expect(buttons.map((button) => button.title)).toEqual(["First", "Second", "Third"]);
+      expect(buttons[1]).toHaveStyle({ paddingLeft: "38px" });
+
+      fireEvent.click(buttons[0]);
+      expect(onSelect).toHaveBeenCalledOnce();
+      expect(onSelect).toHaveBeenCalledWith(headings[0]);
+      buttons[0].focus();
+      fireEvent.keyDown(buttons[0], { key: "ArrowDown" });
+      expect(buttons[1]).toHaveFocus();
+      expect(onSelect).toHaveBeenCalledOnce();
+      fireEvent.click(screen.getByRole("button", { name: "Hide outline" }));
+      expect(onToggle).toHaveBeenCalledOnce();
+    });
+
+    it("updates titles after edits, reordering, removal and document replacement", async () => {
+      loadHeadings();
+      const onSelect = vi.fn();
+      const onToggle = vi.fn();
+      const rendered = render(<OutlinePanel session={session} open onToggle={onToggle} onSelect={onSelect} />);
+
+      async function expectTitles(expected: string[]) {
+        await waitFor(() => {
+          const nav = screen.getByRole("navigation", { name: "Document outline" });
+          const buttons = within(nav).getAllByRole<HTMLButtonElement>("button");
+          expect(buttons.map((button) => button.title)).toEqual(expected);
+          expect(within(nav).getAllByRole("listitem")).toHaveLength(expected.length);
+          expect(buttons.filter((button) => button.tabIndex === 0)).toHaveLength(1);
+          buttons.forEach((button, index) => {
+            expect(button.textContent).toBe(expected[index]);
+            expect(button).toHaveAccessibleName(expected[index]);
+          });
+        });
+      }
+
+      await expectTitles(["First", "Second", "Third"]);
+      const first = screen.getByRole("button", { name: "First" });
+      act(() => session.replaceSource([{ from: 2, to: 7, text: "FIRST" }]));
+      await expectTitles(["FIRST", "Second", "Third"]);
+      expect(screen.getByRole("button", { name: "FIRST" })).toBe(first);
+      fireEvent.click(first);
+      expect(onSelect).toHaveBeenCalledOnce();
+      expect(onSelect).toHaveBeenLastCalledWith(session.binding.getHeadings()[0]);
+
+      act(() => session.replaceSource([{ from: 0, to: session.ytext.length, text: "## Third\n\n# FIRST\n\n## Second" }]));
+      await expectTitles(["Third", "FIRST", "Second"]);
+      fireEvent.click(screen.getByRole("button", { name: "Third" }));
+      expect(onSelect).toHaveBeenCalledTimes(2);
+      expect(onSelect).toHaveBeenLastCalledWith(session.binding.getHeadings()[0]);
+
+      act(() => session.replaceSource([{ from: 0, to: "## Third\n\n".length, text: "" }]));
+      await expectTitles(["FIRST", "Second"]);
+      expect(screen.queryByRole("button", { name: "Third" })).not.toBeInTheDocument();
+
+      const replacement = makeSession("outline-title-replacement");
+      const replacementHeadings = loadHeadings(replacement, DISJOINT_SOURCE);
+      rendered.rerender(<OutlinePanel session={replacement} open onToggle={onToggle} onSelect={onSelect} />);
+      await expectTitles(["Replacement first", "Replacement nested", "Replacement last"]);
+      expect(screen.queryByRole("button", { name: "FIRST" })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Replacement first" }));
+      expect(onSelect).toHaveBeenCalledTimes(3);
+      expect(onSelect).toHaveBeenLastCalledWith(replacementHeadings[0]);
+    });
+  });
+
   it("reveals once per active-index transition without moving focus or the document", async () => {
     const headings = loadHeadings();
     session.localCursor.rich = headings[0].from;
