@@ -8943,7 +8943,7 @@ function createCommitEnterRoute(
     wrappers.set(event, delivery);
     proof.deliveries.set(boundary, delivery);
   };
-  const remember: EventListener = function (event) {
+  const remember: EventListener = function (this: EventTarget, event) {
     coordinator.deliverEnter(() => {
       if (
         released ||
