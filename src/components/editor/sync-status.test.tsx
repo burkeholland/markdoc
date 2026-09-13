@@ -1302,6 +1302,10 @@ describe("Sync dialog keyboard navigation", () => {
       const dialog = screen.getByTestId("sync-dialog");
       const markup = dialog.outerHTML;
       const scroll = { x: window.scrollX, y: window.scrollY };
+      const dialogScroll = {
+        left: dialog.scrollLeft,
+        top: dialog.scrollTop,
+      };
       source.focus();
       focus.mockClear();
       preventDefault.mockClear();
@@ -1337,6 +1341,10 @@ describe("Sync dialog keyboard navigation", () => {
       expect(actions.compare).not.toHaveBeenCalled();
       expect(onOpenChange).not.toHaveBeenCalled();
       expect({ x: window.scrollX, y: window.scrollY }).toEqual(scroll);
+      expect({
+        left: dialog.scrollLeft,
+        top: dialog.scrollTop,
+      }).toEqual(dialogScroll);
     },
   );
 
