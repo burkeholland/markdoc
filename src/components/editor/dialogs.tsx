@@ -6188,7 +6188,7 @@ class TableGridPublication {
       if (!checkpoint(false) || read(() => event.preventDefault) !== delivery.prevent || !live()) return;
       Reflect.apply(delivery.prevent, delivery.wrapper, []);
       // React 19 replaces this one query in preventDefault. Retain it before any other public callback.
-      const preventedQuery = delivery.wrapper.isDefaultPrevented;
+      const preventedQuery = read(() => delivery.wrapper.isDefaultPrevented);
       if (!live() || !checkpoint(true, preventedQuery)) return;
       this.move(next);
       if (!live() || !checkpoint(true, preventedQuery) ||

@@ -1626,6 +1626,75 @@ describe("TableDialog grid-navigation public deliveries", () => {
     },
   );
 
+  it.each(["unmount", "visit replacement"] as const)(
+    "does not read the replacement query after prevention retires via %s", (transition) => {
+      const nativePrevention = vi.spyOn(Event.prototype, "preventDefault");
+      const context = setup();
+      const replacement: TableActions = { onOpenChange: vi.fn(), onSubmit: vi.fn() };
+      const label = screen.getByTestId("table-grid-label");
+      const retiredGetter = vi.fn();
+      const replacementQueryBody = vi.fn();
+      let retired = false;
+      let replacements = 0;
+      const result = deliverTableKey(context.controls, undefined, {
+        bubble: (delivery, handler) => {
+          let query = delivery.isDefaultPrevented;
+          Object.defineProperty(delivery, "isDefaultPrevented", {
+            configurable: true,
+            get: () => {
+              if (retired) retiredGetter();
+              return query;
+            },
+            set: (next: TablePublicEvent["isDefaultPrevented"]) => {
+              replacements++;
+              query = function (this: TablePublicEvent) {
+                replacementQueryBody();
+                return Reflect.apply(next, this, []);
+              };
+            },
+          });
+          const prevent = delivery.preventDefault;
+          delivery.preventDefault = function () {
+            Reflect.apply(prevent, this, []);
+            flushSync(() => {
+              if (transition === "unmount") context.unmount();
+              else context.rerender(<TableDialog open {...replacement} />);
+            });
+            retired = true;
+          };
+          handler(delivery);
+        },
+      });
+      expect(retired).toBe(true);
+      expect(replacements).toBe(1);
+      expect(retiredGetter).not.toHaveBeenCalled();
+      expect(replacementQueryBody).not.toHaveBeenCalled();
+      expect(result.preventions[0]).not.toHaveBeenCalled();
+      expect(result.preventions[1]).toHaveBeenCalledOnce();
+      expect(result.preventions[1].mock.contexts).toEqual([result.wrappers[1]]);
+      expect(nativePrevention).toHaveBeenCalledOnce();
+      expect(nativePrevention.mock.contexts).toEqual([result.event]);
+      expect(result.event.defaultPrevented).toBe(true);
+      expect(context.focus).not.toHaveBeenCalled();
+      expect(label.textContent).toBe("1 rows × 1 columns");
+      expect(context.controls.cells.filter((cell) => cell.tabIndex === 0)).toEqual([context.controls.cells[0]]);
+      expectNoActions(context.actions);
+      expectNoActions(replacement);
+      if (transition === "unmount") {
+        expect(screen.queryByTestId("table-grid")).toBeNull();
+        render(<TableDialog open {...replacement} />);
+      }
+      expectGrid(0, 0);
+      act(() => tableGridControls().cells[0].focus());
+      context.focus.mockClear();
+      expectAccepted(context, deliverTableKey(tableGridControls()), 0, 1);
+      expect(nativePrevention).toHaveBeenCalledTimes(2);
+      expectNoActions(replacement);
+      expect(retiredGetter).not.toHaveBeenCalled();
+      expect(replacementQueryBody).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["close", "visit"] as const)("rejects old handlers across %s replacement and supports reopening", (kind) => {
     const context = setup();
     const retained = deliverTableKey(context.controls, undefined, { bubble: () => {} });
