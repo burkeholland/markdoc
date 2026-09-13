@@ -12,12 +12,17 @@ import type { CollabSession } from "@/editor/collab/session";
 import { jsonEqual, useSessionValue } from "./use-session";
 
 const BANNER_CLASS =
-  "flex h-8 shrink-0 items-center justify-center gap-2 px-3 text-[13px] font-medium text-white";
+  "flex h-8 min-w-0 shrink-0 items-center justify-center gap-2 px-3 text-[13px] font-medium text-white";
+const MESSAGE_CLASS = "min-w-0 flex-initial truncate";
 const SECTION_CLASS = "opacity-80";
-const SEPARATOR_CLASS = "opacity-60";
+const SEPARATOR_CLASS = "shrink-0 opacity-60";
 const STOP_CLASS =
-  "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 hover:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white";
+  "inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 hover:bg-white/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-white";
 const SHORTCUT_CLASS = "opacity-70";
+
+function followMessage(name: string, section: string | null) {
+  return `Following ${name}${section ? ` · in ‘${section}’` : ""}`;
+}
 
 interface FollowedSnapshot {
   readonly followUserId: string;
@@ -35,6 +40,7 @@ interface FollowAuthority {
   readonly followed: FollowedSnapshot;
   readonly follow: CollabSession["follow"];
   readonly bannerClass: string;
+  readonly messageClass: string;
   readonly sectionClass: string;
   readonly separatorClass: string;
   readonly stopClass: string;
@@ -627,6 +633,7 @@ function sameAuthorityFacts(
     expected.followed === current.followed &&
     expected.follow === current.follow &&
     expected.bannerClass === current.bannerClass &&
+    expected.messageClass === current.messageClass &&
     expected.sectionClass === current.sectionClass &&
     expected.separatorClass === current.separatorClass &&
     expected.stopClass === current.stopClass &&
@@ -647,6 +654,7 @@ function createFollowPresentation(
     followed,
     follow,
     bannerClass,
+    messageClass,
     sectionClass,
     separatorClass,
     stopClass,
@@ -654,7 +662,7 @@ function createFollowPresentation(
   } = authority;
   const { followUserId, id, name, color, section } = followed;
   const refNames: readonly FollowElementName[] =
-    section === null
+    !section
       ? ["banner", "message", "separator", "stop", "icon", "shortcut"]
       : ["banner", "message", "section", "separator", "stop", "icon", "shortcut"];
   let phase: FollowPhase = "mounting";
@@ -776,6 +784,7 @@ function createFollowPresentation(
     followed.color === color &&
     followed.section === section &&
     authority.bannerClass === bannerClass &&
+    authority.messageClass === messageClass &&
     authority.sectionClass === sectionClass &&
     authority.separatorClass === separatorClass &&
     authority.stopClass === stopClass &&
@@ -813,7 +822,7 @@ function createFollowPresentation(
       !stop ||
       !icon ||
       !shortcut ||
-      (section === null ? currentSection !== null : currentSection === null)
+      (section ? currentSection === null : currentSection !== null)
     ) {
       return null;
     }
@@ -871,15 +880,16 @@ function createFollowPresentation(
       banner.children.item(2) !== stop ||
       message.tagName !== "SPAN" ||
       message.parentElement !== banner ||
+      message.getAttribute("class") !== messageClass ||
+      message.getAttribute("title") !== followMessage(name, section) ||
       message.firstChild?.nodeType !== ownerWindow.Node.TEXT_NODE ||
       message.firstChild.textContent !== "Following " ||
       message.childNodes.item(1)?.nodeType !== ownerWindow.Node.TEXT_NODE ||
       message.childNodes.item(1)?.textContent !== name ||
-      message.children.length !== (section === null ? 0 : 1) ||
-      message.childNodes.length !== (section === null ? 2 : 3) ||
-      message.textContent !==
-        `Following ${name}${section === null ? "" : ` · in ‘${section}’`}` ||
-      (section === null
+      message.children.length !== (section ? 1 : 0) ||
+      message.childNodes.length !== (section ? 3 : 2) ||
+      message.textContent !== followMessage(name, section) ||
+      (!section
         ? currentSection !== null
         : currentSection?.parentElement !== message ||
           message.children.item(0) !== currentSection ||
@@ -1346,6 +1356,7 @@ export function FollowBanner({ session }: { session: CollabSession }) {
             followed,
             follow,
             bannerClass: BANNER_CLASS,
+            messageClass: MESSAGE_CLASS,
             sectionClass: SECTION_CLASS,
             separatorClass: SEPARATOR_CLASS,
             stopClass: STOP_CLASS,
@@ -1391,7 +1402,11 @@ export function FollowBanner({ session }: { session: CollabSession }) {
       data-testid="follow-banner"
       data-user-id={current.id}
     >
-      <span ref={captureMessage}>
+      <span
+        ref={captureMessage}
+        className={authority.messageClass}
+        title={followMessage(current.name, current.section)}
+      >
         Following {current.name}
         {current.section ? (
           <span ref={captureSection} className={authority.sectionClass}>

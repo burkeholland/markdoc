@@ -409,6 +409,181 @@ describe("FollowBanner", () => {
     expect(screen.queryByTestId("follow-banner")).toBeNull();
   });
 
+  describe("long labels and native title", () => {
+    it.each([
+      { label: "spaced name", name: "Long collaborator name ".repeat(12), section: null },
+      { label: "unbroken name", name: "N".repeat(240), section: null },
+      {
+        label: "spaced name and section",
+        name: "Long collaborator name ".repeat(12),
+        section: "Long section heading ".repeat(12),
+      },
+      { label: "unbroken name and section", name: "N".repeat(240), section: "S".repeat(240) },
+      { label: "empty section", name: "N".repeat(240), section: "" },
+    ])("constrains $label without shortening literal text or displacing Stop", ({ name, section }) => {
+      const action = vi.fn<(userId: string | null) => void>();
+      const session = new ControlledSession(BASE_USER.id, [user({ name, section })], action);
+      const view = render(
+        <StrictMode>
+          <FollowBanner session={session.asCollabSession()} />
+        </StrictMode>,
+      );
+      const banner = screen.getByRole("status");
+      const message = banner.firstElementChild;
+      const separator = banner.children.item(1);
+      const stop = stopButton(view.container);
+      const expected = `Following ${name}${section ? ` · in ‘${section}’` : ""}`;
+
+      expect(name.length).toBeGreaterThanOrEqual(200);
+      if (section) expect(section.length).toBeGreaterThanOrEqual(200);
+      expect(banner).toHaveClass("flex", "h-8", "min-w-0", "shrink-0", "justify-center");
+      expect(banner.style.backgroundColor).toBe("rgb(18, 52, 86)");
+      expect(banner.children).toHaveLength(3);
+      expect(banner.childNodes).toHaveLength(3);
+      expect(message?.tagName).toBe("SPAN");
+      expect(message).toHaveClass("min-w-0 flex-initial truncate", { exact: true });
+      expect(message?.textContent).toBe(expected);
+      expect(message).toHaveAttribute("title", expected);
+      expect(message?.childNodes).toHaveLength(section ? 3 : 2);
+      expect(message?.children).toHaveLength(section ? 1 : 0);
+      if (section) {
+        expect(message?.firstElementChild?.tagName).toBe("SPAN");
+        expect(message?.firstElementChild).toHaveClass("opacity-80", { exact: true });
+        expect(message?.firstElementChild?.textContent).toBe(` · in ‘${section}’`);
+      }
+      expect(separator?.tagName).toBe("SPAN");
+      expect(separator?.textContent).toBe("·");
+      expect(separator).toHaveClass("shrink-0 opacity-60", { exact: true });
+      expect(stop).toHaveClass("shrink-0");
+      expect(stop).toHaveAttribute("type", "button");
+      expect(stop).toHaveAccessibleName("Stop (Esc)");
+      expect(stop.querySelector("svg")).toHaveAttribute("width", "13");
+      expect(banner.querySelectorAll("button, a, input, [tabindex]")).toHaveLength(1);
+
+      nativeClick(stop);
+      nativeClick(stop);
+      expect(action).toHaveBeenCalledExactlyOnceWith(null);
+      expect(action.mock.contexts[0]).toBe(session);
+    });
+
+    it("keeps special names and sections literal in the existing spans and title", () => {
+      const name = '<strong title="name">A & B</strong>'.repeat(8);
+      const section = '<img alt="section"> \'quoted\' & <span>text</span>'.repeat(8);
+      const action = vi.fn<(userId: string | null) => void>();
+      const session = new ControlledSession(BASE_USER.id, [user({ name, section })], action);
+      const view = render(<FollowBanner session={session.asCollabSession()} />);
+      const banner = screen.getByRole("status");
+      const message = banner.firstElementChild;
+      const expected = `Following ${name} · in ‘${section}’`;
+
+      expect(name.length).toBeGreaterThanOrEqual(200);
+      expect(section.length).toBeGreaterThanOrEqual(200);
+      expect(message?.textContent).toBe(expected);
+      expect(message).toHaveAttribute("title", expected);
+      expect(banner.children).toHaveLength(3);
+      expect(message?.childNodes).toHaveLength(3);
+      expect(message?.querySelectorAll("*")).toHaveLength(1);
+      expect(message?.firstElementChild?.tagName).toBe("SPAN");
+      expect(message?.firstElementChild?.children).toHaveLength(0);
+      expect(message?.firstElementChild?.textContent).toBe(` · in ‘${section}’`);
+      expect(banner.querySelectorAll("strong, img")).toHaveLength(0);
+
+      nativeClick(stopButton(view.container));
+      expect(action).toHaveBeenCalledExactlyOnceWith(null);
+    });
+
+    it.each(["name", "section", "null section", "empty section", "target", "session"] as const)(
+      "updates the title and current Stop after replacing the %s",
+      (replacement) => {
+        const action = vi.fn<(userId: string | null) => void>();
+        const first = user({ name: "N".repeat(240), section: "S".repeat(240) });
+        let session = new ControlledSession(first.id, [first], action);
+        const view = render(
+          <StrictMode>
+            <FollowBanner session={session.asCollabSession()} />
+          </StrictMode>,
+        );
+        const previousStop = stopButton(view.container);
+        const retiredHandler = reactHandler<StopHandler>(previousStop, "onClick");
+        const next = user({
+          ...first,
+          ...(replacement === "name" ? { name: "Updated name ".repeat(24) } : {}),
+          ...(replacement === "section" ? { section: "Updated section ".repeat(24) } : {}),
+          ...(replacement === "null section" ? { section: null } : {}),
+          ...(replacement === "empty section" ? { section: "" } : {}),
+          ...(replacement === "target" || replacement === "session"
+            ? { id: "collaborator-b", name: "B".repeat(240), section: "T".repeat(240), clientId: 202 }
+            : {}),
+        });
+        if (replacement === "session") {
+          session = new ControlledSession(next.id, [next], action);
+        } else {
+          session.publish(next.id, [next]);
+        }
+        view.rerender(
+          <StrictMode>
+            <FollowBanner session={session.asCollabSession()} />
+          </StrictMode>,
+        );
+        const banner = screen.getByRole("status");
+        const message = banner.firstElementChild;
+        const expected = `Following ${next.name}${next.section ? ` · in ‘${next.section}’` : ""}`;
+
+        expect(banner).toHaveAttribute("data-user-id", next.id);
+        expect(message?.textContent).toBe(expected);
+        expect(message).toHaveAttribute("title", expected);
+        expect(message?.children).toHaveLength(next.section ? 1 : 0);
+        activateStop(retiredHandler, previousStop);
+        expect(action).not.toHaveBeenCalled();
+        const stop = stopButton(view.container);
+        nativeClick(stop);
+        nativeClick(stop);
+        expect(action).toHaveBeenCalledExactlyOnceWith(null);
+        expect(action.mock.contexts[0]).toBe(session);
+      },
+    );
+
+    it("adds no callback, focus, network, scheduling, or DOM work on native-title hover", () => {
+      const action = vi.fn<(userId: string | null) => void>();
+      const name = "N".repeat(240);
+      const section = "S".repeat(240);
+      const session = new ControlledSession(BASE_USER.id, [user({ name, section })], action);
+      const view = render(<FollowBanner session={session.asCollabSession()} />);
+      const banner = screen.getByRole("status");
+      const message = banner.firstElementChild;
+      if (!message) throw new Error("The Follow banner has no message");
+      const stop = stopButton(view.container);
+      stop.focus();
+      const probe = probeWork(view.container, action, [session]);
+      const timeout = vi.spyOn(globalThis, "setTimeout");
+      const interval = vi.spyOn(globalThis, "setInterval");
+      const frame = vi.spyOn(window, "requestAnimationFrame");
+      const microtask = vi.spyOn(globalThis, "queueMicrotask");
+      const fetch = vi.spyOn(globalThis, "fetch");
+      const xhr = vi.spyOn(XMLHttpRequest.prototype, "send");
+
+      try {
+        expectNoWork(() => {
+          for (const type of ["mouseover", "mouseenter", "mousemove", "mouseout", "mouseleave"]) {
+            message.dispatchEvent(new MouseEvent(type, { bubbles: true }));
+          }
+        }, probe);
+        expect(timeout).not.toHaveBeenCalled();
+        expect(interval).not.toHaveBeenCalled();
+        expect(frame).not.toHaveBeenCalled();
+        expect(microtask).not.toHaveBeenCalled();
+        expect(fetch).not.toHaveBeenCalled();
+        expect(xhr).not.toHaveBeenCalled();
+        expect(message).toHaveAttribute("title", `Following ${name} · in ‘${section}’`);
+        expect(document.activeElement).toBe(stop);
+      } finally {
+        releaseProbe(probe);
+      }
+      nativeClick(stop);
+      expect(action).toHaveBeenCalledExactlyOnceWith(null);
+    });
+  });
+
   describe("Strict Mode Stop", () => {
     it("publishes one fresh replay authority and accepts only a genuine current native click", () => {
       const action = vi.fn<(userId: string | null) => void>();
