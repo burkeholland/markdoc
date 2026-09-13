@@ -6742,7 +6742,7 @@ export const ShareDialog = memo(function ShareDialog({
         {presentation.addError && (
           <div
             ref={(element) => bindElement(presentation, "addError", element)}
-            className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40"
+            className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40 wrap-anywhere"
             role="alert"
             aria-atomic="true"
             data-testid="share-add-error"
@@ -6753,7 +6753,7 @@ export const ShareDialog = memo(function ShareDialog({
         {presentation.actionError && (
           <div
             ref={(element) => bindElement(presentation, "actionError", element)}
-            className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40"
+            className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40 wrap-anywhere"
             role="alert"
             aria-atomic="true"
             data-testid="share-action-error"
@@ -6793,7 +6793,7 @@ export const ShareDialog = memo(function ShareDialog({
                 aria-atomic="true"
                 data-testid="collaborator-list-error"
               >
-                <div>{presentation.list.message}</div>
+                <div className="wrap-anywhere">{presentation.list.message}</div>
                 <button
                   ref={(element) => bindElement(presentation, "retry", element)}
                   type="button"

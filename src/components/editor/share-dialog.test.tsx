@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { compile } from "tailwindcss";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
@@ -2041,6 +2042,306 @@ describe("ShareDialog collaborator list recovery", () => {
     expect(screen.getByTestId("share-login")).toHaveValue("");
     expect(addCollaborator).toHaveBeenCalledTimes(2);
     expect(collaborators).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("ShareDialog failure message wrapping", () => {
+  const messages = [
+    { kind: "unbroken", message: "DirectoryFailure".repeat(20) },
+    { kind: "literal", message: `  <button tabindex="0">Retry & "share"</button>\n${"<script>literal</script>".repeat(12)}  ` },
+    { kind: "ordinary", message: "The sharing service could not complete this request. Please try again. ".repeat(5) },
+  ];
+  const surfaces = ["add", "role", "remove", "link", "list"] as const;
+  type Surface = typeof surfaces[number];
+
+  function errorId(surface: Surface) {
+    return surface === "add" ? "share-add-error"
+      : surface === "list" ? "collaborator-list-error"
+        : "share-action-error";
+  }
+
+  function mutation(surface: Surface) {
+    return surface === "list" ? collaborators
+      : surface === "link" ? patchDocument
+        : surface === "remove" ? removeCollaborator
+          : addCollaborator;
+  }
+
+  function activate(surface: Surface) {
+    if (surface === "add") {
+      fireEvent.change(screen.getByTestId("share-login"), { target: { value: "charlie" } });
+      fireEvent.click(screen.getByTestId("share-add"));
+    } else if (surface === "role") {
+      fireEvent.change(screen.getByRole("combobox", { name: "Role for bob" }), { target: { value: "viewer" } });
+    } else if (surface === "remove") {
+      fireEvent.click(screen.getByRole("button", { name: "Remove bob" }));
+    } else if (surface === "link") {
+      fireEvent.change(screen.getByTestId("link-access"), { target: { value: "view" } });
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    }
+  }
+
+  function expectMessage(surface: Surface, message: string) {
+    const alert = screen.getByTestId(errorId(surface));
+    expect(alert.tagName).toBe(surface === "list" ? "LI" : "DIV");
+    expect(alert.getAttributeNames().sort()).toEqual(["aria-atomic", "class", "data-testid", "role"]);
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).toHaveAttribute("aria-atomic", "true");
+    expect(alert.tabIndex).toBe(-1);
+    expect(alert.className).toBe(surface === "list"
+      ? "bg-red-50 px-3 py-3 text-sm text-danger dark:bg-red-950/40"
+      : "mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40 wrap-anywhere");
+    const text = surface === "list" ? alert.firstElementChild : alert;
+    if (!(text instanceof HTMLDivElement)) throw new Error("Failure text must remain in its existing div");
+    expect(text.textContent).toBe(message);
+    expect(text.childNodes).toHaveLength(1);
+    expect(text.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(text.childElementCount).toBe(0);
+    expect(text.tabIndex).toBe(-1);
+    expect(text).toHaveClass("wrap-anywhere");
+    if (surface === "list") {
+      expect(text.getAttributeNames()).toEqual(["class"]);
+      expect(text.className).toBe("wrap-anywhere");
+      const retry = within(alert).getByRole("button", { name: "Retry" });
+      expect(Array.from(alert.children, (element) => element.tagName)).toEqual(["DIV", "BUTTON"]);
+      expect(retry.parentElement).toBe(alert);
+      expect(retry).toBe(alert.lastElementChild);
+      expect(retry.getAttributeNames().sort()).toEqual(["class", "type"]);
+      expect(retry).toHaveAttribute("type", "button");
+      expect(retry.className).toBe("btn btn-outline btn-sm mt-2 gap-1.5");
+      expect(retry.textContent).toBe("Retry");
+      expect(retry.childElementCount).toBe(0);
+      expect(retry).toBeEnabled();
+    }
+    expect(alert.querySelectorAll("script, a, input, select, [tabindex], [contenteditable], [title]")).toHaveLength(0);
+    expect(alert.querySelectorAll("button")).toHaveLength(surface === "list" ? 1 : 0);
+    expect(screen.getAllByRole("alert")).toEqual([alert]);
+    expect(screen.queryByTestId("collaborator-list-loading")).toBeNull();
+    expect(screen.queryByText("Nobody else has been added yet.")).toBeNull();
+    return alert;
+  }
+
+  it.each(surfaces.flatMap((surface) => messages.map((text) => ({ surface, ...text }))))(
+    "keeps $kind $surface failures exact, contained and passive",
+    async ({ surface, message }) => {
+      expect(message.length).toBeGreaterThanOrEqual(240);
+      mutation(surface).mockRejectedValueOnce(new ApiError(503, message));
+      const onOpenChange = vi.fn();
+      const onDocChange = vi.fn();
+      render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+      if (surface !== "list") {
+        await screen.findByText("@bob");
+        activate(surface);
+      }
+      await screen.findByTestId(errorId(surface));
+      expectMessage(surface, message);
+      expect(collaborators).toHaveBeenCalledExactlyOnceWith(DOC_ID);
+      if (surface === "add" || surface === "role") {
+        expect(addCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, surface === "add" ? "charlie" : "bob", surface === "add" ? "editor" : "viewer");
+      } else if (surface === "remove") {
+        expect(removeCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "bob");
+      } else if (surface === "link") {
+        expect(patchDocument).toHaveBeenCalledExactlyOnceWith(DOC_ID, { linkAccess: "view" });
+      }
+
+      const done = screen.getByRole("button", { name: "Done" });
+      act(() => done.focus());
+      const effects = [collaborators, addCollaborator, removeCollaborator, patchDocument, tokensList, tokensCreate, copyText, onOpenChange, onDocChange];
+      const counts = effects.map((effect) => effect.mock.calls.length);
+      const spies = [
+        vi.spyOn(HTMLElement.prototype, "focus"),
+        vi.spyOn(globalThis, "setTimeout"),
+        vi.spyOn(globalThis, "setInterval"),
+        vi.spyOn(window, "requestAnimationFrame"),
+        vi.spyOn(globalThis, "queueMicrotask"),
+        vi.spyOn(globalThis, "fetch"),
+      ];
+      const observer = new MutationObserver(() => {});
+      observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+      try {
+        expectMessage(surface, message);
+        expectMessage(surface, message);
+        expect(observer.takeRecords()).toHaveLength(0);
+        expect(effects.map((effect) => effect.mock.calls.length)).toEqual(counts);
+        for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+        expect(done).toHaveFocus();
+      } finally {
+        observer.disconnect();
+        for (const spy of spies) spy.mockRestore();
+      }
+    },
+  );
+
+  it("replaces repeated list failures and keeps one current Retry after recovery, reopen and replacement", async () => {
+    const first = messages[0].message;
+    const second = messages[1].message;
+    collaborators.mockRejectedValueOnce(new ApiError(503, first));
+    const onOpenChange = vi.fn();
+    const onDocChange = vi.fn();
+    const view = render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByTestId("collaborator-list-error");
+    expectMessage("list", first);
+    const oldRetry = captureClick(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }));
+    const repeated = deferred<CollaboratorResponse>();
+    collaborators.mockReturnValueOnce(repeated.promise);
+    activate("list");
+    fireEvent.click(oldRetry.element);
+    expect(collaborators.mock.calls).toEqual([[DOC_ID], [DOC_ID]]);
+    expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    await act(async () => {
+      repeated.reject(new ApiError(503, second));
+      await repeated.promise.catch(() => undefined);
+    });
+    expectMessage("list", second);
+    const recovered = deferred<CollaboratorResponse>();
+    collaborators.mockReturnValueOnce(recovered.promise);
+    activate("list");
+    expect(collaborators.mock.calls).toEqual([[DOC_ID], [DOC_ID], [DOC_ID]]);
+    await act(async () => {
+      recovered.resolve(collaboratorRows("bob"));
+      await recovered.promise;
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+
+    collaborators.mockRejectedValueOnce(new ApiError(503, second));
+    view.rerender(<ShareDialog open={false} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    view.rerender(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByTestId("collaborator-list-error");
+    expectMessage("list", second);
+    const reopenedRetry = captureClick(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }));
+    const nextDoc = { ...doc, id: "doc-wrapped-list" };
+    collaborators.mockRejectedValueOnce(new ApiError(503, messages[2].message));
+    view.rerender(<ShareDialog open onOpenChange={onOpenChange} doc={nextDoc} isOwner onDocChange={onDocChange} />);
+    expect(screen.queryByRole("alert")).toBeNull();
+    await screen.findByTestId("collaborator-list-error");
+    expectMessage("list", messages[2].message);
+    const before = collaborators.mock.calls.length;
+    directInvoke(oldRetry);
+    directInvoke(reopenedRetry);
+    expect(collaborators).toHaveBeenCalledTimes(before);
+    const current = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(current);
+    fireEvent.click(current);
+    expect(collaborators).toHaveBeenCalledTimes(before + 1);
+    expect(collaborators).toHaveBeenLastCalledWith(nextDoc.id);
+    await screen.findByText("@bob");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(addCollaborator).not.toHaveBeenCalled();
+    expect(removeCollaborator).not.toHaveBeenCalled();
+    expect(patchDocument).not.toHaveBeenCalled();
+  });
+
+  it.each(["add", "role"] as const)(
+    "clears repeated %s failures on recovery and removal without inventing reloads",
+    async (surface) => {
+      await openDialog();
+      for (const { message } of messages.slice(0, 2)) {
+        addCollaborator.mockRejectedValueOnce(new ApiError(503, message));
+        activate(surface);
+        expect(screen.queryByRole("alert")).toBeNull();
+        await screen.findByTestId(errorId(surface));
+        expectMessage(surface, message);
+      }
+      expect(collaborators).toHaveBeenCalledExactlyOnceWith(DOC_ID);
+      expect(addCollaborator).toHaveBeenCalledTimes(2);
+      if (surface === "add") collaborators.mockResolvedValueOnce(collaboratorRows("bob", "charlie"));
+      activate(surface);
+      expect(screen.queryByRole("alert")).toBeNull();
+      if (surface === "add") {
+        await screen.findByText("@charlie");
+        expect(screen.getByTestId("share-login")).toHaveValue("");
+        expect(collaborators.mock.calls).toEqual([[DOC_ID], [DOC_ID]]);
+      } else {
+        await waitFor(() => expect(screen.getByRole("combobox", { name: "Role for bob" })).toHaveValue("viewer"));
+        expect(collaborators).toHaveBeenCalledExactlyOnceWith(DOC_ID);
+      }
+      expect(addCollaborator).toHaveBeenCalledTimes(3);
+
+      const removedLogin = surface === "add" ? "charlie" : "bob";
+      removeCollaborator.mockRejectedValueOnce(new ApiError(503, messages[2].message));
+      fireEvent.click(screen.getByRole("button", { name: `Remove ${removedLogin}` }));
+      await screen.findByTestId("share-action-error");
+      expectMessage("remove", messages[2].message);
+      const remove = screen.getByRole("button", { name: `Remove ${removedLogin}` });
+      fireEvent.click(remove);
+      fireEvent.click(remove);
+      expect(removeCollaborator.mock.calls).toEqual([[DOC_ID, removedLogin], [DOC_ID, removedLogin]]);
+      expect(screen.queryByRole("alert")).toBeNull();
+      await waitFor(() => expect(screen.queryByText(`@${removedLogin}`)).toBeNull());
+      expect(collaborators).toHaveBeenCalledTimes(surface === "add" ? 2 : 1);
+      expect(screen.queryByRole("alert")).toBeNull();
+    },
+  );
+
+  it.each(["add", "role", "link"] as const)(
+    "retires %s errors and old actions across closed, reopened and replacement documents",
+    async (surface) => {
+      const onOpenChange = vi.fn();
+      const onDocChange = vi.fn();
+      const view = render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+      await screen.findByText("@bob");
+      mutation(surface).mockRejectedValueOnce(new ApiError(503, messages[0].message));
+      activate(surface);
+      await screen.findByTestId(errorId(surface));
+      expectMessage(surface, messages[0].message);
+
+      function captureAction() {
+        if (surface === "add") {
+          const form = screen.getByTestId("share-add").closest("form");
+          if (!form) throw new Error("Add must remain a form");
+          const control = captureSubmit(form);
+          return () => directInvoke(control);
+        }
+        const control = captureChange(surface === "role"
+          ? screen.getByRole<HTMLSelectElement>("combobox", { name: "Role for bob" })
+          : screen.getByTestId<HTMLSelectElement>("link-access"));
+        return () => directInvoke(control);
+      }
+
+      const oldAction = captureAction();
+      fireEvent.click(screen.getByRole("button", { name: "Done" }));
+      expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      view.rerender(<ShareDialog open={false} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+      expect(screen.queryByRole("dialog")).toBeNull();
+      oldAction();
+      expect(mutation(surface)).toHaveBeenCalledOnce();
+      view.rerender(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+      await screen.findByText("@bob");
+      expect(screen.queryByRole("alert")).toBeNull();
+      oldAction();
+      expect(mutation(surface)).toHaveBeenCalledOnce();
+      mutation(surface).mockRejectedValueOnce(new ApiError(503, messages[1].message));
+      activate(surface);
+      await screen.findByTestId(errorId(surface));
+      expectMessage(surface, messages[1].message);
+      expect(mutation(surface)).toHaveBeenCalledTimes(2);
+      const reopenedAction = captureAction();
+      const nextDoc = { ...doc, id: `doc-wrapped-${surface}` };
+      view.rerender(<ShareDialog open onOpenChange={onOpenChange} doc={nextDoc} isOwner onDocChange={onDocChange} />);
+      expect(screen.queryByRole("alert")).toBeNull();
+      await screen.findByText("@bob");
+      oldAction();
+      reopenedAction();
+      expect(mutation(surface)).toHaveBeenCalledTimes(2);
+      expect(collaborators.mock.calls).toEqual([[DOC_ID], [DOC_ID], [nextDoc.id]]);
+      mutation(surface).mockRejectedValueOnce(new ApiError(503, messages[2].message));
+      activate(surface);
+      expect(mutation(surface)).toHaveBeenCalledTimes(3);
+      expect(mutation(surface).mock.lastCall?.[0]).toBe(nextDoc.id);
+      await screen.findByTestId(errorId(surface));
+      expectMessage(surface, messages[2].message);
+      expect(onDocChange).not.toHaveBeenCalled();
+    },
+  );
+
+  it("emits overflow-wrap anywhere from the installed Tailwind utility", async () => {
+    const { build } = await compile("@tailwind utilities;");
+    const css = build(["wrap-anywhere"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).not.toMatch(/word-break:|text-overflow:|overflow:\s*(hidden|auto|scroll)/);
   });
 });
 
