@@ -2050,7 +2050,7 @@ class AgentTabCoordinator {
       bubble.metaKey !== snapshot.metaKey ||
       bubble.shiftKey !== snapshot.shiftKey ||
       bubble.repeat !== snapshot.repeat ||
-      bubble.view !== snapshot.view ||
+      !Object.is(bubble.view, snapshot.view) ||
       snapshot.type !== "keydown" ||
       snapshot.target !== source ||
       snapshot.currentTarget === null ||
@@ -2230,7 +2230,7 @@ class AgentTabCoordinator {
       capture.metaKey !== nativeSnapshot.metaKey ||
       capture.shiftKey !== nativeSnapshot.shiftKey ||
       capture.repeat !== nativeSnapshot.repeat ||
-      capture.view !== nativeSnapshot.view ||
+      !Object.is(capture.view, nativeSnapshot.view) ||
       nativeSnapshot.currentTarget === null ||
       nativeSnapshot.eventPhase !== publication.intrinsics.capturingPhase ||
       !nativeSnapshot.path.includes(nativeSnapshot.currentTarget) ||
