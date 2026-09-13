@@ -917,6 +917,13 @@ describe("mounted theme controls", () => {
     const system = option(host, "system");
     const ownerWindow = system.ownerDocument.defaultView;
     if (!ownerWindow) throw new Error("The theme picker did not have an owner Window");
+    let eventLocalReceiver: EventTarget | null = null;
+    let eventPathTerminal: EventTarget | null = null;
+    const observeReceiver = function (this: EventTarget, event: Event) {
+      eventLocalReceiver = this;
+      eventPathTerminal = event.composedPath().at(-1) ?? null;
+    };
+    ownerWindow.addEventListener("keydown", observeReceiver, true);
     system.focus();
     focus.mockClear();
 
@@ -930,25 +937,28 @@ describe("mounted theme controls", () => {
     expect(system).toHaveFocus();
     expect(focus).not.toHaveBeenCalled();
 
-    const setOwnerWindow = (event: ReactKeyboardEvent<HTMLElement>) => {
-      replacePublicEventValue(event, "view", ownerWindow);
+    const setProvenReceiver = (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (!eventLocalReceiver) throw new Error("The Window receiver was not observed");
+      replacePublicEventValue(event, "view", eventLocalReceiver);
     };
     const restoreCapture = interceptKeyDownCapture(root, (original, event) => {
-      setOwnerWindow(event);
+      setProvenReceiver(event);
       original(event);
     });
     const restoreBubble = interceptKeyDown(system, (original, event) => {
-      setOwnerWindow(event);
+      setProvenReceiver(event);
       original(event);
     });
     try {
       const accepted = dispatchKey(system, "ArrowRight");
       expect(accepted.defaultPrevented).toBe(true);
+      expect(eventLocalReceiver).toBe(eventPathTerminal);
       expect(option(host, "light")).toHaveFocus();
       expect(focus).toHaveBeenCalledOnce();
     } finally {
       restoreBubble();
       restoreCapture();
+      ownerWindow.removeEventListener("keydown", observeReceiver, true);
     }
   });
 
@@ -1434,6 +1444,63 @@ describe("mounted theme controls", () => {
     expect(storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY))
       .toEqual([[THEME_STORAGE_KEY, "light"]]);
     expect(focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps retained capture and bubble wrappers inert after cleanup and accepts a clean successor", () => {
+    const view = renderDirect(
+      <StrictMode>
+        <ThemePicker />
+      </StrictMode>,
+    );
+    const root = picker(view.host);
+    const system = option(view.host, "system");
+    const staleCapture = reactProperty<ThemeGroupKeyDown>(root, "onKeyDownCapture");
+    const staleBubble = captureKeyDown(system);
+    if (!staleCapture) throw new Error("The theme picker capture handler was not published");
+    let captureWrapper: ReactKeyboardEvent<HTMLDivElement> | null = null;
+    let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    const restoreCapture = interceptKeyDownCapture(root, (original, event) => {
+      captureWrapper = event;
+      original(event);
+    });
+    const restoreBubble = interceptKeyDown(system, (original, event) => {
+      bubbleWrapper = event;
+      original(event);
+    });
+    system.focus();
+    const inert = dispatchKey(system, "Tab");
+    restoreBubble();
+    restoreCapture();
+    expect(inert.defaultPrevented).toBe(false);
+    if (!captureWrapper || !bubbleWrapper) {
+      throw new Error("The retained React keyboard wrappers were not observed");
+    }
+    act(() => view.root.render(null));
+    const effects = trackThemeEffects();
+
+    const evidence = invokeStale(effects, view.host, [
+      () => staleCapture(captureWrapper!),
+      () => staleBubble(bubbleWrapper!),
+    ]);
+
+    expectNoStaleEffects(evidence);
+    act(() => view.root.render(
+      <StrictMode>
+        <ThemePicker />
+      </StrictMode>,
+    ));
+    const successor = option(view.host, "system");
+    successor.focus();
+    effects.focus.mockClear();
+    const accepted = dispatchKey(successor, "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(option(view.host, "light")).toHaveFocus();
+    expect(effectCounts(effects)).toMatchObject({
+      attribute: 1,
+      emission: 1,
+      focus: 1,
+      storage: 1,
+    });
   });
 
   it("cycles one current Toggle activation through every preference exactly once", () => {
