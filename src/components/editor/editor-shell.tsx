@@ -3416,7 +3416,7 @@ export function EditorShell({
         {everOpened.shortcuts && <ShortcutsDialog open={dialog === "shortcuts"} onOpenChange={dialogOpenChange.shortcuts} />}
         {everOpened.palette && <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} commands={paletteCommands} />}
 
-        <div className="pointer-events-none fixed bottom-14 left-1/2 z-[70] flex -translate-x-1/2 flex-col items-center gap-2" aria-live="polite">
+        <div className="pointer-events-none fixed bottom-14 left-1/2 z-[70] flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col items-center gap-2" aria-live="polite">
           {toastPublications
             .filter(
               (publication) =>
@@ -3427,29 +3427,29 @@ export function EditorShell({
               <div
                 key={toastRenderKey(t)}
                 className={cn(
-                  "pointer-events-auto flex items-center gap-3 rounded-xl px-4 py-2.5 text-sm shadow-xl animate-fade-in",
+                  "pointer-events-auto flex min-w-0 max-w-full items-center gap-3 rounded-xl px-4 py-2.5 text-sm shadow-xl animate-fade-in",
                   t.kind === "error" ? "bg-red-600 text-white" : "bg-inverse text-white",
                 )}
                 role="status"
                 data-testid="toast"
               >
-                <span>{t.message}</span>
+                <span className="min-w-0 wrap-anywhere">{t.message}</span>
                 {t.action?.href && (
-                  <a className="font-semibold underline decoration-white/40 underline-offset-2" href={t.action.href} target="_blank" rel="noopener noreferrer">
+                  <a className="min-w-0 wrap-anywhere font-semibold underline decoration-white/40 underline-offset-2" href={t.action.href} target="_blank" rel="noopener noreferrer">
                     {t.action.label}
                   </a>
                 )}
                 {t.action?.onClick && (
                   <button
                     type="button"
-                    className="font-semibold underline decoration-white/40 underline-offset-2"
+                    className="min-w-0 wrap-anywhere font-semibold underline decoration-white/40 underline-offset-2"
                     onClick={() => activateToastAction(t)}
                     data-testid="toast-action"
                   >
                     {t.action.label}
                   </button>
                 )}
-                <button type="button" className="text-white/60 hover:text-white" onClick={() => dismissToast(t)} aria-label="Dismiss">
+                <button type="button" className="shrink-0 text-white/60 hover:text-white" onClick={() => dismissToast(t)} aria-label="Dismiss">
                   <X size={14} />
                 </button>
               </div>
