@@ -427,6 +427,37 @@ function createStrictView(router: Router, notificationSnapshot: NotificationSnap
   return view;
 }
 
+function renderStrictGeneration(
+  view: DirectView,
+  router: Router,
+  notificationSnapshot: NotificationSnapshot,
+  generation: string,
+) {
+  currentRouter = router;
+  currentSnapshot = notificationSnapshot;
+  act(() => {
+    view.root.render(
+      <StrictMode>
+        <div key={generation}>
+          <NotificationsStrip />
+        </div>
+      </StrictMode>,
+    );
+  });
+}
+
+function createStrictGenerationView(
+  router: Router,
+  notificationSnapshot: NotificationSnapshot,
+) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = { root: createRoot(host), host };
+  directViews.push(view);
+  renderStrictGeneration(view, router, notificationSnapshot, "initial");
+  return view;
+}
+
 function renderDirect(
   view: DirectView,
   router: Router,
@@ -521,6 +552,19 @@ function dispatchTrustedKey(
     allowed = source.dispatchEvent(event);
   });
   return { event, allowed };
+}
+
+function dispatchTrustedDelete(
+  source: HTMLButtonElement,
+  init: KeyboardEventInit = {},
+  focus = true,
+) {
+  return dispatchTrustedKey(
+    source,
+    "Delete",
+    { code: "Delete", ...init },
+    focus,
+  );
 }
 
 beforeEach(() => {
@@ -1740,6 +1784,357 @@ describe("notification strip keyboard browsing", () => {
       window.MutationObserver = NativeMutationObserver;
       view?.host.remove();
     }
+  });
+});
+
+describe("notification strip Delete dismissal", () => {
+  it.each([
+    ["first", 0, ITEM.id],
+    ["middle", 1, ITEM_TWO.id],
+    ["last", 2, ITEM_THREE.id],
+  ] as const)(
+    "marks only the %s focused row read after one trusted prevention",
+    (_position, sourceIndex, expectedId) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const router = createRouter(`delete-${sourceIndex}`);
+      const scroll = { x: window.scrollX, y: window.scrollY };
+      try {
+        const view = createStrictView(
+          router,
+          snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+        );
+        const controls = openButtons(view.host);
+        const source = controls[sourceIndex]!;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        store.markNotificationRead.mockImplementation((id) => {
+          expect(id).toBe(expectedId);
+          expect(document.activeElement).toBe(source);
+          expect(focus).not.toHaveBeenCalled();
+          return Promise.resolve();
+        });
+
+        const result = dispatchTrustedDelete(source, {}, false);
+
+        expect(result.allowed).toBe(false);
+        expect(result.event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+          expectedId,
+        );
+        expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expect(window.scrollX).toBe(scroll.x);
+        expect(window.scrollY).toBe(scroll.y);
+      } finally {
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it("rejects untrusted, inexact, modified, repeated, composing, canceled, stopped, and unfocused Delete input", () => {
+    const router = createRouter("delete-rejections");
+    const view = createStrictView(
+      router,
+      snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+    );
+    const current = captureActions(1, view.host);
+    const source = current.openButton;
+    const sentinel = connectedButton("Delete focus sentinel");
+
+    expect(dispatchKey(source, "Delete", { code: "Delete" }).allowed).toBe(true);
+    for (const init of [
+      { code: "Backspace" },
+      { code: "Delete", location: 1 },
+      { code: "Delete", ctrlKey: true },
+      { code: "Delete", altKey: true },
+      { code: "Delete", metaKey: true },
+      { code: "Delete", shiftKey: true },
+      { code: "Delete", repeat: true },
+      { code: "Delete", isComposing: true },
+    ] satisfies KeyboardEventInit[]) {
+      const result = dispatchTrustedKey(source, "Delete", init);
+      expect(result.allowed).toBe(true);
+      expect(result.event.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+    }
+
+    const cancel = (event: KeyboardEvent) => event.preventDefault();
+    source.addEventListener("keydown", cancel, { capture: true, once: true });
+    expect(dispatchTrustedDelete(source).allowed).toBe(false);
+    expect(source).toHaveFocus();
+
+    const stop = (event: KeyboardEvent) => event.stopPropagation();
+    source.addEventListener("keydown", stop, { capture: true, once: true });
+    expect(dispatchTrustedDelete(source).allowed).toBe(true);
+    expect(source).toHaveFocus();
+
+    sentinel.focus();
+    const unfocused = dispatchTrustedDelete(source, {}, false);
+    expect(unfocused.allowed).toBe(true);
+    expect(unfocused.event.defaultPrevented).toBe(false);
+    expect(sentinel).toHaveFocus();
+
+    for (const outside of [current.dismissButton, current.readAllButton]) {
+      const { propsKey, record, props } = reactPropsEntry(outside);
+      record[propsKey] = { ...props, onKeyDown: current.keyDown };
+      try {
+        const result = dispatchTrustedDelete(outside);
+        expect(result.allowed).toBe(true);
+        expect(result.event.defaultPrevented).toBe(false);
+        expect(outside).toHaveFocus();
+      } finally {
+        record[propsKey] = props;
+      }
+    }
+
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    const recovered = dispatchTrustedDelete(source);
+    expect(recovered.allowed).toBe(false);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+      ITEM_TWO.id,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    sentinel.remove();
+  });
+
+  it("claims the exact React wrapper, native event, row, action, and publication once before reentry", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const router = createRouter("delete-one-use");
+    const view = createStrictView(
+      router,
+      snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+    );
+    const current = captureActions(1, view.host);
+    let reenter: () => void = () => undefined;
+    store.markNotificationRead.mockImplementation(() => {
+      reenter();
+      return Promise.resolve();
+    });
+    current.openButton.focus();
+    preventDefault.mockClear();
+    const restore = interceptKeyDown(current.openButton, (original, event) => {
+      original({ ...event } as ReactKeyboardEvent<HTMLButtonElement>);
+      original(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "isTrusted") return false;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+      original(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "view") return undefined;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+      original(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "code") return "Backspace";
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      reenter = () => original(event);
+      original(event);
+      original(event);
+    });
+    try {
+      const result = dispatchTrustedDelete(current.openButton, {}, false);
+      expect(result.allowed).toBe(false);
+      expect(result.event.defaultPrevented).toBe(true);
+    } finally {
+      restore();
+      preventDefault.mockRestore();
+    }
+
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+      ITEM_TWO.id,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("keeps stale item, router, and row-order facts inert before a complete clean successor", () => {
+    const first = { ...ITEM };
+    const second = { ...ITEM_TWO };
+    const third = { ...ITEM_THREE };
+    const items = [first, second, third];
+    const current = snapshot(items, 3);
+    const router = createRouter("delete-stale");
+    const view = createStrictGenerationView(router, current);
+    const stale = captureActions(0, view.host);
+
+    first.documentTitle = "Mutated title";
+    items.reverse();
+    router.push = vi.fn();
+    stale.openButton.focus();
+    const rejected = dispatchTrustedDelete(stale.openButton, {}, false);
+
+    expect(rejected.allowed).toBe(true);
+    expect(rejected.event.defaultPrevented).toBe(false);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    renderStrictGeneration(view, router, current, "successor");
+    const successor = captureActions(0, view.host);
+    expect(successor.item).toHaveAttribute(
+      "data-notification-id",
+      ITEM_THREE.id,
+    );
+    const accepted = dispatchTrustedDelete(successor.openButton);
+    expect(accepted.allowed).toBe(false);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+      ITEM_THREE.id,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["reordered row", (first: CapturedActions, second: CapturedActions) => {
+      first.list.append(first.item);
+      first.list.insertBefore(first.item, second.item);
+    }],
+    ["detached row", (first: CapturedActions) => {
+      first.item.remove();
+      first.list.prepend(first.item);
+    }],
+    ["replaced row", (first: CapturedActions) => {
+      const replacement = first.item.cloneNode(true) as HTMLLIElement;
+      first.item.replaceWith(replacement);
+      replacement.replaceWith(first.item);
+    }],
+    ["restored attribute", (first: CapturedActions) => {
+      const className = first.openButton.className;
+      first.openButton.className = `${className} changed`;
+      first.openButton.className = className;
+    }],
+    ["detached strip", (first: CapturedActions, _second: CapturedActions, view: DirectView) => {
+      first.section.remove();
+      view.host.append(first.section);
+    }],
+  ] as const)(
+    "rejects a restored %s DOM history and lets a distinct clean successor recover",
+    (_scenario, tamper) => {
+      const router = createRouter(`delete-history-${_scenario}`);
+      const current = snapshot([ITEM, ITEM_TWO], 2);
+      const view = createStrictGenerationView(router, current);
+      const first = captureActions(0, view.host);
+      const second = captureActions(1, view.host);
+
+      tamper(first, second, view);
+      const rejected = dispatchTrustedDelete(first.openButton);
+      expect(rejected.allowed).toBe(true);
+      expect(rejected.event.defaultPrevented).toBe(false);
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+
+      renderStrictGeneration(view, router, current, `successor-${_scenario}`);
+      const sections = view.host.querySelectorAll<HTMLElement>(
+        '[data-testid="notifications-strip"]',
+      );
+      const successor = captureActions(0, sections[sections.length - 1]!);
+      const accepted = dispatchTrustedDelete(successor.openButton);
+      expect(accepted.allowed).toBe(false);
+      expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+        ITEM.id,
+      );
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not revive Delete authority after a keyboard descriptor is replaced and restored", () => {
+    const router = createRouter("delete-descriptor");
+    const current = snapshot([ITEM, ITEM_TWO], 2);
+    const view = createStrictGenerationView(router, current);
+    const stale = captureActions(0, view.host);
+    const descriptor = Object.getOwnPropertyDescriptor(
+      KeyboardEvent.prototype,
+      "code",
+    );
+    if (!descriptor?.get) {
+      throw new Error("KeyboardEvent.code getter is unavailable");
+    }
+    Object.defineProperty(KeyboardEvent.prototype, "code", {
+      ...descriptor,
+      get() {
+        return descriptor.get!.call(this);
+      },
+    });
+    try {
+      expect(dispatchTrustedDelete(stale.openButton).allowed).toBe(true);
+    } finally {
+      Object.defineProperty(KeyboardEvent.prototype, "code", descriptor);
+    }
+
+    expect(dispatchTrustedDelete(stale.openButton).allowed).toBe(true);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    renderStrictGeneration(view, router, current, "descriptor-successor");
+    const successor = captureActions(0, view.host);
+    expect(dispatchTrustedDelete(successor.openButton).allowed).toBe(false);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+      ITEM.id,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("retires a cleaned-up Delete handler and accepts a later complete mount", async () => {
+    const router = createRouter("delete-cleanup");
+    const current = snapshot([ITEM, ITEM_TWO], 2);
+    const view = createStrictView(router, current);
+    const stale = captureActions(0, view.host);
+    const staleInput: {
+      event?: ReactKeyboardEvent<HTMLButtonElement>;
+    } = {};
+    const restore = interceptKeyDown(stale.openButton, (original, event) => {
+      expect(original).toBe(stale.keyDown);
+      staleInput.event = event;
+    });
+    dispatchTrustedDelete(stale.openButton);
+    restore();
+    const removed = stale.section;
+
+    await act(async () => {
+      view.root.unmount();
+      await Promise.resolve();
+    });
+    const index = directViews.indexOf(view);
+    if (index >= 0) directViews.splice(index, 1);
+    view.host.append(removed);
+    if (!staleInput.event) {
+      throw new Error("The stale Delete event was not captured");
+    }
+    stale.keyDown(staleInput.event);
+
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    const successor = createStrictView(router, current);
+    const active = captureActions(1, successor.host);
+    expect(dispatchTrustedDelete(active.openButton).allowed).toBe(false);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+      ITEM_TWO.id,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    view.host.remove();
   });
 });
 
