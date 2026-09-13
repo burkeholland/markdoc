@@ -61,6 +61,7 @@ function request(
 }
 
 class PresenceSession {
+  readonly docId: string;
   readonly user: { id: string; name: string; login: string; color: string; colorLight: string };
   readonly role: "owner" | "editor";
   private users: PresenceUser[];
@@ -70,6 +71,7 @@ class PresenceSession {
   followUserId: string | null = null;
 
   constructor({
+    docId = "presence-document",
     localId,
     localName,
     users,
@@ -77,6 +79,7 @@ class PresenceSession {
     activity = null,
     role = "owner",
   }: {
+    docId?: string;
     localId: string;
     localName: string;
     users: PresenceUser[];
@@ -84,6 +87,7 @@ class PresenceSession {
     activity?: { name: string; action: string; at: number } | null;
     role?: "owner" | "editor";
   }) {
+    this.docId = docId;
     this.user = {
       id: localId,
       name: localName,
@@ -121,6 +125,11 @@ class PresenceSession {
 
   setRequests(requests: AgentRequestMirror[]) {
     this.requests = requests;
+    this.publish();
+  }
+
+  setUsers(users: PresenceUser[]) {
+    this.users = users;
     this.publish();
   }
 
@@ -457,6 +466,200 @@ afterEach(() => {
 });
 
 describe("PresenceStack", () => {
+  describe("display-name titles", () => {
+    const localName = "  Alexandra Local Collaborator with a complete display identity for the collaborative document review across editorial planning accessibility research technical writing release coordination customer education and documentation maintenance teams  ";
+    const remoteName = "  Benjamin Remote Collaborator with a different complete display identity for the shared document review across product engineering content strategy international support quality assurance implementation planning and long term knowledge management teams  ";
+    const agentName = "Document Review Assistant for editorial planning accessibility research technical writing release coordination customer education documentation maintenance product engineering content strategy international support and long term knowledge management";
+
+    function expectNames(popover: HTMLElement, expected: string[]) {
+      const rows = within(popover).getAllByTestId("presence-row");
+      expect(rows).toHaveLength(expected.length);
+      return rows.map((row, index) => {
+        const spans = row.querySelectorAll("span.truncate");
+        expect(spans).toHaveLength(1);
+        const span = spans[0];
+        expect(span.tagName).toBe("SPAN");
+        expect(span.className).toBe("truncate");
+        expect(span.getAttribute("title")).toBe(expected[index]);
+        expect(span.textContent).toBe(expected[index]);
+        expect(span.children).toHaveLength(0);
+        expect(span.childNodes).toHaveLength(expected[index] === "" ? 0 : 1);
+        expect(span.getAttributeNames().sort()).toEqual(["class", "title"]);
+        expect(span.parentElement?.className).toBe("flex items-center gap-1.5 text-sm font-medium text-ink");
+        expect(span.parentElement?.parentElement).toBe(row.children[1]);
+        expect(row.children[1].className).toBe("min-w-0 flex-1");
+        expect(row.children[1].children).toHaveLength(2);
+        expect(Array.from(row.querySelectorAll("button, a[href], input, select, textarea, [tabindex], [contenteditable]"))).toEqual(
+          within(row).queryAllByRole("button"),
+        );
+        return span;
+      });
+    }
+
+    it.each(["Jump", "Follow"] as const)(
+      "keeps long displayed identities and hover passive before one explicit %s",
+      (action) => {
+        for (const name of [localName, remoteName, agentName]) expect(name.length).toBeGreaterThanOrEqual(200);
+        expect(new Set([localName, remoteName, agentName]).size).toBe(3);
+        const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected presence fetch"));
+        const xhrSpy = vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => { throw new Error("Unexpected presence XHR"); });
+        const socketSpy = vi.spyOn(globalThis, "WebSocket").mockImplementation(function () { throw new Error("Unexpected presence WebSocket"); });
+        const local = person("local", localName, { isLocal: true, role: "owner", idleSince: Date.now() - 120_000 });
+        const remote = person("remote", remoteName, { idleSince: Date.now() - 120_000, section: "Review plan" });
+        const working = person("working-agent", agentName, {
+          isAgent: true, role: null, cursor: null, section: null, status: "drafting",
+          ownerLogin: "owner", ownerName: "Morgan", idleSince: Date.now() - 120_000,
+        });
+        const idle = person("idle-agent", "Local assistant", {
+          isAgent: true, role: null, cursor: null, status: "ready",
+          ownerLogin: local.id, ownerName: "Local owner", idleSince: Date.now() - 120_000,
+        });
+        const noCursor = person("no-cursor", "Reader", { role: "viewer", cursor: null });
+        const users = [local, remote, working, idle, noCursor];
+        const session = new PresenceSession({
+          localId: local.id, localName: local.name, users,
+          requests: [request("current-request", local.id, { status: "claimed", claimedBy: working.name })],
+        });
+        const handlers = callbacks();
+        render(<PresenceBoundary session={session} callbacks={handlers} />);
+        const trigger = screen.getByTestId("presence");
+        const triggerLabel = `5 people here: ${localName} (you), ${remoteName}, Morgan's ${agentName} (agent: drafting), Local assistant (agent: ready), Reader`;
+        expect(trigger.getAttribute("aria-label")).toBe(triggerLabel);
+        expect(within(trigger).getByText("+2")).toBeInTheDocument();
+        expect(screen.getAllByTestId("presence-avatar").map((avatar) => avatar.getAttribute("data-user-id"))).toEqual(
+          users.slice(0, 3).map((user) => user.id),
+        );
+        const popover = openPresence();
+        const names = expectNames(popover, [`${localName} (you)`, remoteName, `Morgan's ${agentName}`, idle.name, noCursor.name]);
+        const rows = within(popover).getAllByTestId("presence-row");
+        expect(rows.map((row) => row.getAttribute("data-user-id"))).toEqual(users.map((user) => user.id));
+        expect(rows.map((row) => row.children.length)).toEqual([2, 3, 2, 2, 3]);
+        expect(rows.map((row) => within(row).queryAllByRole("button").map((button) => button.textContent))).toEqual([
+          [], ["Jump", "Follow"], [], [], ["Jump", "Follow"],
+        ]);
+        expect(within(rows[0]).getByText("Owner")).toBeInTheDocument();
+        expect(within(rows[1]).getByText("Editor")).toBeInTheDocument();
+        expect(within(rows[4]).getByText("Viewer")).toBeInTheDocument();
+        expect(rows.map((row) => row.hasAttribute("data-agent"))).toEqual([false, false, true, true, false]);
+        expect(within(rows[2]).getByText("Agent")).toBeInTheDocument();
+        expect(within(rows[3]).getByText("Agent")).toBeInTheDocument();
+        expect(rows.map((row) => row.classList.contains("opacity-60"))).toEqual([false, true, false, true, false]);
+        expect(within(rows[2]).getByTestId("presence-avatar-busy")).toHaveAccessibleName(`Morgan's ${agentName} is working`);
+        expect(within(rows[3]).queryByTestId("presence-avatar-busy")).toBeNull();
+        expect(within(rows[2]).getByRole("img", { name: `${agentName} (agent)` })).toBeInTheDocument();
+        expect(rows[0].querySelector(".avatar")?.getAttribute("title")).toBe(localName);
+        expect(rows[1].querySelector(".avatar")?.getAttribute("title")).toBe(remoteName);
+        expect(within(popover).getByText("5 people here")).toBeInTheDocument();
+        expect(within(popover).getAllByTestId("presence-section").map((section) => section.textContent)).toEqual([
+          "in ‘Overview’", "Idle · in ‘Review plan’", "drafting", "Idle", "no cursor",
+        ]);
+        expect(within(rows[4]).getByTestId("presence-jump")).toBeDisabled();
+        expect(within(rows[1]).getByTestId("presence-follow")).toHaveAttribute("aria-pressed", "false");
+        expect(within(popover).getByTestId("presence-request-cancel")).toBeInTheDocument();
+        expect(within(popover).queryByTestId("keep-agent-here")).toBeNull();
+        const markup = popover.innerHTML;
+        const focusOwner = document.activeElement;
+        for (const name of names) {
+          fireEvent.pointerEnter(name);
+          fireEvent.mouseEnter(name);
+          fireEvent.pointerMove(name);
+          fireEvent.mouseMove(name);
+          fireEvent.mouseLeave(name);
+          fireEvent.pointerLeave(name);
+        }
+        expect(popover.innerHTML).toBe(markup);
+        expect(document.activeElement).toBe(focusOwner);
+        expect(trigger.getAttribute("aria-label")).toBe(triggerLabel);
+        expect(handlers.onJump).not.toHaveBeenCalled();
+        expect(session.follow).not.toHaveBeenCalled();
+        expect(handlers.onCancelRequest).not.toHaveBeenCalled();
+        expect(handlers.onKeepAgent).not.toHaveBeenCalled();
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(xhrSpy).not.toHaveBeenCalled();
+        expect(socketSpy).not.toHaveBeenCalled();
+
+        fireEvent.click(within(rows[1]).getByRole("button", { name: action }));
+        if (action === "Jump") {
+          expect(handlers.onJump).toHaveBeenCalledExactlyOnceWith(remote);
+          expect(session.follow).not.toHaveBeenCalled();
+        } else {
+          expect(session.follow).toHaveBeenCalledExactlyOnceWith(remote.id);
+          expect(handlers.onJump).not.toHaveBeenCalled();
+        }
+        expect(handlers.onCancelRequest).not.toHaveBeenCalled();
+        expect(handlers.onKeepAgent).not.toHaveBeenCalled();
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(xhrSpy).not.toHaveBeenCalled();
+        expect(socketSpy).not.toHaveBeenCalled();
+        expect(screen.queryByTestId("presence-popover")).toBeNull();
+      },
+    );
+
+    it("refreshes same-ID names and agent display ownership, removes departed titles, and replaces the document session", () => {
+      const local = person("local", localName, { isLocal: true });
+      const remote = person("remote", remoteName);
+      const agent = person("agent", agentName, { isAgent: true, role: null, ownerLogin: "owner", ownerName: "Morgan" });
+      const session = new PresenceSession({ docId: "document-a", localId: local.id, localName: local.name, users: [local, remote, agent] });
+      const handlers = callbacks();
+      const view = render(<PresenceBoundary session={session} callbacks={handlers} />);
+      let popover = openPresence();
+      const originalNames = expectNames(popover, [`${localName} (you)`, remoteName, `Morgan's ${agentName}`]);
+      const oldTitles = Array.from(document.querySelectorAll("[title]"), (element) => element.getAttribute("title"));
+      const updatedLocal = { ...local, name: remoteName };
+      const updatedRemote = { ...remote, name: "  Updated remote  " };
+      const updatedAgent = { ...agent, ownerName: "Taylor" };
+      act(() => session.setUsers([updatedLocal, updatedRemote, updatedAgent]));
+      const updatedNames = expectNames(popover, [`${remoteName} (you)`, updatedRemote.name, `Taylor's ${agentName}`]);
+      updatedNames.forEach((name, index) => expect(name).toBe(originalNames[index]));
+      expect(updatedNames[2].getAttribute("title")).not.toBe(agent.name);
+
+      act(() => session.setUsers([updatedLocal, updatedRemote, { ...updatedAgent, ownerLogin: local.id }]));
+      expectNames(popover, [`${remoteName} (you)`, updatedRemote.name, agentName]);
+      act(() => session.setUsers([updatedLocal, updatedRemote]));
+      expectNames(popover, [`${remoteName} (you)`, updatedRemote.name]);
+      expect(originalNames[2]).not.toBeInTheDocument();
+      expect(within(popover).getByTestId("keep-agent-here")).toBeInTheDocument();
+      const remainingTitles = Array.from(document.querySelectorAll("[title]"), (element) => element.getAttribute("title"));
+      expect(remainingTitles).not.toContain(agentName);
+      expect(remainingTitles).not.toContain(`Morgan's ${agentName}`);
+      expect(remainingTitles).not.toContain(`Taylor's ${agentName}`);
+
+      const replacementLocal = { ...local, name: "Current local" };
+      const replacementRemote = { ...remote, name: "Current remote" };
+      const replacementAgent = { ...agent, name: "Current assistant", ownerName: "Current owner" };
+      const replacement = new PresenceSession({
+        docId: "document-b", localId: replacementLocal.id, localName: replacementLocal.name,
+        users: [replacementLocal, replacementRemote, replacementAgent],
+      });
+      view.rerender(<PresenceBoundary session={replacement} callbacks={handlers} />);
+      expect(replacement.docId).not.toBe(session.docId);
+      expect(screen.queryByTestId("presence-popover")).toBeNull();
+      originalNames.forEach((name) => expect(name).not.toBeInTheDocument());
+      popover = openPresence();
+      expectNames(popover, ["Current local (you)", "Current remote", "Current owner's Current assistant"]);
+      act(() => session.setUsers([local, remote, agent]));
+      expectNames(popover, ["Current local (you)", "Current remote", "Current owner's Current assistant"]);
+      const currentTitles = Array.from(document.querySelectorAll("[title]"), (element) => element.getAttribute("title"));
+      for (const title of [...oldTitles, ...remainingTitles]) expect(currentTitles).not.toContain(title);
+      expect(session.follow).not.toHaveBeenCalled();
+      expect(replacement.follow).not.toHaveBeenCalled();
+      expect(handlers.onJump).not.toHaveBeenCalled();
+      expect(handlers.onCancelRequest).not.toHaveBeenCalled();
+      expect(handlers.onKeepAgent).not.toHaveBeenCalled();
+      fireEvent.click(within(popover).getByTestId("presence-jump"));
+      expect(handlers.onJump).toHaveBeenCalledExactlyOnceWith(replacementRemote);
+    });
+
+    it("preserves empty and whitespace-only displayed names without a fallback", () => {
+      const local = person("local", "", { isLocal: true });
+      const remote = person("remote", "  ");
+      const agent = person("agent", "", { isAgent: true, ownerLogin: local.id, ownerName: "Unused owner" });
+      const session = new PresenceSession({ localId: local.id, localName: local.name, users: [local, remote, agent] });
+      render(<PresenceBoundary session={session} callbacks={callbacks()} />);
+      expectNames(openPresence(), [" (you)", "  ", ""]);
+    });
+  });
+
   it("preserves presence ordering, naming, activity, request ownership, actions, and accessibility", () => {
     const now = Date.now();
     const local = person("alice", "Alice", { isLocal: true, role: "owner" });

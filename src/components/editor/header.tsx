@@ -2654,7 +2654,7 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5 text-sm font-medium text-ink">
-                    <span className="truncate">{u.isLocal ? `${u.name} (you)` : u.isAgent ? agentName(u) : u.name}</span>
+                    <span className="truncate" title={u.isLocal ? `${u.name} (you)` : u.isAgent ? agentName(u) : u.name}>{u.isLocal ? `${u.name} (you)` : u.isAgent ? agentName(u) : u.name}</span>
                     {u.isAgent && <span className="rounded-md bg-violet-100 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:bg-violet-950 dark:text-violet-300">Agent</span>}
                     {u.role && <span className="rounded-md bg-surface-2 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-ink-3">{roleLabel[u.role] ?? u.role}</span>}
                   </div>
