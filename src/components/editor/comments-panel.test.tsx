@@ -284,6 +284,96 @@ function requestModeHandler(element: HTMLButtonElement) {
   return reactProperty<RequestModeKeyHandler>(element, "onKeyDown");
 }
 
+function requestModeCaptureHandler(element: HTMLButtonElement) {
+  return reactProperty<RequestModeKeyHandler>(element, "onKeyDownCapture");
+}
+
+function requestModeButtonRef(element: HTMLButtonElement) {
+  const fiberKey = Object.keys(element).find((key) =>
+    key.startsWith("__reactFiber$"),
+  );
+  if (!fiberKey) {
+    throw new Error("React fiber was not attached to the request mode");
+  }
+  const ref = (
+    element as unknown as Record<
+      string,
+      { ref?: RefCallback<HTMLButtonElement> | null }
+    >
+  )[fiberKey]?.ref;
+  if (typeof ref !== "function") {
+    throw new Error("A callback ref was not attached to the request mode");
+  }
+  return ref;
+}
+
+function dispatchRequestModeKeyWithBoundaryProbe(
+  source: HTMLButtonElement,
+  key: string,
+  alter?: (
+    phase: "capture-before" | "capture-after" | "bubble-before",
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void,
+  focus = true,
+) {
+  const propsKey = Object.keys(source).find((candidate) =>
+    candidate.startsWith("__reactProps$"),
+  );
+  if (!propsKey) {
+    throw new Error("React props were not attached to the request mode");
+  }
+  const record = source as unknown as Record<
+    string,
+    Record<string, unknown> | undefined
+  >;
+  const props = record[propsKey];
+  const captureHandler = props?.onKeyDownCapture;
+  const bubbleHandler = props?.onKeyDown;
+  if (
+    !props ||
+    typeof captureHandler !== "function" ||
+    typeof bubbleHandler !== "function"
+  ) {
+    throw new Error("Both request-mode keyboard boundaries must be attached");
+  }
+  const pair: {
+    capture?: ReactKeyboardEvent<HTMLButtonElement>;
+    bubble?: ReactKeyboardEvent<HTMLButtonElement>;
+  } = {};
+  const replacement = {
+    ...props,
+    onKeyDownCapture: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      pair.capture = event;
+      alter?.("capture-before", event);
+      (captureHandler as RequestModeKeyHandler)(event);
+      alter?.("capture-after", event);
+    },
+    onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      pair.bubble = event;
+      alter?.("bubble-before", event);
+      (bubbleHandler as RequestModeKeyHandler)(event);
+    },
+  };
+  record[propsKey] = replacement;
+  if (focus) source.focus();
+  const nativeEvent = requestModeKeyboardEvent(source, key);
+  try {
+    act(() => {
+      source.dispatchEvent(nativeEvent);
+    });
+  } finally {
+    if (record[propsKey] === replacement) record[propsKey] = props;
+  }
+  if (!pair.capture || !pair.bubble) {
+    throw new Error("The key did not cross both request-mode boundaries");
+  }
+  return {
+    nativeEvent,
+    capture: pair.capture,
+    bubble: pair.bubble,
+  };
+}
+
 function commentMenuHandler(element: HTMLButtonElement) {
   return reactProperty<CommentMenuKeyHandler>(element, "onKeyDown");
 }
@@ -8963,6 +9053,398 @@ describe("CommentsPanel", () => {
     });
 
     describe("request-mode keyboard authority", () => {
+      it("pairs distinct genuine React capture and bubble wrappers for one native key", async () => {
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+
+        const pair = dispatchRequestModeKeyWithBoundaryProbe(
+          suggest,
+          "ArrowRight",
+        );
+
+        expect(pair.capture).not.toBe(pair.bubble);
+        expect(pair.capture.nativeEvent).toBe(pair.nativeEvent);
+        expect(pair.bubble.nativeEvent).toBe(pair.nativeEvent);
+        expect(pair.capture.isDefaultPrevented()).toBe(false);
+        expect(pair.bubble.isDefaultPrevented()).toBe(true);
+        expect(pair.nativeEvent.defaultPrevented).toBe(true);
+        expect(view.radio("comment")).toHaveFocus();
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+      });
+
+      it("accepts independent phase prototypes, methods and public scalar accessors without private fields", async () => {
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+        const methods = new Map<
+          string,
+          Record<
+            "preventDefault" | "isDefaultPrevented" | "isPropagationStopped",
+            (...args: never[]) => unknown
+          >
+        >();
+        const receivers: object[] = [];
+
+        const pair = dispatchRequestModeKeyWithBoundaryProbe(
+          suggest,
+          "ArrowRight",
+          (phase, event) => {
+            if (!phase.endsWith("before")) return;
+            Object.setPrototypeOf(
+              event,
+              Object.create(Object.getPrototypeOf(event)),
+            );
+            const key = event.key;
+            const code = event.code;
+            Object.defineProperties(event, {
+              key: {
+                configurable: true,
+                enumerable: true,
+                get: () => key,
+              },
+              code: {
+                configurable: true,
+                enumerable: true,
+                get: () => code,
+              },
+              _reactName: {
+                configurable: true,
+                value: undefined,
+              },
+              persist: {
+                configurable: true,
+                value: "not a function",
+              },
+              isPersistent: {
+                configurable: true,
+                value: null,
+              },
+              stopPropagation: {
+                configurable: true,
+                value: { ignored: true },
+              },
+            });
+            const originals = {
+              preventDefault: event.preventDefault,
+              isDefaultPrevented: event.isDefaultPrevented,
+              isPropagationStopped: event.isPropagationStopped,
+            };
+            const replacements = Object.fromEntries(
+              Object.entries(originals).map(([name, original]) => [
+                name,
+                function (this: object) {
+                  receivers.push(this);
+                  return Reflect.apply(original, this, []);
+                },
+              ]),
+            ) as Record<
+              keyof typeof originals,
+              (...args: never[]) => unknown
+            >;
+            for (const [name, replacement] of Object.entries(replacements)) {
+              Object.defineProperty(event, name, {
+                configurable: true,
+                enumerable: true,
+                value: replacement,
+                writable: true,
+              });
+            }
+            methods.set(phase, replacements);
+          },
+        );
+
+        expect(pair.capture).not.toBe(pair.bubble);
+        expect(Object.getPrototypeOf(pair.capture)).not.toBe(
+          Object.getPrototypeOf(pair.bubble),
+        );
+        expect(methods.get("capture-before")?.preventDefault).not.toBe(
+          methods.get("bubble-before")?.preventDefault,
+        );
+        expect(methods.get("capture-before")?.isDefaultPrevented).not.toBe(
+          methods.get("bubble-before")?.isDefaultPrevented,
+        );
+        expect(methods.get("capture-before")?.isPropagationStopped).not.toBe(
+          methods.get("bubble-before")?.isPropagationStopped,
+        );
+        expect(receivers.length).toBeGreaterThanOrEqual(5);
+        expect(
+          receivers.every(
+            (receiver) => receiver === pair.capture || receiver === pair.bubble,
+          ),
+        ).toBe(true);
+        expect(pair.nativeEvent.defaultPrevented).toBe(true);
+        expect(view.radio("comment")).toHaveFocus();
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+      });
+
+      it("keeps an exact pair across nested microtask checkpoints between React phases", async () => {
+        const checkpoint = vi
+          .spyOn(window, "queueMicrotask")
+          .mockImplementation((callback: VoidFunction) => callback());
+        const view = await mountDirectRequestModes();
+        const pair = dispatchRequestModeKeyWithBoundaryProbe(
+          view.radio("suggest"),
+          "ArrowRight",
+          (phase) => {
+            if (phase !== "capture-after") return;
+            window.queueMicrotask(() => {
+              window.queueMicrotask(() => undefined);
+            });
+          },
+        );
+
+        expect(checkpoint.mock.calls.length).toBeGreaterThanOrEqual(2);
+        expect(pair.nativeEvent.defaultPrevented).toBe(true);
+        expect(view.radio("comment")).toHaveFocus();
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+      });
+
+      it("binds the exact backing Window receiver, rejects a lookalike and removes the listener on cleanup", async () => {
+        const additions = vi.spyOn(window, "addEventListener");
+        const removals = vi.spyOn(window, "removeEventListener");
+        const view = await mountDirectRequestModes();
+        const listener = additions.mock.calls
+          .filter(
+            ([type, candidate, options]) =>
+              type === "keydown" &&
+              options === true &&
+              typeof candidate === "function" &&
+              !removals.mock.calls.some(
+                ([removedType, removedCandidate, removedOptions]) =>
+                  removedType === type &&
+                  removedCandidate === candidate &&
+                  removedOptions === options,
+              ),
+          )
+          .map(([, candidate]) => candidate)
+          .at(-1);
+        if (typeof listener !== "function") {
+          throw new Error("No request-mode Window capture listener was added");
+        }
+        const suggest = view.radio("suggest");
+        const lookalike = Object.create(
+          Object.getPrototypeOf(window),
+        ) as Record<string, unknown>;
+        Object.defineProperties(lookalike, {
+          document: { configurable: true, value: document },
+          self: { configurable: true, value: lookalike },
+          window: { configurable: true, value: lookalike },
+        });
+        const rejected = requestModeKeyboardEvent(suggest, "ArrowRight");
+        suggest.focus();
+        act(() => {
+          Reflect.apply(listener, lookalike, [rejected]);
+        });
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(suggest).toHaveFocus();
+        expect(suggest).toHaveAttribute("aria-checked", "true");
+
+        const receivers: EventTarget[] = [];
+        let intrinsicCurrentTarget: EventTarget | null = null;
+        let originalTerminal: EventTarget | null = null;
+        function observeBackingReceiver(this: EventTarget, event: Event) {
+          receivers.push(this);
+          intrinsicCurrentTarget = event.currentTarget;
+          originalTerminal = event.composedPath().at(-1) ?? null;
+        }
+        window.addEventListener("keydown", observeBackingReceiver, true);
+        try {
+          act(() => requestModeKey(suggest, "ArrowRight"));
+        } finally {
+          window.removeEventListener(
+            "keydown",
+            observeBackingReceiver,
+            true,
+          );
+        }
+        expect(receivers).toHaveLength(1);
+        expect(receivers[0]).toBe(intrinsicCurrentTarget);
+        expect(receivers[0]).toBe(originalTerminal);
+        expect(view.radio("comment")).toHaveFocus();
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+
+        act(() => view.root.unmount());
+        const trackedView = directRequestModeViews.findIndex(
+          (candidate) => candidate.root === view.root,
+        );
+        if (trackedView >= 0) directRequestModeViews.splice(trackedView, 1);
+        view.host.remove();
+        expect(removals).toHaveBeenCalledWith("keydown", listener, true);
+      });
+
+      it("does not let wrong-source capture or crossed bubble delivery consume the rightful pair", async () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+        const comment = view.radio("comment");
+        const wrongCapture = requestModeCaptureHandler(comment);
+        const wrongBubble = requestModeHandler(comment);
+        suggest.focus();
+        focus.mockClear();
+
+        const pair = dispatchRequestModeKeyWithBoundaryProbe(
+          suggest,
+          "ArrowRight",
+          (phase, event) => {
+            if (phase === "capture-before") wrongCapture(event);
+            if (phase === "capture-after") wrongBubble(event);
+          },
+          false,
+        );
+
+        expect(pair.nativeEvent.defaultPrevented).toBe(true);
+        expect(comment).toHaveFocus();
+        expect(comment).toHaveAttribute("aria-checked", "true");
+        expect(focus).toHaveBeenCalledTimes(1);
+      });
+
+      it.each([
+        ["capture default query", "capture-before", "isDefaultPrevented"],
+        ["capture propagation query", "capture-before", "isPropagationStopped"],
+        ["bubble default query", "bubble-before", "isDefaultPrevented"],
+        ["bubble propagation query", "bubble-before", "isPropagationStopped"],
+        ["bubble prevention", "bubble-before", "preventDefault"],
+      ] as const)(
+        "excludes reentry during the public %s and accepts only the outer event",
+        async (_attempt, alteredPhase, property) => {
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+          const view = await mountDirectRequestModes();
+          const suggest = view.radio("suggest");
+          suggest.focus();
+          focus.mockClear();
+          preventDefault.mockClear();
+          let reentered = false;
+          let nestedDefaultPrevented: boolean | null = null;
+
+          const pair = dispatchRequestModeKeyWithBoundaryProbe(
+            suggest,
+            "ArrowRight",
+            (phase, event) => {
+              if (phase !== alteredPhase) return;
+              const original = event[property];
+              Object.defineProperty(event, property, {
+                configurable: true,
+                enumerable: true,
+                value: function (this: object) {
+                  if (!reentered) {
+                    reentered = true;
+                    nestedDefaultPrevented =
+                      requestModeKey(suggest, "ArrowRight").defaultPrevented;
+                  }
+                  return Reflect.apply(original, this, []);
+                },
+                writable: true,
+              });
+            },
+            false,
+          );
+
+          expect(reentered).toBe(true);
+          expect(nestedDefaultPrevented).toBe(false);
+          expect(pair.nativeEvent.defaultPrevented).toBe(true);
+          expect(view.radio("comment")).toHaveFocus();
+          expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+          expect(preventDefault).toHaveBeenCalledTimes(1);
+          expect(focus).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it.each([
+        ["capture default query", "capture-before", "isDefaultPrevented"],
+        ["capture propagation query", "capture-before", "isPropagationStopped"],
+        ["bubble default query", "bubble-before", "isDefaultPrevented"],
+        ["bubble propagation query", "bubble-before", "isPropagationStopped"],
+        ["bubble prevention", "bubble-before", "preventDefault"],
+      ] as const)(
+        "rejects method replacement after the public %s, then accepts a fresh event",
+        async (_attempt, alteredPhase, property) => {
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const view = await mountDirectRequestModes();
+          const suggest = view.radio("suggest");
+          suggest.focus();
+          focus.mockClear();
+
+          const rejected = dispatchRequestModeKeyWithBoundaryProbe(
+            suggest,
+            "ArrowRight",
+            (phase, event) => {
+              if (phase !== alteredPhase) return;
+              const original = event[property];
+              Object.defineProperty(event, property, {
+                configurable: true,
+                enumerable: true,
+                value: function (this: object) {
+                  const result = Reflect.apply(original, this, []);
+                  Object.defineProperty(this, property, {
+                    configurable: true,
+                    enumerable: true,
+                    value: () => result,
+                    writable: true,
+                  });
+                  return result;
+                },
+                writable: true,
+              });
+            },
+            false,
+          );
+
+          expect(rejected.nativeEvent.defaultPrevented).toBe(
+            property === "preventDefault",
+          );
+          expect(suggest).toHaveFocus();
+          expect(suggest).toHaveAttribute("aria-checked", "true");
+          expect(focus).not.toHaveBeenCalled();
+
+          act(() => requestModeKey(suggest, "ArrowRight"));
+          expect(view.radio("comment")).toHaveFocus();
+          expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+          expect(focus).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      it.each([
+        ["capture query", "capture-before", "isDefaultPrevented"],
+        ["bubble query", "bubble-before", "isDefaultPrevented"],
+        ["prevention", "bubble-before", "preventDefault"],
+      ] as const)(
+        "rejects a throwing public %s without poisoning a clean event",
+        async (_attempt, alteredPhase, property) => {
+          const focus = vi.spyOn(HTMLElement.prototype, "focus");
+          const view = await mountDirectRequestModes();
+          const suggest = view.radio("suggest");
+          suggest.focus();
+          focus.mockClear();
+
+          const rejected = dispatchRequestModeKeyWithBoundaryProbe(
+            suggest,
+            "ArrowRight",
+            (phase, event) => {
+              if (phase !== alteredPhase) return;
+              Object.defineProperty(event, property, {
+                configurable: true,
+                enumerable: true,
+                value: () => {
+                  throw new Error("hostile request-mode public method");
+                },
+                writable: true,
+              });
+            },
+            false,
+          );
+
+          expect(rejected.nativeEvent.defaultPrevented).toBe(false);
+          expect(suggest).toHaveFocus();
+          expect(suggest).toHaveAttribute("aria-checked", "true");
+          expect(focus).not.toHaveBeenCalled();
+
+          act(() => requestModeKey(suggest, "ArrowRight"));
+          expect(view.radio("comment")).toHaveFocus();
+          expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+          expect(focus).toHaveBeenCalledTimes(1);
+        },
+      );
+
       it.each([
         ["ArrowRight", "suggest", "comment"],
         ["ArrowDown", "comment", "rewrite"],
@@ -9084,22 +9566,50 @@ describe("CommentsPanel", () => {
         expect(vi.mocked(api.documents.createRequest).mock.calls[0][1].mode).toBe("rewrite");
       });
 
-      it("uses captured owner-realm composedPath, preventDefault and focus intrinsics", async () => {
+      it("uses captured owner-realm composedPath and focus intrinsics with public bubble prevention", async () => {
         const focus = vi.spyOn(HTMLElement.prototype, "focus");
         const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
         const view = await mountDirectRequestModes();
         const suggest = view.radio("suggest");
         const comment = view.radio("comment");
+        const handler = requestModeHandler(suggest);
+        const propsKey = Object.keys(suggest).find((key) =>
+          key.startsWith("__reactProps$"),
+        );
+        if (!propsKey) {
+          throw new Error("React props were not attached to the request mode");
+        }
+        const record = suggest as unknown as Record<
+          string,
+          Record<string, unknown>
+        >;
+        const props = record[propsKey];
+        const publicPreventDefault = vi.fn<
+          ReactKeyboardEvent<HTMLButtonElement>["preventDefault"]
+        >();
+        record[propsKey] = {
+          ...props,
+          onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+            const original = event.preventDefault;
+            publicPreventDefault.mockImplementation(function (this: object) {
+              return Reflect.apply(original, this, []);
+            });
+            Object.defineProperty(event, "preventDefault", {
+              configurable: true,
+              value: publicPreventDefault,
+            });
+            handler(event);
+          },
+        };
         suggest.focus();
         focus.mockClear();
         preventDefault.mockClear();
         const event = requestModeKeyboardEvent(suggest, "ArrowRight");
         const publicComposedPath = vi.fn(() => []);
-        const publicPreventDefault = vi.fn();
         const publicFocus = vi.fn();
-        Object.defineProperties(event, {
-          composedPath: { configurable: true, value: publicComposedPath },
-          preventDefault: { configurable: true, value: publicPreventDefault },
+        Object.defineProperty(event, "composedPath", {
+          configurable: true,
+          value: publicComposedPath,
         });
         Object.defineProperty(comment, "focus", {
           configurable: true,
@@ -9107,6 +9617,7 @@ describe("CommentsPanel", () => {
         });
 
         act(() => suggest.dispatchEvent(event));
+        record[propsKey] = props;
 
         expect(event.defaultPrevented).toBe(true);
         expect(comment).toHaveAttribute("aria-checked", "true");
@@ -9114,7 +9625,7 @@ describe("CommentsPanel", () => {
         expect(preventDefault).toHaveBeenCalledTimes(1);
         expect(focus).toHaveBeenCalledTimes(1);
         expect(publicComposedPath).not.toHaveBeenCalled();
-        expect(publicPreventDefault).not.toHaveBeenCalled();
+        expect(publicPreventDefault).toHaveBeenCalledTimes(1);
         expect(publicFocus).not.toHaveBeenCalled();
       });
 
@@ -9428,7 +9939,10 @@ describe("CommentsPanel", () => {
         focus.mockClear();
         preventDefault.mockClear();
 
-        const rejected = requestModeKey(suggest, "ArrowRight");
+        let rejected!: globalThis.KeyboardEvent;
+        act(() => {
+          rejected = requestModeKey(suggest, "ArrowRight");
+        });
 
         expect(rejected.defaultPrevented).toBe(false);
         expect(view.radio("suggest")).toHaveAttribute("aria-checked", "true");
@@ -9449,6 +9963,58 @@ describe("CommentsPanel", () => {
         currentSuggest.focus();
         focus.mockClear();
         act(() => requestModeKey(currentSuggest, "ArrowRight"));
+        expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
+        expect(focus).toHaveBeenCalledTimes(1);
+      });
+
+      it("rejects a partial ref replay after Window staging and lets a distinct composer recover", async () => {
+        const focus = vi.spyOn(HTMLElement.prototype, "focus");
+        const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+        const view = await mountDirectRequestModes();
+        const suggest = view.radio("suggest");
+        const ref = requestModeButtonRef(suggest);
+        suggest.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        function replayOneRef() {
+          ref(null);
+          ref(suggest);
+        }
+        window.addEventListener("keydown", replayOneRef, {
+          capture: true,
+          once: true,
+        });
+
+        let rejected!: globalThis.KeyboardEvent;
+        act(() => {
+          rejected = requestModeKey(suggest, "ArrowRight");
+        });
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(suggest).toHaveFocus();
+        expect(suggest).toHaveAttribute("aria-checked", "true");
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+
+        view.renderVisit("B");
+        const currentBox = await waitFor(() => {
+          const element = view.host.querySelector<HTMLTextAreaElement>(
+            '[data-testid="comment-composer"]',
+          );
+          if (!element) {
+            throw new Error("The clean request-mode composer did not mount");
+          }
+          return element;
+        });
+        fireEvent.change(currentBox, {
+          target: { value: "@alice/Copilot-CLI clean ref successor" },
+        });
+        await waitFor(() => expect(view.radio("suggest")).toBeInTheDocument());
+        const currentSuggest = view.radio("suggest");
+        currentSuggest.focus();
+        focus.mockClear();
+        act(() => requestModeKey(currentSuggest, "ArrowRight"));
+        expect(view.radio("comment")).toHaveFocus();
         expect(view.radio("comment")).toHaveAttribute("aria-checked", "true");
         expect(focus).toHaveBeenCalledTimes(1);
       });

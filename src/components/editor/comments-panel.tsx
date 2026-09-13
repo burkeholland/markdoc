@@ -7126,6 +7126,7 @@ interface RequestModeDomSnapshot {
   readonly node: Node;
   readonly nodeValue: string | null;
   readonly attributes: readonly (readonly [string, string])[] | null;
+  readonly ignoredAttributes: readonly string[];
   readonly children: readonly RequestModeDomSnapshot[];
 }
 
@@ -7158,9 +7159,106 @@ interface RequestModeRefReplay {
   reattached: boolean;
 }
 
-interface RequestModeKeyboardFacts {
-  readonly event: globalThis.KeyboardEvent;
+type RequestModeReactKeyboardMethodName =
+  | "preventDefault"
+  | "isDefaultPrevented"
+  | "isPropagationStopped";
+
+type RequestModeReactKeyboardMethod = (...args: never[]) => unknown;
+
+interface RequestModeNativeKeyboardFacts {
+  readonly type: string;
+  readonly target: EventTarget | null;
+  readonly currentTarget: EventTarget | null;
+  readonly phase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly composed: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly path: readonly EventTarget[];
+  readonly trusted: boolean;
+  readonly view: Window | null;
+  readonly detail: number;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly repeat: boolean;
+  readonly composing: boolean;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+}
+
+interface RequestModeReactKeyboardEvent {
+  readonly preventDefault?: unknown;
+  readonly isDefaultPrevented?: unknown;
+  readonly isPropagationStopped?: unknown;
+  readonly isComposing?: unknown;
+}
+
+interface RequestModeReactKeyboardFacts {
+  readonly nativeEvent: Event;
+  readonly type: string;
+  readonly target: EventTarget;
+  readonly currentTarget: HTMLButtonElement;
+  readonly phase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly trusted: boolean;
+  readonly view: unknown;
+  readonly detail: number;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly repeat: boolean;
+  readonly composing: boolean | undefined;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+}
+
+interface RequestModeReactKeyboardSnapshot {
+  readonly event: KeyboardEvent<HTMLButtonElement>;
+  readonly publicFacts: RequestModeReactKeyboardFacts;
+  readonly nativeFacts: RequestModeNativeKeyboardFacts;
+  readonly methods: Readonly<
+    Record<RequestModeReactKeyboardMethodName, RequestModeReactKeyboardMethod>
+  >;
+}
+
+interface RequestModeKeyboardWindowStage {
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly facts: RequestModeNativeKeyboardFacts;
+  readonly source: HTMLButtonElement;
+  readonly row: RequestModeRowAuthority;
+}
+
+interface RequestModeKeyboardAction {
+  readonly identity: symbol;
+  readonly row: RequestModeRowAuthority;
+}
+
+interface RequestModeKeyboardPair {
+  readonly publication: RequestModePublication;
+  readonly action: RequestModeKeyboardAction;
+  readonly nativeEvent: globalThis.KeyboardEvent;
+  readonly stage: RequestModeKeyboardWindowStage;
+  readonly capture: RequestModeReactKeyboardSnapshot;
+  readonly sourceRow: RequestModeRowAuthority;
+  readonly source: HTMLButtonElement;
+  readonly destinationRow: RequestModeRowAuthority;
+  readonly destination: HTMLButtonElement;
   readonly key: RequestModeNavigationKey;
+}
+
+interface RequestModeKeyboardRegistration {
+  readonly isCurrent: () => boolean;
+  readonly remove: () => void;
 }
 
 interface RequestModeCapturedGetter<Value> {
@@ -7185,17 +7283,24 @@ interface RequestModeKeyboardAuthority {
   readonly UIEvent: typeof globalThis.UIEvent;
   readonly KeyboardEvent: typeof globalThis.KeyboardEvent;
   readonly Node: typeof globalThis.Node;
+  readonly keyboardPrototype: object;
+  readonly prototypeOf: typeof Object.getPrototypeOf;
   readonly eventType: RequestModeCapturedGetter<string>;
   readonly eventTarget: RequestModeCapturedGetter<EventTarget | null>;
+  readonly eventCurrentTarget: RequestModeCapturedGetter<EventTarget | null>;
   readonly eventPhase: RequestModeCapturedGetter<number>;
   readonly eventBubbles: RequestModeCapturedGetter<boolean>;
   readonly eventCancelable: RequestModeCapturedGetter<boolean>;
+  readonly eventComposed: RequestModeCapturedGetter<boolean>;
   readonly eventDefaultPrevented: RequestModeCapturedGetter<boolean>;
   readonly eventCancelBubble: RequestModeCapturedGetter<boolean>;
   readonly eventPath: RequestModeCapturedMethod<readonly [], EventTarget[]>;
   readonly eventPreventDefault: RequestModeCapturedMethod<readonly [], void>;
   readonly eventView: RequestModeCapturedGetter<Window | null>;
+  readonly detail: RequestModeCapturedGetter<number>;
   readonly key: RequestModeCapturedGetter<string>;
+  readonly code: RequestModeCapturedGetter<string>;
+  readonly location: RequestModeCapturedGetter<number>;
   readonly repeat: RequestModeCapturedGetter<boolean>;
   readonly composing: RequestModeCapturedGetter<boolean>;
   readonly altKey: RequestModeCapturedGetter<boolean>;
@@ -7206,6 +7311,14 @@ interface RequestModeKeyboardAuthority {
   readonly focus: RequestModeCapturedMethod<readonly [FocusOptions?], void>;
   readonly trusted: RequestModeTrustedGetter;
   readonly isCurrent: () => boolean;
+  readonly requestModeIsCurrent: () => boolean;
+  readonly applyMethod: (
+    method: RequestModeReactKeyboardMethod,
+    receiver: object,
+  ) => Readonly<{ called: boolean; value?: unknown }>;
+  readonly registerRequestMode: (
+    listener: (this: EventTarget, event: Event) => void,
+  ) => RequestModeKeyboardRegistration | null;
 }
 
 interface RequestModePublication {
@@ -7246,11 +7359,29 @@ interface RequestModeRuntime {
   readonly isExactElementReplay: () => boolean;
   readonly isExactLayoutReplay: () => boolean;
   readonly replay: () => RequestModeReplay | null;
+  readonly keyboardCaptureIsReady: () => boolean;
+  readonly keyboardListenerIsCurrent: () => boolean;
+  readonly keyboardStage: (
+    event: globalThis.KeyboardEvent,
+  ) => RequestModeKeyboardWindowStage | null;
+  readonly pairKeyboard: (
+    event: globalThis.KeyboardEvent,
+    stage: RequestModeKeyboardWindowStage,
+    pair: RequestModeKeyboardPair,
+  ) => boolean;
+  readonly keyboardPair: (
+    event: globalThis.KeyboardEvent,
+  ) => RequestModeKeyboardPair | null;
+  readonly consumeKeyboardPair: (
+    event: globalThis.KeyboardEvent,
+    pair: RequestModeKeyboardPair,
+  ) => boolean;
 }
 
 interface RequestModeRowPresentation {
   readonly authority: RequestModeRowAuthority;
   readonly captureButton: (element: HTMLButtonElement | null) => void;
+  readonly onKeyDownCapture: (event: KeyboardEvent<HTMLButtonElement>) => void;
   readonly onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
 }
 
@@ -7275,6 +7406,9 @@ interface RequestModeCells {
   readonly claimedActions: WeakSet<object>;
   readonly claimedReactEvents: WeakSet<object>;
   readonly claimedNativeEvents: WeakSet<Event>;
+  readonly claimedWindowStages: WeakSet<RequestModeKeyboardWindowStage>;
+  readonly keyboardAttempt: { current: object | null };
+  readonly keyboardDelivery: { current: symbol | null };
 }
 
 const claimedRequestModeReactEvents = new WeakSet<object>();
@@ -7328,6 +7462,9 @@ function createRequestModeCells(): RequestModeCells {
     claimedActions: new WeakSet(),
     claimedReactEvents: new WeakSet(),
     claimedNativeEvents: new WeakSet(),
+    claimedWindowStages: new WeakSet(),
+    keyboardAttempt: { current: null },
+    keyboardDelivery: { current: null },
   };
 }
 
@@ -7446,17 +7583,38 @@ function captureRequestModeKeyboardAuthority(
   const keyboardPrototype = KeyboardEventConstructor.prototype;
   const documentPrototype = ownerWindow.Document.prototype;
   const htmlElementPrototype = ownerWindow.HTMLElement.prototype;
+  const prototypeOf = ownerWindow.Object.getPrototypeOf;
+  const apply = ownerWindow.Reflect.apply;
+  const addEventListener = ownerWindow.addEventListener;
+  const removeEventListener = ownerWindow.removeEventListener;
   const eventType = captureRequestModeGetter<string>(ownerWindow, eventPrototype, "type");
   const eventTarget = captureRequestModeGetter<EventTarget | null>(ownerWindow, eventPrototype, "target");
+  const eventCurrentTarget = captureRequestModeGetter<EventTarget | null>(
+    ownerWindow,
+    eventPrototype,
+    "currentTarget",
+  );
   const eventPhase = captureRequestModeGetter<number>(ownerWindow, eventPrototype, "eventPhase");
   const eventBubbles = captureRequestModeGetter<boolean>(ownerWindow, eventPrototype, "bubbles");
   const eventCancelable = captureRequestModeGetter<boolean>(ownerWindow, eventPrototype, "cancelable");
+  const eventComposed = captureRequestModeGetter<boolean>(
+    ownerWindow,
+    eventPrototype,
+    "composed",
+  );
   const eventDefaultPrevented = captureRequestModeGetter<boolean>(ownerWindow, eventPrototype, "defaultPrevented");
   const eventCancelBubble = captureRequestModeGetter<boolean>(ownerWindow, eventPrototype, "cancelBubble");
   const eventPath = captureRequestModeMethod<readonly [], EventTarget[]>(ownerWindow, eventPrototype, "composedPath");
   const eventPreventDefault = captureRequestModeMethod<readonly [], void>(ownerWindow, eventPrototype, "preventDefault");
   const eventView = captureRequestModeGetter<Window | null>(ownerWindow, uiEventPrototype, "view");
+  const detail = captureRequestModeGetter<number>(ownerWindow, uiEventPrototype, "detail");
   const key = captureRequestModeGetter<string>(ownerWindow, keyboardPrototype, "key");
+  const code = captureRequestModeGetter<string>(ownerWindow, keyboardPrototype, "code");
+  const location = captureRequestModeGetter<number>(
+    ownerWindow,
+    keyboardPrototype,
+    "location",
+  );
   const repeat = captureRequestModeGetter<boolean>(ownerWindow, keyboardPrototype, "repeat");
   const composing = captureRequestModeGetter<boolean>(ownerWindow, keyboardPrototype, "isComposing");
   const altKey = captureRequestModeGetter<boolean>(ownerWindow, keyboardPrototype, "altKey");
@@ -7469,15 +7627,20 @@ function captureRequestModeKeyboardAuthority(
   const intrinsics = [
     eventType,
     eventTarget,
+    eventCurrentTarget,
     eventPhase,
     eventBubbles,
     eventCancelable,
+    eventComposed,
     eventDefaultPrevented,
     eventCancelBubble,
     eventPath,
     eventPreventDefault,
     eventView,
+    detail,
     key,
+    code,
+    location,
     repeat,
     composing,
     altKey,
@@ -7488,7 +7651,12 @@ function captureRequestModeKeyboardAuthority(
     focus,
     trusted,
   ];
-  if (intrinsics.some((intrinsic) => !intrinsic) || ownerDocument.defaultView !== ownerWindow) {
+  if (
+    intrinsics.some((intrinsic) => !intrinsic) ||
+    ownerDocument.defaultView !== ownerWindow ||
+    typeof addEventListener !== "function" ||
+    typeof removeEventListener !== "function"
+  ) {
     return null;
   }
   const exactIntrinsics = intrinsics as readonly (
@@ -7502,6 +7670,8 @@ function captureRequestModeKeyboardAuthority(
     ownerWindow.UIEvent === UIEventConstructor &&
     ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
     ownerWindow.Node === NodeConstructor &&
+    ownerWindow.Object.getPrototypeOf === prototypeOf &&
+    ownerWindow.Reflect.apply === apply &&
     EventConstructor.prototype === eventPrototype &&
     UIEventConstructor.prototype === uiEventPrototype &&
     KeyboardEventConstructor.prototype === keyboardPrototype &&
@@ -7509,23 +7679,39 @@ function captureRequestModeKeyboardAuthority(
     ownerWindow.HTMLElement.prototype === htmlElementPrototype &&
     exactIntrinsics.every((intrinsic) => intrinsic.isCurrent());
   if (!isCurrent()) return null;
+  let requestModeHistoryIsClean = true;
+  const requestModeIsCurrent = () => {
+    if (!requestModeHistoryIsClean) return false;
+    requestModeHistoryIsClean =
+    isCurrent() &&
+    ownerWindow.addEventListener === addEventListener &&
+    ownerWindow.removeEventListener === removeEventListener;
+    return requestModeHistoryIsClean;
+  };
   return Object.freeze({
     ownerWindow,
     Event: EventConstructor,
     UIEvent: UIEventConstructor,
     KeyboardEvent: KeyboardEventConstructor,
     Node: NodeConstructor,
+    keyboardPrototype,
+    prototypeOf,
     eventType: eventType!,
     eventTarget: eventTarget!,
+    eventCurrentTarget: eventCurrentTarget!,
     eventPhase: eventPhase!,
     eventBubbles: eventBubbles!,
     eventCancelable: eventCancelable!,
+    eventComposed: eventComposed!,
     eventDefaultPrevented: eventDefaultPrevented!,
     eventCancelBubble: eventCancelBubble!,
     eventPath: eventPath!,
     eventPreventDefault: eventPreventDefault!,
     eventView: eventView!,
+    detail: detail!,
     key: key!,
+    code: code!,
+    location: location!,
     repeat: repeat!,
     composing: composing!,
     altKey: altKey!,
@@ -7536,29 +7722,89 @@ function captureRequestModeKeyboardAuthority(
     focus: focus!,
     trusted: trusted!,
     isCurrent,
+    requestModeIsCurrent,
+    applyMethod: (method, receiver) => {
+      if (!requestModeIsCurrent()) return Object.freeze({ called: false });
+      try {
+        return Object.freeze({
+          called: true,
+          value: apply(method, receiver, []),
+        });
+      } catch {
+        return Object.freeze({ called: false });
+      }
+    },
+    registerRequestMode: (listener) => {
+      if (!requestModeIsCurrent()) return null;
+      let active = true;
+      try {
+        apply(addEventListener, ownerWindow, ["keydown", listener, true]);
+      } catch {
+        return null;
+      }
+      return Object.freeze({
+        isCurrent: () => active && requestModeIsCurrent(),
+        remove: () => {
+          if (!active) return;
+          active = false;
+          try {
+            apply(removeEventListener, ownerWindow, [
+              "keydown",
+              listener,
+              true,
+            ]);
+          } catch {
+            return;
+          }
+        },
+      });
+    },
   });
 }
 
-function requestModeAttributes(node: Node): readonly (readonly [string, string])[] | null {
+function requestModeAttributes(
+  node: Node,
+  ignoredAttributes: readonly string[] = [],
+): readonly (readonly [string, string])[] | null {
   if (node.nodeType !== 1) return null;
   return Object.freeze(
     [...(node as Element).attributes]
+      .filter(
+        ({ name }) =>
+          !ignoredAttributes.includes(name) &&
+          !(
+            ignoredAttributes.includes("data-radix-popper-*") &&
+            name.startsWith("data-radix-popper-")
+          ),
+      )
       .map(({ name, value }) => Object.freeze([name, value] as const))
       .sort(([left], [right]) => left.localeCompare(right)),
   );
 }
 
-function snapshotRequestModeDom(node: Node): RequestModeDomSnapshot {
+function snapshotRequestModeDom(
+  node: Node,
+  ignoredForNode: (node: Node) => readonly string[] = () => [],
+): RequestModeDomSnapshot {
+  const ignoredAttributes = Object.freeze([...ignoredForNode(node)]);
   return Object.freeze({
     node,
     nodeValue: node.nodeValue,
-    attributes: requestModeAttributes(node),
-    children: Object.freeze([...node.childNodes].map(snapshotRequestModeDom)),
+    attributes: requestModeAttributes(node, ignoredAttributes),
+    ignoredAttributes,
+    children: Object.freeze(
+      [...node.childNodes].map((child) =>
+        snapshotRequestModeDom(child, ignoredForNode),
+      ),
+    ),
   });
 }
 
 function requestModeDomMatches(snapshot: RequestModeDomSnapshot): boolean {
-  const attributes = requestModeAttributes(snapshot.node);
+  const attributes = requestModeAttributes(
+    snapshot.node,
+    snapshot.ignoredAttributes,
+  );
   if (
     snapshot.node.nodeValue !== snapshot.nodeValue ||
     (attributes === null) !== (snapshot.attributes === null)
@@ -7625,6 +7871,7 @@ function requestModePlacementMatches(root: Element, placement: RequestModePlacem
 function createRequestModeDomGuard(
   root: Element,
   placement: RequestModePlacement,
+  ignoreMutation: (record: MutationRecord) => boolean = () => false,
 ): RequestModeDomGuard | null {
   const MutationObserverConstructor = placement.document.defaultView?.MutationObserver;
   if (!MutationObserverConstructor) return null;
@@ -7632,6 +7879,7 @@ function createRequestModeDomGuard(
   const recordChanges = (records: readonly MutationRecord[]) => {
     if (changed) return;
     changed = records.some((record) => {
+      if (ignoreMutation(record)) return false;
       if (record.target === root || root.contains(record.target)) return true;
       if (record.type !== "childList") return false;
       return placement.chain.some(({ node, parent, exactSiblings }) => {
@@ -7705,7 +7953,6 @@ function requestModeAuthoritiesMatch(
   return (
     previous.mount === current.mount &&
     (!includeRevision || previous.revision === current.revision) &&
-    previous.request === current.request &&
     previous.canEdit === current.canEdit &&
     previous.defaultMode === current.defaultMode &&
     previous.value === current.value &&
@@ -7829,98 +8076,373 @@ function requestModeDestination(
   return current === count - 1 ? null : count - 1;
 }
 
-function exactRequestModeKey(
-  event: KeyboardEvent<HTMLButtonElement>,
-  publication: RequestModePublication,
-  source: HTMLButtonElement,
-): RequestModeKeyboardFacts | null {
-  if (!event || typeof event !== "object" || !publication.keyboard.isCurrent()) return null;
-  const keyboard = publication.keyboard;
-  const nativeEvent = event.nativeEvent;
-  const reactEvent = event as KeyboardEvent<HTMLButtonElement> & {
-    _reactName?: unknown;
-    isDefaultPrevented?: unknown;
-    isPropagationStopped?: unknown;
-    persist?: unknown;
-  };
-  if (
-    !(nativeEvent instanceof keyboard.KeyboardEvent) ||
-    Object.getPrototypeOf(nativeEvent) !== keyboard.KeyboardEvent.prototype ||
-    !keyboard.trusted.matches(nativeEvent)
-  ) {
-    return null;
-  }
+function isRequestModeNavigationKey(
+  key: string,
+): key is RequestModeNavigationKey {
+  return (
+    key === "ArrowRight" ||
+    key === "ArrowDown" ||
+    key === "ArrowLeft" ||
+    key === "ArrowUp" ||
+    key === "Home" ||
+    key === "End"
+  );
+}
+
+function readRequestModeNativeKeyboardFacts(
+  event: object,
+  keyboard: RequestModeKeyboardAuthority,
+): RequestModeNativeKeyboardFacts | null {
   try {
-    const key = keyboard.key.read(nativeEvent);
     if (
-      key !== "ArrowRight" &&
-      key !== "ArrowDown" &&
-      key !== "ArrowLeft" &&
-      key !== "ArrowUp" &&
-      key !== "Home" &&
-      key !== "End"
+      !keyboard.requestModeIsCurrent() ||
+      !(event instanceof keyboard.KeyboardEvent) ||
+      keyboard.prototypeOf(event) !== keyboard.keyboardPrototype ||
+      !keyboard.trusted.matches(event) ||
+      keyboard.trusted.read(event) !== true
     ) {
       return null;
     }
-    const target = keyboard.eventTarget.read(nativeEvent);
-    const path = keyboard.eventPath.invoke(nativeEvent);
-    const trusted = keyboard.trusted.read(nativeEvent);
-    const repeat = keyboard.repeat.read(nativeEvent);
-    const composing = keyboard.composing.read(nativeEvent);
-    const altKey = keyboard.altKey.read(nativeEvent);
-    const ctrlKey = keyboard.ctrlKey.read(nativeEvent);
-    const metaKey = keyboard.metaKey.read(nativeEvent);
-    const shiftKey = keyboard.shiftKey.read(nativeEvent);
-    const nativeView = keyboard.eventView.read(nativeEvent);
-    return (
-      keyboard.eventType.read(nativeEvent) === "keydown" &&
-      keyboard.eventPhase.read(nativeEvent) !== keyboard.Event.NONE &&
-      keyboard.eventBubbles.read(nativeEvent) &&
-      keyboard.eventCancelable.read(nativeEvent) &&
-      !keyboard.eventDefaultPrevented.read(nativeEvent) &&
-      !keyboard.eventCancelBubble.read(nativeEvent) &&
-      (nativeView === null || nativeView === publication.ownerWindow) &&
-      trusted &&
-      !repeat &&
-      !composing &&
-      !altKey &&
-      !ctrlKey &&
-      !metaKey &&
-      !shiftKey &&
-      event.type === "keydown" &&
-      event.currentTarget === source &&
-      event.target === target &&
-      event.nativeEvent === nativeEvent &&
-      event.key === key &&
-      event.repeat === repeat &&
-      event.altKey === altKey &&
-      event.ctrlKey === ctrlKey &&
-      event.metaKey === metaKey &&
-      event.shiftKey === shiftKey &&
-      event.bubbles === keyboard.eventBubbles.read(nativeEvent) &&
-      event.cancelable === keyboard.eventCancelable.read(nativeEvent) &&
-      event.defaultPrevented === keyboard.eventDefaultPrevented.read(nativeEvent) &&
-      event.isTrusted === trusted &&
-      Object.is(event.view, nativeView) &&
-      target === source &&
-      target instanceof keyboard.Node &&
-      target.ownerDocument === publication.ownerDocument &&
-      path[0] === source &&
-      path.filter((entry) => entry === source).length === 1 &&
-      path.includes(publication.root) &&
-      keyboard.activeElement.read(publication.ownerDocument) === source &&
-      reactEvent._reactName === "onKeyDown" &&
-      typeof reactEvent.isDefaultPrevented === "function" &&
-      reactEvent.isDefaultPrevented() === keyboard.eventDefaultPrevented.read(nativeEvent) &&
-      typeof reactEvent.isPropagationStopped === "function" &&
-      reactEvent.isPropagationStopped() === keyboard.eventCancelBubble.read(nativeEvent) &&
-      typeof reactEvent.persist === "function"
-    )
-      ? Object.freeze({ event: nativeEvent, key })
+    return Object.freeze({
+      type: keyboard.eventType.read(event),
+      target: keyboard.eventTarget.read(event),
+      currentTarget: keyboard.eventCurrentTarget.read(event),
+      phase: keyboard.eventPhase.read(event),
+      bubbles: keyboard.eventBubbles.read(event),
+      cancelable: keyboard.eventCancelable.read(event),
+      composed: keyboard.eventComposed.read(event),
+      defaultPrevented: keyboard.eventDefaultPrevented.read(event),
+      cancelBubble: keyboard.eventCancelBubble.read(event),
+      path: Object.freeze([...keyboard.eventPath.invoke(event)]),
+      trusted: true,
+      view: keyboard.eventView.read(event),
+      detail: keyboard.detail.read(event),
+      key: keyboard.key.read(event),
+      code: keyboard.code.read(event),
+      location: keyboard.location.read(event),
+      repeat: keyboard.repeat.read(event),
+      composing: keyboard.composing.read(event),
+      altKey: keyboard.altKey.read(event),
+      ctrlKey: keyboard.ctrlKey.read(event),
+      metaKey: keyboard.metaKey.read(event),
+      shiftKey: keyboard.shiftKey.read(event),
+    });
+  } catch {
+    return null;
+  }
+}
+
+function requestModeEventPath(
+  source: HTMLButtonElement,
+  ownerDocument: Document,
+): readonly EventTarget[] | null {
+  const path: EventTarget[] = [];
+  for (let node: Node | null = source; node; node = node.parentNode) {
+    path.push(node);
+    if (node === ownerDocument) return Object.freeze(path);
+  }
+  return null;
+}
+
+function requestModePathMatches(
+  actual: readonly EventTarget[],
+  expected: readonly EventTarget[],
+  terminal: EventTarget,
+) {
+  return (
+    expected.length > 0 &&
+    actual.length === expected.length + 1 &&
+    expected.every((entry, index) => actual[index] === entry) &&
+    actual.at(-1) === terminal
+  );
+}
+
+function requestModeNativeKeyboardFactsMatch(
+  first: RequestModeNativeKeyboardFacts,
+  second: RequestModeNativeKeyboardFacts,
+  expectedDefaultPrevented = first.defaultPrevented,
+  expectedCancelBubble = first.cancelBubble,
+) {
+  return (
+    first.type === second.type &&
+    first.target === second.target &&
+    first.bubbles === second.bubbles &&
+    first.cancelable === second.cancelable &&
+    first.composed === second.composed &&
+    second.defaultPrevented === expectedDefaultPrevented &&
+    second.cancelBubble === expectedCancelBubble &&
+    first.trusted === second.trusted &&
+    first.view === second.view &&
+    first.detail === second.detail &&
+    first.key === second.key &&
+    first.code === second.code &&
+    first.location === second.location &&
+    first.repeat === second.repeat &&
+    first.composing === second.composing &&
+    first.altKey === second.altKey &&
+    first.ctrlKey === second.ctrlKey &&
+    first.metaKey === second.metaKey &&
+    first.shiftKey === second.shiftKey &&
+    first.path.length === second.path.length &&
+    first.path.every((entry, index) => entry === second.path[index])
+  );
+}
+
+function readRequestModeReactKeyboardMethods(
+  event: RequestModeReactKeyboardEvent,
+): Readonly<
+  Record<RequestModeReactKeyboardMethodName, RequestModeReactKeyboardMethod>
+> | null {
+  try {
+    const preventDefault = event.preventDefault;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
+    return typeof preventDefault === "function" &&
+      typeof isDefaultPrevented === "function" &&
+      typeof isPropagationStopped === "function"
+      ? Object.freeze({
+          preventDefault,
+          isDefaultPrevented,
+          isPropagationStopped,
+        })
       : null;
   } catch {
     return null;
   }
+}
+
+function readRequestModeReactKeyboardFacts(
+  event: KeyboardEvent<HTMLButtonElement>,
+): RequestModeReactKeyboardFacts | null {
+  try {
+    const proof = event as KeyboardEvent<HTMLButtonElement> &
+      RequestModeReactKeyboardEvent;
+    const composing = proof.isComposing;
+    return Object.freeze({
+      nativeEvent: event.nativeEvent,
+      type: event.type,
+      target: event.target,
+      currentTarget: event.currentTarget,
+      phase: event.eventPhase,
+      bubbles: event.bubbles,
+      cancelable: event.cancelable,
+      defaultPrevented: event.defaultPrevented,
+      trusted: event.isTrusted,
+      view: event.view,
+      detail: event.detail,
+      key: event.key,
+      code: event.code,
+      location: event.location,
+      repeat: event.repeat,
+      composing:
+        composing === undefined ? undefined : Boolean(composing),
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function requestModeReactKeyboardSnapshotIsCurrent(
+  snapshot: RequestModeReactKeyboardSnapshot,
+  nativeFacts: RequestModeNativeKeyboardFacts,
+  source: HTMLButtonElement,
+  expectedPhase: number,
+  expectedDefaultPrevented: boolean,
+  expectedMethods: Readonly<
+    Record<RequestModeReactKeyboardMethodName, RequestModeReactKeyboardMethod>
+  >,
+) {
+  const current = readRequestModeReactKeyboardFacts(snapshot.event);
+  const methods = readRequestModeReactKeyboardMethods(
+    snapshot.event as KeyboardEvent<HTMLButtonElement> &
+      RequestModeReactKeyboardEvent,
+  );
+  const initial = snapshot.publicFacts;
+  return Boolean(
+    current &&
+      methods &&
+      current.nativeEvent === initial.nativeEvent &&
+      current.type === initial.type &&
+      current.type === nativeFacts.type &&
+      current.type === "keydown" &&
+      current.target === initial.target &&
+      current.target === source &&
+      current.currentTarget === initial.currentTarget &&
+      current.currentTarget === source &&
+      current.phase === initial.phase &&
+      current.phase === nativeFacts.phase &&
+      current.phase === expectedPhase &&
+      current.bubbles === initial.bubbles &&
+      current.bubbles === nativeFacts.bubbles &&
+      current.cancelable === initial.cancelable &&
+      current.cancelable === nativeFacts.cancelable &&
+      initial.defaultPrevented === false &&
+      current.defaultPrevented === expectedDefaultPrevented &&
+      nativeFacts.defaultPrevented === expectedDefaultPrevented &&
+      current.trusted === initial.trusted &&
+      current.trusted === nativeFacts.trusted &&
+      Object.is(current.view, initial.view) &&
+      Object.is(current.view, nativeFacts.view) &&
+      current.detail === initial.detail &&
+      current.detail === nativeFacts.detail &&
+      current.key === initial.key &&
+      current.key === nativeFacts.key &&
+      current.code === initial.code &&
+      current.code === nativeFacts.code &&
+      current.location === initial.location &&
+      current.location === nativeFacts.location &&
+      current.repeat === initial.repeat &&
+      current.repeat === nativeFacts.repeat &&
+      current.composing === initial.composing &&
+      (current.composing === undefined ||
+        current.composing === nativeFacts.composing) &&
+      current.altKey === initial.altKey &&
+      current.altKey === nativeFacts.altKey &&
+      current.ctrlKey === initial.ctrlKey &&
+      current.ctrlKey === nativeFacts.ctrlKey &&
+      current.metaKey === initial.metaKey &&
+      current.metaKey === nativeFacts.metaKey &&
+      current.shiftKey === initial.shiftKey &&
+      current.shiftKey === nativeFacts.shiftKey &&
+      methods.preventDefault === expectedMethods.preventDefault &&
+      methods.isDefaultPrevented ===
+        expectedMethods.isDefaultPrevented &&
+      methods.isPropagationStopped ===
+        expectedMethods.isPropagationStopped
+  );
+}
+
+function requestModeReactKeyboardMethodsAreCurrent(
+  snapshot: RequestModeReactKeyboardSnapshot,
+  expectedMethods: Readonly<
+    Record<RequestModeReactKeyboardMethodName, RequestModeReactKeyboardMethod>
+  > = snapshot.methods,
+) {
+  const methods = readRequestModeReactKeyboardMethods(
+    snapshot.event as KeyboardEvent<HTMLButtonElement> &
+      RequestModeReactKeyboardEvent,
+  );
+  return Boolean(
+    methods &&
+      methods.preventDefault === expectedMethods.preventDefault &&
+      methods.isDefaultPrevented ===
+        expectedMethods.isDefaultPrevented &&
+      methods.isPropagationStopped ===
+        expectedMethods.isPropagationStopped,
+  );
+}
+
+function captureRequestModeReactKeyboardEvent(
+  event: KeyboardEvent<HTMLButtonElement>,
+  nativeEvent: Event,
+  nativeFacts: RequestModeNativeKeyboardFacts,
+  source: HTMLButtonElement,
+  expectedPhase: number,
+): RequestModeReactKeyboardSnapshot | null {
+  const publicFacts = readRequestModeReactKeyboardFacts(event);
+  const methods = readRequestModeReactKeyboardMethods(
+    event as KeyboardEvent<HTMLButtonElement> &
+      RequestModeReactKeyboardEvent,
+  );
+  if (!publicFacts || !methods) return null;
+  const snapshot = Object.freeze({
+    event,
+    publicFacts,
+    nativeFacts,
+    methods: Object.freeze({ ...methods }),
+  });
+  return publicFacts.nativeEvent === nativeEvent &&
+    requestModeReactKeyboardSnapshotIsCurrent(
+      snapshot,
+      nativeFacts,
+      source,
+      expectedPhase,
+      false,
+      snapshot.methods,
+    )
+    ? snapshot
+    : null;
+}
+
+function requestModeNativeKeyboardIsEligible(
+  publication: RequestModePublication,
+  source: HTMLButtonElement,
+  facts: RequestModeNativeKeyboardFacts,
+  expectedPhase: number,
+  receiver: EventTarget,
+  expectedDefaultPrevented = false,
+) {
+  const keyboard = publication.keyboard;
+  const expectedPath = requestModeEventPath(
+    source,
+    publication.ownerDocument,
+  );
+  const terminal = facts.path.at(-1);
+  return Boolean(
+    expectedPath &&
+      terminal &&
+      keyboard.requestModeIsCurrent() &&
+      publication.ownerDocument.defaultView === publication.ownerWindow &&
+      facts.type === "keydown" &&
+      isRequestModeNavigationKey(facts.key) &&
+      facts.phase === expectedPhase &&
+      facts.bubbles &&
+      facts.cancelable &&
+      facts.defaultPrevented === expectedDefaultPrevented &&
+      !facts.cancelBubble &&
+      facts.detail === 0 &&
+      facts.location ===
+        publication.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_STANDARD &&
+      !facts.repeat &&
+      !facts.composing &&
+      !facts.altKey &&
+      !facts.ctrlKey &&
+      !facts.metaKey &&
+      !facts.shiftKey &&
+      facts.target === source &&
+      facts.currentTarget !== null &&
+      facts.path.includes(facts.currentTarget) &&
+      (facts.view === null ||
+        facts.view === publication.ownerWindow ||
+        facts.view === receiver) &&
+      requestModePathMatches(facts.path, expectedPath, terminal),
+  );
+}
+
+function requestModeKeyboardStageMatches(
+  publication: RequestModePublication,
+  stage: RequestModeKeyboardWindowStage,
+  source: HTMLButtonElement,
+  nativeEvent: Event,
+  facts: RequestModeNativeKeyboardFacts,
+  expectedDefaultPrevented = false,
+) {
+  const terminal = stage.facts.path.at(-1);
+  const expectedPath = requestModeEventPath(
+    source,
+    publication.ownerDocument,
+  );
+  return Boolean(
+    terminal &&
+      expectedPath &&
+      stage.nativeEvent === nativeEvent &&
+      stage.source === source &&
+      stage.receiver === stage.facts.currentTarget &&
+      stage.receiver === terminal &&
+      stage.facts.phase === publication.keyboard.Event.CAPTURING_PHASE &&
+      stage.facts.target === source &&
+      requestModePathMatches(stage.facts.path, expectedPath, terminal) &&
+      facts.path.at(-1) === terminal &&
+      requestModeNativeKeyboardFactsMatch(
+        stage.facts,
+        facts,
+        expectedDefaultPrevented,
+      ),
+  );
 }
 
 function createRequestModeRuntime(
@@ -7934,26 +8456,52 @@ function createRequestModeRuntime(
   type Retirement = "element" | "layout" | "other";
   const placement = captureRequestModePlacement(root);
   if (!placement) throw new Error("Cannot publish request modes without committed placement");
-  const dom = snapshotRequestModeDom(root);
+  const tooltipAttributes = Object.freeze([
+    "aria-describedby",
+    "data-state",
+    "data-radix-popper-*",
+  ]);
+  const dom = snapshotRequestModeDom(root, (node) =>
+    buttons.includes(node as HTMLButtonElement) ? tooltipAttributes : [],
+  );
   let retired = false;
   let retirement: Retirement | null = null;
   let established = false;
   let invalidReplay = false;
   let replayRefs: RequestModeRefReplay[] = [];
   let domGuard: RequestModeDomGuard | null = null;
-  const publishedDomMatches = () =>
-    Boolean(
+  let keyboardCaptureReady = false;
+  let keyboardStages: WeakMap<
+    globalThis.KeyboardEvent,
+    RequestModeKeyboardWindowStage
+  > | null = new WeakMap();
+  let keyboardPairs: WeakMap<
+    globalThis.KeyboardEvent,
+    RequestModeKeyboardPair
+  > | null = new WeakMap();
+  let keyboardRegistration: RequestModeKeyboardRegistration | null = null;
+  const publishedDomMatches = () => {
+    const clean = domGuard?.isClean() === true;
+    const placementMatches = requestModePlacementMatches(root, placement);
+    const domMatches = requestModeDomMatches(dom);
+    return Boolean(
       domGuard &&
-        domGuard.isClean() &&
+        clean &&
         root === dom.node &&
         root.isConnected &&
-        requestModePlacementMatches(root, placement) &&
-        requestModeDomMatches(dom),
+        placementMatches &&
+        domMatches
     );
+  };
   const retire = (reason: Retirement) => {
     if (retired) return false;
     retired = true;
     retirement = reason;
+    keyboardCaptureReady = false;
+    keyboardStages = null;
+    keyboardPairs = null;
+    keyboardRegistration?.remove();
+    keyboardRegistration = null;
     cells.retired.add(publication);
     if (cells.active.current === publication) {
       cells.active.current = null;
@@ -8002,7 +8550,7 @@ function createRequestModeRuntime(
     });
     return !invalidReplay && replayed && recovered;
   };
-  return Object.freeze({
+  const runtime: RequestModeRuntime = Object.freeze({
     publication,
     publish: () => {
       established = true;
@@ -8011,7 +8559,19 @@ function createRequestModeRuntime(
         if (!element) throw new Error("Cannot publish request modes without every committed ref");
         return { owner, element, detached: false, reattached: false };
       });
-      domGuard = createRequestModeDomGuard(root, placement);
+      domGuard = createRequestModeDomGuard(
+        root,
+        placement,
+        (record) =>
+          record.type === "attributes" &&
+          buttons.includes(record.target as HTMLButtonElement) &&
+          Boolean(
+            record.attributeName &&
+              (tooltipAttributes.includes(record.attributeName) ||
+                (tooltipAttributes.includes("data-radix-popper-*") &&
+                  record.attributeName.startsWith("data-radix-popper-"))),
+          ),
+      );
       if (!domGuard || cells.retired.has(publication)) {
         domGuard?.release();
         return false;
@@ -8080,7 +8640,112 @@ function createRequestModeRuntime(
             release: domGuard.release,
           })
         : null,
+    keyboardCaptureIsReady: () => keyboardCaptureReady,
+    keyboardListenerIsCurrent: () =>
+      keyboardRegistration?.isCurrent() === true,
+    keyboardStage: (event) => keyboardStages?.get(event) ?? null,
+    pairKeyboard: (event, stage, pair) => {
+      const stages = keyboardStages;
+      const pairs = keyboardPairs;
+      if (
+        !stages ||
+        !pairs ||
+        stages.get(event) !== stage ||
+        pairs.has(event)
+      ) {
+        return false;
+      }
+      stages.delete(event);
+      pairs.set(event, pair);
+      return true;
+    },
+    keyboardPair: (event) => keyboardPairs?.get(event) ?? null,
+    consumeKeyboardPair: (event, pair) => {
+      const pairs = keyboardPairs;
+      if (!pairs || pairs.get(event) !== pair) return false;
+      return pairs.delete(event);
+    },
   });
+  const listenerOwnerWindow = publication.ownerWindow;
+  function rememberRequestModeNative(
+    this: EventTarget,
+    nativeEvent: Event,
+  ) {
+    const stages = keyboardStages;
+    const pairs = keyboardPairs;
+    if (
+      !keyboardCaptureReady ||
+      !stages ||
+      !pairs ||
+      keyboardRegistration?.isCurrent() !== true ||
+      retired ||
+      !established ||
+      cells.active.current !== publication ||
+      cells.keyboardAttempt.current !== null ||
+      cells.keyboardDelivery.current !== null
+    ) {
+      return;
+    }
+    const facts = readRequestModeNativeKeyboardFacts(
+      nativeEvent,
+      publication.keyboard,
+    );
+    const sourceIndex = facts
+      ? publication.buttons.findIndex((button) => button === facts.target)
+      : -1;
+    const source = publication.buttons[sourceIndex];
+    const row = publication.authority.rows[sourceIndex];
+    const terminal = facts?.path.at(-1);
+    if (
+      !facts ||
+      !source ||
+      !row ||
+      !terminal ||
+      facts.currentTarget !== this ||
+      terminal !== this ||
+      (facts.view !== null &&
+        facts.view !== listenerOwnerWindow &&
+        facts.view !== this) ||
+      stages.has(nativeEvent as globalThis.KeyboardEvent) ||
+      pairs.has(nativeEvent as globalThis.KeyboardEvent) ||
+      publication.buttons[row.index] !== source ||
+      publication.authority.rows[row.index] !== row ||
+      publication.keyboard.activeElement.read(publication.ownerDocument) !==
+        source ||
+      !requestModeNativeKeyboardIsEligible(
+        publication,
+        source,
+        facts,
+        publication.keyboard.Event.CAPTURING_PHASE,
+        this,
+      ) ||
+      !requestModeFactsAreCurrent(publication.authority) ||
+      !publication.publishedDomMatches()
+    ) {
+      return;
+    }
+    stages.set(
+      nativeEvent as globalThis.KeyboardEvent,
+      Object.freeze({
+        nativeEvent: nativeEvent as globalThis.KeyboardEvent,
+        receiver: this,
+        facts,
+        source,
+        row,
+      }),
+    );
+  }
+  const registration = keyboard.registerRequestMode(
+    rememberRequestModeNative,
+  );
+  if (registration) {
+    keyboardRegistration = registration;
+    keyboardCaptureReady = true;
+  } else {
+    keyboardStages = null;
+    keyboardPairs = null;
+  }
+  return runtime;
 }
 
 function requestModeReplayAllowsPublication(
@@ -8141,80 +8806,748 @@ function createRequestModePresentation(
   const rootOwner = new RequestModeElementOwner<HTMLDivElement>(onElementChange);
   const rowPresentations = authority.rows.map((row) => {
     const buttonOwner = new RequestModeElementOwner<HTMLButtonElement>(onElementChange);
-    const action = Object.freeze({
+    const action: RequestModeKeyboardAction = Object.freeze({
       identity: Symbol(`request-mode-${row.id}-keyboard-action`),
+      row,
     });
+    const onKeyDownCapture = (event: KeyboardEvent<HTMLButtonElement>) => {
+      stageRequestModeKey(row, buttonOwner, action, event);
+    };
     const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-      const publication = cells.active.current;
-      const source = buttonOwner.element();
-      if (
-        !publication ||
-        publication.isRetired() ||
-        publication.authority !== authority ||
-        !requestModeAuthoritiesMatch(publication.authority, authority) ||
-        authority.rows[row.index] !== row ||
-        publication.buttons[row.index] !== source ||
-        !source ||
-        !requestModeFactsAreCurrent(authority) ||
-        !publication.publishedDomMatches()
-      ) {
-        return;
-      }
-      const exactEvent = exactRequestModeKey(event, publication, source);
-      const destinationIndex = exactEvent
-        ? requestModeDestination(exactEvent.key, row.index, authority.rows.length)
-        : null;
-      const destinationRow =
-        destinationIndex === null ? null : authority.rows[destinationIndex];
-      const destinationPresentation =
-        destinationIndex === null ? null : rowPresentations[destinationIndex];
-      const destination = destinationPresentation?.buttonOwner.element();
-      if (
-        !exactEvent ||
-        destinationIndex === null ||
-        !destinationRow ||
-        !destinationPresentation ||
-        destinationPresentation.authority !== destinationRow ||
-        !destination ||
-        destination.ownerDocument !== publication.ownerDocument ||
-        destination.parentElement !== publication.root ||
-        publication.root.children.item(destinationIndex) !== destination ||
-        cells.claimedPublications.has(publication) ||
-        cells.claimedActions.has(action) ||
-        cells.claimedReactEvents.has(event) ||
-        cells.claimedNativeEvents.has(exactEvent.event) ||
-        claimedRequestModeReactEvents.has(event) ||
-        claimedRequestModeNativeEvents.has(exactEvent.event) ||
-        cells.active.current !== publication
-      ) {
-        return;
-      }
-      cells.claimedPublications.add(publication);
-      cells.claimedActions.add(action);
-      cells.claimedReactEvents.add(event);
-      cells.claimedNativeEvents.add(exactEvent.event);
-      claimedRequestModeReactEvents.add(event);
-      claimedRequestModeNativeEvents.add(exactEvent.event);
-      publication.keyboard.eventPreventDefault.invoke(exactEvent.event);
-      if (!publication.keyboard.eventDefaultPrevented.read(exactEvent.event)) return;
-      publication.keyboard.focus.invoke(destination, { preventScroll: true });
-      if (publication.keyboard.activeElement.read(publication.ownerDocument) !== destination) {
-        authority.requestSuccessor();
-        return;
-      }
-      if (destinationRow.disabled) authority.requestSuccessor();
-      else {
-        authority.setMode(destinationRow.id);
-        if (destinationRow.id === authority.effectiveMode) authority.requestSuccessor();
-      }
+      completeRequestModeKey(row, buttonOwner, action, event);
     };
     return Object.freeze({
       authority: row,
       captureButton: buttonOwner.capture,
       buttonOwner,
+      onKeyDownCapture,
       onKeyDown,
     });
   });
+  const requestModeAttemptIsCurrent = ({
+    runtime,
+    publication,
+    stage,
+    action,
+    sourceRow,
+    source,
+    destinationRow,
+    destination,
+    nativeEvent,
+    nativeFacts,
+    react,
+    methods,
+    expectedPhase,
+    expectedDefaultPrevented,
+    storeIsCurrent,
+    capture,
+    claimed,
+    expectedActive = source,
+  }: {
+    runtime: RequestModeRuntime;
+    publication: RequestModePublication;
+    stage: RequestModeKeyboardWindowStage;
+    action: RequestModeKeyboardAction;
+    sourceRow: RequestModeRowAuthority;
+    source: HTMLButtonElement;
+    destinationRow: RequestModeRowAuthority;
+    destination: HTMLButtonElement;
+    nativeEvent: globalThis.KeyboardEvent;
+    nativeFacts: RequestModeNativeKeyboardFacts;
+    react: RequestModeReactKeyboardSnapshot;
+    methods: Readonly<
+      Record<RequestModeReactKeyboardMethodName, RequestModeReactKeyboardMethod>
+    >;
+    expectedPhase: number;
+    expectedDefaultPrevented: boolean;
+    storeIsCurrent: () => boolean;
+    capture?: RequestModeReactKeyboardSnapshot;
+    claimed: boolean;
+    expectedActive?: Element;
+  }) => {
+    const keyboard = publication.keyboard;
+    const currentNativeFacts = readRequestModeNativeKeyboardFacts(
+      nativeEvent,
+      keyboard,
+    );
+    const sourcePresentation = rowPresentations[sourceRow.index];
+    const destinationPresentation = rowPresentations[destinationRow.index];
+    const currentElements = currentRequestModeElements(
+      authority,
+      rootOwner,
+      rowPresentations,
+    );
+    return Boolean(
+      currentNativeFacts &&
+        runtime.keyboardCaptureIsReady() &&
+        runtime.keyboardListenerIsCurrent() &&
+        !runtime.isRetired() &&
+        !publication.isRetired() &&
+        !cells.retired.has(publication) &&
+        cells.active.current === publication &&
+        publication.authority === authority &&
+        requestModeAuthoritiesMatch(publication.authority, authority) &&
+        cells.keyboardAttempt.current === nativeEvent &&
+        (claimed
+          ? cells.keyboardDelivery.current === publication.identity &&
+            cells.claimedPublications.has(publication) &&
+            cells.claimedActions.has(action) &&
+            cells.claimedReactEvents.has(capture?.event ?? react.event) &&
+            cells.claimedReactEvents.has(react.event) &&
+            cells.claimedNativeEvents.has(nativeEvent) &&
+            cells.claimedWindowStages.has(stage) &&
+            claimedRequestModeReactEvents.has(
+              capture?.event ?? react.event,
+            ) &&
+            claimedRequestModeReactEvents.has(react.event) &&
+            claimedRequestModeNativeEvents.has(nativeEvent)
+          : cells.keyboardDelivery.current === null &&
+            !cells.claimedPublications.has(publication) &&
+            !cells.claimedActions.has(action) &&
+            !cells.claimedReactEvents.has(capture?.event ?? react.event) &&
+            !cells.claimedReactEvents.has(react.event) &&
+            !cells.claimedNativeEvents.has(nativeEvent) &&
+            !cells.claimedWindowStages.has(stage) &&
+            !claimedRequestModeReactEvents.has(
+              capture?.event ?? react.event,
+            ) &&
+            !claimedRequestModeReactEvents.has(react.event) &&
+            !claimedRequestModeNativeEvents.has(nativeEvent)) &&
+        action.row === sourceRow &&
+        authority.rows[sourceRow.index] === sourceRow &&
+        authority.rows[destinationRow.index] === destinationRow &&
+        publication.buttons[sourceRow.index] === source &&
+        publication.buttons[destinationRow.index] === destination &&
+        sourcePresentation?.authority === sourceRow &&
+        sourcePresentation.buttonOwner.element() === source &&
+        destinationPresentation?.authority === destinationRow &&
+        destinationPresentation.buttonOwner.element() === destination &&
+        currentElements?.root === publication.root &&
+        currentElements.buttons.length === publication.buttons.length &&
+        currentElements.buttons.every(
+          (button, index) => publication.buttons[index] === button,
+        ) &&
+        isRequestModeNavigationKey(currentNativeFacts.key) &&
+        requestModeDestination(
+          currentNativeFacts.key,
+          sourceRow.index,
+          authority.rows.length,
+        ) === destinationRow.index &&
+        currentNativeFacts.key === nativeFacts.key &&
+        keyboard.activeElement.read(publication.ownerDocument) ===
+          expectedActive &&
+        react.publicFacts.nativeEvent === nativeEvent &&
+        react.publicFacts.target === source &&
+        react.publicFacts.currentTarget === source &&
+        requestModeReactKeyboardSnapshotIsCurrent(
+          react,
+          currentNativeFacts,
+          source,
+          expectedPhase,
+          expectedDefaultPrevented,
+          methods,
+        ) &&
+        (!capture || requestModeReactKeyboardMethodsAreCurrent(capture)) &&
+        requestModeNativeKeyboardIsEligible(
+          publication,
+          source,
+          currentNativeFacts,
+          expectedPhase,
+          stage.receiver,
+          expectedDefaultPrevented,
+        ) &&
+        requestModeKeyboardStageMatches(
+          publication,
+          stage,
+          source,
+          nativeEvent,
+          currentNativeFacts,
+          expectedDefaultPrevented,
+        ) &&
+        requestModeNativeKeyboardFactsMatch(
+          nativeFacts,
+          currentNativeFacts,
+          expectedDefaultPrevented,
+        ) &&
+        stage.nativeEvent === nativeEvent &&
+        stage.row === sourceRow &&
+        stage.source === source &&
+        storeIsCurrent() &&
+        requestModeFactsAreCurrent(authority) &&
+        publication.publishedDomMatches(),
+    );
+  };
+  function stageRequestModeKey(
+    row: RequestModeRowAuthority,
+    buttonOwner: RequestModeElementOwner<HTMLButtonElement>,
+    action: RequestModeKeyboardAction,
+    event: KeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (!event || typeof event !== "object") return;
+    let carried: unknown;
+    try {
+      carried = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !carried ||
+      typeof carried !== "object" ||
+      cells.claimedReactEvents.has(event) ||
+      cells.claimedNativeEvents.has(carried as Event) ||
+      claimedRequestModeReactEvents.has(event) ||
+      claimedRequestModeNativeEvents.has(carried as Event) ||
+      cells.keyboardAttempt.current !== null ||
+      cells.keyboardDelivery.current !== null
+    ) {
+      return;
+    }
+    cells.keyboardAttempt.current = carried;
+    try {
+      const runtime = currentRuntime;
+      const publication = runtime?.publication;
+      const source = buttonOwner.element();
+      const nativeEvent = carried as globalThis.KeyboardEvent;
+      const stage = runtime?.keyboardStage(nativeEvent);
+      const keyboard = publication?.keyboard;
+      if (
+        !runtime ||
+        !publication ||
+        !source ||
+        !stage ||
+        !keyboard ||
+        stage.source !== source ||
+        stage.row !== row ||
+        action.row !== row ||
+        runtime.keyboardPair(nativeEvent) !== null ||
+        cells.active.current !== publication ||
+        publication.authority !== authority ||
+        publication.buttons[row.index] !== source ||
+        authority.rows[row.index] !== row ||
+        !requestModeFactsAreCurrent(authority) ||
+        !publication.publishedDomMatches()
+      ) {
+        return;
+      }
+      const nativeFacts = readRequestModeNativeKeyboardFacts(
+        nativeEvent,
+        keyboard,
+      );
+      const destinationIndex =
+        nativeFacts && isRequestModeNavigationKey(nativeFacts.key)
+          ? requestModeDestination(
+              nativeFacts.key,
+              row.index,
+              authority.rows.length,
+            )
+          : null;
+      const destinationRow =
+        destinationIndex === null ? null : authority.rows[destinationIndex];
+      const destinationPresentation =
+        destinationIndex === null
+          ? null
+          : rowPresentations[destinationIndex];
+      const destination = destinationPresentation?.buttonOwner.element();
+      const capture = nativeFacts
+        ? captureRequestModeReactKeyboardEvent(
+            event,
+            nativeEvent,
+            nativeFacts,
+            source,
+            keyboard.Event.CAPTURING_PHASE,
+          )
+        : null;
+      if (
+        !nativeFacts ||
+        !destinationRow ||
+        !destinationPresentation ||
+        destinationPresentation.authority !== destinationRow ||
+        !destination ||
+        !capture ||
+        !requestModeAttemptIsCurrent({
+          runtime,
+          publication,
+          stage,
+          action,
+          sourceRow: row,
+          source,
+          destinationRow,
+          destination,
+          nativeEvent,
+          nativeFacts,
+          react: capture,
+          methods: capture.methods,
+          expectedPhase: keyboard.Event.CAPTURING_PHASE,
+          expectedDefaultPrevented: false,
+          storeIsCurrent: () =>
+            runtime.keyboardStage(nativeEvent) === stage &&
+            runtime.keyboardPair(nativeEvent) === null,
+          claimed: false,
+        })
+      ) {
+        return;
+      }
+      const defaultPrevented = keyboard.applyMethod(
+        capture.methods.isDefaultPrevented,
+        capture.event,
+      );
+      if (
+        !defaultPrevented.called ||
+        defaultPrevented.value !== false ||
+        !requestModeAttemptIsCurrent({
+          runtime,
+          publication,
+          stage,
+          action,
+          sourceRow: row,
+          source,
+          destinationRow,
+          destination,
+          nativeEvent,
+          nativeFacts,
+          react: capture,
+          methods: capture.methods,
+          expectedPhase: keyboard.Event.CAPTURING_PHASE,
+          expectedDefaultPrevented: false,
+          storeIsCurrent: () =>
+            runtime.keyboardStage(nativeEvent) === stage &&
+            runtime.keyboardPair(nativeEvent) === null,
+          claimed: false,
+        })
+      ) {
+        return;
+      }
+      const propagationStopped = keyboard.applyMethod(
+        capture.methods.isPropagationStopped,
+        capture.event,
+      );
+      if (
+        !propagationStopped.called ||
+        propagationStopped.value !== false ||
+        !requestModeAttemptIsCurrent({
+          runtime,
+          publication,
+          stage,
+          action,
+          sourceRow: row,
+          source,
+          destinationRow,
+          destination,
+          nativeEvent,
+          nativeFacts,
+          react: capture,
+          methods: capture.methods,
+          expectedPhase: keyboard.Event.CAPTURING_PHASE,
+          expectedDefaultPrevented: false,
+          storeIsCurrent: () =>
+            runtime.keyboardStage(nativeEvent) === stage &&
+            runtime.keyboardPair(nativeEvent) === null,
+          claimed: false,
+        })
+      ) {
+        return;
+      }
+      const pair: RequestModeKeyboardPair = Object.freeze({
+        publication,
+        action,
+        nativeEvent,
+        stage,
+        capture,
+        sourceRow: row,
+        source,
+        destinationRow,
+        destination,
+        key: nativeFacts.key as RequestModeNavigationKey,
+      });
+      runtime.pairKeyboard(nativeEvent, stage, pair);
+    } finally {
+      if (cells.keyboardAttempt.current === carried) {
+        cells.keyboardAttempt.current = null;
+      }
+    }
+  }
+  function completeRequestModeKey(
+    row: RequestModeRowAuthority,
+    buttonOwner: RequestModeElementOwner<HTMLButtonElement>,
+    action: RequestModeKeyboardAction,
+    event: KeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (!event || typeof event !== "object") return;
+    let carried: unknown;
+    try {
+      carried = event.nativeEvent;
+    } catch {
+      return;
+    }
+    if (
+      !carried ||
+      typeof carried !== "object" ||
+      cells.claimedReactEvents.has(event) ||
+      cells.claimedNativeEvents.has(carried as Event) ||
+      claimedRequestModeReactEvents.has(event) ||
+      claimedRequestModeNativeEvents.has(carried as Event) ||
+      cells.keyboardAttempt.current !== null ||
+      cells.keyboardDelivery.current !== null
+    ) {
+      return;
+    }
+    cells.keyboardAttempt.current = carried;
+    try {
+      const runtime = currentRuntime;
+      const publication = runtime?.publication;
+      const nativeEvent = carried as globalThis.KeyboardEvent;
+      const pair = runtime?.keyboardPair(nativeEvent);
+      const source = buttonOwner.element();
+      const keyboard = publication?.keyboard;
+      if (
+        !runtime ||
+        !publication ||
+        !pair ||
+        !source ||
+        !keyboard ||
+        pair.publication !== publication ||
+        pair.action !== action ||
+        pair.sourceRow !== row ||
+        pair.source !== source ||
+        pair.nativeEvent !== nativeEvent ||
+        pair.capture.publicFacts.nativeEvent !== nativeEvent ||
+        pair.capture.event === event ||
+        cells.active.current !== publication ||
+        publication.authority !== authority ||
+        publication.buttons[row.index] !== source ||
+        authority.rows[row.index] !== row ||
+        !requestModeFactsAreCurrent(authority) ||
+        !publication.publishedDomMatches()
+      ) {
+        return;
+      }
+      const nativeFacts = readRequestModeNativeKeyboardFacts(
+        nativeEvent,
+        keyboard,
+      );
+      const bubble = nativeFacts
+        ? captureRequestModeReactKeyboardEvent(
+            event,
+            nativeEvent,
+            nativeFacts,
+            source,
+            keyboard.Event.BUBBLING_PHASE,
+          )
+        : null;
+      const destinationIndex =
+        nativeFacts && isRequestModeNavigationKey(nativeFacts.key)
+          ? requestModeDestination(
+              nativeFacts.key,
+              row.index,
+              authority.rows.length,
+            )
+          : null;
+      const destinationRow =
+        destinationIndex === null ? null : authority.rows[destinationIndex];
+      const destinationPresentation =
+        destinationIndex === null
+          ? null
+          : rowPresentations[destinationIndex];
+      const destination = destinationPresentation?.buttonOwner.element();
+      if (
+        !nativeFacts ||
+        !bubble ||
+        !destinationRow ||
+        !destinationPresentation ||
+        destinationPresentation.authority !== destinationRow ||
+        !destination ||
+        destinationRow !== pair.destinationRow ||
+        destination !== pair.destination ||
+        nativeFacts.key !== pair.key ||
+        pair.capture.publicFacts.target !== bubble.publicFacts.target ||
+        pair.capture.publicFacts.currentTarget !==
+          bubble.publicFacts.currentTarget ||
+        pair.capture.publicFacts.phase !== keyboard.Event.CAPTURING_PHASE ||
+        bubble.publicFacts.phase !== keyboard.Event.BUBBLING_PHASE ||
+        !requestModeAttemptIsCurrent({
+          runtime,
+          publication,
+          stage: pair.stage,
+          action,
+          sourceRow: row,
+          source,
+          destinationRow,
+          destination,
+          nativeEvent,
+          nativeFacts,
+          react: bubble,
+          methods: bubble.methods,
+          expectedPhase: keyboard.Event.BUBBLING_PHASE,
+          expectedDefaultPrevented: false,
+          storeIsCurrent: () => runtime.keyboardPair(nativeEvent) === pair,
+          capture: pair.capture,
+          claimed: false,
+        })
+      ) {
+        return;
+      }
+      const defaultPrevented = keyboard.applyMethod(
+        bubble.methods.isDefaultPrevented,
+        bubble.event,
+      );
+      if (
+        !defaultPrevented.called ||
+        defaultPrevented.value !== false ||
+        !requestModeAttemptIsCurrent({
+          runtime,
+          publication,
+          stage: pair.stage,
+          action,
+          sourceRow: row,
+          source,
+          destinationRow,
+          destination,
+          nativeEvent,
+          nativeFacts,
+          react: bubble,
+          methods: bubble.methods,
+          expectedPhase: keyboard.Event.BUBBLING_PHASE,
+          expectedDefaultPrevented: false,
+          storeIsCurrent: () => runtime.keyboardPair(nativeEvent) === pair,
+          capture: pair.capture,
+          claimed: false,
+        })
+      ) {
+        return;
+      }
+      const propagationStopped = keyboard.applyMethod(
+        bubble.methods.isPropagationStopped,
+        bubble.event,
+      );
+      if (
+        !propagationStopped.called ||
+        propagationStopped.value !== false ||
+        !requestModeAttemptIsCurrent({
+          runtime,
+          publication,
+          stage: pair.stage,
+          action,
+          sourceRow: row,
+          source,
+          destinationRow,
+          destination,
+          nativeEvent,
+          nativeFacts,
+          react: bubble,
+          methods: bubble.methods,
+          expectedPhase: keyboard.Event.BUBBLING_PHASE,
+          expectedDefaultPrevented: false,
+          storeIsCurrent: () => runtime.keyboardPair(nativeEvent) === pair,
+          capture: pair.capture,
+          claimed: false,
+        })
+      ) {
+        return;
+      }
+      if (
+        cells.claimedPublications.has(publication) ||
+        cells.claimedActions.has(action) ||
+        cells.claimedReactEvents.has(pair.capture.event) ||
+        cells.claimedReactEvents.has(event) ||
+        cells.claimedNativeEvents.has(nativeEvent) ||
+        cells.claimedWindowStages.has(pair.stage) ||
+        claimedRequestModeReactEvents.has(pair.capture.event) ||
+        claimedRequestModeReactEvents.has(event) ||
+        claimedRequestModeNativeEvents.has(nativeEvent) ||
+        !runtime.consumeKeyboardPair(nativeEvent, pair)
+      ) {
+        return;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedActions.add(action);
+      cells.claimedReactEvents.add(pair.capture.event);
+      cells.claimedReactEvents.add(event);
+      cells.claimedNativeEvents.add(nativeEvent);
+      cells.claimedWindowStages.add(pair.stage);
+      claimedRequestModeReactEvents.add(pair.capture.event);
+      claimedRequestModeReactEvents.add(event);
+      claimedRequestModeNativeEvents.add(nativeEvent);
+      cells.keyboardDelivery.current = publication.identity;
+      try {
+        if (
+          !requestModeAttemptIsCurrent({
+            runtime,
+            publication,
+            stage: pair.stage,
+            action,
+            sourceRow: row,
+            source,
+            destinationRow,
+            destination,
+            nativeEvent,
+            nativeFacts,
+            react: bubble,
+            methods: bubble.methods,
+            expectedPhase: keyboard.Event.BUBBLING_PHASE,
+            expectedDefaultPrevented: false,
+            storeIsCurrent: () =>
+              runtime.keyboardPair(nativeEvent) === null,
+            capture: pair.capture,
+            claimed: true,
+          })
+        ) {
+          return;
+        }
+        const prevented = keyboard.applyMethod(
+          bubble.methods.preventDefault,
+          bubble.event,
+        );
+        if (!prevented.called) return;
+        const postPreventionMethods =
+          readRequestModeReactKeyboardMethods(
+            bubble.event as KeyboardEvent<HTMLButtonElement> &
+              RequestModeReactKeyboardEvent,
+          );
+        if (
+          !postPreventionMethods ||
+          postPreventionMethods.preventDefault !==
+            bubble.methods.preventDefault ||
+          postPreventionMethods.isPropagationStopped !==
+            bubble.methods.isPropagationStopped ||
+          !requestModeAttemptIsCurrent({
+            runtime,
+            publication,
+            stage: pair.stage,
+            action,
+            sourceRow: row,
+            source,
+            destinationRow,
+            destination,
+            nativeEvent,
+            nativeFacts,
+            react: bubble,
+            methods: postPreventionMethods,
+            expectedPhase: keyboard.Event.BUBBLING_PHASE,
+            expectedDefaultPrevented: true,
+            storeIsCurrent: () =>
+              runtime.keyboardPair(nativeEvent) === null,
+            capture: pair.capture,
+            claimed: true,
+          })
+        ) {
+          return;
+        }
+        const defaultPreventedAfter = keyboard.applyMethod(
+          postPreventionMethods.isDefaultPrevented,
+          bubble.event,
+        );
+        if (
+          !defaultPreventedAfter.called ||
+          defaultPreventedAfter.value !== true ||
+          !requestModeAttemptIsCurrent({
+            runtime,
+            publication,
+            stage: pair.stage,
+            action,
+            sourceRow: row,
+            source,
+            destinationRow,
+            destination,
+            nativeEvent,
+            nativeFacts,
+            react: bubble,
+            methods: postPreventionMethods,
+            expectedPhase: keyboard.Event.BUBBLING_PHASE,
+            expectedDefaultPrevented: true,
+            storeIsCurrent: () =>
+              runtime.keyboardPair(nativeEvent) === null,
+            capture: pair.capture,
+            claimed: true,
+          })
+        ) {
+          return;
+        }
+        const propagationStoppedAfter = keyboard.applyMethod(
+          postPreventionMethods.isPropagationStopped,
+          bubble.event,
+        );
+        if (
+          !propagationStoppedAfter.called ||
+          propagationStoppedAfter.value !== false ||
+          !requestModeAttemptIsCurrent({
+            runtime,
+            publication,
+            stage: pair.stage,
+            action,
+            sourceRow: row,
+            source,
+            destinationRow,
+            destination,
+            nativeEvent,
+            nativeFacts,
+            react: bubble,
+            methods: postPreventionMethods,
+            expectedPhase: keyboard.Event.BUBBLING_PHASE,
+            expectedDefaultPrevented: true,
+            storeIsCurrent: () =>
+              runtime.keyboardPair(nativeEvent) === null,
+            capture: pair.capture,
+            claimed: true,
+          })
+        ) {
+          return;
+        }
+        keyboard.focus.invoke(destination, { preventScroll: true });
+        if (
+          keyboard.activeElement.read(publication.ownerDocument) !==
+          destination
+        ) {
+          authority.requestSuccessor();
+          return;
+        }
+        if (destinationRow.disabled) {
+          return;
+        } else {
+          if (
+            !requestModeAttemptIsCurrent({
+              runtime,
+              publication,
+              stage: pair.stage,
+              action,
+              sourceRow: row,
+              source,
+              destinationRow,
+              destination,
+              nativeEvent,
+              nativeFacts,
+              react: bubble,
+              methods: postPreventionMethods,
+              expectedPhase: keyboard.Event.BUBBLING_PHASE,
+              expectedDefaultPrevented: true,
+              storeIsCurrent: () =>
+                runtime.keyboardPair(nativeEvent) === null,
+              capture: pair.capture,
+              claimed: true,
+              expectedActive: destination,
+            })
+          ) {
+            authority.requestSuccessor();
+            return;
+          }
+          authority.setMode(destinationRow.id);
+          if (destinationRow.id === authority.effectiveMode) {
+            authority.requestSuccessor();
+          }
+        }
+      } finally {
+        cells.claimedPublications.delete(publication);
+        cells.claimedActions.delete(action);
+        cells.claimedWindowStages.delete(pair.stage);
+        if (cells.keyboardDelivery.current === publication.identity) {
+          cells.keyboardDelivery.current = null;
+        }
+      }
+    } finally {
+      if (cells.keyboardAttempt.current === carried) {
+        cells.keyboardAttempt.current = null;
+      }
+    }
+  }
   const expectedOwners = () =>
     Object.freeze([
       rootOwner,
@@ -9684,6 +11017,7 @@ function Composer<Result>({
                   onClick={() => {
                     if (!m.disabled && !activeSubmission.current) setMode(m.id);
                   }}
+                  onKeyDownCapture={rowPresentation.onKeyDownCapture}
                   onKeyDown={rowPresentation.onKeyDown}
                   data-testid={`composer-mode-${m.id}`}
                 >
