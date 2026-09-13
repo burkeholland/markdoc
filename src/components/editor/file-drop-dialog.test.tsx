@@ -1526,7 +1526,7 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         let bubbleWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
         const boundaries: {
           name: string;
-          wrapper: object;
+          wrapper: ReactKeyboardEvent<HTMLElement>;
           preventDefault: () => void;
           isDefaultPrevented: () => boolean;
           isPropagationStopped: () => boolean;
@@ -1564,7 +1564,7 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
               captureWrapper as ReactKeyboardEvent<HTMLDivElement>,
             );
           },
-          onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+          onKeyDown: () => {
             if (!bubbleWrapper) {
               throw new Error("The bubble wrapper was not created");
             }
@@ -1576,9 +1576,7 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
           },
         });
         const restoreOption = replaceReactProps(source, {
-          onKeyDownCapture: (
-            _event: ReactKeyboardEvent<HTMLButtonElement>,
-          ) => {
+          onKeyDownCapture: () => {
             if (!captureWrapper) {
               throw new Error("The capture wrapper was not created");
             }
@@ -1697,11 +1695,17 @@ describe("FileDropDialog Strict Mode publication ownership", () => {
         expect(nativeDelivery.receiver).toBe(nativeDelivery.terminal);
         expect(capturePreventDefault).not.toHaveBeenCalled();
         expect(bubblePreventDefault).toHaveBeenCalledOnce();
-        expect(bubblePreventDefault.mock.contexts[0]).toBe(bubbleWrapper);
+        expect(bubblePreventDefault.mock.contexts[0]).toBe(
+          boundaries[3]!.wrapper,
+        );
         expect(nativeEvent.defaultPrevented).toBe(true);
-        expect(bubbleWrapper?.defaultPrevented).toBe(true);
-        expect(bubbleWrapper?.isDefaultPrevented()).toBe(true);
-        expect(bubbleWrapper?.isPropagationStopped()).toBe(false);
+        expect(boundaries[3]!.wrapper.defaultPrevented).toBe(true);
+        expect(
+          boundaries[3]!.wrapper.isDefaultPrevented(),
+        ).toBe(true);
+        expect(
+          boundaries[3]!.wrapper.isPropagationStopped(),
+        ).toBe(false);
         expect(options.insert).toHaveFocus();
         expect(focus).toHaveBeenCalledExactlyOnceWith({
           preventScroll: true,
