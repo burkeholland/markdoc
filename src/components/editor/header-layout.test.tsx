@@ -71,12 +71,164 @@ function reactProperties(element: Element): Record<string, unknown> {
   return props;
 }
 
+function reactPropsEntry(element: Element) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached to the pane radio");
+  const record = element as unknown as Record<string, Record<string, unknown> | undefined>;
+  const props = record[propsKey];
+  if (!props) throw new Error("React props were not available on the pane radio");
+  return { propsKey, record, props };
+}
+
 function captureKeyDown(element: HTMLButtonElement): LayoutKeyDown {
   const handler = reactProperties(element).onKeyDown;
   if (typeof handler !== "function") {
     throw new Error("The pane radio did not have an onKeyDown handler");
   }
   return handler as LayoutKeyDown;
+}
+
+function captureKeyDownCapture(element: HTMLButtonElement): LayoutKeyDown {
+  const handler = reactProperties(element).onKeyDownCapture;
+  if (typeof handler !== "function") {
+    throw new Error("The pane radio did not have an onKeyDownCapture handler");
+  }
+  return handler as LayoutKeyDown;
+}
+
+function interceptKeyDown(
+  element: HTMLButtonElement,
+  name: "onKeyDown" | "onKeyDownCapture",
+  invoke: (
+    original: LayoutKeyDown,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void,
+) {
+  const { propsKey, record, props } = reactPropsEntry(element);
+  const original = props[name];
+  if (typeof original !== "function") {
+    throw new Error(`The pane radio did not have an ${name} handler`);
+  }
+  record[propsKey] = {
+    ...props,
+    [name]: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+      invoke(original as LayoutKeyDown, event),
+  };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
+function replacePublicEventValue(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+  property: keyof ReactKeyboardEvent<HTMLButtonElement>,
+  value: unknown,
+) {
+  const descriptor = Object.getOwnPropertyDescriptor(event, property);
+  if (!descriptor || !descriptor.configurable) {
+    throw new Error(`${String(property)} was not configurable public event data`);
+  }
+  Object.defineProperty(event, property, { ...descriptor, value });
+}
+
+function exposePublicScalarsAsAccessors(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+) {
+  const properties = [
+    "nativeEvent",
+    "type",
+    "target",
+    "currentTarget",
+    "eventPhase",
+    "bubbles",
+    "cancelable",
+    "defaultPrevented",
+    "isTrusted",
+    "timeStamp",
+    "view",
+    "detail",
+    "key",
+    "code",
+    "location",
+    "repeat",
+    "altKey",
+    "ctrlKey",
+    "metaKey",
+    "shiftKey",
+    "charCode",
+    "keyCode",
+    "which",
+  ] as const;
+  for (const property of properties) {
+    const descriptor = Object.getOwnPropertyDescriptor(event, property);
+    if (!descriptor || !("value" in descriptor) || !descriptor.configurable) {
+      throw new Error(`${property} was not configurable public event data`);
+    }
+    let value = descriptor.value;
+    Object.defineProperty(event, property, {
+      configurable: true,
+      enumerable: descriptor.enumerable,
+      get: () => value,
+      set: (next) => {
+        value = next;
+      },
+    });
+  }
+}
+
+type CompatibilityMode = "absent" | "replaced" | "non-function";
+
+function customizeReactKeyWrapper(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+  phase: "capture" | "bubble",
+  compatibility: CompatibilityMode,
+  preventReceivers: object[],
+  defaultReceivers: object[],
+  propagationReceivers: object[],
+) {
+  const originalPreventDefault = event.preventDefault;
+  const originalIsDefaultPrevented = event.isDefaultPrevented;
+  const originalIsPropagationStopped = event.isPropagationStopped;
+  event.preventDefault = function publicPrevention(this: object) {
+    preventReceivers.push(this);
+    return Reflect.apply(originalPreventDefault, this, []);
+  };
+  event.isDefaultPrevented = function publicDefaultQuery(this: object) {
+    defaultReceivers.push(this);
+    return Reflect.apply(originalIsDefaultPrevented, this, []);
+  };
+  event.isPropagationStopped = function publicPropagationQuery(this: object) {
+    propagationReceivers.push(this);
+    return Reflect.apply(originalIsPropagationStopped, this, []);
+  };
+  const prototype = Object.create(null) as Record<string, unknown>;
+  prototype[`${phase}Only`] = true;
+  for (const name of [
+    "_reactName",
+    "persist",
+    "isPersistent",
+    "stopPropagation",
+  ] as const) {
+    if (!Reflect.deleteProperty(event, name)) {
+      throw new Error(`${name} was not removable React compatibility data`);
+    }
+  }
+  if (compatibility === "replaced") {
+    Object.defineProperties(event, {
+      _reactName: { configurable: true, value: `replaced-${phase}` },
+      persist: { configurable: true, value: vi.fn() },
+      isPersistent: { configurable: true, value: vi.fn(() => false) },
+      stopPropagation: { configurable: true, value: vi.fn() },
+    });
+  } else if (compatibility === "non-function") {
+    Object.defineProperties(event, {
+      _reactName: { configurable: true, value: 17 },
+      persist: { configurable: true, value: null },
+      isPersistent: { configurable: true, value: "no" },
+      stopPropagation: { configurable: true, value: false },
+    });
+  }
+  Object.setPrototypeOf(event, prototype);
 }
 
 function captureRef<T extends Element>(element: T): RefCallback<T> {
@@ -307,7 +459,266 @@ describe("phone pane switch keyboard navigation", () => {
     expectSelection(host, initial);
   });
 
-  it("uses captured owner-realm key, path, prevention, active-element, and focus authorities", () => {
+  it.each(["Tab", "Enter", " ", "Escape"] as const)(
+    "leaves native %s behavior unprevented and unselected",
+    (key) => {
+      const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+      const onChange = vi.fn<(layout: Layout) => void>();
+      const { host } = renderDirect(strictSegment(onChange));
+      const source = pane(host, "rich");
+      source.focus();
+      focus.mockClear();
+
+      const event = dispatchKey(source, key);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(onChange).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expectSelection(host, "rich");
+      expect(source).toHaveFocus();
+    },
+  );
+
+  it("does not query a composed path for keys outside the pane switch", () => {
+    const composedPath = vi.spyOn(window.Event.prototype, "composedPath");
+    const onChange = vi.fn<(layout: Layout) => void>();
+    const { host } = renderDirect(strictSegment(onChange));
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+
+    dispatchKey(outside, "ArrowRight");
+
+    expect(composedPath).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+    expectSelection(host, "rich");
+  });
+
+  it.each(["absent", "replaced", "non-function"] as const)(
+    "pairs independent public wrappers with %s private and optional members",
+    (compatibility) => {
+      const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+      const onChange = vi.fn<(layout: Layout) => void>();
+      const { host } = renderDirect(strictSegment(onChange));
+      const source = pane(host, "rich");
+      const capturePreventReceivers: object[] = [];
+      const bubblePreventReceivers: object[] = [];
+      const captureDefaultReceivers: object[] = [];
+      const bubbleDefaultReceivers: object[] = [];
+      const capturePropagationReceivers: object[] = [];
+      const bubblePropagationReceivers: object[] = [];
+      let captureWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+      let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+      const restoreCapture = interceptKeyDown(
+        source,
+        "onKeyDownCapture",
+        (original, event) => {
+          captureWrapper = event;
+          customizeReactKeyWrapper(
+            event,
+            "capture",
+            compatibility,
+            capturePreventReceivers,
+            captureDefaultReceivers,
+            capturePropagationReceivers,
+          );
+          original(event);
+        },
+      );
+      const restoreBubble = interceptKeyDown(
+        source,
+        "onKeyDown",
+        (original, event) => {
+          bubbleWrapper = event;
+          customizeReactKeyWrapper(
+            event,
+            "bubble",
+            compatibility,
+            bubblePreventReceivers,
+            bubbleDefaultReceivers,
+            bubblePropagationReceivers,
+          );
+          original(event);
+        },
+      );
+      source.focus();
+      focus.mockClear();
+      try {
+        const event = dispatchKey(source, "ArrowRight");
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(captureWrapper).not.toBeNull();
+        expect(bubbleWrapper).not.toBeNull();
+        expect(captureWrapper).not.toBe(bubbleWrapper);
+        expect(Object.getPrototypeOf(captureWrapper))
+          .not.toBe(Object.getPrototypeOf(bubbleWrapper));
+        expect(capturePreventReceivers).toEqual([]);
+        expect(bubblePreventReceivers).toEqual([bubbleWrapper]);
+        expect(captureDefaultReceivers.every(
+          (receiver) => receiver === captureWrapper,
+        )).toBe(true);
+        expect(bubbleDefaultReceivers.every(
+          (receiver) => receiver === bubbleWrapper,
+        )).toBe(true);
+        expect(capturePropagationReceivers.every(
+          (receiver) => receiver === captureWrapper,
+        )).toBe(true);
+        expect(bubblePropagationReceivers.every(
+          (receiver) => receiver === bubbleWrapper,
+        )).toBe(true);
+        expect(onChange).toHaveBeenCalledOnce();
+        expect(onChange).toHaveBeenCalledWith("code");
+        expect(pane(host, "code")).toHaveFocus();
+        expect(focus).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      } finally {
+        restoreBubble();
+        restoreCapture();
+      }
+    },
+  );
+
+  it("accepts exact public keyboard scalars exposed through ordinary accessors", () => {
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const onChange = vi.fn<(layout: Layout) => void>();
+    const { host } = renderDirect(strictSegment(onChange));
+    const source = pane(host, "rich");
+    const restoreCapture = interceptKeyDown(
+      source,
+      "onKeyDownCapture",
+      (original, event) => {
+        exposePublicScalarsAsAccessors(event);
+        original(event);
+      },
+    );
+    const restoreBubble = interceptKeyDown(
+      source,
+      "onKeyDown",
+      (original, event) => {
+        exposePublicScalarsAsAccessors(event);
+        original(event);
+      },
+    );
+    source.focus();
+    focus.mockClear();
+    try {
+      const event = dispatchKey(source, "ArrowRight", {
+        code: "Numpad6",
+        location: 3,
+      });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(onChange).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledWith("code");
+      expect(pane(host, "code")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+  });
+
+  it("retains the exact native pair across nested capture microtask checkpoints", () => {
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const onChange = vi.fn<(layout: Layout) => void>();
+    const { host } = renderDirect(strictSegment(onChange));
+    const source = pane(host, "rich");
+    const ownerWindow = source.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The pane radio did not have an owner Window");
+    const checkpoints: number[] = [];
+    const restoreCapture = interceptKeyDown(
+      source,
+      "onKeyDownCapture",
+      (original, event) => {
+        const queue = vi.spyOn(ownerWindow, "queueMicrotask").mockImplementation(
+          (callback: VoidFunction) => {
+            checkpoints.push(checkpoints.length + 1);
+            callback();
+          },
+        );
+        try {
+          original(event);
+          const checkpoint = (remaining: number) => {
+            if (remaining < 1) return;
+            ownerWindow.queueMicrotask(() => checkpoint(remaining - 1));
+          };
+          checkpoint(2);
+        } finally {
+          queue.mockRestore();
+        }
+      },
+    );
+    source.focus();
+    focus.mockClear();
+    try {
+      const event = dispatchKey(source, "ArrowRight");
+
+      expect(checkpoints).toHaveLength(2);
+      expect(event.defaultPrevented).toBe(true);
+      expect(onChange).toHaveBeenCalledOnce();
+      expect(pane(host, "code")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      restoreCapture();
+    }
+  });
+
+  it("accepts exact owner Window views and rejects a structural lookalike", () => {
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const onChange = vi.fn<(layout: Layout) => void>();
+    const { host } = renderDirect(strictSegment(onChange));
+    const source = pane(host, "rich");
+    const ownerWindow = source.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The pane radio did not have an owner Window");
+    const restoreLookalike = interceptKeyDown(
+      source,
+      "onKeyDownCapture",
+      (original, event) => {
+        replacePublicEventValue(event, "view", Object.create(ownerWindow));
+        original(event);
+      },
+    );
+    source.focus();
+    focus.mockClear();
+
+    const rejected = dispatchKey(source, "ArrowRight");
+    restoreLookalike();
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const setOwnerWindow = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      replacePublicEventValue(event, "view", ownerWindow);
+    };
+    const restoreCapture = interceptKeyDown(
+      source,
+      "onKeyDownCapture",
+      (original, event) => {
+        setOwnerWindow(event);
+        original(event);
+      },
+    );
+    const restoreBubble = interceptKeyDown(
+      source,
+      "onKeyDown",
+      (original, event) => {
+        setOwnerWindow(event);
+        original(event);
+      },
+    );
+    try {
+      const accepted = dispatchKey(source, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(onChange).toHaveBeenCalledOnce();
+      expect(pane(host, "code")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+  });
+
+  it("uses public bubble prevention with captured key, path, active-element, and focus authorities", () => {
     const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
     const onChange = vi.fn<(layout: Layout) => void>();
     const { host } = renderDirect(strictSegment(onChange));
@@ -321,7 +732,10 @@ describe("phone pane switch keyboard navigation", () => {
     source.focus();
     focus.mockClear();
     const event = keyboardEvent(document, "ArrowRight");
-    const publicPreventDefault = vi.fn();
+    const nativePreventDefault = window.Event.prototype.preventDefault;
+    const publicPreventDefault = vi.fn(function preventDefault(this: Event) {
+      nativePreventDefault.call(this);
+    });
     Object.defineProperties(event, {
       composedPath: { configurable: true, value: vi.fn(() => []) },
       preventDefault: { configurable: true, value: publicPreventDefault },
@@ -334,7 +748,8 @@ describe("phone pane switch keyboard navigation", () => {
     expectSelection(host, "code");
     expect(pane(host, "code")).toHaveFocus();
     expect(event.defaultPrevented).toBe(true);
-    expect(publicPreventDefault).not.toHaveBeenCalled();
+    expect(publicPreventDefault).toHaveBeenCalledOnce();
+    expect(publicPreventDefault.mock.instances[0]).toBe(event);
     expect(publicFocus).not.toHaveBeenCalled();
     expect(focus).toHaveBeenCalledOnce();
   });
@@ -402,6 +817,301 @@ describe("phone pane switch keyboard navigation", () => {
     expect(focus).toHaveBeenCalledOnce();
     expectSelection(host, "code");
   });
+
+  it.each(["wrong source", "malformed source", "reentrant bubble"] as const)(
+    "preserves the rightful native pair after a %s attempt",
+    (attempt) => {
+      const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+      const onChange = vi.fn<(layout: Layout) => void>();
+      const { host } = renderDirect(strictSegment(onChange));
+      const source = pane(host, "rich");
+      const wrongSource = captureKeyDown(pane(host, "code"));
+      let reentered = false;
+      const restore = interceptKeyDown(
+        source,
+        "onKeyDown",
+        (original, event) => {
+          if (attempt === "wrong source") {
+            wrongSource(event);
+          } else if (attempt === "malformed source") {
+            const descriptor = Object.getOwnPropertyDescriptor(
+              event,
+              "currentTarget",
+            );
+            if (!descriptor) {
+              throw new Error("The public currentTarget was not owned");
+            }
+            replacePublicEventValue(event, "currentTarget", pane(host, "code"));
+            original(event);
+            Object.defineProperty(event, "currentTarget", descriptor);
+          } else {
+            const publicQuery = event.isPropagationStopped;
+            event.isPropagationStopped = function queryWithReentry(
+              this: typeof event,
+            ) {
+              if (!reentered) {
+                reentered = true;
+                original(event);
+              }
+              return Reflect.apply(publicQuery, this, []);
+            };
+          }
+          original(event);
+        },
+      );
+      source.focus();
+      focus.mockClear();
+      try {
+        const event = dispatchKey(source, "ArrowRight");
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(onChange).toHaveBeenCalledOnce();
+        expect(onChange).toHaveBeenCalledWith("code");
+        expect(pane(host, "code")).toHaveFocus();
+        expect(focus).toHaveBeenCalledOnce();
+        if (attempt === "reentrant bubble") expect(reentered).toBe(true);
+      } finally {
+        restore();
+      }
+    },
+  );
+
+  it("rejects retained capture-method drift without poisoning a clean successor", () => {
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const onChange = vi.fn<(layout: Layout) => void>();
+    const { host } = renderDirect(strictSegment(onChange));
+    const source = pane(host, "rich");
+    const restore = interceptKeyDown(
+      source,
+      "onKeyDownCapture",
+      (original, event) => {
+        original(event);
+        event.preventDefault = vi.fn();
+      },
+    );
+    source.focus();
+    focus.mockClear();
+
+    const rejected = dispatchKey(source, "ArrowRight");
+    restore();
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    act(() => dispatchKey(source, "ArrowRight"));
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(onChange).toHaveBeenCalledWith("code");
+    expect(pane(host, "code")).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a throwing public query without consuming a clean successor", () => {
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const onChange = vi.fn<(layout: Layout) => void>();
+    const { host } = renderDirect(strictSegment(onChange));
+    const source = pane(host, "rich");
+    const restore = interceptKeyDown(
+      source,
+      "onKeyDown",
+      (original, event) => {
+        event.isPropagationStopped = () => {
+          throw new Error("query failed");
+        };
+        original(event);
+      },
+    );
+    source.focus();
+    focus.mockClear();
+
+    const rejected = dispatchKey(source, "ArrowRight");
+    restore();
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    act(() => dispatchKey(source, "ArrowRight"));
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(pane(host, "code")).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  it("claims movement before public prevention can reenter the route", () => {
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const onChange = vi.fn<(layout: Layout) => void>();
+    const { host } = renderDirect(strictSegment(onChange));
+    const source = pane(host, "rich");
+    let reentered = false;
+    const nested = { event: null as KeyboardEvent | null };
+    const restore = interceptKeyDown(
+      source,
+      "onKeyDown",
+      (original, event) => {
+        const publicPreventDefault = event.preventDefault;
+        event.preventDefault = function preventWithReentry(this: typeof event) {
+          if (!reentered) {
+            reentered = true;
+            nested.event = dispatchKey(source, "ArrowRight");
+          }
+          return Reflect.apply(publicPreventDefault, this, []);
+        };
+        original(event);
+      },
+    );
+    source.focus();
+    focus.mockClear();
+    try {
+      const event = dispatchKey(source, "ArrowRight");
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(nested.event?.defaultPrevented).toBe(false);
+      expect(reentered).toBe(true);
+      expect(onChange).toHaveBeenCalledOnce();
+      expect(pane(host, "code")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      restore();
+    }
+  });
+
+  it("authenticates React 19's replaced post-prevention default query", () => {
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const onChange = vi.fn<(layout: Layout) => void>();
+    const { host } = renderDirect(strictSegment(onChange));
+    const source = pane(host, "rich");
+    let before: ((...args: never[]) => boolean) | null = null;
+    let after: ((...args: never[]) => boolean) | null = null;
+    let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    const postPreventionReceivers: object[] = [];
+    const restore = interceptKeyDown(
+      source,
+      "onKeyDown",
+      (original, event) => {
+        bubbleWrapper = event;
+        const publicPreventDefault = event.preventDefault;
+        before = event.isDefaultPrevented;
+        event.preventDefault = function replaceDefaultQuery(this: typeof event) {
+          Reflect.apply(publicPreventDefault, this, []);
+          const replaced = this.isDefaultPrevented;
+          this.isDefaultPrevented = function postPreventionQuery(
+            this: typeof event,
+          ) {
+            postPreventionReceivers.push(this);
+            return Reflect.apply(replaced, this, []);
+          };
+          after = this.isDefaultPrevented;
+        };
+        original(event);
+      },
+    );
+    source.focus();
+    focus.mockClear();
+    try {
+      const event = dispatchKey(source, "ArrowRight");
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(before).not.toBeNull();
+      expect(after).not.toBeNull();
+      expect(after).not.toBe(before);
+      expect(postPreventionReceivers.length).toBeGreaterThan(0);
+      expect(postPreventionReceivers.every(
+        (receiver) => receiver === bubbleWrapper,
+      )).toBe(true);
+      expect(onChange).toHaveBeenCalledOnce();
+      expect(pane(host, "code")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+    } finally {
+      restore();
+    }
+  });
+
+  it.each([
+    "capture query replaces itself",
+    "capture query replaces bubble query",
+    "bubble query replaces itself",
+  ] as const)(
+    "rejects post-prevention drift when the %s and admits a clean successor",
+    (drift) => {
+      const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+      const onChange = vi.fn<(layout: Layout) => void>();
+      const { host } = renderDirect(strictSegment(onChange));
+      const source = pane(host, "rich");
+      let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+      const restoreCapture = interceptKeyDown(
+        source,
+        "onKeyDownCapture",
+        (original, event) => {
+          if (drift !== "bubble query replaces itself") {
+            const publicQuery = event.isDefaultPrevented;
+            event.isDefaultPrevented = function captureQueryWithDrift(
+              this: typeof event,
+            ) {
+              const result = Reflect.apply(publicQuery, this, []);
+              if (this.nativeEvent.defaultPrevented) {
+                if (drift === "capture query replaces itself") {
+                  this.isDefaultPrevented = vi.fn(() => true);
+                } else {
+                  if (!bubbleWrapper) {
+                    throw new Error("The bubble wrapper was not observed");
+                  }
+                  bubbleWrapper.isDefaultPrevented = vi.fn(() => true);
+                }
+              }
+              return result;
+            };
+          }
+          original(event);
+        },
+      );
+      const restoreBubble = interceptKeyDown(
+        source,
+        "onKeyDown",
+        (original, event) => {
+          bubbleWrapper = event;
+          if (drift === "bubble query replaces itself") {
+            const publicPreventDefault = event.preventDefault;
+            event.preventDefault = function preventWithDriftingQuery(
+              this: typeof event,
+            ) {
+              Reflect.apply(publicPreventDefault, this, []);
+              const postPreventionQuery = this.isDefaultPrevented;
+              this.isDefaultPrevented = function bubbleQueryWithDrift(
+                this: typeof event,
+              ) {
+                const result = Reflect.apply(
+                  postPreventionQuery,
+                  this,
+                  [],
+                );
+                this.isDefaultPrevented = vi.fn(() => true);
+                return result;
+              };
+            };
+          }
+          original(event);
+        },
+      );
+      source.focus();
+      focus.mockClear();
+
+      const rejected = dispatchKey(source, "ArrowRight");
+      restoreBubble();
+      restoreCapture();
+
+      expect(rejected.defaultPrevented).toBe(true);
+      expect(onChange).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expectSelection(host, "rich");
+      expect(source).toHaveFocus();
+
+      const successor = dispatchKey(source, "ArrowRight");
+      expect(successor.defaultPrevented).toBe(true);
+      expect(onChange).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledWith("code");
+      expect(pane(host, "code")).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    },
+  );
 
   it.each([
     ["prevented", { prevented: true }],
@@ -790,6 +1500,81 @@ describe("phone pane switch keyboard navigation", () => {
     expect(onChange).toHaveBeenCalledOnce();
     expect(focus).toHaveBeenCalledOnce();
     expectSelection(host, "code");
+  });
+
+  it("revokes listener and weak-pair access while retained wrappers stay inert after cleanup", async () => {
+    const removeEventListener = vi.spyOn(window, "removeEventListener");
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const staleChange = vi.fn<(layout: Layout) => void>();
+    const view = renderDirect(strictSegment(staleChange));
+    const source = pane(view.host, "rich");
+    const staleCapture = captureKeyDownCapture(source);
+    const staleBubble = captureKeyDown(source);
+    let captureWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    let bubbleWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
+    const restoreCapture = interceptKeyDown(
+      source,
+      "onKeyDownCapture",
+      (original, event) => {
+        captureWrapper = event;
+        original(event);
+      },
+    );
+    const restoreBubble = interceptKeyDown(
+      source,
+      "onKeyDown",
+      (_original, event) => {
+        bubbleWrapper = event;
+      },
+    );
+    source.focus();
+    focus.mockClear();
+    const inert = dispatchKey(source, "ArrowRight");
+    restoreBubble();
+    restoreCapture();
+    expect(inert.defaultPrevented).toBe(false);
+    if (!captureWrapper || !bubbleWrapper) {
+      throw new Error("The public capture and bubble wrappers were not observed");
+    }
+    const releasesBeforeCleanup = removeEventListener.mock.calls.filter(
+      ([type, , options]) => type === "keydown" && options === true,
+    ).length;
+
+    await act(async () => view.root.unmount());
+    views.delete(view);
+
+    expect(removeEventListener.mock.calls.filter(
+      ([type, , options]) => type === "keydown" && options === true,
+    )).toHaveLength(releasesBeforeCleanup + 1);
+    const weakAccesses = [
+      vi.spyOn(WeakMap.prototype, "get"),
+      vi.spyOn(WeakMap.prototype, "set"),
+      vi.spyOn(WeakMap.prototype, "has"),
+      vi.spyOn(WeakMap.prototype, "delete"),
+      vi.spyOn(WeakSet.prototype, "add"),
+      vi.spyOn(WeakSet.prototype, "has"),
+      vi.spyOn(WeakSet.prototype, "delete"),
+    ];
+    const accessCount = () => weakAccesses.reduce(
+      (count, method) => count + method.mock.calls.length,
+      0,
+    );
+    const beforeRetainedCallbacks = accessCount();
+    staleCapture(captureWrapper);
+    staleBubble(bubbleWrapper);
+    expect(accessCount()).toBe(beforeRetainedCallbacks);
+    expect(staleChange).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+
+    const currentChange = vi.fn<(layout: Layout) => void>();
+    const successor = renderDirect(strictSegment(currentChange));
+    const currentSource = pane(successor.host, "rich");
+    currentSource.focus();
+    focus.mockClear();
+    act(() => dispatchKey(currentSource, "ArrowRight"));
+    expect(currentChange).toHaveBeenCalledOnce();
+    expect(pane(successor.host, "code")).toHaveFocus();
+    expect(focus).toHaveBeenCalledOnce();
   });
 
   it("disconnects mutation history and leaves retained handlers inert after cleanup", async () => {
