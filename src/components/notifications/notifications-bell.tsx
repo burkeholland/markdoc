@@ -3421,7 +3421,7 @@ function NotificationItem({
           )}
         </span>
         {notification.snippet && notification.kind !== "share" && (
-          <span className="mt-0.5 block truncate text-xs text-ink-3">{notification.snippet}</span>
+          <span className="mt-0.5 block truncate text-xs text-ink-3" title={notification.snippet}>{notification.snippet}</span>
         )}
         <RelativeTime date={notification.createdAt} className="mt-0.5 block text-[11px] text-ink-4" />
       </span>

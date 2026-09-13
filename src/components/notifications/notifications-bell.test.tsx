@@ -629,6 +629,200 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("notification snippet titles", () => {
+  const mentionSnippet =
+    '  Please review <strong title="launch">the launch plan</strong> with "quoted feedback" & literal markup. The preview includes the complete rollout notes, the remaining owner decisions, and the follow-up questions that must stay readable even when the notification row is clipped.  ';
+  const commentSnippet =
+    'A comment says <a href="https://example.invalid">"do not turn this into a link"</a> and <img src="preview" alt="literal text">. Keep every character of this longer discussion, including the final request to compare the revised schedule with the original milestones before responding.';
+  const snippetClasses = "mt-0.5 block truncate text-xs text-ink-3";
+
+  it.each([
+    ["unread mention", ITEM, mentionSnippet, null],
+    ["read mention", ITEM, mentionSnippet, REPLACEMENT_ITEM.readAt],
+    ["unread comment", ITEM_TWO, commentSnippet, null],
+    ["read comment", ITEM_TWO, commentSnippet, REPLACEMENT_ITEM.readAt],
+  ] as const)(
+    "keeps the full %s title passive and activates the existing row once",
+    async (_label, item, snippet, readAt) => {
+      const notification = { ...item, snippet, readAt };
+      const order: string[] = [];
+      const onOpen = vi.fn(() => order.push("open"));
+      store.markNotificationRead.mockImplementation(() => {
+        order.push("read");
+        return Promise.resolve();
+      });
+      openBell({
+        ...EMPTY,
+        items: [notification],
+        unreadCount: readAt ? 0 : 1,
+        loaded: true,
+      }, onOpen);
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
+      const row = screen.getByTestId("notification-item");
+      const preview = row.querySelector("span.truncate");
+      if (!(preview instanceof HTMLSpanElement)) throw new Error("Expected the existing snippet span");
+      expect(snippet.length).toBeGreaterThanOrEqual(200);
+      expect(row.querySelectorAll("span.truncate")).toHaveLength(1);
+      expect(row.querySelectorAll("span[title]")).toHaveLength(1);
+      expect(preview.title).toBe(snippet);
+      expect(preview.textContent).toBe(snippet);
+      expect(preview.className).toBe(snippetClasses);
+      expect(preview.getAttributeNames().sort()).toEqual(["class", "title"]);
+      expect(preview.childNodes).toHaveLength(1);
+      expect(preview.firstChild).toBeInstanceOf(Text);
+      expect(preview.children).toHaveLength(0);
+      expect(preview.tabIndex).toBe(-1);
+      expect(row.querySelectorAll("a, button, input, select, textarea, [tabindex], [contenteditable]")).toHaveLength(0);
+      expect([...preview.parentElement!.children].map((child) => child.tagName)).toEqual(["SPAN", "SPAN", "TIME"]);
+      expect(screen.getAllByRole("button")).toHaveLength(3);
+      expect(row).toHaveAttribute("data-kind", notification.kind);
+      expect(row).toHaveAttribute("data-unread", String(!readAt));
+      expect(screen.queryAllByTestId("notification-unread-dot")).toHaveLength(readAt ? 0 : 1);
+      expect(row.querySelector(".font-medium")?.textContent).toBe(notification.actorName);
+      expect(row).toHaveTextContent(notification.documentTitle);
+      expect(row.querySelector("time")).toHaveAttribute("datetime", notification.createdAt);
+
+      const content = screen.getByTestId("notifications-popover");
+      const focused = document.activeElement;
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const request = vi.spyOn(globalThis, "fetch");
+      const xhr = vi.spyOn(XMLHttpRequest.prototype, "send");
+      const mutation = vi.fn();
+      const observer = new MutationObserver(mutation);
+      observer.observe(content, { attributes: true, childList: true, characterData: true, subtree: true });
+      const timeout = vi.spyOn(globalThis, "setTimeout");
+      const interval = vi.spyOn(globalThis, "setInterval");
+      try {
+        fireEvent.pointerOver(preview, { pointerType: "mouse" });
+        fireEvent.mouseOver(preview);
+        fireEvent.pointerMove(preview, { pointerType: "mouse" });
+        fireEvent.mouseMove(preview);
+        fireEvent.pointerOut(preview, { pointerType: "mouse" });
+        fireEvent.mouseOut(preview);
+        expect(timeout).not.toHaveBeenCalled();
+        expect(interval).not.toHaveBeenCalled();
+        expect(observer.takeRecords()).toEqual([]);
+        await act(() => Promise.resolve());
+        expect(mutation).not.toHaveBeenCalled();
+      } finally {
+        observer.disconnect();
+        timeout.mockRestore();
+        interval.mockRestore();
+      }
+      expect(focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(focused);
+      expect(request).not.toHaveBeenCalled();
+      expect(xhr).not.toHaveBeenCalled();
+      expect(store.refreshNotifications).not.toHaveBeenCalled();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(store.retryNotificationRead).not.toHaveBeenCalled();
+      expect(onOpen).not.toHaveBeenCalled();
+      expect(content).toBeVisible();
+
+      fireEvent.click(preview);
+      await act(() => Promise.resolve());
+
+      expect(order).toEqual(["read", "open"]);
+      expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(notification.id);
+      expect(onOpen).toHaveBeenCalledExactlyOnceWith(notification);
+      expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    },
+  );
+
+  it.each([
+    ["mention", null],
+    ["mention", ""],
+    ["reply", null],
+    ["reply", ""],
+    ["share", null],
+    ["share", ""],
+    ["share", mentionSnippet],
+  ] as const)("omits snippet spans and titles for %s with %j", (kind, snippet) => {
+    // Exercise nullable runtime data at the mocked store boundary, not the string-only DTO.
+    store.useNotifications.mockReturnValue({
+      ...EMPTY,
+      items: [{ ...ITEM, kind, snippet }],
+      unreadCount: 1,
+      loaded: true,
+    });
+    render(<BellBoundary onOpen={vi.fn()} />);
+    openCurrentBell();
+
+    const row = screen.getByTestId("notification-item");
+    expect(row.querySelectorAll("span.truncate")).toHaveLength(0);
+    expect(row.querySelectorAll("span[title]")).toHaveLength(0);
+    expect(row).not.toHaveTextContent(mentionSnippet.trim());
+  });
+
+  it("preserves a truthy whitespace-only snippet without normalization", () => {
+    const snippet = " \t ";
+    openBell({ ...EMPTY, items: [{ ...ITEM, snippet }], unreadCount: 1, loaded: true });
+
+    const preview = screen.getByTestId("notification-item").querySelector("span.truncate");
+    expect(preview).toHaveAttribute("title", snippet);
+    expect(preview?.textContent).toBe(snippet);
+  });
+
+  it("replaces the title for the same notification ID and removes it with the list", () => {
+    const onOpen = vi.fn();
+    const state = { ...EMPTY, items: [{ ...ITEM, snippet: mentionSnippet }], unreadCount: 1, loaded: true };
+    const root = createBellRoot(state, { onOpen });
+    openCurrentBell();
+    const preview = screen.getByTitle(mentionSnippet, { normalizer: (value) => value });
+    const replacement = { ...REPLACEMENT_ITEM, snippet: commentSnippet };
+
+    renderBellRoot(root, { ...state, items: [replacement], unreadCount: 0 }, { onOpen });
+
+    expect(screen.queryByTitle(mentionSnippet, { normalizer: (value) => value })).toBeNull();
+    expect(screen.queryByText(mentionSnippet.trim())).toBeNull();
+    expect(screen.getByTitle(commentSnippet)).toBe(preview);
+    expect(preview.textContent).toBe(commentSnippet);
+    expect(screen.getByTestId("notification-item")).toHaveAttribute("data-notification-id", ITEM.id);
+
+    renderBellRoot(root, { ...state, items: [], unreadCount: 0 }, { onOpen });
+
+    expect(screen.queryAllByTestId("notification-item")).toHaveLength(0);
+    expect(screen.queryByTitle(commentSnippet)).toBeNull();
+    expect(screen.queryByText(commentSnippet)).toBeNull();
+    expect(screen.getByText("You're all caught up.")).toBeVisible();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("shows only the current title after a document context switch and opens the current row", async () => {
+    const onOpen = vi.fn();
+    const state = { ...EMPTY, items: [{ ...ITEM, snippet: mentionSnippet }], unreadCount: 1, loaded: true };
+    const root = createBellRoot(state, { currentDocId: ITEM.documentId, onOpen });
+    openCurrentBell();
+    expect(screen.getByTitle(mentionSnippet, { normalizer: (value) => value })).toHaveTextContent(mentionSnippet.trim());
+    const replacement = { ...REPLACEMENT_ITEM, snippet: commentSnippet };
+
+    renderBellRoot(root, { ...state, items: [replacement], unreadCount: 0 }, {
+      currentDocId: replacement.documentId,
+      onOpen,
+    });
+
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+    expect(screen.queryByTitle(mentionSnippet, { normalizer: (value) => value })).toBeNull();
+    openCurrentBell();
+    expect(screen.queryByTitle(mentionSnippet, { normalizer: (value) => value })).toBeNull();
+    expect(screen.queryByText(mentionSnippet.trim())).toBeNull();
+    expect(screen.getByTitle(commentSnippet).textContent).toBe(commentSnippet);
+    expect(screen.getByTestId("notification-item")).not.toHaveTextContent(replacement.documentTitle);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTitle(commentSnippet));
+    await act(() => Promise.resolve());
+
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(replacement.id);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(replacement);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+  });
+});
+
 describe("notification read actions", () => {
   it("claims a single read before opening the immutable item once", () => {
     const order: string[] = [];
