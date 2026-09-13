@@ -1576,9 +1576,9 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
         {status?.status === "syncing" && <p>Uploading a saved version to the gist.</p>}
         {status?.pending && status.status === "syncing" && <p data-testid="gist-auto-update-pending">The newest saved version is pending behind the current upload.</p>}
         {status?.syncedAt && <p>Last synced at <time dateTime={status.syncedAt}>{new Date(status.syncedAt).toLocaleString()}</time>.</p>}
-        {status?.message && <p>{status.message}</p>}
+        {status?.message && <p className="max-w-full wrap-anywhere">{status.message}</p>}
       </div>
-      {problem && <p role="alert" className="text-xs text-ink-2">{LABELS[problem.status]}: {problem.message}</p>}
+      {problem && <p role="alert" className="max-w-full wrap-anywhere text-xs text-ink-2">{LABELS[problem.status]}: {problem.message}</p>}
       {problem && (problem.source === "enable" || problem.source === "disable" || problem.source === "retry") && (
         <p className="text-xs text-ink-3">Refresh status to confirm the setting and saved-version progress before trying again.</p>
       )}

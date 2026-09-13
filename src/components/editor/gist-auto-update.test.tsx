@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import {
   StrictMode,
   useEffect,
@@ -11,6 +13,7 @@ import {
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { compile } from "tailwindcss";
 import { api, ApiError } from "@/lib/api";
 import { GIST_AUTO_UPDATE_NOTICE, type GistAutoUpdateDestination, type GistAutoUpdateStatus } from "@/lib/gist-auto-update";
 import type { DocumentDto } from "@/server/dto";
@@ -584,6 +587,271 @@ describe("gist auto-update status and recovery", () => {
     expect(api.documents.setGistAutoUpdate).toHaveBeenCalledTimes(1);
     await act(async () => { fireEvent.click(screen.getByTestId("commit-submit")); });
     expect(onCommit).toHaveBeenCalledExactlyOnceWith("Keep this manual description");
+  });
+});
+
+describe("gist auto-update message wrapping", () => {
+  const unbroken = "MessageDetail".repeat(24);
+  const literal = '  <a href="https://example.test">Open</a> <img src=x> <button>Retry</button> & **literal**\n  ';
+  const messages = [
+    ["unbroken", unbroken],
+    ["ordinary", "GitHub could not publish this saved version. Review the destination before trying again."],
+    ["literal", literal],
+  ] as const;
+
+  function expectMessage(element: HTMLElement, message: string) {
+    expect(element.tagName).toBe("P");
+    expect(element.textContent).toBe(message);
+    expect(element.childElementCount).toBe(0);
+    expect(element.tabIndex).toBe(-1);
+    expect(element).not.toHaveAttribute("tabindex");
+    expect(element).not.toHaveAttribute("title");
+    expect(element).not.toHaveAttribute("hidden");
+    expect(element).not.toHaveAttribute("aria-hidden");
+    expect(element).not.toHaveAttribute("style");
+    expect(element).toHaveClass("max-w-full", "wrap-anywhere");
+    for (const className of ["break-all", "break-words", "truncate", "overflow-hidden", "overflow-auto", "whitespace-nowrap"]) {
+      expect(element).not.toHaveClass(className);
+    }
+  }
+
+  function inspectPassively(inspect: () => void) {
+    const root = screen.getByTestId("gist-auto-update");
+    const observer = observeMutations(root);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const microtask = vi.spyOn(globalThis, "queueMicrotask");
+    const animationFrame = vi.spyOn(globalThis, "requestAnimationFrame");
+    const focused = document.activeElement;
+    const markup = root.outerHTML;
+    const operations = externalOperations();
+    const timers = vi.getTimerCount();
+    try {
+      // Keep scheduling assertions inside this synchronous, already-settled inspection.
+      inspect();
+      expect(externalOperations()).toBe(operations);
+      expect(observer.takeRecords()).toHaveLength(0);
+      expect(root.outerHTML).toBe(markup);
+      expect(document.activeElement).toBe(focused);
+      expect(focus).not.toHaveBeenCalled();
+      expect(timeout).not.toHaveBeenCalled();
+      expect(interval).not.toHaveBeenCalled();
+      expect(microtask).not.toHaveBeenCalled();
+      expect(animationFrame).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(timers);
+    } finally {
+      observer.disconnect();
+      focus.mockRestore();
+      timeout.mockRestore();
+      interval.mockRestore();
+      microtask.mockRestore();
+      animationFrame.mockRestore();
+    }
+  }
+
+  it.each(messages)("preserves %s saved and failed-request text through replacement and recovery", async (_kind, message) => {
+    serverStatus = { ...PENDING, status: "synced", message };
+    await mount();
+    const root = screen.getByTestId("gist-auto-update");
+    const destination = screen.getByTestId("gist-auto-update-destination");
+    const destinationMarkup = destination.outerHTML;
+    const saved = screen.getByText(message, { normalizer: (text) => text });
+    const statusRegion = saved.parentElement;
+    vi.mocked(api.documents.gistAutoUpdate).mockRejectedValueOnce(new ApiError(503, message));
+    await advance();
+
+    inspectPassively(() => {
+      expectMessage(saved, message);
+      expectMessage(screen.getByRole("alert"), `Failed: ${message}`);
+      expect(saved).not.toHaveAttribute("role");
+      expect(statusRegion?.tagName).toBe("DIV");
+      expect(statusRegion).toHaveAttribute("role", "status");
+      expect(statusRegion).toHaveAttribute("aria-live", "polite");
+      expect(statusRegion).toHaveClass("text-xs", "text-ink-2");
+      expect(statusRegion?.parentElement).toBe(root);
+      expect(screen.getByRole("alert").parentElement).toBe(root);
+      expect(screen.getByRole("alert")).not.toHaveAttribute("aria-live");
+      expect(screen.getByRole("alert")).toHaveClass("text-xs", "text-ink-2");
+      expect(screen.getAllByRole("status")).toHaveLength(2);
+      expect(state()).toHaveAttribute("data-status", "failed");
+      expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+        "Refresh status", "Disable auto-update",
+      ]);
+      for (const button of screen.getAllByRole("button")) {
+        expect(button).toHaveAttribute("type", "button");
+        expect(button).toBeEnabled();
+      }
+      expect(screen.queryByRole("checkbox")).toBeNull();
+      expect(destination.outerHTML).toBe(destinationMarkup);
+      expect(destination).toHaveClass("break-all");
+      const link = screen.getByRole("link");
+      expect(link.tagName).toBe("A");
+      expect(link).toHaveAttribute("href", DESTINATION.url);
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link).toHaveAttribute("rel", "noopener noreferrer");
+      expect(screen.getByText(GIST_AUTO_UPDATE_NOTICE).textContent).toBe(GIST_AUTO_UPDATE_NOTICE);
+      expect(screen.getByText(/not one atomic operation/)).toBeInTheDocument();
+      expect(screen.getByText(/An update already in progress may still finish/)).toBeInTheDocument();
+    });
+
+    const oldRefresh = capturedButton(capturePresentation(), "Refresh status");
+    const replacement = `Replacement: ${unbroken}`;
+    vi.mocked(api.documents.gistAutoUpdate).mockRejectedValueOnce(new ApiError(503, replacement));
+    await click("Refresh status");
+    expectMessage(screen.getByRole("alert"), `Failed: ${replacement}`);
+    expect(saved.textContent).toBe(message);
+    const currentRefresh = capturedButton(capturePresentation(), "Refresh status");
+    const calls = vi.mocked(api.documents.gistAutoUpdate).mock.calls.length;
+    act(() => invokeButton(oldRefresh, currentRefresh.element));
+    await settle();
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(calls);
+
+    serverStatus = { ...PENDING, status: "synced", message: replacement };
+    act(() => {
+      const event = buttonEvent(currentRefresh.element);
+      currentRefresh.onClick(event);
+      currentRefresh.onClick(event);
+    });
+    await settle();
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(calls + 1);
+    expect(api.documents.gistAutoUpdate).toHaveBeenLastCalledWith(DOC.id);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Refresh status" })).toBeNull();
+    expect(screen.queryByText(message, { normalizer: (text) => text })).toBeNull();
+    expectMessage(screen.getByText(replacement), replacement);
+    for (const absent of [null, ""]) {
+      serverStatus = { ...PENDING, status: "synced", message: absent };
+      await advance();
+      expect(statusRegion?.childElementCount).toBe(0);
+      expect(screen.queryByText(replacement)).toBeNull();
+    }
+    expect(api.documents.gistAutoUpdatePreview).not.toHaveBeenCalled();
+    expect(api.documents.setGistAutoUpdate).not.toHaveBeenCalled();
+    expect(api.documents.retryGistAutoUpdate).not.toHaveBeenCalled();
+  });
+
+  it("clears old messages and Refresh ownership on document switch and removal", async () => {
+    const message = `${unbroken} ${literal}`;
+    serverStatus = { ...PENDING, status: "synced", message };
+    const view = await mount();
+    vi.mocked(api.documents.gistAutoUpdate).mockRejectedValueOnce(new ApiError(503, message));
+    await advance();
+    const oldRefresh = capturedButton(capturePresentation(), "Refresh status");
+    const nextDoc = { ...DOC, id: "next-message-document" };
+    serverStatus = { ...OFF };
+    view.rerender(<GistAutoUpdateControl doc={nextDoc} isOwner />);
+    await settle();
+    expect(screen.queryByText(message, { normalizer: (text) => text })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(api.documents.gistAutoUpdate).toHaveBeenLastCalledWith(nextDoc.id);
+
+    const nextMessage = `Current document: ${message}`;
+    vi.mocked(api.documents.gistAutoUpdate).mockRejectedValueOnce(new ApiError(503, nextMessage));
+    await advance();
+    expectMessage(screen.getByRole("alert"), `Failed: ${nextMessage}`);
+    const currentRefresh = capturedButton(capturePresentation(), "Refresh status");
+    const calls = vi.mocked(api.documents.gistAutoUpdate).mock.calls.length;
+    act(() => invokeButton(oldRefresh, currentRefresh.element));
+    await settle();
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(calls);
+    await click("Refresh status");
+    expect(api.documents.gistAutoUpdate).toHaveBeenCalledTimes(calls + 1);
+    expect(api.documents.gistAutoUpdate).toHaveBeenLastCalledWith(nextDoc.id);
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    serverStatus = { ...OFF, message: nextMessage };
+    await advance();
+    vi.mocked(api.documents.gistAutoUpdate).mockRejectedValueOnce(new ApiError(503, nextMessage));
+    await advance();
+    const removedRefresh = capturedButton(capturePresentation(), "Refresh status");
+    const operations = externalOperations();
+    view.unmount();
+    act(() => {
+      invokeButton(oldRefresh);
+      invokeButton(currentRefresh);
+      invokeButton(removedRefresh);
+    });
+    await settle();
+    expect(screen.queryByTestId("gist-auto-update")).toBeNull();
+    expect(screen.queryByText(nextMessage, { normalizer: (text) => text })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(externalOperations()).toBe(operations);
+  });
+
+  it.each(["preview", "enable", "disable", "retry"] as const)("keeps %s failure recovery and consent controls with long literal text", async (source) => {
+    const message = `${unbroken} ${literal}`;
+    serverStatus = source === "retry"
+      ? { ...PENDING, status: "failed" }
+      : source === "disable" ? { ...PENDING } : { ...OFF };
+    await mount();
+    const error = new ApiError(503, message);
+    if (source === "preview") {
+      vi.mocked(api.documents.gistAutoUpdatePreview).mockRejectedValueOnce(error);
+      await click("Check linked gist");
+    } else if (source === "retry") {
+      vi.mocked(api.documents.retryGistAutoUpdate).mockRejectedValueOnce(error);
+      await click("Retry latest saved version");
+    } else {
+      if (source === "enable") await consent();
+      vi.mocked(api.documents.setGistAutoUpdate).mockRejectedValueOnce(error);
+      await click(source === "enable" ? "Enable auto-update" : "Disable auto-update");
+    }
+    const writeCalls = vi.mocked(api.documents.setGistAutoUpdate).mock.calls.length;
+    const retryCalls = vi.mocked(api.documents.retryGistAutoUpdate).mock.calls.length;
+    inspectPassively(() => {
+      expectMessage(screen.getByRole("alert"), `Failed: ${message}`);
+      expect(screen.getByRole("button", { name: "Refresh status" })).toBeEnabled();
+      expect(screen.queryByRole("checkbox")).toBeNull();
+      if (source === "enable" || source === "preview") {
+        expect(screen.getByRole("button", { name: "Enable auto-update" })).toBeDisabled();
+        expect(screen.getByRole("button", { name: "Check linked gist" })).toBeEnabled();
+      } else {
+        expect(screen.getByRole("button", { name: "Disable auto-update" })).toBeEnabled();
+      }
+      if (source !== "preview") {
+        expect(screen.getByText("Refresh status to confirm the setting and saved-version progress before trying again.")).toBeInTheDocument();
+      }
+    });
+    await click("Refresh status");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(api.documents.setGistAutoUpdate).toHaveBeenCalledTimes(writeCalls);
+    expect(api.documents.retryGistAutoUpdate).toHaveBeenCalledTimes(retryCalls);
+    if (source === "preview" || source === "enable") {
+      await click("Check linked gist");
+      expect(screen.getByRole("checkbox")).not.toBeChecked();
+      expect(screen.getByRole("button", { name: "Enable auto-update" })).toBeDisabled();
+      await act(async () => { fireEvent.click(screen.getByRole("checkbox")); });
+      expect(screen.getByRole("button", { name: "Enable auto-update" })).toBeEnabled();
+    }
+  });
+
+  it("preserves the Conflict prefix and no-overwrite guidance for long saved and retry messages", async () => {
+    const message = `${unbroken} ${literal}`;
+    serverStatus = { ...PENDING, status: "conflict", message };
+    vi.mocked(api.documents.retryGistAutoUpdate).mockRejectedValueOnce(new ApiError(409, message, undefined, { status: "conflict" }));
+    await mount();
+    expectMessage(screen.getByText(message, { normalizer: (text) => text }), message);
+    await click("Retry latest saved version");
+    inspectPassively(() => {
+      expectMessage(screen.getByRole("alert"), `Conflict: ${message}`);
+      expect(state()).toHaveAttribute("data-status", "conflict");
+      expect(screen.getByText(/Manually reconcile/)).toHaveTextContent("Retry does not force an overwrite or resolve a known conflict.");
+      expect(screen.getByRole("button", { name: "Retry latest saved version" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Disable auto-update" })).toBeEnabled();
+    });
+    expect(api.documents.retryGistAutoUpdate).toHaveBeenCalledExactlyOnceWith(DOC.id);
+    expect(api.documents.setGistAutoUpdate).not.toHaveBeenCalled();
+  });
+
+  it("emits anywhere wrapping and available-column bounds from installed Tailwind", async () => {
+    expect(unbroken.length).toBeGreaterThanOrEqual(240);
+    expect(unbroken).not.toMatch(/\s/);
+    const theme = readFileSync(createRequire(import.meta.url).resolve("tailwindcss/theme.css"), "utf8");
+    const { build } = await compile(`${theme}\n@tailwind utilities;`);
+    const css = build(["max-w-full", "wrap-anywhere"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).toMatch(/\.max-w-full\s*\{\s*max-width:\s*100%;\s*\}/);
   });
 });
 
