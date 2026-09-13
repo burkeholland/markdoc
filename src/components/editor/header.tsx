@@ -7243,6 +7243,14 @@ class LayoutSegmentPublicationCoordinator {
   #claimedPublications = new WeakSet<LayoutSegmentPublication>();
   #claimedActions = new WeakSet<object>();
   #claimedEvents = new WeakSet<object>();
+  #claimedDeliveryParts = new WeakSet<object>();
+  #activeDelivery: {
+    readonly publication: LayoutSegmentPublication;
+    readonly action: object;
+    readonly events: readonly object[];
+    readonly parts: readonly object[];
+    readonly delivery: object;
+  } | null = null;
 
   constructor(private readonly mount: symbol) {}
 
@@ -7309,11 +7317,16 @@ class LayoutSegmentPublicationCoordinator {
     event: object,
     nativeEvent: Event,
   ) {
+    const active = this.#activeDelivery;
     return (
       this.#claimedPublications.has(publication)
       || this.#claimedActions.has(action)
       || this.#claimedEvents.has(event)
       || this.#claimedEvents.has(nativeEvent)
+      || active?.publication === publication
+      || active?.action === action
+      || active?.events.includes(event)
+      || active?.events.includes(nativeEvent)
     );
   }
 
@@ -7325,6 +7338,7 @@ class LayoutSegmentPublicationCoordinator {
   ) {
     if (
       !this.isCurrent(publication)
+      || this.#activeDelivery
       || this.hasClaimed(publication, action, event, nativeEvent)
     ) {
       return false;
@@ -7334,6 +7348,64 @@ class LayoutSegmentPublicationCoordinator {
     this.#claimedEvents.add(event);
     this.#claimedEvents.add(nativeEvent);
     return true;
+  }
+
+  claimDelivery(
+    publication: LayoutSegmentPublication,
+    action: object,
+    events: readonly object[],
+    parts: readonly object[],
+    delivery: object,
+  ) {
+    const deliveryParts = [...parts, delivery];
+    if (
+      !this.isCurrent(publication)
+      || this.#activeDelivery
+      || this.#claimedPublications.has(publication)
+      || this.#claimedActions.has(action)
+      || events.some((event) => this.#claimedEvents.has(event))
+      || deliveryParts.some((part) => this.#claimedDeliveryParts.has(part))
+      || new Set([...events, ...deliveryParts]).size !== events.length + deliveryParts.length
+    ) {
+      return false;
+    }
+    this.#activeDelivery = Object.freeze({
+      publication,
+      action,
+      events: Object.freeze([...events]),
+      parts: Object.freeze(deliveryParts),
+      delivery,
+    });
+    return true;
+  }
+
+  deliveryIsActive(delivery: object) {
+    return this.#activeDelivery?.delivery === delivery;
+  }
+
+  commitDelivery(delivery: object) {
+    const active = this.#activeDelivery;
+    if (
+      !active
+      || active.delivery !== delivery
+      || !this.isCurrent(active.publication)
+      || this.#claimedPublications.has(active.publication)
+      || this.#claimedActions.has(active.action)
+      || active.events.some((event) => this.#claimedEvents.has(event))
+      || active.parts.some((part) => this.#claimedDeliveryParts.has(part))
+    ) {
+      return false;
+    }
+    this.#claimedPublications.add(active.publication);
+    this.#claimedActions.add(active.action);
+    for (const event of active.events) this.#claimedEvents.add(event);
+    for (const part of active.parts) this.#claimedDeliveryParts.add(part);
+    this.#activeDelivery = null;
+    return true;
+  }
+
+  finishDelivery(delivery: object) {
+    if (this.#activeDelivery?.delivery === delivery) this.#activeDelivery = null;
   }
 }
 
@@ -7672,38 +7744,76 @@ function layoutSegmentAuthoritiesMatch(
   );
 }
 
-type LayoutSegmentIntrinsicGetter<T> = (target: object) => T;
-type LayoutSegmentIntrinsicMethod<A extends readonly unknown[], R> =
-  (target: object, ...args: A) => R;
+interface LayoutSegmentIntrinsicGetter<T> {
+  readonly read: (target: object) => T;
+  readonly isCurrent: () => boolean;
+}
+
+interface LayoutSegmentIntrinsicMethod<A extends readonly unknown[], R> {
+  readonly invoke: (target: object, ...args: A) => R;
+  readonly isCurrent: () => boolean;
+}
+
+interface LayoutSegmentWindowMethod {
+  readonly value: (...args: unknown[]) => unknown;
+  readonly isCurrent: () => boolean;
+}
+
+interface LayoutSegmentUnforgeableGetter<T> {
+  readonly read: (target: object) => T;
+  readonly matches: (target: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
 
 function layoutSegmentDescriptorsMatch(
   current: PropertyDescriptor | undefined,
-  expected: PropertyDescriptor,
+  expected: Readonly<PropertyDescriptor>,
 ) {
-  return Boolean(
-    current
-    && current.configurable === expected.configurable
-    && current.enumerable === expected.enumerable
+  if (!current) return false;
+  if (
+    current.configurable !== expected.configurable
+    || current.enumerable !== expected.enumerable
+  ) {
+    return false;
+  }
+  if ("value" in expected) {
+    return (
+      "value" in current
+      && current.value === expected.value
+      && current.writable === expected.writable
+    );
+  }
+  return (
+    !("value" in current)
     && current.get === expected.get
     && current.set === expected.set
-    && current.value === expected.value
-    && current.writable === expected.writable
   );
 }
 
 function captureLayoutSegmentIntrinsicGetter<T>(
   prototype: object,
   property: string,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  getPrototypeOf: typeof Object.getPrototypeOf,
+  apply: typeof Reflect.apply,
 ): LayoutSegmentIntrinsicGetter<T> | null {
   let current: object | null = prototype;
   while (current) {
-    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    const descriptor = getOwnPropertyDescriptor(current, property);
     if (descriptor) {
       if (typeof descriptor.get !== "function") return null;
       const getter = descriptor.get;
-      return (target) => Reflect.apply(getter, target, []) as T;
+      const expected = Object.freeze({ ...descriptor });
+      return Object.freeze({
+        read: (target: object) => apply(getter, target, []) as T,
+        isCurrent: () =>
+          layoutSegmentDescriptorsMatch(
+            getOwnPropertyDescriptor(current!, property),
+            expected,
+          ),
+      });
     }
-    current = Object.getPrototypeOf(current) as object | null;
+    current = getPrototypeOf(current) as object | null;
   }
   return null;
 }
@@ -7711,180 +7821,262 @@ function captureLayoutSegmentIntrinsicGetter<T>(
 function captureLayoutSegmentIntrinsicMethod<A extends readonly unknown[], R>(
   prototype: object,
   property: string,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  getPrototypeOf: typeof Object.getPrototypeOf,
+  apply: typeof Reflect.apply,
 ): LayoutSegmentIntrinsicMethod<A, R> | null {
   let current: object | null = prototype;
   while (current) {
-    const descriptor = Object.getOwnPropertyDescriptor(current, property);
+    const descriptor = getOwnPropertyDescriptor(current, property);
     if (descriptor) {
       if (typeof descriptor.value !== "function") return null;
       const method = descriptor.value as (...args: A) => R;
-      return (target, ...args) => Reflect.apply(method, target, args) as R;
+      const expected = Object.freeze({ ...descriptor });
+      return Object.freeze({
+        invoke: (target: object, ...args: A) => apply(method, target, args) as R,
+        isCurrent: () =>
+          layoutSegmentDescriptorsMatch(
+            getOwnPropertyDescriptor(current!, property),
+            expected,
+          ),
+      });
     }
-    current = Object.getPrototypeOf(current) as object | null;
+    current = getPrototypeOf(current) as object | null;
   }
   return null;
 }
 
-interface LayoutSegmentTrustedAuthority {
-  readonly read: (event: object) => boolean;
-  readonly matches: (event: object) => boolean;
-  readonly isCurrent: () => boolean;
+function captureLayoutSegmentWindowMethod(
+  ownerWindow: Window & typeof globalThis,
+  property: "addEventListener" | "removeEventListener",
+): LayoutSegmentWindowMethod | null {
+  const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(Object.freeze({
+      target,
+      descriptor: descriptor ? Object.freeze({ ...descriptor }) : null,
+      prototype,
+    }));
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(ownerWindow, property, ownerWindow);
+  if (!found || typeof value !== "function") return null;
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
+    && ownerWindow.Object.getPrototypeOf === getPrototypeOf
+    && ownerWindow.Reflect.get === reflectGet
+    && path.every(({ target: entry, descriptor, prototype }) => {
+      const current = getOwnPropertyDescriptor(entry, property);
+      return (
+        getPrototypeOf(entry) === prototype
+        && (descriptor
+          ? layoutSegmentDescriptorsMatch(current, descriptor)
+          : current === undefined)
+      );
+    })
+    && reflectGet(ownerWindow, property, ownerWindow) === value;
+  return isCurrent()
+    ? Object.freeze({
+        value: value as (...args: unknown[]) => unknown,
+        isCurrent,
+      })
+    : null;
 }
 
-function captureLayoutSegmentTrustedAuthority(
-  view: Window & typeof globalThis,
-): LayoutSegmentTrustedAuthority | null {
-  let probe: KeyboardEvent;
-  try {
-    probe = new view.KeyboardEvent("layout-segment-keyboard-intrinsic");
-  } catch {
-    return null;
-  }
-  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
-  const apply = view.Reflect.apply;
-  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
-  if (
-    !descriptor
-    || descriptor.configurable !== false
-    || typeof descriptor.get !== "function"
-    || descriptor.set !== undefined
-  ) {
-    return null;
-  }
+function captureLayoutSegmentUnforgeableGetter<T>(
+  owner: object,
+  property: string,
+  getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor,
+  apply: typeof Reflect.apply,
+): LayoutSegmentUnforgeableGetter<T> | null {
+  const descriptor = getOwnPropertyDescriptor(owner, property);
+  if (!descriptor?.get || "value" in descriptor) return null;
   const expected = Object.freeze({ ...descriptor });
-  const matches = (event: object) =>
+  const getter = descriptor.get;
+  const matches = (target: object) =>
     layoutSegmentDescriptorsMatch(
-      getOwnPropertyDescriptor(event, "isTrusted"),
+      getOwnPropertyDescriptor(target, property),
       expected,
     );
   return Object.freeze({
+    read: (target: object) => apply(getter, target, []) as T,
     matches,
-    read: (event: object) =>
-      apply(descriptor.get as (this: object) => boolean, event, []),
-    isCurrent: () =>
-      view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
-      && view.Reflect.apply === apply
-      && matches(probe),
+    isCurrent: () => matches(owner),
   });
+}
+
+interface LayoutSegmentNativeKeyboardFacts {
+  readonly type: string;
+  readonly currentTarget: EventTarget | null;
+  readonly phase: number;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly defaultPrevented: boolean;
+  readonly cancelBubble: boolean;
+  readonly target: EventTarget | null;
+  readonly path: readonly EventTarget[];
+  readonly isTrusted: boolean;
+  readonly timeStamp: number;
+  readonly view: EventTarget | null;
+  readonly composed: boolean;
+  readonly detail: number;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly repeat: boolean;
+  readonly composing: boolean;
+  readonly altKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly shiftKey: boolean;
+  readonly charCode: number;
+  readonly keyCode: number;
+  readonly which: number;
 }
 
 interface LayoutSegmentKeyboardAuthority {
   readonly view: Window & typeof globalThis;
-  readonly trusted: LayoutSegmentTrustedAuthority;
-  readonly eventType: LayoutSegmentIntrinsicGetter<string>;
-  readonly eventTarget: LayoutSegmentIntrinsicGetter<EventTarget | null>;
-  readonly eventPhase: LayoutSegmentIntrinsicGetter<number>;
-  readonly eventBubbles: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly eventCancelable: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly eventComposed: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly eventDefaultPrevented: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly eventCancelBubble: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly eventTimeStamp: LayoutSegmentIntrinsicGetter<number>;
-  readonly eventPath: LayoutSegmentIntrinsicMethod<readonly [], EventTarget[]>;
-  readonly preventDefault: LayoutSegmentIntrinsicMethod<readonly [], void>;
-  readonly key: LayoutSegmentIntrinsicGetter<string>;
-  readonly code: LayoutSegmentIntrinsicGetter<string>;
-  readonly location: LayoutSegmentIntrinsicGetter<number>;
-  readonly repeat: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly composing: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly altKey: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly ctrlKey: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly metaKey: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly shiftKey: LayoutSegmentIntrinsicGetter<boolean>;
-  readonly eventView: LayoutSegmentIntrinsicGetter<Window | null>;
-  readonly activeElement: LayoutSegmentIntrinsicGetter<Element | null>;
+  readonly capturingPhase: number;
+  readonly bubblingPhase: number;
+  readonly apply: typeof Reflect.apply;
+  readonly readTarget: (event: object) => EventTarget | null | undefined;
+  readonly readKeyboard: (
+    event: object,
+  ) => LayoutSegmentNativeKeyboardFacts | null;
+  readonly activeElement: () => Element | null | undefined;
   readonly focus: LayoutSegmentIntrinsicMethod<readonly [FocusOptions?], void>;
+  readonly addEventListener: LayoutSegmentWindowMethod;
+  readonly removeEventListener: LayoutSegmentWindowMethod;
 }
 
 function captureLayoutSegmentKeyboardAuthority(
   publication: LayoutSegmentPublication,
 ): LayoutSegmentKeyboardAuthority | null {
   const { ownerDocument, ownerRealm: view } = publication;
-  const eventPrototype = view.Event.prototype;
-  const uiEventPrototype = view.UIEvent.prototype;
-  const keyboardPrototype = view.KeyboardEvent.prototype;
-  const trusted = captureLayoutSegmentTrustedAuthority(view);
-  const eventType = captureLayoutSegmentIntrinsicGetter<string>(eventPrototype, "type");
-  const eventTarget = captureLayoutSegmentIntrinsicGetter<EventTarget | null>(eventPrototype, "target");
-  const eventPhase = captureLayoutSegmentIntrinsicGetter<number>(eventPrototype, "eventPhase");
-  const eventBubbles = captureLayoutSegmentIntrinsicGetter<boolean>(eventPrototype, "bubbles");
-  const eventCancelable = captureLayoutSegmentIntrinsicGetter<boolean>(eventPrototype, "cancelable");
-  const eventComposed = captureLayoutSegmentIntrinsicGetter<boolean>(eventPrototype, "composed");
-  const eventDefaultPrevented = captureLayoutSegmentIntrinsicGetter<boolean>(eventPrototype, "defaultPrevented");
-  const eventCancelBubble = captureLayoutSegmentIntrinsicGetter<boolean>(eventPrototype, "cancelBubble");
-  const eventTimeStamp = captureLayoutSegmentIntrinsicGetter<number>(eventPrototype, "timeStamp");
-  const eventPath = captureLayoutSegmentIntrinsicMethod<readonly [], EventTarget[]>(
+  const objectConstructor = view.Object;
+  const reflectObject = view.Reflect;
+  const eventConstructor = view.Event;
+  const uiEventConstructor = view.UIEvent;
+  const keyboardConstructor = view.KeyboardEvent;
+  const documentConstructor = view.Document;
+  const htmlElementConstructor = view.HTMLElement;
+  const eventPrototype = eventConstructor.prototype;
+  const uiEventPrototype = uiEventConstructor.prototype;
+  const keyboardPrototype = keyboardConstructor.prototype;
+  const documentPrototype = documentConstructor.prototype;
+  const htmlElementPrototype = htmlElementConstructor.prototype;
+  const getOwnPropertyDescriptor = objectConstructor.getOwnPropertyDescriptor;
+  const getPrototypeOf = objectConstructor.getPrototypeOf;
+  const apply = reflectObject.apply;
+  const getter = <T,>(prototype: object, property: string) =>
+    captureLayoutSegmentIntrinsicGetter<T>(
+      prototype,
+      property,
+      getOwnPropertyDescriptor,
+      getPrototypeOf,
+      apply,
+    );
+  const method = <A extends readonly unknown[], R>(
+    prototype: object,
+    property: string,
+  ) =>
+    captureLayoutSegmentIntrinsicMethod<A, R>(
+      prototype,
+      property,
+      getOwnPropertyDescriptor,
+      getPrototypeOf,
+      apply,
+    );
+  const eventType = getter<string>(eventPrototype, "type");
+  const eventTarget = getter<EventTarget | null>(eventPrototype, "target");
+  const eventCurrentTarget = getter<EventTarget | null>(
+    eventPrototype,
+    "currentTarget",
+  );
+  const eventPhase = getter<number>(eventPrototype, "eventPhase");
+  const eventBubbles = getter<boolean>(eventPrototype, "bubbles");
+  const eventCancelable = getter<boolean>(eventPrototype, "cancelable");
+  const eventDefaultPrevented = getter<boolean>(
+    eventPrototype,
+    "defaultPrevented",
+  );
+  const eventCancelBubble = getter<boolean>(eventPrototype, "cancelBubble");
+  const eventComposed = getter<boolean>(eventPrototype, "composed");
+  const eventTimeStamp = getter<number>(eventPrototype, "timeStamp");
+  const eventPath = method<readonly [], EventTarget[]>(
     eventPrototype,
     "composedPath",
   );
-  const preventDefault = captureLayoutSegmentIntrinsicMethod<readonly [], void>(
-    eventPrototype,
-    "preventDefault",
-  );
-  const key = captureLayoutSegmentIntrinsicGetter<string>(keyboardPrototype, "key");
-  const code = captureLayoutSegmentIntrinsicGetter<string>(keyboardPrototype, "code");
-  const location = captureLayoutSegmentIntrinsicGetter<number>(keyboardPrototype, "location");
-  const repeat = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "repeat");
-  const composing = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "isComposing");
-  const altKey = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "altKey");
-  const ctrlKey = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "ctrlKey");
-  const metaKey = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "metaKey");
-  const shiftKey = captureLayoutSegmentIntrinsicGetter<boolean>(keyboardPrototype, "shiftKey");
-  const eventView = captureLayoutSegmentIntrinsicGetter<Window | null>(
-    uiEventPrototype,
-    "view",
-  );
-  const activeElement = captureLayoutSegmentIntrinsicGetter<Element | null>(
-    view.Document.prototype,
+  const eventView = getter<EventTarget | null>(uiEventPrototype, "view");
+  const eventDetail = getter<number>(uiEventPrototype, "detail");
+  const key = getter<string>(keyboardPrototype, "key");
+  const code = getter<string>(keyboardPrototype, "code");
+  const location = getter<number>(keyboardPrototype, "location");
+  const repeat = getter<boolean>(keyboardPrototype, "repeat");
+  const composing = getter<boolean>(keyboardPrototype, "isComposing");
+  const altKey = getter<boolean>(keyboardPrototype, "altKey");
+  const ctrlKey = getter<boolean>(keyboardPrototype, "ctrlKey");
+  const metaKey = getter<boolean>(keyboardPrototype, "metaKey");
+  const shiftKey = getter<boolean>(keyboardPrototype, "shiftKey");
+  const charCode = getter<number>(keyboardPrototype, "charCode");
+  const keyCode = getter<number>(keyboardPrototype, "keyCode");
+  const which = getter<number>(keyboardPrototype, "which");
+  const activeElement = getter<Element | null>(
+    documentPrototype,
     "activeElement",
   );
-  const focus = captureLayoutSegmentIntrinsicMethod<readonly [FocusOptions?], void>(
-    view.HTMLElement.prototype,
+  const focus = method<readonly [FocusOptions?], void>(
+    htmlElementPrototype,
     "focus",
   );
-  if (
-    !trusted
-    || !eventType
-    || !eventTarget
-    || !eventPhase
-    || !eventBubbles
-    || !eventCancelable
-    || !eventComposed
-    || !eventDefaultPrevented
-    || !eventCancelBubble
-    || !eventTimeStamp
-    || !eventPath
-    || !preventDefault
-    || !key
-    || !code
-    || !location
-    || !repeat
-    || !composing
-    || !altKey
-    || !ctrlKey
-    || !metaKey
-    || !shiftKey
-    || !eventView
-    || !activeElement
-    || !focus
-    || ownerDocument.defaultView !== view
-  ) {
+  const addEventListener = captureLayoutSegmentWindowMethod(
+    view,
+    "addEventListener",
+  );
+  const removeEventListener = captureLayoutSegmentWindowMethod(
+    view,
+    "removeEventListener",
+  );
+  let probe: KeyboardEvent;
+  try {
+    probe = new keyboardConstructor("layout-segment-keyboard-proof");
+  } catch {
     return null;
   }
-  return Object.freeze({
-    view,
-    trusted,
+  const trusted = captureLayoutSegmentUnforgeableGetter<boolean>(
+    probe,
+    "isTrusted",
+    getOwnPropertyDescriptor,
+    apply,
+  );
+  const getters = Object.freeze([
     eventType,
     eventTarget,
+    eventCurrentTarget,
     eventPhase,
     eventBubbles,
     eventCancelable,
-    eventComposed,
     eventDefaultPrevented,
     eventCancelBubble,
+    eventComposed,
     eventTimeStamp,
-    eventPath,
-    preventDefault,
+    eventView,
+    eventDetail,
     key,
     code,
     location,
@@ -7894,9 +8086,153 @@ function captureLayoutSegmentKeyboardAuthority(
     ctrlKey,
     metaKey,
     shiftKey,
-    eventView,
+    charCode,
+    keyCode,
+    which,
     activeElement,
+  ]);
+  const methods = Object.freeze([eventPath, focus]);
+  if (
+    getters.some((intrinsic) => !intrinsic || !intrinsic.isCurrent())
+    || methods.some((intrinsic) => !intrinsic || !intrinsic.isCurrent())
+    || !eventType
+    || !eventTarget
+    || !eventCurrentTarget
+    || !eventPhase
+    || !eventBubbles
+    || !eventCancelable
+    || !eventDefaultPrevented
+    || !eventCancelBubble
+    || !eventComposed
+    || !eventTimeStamp
+    || !eventPath
+    || !eventView
+    || !eventDetail
+    || !key
+    || !code
+    || !location
+    || !repeat
+    || !composing
+    || !altKey
+    || !ctrlKey
+    || !metaKey
+    || !shiftKey
+    || !charCode
+    || !keyCode
+    || !which
+    || !activeElement
+    || !focus
+    || !trusted
+    || !trusted.isCurrent()
+    || !addEventListener
+    || !addEventListener.isCurrent()
+    || !removeEventListener
+    || !removeEventListener.isCurrent()
+    || ownerDocument.defaultView !== view
+  ) {
+    return null;
+  }
+  let historyIsClean = true;
+  const intrinsicsAreCurrent = () => {
+    if (!historyIsClean) return false;
+    historyIsClean = (
+      ownerDocument.defaultView === view
+      && objectConstructor === view.Object
+      && reflectObject === view.Reflect
+      && eventConstructor === view.Event
+      && uiEventConstructor === view.UIEvent
+      && keyboardConstructor === view.KeyboardEvent
+      && documentConstructor === view.Document
+      && htmlElementConstructor === view.HTMLElement
+      && eventPrototype === eventConstructor.prototype
+      && uiEventPrototype === uiEventConstructor.prototype
+      && keyboardPrototype === keyboardConstructor.prototype
+      && documentPrototype === documentConstructor.prototype
+      && htmlElementPrototype === htmlElementConstructor.prototype
+      && view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
+      && view.Object.getPrototypeOf === getPrototypeOf
+      && view.Reflect.apply === apply
+      && getters.every((intrinsic) => intrinsic?.isCurrent() === true)
+      && methods.every((intrinsic) => intrinsic?.isCurrent() === true)
+      && trusted.isCurrent()
+      && addEventListener.isCurrent()
+      && removeEventListener.isCurrent()
+    );
+    return historyIsClean;
+  };
+  return Object.freeze({
+    view,
+    capturingPhase: eventConstructor.CAPTURING_PHASE,
+    bubblingPhase: eventConstructor.BUBBLING_PHASE,
+    apply,
+    readTarget: (event: object) => {
+      try {
+        if (
+          !intrinsicsAreCurrent()
+          || getPrototypeOf(event) !== keyboardPrototype
+          || !trusted.matches(event)
+          || trusted.read(event) !== true
+        ) {
+          return undefined;
+        }
+        return eventTarget.read(event);
+      } catch {
+        return undefined;
+      }
+    },
+    readKeyboard: (event: object) => {
+      try {
+        if (
+          !intrinsicsAreCurrent()
+          || getPrototypeOf(event) !== keyboardPrototype
+          || !trusted.matches(event)
+          || trusted.read(event) !== true
+        ) {
+          return null;
+        }
+        return Object.freeze({
+          type: eventType.read(event),
+          currentTarget: eventCurrentTarget.read(event),
+          phase: eventPhase.read(event),
+          bubbles: eventBubbles.read(event),
+          cancelable: eventCancelable.read(event),
+          defaultPrevented: eventDefaultPrevented.read(event),
+          cancelBubble: eventCancelBubble.read(event),
+          target: eventTarget.read(event),
+          path: Object.freeze([...eventPath.invoke(event)]),
+          isTrusted: trusted.read(event),
+          timeStamp: eventTimeStamp.read(event),
+          view: eventView.read(event),
+          composed: eventComposed.read(event),
+          detail: eventDetail.read(event),
+          key: key.read(event),
+          code: code.read(event),
+          location: location.read(event),
+          repeat: repeat.read(event),
+          composing: composing.read(event),
+          altKey: altKey.read(event),
+          ctrlKey: ctrlKey.read(event),
+          metaKey: metaKey.read(event),
+          shiftKey: shiftKey.read(event),
+          charCode: charCode.read(event),
+          keyCode: keyCode.read(event),
+          which: which.read(event),
+        });
+      } catch {
+        return null;
+      }
+    },
+    activeElement: () => {
+      if (!intrinsicsAreCurrent()) return undefined;
+      try {
+        return activeElement.read(ownerDocument);
+      } catch {
+        return undefined;
+      }
+    },
     focus,
+    addEventListener,
+    removeEventListener,
   });
 }
 
@@ -7913,103 +8249,520 @@ function layoutSegmentDestination(
   return null;
 }
 
-function exactNativeLayoutSegmentKey(
+interface LayoutSegmentWindowProof {
+  readonly registration: LayoutSegmentKeyListener;
+  readonly publication: LayoutSegmentPublication;
+  readonly nativeEvent: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface LayoutSegmentKeyListener {
+  readonly proofFor: (
+    event: KeyboardEvent,
+    publication: LayoutSegmentPublication,
+  ) => LayoutSegmentWindowProof | null;
+  readonly retains: (
+    proof: LayoutSegmentWindowProof,
+    publication: LayoutSegmentPublication,
+  ) => boolean;
+  readonly activate: (publication: LayoutSegmentPublication) => boolean;
+  readonly release: (publication: LayoutSegmentPublication) => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface LayoutSegmentReactKeyboardMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
+  readonly isDefaultPrevented: (...args: never[]) => unknown;
+  readonly isPropagationStopped: (...args: never[]) => unknown;
+}
+
+function isLayoutSegmentReactMethod(
+  value: unknown,
+): value is LayoutSegmentReactKeyboardMethods["isDefaultPrevented"] {
+  return typeof value === "function";
+}
+
+interface LayoutSegmentReactKeyboardSnapshot {
+  readonly event: React.KeyboardEvent<HTMLButtonElement>;
+  readonly nativeEvent: KeyboardEvent;
+  readonly target: HTMLButtonElement;
+  readonly currentTarget: HTMLButtonElement;
+  readonly phase: number;
+  readonly view: React.KeyboardEvent<HTMLButtonElement>["view"];
+  readonly composing: unknown;
+  readonly methods: LayoutSegmentReactKeyboardMethods;
+}
+
+interface LayoutSegmentMovement {
+  readonly identity: symbol;
+  readonly publication: LayoutSegmentPublication;
+  readonly sourceRow: LayoutSegmentRowPresentation;
+  readonly destinationRow: LayoutSegmentRowPresentation;
+  readonly source: HTMLButtonElement;
+  readonly destination: HTMLButtonElement;
+  readonly key: string;
+}
+
+interface LayoutSegmentKeyPair {
+  readonly publication: LayoutSegmentPublication;
+  readonly action: object;
+  readonly native: LayoutSegmentNativeKeyboardFacts;
+  readonly nativeEvent: KeyboardEvent;
+  readonly capture: LayoutSegmentReactKeyboardSnapshot;
+  readonly windowProof: LayoutSegmentWindowProof;
+  readonly sourceRow: LayoutSegmentRowPresentation;
+  readonly destinationRow: LayoutSegmentRowPresentation;
+  readonly source: HTMLButtonElement;
+  readonly destination: HTMLButtonElement;
+  readonly key: string;
+  readonly movement: LayoutSegmentMovement;
+  readonly publicationClaim: object;
+  readonly sourceClaim: object;
+  readonly destinationClaim: object;
+  readonly captureClaim: object;
+  readonly nativeClaim: object;
+  readonly windowClaim: object;
+}
+
+interface LayoutSegmentPairingStore {
+  readonly isDisposed: () => boolean;
+  readonly isInvalid: (event: KeyboardEvent) => boolean;
+  readonly has: (event: KeyboardEvent) => boolean;
+  readonly stage: (
+    event: KeyboardEvent,
+    pair: LayoutSegmentKeyPair,
+  ) => boolean;
+  readonly get: (event: KeyboardEvent) => LayoutSegmentKeyPair | null;
+  readonly begin: (
+    event: KeyboardEvent,
+    pair: LayoutSegmentKeyPair,
+  ) => boolean;
+  readonly finish: (
+    event: KeyboardEvent,
+    pair: LayoutSegmentKeyPair,
+  ) => void;
+  readonly consume: (
+    event: KeyboardEvent,
+    pair: LayoutSegmentKeyPair,
+  ) => boolean;
+  readonly invalidate: (event: KeyboardEvent) => void;
+  readonly dispose: () => void;
+}
+
+interface LayoutSegmentKeyDelivery {
+  readonly pair: LayoutSegmentKeyPair;
+  readonly bubble: LayoutSegmentReactKeyboardSnapshot;
+}
+
+function createLayoutSegmentPairingStore(): LayoutSegmentPairingStore {
+  let pairs: WeakMap<KeyboardEvent, LayoutSegmentKeyPair> | null = new WeakMap();
+  let active: WeakMap<KeyboardEvent, LayoutSegmentKeyPair> | null = new WeakMap();
+  let invalid: WeakSet<KeyboardEvent> | null = new WeakSet();
+  let disposed = false;
+  return Object.freeze({
+    isDisposed: () => disposed,
+    isInvalid: (event: KeyboardEvent) =>
+      disposed || !invalid || invalid.has(event),
+    has: (event: KeyboardEvent) =>
+      !disposed && Boolean(pairs?.has(event)),
+    stage: (event: KeyboardEvent, pair: LayoutSegmentKeyPair) => {
+      if (disposed || !pairs || pairs.has(event)) return false;
+      pairs.set(event, pair);
+      return !disposed;
+    },
+    get: (event: KeyboardEvent) => {
+      if (disposed || !pairs) return null;
+      return pairs.get(event) ?? null;
+    },
+    begin: (event: KeyboardEvent, pair: LayoutSegmentKeyPair) => {
+      if (disposed || !active || active.has(event)) return false;
+      active.set(event, pair);
+      return !disposed;
+    },
+    finish: (event: KeyboardEvent, pair: LayoutSegmentKeyPair) => {
+      if (disposed || !active || active.get(event) !== pair) return;
+      active.delete(event);
+    },
+    consume: (event: KeyboardEvent, pair: LayoutSegmentKeyPair) => {
+      if (disposed || !pairs || pairs.get(event) !== pair) return false;
+      return pairs.delete(event) && !disposed;
+    },
+    invalidate: (event: KeyboardEvent) => {
+      if (disposed || !pairs || !invalid) return;
+      pairs.delete(event);
+      invalid.add(event);
+    },
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      pairs = null;
+      active = null;
+      invalid = null;
+    },
+  });
+}
+
+function createLayoutSegmentKeyListener(
+  authority: LayoutSegmentKeyboardAuthority,
+): LayoutSegmentKeyListener {
+  const proofs = new WeakMap<KeyboardEvent, LayoutSegmentWindowProof>();
+  const invalidEvents = new WeakSet<Event>();
+  let publication: LayoutSegmentPublication | null = null;
+  let active = false;
+  let released = false;
+  const listener: EventListener = function (this: EventTarget, event: Event) {
+    const current = publication;
+    if (
+      !current
+      || !active
+      || released
+      || current.ownerRealm !== authority.view
+      || invalidEvents.has(event)
+    ) {
+      return;
+    }
+    if (proofs.has(event as KeyboardEvent)) {
+      proofs.delete(event as KeyboardEvent);
+      invalidEvents.add(event);
+      return;
+    }
+    const eventTarget = authority.readTarget(event);
+    if (
+      !eventTarget
+      || !layoutSegmentSnapshotContains(
+        current.dom,
+        eventTarget as Node,
+      )
+    ) {
+      return;
+    }
+    const nativeEvent = event as KeyboardEvent;
+    const facts = authority.readKeyboard(nativeEvent);
+    const terminal = facts?.path.at(-1);
+    if (
+      !facts
+      || facts.type !== "keydown"
+      || facts.currentTarget !== this
+      || terminal !== this
+      || facts.phase !== authority.capturingPhase
+      || facts.path.at(-2) !== current.ownerDocument
+      || (facts.view !== null
+        && facts.view !== authority.view
+        && facts.view !== this)
+    ) {
+      invalidEvents.add(event);
+      return;
+    }
+    proofs.set(nativeEvent, Object.freeze({
+      registration,
+      publication: current,
+      nativeEvent,
+      receiver: this,
+      currentTarget: this,
+      terminal,
+      path: Object.freeze([...facts.path]),
+    }));
+  };
+  const proofFor = (
+    event: KeyboardEvent,
+    current: LayoutSegmentPublication,
+  ) => {
+    const proof = proofs.get(event);
+    if (
+      !proof
+      || !active
+      || released
+      || publication !== current
+      || proof.registration !== registration
+      || proof.publication !== current
+      || proof.nativeEvent !== event
+      || proof.receiver !== proof.currentTarget
+      || proof.receiver !== proof.terminal
+      || invalidEvents.has(event)
+    ) {
+      return null;
+    }
+    const facts = authority.readKeyboard(event);
+    return (
+      facts
+      && facts.path.length === proof.path.length
+      && facts.path.every((entry, index) => entry === proof.path[index])
+      && facts.path.at(-2) === current.ownerDocument
+      && facts.path.at(-1) === proof.receiver
+    )
+      ? proof
+      : null;
+  };
+  const registration: LayoutSegmentKeyListener = Object.freeze({
+    proofFor,
+    retains: (
+      proof: LayoutSegmentWindowProof,
+      current: LayoutSegmentPublication,
+    ) =>
+      publication === current
+      && proofFor(proof.nativeEvent, current) === proof
+      && current.ownerRealm === authority.view
+      && authority.addEventListener.isCurrent()
+      && authority.removeEventListener.isCurrent(),
+    activate: (current: LayoutSegmentPublication) => {
+      if (
+        publication
+        || active
+        || released
+        || current.ownerRealm !== authority.view
+        || !authority.addEventListener.isCurrent()
+        || !authority.removeEventListener.isCurrent()
+      ) {
+        return false;
+      }
+      publication = current;
+      active = true;
+      try {
+        authority.apply(
+          authority.addEventListener.value,
+          authority.view,
+          ["keydown", listener, true],
+        );
+      } catch {
+        publication = null;
+        active = false;
+        return false;
+      }
+      if (registration.isCurrent()) return true;
+      publication = null;
+      active = false;
+      try {
+        authority.apply(
+          authority.removeEventListener.value,
+          authority.view,
+          ["keydown", listener, true],
+        );
+      } catch {
+        return false;
+      }
+      return false;
+    },
+    release: (current: LayoutSegmentPublication) => {
+      if (publication !== current || released) return;
+      released = true;
+      const wasActive = active;
+      active = false;
+      publication = null;
+      if (!wasActive) return;
+      try {
+        authority.apply(
+          authority.removeEventListener.value,
+          authority.view,
+          ["keydown", listener, true],
+        );
+      } catch {
+        return;
+      }
+    },
+    isCurrent: () =>
+      active
+      && !released
+      && publication?.ownerRealm === authority.view
+      && authority.addEventListener.isCurrent()
+      && authority.removeEventListener.isCurrent(),
+  });
+  return registration;
+}
+
+function layoutSegmentNativeFactsMatch(
+  previous: LayoutSegmentNativeKeyboardFacts,
+  current: LayoutSegmentNativeKeyboardFacts,
+  defaultPrevented = false,
+) {
+  return (
+    previous.type === current.type
+    && previous.currentTarget === current.currentTarget
+    && previous.bubbles === current.bubbles
+    && previous.cancelable === current.cancelable
+    && current.defaultPrevented === defaultPrevented
+    && previous.cancelBubble === current.cancelBubble
+    && previous.target === current.target
+    && previous.path.length === current.path.length
+    && previous.path.every((entry, index) => entry === current.path[index])
+    && previous.isTrusted === current.isTrusted
+    && previous.timeStamp === current.timeStamp
+    && previous.view === current.view
+    && previous.composed === current.composed
+    && previous.detail === current.detail
+    && previous.key === current.key
+    && previous.code === current.code
+    && previous.location === current.location
+    && previous.repeat === current.repeat
+    && previous.composing === current.composing
+    && previous.altKey === current.altKey
+    && previous.ctrlKey === current.ctrlKey
+    && previous.metaKey === current.metaKey
+    && previous.shiftKey === current.shiftKey
+    && previous.charCode === current.charCode
+    && previous.keyCode === current.keyCode
+    && previous.which === current.which
+  );
+}
+
+function layoutSegmentReactMethodsRemainExact(
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  methods: LayoutSegmentReactKeyboardMethods,
+  currentIsDefaultPrevented: (...args: never[]) => unknown,
+  expectedIsDefaultPrevented = methods.isDefaultPrevented,
+) {
+  return (
+    event.preventDefault === methods.preventDefault
+    && event.isDefaultPrevented === currentIsDefaultPrevented
+    && event.isPropagationStopped === methods.isPropagationStopped
+    && currentIsDefaultPrevented === expectedIsDefaultPrevented
+  );
+}
+
+function captureLayoutSegmentReactKeyboard(
   event: React.KeyboardEvent<HTMLButtonElement>,
   publication: LayoutSegmentPublication,
-  control: HTMLButtonElement,
-  authority: LayoutSegmentKeyboardAuthority,
-): { readonly event: KeyboardEvent; readonly key: string } | null {
-  if (!event || typeof event !== "object") return null;
-  const nativeEvent = event.nativeEvent;
-  const reactEvent = event as React.KeyboardEvent<HTMLButtonElement> & {
-    _reactName?: unknown;
-    isDefaultPrevented?: unknown;
-    isPropagationStopped?: unknown;
-    persist?: unknown;
-  };
-  if (
-    publication.ownerRealm !== authority.view
-    || publication.ownerDocument.defaultView !== authority.view
-    || !(nativeEvent instanceof authority.view.KeyboardEvent)
-    || !authority.trusted.isCurrent()
-    || !authority.trusted.matches(nativeEvent)
-  ) {
-    return null;
-  }
-  const nativeTarget = authority.eventTarget(nativeEvent);
-  const nativePhase = authority.eventPhase(nativeEvent);
-  const path = authority.eventPath(nativeEvent);
-  const key = authority.key(nativeEvent);
-  const code = authority.code(nativeEvent);
-  const location = authority.location(nativeEvent);
-  const repeat = authority.repeat(nativeEvent);
-  const composing = authority.composing(nativeEvent);
-  const altKey = authority.altKey(nativeEvent);
-  const ctrlKey = authority.ctrlKey(nativeEvent);
-  const metaKey = authority.metaKey(nativeEvent);
-  const shiftKey = authority.shiftKey(nativeEvent);
-  const bubbles = authority.eventBubbles(nativeEvent);
-  const cancelable = authority.eventCancelable(nativeEvent);
-  const composed = authority.eventComposed(nativeEvent);
-  const timeStamp = authority.eventTimeStamp(nativeEvent);
-  const nativeView = authority.eventView(nativeEvent);
-  let trusted = false;
+  native: LayoutSegmentNativeKeyboardFacts,
+  nativeEvent: KeyboardEvent,
+  target: HTMLButtonElement,
+  currentTarget: HTMLButtonElement,
+  windowProof: LayoutSegmentWindowProof,
+): LayoutSegmentReactKeyboardSnapshot | null {
   try {
-    trusted = authority.trusted.read(nativeEvent);
+    const wrapper = event;
+    const preventDefault = wrapper.preventDefault;
+    const isDefaultPrevented = wrapper.isDefaultPrevented;
+    const isPropagationStopped = wrapper.isPropagationStopped;
+    const composing = (
+      wrapper as React.KeyboardEvent<HTMLButtonElement> & {
+        isComposing?: unknown;
+      }
+    ).isComposing;
+    const view = wrapper.view;
+    if (
+      typeof preventDefault !== "function"
+      || typeof isDefaultPrevented !== "function"
+      || typeof isPropagationStopped !== "function"
+      || wrapper === (nativeEvent as unknown)
+      || wrapper.nativeEvent !== nativeEvent
+      || wrapper.type !== native.type
+      || wrapper.type !== "keydown"
+      || wrapper.target !== target
+      || wrapper.currentTarget !== currentTarget
+      || wrapper.eventPhase !== native.phase
+      || wrapper.bubbles !== native.bubbles
+      || wrapper.cancelable !== native.cancelable
+      || wrapper.defaultPrevented !== native.defaultPrevented
+      || wrapper.isTrusted !== native.isTrusted
+      || wrapper.timeStamp !== native.timeStamp
+      || wrapper.key !== native.key
+      || wrapper.code !== native.code
+      || wrapper.location !== native.location
+      || wrapper.repeat !== native.repeat
+      || (composing !== undefined && composing !== native.composing)
+      || wrapper.altKey !== native.altKey
+      || wrapper.ctrlKey !== native.ctrlKey
+      || wrapper.metaKey !== native.metaKey
+      || wrapper.shiftKey !== native.shiftKey
+      || wrapper.detail !== native.detail
+      || wrapper.charCode !== native.charCode
+      || wrapper.keyCode !== native.keyCode
+      || wrapper.which !== native.which
+      || (view !== null
+        && !Object.is(view, publication.ownerRealm)
+        && !Object.is(view, windowProof.receiver))
+    ) {
+      return null;
+    }
+    const methods = Object.freeze({
+      preventDefault,
+      isDefaultPrevented,
+      isPropagationStopped,
+    });
+    if (
+      !layoutSegmentReactMethodsRemainExact(
+        wrapper,
+        methods,
+        isDefaultPrevented,
+      )
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event: wrapper,
+      nativeEvent,
+      target,
+      currentTarget,
+      phase: native.phase,
+      view,
+      composing,
+      methods,
+    });
   } catch {
     return null;
   }
-  return (
-    authority.eventType(nativeEvent) === "keydown"
-    && nativePhase !== authority.view.Event.NONE
-    && bubbles
-    && cancelable
-    && composed
-    && trusted === true
-    && !authority.eventDefaultPrevented(nativeEvent)
-    && !authority.eventCancelBubble(nativeEvent)
-    && !repeat
-    && !composing
-    && !altKey
-    && !ctrlKey
-    && !metaKey
-    && !shiftKey
-    && event.nativeEvent === nativeEvent
-    && event.type === "keydown"
-    && event.currentTarget === control
-    && event.target === nativeTarget
-    && event.eventPhase === nativePhase
-    && event.key === key
-    && event.code === code
-    && event.location === location
-    && event.repeat === repeat
-    && event.altKey === altKey
-    && event.ctrlKey === ctrlKey
-    && event.metaKey === metaKey
-    && event.shiftKey === shiftKey
-    && event.bubbles === bubbles
-    && event.cancelable === cancelable
-    && event.isTrusted === trusted
-    && event.timeStamp === timeStamp
-    && Object.is(event.view, nativeView)
-    && !event.defaultPrevented
-    && nativeTarget instanceof authority.view.Node
-    && nativeTarget.ownerDocument === publication.ownerDocument
-    && control.contains(nativeTarget)
-    && path[0] === nativeTarget
-    && path.includes(control)
-    && path.includes(publication.root)
-    && layoutSegmentSnapshotContains(publication.dom, nativeTarget)
-    && authority.activeElement(publication.ownerDocument) === control
-    && reactEvent._reactName === "onKeyDown"
-    && typeof reactEvent.isDefaultPrevented === "function"
-    && !reactEvent.isDefaultPrevented()
-    && typeof reactEvent.isPropagationStopped === "function"
-    && !reactEvent.isPropagationStopped()
-    && typeof reactEvent.persist === "function"
-  )
-    ? Object.freeze({ event: nativeEvent, key })
-    : null;
+}
+
+function layoutSegmentReactKeyboardRemainsExact(
+  snapshot: LayoutSegmentReactKeyboardSnapshot,
+  publication: LayoutSegmentPublication,
+  native: LayoutSegmentNativeKeyboardFacts,
+  currentTarget: HTMLButtonElement | null,
+  defaultPrevented = false,
+  expectedIsDefaultPrevented = snapshot.methods.isDefaultPrevented,
+) {
+  try {
+    const event = snapshot.event;
+    const currentIsDefaultPrevented = event.isDefaultPrevented;
+    const composing = (
+      event as React.KeyboardEvent<HTMLButtonElement> & {
+        isComposing?: unknown;
+      }
+    ).isComposing;
+    return (
+      typeof currentIsDefaultPrevented === "function"
+      && event.nativeEvent === snapshot.nativeEvent
+      && event.type === native.type
+      && event.target === snapshot.target
+      && event.target === native.target
+      && event.currentTarget === currentTarget
+      && event.eventPhase === snapshot.phase
+      && event.eventPhase === native.phase
+      && event.bubbles === native.bubbles
+      && event.cancelable === native.cancelable
+      && event.defaultPrevented === defaultPrevented
+      && event.isTrusted === native.isTrusted
+      && event.timeStamp === native.timeStamp
+      && event.key === native.key
+      && event.code === native.code
+      && event.location === native.location
+      && event.repeat === native.repeat
+      && composing === snapshot.composing
+      && (composing === undefined || composing === native.composing)
+      && event.altKey === native.altKey
+      && event.ctrlKey === native.ctrlKey
+      && event.metaKey === native.metaKey
+      && event.shiftKey === native.shiftKey
+      && event.detail === native.detail
+      && event.charCode === native.charCode
+      && event.keyCode === native.keyCode
+      && event.which === native.which
+      && event.view === snapshot.view
+      && (event.view === null
+        || Object.is(event.view, publication.ownerRealm)
+        || Object.is(event.view, native.path.at(-1)))
+      && layoutSegmentReactMethodsRemainExact(
+        event,
+        snapshot.methods,
+        currentIsDefaultPrevented,
+        expectedIsDefaultPrevented,
+      )
+    );
+  } catch {
+    return false;
+  }
 }
 
 interface LayoutSegmentRowPresentation {
@@ -8018,6 +8771,10 @@ interface LayoutSegmentRowPresentation {
   readonly captureIcon: (element: SVGSVGElement | null) => void;
   readonly buttonOwner: LayoutSegmentElementOwner<HTMLButtonElement>;
   readonly iconOwner: LayoutSegmentElementOwner<SVGSVGElement>;
+  readonly keyboardAction: object;
+  readonly onKeyDownCapture: (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => void;
   readonly onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
 }
 
@@ -8055,8 +8812,30 @@ function createLayoutSegmentPresentation(
   let currentRuntime: LayoutSegmentPublicationRuntime | null = null;
   let lastRuntime: LayoutSegmentPublicationRuntime | null = null;
   let keyboardAuthority: LayoutSegmentKeyboardAuthority | null = null;
+  let keyboardListener: LayoutSegmentKeyListener | null = null;
+  let pairingStore: LayoutSegmentPairingStore | null = null;
   let successorRequested = false;
+  let callbackActive = false;
+  let committedLayout: Layout = authority.layout;
+  let captureLayoutNavigation: (
+    row: LayoutSegmentRowAuthority,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => void = () => {};
+  let completeLayoutNavigation: (
+    row: LayoutSegmentRowAuthority,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => void = () => {};
   const { mount, revision, layout, onLayout, rootClassName, rows } = authority;
+  const disposePairingStore = () => {
+    pairingStore?.dispose();
+    pairingStore = null;
+  };
+  const releaseKeyboard = (publication: LayoutSegmentPublication) => {
+    disposePairingStore();
+    keyboardListener?.release(publication);
+    keyboardAuthority = null;
+    keyboardListener = null;
+  };
   const onElementChange = (
     owner: LayoutSegmentElementOwnerView,
     element: Element | null,
@@ -8066,6 +8845,7 @@ function createLayoutSegmentPresentation(
     const runtime = currentRuntime ?? lastRuntime;
     runtime?.noteRef(owner, element, previous);
     if (element === null || (element !== null && last !== null && element !== last)) {
+      if (currentRuntime) releaseKeyboard(currentRuntime.publication);
       currentRuntime?.retireForElement();
       currentRuntime = null;
     }
@@ -8083,75 +8863,19 @@ function createLayoutSegmentPresentation(
     const keyboardAction = Object.freeze({
       identity: Symbol(`layout-segment-${row.value}-keyboard-action`),
     });
-    const onKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-      const publication = coordinator.active();
-      const button = buttonOwner.element();
-      if (
-        !publication
-        || publication.isRetired()
-        || !layoutSegmentAuthoritiesMatch(publication.authority, authority)
-        || !row.checked
-        || row.value !== layout
-        || rows[row.index] !== row
-        || !button
-        || button.tabIndex !== 0
-        || !coordinator.isCurrent(publication)
-        || !factsAreCurrent()
-        || !exactDomIsCurrent()
-        || !publication.publishedDomMatches()
-        || !keyboardAuthority
-      ) {
-        return;
-      }
-      const exactEvent = exactNativeLayoutSegmentKey(
-        event,
-        publication,
-        button,
-        keyboardAuthority,
-      );
-      const destinationIndex = exactEvent
-        ? layoutSegmentDestination(exactEvent.key, row.index, rows.length)
-        : null;
-      const destination = destinationIndex === null
-        ? null
-        : rowPresentations[destinationIndex];
-      const destinationButton = destination?.buttonOwner.element();
-      if (
-        !exactEvent
-        || destinationIndex === null
-        || !destination
-        || destination.authority !== rows[destinationIndex]
-        || destination.authority.checked
-        || destination.authority.value === layout
-        || !destinationButton
-        || destinationButton.ownerDocument !== publication.ownerDocument
-        || destinationButton.parentElement !== publication.root
-        || publication.root.children.item(destinationIndex) !== destinationButton
-        || coordinator.hasClaimed(
-          publication,
-          keyboardAction,
-          event,
-          exactEvent.event,
-        )
-        || !coordinator.claim(
-          publication,
-          keyboardAction,
-          event,
-          exactEvent.event,
-        )
-      ) {
-        return;
-      }
-      keyboardAuthority.preventDefault(exactEvent.event);
-      onLayout(destination.authority.value);
-      keyboardAuthority.focus(destinationButton, { preventScroll: true });
-    };
+    const onKeyDownCapture = (
+      event: React.KeyboardEvent<HTMLButtonElement>,
+    ) => captureLayoutNavigation(row, event);
+    const onKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) =>
+      completeLayoutNavigation(row, event);
     return Object.freeze({
       authority: row,
       captureButton: buttonOwner.capture,
       captureIcon: iconOwner.capture,
       buttonOwner,
       iconOwner,
+      keyboardAction,
+      onKeyDownCapture,
       onKeyDown,
     });
   });
@@ -8187,6 +8911,114 @@ function createLayoutSegmentPresentation(
         && row.size === 17
       );
     });
+  const movementIsCurrent = (
+    runtime: LayoutSegmentPublicationRuntime,
+    publication: LayoutSegmentPublication,
+    sourceRow: LayoutSegmentRowPresentation,
+    destinationRow: LayoutSegmentRowPresentation,
+    source: HTMLButtonElement,
+    destination: HTMLButtonElement,
+    key: string,
+    expectedLayout: Layout,
+  ) => {
+    const events = keyboardAuthority;
+    const listener = keyboardListener;
+    const destinationIndex = layoutSegmentDestination(
+      key,
+      sourceRow.authority.index,
+      rows.length,
+    );
+    return Boolean(
+      events
+      && listener
+      && currentRuntime === runtime
+      && !runtime.publication.isRetired()
+      && publication === runtime.publication
+      && publication.authority === authority
+      && publication.ownerDocument.defaultView === publication.ownerRealm
+      && authority.layout === layout
+      && authority.onLayout === onLayout
+      && committedLayout === expectedLayout
+      && sourceRow.authority === rows[sourceRow.authority.index]
+      && destinationRow.authority === rows[destinationRow.authority.index]
+      && sourceRow.authority.checked
+      && sourceRow.authority.value === layout
+      && sourceRow.authority.tabIndex === 0
+      && !destinationRow.authority.checked
+      && destinationRow.authority.value !== layout
+      && destinationRow.authority.tabIndex === -1
+      && destinationIndex === destinationRow.authority.index
+      && sourceRow.buttonOwner.element() === source
+      && destinationRow.buttonOwner.element() === destination
+      && source.ownerDocument === publication.ownerDocument
+      && destination.ownerDocument === publication.ownerDocument
+      && source.parentElement === publication.root
+      && destination.parentElement === publication.root
+      && publication.root.children.item(sourceRow.authority.index) === source
+      && publication.root.children.item(destinationRow.authority.index) === destination
+      && events.activeElement() === source
+      && events.focus.isCurrent()
+      && listener.isCurrent()
+      && coordinator.isCurrent(publication)
+      && factsAreCurrent()
+      && exactDomIsCurrent()
+      && publication.publishedDomMatches()
+    );
+  };
+  const publicationAllowsEventAbort = (
+    pairs: LayoutSegmentPairingStore,
+    runtime: LayoutSegmentPublicationRuntime,
+    publication: LayoutSegmentPublication,
+    listener: LayoutSegmentKeyListener,
+    pair: LayoutSegmentKeyPair,
+  ) =>
+    pairingStore === pairs
+    && !pairs.isDisposed()
+    && currentRuntime === runtime
+    && runtime.publication === publication
+    && pair.publication === publication
+    && pair.action === pair.sourceRow.keyboardAction
+    && rowPresentations[pair.sourceRow.authority.index] === pair.sourceRow
+    && rowPresentations[pair.destinationRow.authority.index]
+      === pair.destinationRow
+    && listener.retains(pair.windowProof, publication)
+    && movementIsCurrent(
+      runtime,
+      publication,
+      pair.sourceRow,
+      pair.destinationRow,
+      pair.source,
+      pair.destination,
+      pair.key,
+      committedLayout,
+    );
+  const invokeReactMethod = (
+    events: LayoutSegmentKeyboardAuthority,
+    method: (...args: never[]) => unknown,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => {
+    if (callbackActive) return null;
+    callbackActive = true;
+    try {
+      return Object.freeze({ value: events.apply(method, event, []) });
+    } catch {
+      return null;
+    } finally {
+      callbackActive = false;
+    }
+  };
+  const invokeLayout = (value: LayoutSegmentPane) => {
+    if (callbackActive) return false;
+    callbackActive = true;
+    try {
+      onLayout(value);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      callbackActive = false;
+    }
+  };
   const exactDomIsCurrent = () => {
     const root = rootOwner.element();
     return (
@@ -8232,6 +9064,567 @@ function createLayoutSegmentPresentation(
       })
     );
   };
+  captureLayoutNavigation = (
+    row: LayoutSegmentRowAuthority,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const pairs = pairingStore;
+    if (!pairs || pairs.isDisposed() || callbackActive) return;
+    let nativeEvent: KeyboardEvent;
+    let eventCurrentTarget: EventTarget | null;
+    try {
+      nativeEvent = event.nativeEvent;
+      eventCurrentTarget = event.currentTarget;
+    } catch {
+      return;
+    }
+    if (
+      !nativeEvent
+      || typeof nativeEvent !== "object"
+      || pairs.isInvalid(nativeEvent)
+      || pairs.has(nativeEvent)
+    ) {
+      return;
+    }
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const events = keyboardAuthority;
+    const listener = keyboardListener;
+    const sourceRow = rowPresentations[row.index];
+    const source = sourceRow?.buttonOwner.element();
+    if (
+      !runtime
+      || !publication
+      || !events
+      || !listener
+      || !sourceRow
+      || !source
+      || runtime.publication.isRetired()
+      || sourceRow.authority !== row
+      || sourceRow.keyboardAction
+        !== rowPresentations[sourceRow.authority.index]?.keyboardAction
+      || eventCurrentTarget !== source
+    ) {
+      return;
+    }
+    const native = events.readKeyboard(nativeEvent);
+    const proof = native
+      ? listener.proofFor(nativeEvent, publication)
+      : null;
+    const destinationIndex = native
+      ? layoutSegmentDestination(native.key, row.index, rows.length)
+      : null;
+    const destinationRow = destinationIndex === null
+      ? undefined
+      : rowPresentations[destinationIndex];
+    const destination = destinationRow?.buttonOwner.element();
+    const capture = native && proof && destinationRow && destination
+      ? captureLayoutSegmentReactKeyboard(
+          event,
+          publication,
+          native,
+          nativeEvent,
+          source,
+          source,
+          proof,
+        )
+      : null;
+    const nativeCurrentTarget = native?.currentTarget;
+    if (
+      !native
+      || !proof
+      || destinationIndex === null
+      || !destinationRow
+      || !destination
+      || !capture
+      || native.type !== "keydown"
+      || native.phase !== events.capturingPhase
+      || !native.bubbles
+      || !native.cancelable
+      || native.defaultPrevented
+      || native.cancelBubble
+      || !native.isTrusted
+      || !native.composed
+      || native.repeat
+      || native.composing
+      || native.altKey
+      || native.ctrlKey
+      || native.metaKey
+      || native.shiftKey
+      || native.target !== source
+      || !(nativeCurrentTarget instanceof events.view.Node)
+      || nativeCurrentTarget.ownerDocument !== publication.ownerDocument
+      || !nativeCurrentTarget.contains(publication.root)
+      || native.path[0] !== source
+      || native.path.filter((entry) => entry === source).length !== 1
+      || !native.path.includes(publication.root)
+      || native.path.at(-1) !== proof.receiver
+      || (native.view !== null
+        && native.view !== publication.ownerRealm
+        && native.view !== proof.receiver)
+      || destinationRow.authority !== rows[destinationIndex]
+      || coordinator.hasClaimed(
+        publication,
+        sourceRow.keyboardAction,
+        capture.event,
+        nativeEvent,
+      )
+      || !movementIsCurrent(
+        runtime,
+        publication,
+        sourceRow,
+        destinationRow,
+        source,
+        destination,
+        native.key,
+        layout,
+      )
+    ) {
+      return;
+    }
+    const captureIsCurrent = () => {
+      const currentNative = events.readKeyboard(nativeEvent);
+      return Boolean(
+        currentNative
+        && currentNative.phase === events.capturingPhase
+        && layoutSegmentNativeFactsMatch(native, currentNative)
+        && listener.retains(proof, publication)
+        && layoutSegmentReactKeyboardRemainsExact(
+          capture,
+          publication,
+          native,
+          source,
+        )
+        && pairingStore === pairs
+        && !pairs.isDisposed()
+        && !pairs.has(nativeEvent)
+        && !callbackActive
+        && movementIsCurrent(
+          runtime,
+          publication,
+          sourceRow,
+          destinationRow,
+          source,
+          destination,
+          native.key,
+          layout,
+        )
+      );
+    };
+    if (!captureIsCurrent()) return;
+    const defaultResult = invokeReactMethod(
+      events,
+      capture.methods.isDefaultPrevented,
+      capture.event,
+    );
+    if (defaultResult?.value !== false || !captureIsCurrent()) return;
+    const propagationResult = invokeReactMethod(
+      events,
+      capture.methods.isPropagationStopped,
+      capture.event,
+    );
+    if (propagationResult?.value !== false || !captureIsCurrent()) return;
+    const movement = Object.freeze<LayoutSegmentMovement>({
+      identity: Symbol("layout-segment-keyboard-movement"),
+      publication,
+      sourceRow,
+      destinationRow,
+      source,
+      destination,
+      key: native.key,
+    });
+    pairs.stage(nativeEvent, Object.freeze({
+      publication,
+      action: sourceRow.keyboardAction,
+      native,
+      nativeEvent,
+      capture,
+      windowProof: proof,
+      sourceRow,
+      destinationRow,
+      source,
+      destination,
+      key: native.key,
+      movement,
+      publicationClaim: Object.freeze({ publication }),
+      sourceClaim: Object.freeze({ sourceRow, source }),
+      destinationClaim: Object.freeze({ destinationRow, destination }),
+      captureClaim: Object.freeze({ capture }),
+      nativeClaim: Object.freeze({ nativeEvent }),
+      windowClaim: Object.freeze({ listener, proof, receiver: proof.receiver }),
+    }));
+  };
+  completeLayoutNavigation = (
+    row: LayoutSegmentRowAuthority,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const pairs = pairingStore;
+    if (!pairs || pairs.isDisposed() || callbackActive) return;
+    let nativeEvent: KeyboardEvent;
+    let eventCurrentTarget: EventTarget | null;
+    try {
+      nativeEvent = event.nativeEvent;
+      eventCurrentTarget = event.currentTarget;
+    } catch {
+      return;
+    }
+    if (
+      !nativeEvent
+      || typeof nativeEvent !== "object"
+      || pairs.isInvalid(nativeEvent)
+    ) {
+      return;
+    }
+    const pair = pairs.get(nativeEvent);
+    if (!pair || pair.nativeEvent !== nativeEvent) return;
+    const runtime = currentRuntime;
+    const publication = runtime?.publication;
+    const events = keyboardAuthority;
+    const listener = keyboardListener;
+    if (
+      !runtime
+      || !publication
+      || !events
+      || !listener
+      || pair.publication !== publication
+      || pair.sourceRow.authority !== row
+      || pair.action !== pair.sourceRow.keyboardAction
+      || pair.source !== eventCurrentTarget
+      || !pairs.begin(nativeEvent, pair)
+    ) {
+      return;
+    }
+    let delivery: LayoutSegmentKeyDelivery | null = null;
+    let claimed = false;
+    let committed = false;
+    try {
+      const native = events.readKeyboard(nativeEvent);
+      const proof = native
+        ? listener.proofFor(nativeEvent, publication)
+        : null;
+      const bubble = native && proof
+        ? captureLayoutSegmentReactKeyboard(
+            event,
+            publication,
+            native,
+            nativeEvent,
+            pair.source,
+            pair.source,
+            proof,
+          )
+        : null;
+      if (
+        !native
+        || !proof
+        || !bubble
+        || bubble.event === pair.capture.event
+        || native.phase !== events.bubblingPhase
+        || pair.native.phase !== events.capturingPhase
+        || native.currentTarget !== pair.native.currentTarget
+        || proof !== pair.windowProof
+        || proof.receiver !== native.path.at(-1)
+        || !layoutSegmentNativeFactsMatch(pair.native, native)
+      ) {
+        return;
+      }
+      const deliveryIsCurrent = (
+        currentNative: LayoutSegmentNativeKeyboardFacts,
+        expectedLayout: Layout,
+        defaultPrevented = false,
+        activeDelivery: LayoutSegmentKeyDelivery | null = null,
+        bubbleDefault = bubble.methods.isDefaultPrevented,
+      ) => Boolean(
+        pairingStore === pairs
+        && !pairs.isDisposed()
+        && !callbackActive
+        && listener.retains(pair.windowProof, publication)
+        && (!activeDelivery
+          || coordinator.deliveryIsActive(activeDelivery))
+        && layoutSegmentNativeFactsMatch(
+          pair.native,
+          currentNative,
+          defaultPrevented,
+        )
+        && currentNative.phase === events.bubblingPhase
+        && layoutSegmentReactKeyboardRemainsExact(
+          pair.capture,
+          publication,
+          pair.native,
+          null,
+        )
+        && layoutSegmentReactKeyboardRemainsExact(
+          bubble,
+          publication,
+          currentNative,
+          pair.source,
+          defaultPrevented,
+          bubbleDefault,
+        )
+        && movementIsCurrent(
+          runtime,
+          publication,
+          pair.sourceRow,
+          pair.destinationRow,
+          pair.source,
+          pair.destination,
+          pair.key,
+          expectedLayout,
+        )
+      );
+      const cancellationIsCurrent = (
+        snapshot: LayoutSegmentReactKeyboardSnapshot,
+        property: "isDefaultPrevented" | "isPropagationStopped",
+        expectedMethod: (...args: never[]) => unknown,
+        expected: boolean,
+        currentNative: LayoutSegmentNativeKeyboardFacts,
+        expectedLayout: Layout,
+        activeDelivery: LayoutSegmentKeyDelivery | null = null,
+        bubbleDefault = bubble.methods.isDefaultPrevented,
+      ) => {
+        if (
+          !deliveryIsCurrent(
+            currentNative,
+            expectedLayout,
+            currentNative.defaultPrevented,
+            activeDelivery,
+            bubbleDefault,
+          )
+        ) {
+          return false;
+        }
+        let method: unknown;
+        try {
+          method = snapshot.event[property];
+        } catch {
+          return false;
+        }
+        if (
+          !isLayoutSegmentReactMethod(method)
+          || method !== expectedMethod
+          || !deliveryIsCurrent(
+            currentNative,
+            expectedLayout,
+            currentNative.defaultPrevented,
+            activeDelivery,
+            bubbleDefault,
+          )
+        ) {
+          return false;
+        }
+        const result = invokeReactMethod(events, method, snapshot.event);
+        const after = events.readKeyboard(nativeEvent);
+        let currentMethod: unknown;
+        try {
+          currentMethod = snapshot.event[property];
+        } catch {
+          return false;
+        }
+        return Boolean(
+          result?.value === expected
+          && after
+          && currentMethod === method
+          && deliveryIsCurrent(
+            after,
+            expectedLayout,
+            currentNative.defaultPrevented,
+            activeDelivery,
+            bubbleDefault,
+          )
+        );
+      };
+      const wrappersAreCurrent = (
+        currentNative: LayoutSegmentNativeKeyboardFacts,
+        expectedLayout: Layout,
+        activeDelivery: LayoutSegmentKeyDelivery | null = null,
+        bubbleDefault = bubble.methods.isDefaultPrevented,
+      ) => {
+        if (
+          !deliveryIsCurrent(
+            currentNative,
+            expectedLayout,
+            currentNative.defaultPrevented,
+            activeDelivery,
+            bubbleDefault,
+          )
+        ) {
+          return false;
+        }
+        return (
+          cancellationIsCurrent(
+            pair.capture,
+            "isDefaultPrevented",
+            pair.capture.methods.isDefaultPrevented,
+            false,
+            currentNative,
+            expectedLayout,
+            activeDelivery,
+            bubbleDefault,
+          )
+          && cancellationIsCurrent(
+            pair.capture,
+            "isPropagationStopped",
+            pair.capture.methods.isPropagationStopped,
+            false,
+            currentNative,
+            expectedLayout,
+            activeDelivery,
+            bubbleDefault,
+          )
+          && cancellationIsCurrent(
+            bubble,
+            "isDefaultPrevented",
+            bubbleDefault,
+            currentNative.defaultPrevented,
+            currentNative,
+            expectedLayout,
+            activeDelivery,
+            bubbleDefault,
+          )
+          && cancellationIsCurrent(
+            bubble,
+            "isPropagationStopped",
+            bubble.methods.isPropagationStopped,
+            false,
+            currentNative,
+            expectedLayout,
+            activeDelivery,
+            bubbleDefault,
+          )
+        );
+      };
+      if (
+        !deliveryIsCurrent(native, layout)
+        || !wrappersAreCurrent(native, layout)
+      ) {
+        return;
+      }
+      delivery = Object.freeze<LayoutSegmentKeyDelivery>({ pair, bubble });
+      if (
+        !coordinator.claimDelivery(
+          publication,
+          pair.action,
+          [pair.capture.event, bubble.event, pair.nativeEvent],
+          [
+            pair.movement,
+            pair.windowProof,
+            pair.publicationClaim,
+            pair.sourceClaim,
+            pair.destinationClaim,
+            pair.captureClaim,
+            pair.nativeClaim,
+            pair.windowClaim,
+          ],
+          delivery,
+        )
+        || !deliveryIsCurrent(native, layout, false, delivery)
+        || !wrappersAreCurrent(native, layout, delivery)
+        || !pairs.consume(nativeEvent, pair)
+        || !deliveryIsCurrent(native, layout, false, delivery)
+      ) {
+        pairs.invalidate(nativeEvent);
+        return;
+      }
+      claimed = true;
+      const prevention = invokeReactMethod(
+        events,
+        bubble.methods.preventDefault,
+        bubble.event,
+      );
+      const preventedNative = events.readKeyboard(nativeEvent);
+      let postPreventionBubbleDefault: unknown;
+      try {
+        postPreventionBubbleDefault = bubble.event.isDefaultPrevented;
+      } catch {
+        return;
+      }
+      if (
+        !prevention
+        || !preventedNative
+        || !isLayoutSegmentReactMethod(postPreventionBubbleDefault)
+        || !deliveryIsCurrent(
+          preventedNative,
+          layout,
+          true,
+          delivery,
+          postPreventionBubbleDefault,
+        )
+        || !wrappersAreCurrent(
+          preventedNative,
+          layout,
+          delivery,
+          postPreventionBubbleDefault,
+        )
+      ) {
+        return;
+      }
+      if (
+        !deliveryIsCurrent(
+          preventedNative,
+          layout,
+          true,
+          delivery,
+          postPreventionBubbleDefault,
+        )
+        || !invokeLayout(pair.destinationRow.authority.value)
+      ) {
+        return;
+      }
+      committedLayout = pair.destinationRow.authority.value;
+      const selectedNative = events.readKeyboard(nativeEvent);
+      if (
+        !selectedNative
+        || !deliveryIsCurrent(
+          selectedNative,
+          committedLayout,
+          true,
+          delivery,
+          postPreventionBubbleDefault,
+        )
+        || !wrappersAreCurrent(
+          selectedNative,
+          committedLayout,
+          delivery,
+          postPreventionBubbleDefault,
+        )
+        || !deliveryIsCurrent(
+          selectedNative,
+          committedLayout,
+          true,
+          delivery,
+          postPreventionBubbleDefault,
+        )
+      ) {
+        return;
+      }
+      events.focus.invoke(pair.destination, { preventScroll: true });
+      if (!coordinator.commitDelivery(delivery)) return;
+      committed = true;
+    } finally {
+      pairs.finish(nativeEvent, pair);
+      if (delivery) coordinator.finishDelivery(delivery);
+      if (claimed && !committed) {
+        pairs.invalidate(nativeEvent);
+        if (
+          currentRuntime === runtime
+          && !publicationAllowsEventAbort(
+            pairs,
+            runtime,
+            publication,
+            listener,
+            pair,
+          )
+        ) {
+          releaseKeyboard(publication);
+          runtime.retireForElement();
+          currentRuntime = null;
+          if (!successorRequested) {
+            successorRequested = true;
+            requestSuccessor();
+          }
+        }
+      }
+    }
+  };
   const requestReplaySuccessor = (runtime: LayoutSegmentPublicationRuntime) => {
     const replay = runtime.replay();
     if (
@@ -8275,13 +9668,27 @@ function createLayoutSegmentPresentation(
     currentRuntime = runtime;
     lastRuntime = runtime;
     keyboardAuthority = captureLayoutSegmentKeyboardAuthority(runtime.publication);
-    if (!keyboardAuthority || !runtime.publish()) {
+    keyboardListener = keyboardAuthority
+      ? createLayoutSegmentKeyListener(keyboardAuthority)
+      : null;
+    if (
+      !keyboardAuthority
+      || !keyboardListener
+      || !runtime.publish()
+      || !keyboardListener.activate(runtime.publication)
+    ) {
+      keyboardListener?.release(runtime.publication);
       runtime.retireForElement();
       currentRuntime = null;
       keyboardAuthority = null;
+      keyboardListener = null;
       return undefined;
     }
-    return runtime.retireForLayout;
+    pairingStore = createLayoutSegmentPairingStore();
+    return () => {
+      releaseKeyboard(runtime.publication);
+      runtime.retireForLayout();
+    };
   };
 
   return Object.freeze({
@@ -8361,6 +9768,7 @@ export function LayoutSegment({ layout, onLayout }: { layout: Layout; onLayout: 
             tabIndex={row.authority.tabIndex}
             className={row.authority.className}
             onClick={() => onLayout(row.authority.value)}
+            onKeyDownCapture={row.onKeyDownCapture}
             onKeyDown={row.onKeyDown}
             data-testid={`layout-segment-${row.authority.value}`}
           >
