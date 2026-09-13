@@ -4505,8 +4505,6 @@ function captureModeSwitcherReactKeyboardProof(
       && typeof preventDefault === "function"
       && typeof isDefaultPrevented === "function"
       && typeof isPropagationStopped === "function"
-      && modeSwitcherNativeCall<boolean>(isDefaultPrevented, event, [], authority) === false
-      && modeSwitcherNativeCall<boolean>(isPropagationStopped, event, [], authority) === false
       && modeSwitcherReactKeyboardEventMatches(delivery, event, proof, phase, false)
     )
       ? proof
@@ -4675,18 +4673,53 @@ function modeSwitcherNativeListenerProofMatches(
   );
 }
 
+function modeSwitcherReactKeyboardCancellationStateMatches(
+  delivery: ModeSwitcherKeyboardDelivery,
+  event: React.KeyboardEvent<HTMLButtonElement>,
+  proof: ModeSwitcherReactKeyboardProof,
+  authority: ModeSwitcherKeyboardAuthority,
+  wrapperDefaultPrevented: boolean,
+  nativeDefaultPrevented: boolean,
+  isDefaultPrevented: ModeSwitcherNativeMethod,
+) {
+  const nativeEvent = delivery.snapshot.event;
+  try {
+    return Boolean(
+      proof.event === event
+      && event.nativeEvent === nativeEvent
+      && event.defaultPrevented === wrapperDefaultPrevented
+      && modeSwitcherNativeValue<boolean>(
+        authority.event.defaultPrevented,
+        nativeEvent,
+        authority,
+      ) === nativeDefaultPrevented
+      && !modeSwitcherNativeValue<boolean>(
+        authority.event.cancelBubble,
+        nativeEvent,
+        authority,
+      )
+      && event.preventDefault === proof.preventDefault
+      && event.isDefaultPrevented === isDefaultPrevented
+      && event.isPropagationStopped === proof.isPropagationStopped
+    );
+  } catch {
+    return false;
+  }
+}
+
 function modeSwitcherReactKeyboardEventMatches(
   delivery: ModeSwitcherKeyboardDelivery,
   event: React.KeyboardEvent<HTMLButtonElement>,
   proof: ModeSwitcherReactKeyboardProof,
   phase: ModeSwitcherReactKeyboardPhase,
   releasedCurrentTarget: boolean,
+  nativeDefaultPrevented = false,
 ) {
   const { snapshot } = delivery;
   const authority = snapshot.publication.keyboardAuthority;
   if (!authority) return false;
   try {
-    return Boolean(
+    const publicFactsMatch = Boolean(
       proof.event === event
       && proof.nativeEvent === snapshot.event
       && proof.currentTarget === snapshot.source
@@ -4733,18 +4766,41 @@ function modeSwitcherReactKeyboardEventMatches(
       && event.preventDefault === proof.preventDefault
       && event.isDefaultPrevented === proof.isDefaultPrevented
       && event.isPropagationStopped === proof.isPropagationStopped
-      && modeSwitcherNativeCall<boolean>(
+    );
+    if (
+      !publicFactsMatch
+      || modeSwitcherNativeCall<boolean>(
         proof.isDefaultPrevented,
         event,
         [],
         authority,
-      ) === false
-      && modeSwitcherNativeCall<boolean>(
+      ) !== false
+      || !modeSwitcherReactKeyboardCancellationStateMatches(
+        delivery,
+        event,
+        proof,
+        authority,
+        false,
+        nativeDefaultPrevented,
+        proof.isDefaultPrevented,
+      )
+      || modeSwitcherNativeCall<boolean>(
         proof.isPropagationStopped,
         event,
         [],
         authority,
-      ) === false
+      ) !== false
+    ) {
+      return false;
+    }
+    return modeSwitcherReactKeyboardCancellationStateMatches(
+      delivery,
+      event,
+      proof,
+      authority,
+      false,
+      nativeDefaultPrevented,
+      proof.isDefaultPrevented,
     );
   } catch {
     return false;
@@ -4760,7 +4816,7 @@ function modeSwitcherReactKeyboardEventWasPrevented(
   const { snapshot } = delivery;
   try {
     const isDefaultPrevented = event.isDefaultPrevented as ModeSwitcherNativeMethod;
-    return Boolean(
+    const publicFactsMatch = Boolean(
       proof.event === event
       && proof.nativeEvent === snapshot.event
       && proof.currentTarget === snapshot.source
@@ -4795,21 +4851,45 @@ function modeSwitcherReactKeyboardEventWasPrevented(
       && Object.is(event.view, proof.view)
       && Object.is(proof.view, snapshot.view)
       && event.preventDefault === proof.preventDefault
+      && event.isDefaultPrevented === isDefaultPrevented
       && event.isPropagationStopped === proof.isPropagationStopped
       && typeof isDefaultPrevented === "function"
       && event.defaultPrevented === true
-      && modeSwitcherNativeCall<boolean>(
+    );
+    if (
+      !publicFactsMatch
+      || modeSwitcherNativeCall<boolean>(
         isDefaultPrevented,
         event,
         [],
         authority,
-      ) === true
-      && modeSwitcherNativeCall<boolean>(
+      ) !== true
+      || !modeSwitcherReactKeyboardCancellationStateMatches(
+        delivery,
+        event,
+        proof,
+        authority,
+        true,
+        true,
+        isDefaultPrevented,
+      )
+      || modeSwitcherNativeCall<boolean>(
         proof.isPropagationStopped,
         event,
         [],
         authority,
-      ) === false
+      ) !== false
+    ) {
+      return false;
+    }
+    return modeSwitcherReactKeyboardCancellationStateMatches(
+      delivery,
+      event,
+      proof,
+      authority,
+      true,
+      true,
+      isDefaultPrevented,
     );
   } catch {
     return false;
@@ -4884,6 +4964,7 @@ function preventModeSwitcherArrow(
       captureEvent,
       captureProof,
       "capture",
+      true,
       true,
     )
     && modeSwitcherActiveElement(authority) === claim.action.trigger

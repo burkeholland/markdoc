@@ -1198,6 +1198,97 @@ describe("ModeSwitcher trusted arrow disclosure", () => {
   });
 
   it.each([
+    ["post-default", "preventDefault", "ArrowDown", "Editing"],
+    ["post-default", "isPropagationStopped", "ArrowUp", "reader"],
+    ["propagation", "preventDefault", "ArrowDown", "Editing"],
+    ["propagation", "isDefaultPrevented", "ArrowUp", "reader"],
+  ] as const)(
+    "rejects %s late-query drift of %s and admits a distinct clean %s successor",
+    async (window, replacement, key, destinationName) => {
+      const session = new ModeSession(`arrow-${window}-${replacement}`, "owner", "editing");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+
+      try {
+        act(() => root.render(
+          <StrictMode>
+            <ModeSwitcher session={session.asCollabSession()} />
+          </StrictMode>,
+        ));
+        const modeTrigger = trigger();
+        let drift = true;
+        interceptModeKeyWrappers(modeTrigger, (event, phase) => {
+          if (phase !== "bubble" || !drift) return;
+          drift = false;
+          if (window === "post-default") {
+            const retainedPreventDefault = event.preventDefault;
+            event.preventDefault = function (this: ModeReactKeyEvent) {
+              retainedPreventDefault.call(this);
+              const currentDefaultQuery = this.isDefaultPrevented;
+              this.isDefaultPrevented = function (this: ModeReactKeyEvent) {
+                if (replacement === "preventDefault") {
+                  this.preventDefault = () => undefined;
+                } else {
+                  this.isPropagationStopped = () => false;
+                }
+                return currentDefaultQuery.call(this);
+              };
+            };
+          } else {
+            const retainedPropagationQuery = event.isPropagationStopped;
+            event.isPropagationStopped = function (this: ModeReactKeyEvent) {
+              if (this.defaultPrevented) {
+                if (replacement === "preventDefault") {
+                  this.preventDefault = () => undefined;
+                } else {
+                  this.isDefaultPrevented = () => true;
+                }
+              }
+              return retainedPropagationQuery.call(this);
+            };
+          }
+        });
+        modeTrigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const replay = modeArrow(modeTrigger, key);
+        expect(replay.defaultPrevented).toBe(true);
+        expect(preventDefault.mock.contexts.filter((context) => context === replay)).toHaveLength(1);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(focus).not.toHaveBeenCalled();
+        expect(modeTrigger).toHaveFocus();
+        expectNoModeAction(session);
+
+        fireEvent(modeTrigger, replay);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(focus).not.toHaveBeenCalled();
+        expect(modeTrigger).toHaveFocus();
+        expectNoModeAction(session);
+
+        focus.mockClear();
+        preventDefault.mockClear();
+        const successor = modeArrow(modeTrigger, key);
+        const destination = destinationName === "reader"
+          ? screen.getByTestId("mode-reader")
+          : radio(destinationName);
+        await waitFor(() => expect(destination).toHaveFocus());
+
+        expect(successor.defaultPrevented).toBe(true);
+        expect(preventDefault.mock.contexts.filter((context) => context === successor)).toHaveLength(1);
+        expect(document.querySelectorAll('[role="menu"]')).toHaveLength(1);
+        expect(focus.mock.contexts.filter((context) => context === destination)).toHaveLength(1);
+        expectNoModeAction(session);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it.each([
     ["non-Strict add pair", false, 2, 0],
     ["Strict add, retire, and distinct rebind", true, 4, 2],
   ] as const)("accepts the exact %s opening history", async (_name, strict, addCount, removeCount) => {
