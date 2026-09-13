@@ -2403,11 +2403,15 @@ describe("ActivityPanel header focus movement", () => {
       preventDefault.mockClear();
       const requests = activity.mock.calls.length;
 
-      const event = activityKey(source, key, {
+      const event = activityKeyboardEvent(source, key, {
         code,
         location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
-        view: source.ownerDocument.defaultView,
       });
+      const ownerWindow = source.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("Activity has no owner Window");
+      setActivityEventView(event, ownerWindow);
+      expect(event.view).toBe(ownerWindow);
+      act(() => source.dispatchEvent(event));
 
       expect(event.code).toBe(code);
       expect(event.location).toBe(KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
@@ -2686,9 +2690,11 @@ describe("ActivityPanel header focus movement", () => {
     const published = activityPanel().innerHTML;
     const scroll = activityPanel().lastElementChild;
     const scrollBefore = [window.scrollX, window.scrollY, scroll?.scrollTop ?? 0];
-    const event = activityKeyboardEvent(refresh, "ArrowRight", {
-      view: refresh.ownerDocument.defaultView,
-    });
+    const event = activityKeyboardEvent(refresh, "ArrowRight");
+    const ownerWindow = refresh.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("Activity has no owner Window");
+    setActivityEventView(event, ownerWindow);
+    expect(event.view).toBe(ownerWindow);
 
     try {
       act(() => refresh.dispatchEvent(event));
@@ -2870,11 +2876,11 @@ describe("ActivityPanel header focus movement", () => {
     const close = headerControl("Close activity");
     const bubble = reactHandler<ActivityKeyHandler>(refresh, "onKeyDown");
     const restore = replaceKeyHandler(refresh, (event) => {
+      bubble(event);
       Object.defineProperty(event, "isDefaultPrevented", {
         configurable: true,
         value: () => false,
       });
-      bubble(event);
     });
     refresh.focus();
     focus.mockClear();
@@ -3051,9 +3057,9 @@ describe("ActivityPanel header focus movement", () => {
       cancelable: true,
     });
     markActivityEventTrusted(foreign);
-    const foreignView = activityKeyboardEvent(refresh, "ArrowRight", {
-      view: foreignWindow,
-    });
+    const foreignView = activityKeyboardEvent(refresh, "ArrowRight");
+    setActivityEventView(foreignView, foreignWindow);
+    expect(foreignView.view).toBe(foreignWindow);
     const structuralWindow = new Proxy(
       Object.create(Object.getPrototypeOf(ownerWindow), {
         document: { configurable: true, value: refresh.ownerDocument },
@@ -3066,9 +3072,7 @@ describe("ActivityPanel header focus movement", () => {
       }),
       {},
     ) as Window;
-    const structuralView = activityKeyboardEvent(refresh, "ArrowRight", {
-      view: ownerWindow,
-    });
+    const structuralView = activityKeyboardEvent(refresh, "ArrowRight");
     setActivityEventView(structuralView, structuralWindow);
     expect(structuralView.view).toBe(structuralWindow);
     expect(structuralWindow).not.toBe(ownerWindow);
@@ -3099,7 +3103,10 @@ describe("ActivityPanel header focus movement", () => {
     expect(focus).not.toHaveBeenCalled();
     expect(preventDefault).not.toHaveBeenCalled();
 
-    const genuine = activityKey(refresh, "ArrowRight", { view: ownerWindow });
+    const genuine = activityKeyboardEvent(refresh, "ArrowRight");
+    setActivityEventView(genuine, ownerWindow);
+    expect(genuine.view).toBe(ownerWindow);
+    act(() => refresh.dispatchEvent(genuine));
 
     expect(genuine.defaultPrevented).toBe(true);
     expect(close).toHaveFocus();
