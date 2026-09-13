@@ -2518,7 +2518,6 @@ describe("notification row keyboard browsing", () => {
     ["authentication", "isDefaultPrevented", 2],
     ["authentication", "isPropagationStopped", 2],
     ["final validation", "isDefaultPrevented", 3],
-    ["final validation", "isPropagationStopped", 3],
   ] as const)(
     "poisons row delivery when %s %s reenters staging and admits a distinct event",
     (_phase, method, invokeAt) => {
@@ -2564,6 +2563,77 @@ describe("notification row keyboard browsing", () => {
       expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
     },
   );
+
+  it("poisons row delivery on the first propagation query after exact prevention", () => {
+    const nativePreventDefault = Event.prototype.preventDefault;
+    let exactEvent: Event | null = null;
+    let preventionCompleted = false;
+    let hostileQueryRan = false;
+    const preventDefault = vi
+      .spyOn(Event.prototype, "preventDefault")
+      .mockImplementation(function (this: Event) {
+        Reflect.apply(nativePreventDefault, this, []);
+        if (this === exactEvent) preventionCompleted = true;
+      });
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const { onOpen, actions } = openStrictKeyboardBell();
+    const source = actions.rows[0]!;
+    const destination = actions.rows[2]!.element;
+    source.element.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const rejected = dispatchKeyWithHandlers(
+      source,
+      [
+        (event) => {
+          exactEvent = event.nativeEvent;
+          const isPropagationStopped = event.isPropagationStopped;
+          Object.defineProperty(event, "isPropagationStopped", {
+            configurable: true,
+            value: () => {
+              const stopped = Reflect.apply(
+                isPropagationStopped,
+                event,
+                [],
+              );
+              if (preventionCompleted && !hostileQueryRan) {
+                hostileQueryRan = true;
+                source.keyDown?.(event);
+              }
+              return stopped;
+            },
+          });
+        },
+        source.keyDown!,
+      ],
+      { key: "PageDown" },
+    );
+
+    expect(rejected.defaultPrevented).toBe(true);
+    expect(preventionCompleted).toBe(true);
+    expect(hostileQueryRan).toBe(true);
+    expect(source.element).toHaveFocus();
+    expect(
+      preventDefault.mock.contexts.filter((context) => context === rejected),
+    ).toHaveLength(1);
+    expect(
+      focus.mock.contexts.filter((context) => context === destination),
+    ).toHaveLength(0);
+    expectNoKeyboardActions(onOpen);
+
+    source.element.focus();
+    focus.mockClear();
+    fireEvent(source.element, rejected);
+    expect(source.element).toHaveFocus();
+    expect(focus).not.toHaveBeenCalled();
+    expectNoKeyboardActions(onOpen);
+
+    const successor = nativeKey(source.element, "PageDown");
+    expect(successor.defaultPrevented).toBe(true);
+    expect(destination).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+  });
 
   it.each([
     "native propagation",
