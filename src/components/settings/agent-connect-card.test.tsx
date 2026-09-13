@@ -2399,7 +2399,7 @@ describe("AgentConnectCard exact keyboard publication", () => {
         return Reflect.get(target, property, target);
       },
     });
-    vi.spyOn(Document.prototype, "defaultView", "get").mockReturnValue(facade);
+    vi.spyOn(document, "defaultView", "get").mockReturnValue(facade);
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const view = renderDirect(
