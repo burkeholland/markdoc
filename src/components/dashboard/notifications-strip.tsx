@@ -1811,7 +1811,6 @@ function captureNotificationReactKeyboard(
       }
     ).isComposing;
     const view = event.view;
-    const publicView = view as unknown as EventTarget | null;
     if (
       typeof preventDefault !== "function" ||
       typeof isDefaultPrevented !== "function" ||
@@ -1850,34 +1849,9 @@ function captureNotificationReactKeyboard(
       (reactIsComposing !== undefined &&
         reactIsComposing !== native.isComposing) ||
       event.detail !== native.detail ||
-      (publicView !== null &&
-        publicView !== publication.ownerWindow &&
-        publicView !== windowProof.receiver) ||
-      !notificationReactOwnPropertiesMatch(
-        event,
-        [
-          ["nativeEvent", nativeEvent],
-          ["type", event.type],
-          ["currentTarget", event.currentTarget],
-          ["target", event.target],
-          ["eventPhase", event.eventPhase],
-          ["bubbles", event.bubbles],
-          ["cancelable", event.cancelable],
-          ["defaultPrevented", event.defaultPrevented],
-          ["isTrusted", event.isTrusted],
-          ["view", event.view],
-          ["detail", event.detail],
-          ["key", event.key],
-          ["code", event.code],
-          ["location", event.location],
-          ["ctrlKey", event.ctrlKey],
-          ["altKey", event.altKey],
-          ["metaKey", event.metaKey],
-          ["shiftKey", event.shiftKey],
-          ["repeat", event.repeat],
-        ],
-        intrinsics,
-      )
+      (!Object.is(view, null) &&
+        !Object.is(view, publication.ownerWindow) &&
+        !Object.is(view, windowProof.receiver))
     ) {
       return null;
     }
@@ -1940,11 +1914,10 @@ function notificationReactKeyboardRemainsExact(
       (reactIsComposing === undefined ||
         reactIsComposing === native.isComposing) &&
       event.detail === native.detail &&
-      event.view === snapshot.view &&
-      (event.view === null ||
-        (event.view as unknown as EventTarget) ===
-          publication.ownerWindow ||
-        (event.view as unknown as EventTarget) === native.path.at(-1)) &&
+      Object.is(event.view, snapshot.view) &&
+      (Object.is(event.view, null) ||
+        Object.is(event.view, publication.ownerWindow) ||
+        Object.is(event.view, native.path.at(-1))) &&
       event.preventDefault === methods.preventDefault &&
       event.isPropagationStopped === methods.isPropagationStopped &&
       intrinsics.methodMatches(

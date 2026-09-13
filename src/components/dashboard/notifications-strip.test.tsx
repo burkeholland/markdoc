@@ -346,6 +346,26 @@ function interceptKeyDownCapture(
   };
 }
 
+function exposeKeyboardScalarThroughGetter(
+  event: ReactKeyboardEvent<HTMLElement>,
+  property: keyof ReactKeyboardEvent<HTMLElement>,
+) {
+  const descriptor = Object.getOwnPropertyDescriptor(event, property);
+  if (
+    !descriptor ||
+    !("value" in descriptor) ||
+    !descriptor.configurable
+  ) {
+    throw new Error(`${String(property)} was not configurable public data`);
+  }
+  const value = descriptor.value;
+  Object.defineProperty(event, property, {
+    configurable: true,
+    enumerable: descriptor.enumerable,
+    get: () => value,
+  });
+}
+
 function connectedButton(label = "Other") {
   const button = document.createElement("button");
   button.type = "button";
@@ -2005,7 +2025,45 @@ describe("notification strip row action navigation", () => {
     }
   });
 
-  it("rejects independently replaced wrapper facts without consuming a clean successor", () => {
+  it("accepts exact scalar wrapper values exposed through non-data descriptors", () => {
+    const router = createRouter("row-wrapper-accessors");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const actions = captureActions(0, view.host);
+    const restoreCapture = interceptKeyDownCapture(
+      actions.item,
+      (original, event) => {
+        exposeKeyboardScalarThroughGetter(event, "key");
+        original(event);
+      },
+    );
+    const restoreBubble = interceptKeyDown(
+      actions.openButton,
+      (original, event) => {
+        exposeKeyboardScalarThroughGetter(event, "key");
+        original(event);
+      },
+    );
+    try {
+      actions.openButton.focus();
+      const result = dispatchTrustedKey(
+        actions.openButton,
+        "ArrowRight",
+        {},
+        false,
+      );
+
+      expect(result.allowed).toBe(false);
+      expect(result.event.defaultPrevented).toBe(true);
+      expect(actions.dismissButton).toHaveFocus();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+  });
+
+  it("rejects scalar value and required-method drift without consuming a clean successor", () => {
     const router = createRouter("replaced-row-wrapper-facts");
     const view = createStrictView(router, snapshot([ITEM]));
     const actions = captureActions(0, view.host);
@@ -2014,12 +2072,15 @@ describe("notification strip row action navigation", () => {
     const restoreCapture = interceptKeyDownCapture(
       actions.item,
       (original, event) => {
-        original(new Proxy(event, {
-          get(target, property, receiver) {
-            if (property === "isPropagationStopped") return () => true;
-            return Reflect.get(target, property, receiver);
-          },
-        }));
+        const descriptor = Object.getOwnPropertyDescriptor(event, "key");
+        if (!descriptor || !("value" in descriptor)) {
+          throw new Error("The capture wrapper key was not public data");
+        }
+        Object.defineProperty(event, "key", {
+          ...descriptor,
+          value: "ArrowLeft",
+        });
+        original(event);
       },
     );
     try {
