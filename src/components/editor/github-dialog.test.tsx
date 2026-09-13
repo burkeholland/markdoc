@@ -1921,21 +1921,23 @@ describe("GitHubPicker exact control publication", () => {
         view.root.render(<StrictMode>{picker("fresh-form")}</StrictMode>);
       });
       await selectStrictRepository(view.host);
-      const currentPath = (await view.picker.findByTestId("repo-path")) as HTMLInputElement;
-      const currentForm = currentPath.form;
-      if (!currentForm) throw new Error("The fresh repository path has no form");
-      fireEvent.change(currentPath, { target: { value: "docs/current.md" } });
+      await view.picker.findByTestId("repo-path");
       await act(async () => {});
-      const currentSubmit = new SubmitEventConstructor("submit", {
-        bubbles: true,
-        cancelable: true,
-        submitter: null,
-      });
-      act(() => {
-        currentForm.dispatchEvent(currentSubmit);
-      });
+      const path = view.picker.getByTestId("repo-path") as HTMLInputElement;
+      fireEvent.change(path, { target: { value: "docs/current.md" } });
+      await act(async () => {});
 
-      expect(currentSubmit.defaultPrevented).toBe(true);
+      const currentPath = view.picker.getByTestId("repo-path") as HTMLInputElement;
+      const currentForm = currentPath.form;
+      const currentSubmit = view.picker.getByTestId("repo-link") as HTMLButtonElement;
+      if (!currentForm) throw new Error("The fresh repository path has no form");
+      expect(currentPath).toHaveValue("docs/current.md");
+      expect(currentSubmit.form).toBe(currentForm);
+      expect(currentSubmit).toBeEnabled();
+      expect(linkDocument).not.toHaveBeenCalled();
+
+      act(() => currentForm.requestSubmit());
+
       expect(linkDocument).toHaveBeenCalledExactlyOnceWith(doc.id, {
         storage: "repo",
         owner: currentRepo.owner,
