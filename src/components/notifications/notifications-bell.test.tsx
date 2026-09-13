@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import {
   StrictMode,
   useLayoutEffect,
@@ -8,6 +10,7 @@ import {
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { compile } from "tailwindcss";
 import type { NotificationDto } from "@/lib/api";
 import type { NotificationReadError } from "@/lib/notifications-store";
 import { TooltipProvider } from "@/components/ui/primitives";
@@ -903,6 +906,210 @@ describe("notification read actions", () => {
   });
 });
 
+describe("notification read-error wrapping", () => {
+  const unbrokenMessage = "NotificationReadFailure".repeat(16);
+  const ordinaryMessage = "The notification could not be marked as read because the request was interrupted. Please retry without leaving the current document. ".repeat(3);
+  const literalMessage = ' \tCould not read <strong>this notification</strong>\n<img src="invalid" alt="literal"> & "retry"  '.repeat(3);
+  const alertClass = "flex items-center justify-between gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40";
+  const state = {
+    ...EMPTY,
+    items: [ITEM, ITEM_TWO],
+    unreadCount: 2,
+    loaded: true,
+  };
+
+  function expectReadError(message: string, pending = false) {
+    const alert = screen.getByRole("alert");
+    const span = alert.firstElementChild;
+    const retry = screen.getByTestId("notifications-read-retry");
+    if (!(span instanceof HTMLSpanElement)) throw new Error("Expected the existing read-error span");
+
+    expect(alert.tagName).toBe("DIV");
+    expect(Object.fromEntries([...alert.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      class: alertClass,
+      role: "alert",
+      "aria-atomic": "true",
+    });
+    expect([...alert.childNodes]).toEqual([span, retry]);
+    expect(span.textContent).toBe(message);
+    expect(span.childNodes).toHaveLength(1);
+    expect(span.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(span.children).toHaveLength(0);
+    expect(Object.fromEntries([...span.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      class: "min-w-0 wrap-anywhere",
+    });
+    expect(retry.tagName).toBe("BUTTON");
+    expect(retry.textContent).toBe(pending ? "Retrying…" : "Retry");
+    expect(retry.children).toHaveLength(0);
+    expect(Object.fromEntries([...retry.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      type: "button",
+      class: "btn btn-outline h-7 shrink-0 px-2 text-xs",
+      "data-testid": "notifications-read-retry",
+      ...(pending ? { disabled: "" } : {}),
+    });
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getAllByTestId("notifications-read-retry")).toEqual([retry]);
+    expect(screen.queryByTestId("notifications-load-retry")).toBeNull();
+    expect(alert.parentElement?.tagName).toBe("LI");
+    expect(alert.parentElement).toHaveAttribute("class", "px-3 py-2");
+    const list = screen.getByRole("list", { name: "Notifications" });
+    expect(list.firstElementChild).toBe(alert.parentElement);
+    expect(list.children).toHaveLength(3);
+    expect(list.className).toBe("scrollbar-thin max-h-[420px] overflow-y-auto py-1");
+    expect(screen.getByTestId("notifications-popover")).toHaveClass("w-[min(380px,calc(100vw-16px))]", "p-0");
+    return { span, retry };
+  }
+
+  function surroundingMarkup() {
+    const root = screen.getByTestId("notifications-popover").firstElementChild;
+    const badge = screen.getByTestId("notifications-badge");
+    const bell = screen.getByTestId("notifications-bell");
+    expect(bell).toHaveAttribute("data-unread", "2");
+    expect(bell).toHaveAttribute("aria-label", "Notifications, 2 unread");
+    expect(badge.textContent).toBe("2");
+    expect(screen.getByTestId("notifications-unread-count").textContent).toBe("2 unread");
+    const rows = screen.getAllByTestId("notification-item");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).not.toHaveTextContent(ITEM.documentTitle);
+    expect(rows[1]).toHaveTextContent(ITEM_TWO.documentTitle);
+    expect(rows[0]?.querySelector("span[title]")).toHaveAttribute("title", ITEM.snippet);
+    expect(rows[1]?.querySelector("span[title]")).toHaveAttribute("title", ITEM_TWO.snippet);
+    return [
+      root?.firstElementChild?.outerHTML,
+      ...rows.map((row) => row.outerHTML),
+      root?.lastElementChild?.outerHTML,
+      badge.outerHTML,
+    ];
+  }
+
+  it.each([
+    ["unbroken", unbrokenMessage],
+    ["ordinary", ordinaryMessage],
+    ["literal HTML and whitespace", literalMessage],
+  ])("keeps the exact %s read reason beside one unchanged Retry", (_label, message) => {
+    expect(message.length).toBeGreaterThanOrEqual(240);
+    expect(unbrokenMessage).not.toMatch(/\s/);
+    const error = { ...READ_FAILURE, message };
+    const onOpen = vi.fn();
+    createBellRoot({ ...state, readError: error }, { currentDocId: ITEM.documentId, onOpen });
+    openCurrentBell();
+
+    expectReadError(message);
+    const before = surroundingMarkup();
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+    const retry = captureActions().readRetry!;
+    dispatchWithHandlers(retry, [retry.click, retry.click]);
+    fireEvent.click(retry.element);
+
+    expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(error);
+    expect(surroundingMarkup()).toEqual(before);
+    expect(store.refreshNotifications).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["state replacement", false, false],
+    ["state replacement, current first", false, true],
+    ["closed/reopened visit", true, false],
+    ["closed/reopened visit, current first", true, true],
+  ] as const)("keeps only the current read Retry through %s, pending and recovery", (_label, reopen, currentFirst) => {
+    const onOpen = vi.fn();
+    const props = { currentDocId: ITEM.documentId, onOpen };
+    const root = createBellRoot({
+      ...state,
+      readError: { ...READ_FAILURE, message: unbrokenMessage },
+    }, props);
+    openCurrentBell();
+    const original = expectReadError(unbrokenMessage);
+    const before = surroundingMarkup();
+    const stale = captureActions().readRetry!;
+    const replacement = { ...READ_FAILURE, id: 8, operationId: 8, message: literalMessage };
+
+    if (reopen) {
+      fireEvent.click(screen.getByTestId("notifications-bell"));
+      expect(screen.queryByTestId("notifications-popover")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(original.span.isConnected).toBe(false);
+    }
+    renderBellRoot(root, { ...state, readError: replacement }, props);
+    if (reopen) openCurrentBell();
+
+    const updated = expectReadError(literalMessage);
+    expect(updated.span === original.span).toBe(!reopen);
+    expect(screen.queryByText(unbrokenMessage)).toBeNull();
+    expect(surroundingMarkup()).toEqual(before);
+    const current = captureActions().readRetry!;
+    dispatchWithHandlers(current, [stale.click, stale.click]);
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+    dispatchWithHandlers(
+      current,
+      currentFirst
+        ? [current.click, stale.click, current.click]
+        : [stale.click, current.click, current.click],
+    );
+    fireEvent.click(current.element);
+    expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(replacement);
+
+    renderBellRoot(root, { ...state, readError: replacement, readErrorPending: true }, props);
+    const pending = expectReadError(literalMessage, true);
+    expect(pending.span).toBe(updated.span);
+    expect(pending.retry).toBeDisabled();
+    const pendingControl = captureActions().readRetry!;
+    dispatchWithHandlers(pendingControl, [stale.click, current.click, pendingControl.click, pendingControl.click]);
+    fireEvent.click(pending.retry);
+    expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(replacement);
+    expect(surroundingMarkup()).toEqual(before);
+
+    renderBellRoot(root, state, props);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("notifications-read-retry")).toBeNull();
+    expect(screen.queryByText(literalMessage, { normalizer: (value) => value })).toBeNull();
+    expect(pending.span.isConnected).toBe(false);
+    expect(pending.retry.isConnected).toBe(false);
+    expect(screen.getByRole("list", { name: "Notifications" }).children).toHaveLength(2);
+    expect(surroundingMarkup()).toEqual(before);
+    expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(replacement);
+    expect(store.refreshNotifications).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("notifications-read-all"));
+    fireEvent.click(screen.getByTestId("notifications-read-all"));
+    expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getAllByTestId("notification-item")[0]!);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
+    expect(screen.queryByTestId("notifications-popover")).toBeNull();
+  });
+
+  it("still retires the Retry after read-error class mutation and restoration", () => {
+    createBellRoot({
+      ...state,
+      readError: { ...READ_FAILURE, message: unbrokenMessage },
+    }, { currentDocId: ITEM.documentId, onOpen: vi.fn() });
+    openCurrentBell();
+    const { span } = expectReadError(unbrokenMessage);
+    const retry = captureActions().readRetry!;
+    span.className = "min-w-0 wrap-anywhere extra";
+    span.className = "min-w-0 wrap-anywhere";
+    fireEvent.click(retry.element);
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+  });
+
+  it("compiles read-error wrapping and Retry shrinking with the installed Tailwind theme", async () => {
+    const theme = readFileSync(createRequire(import.meta.url).resolve("tailwindcss/theme.css"), "utf8");
+    const { build } = await compile(`${theme}\n@tailwind utilities;`);
+    const css = build(["min-w-0", "wrap-anywhere", "shrink-0"]);
+    expect(css).toMatch(/\.min-w-0\s*\{\s*min-width:\s*0px;\s*\}/);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).toMatch(/\.shrink-0\s*\{\s*flex-shrink:\s*0;\s*\}/);
+    expect(css).not.toMatch(/word-break:\s*break-all|overflow:\s*(auto|scroll|hidden)|text-overflow:\s*ellipsis/);
+  });
+});
+
 describe("notification bell loading", () => {
   it("shows a neutral first-load state instead of claiming empty success", () => {
     openBell({ ...EMPTY, loading: true });
@@ -917,7 +1124,22 @@ describe("notification bell loading", () => {
     const view = openBell({ ...EMPTY, loadError: true }, onOpen);
     const retry = screen.getByTestId("notifications-load-retry");
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't load notifications.");
+    const alert = screen.getByRole("alert");
+    const span = alert.firstElementChild;
+    expect(span?.tagName).toBe("SPAN");
+    expect(span?.textContent).toBe("Couldn't load notifications.");
+    expect(span?.getAttributeNames()).toEqual([]);
+    expect(span?.children).toHaveLength(0);
+    expect([...alert.childNodes]).toEqual([span, retry]);
+    expect(alert).toHaveAttribute("aria-atomic", "true");
+    expect(alert.className).toBe("flex items-center justify-between gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40");
+    expect(screen.getAllByTestId("notifications-load-retry")).toEqual([retry]);
+    expect(screen.queryByTestId("notifications-read-retry")).toBeNull();
+    expect(retry).toHaveAttribute("type", "button");
+    expect(retry.className).toBe("btn btn-outline h-7 shrink-0 px-2 text-xs");
+    expect(retry.textContent).toBe("Retry");
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
     fireEvent.click(retry);
     expect(store.refreshNotifications).toHaveBeenCalledOnce();
 
@@ -928,6 +1150,23 @@ describe("notification bell loading", () => {
       </TooltipProvider>,
     );
     expect(screen.getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    expect(span?.textContent).toBe("Couldn't load notifications.");
+    expect(span?.getAttributeNames()).toEqual([]);
+    fireEvent.click(screen.getByTestId("notifications-load-retry"));
+    expect(store.refreshNotifications).toHaveBeenCalledOnce();
+
+    store.useNotifications.mockReturnValue({ ...EMPTY, loaded: true });
+    view.rerender(
+      <TooltipProvider>
+        <NotificationsBell onOpen={onOpen} />
+      </TooltipProvider>,
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByTestId("notifications-load-retry")).toBeNull();
+    expect(screen.getByText("You're all caught up.")).toBeVisible();
+    expect(store.refreshNotifications).toHaveBeenCalledOnce();
+    expect(store.retryNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
   });
 
   it("shows empty success only after a successful load", () => {
