@@ -932,6 +932,85 @@ describe("DownloadMenu trusted toggle directions", () => {
     });
   });
 
+  it("requires the real backing Window receiver instead of a same-prototype lookalike", () => {
+    const originalAdd = window.addEventListener.bind(window);
+    const originalRemove = window.removeEventListener.bind(window);
+    const bridges = new WeakMap<EventListener, EventListener>();
+    const lookalike = Object.create(
+      Object.getPrototypeOf(window),
+    ) as Window;
+    Object.defineProperty(lookalike, "document", {
+      configurable: true,
+      value: document,
+    });
+    let useLookalike = true;
+    vi.spyOn(window, "addEventListener").mockImplementation(
+      (type, listener, options) => {
+        if (type === "keydown" && typeof listener === "function") {
+          const bridge: EventListener = function (this: Window, event) {
+            Reflect.apply(
+              listener,
+              useLookalike ? lookalike : this,
+              [event],
+            );
+          };
+          bridges.set(listener, bridge);
+          originalAdd(type, bridge, options);
+          return;
+        }
+        originalAdd(type, listener, options);
+      },
+    );
+    vi.spyOn(window, "removeEventListener").mockImplementation(
+      (type, listener, options) => {
+        const exact =
+          type === "keydown" && typeof listener === "function"
+            ? bridges.get(listener)
+            : undefined;
+        originalRemove(type, exact ?? listener, options);
+      },
+    );
+    const preventDefault = vi.spyOn(
+      Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    act(() => {
+      root.render(
+        <StrictMode>
+          <DownloadMenu docId={DOC_ID} />
+        </StrictMode>,
+      );
+    });
+    const toggle = menuElements().toggle;
+    toggle.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+
+    const rejected = dispatchToggleKey(toggle, "ArrowDown");
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(menuElements().list).not.toBeVisible();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(lookalike.document).toBe(document);
+    expect(Object.getPrototypeOf(lookalike)).toBe(
+      Object.getPrototypeOf(window),
+    );
+
+    useLookalike = false;
+    const accepted = dispatchToggleKey(toggle, "ArrowUp");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(menuElements().links.pdf).toHaveFocus();
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+  });
+
   it("rejects altered key facts, prior cancellation, and missing focus before a fresh trusted recovery", () => {
     const nativePreventDefault = Event.prototype.preventDefault;
     const preventDefault = vi.spyOn(
