@@ -2441,6 +2441,243 @@ describe("ShareDialog authority layout boundaries", () => {
   });
 });
 
+describe("ShareDialog identity titles", () => {
+  function expectIdentity(row: Element, name: string | null | undefined, login: string | null) {
+    expect(row.tagName).toBe("LI");
+    expect(row.className).toBe("flex items-center gap-3 px-3 py-2.5");
+    const metadata = row.children.item(1);
+    if (!(metadata instanceof HTMLDivElement)) throw new Error("Identity metadata must remain a direct div");
+    expect(metadata.className).toBe("min-w-0 flex-1");
+    expect(metadata.getAttributeNames()).toEqual(["class"]);
+    expect(metadata.children).toHaveLength(login === null ? 1 : 2);
+    const values = login === null ? [name] : [name, `@${login}`];
+    values.forEach((value, index) => {
+      const element = metadata.children.item(index);
+      if (!(element instanceof HTMLDivElement)) throw new Error("Identity text must remain a div");
+      expect(element.className).toBe(index === 0
+        ? "truncate text-sm font-medium text-ink"
+        : "truncate text-xs text-ink-3");
+      expect(element.textContent).toBe(value ?? "");
+      expect(element.getAttribute("title")).toBe(value ?? null);
+      expect(element.getAttributeNames().sort()).toEqual(value == null ? ["class"] : ["class", "title"]);
+      expect(element.childElementCount).toBe(0);
+      expect(element.tabIndex).toBe(-1);
+    });
+    expect(metadata.querySelectorAll('a, button, input, select, [tabindex], [role], [contenteditable]')).toHaveLength(0);
+    return metadata;
+  }
+
+  it.each([true, false])("keeps exact long native titles and passive hover with isOwner=%s", async (isOwner) => {
+    const ownerName = `Owner ${"similar identity ".repeat(16)}<em title="owner">"literal"</em>`;
+    const collaboratorName = `Collaborator ${"similar identity ".repeat(16)}<script>"literal"</script>`;
+    const ownerLogin = `owner-${"long-login-".repeat(20)}<b title="owner">`;
+    const collaboratorLogin = `collaborator-${"long-login-".repeat(20)}<i title="collaborator">`;
+    expect(ownerName.length).toBeGreaterThanOrEqual(200);
+    expect(collaboratorName.length).toBeGreaterThanOrEqual(200);
+    expect(ownerName).not.toBe(collaboratorName);
+    expect(ownerLogin.length).toBeGreaterThanOrEqual(200);
+    expect(collaboratorLogin.length).toBeGreaterThanOrEqual(200);
+    collaborators.mockResolvedValueOnce({
+      owner: { name: ownerName, login: ownerLogin, image: null },
+      linkAccess: "private",
+      collaborators: [{ name: collaboratorName, login: collaboratorLogin, image: null, role: "viewer" }],
+      agents: [],
+    });
+    const onDocChange = vi.fn();
+    const onOpenChange = vi.fn();
+    render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner={isOwner} onDocChange={onDocChange} />);
+    const row = await screen.findByTestId("collaborator-row");
+    const list = screen.getByRole("list", { name: "People with access" });
+    expect(list.children).toHaveLength(2);
+    const ownerRow = list.children[0];
+    const ownerMetadata = expectIdentity(ownerRow, ownerName, ownerLogin);
+    const collaboratorMetadata = expectIdentity(row, collaboratorName, collaboratorLogin);
+    expect(Array.from(ownerRow.children, (element) => element.tagName)).toEqual(["SPAN", "DIV", "SPAN"]);
+    expect(Array.from(row.children, (element) => element.tagName)).toEqual(isOwner
+      ? ["SPAN", "DIV", "SELECT", "BUTTON"]
+      : ["SPAN", "DIV", "SPAN"]);
+    expect(ownerRow.firstElementChild).toHaveClass("avatar");
+    expect(ownerRow.firstElementChild).toHaveAttribute("title", ownerName);
+    expect(row.firstElementChild).toHaveClass("avatar");
+    expect(row.firstElementChild).toHaveAttribute("title", collaboratorName);
+    expect(ownerRow.lastElementChild).toHaveTextContent(/^Owner$/);
+    expect(ownerRow.lastElementChild).toHaveClass("text-xs", "font-medium", "text-ink-3");
+    expect(row).toHaveAttribute("data-login", collaboratorLogin);
+    expect(list.querySelectorAll("script, em, b, i, a, [tabindex]")).toHaveLength(0);
+    if (isOwner) {
+      expect(within(row).getByRole("combobox", { name: `Role for ${collaboratorLogin}` })).toHaveValue("viewer");
+      expect(within(row).getByRole("button", { name: `Remove ${collaboratorLogin}` })).toBeEnabled();
+      expect(list.querySelectorAll("select, button")).toHaveLength(2);
+    } else {
+      expect(list.querySelectorAll("select, button")).toHaveLength(0);
+      expect(row.lastElementChild).toHaveTextContent(/^viewer$/);
+      expect(row.lastElementChild).toHaveClass("text-xs", "font-medium", "capitalize", "text-ink-3");
+      expect(screen.queryByTestId("share-login")).toBeNull();
+      expect(screen.queryByTestId("link-access")).toBeNull();
+    }
+    const done = screen.getByRole("button", { name: "Done" });
+    act(() => done.focus());
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const animationFrame = vi.spyOn(window, "requestAnimationFrame");
+    const microtask = vi.spyOn(globalThis, "queueMicrotask");
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected hover request"));
+    const listHtml = list.innerHTML;
+    try {
+      for (const element of [...ownerMetadata.children, ...collaboratorMetadata.children]) {
+        fireEvent.pointerOver(element);
+        fireEvent.mouseOver(element);
+        fireEvent.mouseMove(element);
+        fireEvent.mouseOut(element);
+        fireEvent.pointerOut(element);
+      }
+      // Observe only synchronous hover scheduling, not async React setup or teardown.
+      expect(timeout).not.toHaveBeenCalled();
+      expect(interval).not.toHaveBeenCalled();
+      expect(animationFrame).not.toHaveBeenCalled();
+      expect(microtask).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(done).toHaveFocus();
+      expect(list.innerHTML).toBe(listHtml);
+      expect(collaborators).toHaveBeenCalledExactlyOnceWith(DOC_ID);
+      expect(addCollaborator).not.toHaveBeenCalled();
+      expect(removeCollaborator).not.toHaveBeenCalled();
+      expect(patchDocument).not.toHaveBeenCalled();
+      expect(tokensList).not.toHaveBeenCalled();
+      expect(tokensCreate).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+      expect(onDocChange).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    } finally {
+      focus.mockRestore();
+      timeout.mockRestore();
+      interval.mockRestore();
+      animationFrame.mockRestore();
+      microtask.mockRestore();
+      fetch.mockRestore();
+    }
+  });
+
+  it.each([
+    { name: null, login: "fallback-login" },
+    { name: undefined, login: "fallback-login" },
+    { name: "", login: "not-a-name-fallback" },
+    { name: "  untrimmed name  ", login: "  untrimmed-login  " },
+    { name: "Named owner", login: null },
+    { name: "Named owner", login: undefined },
+    { name: "Named owner", login: "" },
+    { name: null, login: null },
+    { name: undefined, login: undefined },
+    { name: null, login: undefined },
+    { name: undefined, login: null },
+    { name: "", login: "" },
+  ])("preserves nullish and empty identity semantics for $name / $login", async ({ name, login }) => {
+    const collaboratorLogin = login ?? "collaborator-fallback";
+    collaborators.mockResolvedValueOnce({
+      owner: { name, login, image: null },
+      linkAccess: "private",
+      collaborators: [{ name, login: collaboratorLogin, image: null, role: "editor" }],
+      agents: [],
+    });
+    await openDialog();
+    const list = screen.getByRole("list", { name: "People with access" });
+    expect(list.children).toHaveLength(2);
+    expectIdentity(list.children[0], name ?? login, login || null);
+    expectIdentity(list.children[1], name ?? collaboratorLogin, collaboratorLogin);
+    expect(list.children[0].firstElementChild).toHaveAttribute("title", name ?? login ?? "Owner");
+    const role = within(screen.getByTestId("collaborator-row")).getByRole("combobox");
+    expect(role).toBeEnabled();
+    expect(role).toHaveAttribute("aria-label", `Role for ${collaboratorLogin}`);
+  });
+
+  it("refreshes same-login and owner titles on list reload, removal, and document replacement", async () => {
+    const initial = collaboratorRows("bob", "charlie");
+    const renamed = collaboratorRows("bob", "charlie", "dana");
+    renamed.owner = { name: "Replacement owner", login: "new-owner", image: null };
+    renamed.collaborators[0].name = "Renamed Bob";
+    collaborators.mockResolvedValueOnce(initial).mockResolvedValueOnce(renamed);
+    const view = renderDialog();
+    await screen.findByText("@bob");
+    fireEvent.change(screen.getByTestId("share-login"), { target: { value: "dana" } });
+    fireEvent.click(screen.getByTestId("share-add"));
+    await screen.findByText("Renamed Bob");
+    expect(addCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "dana", "editor");
+    expect(collaborators.mock.calls).toEqual([[DOC_ID], [DOC_ID]]);
+    const list = screen.getByRole("list", { name: "People with access" });
+    expect(list.children).toHaveLength(4);
+    expectIdentity(list.children[0], "Replacement owner", "new-owner");
+    expectIdentity(collaboratorRow("bob"), "Renamed Bob", "bob");
+    expect(list.querySelector('[title="Bob"], [title="Alice"], [title="@alice"]')).toBeNull();
+
+    fireEvent.click(removeButton("charlie"));
+    await waitFor(() => expect(screen.queryByText("@charlie")).toBeNull());
+    expect(removeCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "charlie");
+    expect(list.children).toHaveLength(3);
+    expect(list.querySelector('[title="Charlie"], [title="@charlie"]')).toBeNull();
+    expectIdentity(collaboratorRow("bob"), "Renamed Bob", "bob");
+
+    const nextDocument = { ...doc, id: "doc-identity-replacement", title: "Replacement document" };
+    const nextList = deferred<CollaboratorResponse>();
+    collaborators.mockReturnValueOnce(nextList.promise);
+    view.rerender(<ShareDialog open onOpenChange={vi.fn()} doc={nextDocument} isOwner onDocChange={vi.fn()} />);
+    expect(screen.getByTestId("collaborator-list-loading")).toBeInTheDocument();
+    expect(screen.queryAllByTestId("collaborator-row")).toHaveLength(0);
+    expect(list.querySelector('[title="Renamed Bob"], [title="Replacement owner"], [title="@new-owner"]')).toBeNull();
+    nextList.resolve(collaboratorResponse("Next owner", "Next collaborator"));
+    await screen.findByText("Next collaborator");
+    expect(collaborators.mock.calls).toEqual([[DOC_ID], [DOC_ID], [nextDocument.id]]);
+    expect(list.children).toHaveLength(2);
+    expectIdentity(list.children[0], "Next owner", "Next owner");
+    expectIdentity(list.children[1], "Next collaborator", "Next collaborator");
+    expect(list.querySelector('[title="@bob"], [title="@dana"], [title="@new-owner"]')).toBeNull();
+  });
+
+  it("keeps one permitted role mutation and current titles through the role update and reopen reload", async () => {
+    const pendingRole = deferred<unknown>();
+    addCollaborator.mockReturnValueOnce(pendingRole.promise);
+    const onOpenChange = vi.fn();
+    const onDocChange = vi.fn();
+    const view = render(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByText("@bob");
+    const select = within(collaboratorRow("bob")).getByRole("combobox", { name: "Role for bob" });
+    fireEvent.change(select, { target: { value: "viewer" } });
+    expect(addCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "bob", "viewer");
+    expect(select).toBeDisabled();
+    expectIdentity(collaboratorRow("bob"), "Bob", "bob");
+    await act(async () => {
+      pendingRole.resolve({});
+      await pendingRole.promise;
+    });
+    expect(select).toBeEnabled();
+    expect(select).toHaveValue("viewer");
+    expectIdentity(collaboratorRow("bob"), "Bob", "bob");
+    // Role changes refresh local state; reopening uses the existing list request.
+    expect(collaborators).toHaveBeenCalledExactlyOnceWith(DOC_ID);
+    const refreshed = collaboratorRows("bob");
+    refreshed.collaborators[0].name = "Bob after reload";
+    refreshed.collaborators[0].role = "viewer";
+    refreshed.owner = { name: "Alice after reload", login: "alice", image: null };
+    collaborators.mockResolvedValueOnce(refreshed);
+    view.rerender(<ShareDialog open={false} onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+    view.rerender(<ShareDialog open onOpenChange={onOpenChange} doc={doc} isOwner onDocChange={onDocChange} />);
+    await screen.findByText("Bob after reload");
+    const list = screen.getByRole("list", { name: "People with access" });
+    expectIdentity(list.children[0], "Alice after reload", "alice");
+    expectIdentity(collaboratorRow("bob"), "Bob after reload", "bob");
+    expect(list.querySelector('[title="Alice"], [title="Bob"]')).toBeNull();
+    expect(within(collaboratorRow("bob")).getByRole("combobox")).toHaveValue("viewer");
+    expect(collaborators.mock.calls).toEqual([[DOC_ID], [DOC_ID]]);
+    expect(addCollaborator).toHaveBeenCalledExactlyOnceWith(DOC_ID, "bob", "viewer");
+    expect(removeCollaborator).not.toHaveBeenCalled();
+    expect(onDocChange).not.toHaveBeenCalled();
+  });
+});
+
 describe("ShareDialog layout", () => {
   it("puts the copy-link row under the people list, before General access and the agent card; the footer is just Done", async () => {
     const dialog = await openDialog();
