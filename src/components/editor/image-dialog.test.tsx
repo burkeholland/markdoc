@@ -160,12 +160,19 @@ async function chooseFromCommittedSuccessor(
   file: File,
   settledInput: HTMLInputElement,
 ) {
+  const upload = screen.getByTestId("image-upload");
   expect(screen.getByTestId("image-file")).toBe(settledInput);
+  expect(screen.getByTestId("image-upload-error")).toBeVisible();
   expect(settledInput).toBeEnabled();
+  expect(settledInput).toHaveValue("");
+  expect(upload).toBeEnabled();
+  fireEvent.click(upload);
   await act(async () => {});
   const currentInput = screen.getByTestId("image-file") as HTMLInputElement;
   expect(currentInput).toBe(settledInput);
   expect(currentInput).toBeEnabled();
+  expect(currentInput).toHaveValue("");
+  expect(screen.getByTestId("image-upload")).toBeEnabled();
   fireEvent.change(currentInput, { target: { files: [file] } });
 }
 
