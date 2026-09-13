@@ -4912,7 +4912,7 @@ export function NotificationsStrip() {
                   )}
                 </span>
                 <RelativeTime date={notification.createdAt} className="ml-2 text-xs text-ink-4" />
-                {notification.snippet && notification.kind !== "share" && <span className="mt-0.5 block truncate text-ink-3">{notification.snippet}</span>}
+                {notification.snippet && notification.kind !== "share" && <span className="mt-0.5 block truncate text-ink-3" title={notification.snippet}>{notification.snippet}</span>}
               </button>
               <button
                 ref={published.captureDismiss}

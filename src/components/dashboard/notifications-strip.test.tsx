@@ -732,6 +732,203 @@ afterEach(() => {
   }
 });
 
+describe("notification strip snippet titles", () => {
+  const mentionSnippet = "  Please review the launch plan before the team meeting. Keep the full context about owners, dates, dependencies, and follow-up questions available here even when the dashboard preview is clipped to fit a single line. This final sentence must remain in the hover text.  ";
+  const replySnippet = '  Literal <strong data-note="quoted">comment</strong> &amp; <a href="/not-a-link">not a link</a>: keep "double quotes", \'single quotes\', and <script>not executable</script> as text.\nDo not decode entities or discard the remaining details from this deliberately long reply.  ';
+  const mention = { ...ITEM, snippet: mentionSnippet };
+  const reply: NotificationDto = { ...ITEM_TWO, kind: "reply", snippet: replySnippet };
+  const exactTitle = { normalizer: (value: string) => value };
+
+  it("keeps exact long mention and comment text on one existing span without changing presentation or controls", () => {
+    createDirectView(currentRouter, snapshot([
+      mention,
+      { ...mention, id: "read-mention", readAt: ITEM.createdAt },
+      reply,
+      { ...reply, id: "read-reply", readAt: ITEM.createdAt },
+      { ...SHARE, snippet: replySnippet },
+    ]));
+
+    const rows = screen.getAllByTestId("notification-item");
+    expect(rows.map((row) => row.dataset.notificationId)).toEqual([mention.id, reply.id, SHARE.id]);
+    expect(screen.getByRole("heading", { name: "Notifications3" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Mark all read" })).toBeVisible();
+    expect(screen.getAllByRole("button")).toHaveLength(7);
+    expect(screen.getAllByTestId("relative-time").map((time) => time.textContent))
+      .toEqual([mention.createdAt, reply.createdAt, SHARE.createdAt]);
+
+    [mention, reply].forEach((notification, index) => {
+      expect(notification.snippet.length).toBeGreaterThanOrEqual(200);
+      const row = rows[index];
+      const open = within(row).getByTestId("notification-open");
+      const snippets = open.querySelectorAll("span.truncate");
+      expect(snippets).toHaveLength(1);
+      const snippet = snippets[0];
+      expect(snippet.textContent).toBe(notification.snippet);
+      expect(snippet).toHaveAttribute("title", notification.snippet);
+      expect(snippet).toHaveAttribute("class", "mt-0.5 block truncate text-ink-3");
+      expect(snippet.getAttributeNames().sort()).toEqual(["class", "title"]);
+      expect(snippet.childNodes).toHaveLength(1);
+      expect(snippet.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+      expect(snippet.childElementCount).toBe(0);
+      expect([...open.children].map((child) => child.tagName)).toEqual(["SPAN", "TIME", "SPAN"]);
+      expect(open.lastElementChild).toBe(snippet);
+      expect(open.querySelectorAll("[title]")).toHaveLength(1);
+      expect(open).toHaveAccessibleName(
+        `Alice ${notification.kind} sentence in ${notification.documentTitle}${notification.createdAt}${notification.snippet.trim()}`,
+      );
+      expect(within(row).getByTestId("notification-doc-title").textContent).toBe(notification.documentTitle);
+      const dismiss = within(row).getByRole("button", { name: "Mark as read" });
+      expect([...row.querySelectorAll('a, button, input, select, textarea, [tabindex], [contenteditable="true"]')])
+        .toEqual([open, dismiss]);
+      expect(open.tabIndex).toBe(0);
+      expect(dismiss.tabIndex).toBe(0);
+    });
+    const shareOpen = within(rows[2]).getByTestId("notification-open");
+    expect(shareOpen.querySelectorAll(".truncate, [title]")).toHaveLength(0);
+    expect(shareOpen).toHaveAccessibleName(`@bob share sentence${SHARE.createdAt}`);
+    expect(screen.queryAllByRole("link")).toHaveLength(0);
+  });
+
+  it.each([null, ""])("omits snippet spans and titles for %s mention, comment, and share previews", (snippet) => {
+    const items = [mention, reply, SHARE].map((notification) => {
+      const item = { ...notification };
+      // Exercise runtime null payloads as well as the DTO's supported empty string.
+      Object.defineProperty(item, "snippet", { value: snippet });
+      return item;
+    });
+    createDirectView(currentRouter, snapshot(items));
+
+    expect(screen.getAllByTestId("notification-item")).toHaveLength(3);
+    screen.getAllByTestId("notification-open").forEach((open) => {
+      expect(open.querySelectorAll(".truncate, [title]")).toHaveLength(0);
+      expect([...open.children].map((child) => child.tagName)).toEqual(["SPAN", "TIME"]);
+    });
+  });
+
+  it("updates the existing title on same-ID store reload and removes read or deleted row titles", () => {
+    const view = createDirectView(currentRouter, snapshot([mention, reply]));
+    const originalSpan = within(screen.getAllByTestId("notification-item")[0]).getByTitle(mentionSnippet, exactTitle);
+    const replacement = { ...SAME_ID_REPLACEMENT, snippet: replySnippet };
+    const props = { onPassiveCleanup: vi.fn() };
+
+    renderDirect(view, currentRouter, snapshot([replacement, reply]), props);
+    const currentSpan = within(screen.getAllByTestId("notification-item")[0]).getByTitle(replySnippet, exactTitle);
+    expect(currentSpan).toBe(originalSpan);
+    expect(currentSpan.textContent).toBe(replySnippet);
+    expect(screen.queryByTitle(mentionSnippet, exactTitle)).not.toBeInTheDocument();
+    expect([...view.host.querySelectorAll("span[title]")].map((span) => span.getAttribute("title")))
+      .toEqual([replySnippet, replySnippet]);
+
+    renderDirect(view, currentRouter, snapshot([{ ...replacement, readAt: ITEM.createdAt }, reply]), props);
+    expect(originalSpan).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("notification-item")).toHaveLength(1);
+    expect(screen.getByTitle(replySnippet, exactTitle).textContent).toBe(replySnippet);
+    renderDirect(view, currentRouter, snapshot([]), props);
+    expect(screen.queryByTestId("notifications-strip")).not.toBeInTheDocument();
+    expect(view.host.querySelectorAll("[title]")).toHaveLength(0);
+  });
+
+  it.each([false, true])("shows only the new account's same-ID snippet after store replacement (reset: %s)", (reset) => {
+    const firstRouter = createRouter("first-account");
+    const nextRouter = createRouter("next-account");
+    const view = createDirectView(firstRouter, snapshot([mention]));
+    const stale = captureActions();
+    const props = { onPassiveCleanup: vi.fn() };
+
+    // The strip receives account changes through the shared hook's reset/replacement snapshots.
+    if (reset) {
+      renderDirect(view, nextRouter, { ...snapshot([]), loaded: false, loading: true }, props);
+      expect(view.host.querySelectorAll("[title]")).toHaveLength(0);
+      expect(screen.queryByTestId("notifications-strip")).not.toBeInTheDocument();
+    }
+    renderDirect(view, nextRouter, snapshot([{ ...SAME_ID_REPLACEMENT, snippet: replySnippet }]), props);
+    expect(screen.getAllByTestId("notification-item")).toHaveLength(1);
+    expect([...view.host.querySelectorAll("span[title]")].map((span) => span.getAttribute("title")))
+      .toEqual([replySnippet]);
+    expect(screen.getByTitle(replySnippet, exactTitle).textContent).toBe(replySnippet);
+    expect(screen.queryByTitle(mentionSnippet, exactTitle)).not.toBeInTheDocument();
+    expect(view.host.textContent).not.toContain(mentionSnippet);
+    expectStaleInert(stale, view, [firstRouter, nextRouter]);
+    const current = captureActions();
+    click(current.dismiss);
+    click(current.dismiss);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(SAME_ID_REPLACEMENT.id);
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(firstRouter.push).not.toHaveBeenCalled();
+    expect(nextRouter.push).not.toHaveBeenCalled();
+  });
+
+  it.each(["open", "dismiss"] as const)("keeps the current %s control's expected effect exactly once with a long snippet title", (action) => {
+    const router = createRouter(action);
+    createDirectView(router, snapshot([mention]));
+    const current = captureActions();
+    expect(current.openButton).toHaveAccessibleName(
+      `Alice mention sentence in ${mention.documentTitle}${mention.createdAt}${mentionSnippet.trim()}`,
+    );
+    expect(current.dismissButton).toHaveAccessibleName("Mark as read");
+    expect(within(current.openButton).getByTitle(mentionSnippet, exactTitle).textContent).toBe(mentionSnippet);
+
+    click(current[action]);
+    click(current[action]);
+    click(current[action === "open" ? "dismiss" : "open"]);
+
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(mention.id);
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    if (action === "open") {
+      expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${mention.documentId}?thread=${mention.refId}`);
+    } else {
+      expect(router.push).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps passive snippet hover free of navigation, read, DOM mutation, request, and focus effects", async () => {
+    const user = userEvent.setup();
+    const router = createRouter("hover");
+    const view = createDirectView(router, snapshot([mention, reply]));
+    const focusTarget = connectedButton("Hover focus sentinel");
+    focusTarget.focus();
+    await user.hover(focusTarget);
+    const markup = view.host.innerHTML;
+    const mutations = vi.fn();
+    const observer = new MutationObserver(mutations);
+    observer.observe(view.host, { attributes: true, childList: true, characterData: true, subtree: true });
+    const focus = vi.fn();
+    document.addEventListener("focusin", focus);
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected hover request"));
+    const send = vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => {
+      throw new Error("Unexpected hover request");
+    });
+
+    try {
+      for (const snippet of [mentionSnippet, replySnippet]) {
+        const span = screen.getByTitle(snippet, exactTitle);
+        await user.hover(span);
+        await user.unhover(span);
+        expect(span.textContent).toBe(snippet);
+        expect(span).toHaveAttribute("title", snippet);
+      }
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      for (const method of [router.push, router.replace, router.refresh, router.prefetch, router.back, router.forward]) {
+        expect(method).not.toHaveBeenCalled();
+      }
+      expect(fetch).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+      expect(mutations).not.toHaveBeenCalled();
+      expect(observer.takeRecords()).toEqual([]);
+      expect(view.host.innerHTML).toBe(markup);
+      expect(focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(focusTarget);
+    } finally {
+      observer.disconnect();
+      document.removeEventListener("focusin", focus);
+      fetch.mockRestore();
+      send.mockRestore();
+      focusTarget.remove();
+    }
+  });
+});
+
 describe("notification strip current actions", () => {
   it("preserves document and share presentation while claiming Open and Mark all read once", () => {
     const order: string[] = [];
