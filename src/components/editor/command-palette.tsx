@@ -2578,7 +2578,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                         }}
                       >
                         <CommandIcon name={command.icon} />
-                        <span className="flex-1 truncate">{command.title}</span>
+                        <span className="flex-1 truncate" title={command.title}>{command.title}</span>
                         {command.shortcut && <Kbd>{shortcut(command.shortcut)}</Kbd>}
                         {command.children && <ChevronRight size={14} className="text-ink-4" aria-hidden />}
                         {selected && !command.children && <CornerDownLeft size={13} className="text-ink-4" aria-hidden />}
