@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
@@ -2269,6 +2271,16 @@ describe("FindBar first-row action navigation", () => {
   });
 
   it("performs one final public DOM walk in capture, pre-claim, and pre-focus phases", async () => {
+    const implementation = readFileSync(path.resolve(__dirname, "find-bar.tsx"), "utf8");
+    const afterClaim = implementation.slice(
+      implementation.indexOf("if (!claimFirstRowMovement("),
+      implementation.indexOf("  const createRuntime ="),
+    );
+    expect(afterClaim).toMatch(
+      /const finalProofRetained = finalMovementRetained &&\s+nav\.listener\.retains\(pair\.proof, publication\);/,
+    );
+    expect(afterClaim).not.toContain(".proofFor(");
+
     const s = session("owner", "actions-one-public-walk");
     const focus = trackActionFocus();
     const view = renderActionBar(s, silentCallbacks());
@@ -2282,6 +2294,7 @@ describe("FindBar first-row action navigation", () => {
     )?.get;
     if (!readAttributes) throw new Error("The realm publishes no attributes getter");
     const walks = { capture: 0, preClaim: 0, preFocus: 0 };
+    const preventions: { receiver: unknown; wrapper: object; args: unknown[] }[] = [];
     let phase: "capture" | "bubble" | null = null;
     let nativeEvent: Event | null = null;
 
@@ -2315,7 +2328,13 @@ describe("FindBar first-row action navigation", () => {
       (current, event) => {
         phase = "bubble";
         nativeEvent = event.nativeEvent;
+        const preventDefault = event.preventDefault;
+        event.preventDefault = function (this: ReactKeyboardEvent<HTMLButtonElement>, ...args: unknown[]) {
+          preventions.push({ receiver: this, wrapper: event, args });
+          return Reflect.apply(preventDefault, this, args);
+        };
         try {
+          current(event);
           current(event);
         } finally {
           phase = null;
@@ -2328,7 +2347,11 @@ describe("FindBar first-row action navigation", () => {
       const event = dispatchActionKey(source, "ArrowRight");
       expect(event.defaultPrevented).toBe(true);
       expect(walks).toEqual({ capture: 1, preClaim: 1, preFocus: 1 });
+      expect(preventions).toHaveLength(1);
+      expect(preventions[0]?.receiver).toBe(preventions[0]?.wrapper);
+      expect(preventions[0]?.args).toEqual([]);
       expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
       expect(document.activeElement).toBe(view.action("find-next"));
     } finally {
       restoreBubble();

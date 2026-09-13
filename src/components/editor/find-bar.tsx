@@ -4085,7 +4085,7 @@ function createFindBarPublication({
             FIND_ACTION_PUBLIC_READER,
           );
         const finalProofRetained = finalMovementRetained &&
-          nav.listener.proofFor(pair.nativeEvent, publication) === pair.proof;
+          nav.listener.retains(pair.proof, publication);
         const finalFacts = finalProofRetained ? nav.facts(nativeEvent) : null;
         const finalDomRetained = !!finalFacts && runtime.publishedDomMatches();
         const finalLiveRetained = finalDomRetained && probeLiveAuthority();
