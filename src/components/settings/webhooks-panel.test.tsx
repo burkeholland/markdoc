@@ -474,17 +474,34 @@ function dispatchKeyboardWithReactPairMutation(
   ) {
     throw new Error("The form has no complete keyboard delivery pair");
   }
-  let captureEvent: ReactKeyboardEvent<HTMLFormElement> | null = null;
-  let bubbleEvent: ReactKeyboardEvent<HTMLFormElement> | null = null;
+  const delivery: {
+    captureEvent: ReactKeyboardEvent<HTMLFormElement> | null;
+    bubbleEvent: ReactKeyboardEvent<HTMLFormElement> | null;
+    captureCurrentTarget: EventTarget | null;
+    bubbleCurrentTarget: EventTarget | null;
+    capturePhase: number;
+    bubblePhase: number;
+  } = {
+    captureEvent: null,
+    bubbleEvent: null,
+    captureCurrentTarget: null,
+    bubbleCurrentTarget: null,
+    capturePhase: Event.NONE,
+    bubblePhase: Event.NONE,
+  };
   const wrapped = {
     ...props,
     onKeyDownCapture: (event: ReactKeyboardEvent<HTMLFormElement>) => {
-      captureEvent = event;
+      delivery.captureEvent = event;
+      delivery.captureCurrentTarget = event.currentTarget;
+      delivery.capturePhase = event.eventPhase;
       (capture as KeyDownHandler)(event);
       mutations.captureAfter?.(event);
     },
     onKeyDown: (event: ReactKeyboardEvent<HTMLFormElement>) => {
-      bubbleEvent = event;
+      delivery.bubbleEvent = event;
+      delivery.bubbleCurrentTarget = event.currentTarget;
+      delivery.bubblePhase = event.eventPhase;
       mutations.bubbleBefore?.(event);
       (bubble as KeyDownHandler)(event);
     },
@@ -496,10 +513,16 @@ function dispatchKeyboardWithReactPairMutation(
   } finally {
     if (properties[propsKey] === wrapped) properties[propsKey] = props;
   }
+  const { captureEvent, bubbleEvent } = delivery;
   if (!captureEvent || !bubbleEvent) {
     throw new Error("React did not deliver both keyboard phases");
   }
-  return { nativeEvent, captureEvent, bubbleEvent };
+  return {
+    nativeEvent,
+    ...delivery,
+    captureEvent,
+    bubbleEvent,
+  };
 }
 
 interface DirectView {
@@ -2459,7 +2482,6 @@ describe("Settings → Webhooks: exact committed controls", () => {
           (event: ReactKeyboardEvent<HTMLFormElement>) => void,
         ]
       > = [
-        ["React name", (event) => replace(event, "_reactName", "onKeyUp")],
         ["native identity", (event) => replace(
           event,
           "nativeEvent",
@@ -3109,6 +3131,108 @@ describe("Settings → Webhooks: exact committed controls", () => {
       }]);
       expect(cancel).toHaveFocus();
     });
+
+    it.each([
+      ["capture", "present"],
+      ["capture", "absent"],
+      ["capture", "mutated"],
+      ["bubble", "present"],
+      ["bubble", "absent"],
+      ["bubble", "mutated"],
+    ] as const)(
+      "accepts movement with %s-wrapper private _reactName %s",
+      async (phase, state) => {
+        fetchMock.mockImplementation(() =>
+          Promise.resolve(response({ webhooks: [] })));
+        const view = renderKeyboardDirect(
+          <StrictMode><WebhooksPanel /></StrictMode>,
+          trackCreateNavigationEffects,
+        );
+        const effects = view.setup;
+        await within(view.host).findByTestId("webhooks-empty");
+        await settle();
+        fireEvent.click(within(view.host).getByTestId("webhook-add"));
+        fireEvent.change(within(view.host).getByTestId("webhook-url"), {
+          target: { value: "https://receiver.example/public-authority" },
+        });
+        await settle();
+
+        const form = within(view.host)
+          .getByTestId("webhook-form") as HTMLFormElement;
+        const create = within(view.host)
+          .getByTestId("webhook-create") as HTMLButtonElement;
+        const cancel = within(view.host)
+          .getByRole("button", { name: "Cancel" }) as HTMLButtonElement;
+        const mutate = (event: ReactKeyboardEvent<HTMLFormElement>) => {
+          if (state === "present") {
+            expect(Reflect.has(event, "_reactName")).toBe(true);
+          } else if (state === "absent") {
+            expect(Reflect.deleteProperty(event, "_reactName")).toBe(true);
+            expect(Reflect.has(event, "_reactName")).toBe(false);
+          } else {
+            Object.defineProperty(event, "_reactName", {
+              configurable: true,
+              value: phase === "capture" ? "capture-private-drift" : Symbol(),
+            });
+          }
+        };
+        create.focus();
+        effects.preventDefault.mockClear();
+        effects.focus.mockClear();
+        effects.focusCalls.length = 0;
+
+        const delivery = dispatchKeyboardWithReactPairMutation(
+          form,
+          create,
+          phase === "capture"
+            ? { captureAfter: mutate }
+            : { bubbleBefore: mutate },
+          navigationInit("ArrowRight"),
+        );
+
+        expect(delivery.captureEvent).not.toBe(delivery.bubbleEvent);
+        expect(delivery.captureEvent.nativeEvent).toBe(delivery.nativeEvent);
+        expect(delivery.bubbleEvent.nativeEvent).toBe(delivery.nativeEvent);
+        expect(delivery.captureCurrentTarget).toBe(form);
+        expect(delivery.bubbleCurrentTarget).toBe(form);
+        expect(delivery.capturePhase).toBe(Event.CAPTURING_PHASE);
+        expect(delivery.bubblePhase).toBe(Event.BUBBLING_PHASE);
+        expect(delivery.captureEvent.isDefaultPrevented).toBe(
+          delivery.bubbleEvent.isDefaultPrevented,
+        );
+        expect(delivery.captureEvent.isPropagationStopped).toBe(
+          delivery.bubbleEvent.isPropagationStopped,
+        );
+        expect(Reflect.apply(
+          delivery.captureEvent.isDefaultPrevented,
+          delivery.captureEvent,
+          [],
+        )).toBe(false);
+        expect(Reflect.apply(
+          delivery.captureEvent.isPropagationStopped,
+          delivery.captureEvent,
+          [],
+        )).toBe(false);
+        expect(Reflect.apply(
+          delivery.bubbleEvent.isDefaultPrevented,
+          delivery.bubbleEvent,
+          [],
+        )).toBe(false);
+        expect(Reflect.apply(
+          delivery.bubbleEvent.isPropagationStopped,
+          delivery.bubbleEvent,
+          [],
+        )).toBe(false);
+        expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+        expect(effects.preventDefault).toHaveBeenCalledTimes(1);
+        expect(effects.focus).toHaveBeenCalledTimes(1);
+        expect(effects.focusCalls).toEqual([{
+          target: cancel,
+          options: { preventScroll: true },
+        }]);
+        expect(cancel).toHaveFocus();
+      },
+    );
 
     it.each([
       ["capture", "isDefaultPrevented"],

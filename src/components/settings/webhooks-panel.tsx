@@ -2492,7 +2492,6 @@ function captureFormKeyboardReactEvent(
 ): FormKeyboardReactSnapshot | null {
   try {
     const reactEvent = event as ReactKeyboardEvent<HTMLFormElement> & {
-      _reactName?: unknown;
       isPersistent?: unknown;
       persist?: unknown;
     };
@@ -2500,7 +2499,6 @@ function captureFormKeyboardReactEvent(
     const isPersistent = reactEvent.isPersistent;
     return (
       cancellation &&
-      reactEvent._reactName === "onKeyDown" &&
       event.nativeEvent === snapshot.event &&
       event.type === snapshot.type &&
       event.target === snapshot.target &&
