@@ -72,6 +72,40 @@ test.describe("name current version", () => {
 });
 
 test.describe("version compare", () => {
+  test("row keyboard navigation moves focus without selecting or changing versions", async ({ browser }) => {
+    const user = await signIn(browser, "vera-row-keys");
+    const { page } = user;
+    const id = await createDocument(page, V1);
+    await saveNamed(page, id, V2, "Keyboard older");
+    await saveNamed(page, id, V3, "Keyboard newer");
+    await openDocument(page, id);
+    await openHistory(page);
+    const panel = page.getByTestId("versions-panel");
+    const selects = panel.getByTestId("version-item").locator("button");
+    const newer = row(page, "Keyboard newer").getByRole("button").first();
+    const older = row(page, "Keyboard older").getByRole("button").first();
+    await expect(newer).toBeVisible();
+    await expect(older).toBeVisible();
+    await newer.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(older).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(newer).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(selects.last()).toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(selects.first()).toBeFocused();
+    await expect(panel.getByTestId("version-restore")).toHaveCount(0);
+    await expect(panel.getByTestId("version-rename-input")).toHaveCount(0);
+    await expect(panel.getByTestId("compare-hint")).toHaveCount(0);
+    await expect(panel.locator('input[type="checkbox"]:checked')).toHaveCount(0);
+
+    await older.focus();
+    await page.keyboard.press("Enter");
+    await expect(row(page, "Keyboard older").getByTestId("version-restore")).toBeVisible();
+    await user.context.close();
+  });
+
   test("long unbroken version title keeps comparison controls inside desktop viewports", async ({ browser }) => {
     const user = await signIn(browser, "vera-long-title");
     const { page } = user;

@@ -5614,6 +5614,310 @@ describe("VersionsPanel · direct-root Strict Mode row navigation", () => {
     versions.mockReset().mockResolvedValue({ versions: rowVersions });
   });
 
+  it.each(["own accessors", "inherited accessors"] as const)(
+    "accepts independent public row wrappers with %s and no private authority",
+    async (storage) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+      try {
+        await renderStrictVersions(root, {
+          session: session(`rows-public-${storage}`),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText("Row four");
+        const source = versionRowSelects(host)[1];
+        const list = source.closest("ul")!;
+        const wrappers: Record<PropertyKey, unknown>[] = [];
+        const methods: ReturnType<typeof cloneVersionsToolbarReactKey>["methods"][] = [];
+        for (const [element, prop, privateState] of [
+          [list, "onKeyDownCapture", "absent"],
+          [source, "onKeyDownCapture", "replaced"],
+          [source, "onKeyDown", "non-function"],
+          [list, "onKeyDown", "absent"],
+        ] as const) {
+          interceptEvent<HTMLElement>(element, prop, (original, event) => {
+            const prototype = Object.create(null) as object;
+            const isolated = cloneVersionsToolbarReactKey(event, prototype, {
+              accessors: true,
+              privateState,
+            });
+            const wrapper = isolated.clone as unknown as Record<PropertyKey, unknown>;
+            for (const property of [
+              "constructor", "_reactName", "persist", "isPersistent", "stopPropagation",
+            ]) {
+              Object.defineProperty(wrapper, property, {
+                configurable: true,
+                get: () => { throw new Error(`Private field ${property} was read`); },
+              });
+            }
+            if (storage === "inherited accessors") {
+              for (const property of [
+                ...VERSIONS_TOOLBAR_PUBLIC_KEY_SCALARS,
+                ...VERSIONS_TOOLBAR_PUBLIC_KEY_METHODS,
+              ]) {
+                const descriptor = Object.getOwnPropertyDescriptor(wrapper, property)!;
+                let value = descriptor.value;
+                Object.defineProperty(prototype, property, "value" in descriptor
+                  ? { configurable: true, get: () => value, set: (next) => { value = next; } }
+                  : descriptor);
+                Reflect.deleteProperty(wrapper, property);
+              }
+            }
+            wrappers.push(wrapper);
+            methods.push(isolated.methods);
+            original(isolated.clone);
+            wrapper.currentTarget = null;
+          });
+        }
+        source.focus();
+        focus.mockClear();
+        const requests = versions.mock.calls.length;
+        const accepted = await dispatchVersionsToolbarKey(source, "ArrowDown", {}, false);
+        expect(new Set(wrappers).size).toBe(4);
+        expect(new Set(wrappers.map(Object.getPrototypeOf)).size).toBe(4);
+        expect(new Set(methods.flatMap((value) => Object.values(value))).size).toBe(12);
+        expect(methods[2].preventDefault).toHaveBeenCalledOnce();
+        for (const index of [0, 1, 3]) expect(methods[index].preventDefault).not.toHaveBeenCalled();
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(versionRowSelects(host)[2]).toHaveFocus();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each([
+    ["code", "wrong-code"],
+    ["location", 7],
+    ["locale", "wrong-locale"],
+    ["charCode", 7],
+    ["keyCode", 7],
+    ["which", 7],
+    ["detail", 7],
+    ["timeStamp", -1],
+    ["isComposing", true],
+    ["preventDefault", null],
+    ["isDefaultPrevented", null],
+    ["isPropagationStopped", null],
+  ] as const)("rejects changed public row %s evidence and accepts a clean successor", async (property, value) => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+    try {
+      await renderStrictVersions(root, {
+        session: session(`rows-public-drift-${property}`),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText("Row four");
+      const source = versionRowSelects(host)[0];
+      interceptVersionsToolbarReactKey(
+        source.closest("ul")!,
+        "onKeyDownCapture",
+        null,
+        { accessors: true, privateState: "absent", after: (wrapper) => {
+          wrapper[property] = value;
+        } },
+      );
+      source.focus();
+      focus.mockClear();
+      const requests = versions.mock.calls.length;
+      const rejected = await dispatchVersionsToolbarKey(source, "ArrowDown", {}, false);
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      expectNoVersionRowWork(onClose, onPreview, requests);
+      const accepted = await dispatchVersionsToolbarKey(source, "ArrowDown", {}, false);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(versionRowSelects(host)[1]).toHaveFocus();
+      expectNoVersionRowWork(onClose, onPreview, requests);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("ignores throwing, reentrant, wrong-source and duplicate public row attempts", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const onClose = vi.fn();
+    const onPreview = vi.fn();
+    try {
+      await renderStrictVersions(root, {
+        session: session("rows-public-callbacks"),
+        onClose,
+        onPreview,
+        refreshKey: 0,
+      });
+      await screen.findByText("Row four");
+      const source = versionRowSelects(host)[0];
+      const list = source.closest("ul")!;
+      interceptEvent<HTMLElement>(list, "onKeyDownCapture", (original, event) => {
+        const throwing = cloneVersionsToolbarReactKey(event, null).clone;
+        Object.defineProperty(throwing, "key", { get: () => { throw new Error("bad key"); } });
+        original(throwing);
+        const wrong = cloneVersionsToolbarReactKey(event, null).clone;
+        wrong.currentTarget = source;
+        original(wrong);
+        const current = cloneVersionsToolbarReactKey(event, null).clone;
+        const key = event.key;
+        Object.defineProperty(current, "key", { get: () => {
+          original(throwing);
+          return key;
+        } });
+        original(current);
+        original(current);
+        Reflect.set(current, "currentTarget", null);
+      });
+      source.focus();
+      focus.mockClear();
+      const requests = versions.mock.calls.length;
+      const accepted = await dispatchVersionsToolbarKey(source, "ArrowDown", {}, false);
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(versionRowSelects(host)[1]).toHaveFocus();
+      expectNoVersionRowWork(onClose, onPreview, requests);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["throwing", "ineffective", "method drift", "reentrant"] as const)(
+    "rechecks %s public row prevention before focusing and recovers",
+    async (behavior) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+      try {
+        await renderStrictVersions(root, {
+          session: session(`rows-prevention-${behavior}`),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText("Row four");
+        const source = versionRowSelects(host)[0];
+        const prevention = vi.fn();
+        interceptEvent<HTMLElement>(source, "onKeyDown", (original, event) => {
+          const isolated = cloneVersionsToolbarReactKey(event, null, { privateState: "absent" });
+          const implementation = isolated.methods.preventDefault.getMockImplementation()!;
+          isolated.methods.preventDefault.mockImplementation(function (this: object) {
+            prevention();
+            if (behavior === "throwing") throw new Error("row prevention failed");
+            if (behavior === "ineffective") return;
+            if (behavior === "reentrant") original(isolated.clone);
+            Reflect.apply(implementation, this, []);
+            if (behavior === "method drift") {
+              Reflect.set(isolated.clone, "isPropagationStopped", vi.fn(() => false));
+            }
+          });
+          original(isolated.clone);
+          Reflect.set(isolated.clone, "currentTarget", null);
+        });
+        source.focus();
+        focus.mockClear();
+        const requests = versions.mock.calls.length;
+        await dispatchVersionsToolbarKey(source, "ArrowDown", {}, false);
+        expect(prevention).toHaveBeenCalledOnce();
+        if (behavior === "reentrant") {
+          expect(preventDefault).toHaveBeenCalledOnce();
+          expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+          expect(versionRowSelects(host)[1]).toHaveFocus();
+        } else {
+          expect(focus).not.toHaveBeenCalled();
+          expect(source).toHaveFocus();
+        }
+        expectNoVersionRowWork(onClose, onPreview, requests);
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const successor = await dispatchVersionsToolbarKey(source, "ArrowDown", {}, false);
+        expect(successor.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(versionRowSelects(host)[1]).toHaveFocus();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["nested delivery", "stopped propagation"] as const)(
+    "rejects %s while retaining a clean subsequent row delivery",
+    async (behavior) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const onClose = vi.fn();
+      const onPreview = vi.fn();
+      try {
+        await renderStrictVersions(root, {
+          session: session(`rows-interrupted-${behavior}`),
+          onClose,
+          onPreview,
+          refreshKey: 0,
+        });
+        await screen.findByText("Row four");
+        const source = versionRowSelects(host)[0];
+        const nested = createVersionsToolbarKey(source, "ArrowDown");
+        source.addEventListener("keydown", (event) => {
+          if (behavior === "nested delivery") source.dispatchEvent(nested);
+          else event.stopPropagation();
+        }, { once: true });
+        source.focus();
+        focus.mockClear();
+        const requests = versions.mock.calls.length;
+        const rejected = await dispatchVersionsToolbarKey(source, "ArrowDown", {}, false);
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(nested.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+        const successor = await dispatchVersionsToolbarKey(source, "ArrowDown", {}, false);
+        expect(successor.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+        expect(versionRowSelects(host)[1]).toHaveFocus();
+        expectNoVersionRowWork(onClose, onPreview, requests);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
   it.each([
     ["ArrowDown", 0, 1],
     ["ArrowDown", 1, 2],
@@ -6156,7 +6460,7 @@ describe("VersionsPanel · direct-root Strict Mode row navigation", () => {
     },
   );
 
-  it("rejects crossed row deliveries and recovers with a clean event", async () => {
+  it("preserves a completed row delivery when another follows synchronously", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const host = document.createElement("div");
     document.body.append(host);
@@ -6182,10 +6486,10 @@ describe("VersionsPanel · direct-root Strict Mode row navigation", () => {
         await Promise.resolve();
       });
 
-      expect(first.defaultPrevented).toBe(false);
+      expect(first.defaultPrevented).toBe(true);
       expect(second.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-      expect(source).toHaveFocus();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(versionRowSelects(host)[1]).toHaveFocus();
 
       const current = versionRowSelects(host)[0];
       current.focus();
