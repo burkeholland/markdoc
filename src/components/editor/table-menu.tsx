@@ -242,16 +242,19 @@ interface TableMenuNativeKeyProof {
   crossed: boolean;
 }
 
+type TableMenuReactEventMethod = (...args: never[]) => unknown;
+
 interface TableMenuReactEventMethods {
-  readonly preventDefault: (...args: never[]) => unknown;
-  readonly isDefaultPrevented: (...args: never[]) => unknown;
-  readonly isPropagationStopped: (...args: never[]) => unknown;
+  readonly preventDefault: TableMenuReactEventMethod;
+  readonly isDefaultPrevented: TableMenuReactEventMethod;
+  readonly isPropagationStopped: TableMenuReactEventMethod;
 }
 
 interface TableMenuReactKeyProof {
   readonly event: object;
   readonly nativeEvent: KeyboardEvent;
   readonly target: HTMLButtonElement;
+  readonly currentTarget: Element;
   readonly key: string;
   readonly eventPhase: number;
   readonly methods: TableMenuReactEventMethods;
@@ -260,8 +263,10 @@ interface TableMenuReactKeyProof {
 
 interface TableMenuTerminalKeyProof {
   readonly native: TableMenuNativeKeyProof;
-  readonly reactCapture: TableMenuReactKeyProof;
-  readonly reactBubble: TableMenuReactKeyProof;
+  readonly reactRootCapture: TableMenuReactKeyProof;
+  readonly reactControlCapture: TableMenuReactKeyProof;
+  readonly reactControlBubble: TableMenuReactKeyProof;
+  readonly reactRootBubble: TableMenuReactKeyProof;
 }
 
 interface TableMenuNativeReactPair {
@@ -978,16 +983,16 @@ function readTableMenuReactKeyProof(
   const isDefaultPrevented = publicValue("isDefaultPrevented");
   const isPropagationStopped = publicValue("isPropagationStopped");
   if (
-    typeof preventDefault !== "function"
-    || typeof isDefaultPrevented !== "function"
-    || typeof isPropagationStopped !== "function"
+    !tableMenuIsReactEventMethod(preventDefault)
+    || !tableMenuIsReactEventMethod(isDefaultPrevented)
+    || !tableMenuIsReactEventMethod(isPropagationStopped)
   ) {
     return null;
   }
   const methods = Object.freeze({
-    preventDefault: preventDefault as (...args: never[]) => unknown,
-    isDefaultPrevented: isDefaultPrevented as (...args: never[]) => unknown,
-    isPropagationStopped: isPropagationStopped as (...args: never[]) => unknown,
+    preventDefault,
+    isDefaultPrevented,
+    isPropagationStopped,
   });
   const composing = publicValue("isComposing");
   const eventPhase = publicValue("eventPhase");
@@ -1023,6 +1028,7 @@ function readTableMenuReactKeyProof(
     event,
     nativeEvent: native.event,
     target: native.target,
+    currentTarget,
     key: native.key,
     eventPhase: eventPhase as number,
     methods,
@@ -1030,77 +1036,93 @@ function readTableMenuReactKeyProof(
   });
 }
 
+function tableMenuIsReactEventMethod(
+  value: unknown,
+): value is TableMenuReactEventMethod {
+  return typeof value === "function";
+}
+
+function tableMenuReactPhaseProofsMatch(
+  rootProof: TableMenuReactKeyProof,
+  controlProof: TableMenuReactKeyProof,
+  native: TableMenuNativeKeyProof,
+  root: HTMLDivElement,
+  phase: number,
+) {
+  const recordMatches = (
+    proof: TableMenuReactKeyProof,
+    currentTarget: Element,
+  ) => proof.nativeEvent === native.event
+    && proof.target === native.target
+    && proof.currentTarget === currentTarget
+    && proof.key === native.key
+    && proof.eventPhase === phase
+    && (proof.composing === false || proof.composing === null);
+  return recordMatches(rootProof, root)
+    && recordMatches(controlProof, native.entry.element)
+    && rootProof.event === controlProof.event
+    && rootProof.composing === controlProof.composing
+    && rootProof.methods.preventDefault === controlProof.methods.preventDefault
+    && rootProof.methods.isDefaultPrevented === controlProof.methods.isDefaultPrevented
+    && rootProof.methods.isPropagationStopped === controlProof.methods.isPropagationStopped;
+}
+
+function tableMenuReactProofFieldsMatch(
+  proof: TableMenuReactKeyProof,
+  native: TableMenuNativeKeyProof,
+  defaultPrevented: boolean,
+  isDefaultPrevented: TableMenuReactEventMethod,
+) {
+  const event = proof.event;
+  const publicValue = (property: PropertyKey) =>
+    (event as Record<PropertyKey, unknown>)[property];
+  return publicValue("type") === "keydown"
+    && publicValue("nativeEvent") === native.event
+    && publicValue("target") === native.target
+    && publicValue("currentTarget") === null
+    && publicValue("bubbles") === true
+    && publicValue("cancelable") === true
+    && publicValue("defaultPrevented") === defaultPrevented
+    && publicValue("isTrusted") === true
+    && publicValue("key") === native.key
+    && publicValue("ctrlKey") === false
+    && publicValue("metaKey") === false
+    && publicValue("altKey") === false
+    && publicValue("shiftKey") === false
+    && publicValue("repeat") === false
+    && (
+      proof.composing === null
+        ? publicValue("isComposing") === undefined
+        : publicValue("isComposing") === false
+    )
+    && publicValue("view") === native.publication.ownerWindow
+    && publicValue("eventPhase") === proof.eventPhase
+    && publicValue("preventDefault") === proof.methods.preventDefault
+    && publicValue("isDefaultPrevented") === isDefaultPrevented
+    && publicValue("isPropagationStopped") === proof.methods.isPropagationStopped;
+}
+
 function tableMenuReactProofIsCurrent(
   proof: TableMenuReactKeyProof,
   native: TableMenuNativeKeyProof,
   authority: TableMenuKeyboardAuthority,
 ) {
-  const event = proof.event;
-  const publicValue = (property: PropertyKey) =>
-    (event as Record<PropertyKey, unknown>)[property];
-  return publicValue("type") === "keydown"
-    && publicValue("nativeEvent") === native.event
-    && publicValue("target") === native.target
-    && publicValue("currentTarget") === null
-    && publicValue("bubbles") === true
-    && publicValue("cancelable") === true
-    && publicValue("defaultPrevented") === false
-    && publicValue("isTrusted") === true
-    && publicValue("key") === native.key
-    && publicValue("ctrlKey") === false
-    && publicValue("metaKey") === false
-    && publicValue("altKey") === false
-    && publicValue("shiftKey") === false
-    && publicValue("repeat") === false
-    && (
-      proof.composing === null
-        ? publicValue("isComposing") === undefined
-        : publicValue("isComposing") === false
-    )
-    && publicValue("view") === native.publication.ownerWindow
-    && publicValue("eventPhase") === proof.eventPhase
-    && publicValue("preventDefault") === proof.methods.preventDefault
-    && publicValue("isDefaultPrevented") === proof.methods.isDefaultPrevented
-    && publicValue("isPropagationStopped") === proof.methods.isPropagationStopped
-    && authority.apply(proof.methods.isDefaultPrevented, event, []) === false
-    && authority.apply(proof.methods.isPropagationStopped, event, []) === false;
-}
-
-function tableMenuReactProofIsPrevented(
-  proof: TableMenuReactKeyProof,
-  native: TableMenuNativeKeyProof,
-  authority: TableMenuKeyboardAuthority,
-) {
-  const event = proof.event;
-  const publicValue = (property: PropertyKey) =>
-    (event as Record<PropertyKey, unknown>)[property];
-  const currentIsDefaultPrevented = publicValue("isDefaultPrevented");
-  return publicValue("type") === "keydown"
-    && publicValue("nativeEvent") === native.event
-    && publicValue("target") === native.target
-    && publicValue("currentTarget") === null
-    && publicValue("bubbles") === true
-    && publicValue("cancelable") === true
-    && publicValue("defaultPrevented") === true
-    && publicValue("isTrusted") === true
-    && publicValue("key") === native.key
-    && publicValue("ctrlKey") === false
-    && publicValue("metaKey") === false
-    && publicValue("altKey") === false
-    && publicValue("shiftKey") === false
-    && publicValue("repeat") === false
-    && (
-      proof.composing === null
-        ? publicValue("isComposing") === undefined
-        : publicValue("isComposing") === false
-    )
-    && publicValue("view") === native.publication.ownerWindow
-    && publicValue("eventPhase") === proof.eventPhase
-    && publicValue("preventDefault") === proof.methods.preventDefault
-    && typeof currentIsDefaultPrevented === "function"
-    && publicValue("isPropagationStopped") === proof.methods.isPropagationStopped
-    && authority.apply(currentIsDefaultPrevented, event, []) === true
-    && authority.apply(proof.methods.isPropagationStopped, event, []) === false;
+  return tableMenuReactProofFieldsMatch(
+    proof,
+    native,
+    false,
+    proof.methods.isDefaultPrevented,
+  )
+    && authority.apply(
+      proof.methods.isDefaultPrevented,
+      proof.event,
+      [],
+    ) === false
+    && authority.apply(
+      proof.methods.isPropagationStopped,
+      proof.event,
+      [],
+    ) === false;
 }
 
 function createTableMenuKeyboardRuntime(
@@ -1219,9 +1241,8 @@ function createTableMenuKeyboardRuntime(
     pair: TableMenuNativeReactPair,
     retirePublication = false,
   ) => {
-    if (pair.consumed) return;
     pair.rejected = true;
-    if (!retirePublication) return;
+    if (pair.consumed || !retirePublication) return;
     nativePairs.delete(pair.native.event);
     if (pair.terminal) removeWindowListener();
     if (coordinator.ownsPublication(controlPublication)) {
@@ -1504,36 +1525,68 @@ function createTableMenuKeyboardRuntime(
     pair.reactRootBubble = proof;
   };
   const authenticateTerminal = (pair: TableMenuNativeReactPair) => {
-    const proof = pair.native;
+    const native = pair.native;
+    const reactRootCapture = pair.reactRootCapture;
+    const reactControlCapture = pair.reactControlCapture;
+    const reactControlBubble = pair.reactControlBubble;
+    const reactRootBubble = pair.reactRootBubble;
     if (
       pair.rejected
       || pair.consumed
-      || proof.crossed
+      || native.crossed
       || !pair.boundaryObserved
-      || !pair.reactRootCapture
-      || pair.reactControlCapture?.event !== pair.reactRootCapture.event
-      || !pair.reactControlBubble
-      || pair.reactRootBubble?.event !== pair.reactControlBubble.event
-      || !nativeStillMatches(proof)
+      || !reactRootCapture
+      || !reactControlCapture
+      || !reactControlBubble
+      || !reactRootBubble
+      || !tableMenuReactPhaseProofsMatch(
+        reactRootCapture,
+        reactControlCapture,
+        native,
+        publication.root,
+        ownerWindow.Event.CAPTURING_PHASE,
+      )
+      || !tableMenuReactPhaseProofsMatch(
+        reactRootBubble,
+        reactControlBubble,
+        native,
+        publication.root,
+        ownerWindow.Event.BUBBLING_PHASE,
+      )
+      || !nativeStillMatches(native)
       || !tableMenuReactProofIsCurrent(
-        pair.reactRootCapture,
-        proof,
+        reactRootCapture,
+        native,
         authority,
       )
+      || !tableMenuReactProofFieldsMatch(
+        reactControlCapture,
+        native,
+        false,
+        reactControlCapture.methods.isDefaultPrevented,
+      )
       || !tableMenuReactProofIsCurrent(
-        pair.reactControlBubble,
-        proof,
+        reactControlBubble,
+        native,
         authority,
+      )
+      || !tableMenuReactProofFieldsMatch(
+        reactRootBubble,
+        native,
+        false,
+        reactRootBubble.methods.isDefaultPrevented,
       )
       || !publicationIsCurrent()
-      || authority.activeElement.read(ownerDocument) !== proof.target
+      || authority.activeElement.read(ownerDocument) !== native.target
     ) {
       return null;
     }
     return Object.freeze({
-      native: proof,
-      reactCapture: pair.reactRootCapture,
-      reactBubble: pair.reactControlBubble,
+      native,
+      reactRootCapture,
+      reactControlCapture,
+      reactControlBubble,
+      reactRootBubble,
     });
   };
   const settleTerminal = (
@@ -1541,55 +1594,195 @@ function createTableMenuKeyboardRuntime(
     proof: TableMenuTerminalKeyProof,
   ) => {
     const native = proof.native;
+    const reactRootCapture = proof.reactRootCapture;
+    const reactControlCapture = proof.reactControlCapture;
+    const reactControlBubble = proof.reactControlBubble;
+    const reactRootBubble = proof.reactRootBubble;
     if (
       !pair.consumed
+      || pair.rejected
       || pair.terminal !== proof
       || released
       || native.crossed
       || native.propagationStopped()
-      || authority.eventCurrentTarget.read(native.event) !== null
-      || authority.eventPhase.read(native.event) !== ownerWindow.Event.NONE
+      || activeNativeEvent?.deref() !== native.event
+      || nativePairs.get(native.event) !== pair
+      || !tableMenuIsOwnerWindow(
+        authority.eventCurrentTarget.read(native.event),
+        ownerDocument,
+        authority,
+      )
+      || authority.eventPhase.read(native.event) !== ownerWindow.Event.BUBBLING_PHASE
       || authority.eventDefaultPrevented.read(native.event)
       || authority.eventCancelBubble.read(native.event)
       || authority.activeElement.read(ownerDocument) !== native.target
       || !nativeStillMatches(native)
-      || !tableMenuReactProofIsCurrent(proof.reactCapture, native, authority)
-      || !tableMenuReactProofIsCurrent(proof.reactBubble, native, authority)
+      || !tableMenuReactProofIsCurrent(reactRootCapture, native, authority)
+      || !tableMenuReactProofIsCurrent(reactControlBubble, native, authority)
+      || !tableMenuReactProofFieldsMatch(
+        reactControlCapture,
+        native,
+        false,
+        reactControlCapture.methods.isDefaultPrevented,
+      )
+      || !tableMenuReactProofFieldsMatch(
+        reactRootBubble,
+        native,
+        false,
+        reactRootBubble.methods.isDefaultPrevented,
+      )
+      || !tableMenuReactPhaseProofsMatch(
+        reactRootCapture,
+        reactControlCapture,
+        native,
+        publication.root,
+        ownerWindow.Event.CAPTURING_PHASE,
+      )
+      || !tableMenuReactPhaseProofsMatch(
+        reactRootBubble,
+        reactControlBubble,
+        native,
+        publication.root,
+        ownerWindow.Event.BUBBLING_PHASE,
+      )
       || !publicationIsCurrent()
       || !coordinator.canClaimKeyboard(
         publication,
         native.entry,
         native.action,
-        proof.reactCapture.event,
-        proof.reactBubble.event,
+        reactRootCapture.event,
+        reactControlBubble.event,
         native.event,
       )
     ) {
       return;
     }
     authority.apply(
-      proof.reactBubble.methods.preventDefault,
-      proof.reactBubble.event,
+      reactControlBubble.methods.preventDefault,
+      reactControlBubble.event,
       [],
     );
+    const currentIsDefaultPrevented = (
+      reactControlBubble.event as Record<PropertyKey, unknown>
+    ).isDefaultPrevented;
+    if (!tableMenuIsReactEventMethod(currentIsDefaultPrevented)) return;
+    const wrapperDefaultPrevented = authority.apply(
+      currentIsDefaultPrevented,
+      reactControlBubble.event,
+      [],
+    );
+    const capturePropagationStopped = authority.apply(
+      reactRootCapture.methods.isPropagationStopped,
+      reactRootCapture.event,
+      [],
+    );
+    const bubblePropagationStopped = authority.apply(
+      reactControlBubble.methods.isPropagationStopped,
+      reactControlBubble.event,
+      [],
+    );
+    const sharedReactWrapper = reactRootCapture.event === reactControlBubble.event;
+    const destinationIndex = tableMenuDestination(
+      native.key,
+      native.entry.index,
+      publication.entries.length,
+    );
     if (
-      !authority.eventDefaultPrevented.read(native.event)
-      || authority.eventCancelBubble.read(native.event)
-      || native.propagationStopped()
-      || authority.activeElement.read(ownerDocument) !== native.target
-      || !nativeStillMatches(native)
-      || !tableMenuReactProofIsPrevented(
-        proof.reactBubble,
-        native,
+      !pair.consumed
+      || pair.rejected
+      || pair.native !== native
+      || pair.terminal !== proof
+      || pair.reactRootCapture !== reactRootCapture
+      || pair.reactControlCapture !== reactControlCapture
+      || pair.reactControlBubble !== reactControlBubble
+      || pair.reactRootBubble !== reactRootBubble
+      || activeNativeEvent?.deref() !== native.event
+      || nativePairs.get(native.event) !== pair
+      || !tableMenuIsOwnerWindow(
+        authority.eventCurrentTarget.read(native.event),
+        ownerDocument,
         authority,
       )
+      || authority.eventPhase.read(native.event) !== ownerWindow.Event.BUBBLING_PHASE
+      || released
+      || native.crossed
+      || wrapperDefaultPrevented !== true
+      || capturePropagationStopped !== false
+      || bubblePropagationStopped !== false
+      || !authority.eventDefaultPrevented.read(native.event)
+      || authority.eventCancelBubble.read(native.event)
+      || native.propagationStopped()
+      || !tableMenuPathMatches(
+        native.path,
+        authority.eventPath.call(native.event),
+        ownerDocument,
+      )
+      || authority.activeElement.read(ownerDocument) !== native.target
+      || !nativeStillMatches(native)
+      || !tableMenuReactProofFieldsMatch(
+        reactRootCapture,
+        native,
+        sharedReactWrapper,
+        sharedReactWrapper
+          ? currentIsDefaultPrevented
+          : reactRootCapture.methods.isDefaultPrevented,
+      )
+      || !tableMenuReactProofFieldsMatch(
+        reactControlCapture,
+        native,
+        sharedReactWrapper,
+        sharedReactWrapper
+          ? currentIsDefaultPrevented
+          : reactControlCapture.methods.isDefaultPrevented,
+      )
+      || !tableMenuReactProofFieldsMatch(
+        reactControlBubble,
+        native,
+        true,
+        currentIsDefaultPrevented,
+      )
+      || !tableMenuReactProofFieldsMatch(
+        reactRootBubble,
+        native,
+        true,
+        currentIsDefaultPrevented,
+      )
+      || !tableMenuReactPhaseProofsMatch(
+        reactRootCapture,
+        reactControlCapture,
+        native,
+        publication.root,
+        ownerWindow.Event.CAPTURING_PHASE,
+      )
+      || !tableMenuReactPhaseProofsMatch(
+        reactRootBubble,
+        reactControlBubble,
+        native,
+        publication.root,
+        ownerWindow.Event.BUBBLING_PHASE,
+      )
       || !publicationIsCurrent()
+      || !tableMenuDomIsExact(publication)
+      || publication.entries[native.entry.index] !== native.entry
+      || destinationIndex === null
+      || publication.entries[destinationIndex] !== native.destination
+      || native.destination.index !== destinationIndex
+      || native.destination.element === native.target
+      || native.destination.element.ownerDocument !== ownerDocument
+      || !coordinator.canClaimKeyboard(
+        publication,
+        native.entry,
+        native.action,
+        reactRootCapture.event,
+        reactControlBubble.event,
+        native.event,
+      )
       || !coordinator.claimKeyboard(
         publication,
         native.entry,
         native.action,
-        proof.reactCapture.event,
-        proof.reactBubble.event,
+        reactRootCapture.event,
+        reactControlBubble.event,
         native.event,
       )
     ) {
@@ -1599,7 +1792,12 @@ function createTableMenuKeyboardRuntime(
     coordinator.requestSuccessor(controlPublication);
   };
   function onNativeWindowBubble(event: Event) {
-    if (authority.getPrototypeOf(event) !== authority.keyboardPrototype) return;
+    if (
+      keyboardAuthority.getPrototypeOf(event)
+      !== keyboardAuthority.keyboardPrototype
+    ) {
+      return;
+    }
     const pair = nativePairs.get(event as KeyboardEvent);
     const terminal = pair?.terminal;
     if (
@@ -1625,9 +1823,17 @@ function createTableMenuKeyboardRuntime(
       return;
     }
     pair.consumed = true;
-    nativePairs.delete(pair.native.event);
     removeWindowListener();
-    queueMicrotask(() => settleTerminal(pair, terminal));
+    try {
+      settleTerminal(pair, terminal);
+    } finally {
+      if (nativePairs.get(pair.native.event) === pair) {
+        nativePairs.delete(pair.native.event);
+      }
+      if (activeNativeEvent?.deref() === pair.native.event) {
+        activeNativeEvent = null;
+      }
+    }
   }
   const onNativeCapture = (event: Event) => {
     beginNativeEvent(event);
