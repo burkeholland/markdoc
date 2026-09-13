@@ -1611,7 +1611,7 @@ function ListLoadError({
 }) {
   return (
     <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid={testId}>
-      <div>{error}</div>
+      <div className="wrap-anywhere">{error}</div>
       <button
         ref={buttonRef}
         type="button"
@@ -5004,7 +5004,7 @@ function GitHubPickerVisit({
         </div>
       </div>
       {presentation.actionError && (
-        <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="github-action-error">
+        <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40 wrap-anywhere" role="alert" aria-atomic="true" data-testid="github-action-error">
           {presentation.actionError}
         </div>
       )}
