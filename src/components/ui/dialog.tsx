@@ -2269,7 +2269,7 @@ class DialogCoordinator {
       !pending
       || pending.root !== authority
       || !this.isCurrent(pending.publication)
-      || !pending.publication.journal.startClosing(true)
+      || !pending.publication.journal.startClosing(authority.controlled)
     ) {
       return false;
     }
