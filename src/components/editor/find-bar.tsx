@@ -763,6 +763,15 @@ interface FindActionKeyListener {
     publication: FindBarPublication,
   ) => boolean;
   /**
+   * Drops only this listener's exact current, unclaimed proof when capture completed without
+   * publishing an action pair. A pending pair and every bubble attempt keep their proof.
+   */
+  readonly releaseUnclaimed: (
+    proof: FindActionWindowProof,
+    publication: FindBarPublication,
+    nativeEvent: object,
+  ) => boolean;
+  /**
    * Drops a consumed proof once its pair has been claimed and its delivery has finished. Rejected
    * attempts keep theirs, so the rightful bubble of the same exact native event can still recover.
    */
@@ -1915,6 +1924,7 @@ function createFindActionKeyListener(
   intrinsics: FindActionIntrinsics,
   ownerDocument: Document,
   readFacts: (event: object) => FindNativeKeyboardFacts | null,
+  actionPairIsAbsent: (event: object, publication: FindBarPublication) => boolean,
 ): FindActionKeyListener {
   const proofs = new WeakMap<object, FindActionWindowProof>();
   /**
@@ -1930,6 +1940,7 @@ function createFindActionKeyListener(
   let active = false;
   let released = false;
   let claiming = false;
+  let releasing = false;
 
   const forgetProof = (nativeEvent: object) => {
     findActionWeakDelete(proofs, nativeEvent);
@@ -2055,6 +2066,35 @@ function createFindActionKeyListener(
         return true;
       } finally {
         claiming = false;
+      }
+    },
+    releaseUnclaimed: (
+      proof: FindActionWindowProof,
+      current: FindBarPublication,
+      nativeEvent: object,
+    ) => {
+      if (claiming || releasing) return false;
+      releasing = true;
+      try {
+        if (
+          proof.registration !== registration ||
+          proof.publication !== current ||
+          proof.nativeEvent !== nativeEvent ||
+          publication !== current ||
+          findActionWeakGet(proofs, nativeEvent) !== proof ||
+          findActionTokenIsClaimed(claimedEvents, nativeEvent) ||
+          findActionTokenIsClaimed(invalidEvents, nativeEvent) ||
+          !active ||
+          released ||
+          !intrinsics.isCurrent() ||
+          !actionPairIsAbsent(nativeEvent, current)
+        ) {
+          return false;
+        }
+        forgetProof(nativeEvent);
+        return true;
+      } finally {
+        releasing = false;
       }
     },
     finish: (proof: FindActionWindowProof, current: FindBarPublication) => {
@@ -3063,8 +3103,7 @@ function createFindBarPublication({
       ) &&
       facts.activeElement === movement.source &&
       factsAreCurrent() &&
-      exactDomIsCurrent() &&
-      runtime.publishedDomMatches();
+      exactDomIsCurrent();
     if (!current || !root || !row || !resolved) return null;
     const intrinsics = runtime.nav?.intrinsics;
     if (!intrinsics) return null;
@@ -3772,6 +3811,9 @@ function createFindBarPublication({
     if (findActionWeakHas(cells.actionPairs, nativeEvent)) return;
     const attempt = beginFirstRowAttempt("capture", event, nativeEvent);
     if (!attempt) return;
+    let unclaimedProof: FindActionWindowProof | null = null;
+    let unclaimedPublication: FindBarPublication | null = null;
+    let unclaimedListener: FindActionKeyListener | null = null;
     try {
       const runtime = currentRuntime;
       const publication = runtime?.publication;
@@ -3794,6 +3836,11 @@ function createFindBarPublication({
       const facts = nav.facts(nativeEvent);
       if (!facts || facts.type !== "keydown" || !isFindActionKey(facts.key)) return;
       const proof = nav.listener.proofFor(nativeEvent, publication);
+      if (proof) {
+        unclaimedProof = proof;
+        unclaimedPublication = publication;
+        unclaimedListener = nav.listener;
+      }
       const resolved = proof
         ? resolveFirstRowMovement(publication, facts.target, facts.key)
         : null;
@@ -3845,7 +3892,12 @@ function createFindBarPublication({
         source: resolved.source,
         destination: resolved.destination,
       });
-      if (!firstRowMovementIsCurrent(runtime, publication, facts, movement)) return;
+      if (
+        !firstRowMovementIsCurrent(runtime, publication, facts, movement) ||
+        !runtime.publishedDomMatches()
+      ) {
+        return;
+      }
       if (
         !firstRowAttemptIsCurrent(attempt) ||
         cells.activeActionDelivery.current ||
@@ -3881,8 +3933,18 @@ function createFindBarPublication({
           }),
         }),
       );
+      unclaimedProof = null;
+      unclaimedPublication = null;
+      unclaimedListener = null;
     } finally {
       endFirstRowAttempt(attempt);
+      if (unclaimedProof && unclaimedPublication && unclaimedListener) {
+        unclaimedListener.releaseUnclaimed(
+          unclaimedProof,
+          unclaimedPublication,
+          nativeEvent,
+        );
+      }
     }
   };
 
@@ -3947,27 +4009,26 @@ function createFindBarPublication({
         return;
       }
       const delivery: FindActionKeyDelivery = FIND_ACTION_FREEZE({ pair, bubble });
-      // B. Every mutation-capable pre-claim query runs here and finishes here, in this order: the
-      // public wrapper reads with both React predicates, the owned-control queries with `matches()`
-      // and `querySelectorAll()`, the committed first-row re-read through public node state, the
-      // published DOM walk, the live session and callback pass, the Window proof with its public
-      // facts read, the last native facts reading, and the observer drain that records whatever any
-      // of them queued — including a detach and restore in the same position.
+      // B. Every callback-capable pre-claim query runs here and finishes here, in this order: both
+      // React predicates and public method identities, current movement and committed-row facts, the
+      // exact listener proof, exact native facts, one final published-DOM walk, and the live authority
+      // probe last. The retained observer drain then records whatever those operations queued.
       const readings = readFirstRowPredicates(pair, bubble, nav, facts, false);
       const commitment = readings
         ? firstRowMovementIsCurrent(runtime, publication, facts, pair.movement)
         : null;
-      const retained = !!commitment &&
+      const movementRetained = !!commitment &&
         firstRowCommitmentIsRetained(
           commitment,
           pair.movement,
           FIND_ACTION_PUBLIC_READER,
-        ) &&
-        runtime.publishedDomMatches() &&
-        probeLiveAuthority() &&
+        );
+      const proofRetained = movementRetained &&
         nav.listener.proofFor(pair.nativeEvent, publication) === pair.proof;
-      const current = retained ? nav.facts(nativeEvent) : null;
-      const drained = !!current && runtime.drainObservedMutations();
+      const current = proofRetained ? nav.facts(nativeEvent) : null;
+      const domRetained = !!current && runtime.publishedDomMatches();
+      const liveRetained = domRetained && probeLiveAuthority();
+      const drained = liveRetained && runtime.drainObservedMutations();
       // C. Callback-free: nothing below can hand control to page code, so a pre-claim query that
       // mutated a wrapper, the live authority, the publication, or the DOM is rejected here — with
       // only this removable attempt cleared and the rightful pair still pending for this event.
@@ -4010,24 +4071,25 @@ function createFindBarPublication({
         ) {
           return;
         }
-        // F. Every mutation-capable post-effect query, in the same order and for the last time. The
-        // native facts are read here, while mutation is still allowed, because the realm copies the
-        // composed path through an array iterator page code can replace; the gate below never asks
-        // for them again.
+        // F. Every callback-capable post-effect query, in the same order and for the last time:
+        // wrappers, movement, listener proof, native facts, one final DOM walk, then live authority.
+        // Only the retained mutation drain and callback-free exact gate follow.
         const finalReadings = readFirstRowPredicates(pair, bubble, nav, prevented, true);
         const committed = finalReadings
           ? firstRowMovementIsCurrent(runtime, publication, prevented, pair.movement)
           : null;
-        const finalRetained = !!committed &&
+        const finalMovementRetained = !!committed &&
           firstRowCommitmentIsRetained(
             committed,
             pair.movement,
             FIND_ACTION_PUBLIC_READER,
-          ) &&
-          runtime.publishedDomMatches() &&
-          probeLiveAuthority();
-        const finalFacts = finalRetained ? nav.facts(nativeEvent) : null;
-        const finalDrained = !!finalFacts && runtime.drainObservedMutations();
+          );
+        const finalProofRetained = finalMovementRetained &&
+          nav.listener.proofFor(pair.nativeEvent, publication) === pair.proof;
+        const finalFacts = finalProofRetained ? nav.facts(nativeEvent) : null;
+        const finalDomRetained = !!finalFacts && runtime.publishedDomMatches();
+        const finalLiveRetained = finalDomRetained && probeLiveAuthority();
+        const finalDrained = finalLiveRetained && runtime.drainObservedMutations();
         // G. Immediately before owner-realm focus, and after nothing that can call page code.
         if (
           !finalReadings ||
@@ -4118,7 +4180,19 @@ function createFindBarPublication({
       ? captureFindActionIntrinsics(ownerWindow)
       : null;
     const actionListener = actionIntrinsics
-      ? createFindActionKeyListener(actionIntrinsics, ownerDocument, readActionFacts)
+      ? createFindActionKeyListener(
+          actionIntrinsics,
+          ownerDocument,
+          readActionFacts,
+          (nativeEvent, currentPublication) => {
+            const pair = findActionWeakGet(cells.actionPairs, nativeEvent);
+            const pending = findActionMapGet(cells.pendingActionKeys, currentPublication);
+            return (
+              pair === undefined &&
+              (!pending || !findActionSetHas(pending, nativeEvent))
+            );
+          },
+        )
       : null;
     const nav: FindActionRuntimeView | null =
       actionIntrinsics && actionListener && keyboardIntrinsics && keyboardDescriptorProof

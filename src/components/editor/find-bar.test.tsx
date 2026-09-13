@@ -2268,6 +2268,75 @@ describe("FindBar first-row action navigation", () => {
     }
   });
 
+  it("performs one final public DOM walk in capture, pre-claim, and pre-focus phases", async () => {
+    const s = session("owner", "actions-one-public-walk");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-prev");
+    const lastPublished = view.action("replace-all");
+    const readAttributes = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "attributes",
+    )?.get;
+    if (!readAttributes) throw new Error("The realm publishes no attributes getter");
+    const walks = { capture: 0, preClaim: 0, preFocus: 0 };
+    let phase: "capture" | "bubble" | null = null;
+    let nativeEvent: Event | null = null;
+
+    Object.defineProperty(lastPublished, "attributes", {
+      configurable: true,
+      get(this: Element) {
+        if (phase === "capture") walks.capture += 1;
+        if (phase === "bubble") {
+          if (nativeEvent?.defaultPrevented) walks.preFocus += 1;
+          else walks.preClaim += 1;
+        }
+        return readAttributes.call(this) as NamedNodeMap;
+      },
+    });
+    const restoreCapture = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, event) => {
+        phase = "capture";
+        nativeEvent = event.nativeEvent;
+        try {
+          current(event);
+        } finally {
+          phase = null;
+        }
+      },
+    );
+    const restoreBubble = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        phase = "bubble";
+        nativeEvent = event.nativeEvent;
+        try {
+          current(event);
+        } finally {
+          phase = null;
+        }
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(walks).toEqual({ capture: 1, preClaim: 1, preFocus: 1 });
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action("find-next"));
+    } finally {
+      restoreBubble();
+      restoreCapture();
+      Reflect.deleteProperty(lastPublished, "attributes");
+    }
+  });
+
   it("performs no search, replacement, storage, timer, network, or scroll work before activation", async () => {
     const s = session("owner", "actions-zero-work");
     const frames = frameEnvironment();
@@ -2402,6 +2471,8 @@ describe("FindBar first-row action navigation", () => {
     const focus = trackActionFocus();
     const view = renderActionBar(s, silentCallbacks());
     await act(async () => {});
+    const bar = view.element<HTMLDivElement>("find-bar");
+    const retiredHandler = reactHandler<NativeBarKeyHandler>(bar, "onKeyDown");
     const source = view.action("find-prev");
     Object.defineProperty(source, "parentElement", {
       configurable: true,
@@ -2416,10 +2487,115 @@ describe("FindBar first-row action navigation", () => {
     expect(document.activeElement).toBe(source);
 
     Reflect.deleteProperty(source, "parentElement");
-    const recovered = dispatchActionKey(source, "ArrowRight");
+    await waitFor(() => {
+      expect(reactHandler<NativeBarKeyHandler>(
+        view.element<HTMLDivElement>("find-bar"),
+        "onKeyDown",
+      )).not.toBe(retiredHandler);
+    });
+    focus.reset();
+    const recovered = dispatchActionKey(view.action("find-prev"), "ArrowRight");
     expect(recovered.defaultPrevented).toBe(true);
     expect(focus.moves()).toHaveLength(1);
     expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it("releases an exact unclaimed capture proof so the same native event can recover", async () => {
+    const s = session("owner", "actions-unclaimed-proof");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    act(() => view.action("find-prev").focus());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-prev");
+    const event = actionKey(source, "ArrowRight");
+    const restore = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, wrapper) => {
+        Object.defineProperty(wrapper, "isPropagationStopped", {
+          configurable: true,
+          writable: true,
+          value: () => true,
+        });
+        current(wrapper);
+      },
+    );
+    focus.reset();
+
+    try {
+      dispatchExactKey(source, event, false);
+      expect(event.defaultPrevented).toBe(false);
+      expect(focus.moves()).toHaveLength(0);
+      expect(document.activeElement).toBe(source);
+    } finally {
+      restore();
+    }
+
+    focus.reset();
+    dispatchExactKey(source, event, false);
+    expect(event.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+    expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+    expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+  });
+
+  it("does not release a pending pair when capture is delivered again", async () => {
+    const s = session("owner", "actions-pending-proof");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-prev");
+    const restore = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, event) => {
+        current(event);
+        current(event);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not release a pending proof when a rejected bubble precedes its rightful bubble", async () => {
+    const s = session("owner", "actions-rejected-bubble-proof");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const crossed = view.action("find-close");
+    const restore = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        current({
+          nativeEvent: event.nativeEvent,
+          currentTarget: crossed,
+        } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+        current(event);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+    } finally {
+      restore();
+    }
   });
 
   it("steps across an absent Replace toggle for a viewer", async () => {
@@ -3239,7 +3415,7 @@ describe("FindBar first-row action navigation", () => {
         const event = dispatchActionKey(source, "ArrowRight");
 
         expect(armed).toBe(true);
-        expect(walks).toBeGreaterThan(1);
+        expect(walks).toBe(2);
         // The drift landed in the last published DOM walk; no mutable query ran after it.
         expect(driftedOnWalk).toBe(walks);
         if (drift === "detach and restore") expect(restoredInPlace).toBe(true);
@@ -3294,11 +3470,13 @@ describe("FindBar first-row action navigation", () => {
     const retained: { preventDefault: unknown } = { preventDefault: null };
     let delivering = false;
     let drifted = false;
+    let walks = 0;
 
     Object.defineProperty(lastPublished, "attributes", {
       configurable: true,
       get(this: Element) {
         const event = held.event;
+        if (delivering && event && !event.nativeEvent.defaultPrevented) walks += 1;
         if (delivering && !drifted && event && !event.nativeEvent.defaultPrevented) {
           drifted = true;
           retained.preventDefault = event.preventDefault;
@@ -3320,6 +3498,7 @@ describe("FindBar first-row action navigation", () => {
         try {
           current(event);
           expect(drifted).toBe(true);
+          expect(walks).toBe(1);
           expect(event.nativeEvent.defaultPrevented).toBe(false);
           expect(focus.moves()).toHaveLength(0);
           // Nothing was consumed: put the exact prevention back and let the rightful bubble of the
@@ -3341,6 +3520,7 @@ describe("FindBar first-row action navigation", () => {
       const event = dispatchActionKey(source, "ArrowRight");
 
       expect(drifted).toBe(true);
+      expect(walks).toBe(3);
       expect(event.defaultPrevented).toBe(true);
       expect(focus.moves()).toHaveLength(1);
       expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
@@ -3918,6 +4098,10 @@ describe("FindBar first-row action navigation", () => {
         "onKeyDown",
       )).not.toBe(staleHandler);
     });
+    const recoveredHandler = reactHandler<NativeBarKeyHandler>(
+      view.element<HTMLDivElement>("find-bar"),
+      "onKeyDown",
+    );
     focus.reset();
 
     // Retirement revoked the held pair even though the native event is still live: the successor
@@ -3933,6 +4117,12 @@ describe("FindBar first-row action navigation", () => {
     dispatchExactKey(view.action("find-prev"), held);
     expect(focus.moves()).toHaveLength(0);
 
+    await waitFor(() => {
+      expect(reactHandler<NativeBarKeyHandler>(
+        view.element<HTMLDivElement>("find-bar"),
+        "onKeyDown",
+      )).not.toBe(recoveredHandler);
+    });
     focus.reset();
     const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
     expect(fresh.defaultPrevented).toBe(true);
