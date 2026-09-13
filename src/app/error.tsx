@@ -341,11 +341,11 @@ export default function AppError({ error, reset }: { error: BoundaryError; reset
         {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- keeps next/link out of every route's shared chunk (#1485) */}
         <a href="/" className="btn btn-ghost max-sm:h-10">Back to your documents</a>
       </div>
-      <details className="mt-6 max-w-sm text-left text-xs text-ink-3">
+      <details className="mt-6 w-full max-w-sm text-left text-xs text-ink-3">
         <summary>Details</summary>
         {/* A production server error arrives with its message redacted and only a digest: that is what support asks for. */}
-        {error.digest ? <p data-testid="app-error-digest">Reference: {error.digest}</p> : null}
-        {error.message ? <pre className="mt-1 whitespace-pre-wrap break-words">{error.message}</pre> : null}
+        {error.digest ? <p className="wrap-anywhere" data-testid="app-error-digest">Reference: {error.digest}</p> : null}
+        {error.message ? <pre className="mt-1 whitespace-pre-wrap wrap-anywhere">{error.message}</pre> : null}
       </details>
     </main>
   );

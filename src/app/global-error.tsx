@@ -34,8 +34,8 @@ const action: CSSProperties = {
 };
 const primary: CSSProperties = { ...action, background: "var(--accent)", color: "var(--on-accent)" };
 const ghost: CSSProperties = { ...action, background: "transparent", color: "var(--ink-2)" };
-const details: CSSProperties = { marginTop: "1.5rem", fontSize: "0.75rem", textAlign: "left", color: "var(--ink-3)" };
-const pre: CSSProperties = { margin: "0.25rem 0 0", whiteSpace: "pre-wrap", overflowWrap: "break-word", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" };
+const details: CSSProperties = { width: "100%", overflowWrap: "anywhere", marginTop: "1.5rem", fontSize: "0.75rem", textAlign: "left", color: "var(--ink-3)" };
+const pre: CSSProperties = { margin: "0.25rem 0 0", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" };
 
 type BoundaryError = Error & { digest?: string };
 
