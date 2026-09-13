@@ -495,17 +495,18 @@ type SuggestionNavigationKey =
 
 function suggestionEventView(
   ownerDocument: Document,
-  ownerWindow: Window,
-): Window {
+  ownerWindow: Window & typeof globalThis,
+): Window & typeof globalThis {
   const implementationSymbol = Object.getOwnPropertySymbols(ownerDocument).find(
     (symbol) => String(symbol) === "Symbol(impl)",
   );
   return implementationSymbol
     ? (
-        ownerDocument as unknown as Record<
-          symbol,
-          { _globalObject: Window }
-        >
+        ownerDocument as Document &
+          Record<
+            symbol,
+            { _globalObject: Window & typeof globalThis }
+          >
       )[implementationSymbol]._globalObject
     : ownerWindow;
 }
@@ -1337,8 +1338,9 @@ describe("CommentsPanel", () => {
 
     it("rejects untrusted, modified, repeated, composing, cancelled, foreign, wrong-focus, and plain keys before clean recovery", async () => {
       const fixture = reviewSession("suggestion-keyboard-invalid-input");
-      session = fixture.session;
-      addCommentSuggestion(session, fixture.user);
+      const currentSession: CollabSession = fixture.session;
+      session = currentSession;
+      addCommentSuggestion(currentSession, fixture.user);
       const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
         Element.prototype,
         "scrollIntoView",
@@ -1355,7 +1357,7 @@ describe("CommentsPanel", () => {
       let outsider: HTMLButtonElement | null = null;
       try {
         const rendered = render(
-          <StrictMode>{suggestionPanel(session)}</StrictMode>,
+          <StrictMode>{suggestionPanel(currentSession)}</StrictMode>,
         );
         await screen.findByTestId("suggestion-accept-comment");
         const actions = captureSuggestionActions();
@@ -1382,7 +1384,9 @@ describe("CommentsPanel", () => {
         rejected.push(cancelled);
         frame = document.createElement("iframe");
         document.body.append(frame);
-        const foreignWindow = frame.contentWindow;
+        const foreignWindow = frame.contentWindow as
+          | (Window & typeof globalThis)
+          | null;
         if (!foreignWindow) throw new Error("The foreign frame has no window");
         const foreign = new foreignWindow.KeyboardEvent("keydown", {
           key: "ArrowRight",
@@ -1408,7 +1412,7 @@ describe("CommentsPanel", () => {
 
         await act(async () => {
           rendered.rerender(
-            <StrictMode>{suggestionPanel(session)}</StrictMode>,
+            <StrictMode>{suggestionPanel(currentSession)}</StrictMode>,
           );
         });
         const current = captureSuggestionActions();

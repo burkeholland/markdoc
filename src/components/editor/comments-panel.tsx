@@ -1463,7 +1463,9 @@ function suggestionKeyboardMovement(
 
 function captureSuggestionReactKeyProof(
   authority: SuggestionKeyboardAuthority,
-  event: KeyboardEvent<HTMLDivElement>,
+  event: KeyboardEvent<HTMLDivElement> & {
+    readonly isComposing?: boolean;
+  },
   nativeEvent: globalThis.KeyboardEvent,
   target: HTMLButtonElement,
   currentTarget: HTMLDivElement,
@@ -1496,8 +1498,8 @@ function captureSuggestionReactKeyProof(
       event.altKey ||
       event.shiftKey ||
       event.repeat ||
-      event.isComposing ||
-      event.view !== view ||
+      event.isComposing === true ||
+      !Object.is(event.view, view) ||
       typeof preventDefault !== "function" ||
       typeof stopPropagation !== "function" ||
       typeof isDefaultPrevented !== "function" ||
