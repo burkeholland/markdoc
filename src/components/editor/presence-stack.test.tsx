@@ -1,5 +1,9 @@
 // @vitest-environment jsdom
-import { StrictMode, useLayoutEffect } from "react";
+import {
+  StrictMode,
+  useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { createRoot } from "react-dom/client";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -226,15 +230,25 @@ function openPresence() {
 }
 
 type CapturedClick = (event: unknown) => void;
+type CapturedKeyDown = (
+  event: ReactKeyboardEvent<HTMLElement>,
+) => void;
+
+interface CapturedReactProps {
+  onClick?: CapturedClick;
+  onKeyDown?: CapturedKeyDown;
+  onKeyDownCapture?: CapturedKeyDown;
+  ref?: (node: HTMLElement | null) => void;
+}
 
 function reactPropsEntry(element: HTMLElement): {
   key: string;
-  record: Record<string, { onClick?: CapturedClick; ref?: (node: HTMLElement | null) => void }>;
-  props: { onClick?: CapturedClick; ref?: (node: HTMLElement | null) => void };
+  record: Record<string, CapturedReactProps>;
+  props: CapturedReactProps;
 } {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error("React props were not attached to the presence control");
-  const record = element as unknown as Record<string, { onClick?: CapturedClick; ref?: (node: HTMLElement | null) => void }>;
+  const record = element as unknown as Record<string, CapturedReactProps>;
   return { key: propsKey, record, props: record[propsKey]! };
 }
 
@@ -253,6 +267,30 @@ function interceptClick(
   const current = props.onClick;
   if (!current) throw new Error("The presence control did not have an onClick handler");
   const intercepted = { ...props, onClick: (event: unknown) => invoke(current, event) };
+  record[key] = intercepted;
+  return () => {
+    if (record[key] === intercepted) record[key] = props;
+  };
+}
+
+function interceptKeyDown(
+  element: HTMLElement,
+  property: "onKeyDown" | "onKeyDownCapture",
+  invoke: (
+    current: CapturedKeyDown,
+    event: ReactKeyboardEvent<HTMLElement>,
+  ) => void,
+): () => void {
+  const { key, record, props } = reactPropsEntry(element);
+  const current = props[property];
+  if (!current) {
+    throw new Error(`The presence control did not have ${property}`);
+  }
+  const intercepted = {
+    ...props,
+    [property]: (event: ReactKeyboardEvent<HTMLElement>) =>
+      invoke(current, event),
+  };
   record[key] = intercepted;
   return () => {
     if (record[key] === intercepted) record[key] = props;
@@ -300,6 +338,53 @@ function connectedButton(label = "Other action") {
   button.setAttribute("aria-label", label);
   document.body.append(button);
   return button;
+}
+
+function markPresenceEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) =>
+        (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
+function presenceKeyDown(
+  target: HTMLElement,
+  init: KeyboardEventInit,
+  trusted = true,
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The keyboard target has no Window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  if (trusted) markPresenceEventTrusted(event);
+  fireEvent(target, event);
+  return event;
 }
 
 interface ReactFiber {
@@ -452,6 +537,944 @@ describe("PresenceStack", () => {
     expect(handlers.onJump).toHaveBeenCalledOnce();
     expect(handlers.onJump).toHaveBeenCalledWith(bob);
     expect(screen.queryByTestId("presence-popover")).toBeNull();
+  });
+
+  it("navigates current Cancel controls by semantic key in committed request order without activating work", () => {
+    const local = person("keyboard-local", "Keyboard local", {
+      isLocal: true,
+      role: "editor",
+    });
+    const session = new PresenceSession({
+      localId: local.id,
+      localName: local.name,
+      users: [local],
+      role: "editor",
+    });
+    const pending = [
+      request("keyboard-a", local.id),
+      request("keyboard-foreign-a", "foreign-a"),
+      request("keyboard-b", local.id),
+      request("keyboard-foreign-b", "foreign-b"),
+      request("keyboard-c", local.id),
+    ];
+    const onCancel = vi.fn<(requestId: string) => void>();
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("The test document has no Window");
+    const preventDefault = vi.spyOn(
+      ownerWindow.Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(
+      ownerWindow.HTMLElement.prototype,
+      "focus",
+    );
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const scrollTo = vi
+      .spyOn(ownerWindow, "scrollTo")
+      .mockImplementation(() => undefined);
+    const scrollBy = vi
+      .spyOn(ownerWindow, "scrollBy")
+      .mockImplementation(() => undefined);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    const keys = [
+      { key: "ArrowLeft", code: "Numpad4", move: -1 },
+      { key: "ArrowUp", code: "Numpad8", move: -1 },
+      { key: "ArrowRight", code: "Numpad6", move: 1 },
+      { key: "ArrowDown", code: "Numpad2", move: 1 },
+      { key: "Home", code: "Numpad7", move: "first" },
+      { key: "End", code: "Numpad1", move: "last" },
+    ] as const;
+
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <PresenceRequests
+              session={session.asCollabSession()}
+              pending={pending}
+              nameOf={(id) => id}
+              onCancel={onCancel}
+            />
+          </StrictMode>,
+        );
+      });
+      const section = within(host).getByTestId("presence-requests");
+      const list = section.children.item(1);
+      const rows = within(host).getAllByTestId("presence-request");
+      const cancels = within(host).getAllByTestId(
+        "presence-request-cancel",
+      ) as HTMLButtonElement[];
+      if (!(list instanceof HTMLUListElement)) {
+        throw new Error("The request list was not rendered");
+      }
+      expect(rows).toHaveLength(5);
+      expect(cancels).toHaveLength(3);
+      expect(rows[1]).not.toContainElement(cancels[1]!);
+      expect(rows[3]).not.toContainElement(cancels[2]!);
+      const markup = host.innerHTML;
+      const listScroll = list.scrollTop;
+      const pageScroll = ownerWindow.scrollY;
+      setTimeoutSpy.mockClear();
+
+      for (const sourceIndex of [0, 1, 2] as const) {
+        for (const { key, code, move } of keys) {
+          const source = cancels[sourceIndex]!;
+          const destinationIndex =
+            move === "first"
+              ? 0
+              : move === "last"
+                ? 2
+                : sourceIndex + move;
+          const accepts =
+            destinationIndex >= 0 &&
+            destinationIndex < cancels.length &&
+            destinationIndex !== sourceIndex;
+          source.focus();
+          preventDefault.mockClear();
+          focus.mockClear();
+          scrollTo.mockClear();
+          scrollBy.mockClear();
+
+          const event = presenceKeyDown(source, {
+            key,
+            code,
+            location: 3,
+          });
+
+          expect(event.defaultPrevented, `${sourceIndex}:${key}`).toBe(
+            accepts,
+          );
+          if (accepts) {
+            expect(
+              cancels[destinationIndex],
+              `${sourceIndex}:${key}`,
+            ).toHaveFocus();
+            expect(
+              preventDefault,
+              `${sourceIndex}:${key}`,
+            ).toHaveBeenCalledOnce();
+            expect(
+              focus,
+              `${sourceIndex}:${key}`,
+            ).toHaveBeenCalledExactlyOnceWith({
+              preventScroll: true,
+            });
+          } else {
+            expect(source, `${sourceIndex}:${key}`).toHaveFocus();
+            expect(
+              preventDefault,
+              `${sourceIndex}:${key}`,
+            ).not.toHaveBeenCalled();
+            expect(focus, `${sourceIndex}:${key}`).not.toHaveBeenCalled();
+          }
+          expect(onCancel, `${sourceIndex}:${key}`).not.toHaveBeenCalled();
+          expect(session.follow, `${sourceIndex}:${key}`).not.toHaveBeenCalled();
+          expect(
+            timerCallbacks(setTimeoutSpy.mock.calls, CANCEL_GRACE_MS),
+            `${sourceIndex}:${key}`,
+          ).toHaveLength(0);
+          expect(scrollTo, `${sourceIndex}:${key}`).not.toHaveBeenCalled();
+          expect(scrollBy, `${sourceIndex}:${key}`).not.toHaveBeenCalled();
+          expect(list.scrollTop, `${sourceIndex}:${key}`).toBe(listScroll);
+          expect(ownerWindow.scrollY, `${sourceIndex}:${key}`).toBe(
+            pageScroll,
+          );
+          expect(host.innerHTML, `${sourceIndex}:${key}`).toBe(markup);
+        }
+      }
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a disabled Cancel destination and leaves a single current Cancel inert", () => {
+    const local = person("disabled-local", "Disabled local", {
+      isLocal: true,
+      role: "owner",
+    });
+    const session = new PresenceSession({
+      localId: local.id,
+      localName: local.name,
+      users: [local],
+      role: "owner",
+    });
+    const onCancel = vi.fn<(requestId: string) => void>();
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("The test document has no Window");
+    const preventDefault = vi.spyOn(
+      ownerWindow.Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(
+      ownerWindow.HTMLElement.prototype,
+      "focus",
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <PresenceRequests
+              session={session.asCollabSession()}
+              pending={[
+                request("disabled-a", local.id),
+                request("disabled-b", local.id),
+                request("disabled-c", local.id),
+              ]}
+              nameOf={(id) => id}
+              onCancel={onCancel}
+            />
+          </StrictMode>,
+        );
+      });
+      let cancels = within(host).getAllByTestId(
+        "presence-request-cancel",
+      ) as HTMLButtonElement[];
+      cancels[1]!.disabled = true;
+      expect(cancels[1]).toBeDisabled();
+      cancels[0]!.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      expect(
+        presenceKeyDown(cancels[0]!, {
+          key: "ArrowRight",
+          code: "KeyK",
+          location: 2,
+        }).defaultPrevented,
+      ).toBe(false);
+      expect(cancels[0]).toHaveFocus();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(onCancel).not.toHaveBeenCalled();
+
+      act(() => {
+        root.render(
+          <StrictMode>
+            <PresenceRequests
+              session={session.asCollabSession()}
+              pending={[request("single-cancel", local.id)]}
+              nameOf={(id) => id}
+              onCancel={onCancel}
+            />
+          </StrictMode>,
+        );
+      });
+      cancels = [
+        within(host).getByTestId(
+          "presence-request-cancel",
+        ) as HTMLButtonElement,
+      ];
+      for (const key of [
+        "ArrowLeft",
+        "ArrowUp",
+        "ArrowRight",
+        "ArrowDown",
+        "Home",
+        "End",
+      ]) {
+        cancels[0]!.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const event = presenceKeyDown(cancels[0]!, {
+          key,
+          code: `Unrestricted${key}`,
+          location: 1,
+        });
+        expect(event.defaultPrevented, key).toBe(false);
+        expect(preventDefault, key).not.toHaveBeenCalled();
+        expect(focus, key).not.toHaveBeenCalled();
+        expect(cancels[0], key).toHaveFocus();
+      }
+      expect(onCancel).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("authenticates independent list and Cancel wrappers around the exact owner Window delivery", () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const ownerDocument = frame.contentDocument;
+    const ownerWindow = ownerDocument?.defaultView;
+    if (!ownerDocument || !ownerWindow) {
+      frame.remove();
+      throw new Error("The keyboard frame has no owner realm");
+    }
+    const host = ownerDocument.createElement("div");
+    ownerDocument.body.append(host);
+    const local = person("realm-local", "Realm local", {
+      isLocal: true,
+      role: "owner",
+    });
+    const session = new PresenceSession({
+      localId: local.id,
+      localName: local.name,
+      users: [local],
+      role: "owner",
+    });
+    const onCancel = vi.fn<(requestId: string) => void>();
+    const preventDefault = vi.spyOn(
+      ownerWindow.Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(
+      ownerWindow.HTMLElement.prototype,
+      "focus",
+    );
+    const currentTargetDescriptor = Object.getOwnPropertyDescriptor(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+    );
+    const nativePath = ownerWindow.Event.prototype.composedPath;
+    if (typeof currentTargetDescriptor?.get !== "function") {
+      throw new Error("Event.currentTarget has no intrinsic getter");
+    }
+    const windowDeliveries: Array<{
+      receiver: EventTarget;
+      currentTarget: EventTarget | null;
+      terminal: EventTarget | undefined;
+    }> = [];
+    ownerWindow.addEventListener(
+      "keydown",
+      function (this: EventTarget, event: Event) {
+        windowDeliveries.push({
+          receiver: this,
+          currentTarget: Reflect.apply(
+            currentTargetDescriptor.get!,
+            event,
+            [],
+          ) as EventTarget | null,
+          terminal: (
+            Reflect.apply(nativePath, event, []) as EventTarget[]
+          ).at(-1),
+        });
+      },
+      true,
+    );
+    const implementationSymbol = Object.getOwnPropertySymbols(
+      ownerDocument,
+    ).find((symbol) => String(symbol) === "Symbol(impl)");
+    const backingReceiver = implementationSymbol
+      ? (
+          ownerDocument as unknown as Record<
+            symbol,
+            { _globalObject: EventTarget }
+          >
+        )[implementationSymbol]._globalObject
+      : ownerWindow;
+    const root = createRoot(host);
+
+    let captureWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
+    let bubbleWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
+    let capturePrototype: object | null = null;
+    let bubblePrototype: object | null = null;
+    let capturePrevent: unknown;
+    let bubblePrevent: unknown;
+    const preventReceivers: object[] = [];
+    const preClaimQueries: boolean[] = [];
+    let restoreCapture: () => void = () => undefined;
+    let restoreBubble: () => void = () => undefined;
+
+    const makeIndependentMethods = (
+      event: ReactKeyboardEvent<HTMLElement>,
+      trackReceiver: boolean,
+    ) => {
+      const originalPrevent = event.preventDefault;
+      const originalDefault = event.isDefaultPrevented;
+      const originalPropagation = event.isPropagationStopped;
+      const replacementPrevent = function (
+        this: ReactKeyboardEvent<HTMLElement>,
+      ) {
+        if (trackReceiver) preventReceivers.push(this);
+        return Reflect.apply(originalPrevent, this, []);
+      };
+      const replacementDefault = function (
+        this: ReactKeyboardEvent<HTMLElement>,
+      ) {
+        return Reflect.apply(originalDefault, this, []);
+      };
+      const replacementPropagation = function (
+        this: ReactKeyboardEvent<HTMLElement>,
+      ) {
+        return Reflect.apply(originalPropagation, this, []);
+      };
+      Object.defineProperties(event, {
+        preventDefault: {
+          configurable: true,
+          value: replacementPrevent,
+        },
+        isDefaultPrevented: {
+          configurable: true,
+          value: replacementDefault,
+          writable: true,
+        },
+        isPropagationStopped: {
+          configurable: true,
+          value: replacementPropagation,
+          writable: true,
+        },
+      });
+      preClaimQueries.push(
+        event.isDefaultPrevented(),
+        event.isPropagationStopped(),
+      );
+      return replacementPrevent;
+    };
+
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <PresenceRequests
+              session={session.asCollabSession()}
+              pending={[
+                request("realm-a", local.id),
+                request("realm-b", local.id),
+              ]}
+              nameOf={(id) => id}
+              onCancel={onCancel}
+            />
+          </StrictMode>,
+        );
+      });
+      const list = within(host).getByRole("list");
+      const cancels = within(host).getAllByTestId(
+        "presence-request-cancel",
+      ) as HTMLButtonElement[];
+      const source = cancels[0]!;
+      const destination = cancels[1]!;
+      source.focus();
+      const baseline = presenceKeyDown(source, {
+        key: "ArrowRight",
+        code: "Numpad6",
+        location: 3,
+        view: ownerWindow,
+      });
+      expect(baseline.defaultPrevented).toBe(true);
+      windowDeliveries.length = 0;
+      restoreCapture = interceptKeyDown(
+        list,
+        "onKeyDownCapture",
+        (active, event) => {
+          captureWrapper = event;
+          Object.setPrototypeOf(
+            event,
+            Object.create(Object.getPrototypeOf(event)),
+          );
+          capturePrototype = Object.getPrototypeOf(event);
+          capturePrevent = makeIndependentMethods(event, false);
+          active(event);
+        },
+      );
+      restoreBubble = interceptKeyDown(
+        source,
+        "onKeyDown",
+        (active, event) => {
+          bubbleWrapper = event;
+          Object.setPrototypeOf(
+            event,
+            Object.create(Object.getPrototypeOf(event)),
+          );
+          bubblePrototype = Object.getPrototypeOf(event);
+          bubblePrevent = makeIndependentMethods(event, true);
+          active(event);
+        },
+      );
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+
+      const event = presenceKeyDown(source, {
+        key: "ArrowRight",
+        code: "Numpad6",
+        location: 3,
+        view: ownerWindow,
+      });
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(captureWrapper).not.toBeNull();
+      expect(bubbleWrapper).not.toBeNull();
+      expect(captureWrapper).not.toBe(bubbleWrapper);
+      expect(capturePrototype).not.toBe(bubblePrototype);
+      expect(capturePrevent).not.toBe(bubblePrevent);
+      expect(captureWrapper!.nativeEvent).toBe(event);
+      expect(bubbleWrapper!.nativeEvent).toBe(event);
+      expect(captureWrapper!.eventPhase).toBe(
+        ownerWindow.Event.CAPTURING_PHASE,
+      );
+      expect(bubbleWrapper!.eventPhase).toBe(
+        ownerWindow.Event.BUBBLING_PHASE,
+      );
+      expect(preClaimQueries).toEqual([false, false, false, false]);
+      expect(preventReceivers).toEqual([bubbleWrapper]);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(destination).toHaveFocus();
+      expect(onCancel).not.toHaveBeenCalled();
+      expect(windowDeliveries).toHaveLength(1);
+      expect(windowDeliveries[0]!.receiver).toBe(backingReceiver);
+      expect(windowDeliveries[0]!.currentTarget).toBe(
+        windowDeliveries[0]!.receiver,
+      );
+      expect(windowDeliveries[0]!.terminal).toBe(
+        windowDeliveries[0]!.receiver,
+      );
+
+      const foreignFrame = ownerDocument.createElement("iframe");
+      ownerDocument.body.append(foreignFrame);
+      const foreignWindow = foreignFrame.contentWindow;
+      if (!foreignWindow) {
+        throw new Error("The structural Window lookalike was absent");
+      }
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      const rejected = presenceKeyDown(source, {
+        key: "ArrowRight",
+        code: "Arbitrary",
+        view: foreignWindow,
+      });
+      expect(rejected.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      foreignFrame.remove();
+    } finally {
+      restoreCapture();
+      restoreBubble();
+      act(() => root.unmount());
+      host.remove();
+      frame.remove();
+    }
+  });
+
+  it("rejects modified, stale, replayed, and restored input before a clean successor event recovers", () => {
+    const localA = person("reject-local-a", "Reject local A", {
+      isLocal: true,
+      role: "owner",
+    });
+    const localB = person("reject-local-b", "Reject local B", {
+      isLocal: true,
+      role: "owner",
+    });
+    const sessionA = new PresenceSession({
+      localId: localA.id,
+      localName: localA.name,
+      users: [localA],
+      role: "owner",
+    });
+    const sessionB = new PresenceSession({
+      localId: localB.id,
+      localName: localB.name,
+      users: [localB],
+      role: "owner",
+    });
+    const pendingA = [
+      request("reject-a", localA.id),
+      request("reject-b", localA.id),
+      request("reject-c", localA.id),
+    ];
+    const pendingB = [
+      request("reject-a", localB.id),
+      request("reject-b", localB.id),
+      request("reject-c", localB.id),
+    ];
+    const onCancelA = vi.fn<(requestId: string) => void>();
+    const onCancelB = vi.fn<(requestId: string) => void>();
+    const nameOf = (id: string) => id;
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("The test document has no Window");
+    const preventDefault = vi.spyOn(
+      ownerWindow.Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(
+      ownerWindow.HTMLElement.prototype,
+      "focus",
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const renderRequests = (
+      session: PresenceSession,
+      pending: AgentRequestMirror[],
+      onCancel: (requestId: string) => void,
+      instance = "same",
+    ) => (
+      <StrictMode>
+        <PresenceRequests
+          key={instance}
+          session={session.asCollabSession()}
+          pending={pending}
+          nameOf={nameOf}
+          onCancel={onCancel}
+        />
+      </StrictMode>
+    );
+
+    try {
+      act(() => {
+        root.render(renderRequests(sessionA, pendingA, onCancelA));
+      });
+      let list = within(host).getByRole("list");
+      let cancels = within(host).getAllByTestId(
+        "presence-request-cancel",
+      ) as HTMLButtonElement[];
+      const source = cancels[1]!;
+      const rejected: Array<{
+        label: string;
+        init: KeyboardEventInit;
+        trusted?: boolean;
+      }> = [
+        {
+          label: "Alt",
+          init: { key: "ArrowRight", altKey: true },
+        },
+        {
+          label: "Control",
+          init: { key: "ArrowRight", ctrlKey: true },
+        },
+        {
+          label: "Meta",
+          init: { key: "ArrowRight", metaKey: true },
+        },
+        {
+          label: "Shift",
+          init: { key: "ArrowRight", shiftKey: true },
+        },
+        {
+          label: "repeat",
+          init: { key: "ArrowRight", repeat: true },
+        },
+        {
+          label: "composition",
+          init: { key: "ArrowRight", isComposing: true },
+        },
+        {
+          label: "noncancelable",
+          init: { key: "ArrowRight", cancelable: false },
+        },
+        {
+          label: "nonbubbling",
+          init: { key: "ArrowRight", bubbles: false },
+        },
+        {
+          label: "untrusted",
+          init: { key: "ArrowRight" },
+          trusted: false,
+        },
+        { label: "Tab", init: { key: "Tab", code: "Tab" } },
+        { label: "Enter", init: { key: "Enter", code: "Enter" } },
+        { label: "Space", init: { key: " ", code: "Space" } },
+        {
+          label: "unrelated semantic key",
+          init: { key: "PageDown", code: "ArrowRight" },
+        },
+      ];
+      for (const { label, init, trusted = true } of rejected) {
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        const event = presenceKeyDown(
+          source,
+          {
+            code: "Unrestricted",
+            ...init,
+          },
+          trusted,
+        );
+        expect(event.defaultPrevented, label).toBe(false);
+        expect(preventDefault, label).not.toHaveBeenCalled();
+        expect(focus, label).not.toHaveBeenCalled();
+        expect(source, label).toHaveFocus();
+      }
+
+      cancels[0]!.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      expect(
+        presenceKeyDown(source, {
+          key: "ArrowRight",
+          code: "WrongFocus",
+        }).defaultPrevented,
+      ).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(cancels[0]).toHaveFocus();
+
+      source.focus();
+      const preCanceled = new ownerWindow.KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markPresenceEventTrusted(preCanceled);
+      preCanceled.preventDefault();
+      preventDefault.mockClear();
+      focus.mockClear();
+      fireEvent(source, preCanceled);
+      expect(preCanceled.defaultPrevented).toBe(true);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+
+      const staleCapture = reactPropsEntry(list).props.onKeyDownCapture;
+      const staleBubble = reactPropsEntry(source).props.onKeyDown;
+      if (!staleCapture || !staleBubble) {
+        throw new Error("The old keyboard wrappers were not published");
+      }
+      act(() => {
+        root.render(renderRequests(sessionB, pendingB, onCancelB));
+      });
+      list = within(host).getByRole("list");
+      cancels = within(host).getAllByTestId(
+        "presence-request-cancel",
+      ) as HTMLButtonElement[];
+      const currentSource = cancels[1]!;
+      const currentDestination = cancels[2]!;
+      const restoreCapture = interceptKeyDown(
+        list,
+        "onKeyDownCapture",
+        (active, event) => {
+          staleCapture(event);
+          active(event);
+        },
+      );
+      const restoreBubble = interceptKeyDown(
+        currentSource,
+        "onKeyDown",
+        (active, event) => {
+          staleBubble(event);
+          active(event);
+        },
+      );
+      currentSource.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      const stale = presenceKeyDown(currentSource, {
+        key: "ArrowRight",
+        code: "StaleCallbackAndSession",
+      });
+      expect(stale.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(currentSource).toHaveFocus();
+      restoreCapture();
+      restoreBubble();
+
+      preventDefault.mockClear();
+      focus.mockClear();
+      const once = new ownerWindow.KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        code: "CleanSuccessor",
+        bubbles: true,
+        cancelable: true,
+      });
+      markPresenceEventTrusted(once);
+      fireEvent(currentSource, once);
+      expect(once.defaultPrevented).toBe(true);
+      expect(currentDestination).toHaveFocus();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      currentSource.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      fireEvent(currentSource, once);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(currentSource).toHaveFocus();
+
+      const firstRow = within(host).getAllByTestId(
+        "presence-request",
+      )[0]!;
+      const parent = firstRow.parentNode;
+      const next = firstRow.nextSibling;
+      if (!parent) throw new Error("The request row has no parent");
+      parent.append(firstRow);
+      parent.insertBefore(firstRow, next);
+      currentSource.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      const restored = presenceKeyDown(currentSource, {
+        key: "ArrowRight",
+        code: "RestoredDom",
+      });
+      expect(restored.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(currentSource).toHaveFocus();
+
+      act(() => {
+        root.render(
+          renderRequests(
+            sessionB,
+            pendingB,
+            onCancelB,
+            "clean-remount",
+          ),
+        );
+      });
+      cancels = within(host).getAllByTestId(
+        "presence-request-cancel",
+      ) as HTMLButtonElement[];
+      cancels[1]!.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      const recovered = presenceKeyDown(cancels[1]!, {
+        key: "ArrowRight",
+        code: "Recovered",
+      });
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(cancels[2]).toHaveFocus();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(onCancelA).not.toHaveBeenCalled();
+      expect(onCancelB).not.toHaveBeenCalled();
+      expect(sessionA.follow).not.toHaveBeenCalled();
+      expect(sessionB.follow).not.toHaveBeenCalled();
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("blocks keyboard reentry while retaining Tab, click, Enter, and Space cancellation", () => {
+    const local = person("activation-local", "Activation local", {
+      isLocal: true,
+      role: "owner",
+    });
+    const session = new PresenceSession({
+      localId: local.id,
+      localName: local.name,
+      users: [local],
+      role: "owner",
+    });
+    const onCancel = vi.fn<(requestId: string) => void>();
+    const ownerWindow = document.defaultView;
+    if (!ownerWindow) throw new Error("The test document has no Window");
+    const preventDefault = vi.spyOn(
+      ownerWindow.Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(
+      ownerWindow.HTMLElement.prototype,
+      "focus",
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const renderInstance = (instance: string) => {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <PresenceRequests
+              key={instance}
+              session={session.asCollabSession()}
+              pending={[
+                request(`${instance}-a`, local.id),
+                request(`${instance}-b`, local.id),
+              ]}
+              nameOf={(id) => id}
+              onCancel={onCancel}
+            />
+          </StrictMode>,
+        );
+      });
+      return within(host).getAllByTestId(
+        "presence-request-cancel",
+      ) as HTMLButtonElement[];
+    };
+
+    try {
+      let cancels = renderInstance("reentry");
+      const source = cancels[0]!;
+      const destination = cancels[1]!;
+      const restore = interceptKeyDown(
+        source,
+        "onKeyDown",
+        (active, event) => {
+          const original = event.preventDefault;
+          Object.defineProperty(event, "preventDefault", {
+            configurable: true,
+            value: function (
+              this: ReactKeyboardEvent<HTMLElement>,
+            ) {
+              const nested = presenceKeyDown(source, {
+                key: "ArrowRight",
+                code: "Nested",
+              });
+              expect(nested.defaultPrevented).toBe(false);
+              return Reflect.apply(original, this, []);
+            },
+          });
+          active(event);
+        },
+      );
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      const outer = presenceKeyDown(source, {
+        key: "ArrowRight",
+        code: "Outer",
+      });
+      restore();
+      expect(outer.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(onCancel).not.toHaveBeenCalled();
+
+      cancels = renderInstance("tab");
+      cancels[0]!.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+      const tab = presenceKeyDown(cancels[0]!, {
+        key: "Tab",
+        code: "Tab",
+      });
+      expect(tab.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(onCancel).not.toHaveBeenCalled();
+
+      for (const activation of ["click", "Enter", " "] as const) {
+        cancels = renderInstance(`activate-${activation}`);
+        const button = cancels[0]!;
+        if (activation !== "click") {
+          button.focus();
+          const key = presenceKeyDown(button, {
+            key: activation,
+            code: activation === " " ? "Space" : "Enter",
+          });
+          expect(key.defaultPrevented).toBe(false);
+          expect(onCancel).not.toHaveBeenCalled();
+        }
+        act(() => button.click());
+        expect(onCancel).toHaveBeenCalledExactlyOnceWith(
+          `activate-${activation}-a`,
+        );
+        onCancel.mockClear();
+      }
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
   });
 
   it.each(["a-before-b", "b-before-a"] as const)(
