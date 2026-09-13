@@ -759,6 +759,337 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("Settings Webhooks: request error wrapping", () => {
+  const longReason = "WebhookRequestFailed".repeat(16);
+  const reasons = [
+    { label: "ordinary", reason: "Webhook service is temporarily unavailable." },
+    { label: "unbroken", reason: longReason },
+    { label: "literal", reason: " \t<img src=x onerror='alert(1)'> \"retry\" & <script>never()</script>\n  " },
+  ];
+  const draftUrl = "https://receiver.example/kept-draft";
+  const draftDocs = "doc-one, doc-two";
+
+  beforeEach(() => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-01T12:02:00.000Z"));
+  });
+
+  function expectLiteralAlert(alert: HTMLElement, reason: string) {
+    expect(alert.textContent).toBe(reason);
+    expect(alert.childNodes).toHaveLength(1);
+    expect(alert.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(alert.firstChild?.nodeValue).toBe(reason);
+    expect(alert.children).toHaveLength(0);
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).toHaveAttribute("aria-atomic", "true");
+    expect(alert.tabIndex).toBe(-1);
+    expect(alert).not.toHaveAttribute("title");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  }
+
+  function expectListError(reason: string, { pending = false, actionPending = false } = {}) {
+    const block = screen.getByTestId("webhooks-list-error");
+    const alert = within(block).getByRole("alert");
+    const retry = within(block).getByRole<HTMLButtonElement>("button", {
+      name: pending ? "Retrying…" : "Retry",
+    });
+    expect(block.tagName).toBe("DIV");
+    expect(block.getAttributeNames().sort()).toEqual(["class", "data-testid"]);
+    expect(block.className).toBe("mx-5 mt-3 flex items-center gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40");
+    expect([...block.childNodes]).toEqual([alert, retry]);
+    expect(alert.tagName).toBe("SPAN");
+    expect(alert.getAttributeNames().sort()).toEqual(["aria-atomic", "class", "role"]);
+    expect(alert.className).toBe("min-w-0 flex-1 wrap-anywhere");
+    expectLiteralAlert(alert, reason);
+    expect(retry.className).toBe("btn btn-outline btn-sm shrink-0 gap-1.5");
+    expect(retry).toHaveAttribute("type", "button");
+    expect(retry.disabled).toBe(pending || actionPending);
+    expect(retry.getAttribute("aria-busy")).toBe(pending ? "true" : null);
+    expect(retry.childNodes).toHaveLength(pending ? 2 : 1);
+    expect(retry.lastChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(retry.textContent).toBe(pending ? "Retrying…" : "Retry");
+    if (pending) expect(retry.firstElementChild?.tagName).toBe("svg");
+    return retry;
+  }
+
+  function expectActionError(reason: string) {
+    const alert = screen.getByTestId("webhook-action-error");
+    expect(alert.tagName).toBe("DIV");
+    expect(alert.getAttributeNames().sort()).toEqual(["aria-atomic", "class", "data-testid", "role"]);
+    expect(alert.className).toBe("mx-5 mt-3 wrap-anywhere rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40");
+    expectLiteralAlert(alert, reason);
+    return alert;
+  }
+
+  function openDraft() {
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    fireEvent.change(screen.getByTestId("webhook-url"), { target: { value: draftUrl } });
+    fireEvent.change(screen.getByTestId("webhook-docs"), { target: { value: draftDocs } });
+  }
+
+  function draftState() {
+    return [...screen.getByTestId("webhook-form").querySelectorAll("input")].map((input) => ({
+      id: input.dataset.testid,
+      value: input.value,
+      checked: input.checked,
+      disabled: input.disabled,
+    }));
+  }
+
+  it("emits overflow-wrap anywhere, not break-all, from installed Tailwind", async () => {
+    const { compile } = await import("tailwindcss");
+    const { build } = await compile("@tailwind utilities;");
+    const css = build(["wrap-anywhere"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).not.toMatch(/word-break:\s*break-all/);
+    expect(longReason.length).toBeGreaterThanOrEqual(240);
+    expect(longReason).not.toMatch(/\s/);
+  });
+
+  it.each(reasons)("keeps $label list and Enable reasons literal through replacement and independent recovery", async ({ reason }) => {
+    const retryFailure = deferred<Response>();
+    const enableFailure = deferred<Response>();
+    const retrySuccess = deferred<Response>();
+    const enableSuccess = deferred<Response>();
+    const replacement = `${reason}replacement`;
+    const enabledWebhook = { ...disabledWebhook, active: true, failures: 0 };
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook, activeWebhook] }))
+      .mockResolvedValueOnce(response({ error: reason }, 503))
+      .mockResolvedValueOnce(response({ error: reason }, 409))
+      .mockReturnValueOnce(retryFailure.promise)
+      .mockReturnValueOnce(enableFailure.promise)
+      .mockReturnValueOnce(retrySuccess.promise)
+      .mockReturnValueOnce(enableSuccess.promise)
+      .mockResolvedValueOnce(response({ webhooks: [enabledWebhook, activeWebhook] }));
+    render(<WebhooksPanel />);
+    const rows = await screen.findAllByTestId("webhook-row");
+    openDraft();
+    const draft = draftState();
+    const rowMarkup = rows.map((row) => row.outerHTML);
+    fireEvent.click(screen.getByTestId("webhook-refresh"));
+    await screen.findByTestId("webhooks-list-error");
+    expectListError(reason);
+    fireEvent.click(within(rows[0]).getByTestId("webhook-enable"));
+    await screen.findByTestId("webhook-action-error");
+    await settle();
+
+    expectListError(reason);
+    const actionAlert = expectActionError(reason);
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+    expect(actionAlert.previousElementSibling).toBe(screen.getByTestId("webhooks-list-error"));
+    expect(screen.getAllByTestId("webhook-row").map((row) => row.outerHTML)).toEqual(rowMarkup);
+    expect(draftState()).toEqual(draft);
+
+    const retry = expectListError(reason);
+    const retiredRetry = reactProp<ClickHandler>(retry, "onClick");
+    act(() => {
+      const event = mouseEvent(retry);
+      retiredRetry(event);
+      retiredRetry(event);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expectListError(reason, { pending: true });
+    expectActionError(reason);
+    await act(async () => retryFailure.resolve(response({ error: replacement }, 503)));
+    await settle();
+    const replacedRetry = expectListError(replacement);
+    act(() => retiredRetry(mouseEvent(replacedRetry)));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    const enable = within(rows[0]).getByTestId<HTMLButtonElement>("webhook-enable");
+    const retiredEnable = reactProp<ClickHandler>(enable, "onClick");
+    act(() => {
+      const event = mouseEvent(enable);
+      retiredEnable(event);
+      retiredEnable(event);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(screen.queryByTestId("webhook-action-error")).toBeNull();
+    expectListError(replacement, { actionPending: true });
+    expect(enable).toBeDisabled();
+    expect(within(rows[1]).getByTestId("webhook-test")).toBeEnabled();
+    expect(within(rows[1]).getByTestId("webhook-delete")).toBeEnabled();
+    expect(draftState()).toEqual(draft);
+    await act(async () => enableFailure.resolve(response({ error: replacement }, 409)));
+    await settle();
+    expectActionError(replacement);
+    act(() => retiredEnable(mouseEvent(enable)));
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(screen.getAllByTestId("webhook-row").map((row) => row.outerHTML)).toEqual(rowMarkup);
+
+    const currentRetry = expectListError(replacement);
+    const retryHandler = reactProp<ClickHandler>(currentRetry, "onClick");
+    act(() => {
+      const event = mouseEvent(currentRetry);
+      retryHandler(event);
+      retryHandler(event);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expectListError(replacement, { pending: true });
+    await act(async () => retrySuccess.resolve(response({ webhooks: [disabledWebhook, activeWebhook] })));
+    await settle();
+    expect(screen.queryByTestId("webhooks-list-error")).toBeNull();
+    expectActionError(replacement);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(draftState()).toEqual(draft);
+    act(() => {
+      retiredRetry(mouseEvent(currentRetry));
+      retryHandler(mouseEvent(currentRetry));
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+
+    const currentEnable = within(screen.getAllByTestId("webhook-row")[0])
+      .getByTestId<HTMLButtonElement>("webhook-enable");
+    const enableHandler = reactProp<ClickHandler>(currentEnable, "onClick");
+    act(() => {
+      const event = mouseEvent(currentEnable);
+      enableHandler(event);
+      enableHandler(event);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(screen.queryByTestId("webhook-action-error")).toBeNull();
+    await act(async () => enableSuccess.resolve(response({ webhook: enabledWebhook })));
+    await waitFor(() => expect(screen.queryByTestId("webhook-enable")).toBeNull());
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(8);
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? "GET"])).toEqual([
+      ["/api/webhooks", "GET"],
+      ["/api/webhooks", "GET"],
+      ["/api/webhooks/disabled-hook/enable", "POST"],
+      ["/api/webhooks", "GET"],
+      ["/api/webhooks/disabled-hook/enable", "POST"],
+      ["/api/webhooks", "GET"],
+      ["/api/webhooks/disabled-hook/enable", "POST"],
+      ["/api/webhooks", "GET"],
+    ]);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getAllByTestId("webhook-row")).toHaveLength(2);
+    expect(screen.getAllByTestId("webhook-row")[1].outerHTML).toBe(rowMarkup[1]);
+    expect(draftState()).toEqual(draft);
+    expect(screen.getByTestId("webhook-create")).toBeEnabled();
+    expect(screen.queryByTestId("webhook-created")).toBeNull();
+  });
+
+  it.each(reasons)("preserves a $label Create reason and draft while retiring replaced and closed submits", async ({ reason }) => {
+    const replacement = `${reason}replacement`;
+    const failure = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(response({ error: reason }, 503))
+      .mockResolvedValueOnce(response({ error: reason }, 422))
+      .mockReturnValueOnce(failure.promise);
+    render(<WebhooksPanel />);
+    await screen.findByTestId("webhooks-list-error");
+    openDraft();
+    const draft = draftState();
+    fireEvent.click(screen.getByTestId("webhook-create"));
+    await screen.findByTestId("webhook-action-error");
+    await settle();
+    expectActionError(reason);
+    expectListError(reason);
+    expect(draftState()).toEqual(draft);
+    const form = screen.getByTestId<HTMLFormElement>("webhook-form");
+    const create = screen.getByTestId<HTMLButtonElement>("webhook-create");
+    const retiredSubmit = reactProp<SubmitHandler>(form, "onSubmit");
+    act(() => {
+      const { event } = submitEvent(form, form, form, create);
+      retiredSubmit(event);
+      retiredSubmit(event);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(create).toBeDisabled();
+    expect(screen.getByTestId("webhook-url")).toHaveValue(draftUrl);
+    expect(screen.getByTestId("webhook-docs")).toHaveValue(draftDocs);
+    expect(screen.queryByTestId("webhook-action-error")).toBeNull();
+    expectListError(reason, { actionPending: true });
+    await act(async () => failure.resolve(response({ error: replacement }, 422)));
+    await settle();
+    expectActionError(replacement);
+    expectListError(reason);
+    expect(draftState()).toEqual(draft);
+    act(() => retiredSubmit(submitEvent(form, form, form, create).event));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const closedSubmit = reactProp<SubmitHandler>(form, "onSubmit");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByTestId("webhook-form")).toBeNull();
+    act(() => closedSubmit(submitEvent(form, form, form, create).event));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expectActionError(replacement);
+    expectListError(reason);
+    fireEvent.click(screen.getByTestId("webhook-add"));
+    expect(draftState()).toEqual(draft);
+    const reopenedForm = screen.getByTestId<HTMLFormElement>("webhook-form");
+    const reopenedCreate = screen.getByTestId<HTMLButtonElement>("webhook-create");
+    act(() => closedSubmit(submitEvent(reopenedForm, reopenedForm, reopenedForm, reopenedCreate).event));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId("webhook-create")).toBeEnabled();
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
+    expect(screen.queryByTestId("webhook-created")).toBeNull();
+  });
+
+  it("retires wrapped-error Retry and Enable callbacks across a panel remount", async () => {
+    const retrySuccess = deferred<Response>();
+    const enableSuccess = deferred<Response>();
+    const enabledWebhook = { ...disabledWebhook, active: true, failures: 0 };
+    fetchMock
+      .mockResolvedValueOnce(response({ webhooks: [disabledWebhook] }))
+      .mockResolvedValueOnce(response({ error: longReason }, 503))
+      .mockResolvedValueOnce(response({ error: longReason }, 409))
+      .mockResolvedValueOnce(response({ error: longReason }, 503))
+      .mockReturnValueOnce(retrySuccess.promise)
+      .mockReturnValueOnce(enableSuccess.promise)
+      .mockResolvedValueOnce(response({ webhooks: [enabledWebhook] }));
+    const view = render(<BoundaryHarness cardKey={1} />);
+    await screen.findByTestId("webhook-row");
+    fireEvent.click(screen.getByTestId("webhook-refresh"));
+    await screen.findByTestId("webhooks-list-error");
+    fireEvent.click(screen.getByTestId("webhook-enable"));
+    await screen.findByTestId("webhook-action-error");
+    await settle();
+    expectActionError(longReason);
+    const oldRetry = expectListError(longReason);
+    const oldEnable = screen.getByTestId<HTMLButtonElement>("webhook-enable");
+    const retiredRetry = reactProp<ClickHandler>(oldRetry, "onClick");
+    const retiredEnable = reactProp<ClickHandler>(oldEnable, "onClick");
+    view.rerender(<BoundaryHarness cardKey={2} />);
+    await screen.findByTestId("webhooks-list-error");
+    await settle();
+    const currentRetry = expectListError(longReason);
+    act(() => {
+      retiredRetry(mouseEvent(oldRetry));
+      retiredRetry(mouseEvent(currentRetry));
+      retiredEnable(mouseEvent(oldEnable));
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(screen.queryByTestId("webhook-action-error")).toBeNull();
+    const retryHandler = reactProp<ClickHandler>(currentRetry, "onClick");
+    act(() => {
+      const event = mouseEvent(currentRetry);
+      retryHandler(event);
+      retryHandler(event);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expectListError(longReason, { pending: true });
+    await act(async () => retrySuccess.resolve(response({ webhooks: [disabledWebhook] })));
+    await settle();
+    const currentEnable = screen.getByTestId<HTMLButtonElement>("webhook-enable");
+    act(() => retiredEnable(mouseEvent(currentEnable)));
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const enableHandler = reactProp<ClickHandler>(currentEnable, "onClick");
+    act(() => {
+      const event = mouseEvent(currentEnable);
+      enableHandler(event);
+      enableHandler(event);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    await act(async () => enableSuccess.resolve(response({ webhook: enabledWebhook })));
+    await waitFor(() => expect(screen.queryByTestId("webhook-enable")).toBeNull());
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getAllByTestId("webhook-row")).toHaveLength(1);
+  });
+});
+
 describe("Settings → Webhooks: native metadata titles", () => {
   const now = "2026-09-13T12:00:00.000Z";
   const destination = `https://receiver.example/${"similar-destination-".repeat(12)}`;

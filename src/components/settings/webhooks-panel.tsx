@@ -6048,7 +6048,7 @@ export function WebhooksPanel() {
         >
           <span
             ref={bindElement(publication, publication.listAlert)}
-            className="min-w-0 flex-1"
+            className="min-w-0 flex-1 wrap-anywhere"
             role="alert"
             aria-atomic="true"
           >
@@ -6080,7 +6080,7 @@ export function WebhooksPanel() {
       {presentation.actionError && (
         <div
           ref={bindElement(publication, publication.actionError)}
-          className="mx-5 mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40"
+          className="mx-5 mt-3 wrap-anywhere rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40"
           role="alert"
           aria-atomic="true"
           data-testid="webhook-action-error"
