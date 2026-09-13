@@ -456,6 +456,8 @@ class NotificationStripCoordinator {
   #claimedRowReactEvents = new WeakSet<object>();
   #claimedRowNativeEvents = new WeakSet<object>();
   #activeRowDelivery: NotificationRowKeyDelivery | null = null;
+  #attemptedListReactEvents = new WeakSet<object>();
+  #attemptedListNativeEvents = new WeakSet<object>();
   #claimedListDeliveries = new WeakSet<NotificationListKeyDelivery>();
   #claimedListPairs = new WeakSet<NotificationListKeyPair>();
   #claimedListMovements = new WeakSet<NotificationListMovement>();
@@ -467,6 +469,8 @@ class NotificationStripCoordinator {
   #claimedListCaptureClaims = new WeakSet<object>();
   #claimedListNativeClaims = new WeakSet<object>();
   #claimedListWindowClaims = new WeakSet<object>();
+  #claimedListReactEvents = new WeakSet<object>();
+  #claimedListNativeEvents = new WeakSet<object>();
   #activeListDelivery: NotificationListKeyDelivery | null = null;
 
   constructor(mount: symbol) {
@@ -724,6 +728,31 @@ class NotificationStripCoordinator {
     return this.#activeListDelivery === null;
   }
 
+  prepareListCapture(event: object, nativeEvent: object) {
+    if (
+      this.#activeListDelivery ||
+      this.#attemptedListReactEvents.has(event) ||
+      this.#attemptedListNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    this.#attemptedListReactEvents.add(event);
+    this.#attemptedListNativeEvents.add(nativeEvent);
+    return true;
+  }
+
+  prepareListBubble(event: object, nativeEvent: object) {
+    if (
+      this.#activeListDelivery ||
+      this.#attemptedListReactEvents.has(event) ||
+      !this.#attemptedListNativeEvents.has(nativeEvent)
+    ) {
+      return false;
+    }
+    this.#attemptedListReactEvents.add(event);
+    return true;
+  }
+
   claimListMovement(delivery: NotificationListKeyDelivery) {
     const { pair, bubble } = delivery;
     if (
@@ -733,11 +762,6 @@ class NotificationStripCoordinator {
         pair.sourceRow ||
       pair.publication.rows[pair.destinationRow.authority.index] !==
         pair.destinationRow ||
-      this.#claimedPublications.has(pair.publication) ||
-      this.#claimedActions.has(pair.sourceAction) ||
-      this.#claimedEvents.has(pair.capture.event) ||
-      this.#claimedEvents.has(bubble.event) ||
-      this.#claimedEvents.has(pair.nativeEvent) ||
       this.#claimedListDeliveries.has(delivery) ||
       this.#claimedListPairs.has(pair) ||
       this.#claimedListMovements.has(pair.movement) ||
@@ -749,6 +773,12 @@ class NotificationStripCoordinator {
       this.#claimedListCaptureClaims.has(pair.captureClaim) ||
       this.#claimedListNativeClaims.has(pair.nativeClaim) ||
       this.#claimedListWindowClaims.has(pair.windowClaim) ||
+      this.#claimedListReactEvents.has(pair.capture.event) ||
+      this.#claimedListReactEvents.has(bubble.event) ||
+      this.#claimedListNativeEvents.has(pair.nativeEvent) ||
+      !this.#attemptedListReactEvents.has(pair.capture.event) ||
+      !this.#attemptedListReactEvents.has(bubble.event) ||
+      !this.#attemptedListNativeEvents.has(pair.nativeEvent) ||
       !pair.publication.keyListener?.claim(
         pair.windowProof,
         pair.publication,
@@ -756,11 +786,6 @@ class NotificationStripCoordinator {
     ) {
       return false;
     }
-    this.#claimedPublications.add(pair.publication);
-    this.#claimedActions.add(pair.sourceAction);
-    this.#claimedEvents.add(pair.capture.event);
-    this.#claimedEvents.add(bubble.event);
-    this.#claimedEvents.add(pair.nativeEvent);
     this.#claimedListDeliveries.add(delivery);
     this.#claimedListPairs.add(pair);
     this.#claimedListMovements.add(pair.movement);
@@ -772,6 +797,9 @@ class NotificationStripCoordinator {
     this.#claimedListCaptureClaims.add(pair.captureClaim);
     this.#claimedListNativeClaims.add(pair.nativeClaim);
     this.#claimedListWindowClaims.add(pair.windowClaim);
+    this.#claimedListReactEvents.add(pair.capture.event);
+    this.#claimedListReactEvents.add(bubble.event);
+    this.#claimedListNativeEvents.add(pair.nativeEvent);
     this.#activeListDelivery = delivery;
     return true;
   }
@@ -780,11 +808,6 @@ class NotificationStripCoordinator {
     const { pair, bubble } = delivery;
     return (
       this.#activeListDelivery === delivery &&
-      this.#claimedPublications.has(pair.publication) &&
-      this.#claimedActions.has(pair.sourceAction) &&
-      this.#claimedEvents.has(pair.capture.event) &&
-      this.#claimedEvents.has(bubble.event) &&
-      this.#claimedEvents.has(pair.nativeEvent) &&
       this.#claimedListDeliveries.has(delivery) &&
       this.#claimedListPairs.has(pair) &&
       this.#claimedListMovements.has(pair.movement) &&
@@ -796,6 +819,9 @@ class NotificationStripCoordinator {
       this.#claimedListCaptureClaims.has(pair.captureClaim) &&
       this.#claimedListNativeClaims.has(pair.nativeClaim) &&
       this.#claimedListWindowClaims.has(pair.windowClaim) &&
+      this.#claimedListReactEvents.has(pair.capture.event) &&
+      this.#claimedListReactEvents.has(bubble.event) &&
+      this.#claimedListNativeEvents.has(pair.nativeEvent) &&
       pair.movement.publication === pair.publication &&
       pair.movement.order === pair.publication.rows &&
       pair.movement.sourceRow === pair.sourceRow &&
@@ -1980,195 +2006,7 @@ function notificationReactOwnPropertiesMatch(
     intrinsics.ownDataMatches(event, property, value));
 }
 
-function captureNotificationPublicReactKeyboard(
-  event: ReactKeyboardEvent<HTMLElement>,
-  publication: NotificationStripPublication,
-  native: NotificationNativeKeyboardFacts,
-  nativeEvent: KeyboardEvent,
-  currentTarget: HTMLElement,
-  windowProof: NotificationWindowProof,
-): NotificationReactKeyboardSnapshot | null {
-  const intrinsics = publication.events;
-  if (!intrinsics) return null;
-  try {
-    const preventDefault = event.preventDefault;
-    const isDefaultPrevented = event.isDefaultPrevented;
-    const isPropagationStopped = event.isPropagationStopped;
-    const reactIsComposing = (
-      event as ReactKeyboardEvent<HTMLElement> & {
-        isComposing?: unknown;
-      }
-    ).isComposing;
-    const view = event.view;
-    if (
-      typeof preventDefault !== "function" ||
-      typeof isDefaultPrevented !== "function" ||
-      typeof isPropagationStopped !== "function" ||
-      event.preventDefault !== preventDefault ||
-      event.isDefaultPrevented !== isDefaultPrevented ||
-      event.isPropagationStopped !== isPropagationStopped ||
-      event === (nativeEvent as unknown) ||
-      event.nativeEvent !== nativeEvent ||
-      event.type !== native.type ||
-      event.target !== native.target ||
-      event.currentTarget !== currentTarget ||
-      event.eventPhase !== native.phase ||
-      event.bubbles !== native.bubbles ||
-      event.cancelable !== native.cancelable ||
-      event.defaultPrevented !== native.defaultPrevented ||
-      event.isTrusted !== native.isTrusted ||
-      event.key !== native.key ||
-      event.code !== native.code ||
-      event.location !== native.location ||
-      event.ctrlKey !== native.ctrlKey ||
-      event.altKey !== native.altKey ||
-      event.metaKey !== native.metaKey ||
-      event.shiftKey !== native.shiftKey ||
-      event.repeat !== native.repeat ||
-      (reactIsComposing !== undefined &&
-        reactIsComposing !== native.isComposing) ||
-      event.detail !== native.detail ||
-      (!Object.is(view, null) &&
-        !Object.is(view, publication.ownerWindow) &&
-        !Object.is(view, windowProof.receiver))
-    ) {
-      return null;
-    }
-    const captured = Object.freeze<NotificationReactKeyboardSnapshot>({
-      event,
-      nativeEvent,
-      target: native.target as HTMLButtonElement,
-      currentTarget,
-      phase: native.phase,
-      view,
-      methods: Object.freeze({
-        preventDefault,
-        isDefaultPrevented,
-        isPropagationStopped,
-      }),
-    });
-    return notificationPublicReactKeyboardSurfaceIsExact(
-      captured,
-      publication,
-      native,
-      currentTarget,
-    )
-      ? captured
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function notificationPublicReactKeyboardSurfaceIsExact(
-  snapshot: NotificationReactKeyboardSnapshot,
-  publication: NotificationStripPublication,
-  native: NotificationNativeKeyboardFacts,
-  currentTarget: HTMLElement | null,
-  defaultPrevented = false,
-): NotificationReactKeyboardCurrentQueries | null {
-  const intrinsics = publication.events;
-  if (!intrinsics) return null;
-  try {
-    const event = snapshot.event;
-    const methods = snapshot.methods;
-    const currentPreventDefault = event.preventDefault;
-    const currentIsDefaultPrevented = event.isDefaultPrevented;
-    const currentIsPropagationStopped = event.isPropagationStopped;
-    const reactIsComposing = (
-      event as ReactKeyboardEvent<HTMLElement> & {
-        isComposing?: unknown;
-      }
-    ).isComposing;
-    if (
-      typeof currentPreventDefault !== "function" ||
-      typeof currentIsDefaultPrevented !== "function" ||
-      typeof currentIsPropagationStopped !== "function" ||
-      event.nativeEvent !== snapshot.nativeEvent ||
-      event.type !== native.type ||
-      event.target !== snapshot.target ||
-      event.target !== native.target ||
-      event.currentTarget !== currentTarget ||
-      event.eventPhase !== snapshot.phase ||
-      event.eventPhase !== native.phase ||
-      event.bubbles !== native.bubbles ||
-      event.cancelable !== native.cancelable ||
-      event.defaultPrevented !== defaultPrevented ||
-      event.isTrusted !== native.isTrusted ||
-      event.key !== native.key ||
-      event.code !== native.code ||
-      event.location !== native.location ||
-      event.ctrlKey !== native.ctrlKey ||
-      event.altKey !== native.altKey ||
-      event.metaKey !== native.metaKey ||
-      event.shiftKey !== native.shiftKey ||
-      event.repeat !== native.repeat ||
-      (reactIsComposing !== undefined &&
-        reactIsComposing !== native.isComposing) ||
-      event.detail !== native.detail ||
-      !Object.is(event.view, snapshot.view) ||
-      (!Object.is(event.view, null) &&
-        !Object.is(event.view, publication.ownerWindow) &&
-        !Object.is(event.view, native.path.at(-1))) ||
-      currentPreventDefault !== methods.preventDefault ||
-      currentIsPropagationStopped !== methods.isPropagationStopped ||
-      (defaultPrevented
-        ? currentIsDefaultPrevented === methods.isDefaultPrevented
-        : currentIsDefaultPrevented !== methods.isDefaultPrevented) ||
-      !intrinsics.methodMatches(
-        event,
-        "preventDefault",
-        currentPreventDefault,
-      ) ||
-      !intrinsics.methodMatches(
-        event,
-        "isDefaultPrevented",
-        currentIsDefaultPrevented,
-      ) ||
-      !intrinsics.methodMatches(
-        event,
-        "isPropagationStopped",
-        currentIsPropagationStopped,
-      ) ||
-      event.preventDefault !== currentPreventDefault ||
-      event.isDefaultPrevented !== currentIsDefaultPrevented ||
-      event.isPropagationStopped !== currentIsPropagationStopped ||
-      event.nativeEvent !== snapshot.nativeEvent ||
-      event.type !== native.type ||
-      event.target !== snapshot.target ||
-      event.target !== native.target ||
-      event.currentTarget !== currentTarget ||
-      event.eventPhase !== snapshot.phase ||
-      event.eventPhase !== native.phase ||
-      event.bubbles !== native.bubbles ||
-      event.cancelable !== native.cancelable ||
-      event.defaultPrevented !== defaultPrevented ||
-      event.isTrusted !== native.isTrusted ||
-      event.key !== native.key ||
-      event.code !== native.code ||
-      event.location !== native.location ||
-      event.ctrlKey !== native.ctrlKey ||
-      event.altKey !== native.altKey ||
-      event.metaKey !== native.metaKey ||
-      event.shiftKey !== native.shiftKey ||
-      event.repeat !== native.repeat ||
-      (reactIsComposing !== undefined &&
-        reactIsComposing !== native.isComposing) ||
-      event.detail !== native.detail ||
-      !Object.is(event.view, snapshot.view)
-    ) {
-      return null;
-    }
-    return Object.freeze({
-      isDefaultPrevented: currentIsDefaultPrevented,
-      isPropagationStopped: currentIsPropagationStopped,
-    });
-  } catch {
-    return null;
-  }
-}
-
-function captureNotificationRowReactKeyboard(
+function captureNotificationNavigationReactKeyboard(
   event: ReactKeyboardEvent<HTMLElement>,
   publication: NotificationStripPublication,
   native: NotificationNativeKeyboardFacts,
@@ -2234,7 +2072,7 @@ function captureNotificationRowReactKeyboard(
         isPropagationStopped,
       }),
     });
-    return notificationRowReactKeyboardSurfaceIsExact(
+    return notificationNavigationReactKeyboardSurfaceIsExact(
       captured,
       publication,
       native,
@@ -2247,7 +2085,7 @@ function captureNotificationRowReactKeyboard(
   }
 }
 
-function notificationRowReactKeyboardSurfaceIsExact(
+function notificationNavigationReactKeyboardSurfaceIsExact(
   snapshot: NotificationReactKeyboardSnapshot,
   publication: NotificationStripPublication,
   native: NotificationNativeKeyboardFacts,
@@ -3328,7 +3166,7 @@ function createNotificationStripPublication(
     defaultPrevented: boolean,
     validateAfterCall: () => boolean,
   ) => {
-    let queries = notificationRowReactKeyboardSurfaceIsExact(
+    let queries = notificationNavigationReactKeyboardSurfaceIsExact(
       snapshot,
       publicCalls.publication,
       native,
@@ -3348,7 +3186,7 @@ function createNotificationStripPublication(
     ) {
       return false;
     }
-    queries = notificationRowReactKeyboardSurfaceIsExact(
+    queries = notificationNavigationReactKeyboardSurfaceIsExact(
       snapshot,
       publicCalls.publication,
       native,
@@ -3493,7 +3331,7 @@ function createNotificationStripPublication(
     defaultPrevented: boolean,
     validateAfterCall: () => boolean,
   ) => {
-    let queries = notificationPublicReactKeyboardSurfaceIsExact(
+    let queries = notificationNavigationReactKeyboardSurfaceIsExact(
       snapshot,
       publicCalls.publication,
       native,
@@ -3513,7 +3351,7 @@ function createNotificationStripPublication(
     ) {
       return false;
     }
-    queries = notificationPublicReactKeyboardSurfaceIsExact(
+    queries = notificationNavigationReactKeyboardSurfaceIsExact(
       snapshot,
       publicCalls.publication,
       native,
@@ -3676,7 +3514,7 @@ function createNotificationStripPublication(
         : null;
     const capture =
       native && proof
-        ? captureNotificationPublicReactKeyboard(
+        ? captureNotificationNavigationReactKeyboard(
           event,
           publication,
           native,
@@ -3749,7 +3587,7 @@ function createNotificationStripPublication(
           nativeEvent as KeyboardEvent,
           publication,
         ) === proof &&
-        notificationPublicReactKeyboardSurfaceIsExact(
+        notificationNavigationReactKeyboardSurfaceIsExact(
           capture,
           publication,
           currentNative,
@@ -3779,7 +3617,10 @@ function createNotificationStripPublication(
         publication.list,
         false,
         captureAttemptIsCurrent,
-      )
+      ) ||
+      !captureAttemptIsCurrent() ||
+      !coordinator.prepareListCapture(event, nativeEvent) ||
+      !captureAttemptIsCurrent()
     ) {
       return;
     }
@@ -3905,7 +3746,7 @@ function createNotificationStripPublication(
       : null;
     const bubble =
       native && proof
-        ? captureNotificationPublicReactKeyboard(
+        ? captureNotificationNavigationReactKeyboard(
           event,
           publication,
           native,
@@ -3954,13 +3795,13 @@ function createNotificationStripPublication(
         currentNative.currentTarget === native.currentTarget &&
         currentNative.phase === native.phase &&
         listener.proofFor(pair.nativeEvent, publication) === proof &&
-        notificationPublicReactKeyboardSurfaceIsExact(
+        notificationNavigationReactKeyboardSurfaceIsExact(
           pair.capture,
           publication,
           pair.native,
           null,
         ) &&
-        notificationPublicReactKeyboardSurfaceIsExact(
+        notificationNavigationReactKeyboardSurfaceIsExact(
           bubble,
           publication,
           currentNative,
@@ -4016,6 +3857,8 @@ function createNotificationStripPublication(
     });
     if (
       !unclaimedDeliveryIsCurrent() ||
+      !coordinator.prepareListBubble(event, pair.nativeEvent) ||
+      !unclaimedDeliveryIsCurrent() ||
       !coordinator.claimListMovement(delivery)
     ) {
       return;
@@ -4061,13 +3904,13 @@ function createNotificationStripPublication(
           (pairIsRetained
             ? pairings.get(pair.nativeEvent) === pair
             : !pairings.has(pair.nativeEvent)) &&
-          notificationPublicReactKeyboardSurfaceIsExact(
+          notificationNavigationReactKeyboardSurfaceIsExact(
             pair.capture,
             publication,
             pair.native,
             null,
           ) &&
-          notificationPublicReactKeyboardSurfaceIsExact(
+          notificationNavigationReactKeyboardSurfaceIsExact(
             bubble,
             publication,
             currentNative,
@@ -4106,7 +3949,7 @@ function createNotificationStripPublication(
           () => claimedDeliveryIsCurrent(false, true),
         ) ||
         !claimedDeliveryIsCurrent(false, true) ||
-        !notificationPublicReactKeyboardSurfaceIsExact(
+        !notificationNavigationReactKeyboardSurfaceIsExact(
           bubble,
           publication,
           native,
@@ -4270,7 +4113,7 @@ function createNotificationStripPublication(
         : publishedRow.dismissPath;
     const capture =
       native && proof
-        ? captureNotificationRowReactKeyboard(
+        ? captureNotificationNavigationReactKeyboard(
             event,
             publication,
             native,
@@ -4342,7 +4185,7 @@ function createNotificationStripPublication(
           nativeEvent as KeyboardEvent,
           publication,
         ) === proof &&
-        notificationRowReactKeyboardSurfaceIsExact(
+        notificationNavigationReactKeyboardSurfaceIsExact(
           capture,
           publication,
           currentNative,
@@ -4484,7 +4327,7 @@ function createNotificationStripPublication(
       : null;
     const bubble =
       native && proof
-        ? captureNotificationRowReactKeyboard(
+        ? captureNotificationNavigationReactKeyboard(
             event,
             publication,
             native,
@@ -4513,13 +4356,13 @@ function createNotificationStripPublication(
       proof !== pair.windowProof ||
       proof.receiver !== native.path.at(-1) ||
       !notificationKeyboardStableFactsMatch(pair.native, native) ||
-      !notificationRowReactKeyboardSurfaceIsExact(
+      !notificationNavigationReactKeyboardSurfaceIsExact(
         pair.capture,
         publication,
         pair.native,
         null,
       ) ||
-      !notificationRowReactKeyboardSurfaceIsExact(
+      !notificationNavigationReactKeyboardSurfaceIsExact(
         bubble,
         publication,
         native,
@@ -4550,13 +4393,13 @@ function createNotificationStripPublication(
         currentNative.currentTarget === native.currentTarget &&
         currentNative.phase === native.phase &&
         listener.proofFor(pair.nativeEvent, publication) === proof &&
-        notificationRowReactKeyboardSurfaceIsExact(
+        notificationNavigationReactKeyboardSurfaceIsExact(
           pair.capture,
           publication,
           pair.native,
           null,
         ) &&
-        notificationRowReactKeyboardSurfaceIsExact(
+        notificationNavigationReactKeyboardSurfaceIsExact(
           bubble,
           publication,
           currentNative,
@@ -4639,13 +4482,13 @@ function createNotificationStripPublication(
           (pairIsRetained
             ? pairings.get(pair.nativeEvent) === pair
             : !pairings.has(pair.nativeEvent)) &&
-          notificationRowReactKeyboardSurfaceIsExact(
+          notificationNavigationReactKeyboardSurfaceIsExact(
             pair.capture,
             publication,
             pair.native,
             null,
           ) &&
-          notificationRowReactKeyboardSurfaceIsExact(
+          notificationNavigationReactKeyboardSurfaceIsExact(
             bubble,
             publication,
             currentNative,
@@ -4685,7 +4528,7 @@ function createNotificationStripPublication(
           () => claimedDeliveryIsCurrent(false, true),
         ) ||
         !claimedDeliveryIsCurrent(false, true) ||
-        !notificationRowReactKeyboardSurfaceIsExact(
+        !notificationNavigationReactKeyboardSurfaceIsExact(
           bubble,
           publication,
           native,
