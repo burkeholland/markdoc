@@ -2437,7 +2437,8 @@ function resolveImageDom(
       upload.textContent !== (authority.uploading ? "Uploading…" : "Upload…") ||
       file.type !== "file" ||
       file.form !== form ||
-      file.disabled ||
+      file.disabled !== authority.uploading ||
+      file.matches(":disabled") !== authority.uploading ||
       file.accept !== IMAGE_FILE_ACCEPT ||
       file.className !== "hidden" ||
       file.dataset.testid !== "image-file" ||
@@ -5187,9 +5188,11 @@ export const ImageDialog = memo(function ImageDialog({
   );
   const abandonSettledUpload = useCallback(
     (lease: ImageUploadLease) => {
-      abandonUploadOwner(lease.owner, lease.publication);
+      const abandoned = abandonUploadOwner(lease.owner, lease.publication);
+      coordinator.releaseTerminal(lease.publication);
+      return abandoned;
     },
-    [abandonUploadOwner],
+    [abandonUploadOwner, coordinator],
   );
   const settleUpload = useCallback(
     (
@@ -5305,6 +5308,11 @@ export const ImageDialog = memo(function ImageDialog({
           return;
         }
       }
+      if (!publication.retire()) {
+        abandonSettledUpload(lease);
+        return;
+      }
+      coordinator.releaseTerminal(publication);
       activeUpload.set(null);
       setDraft((current) => {
         if (
@@ -5624,6 +5632,7 @@ export const ImageDialog = memo(function ImageDialog({
                         type="file"
                         accept={IMAGE_FILE_ACCEPT}
                         className="hidden"
+                        disabled={current.uploading}
                         onChange={onFileChange}
                         data-testid="image-file"
                       />
