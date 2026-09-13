@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
@@ -10,6 +12,35 @@ import {
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type * as Y from "yjs";
+
+const ownerRealmRead = vi.hoisted(() => {
+  const apply = Reflect.apply;
+  const boundary: {
+    enter: ((property: "activeElement" | "isConnected") => (() => void) | undefined) | null;
+  } = { enter: null };
+  // Install before keyboard trust captures these getters. Native browser shadow-tree reads cannot
+  // call the page's Boolean binding, but jsdom implements them in JavaScript using that binding.
+  for (const [prototype, property] of [
+    [Document.prototype, "activeElement"],
+    [Node.prototype, "isConnected"],
+  ] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
+    const read = descriptor?.get;
+    if (!descriptor || !read) throw new Error(`The owner realm publishes no ${property} getter`);
+    Object.defineProperty(prototype, property, {
+      ...descriptor,
+      get(this: Node) {
+        const leave = boundary.enter?.(property);
+        try {
+          return apply(read, this, []);
+        } finally {
+          leave?.();
+        }
+      },
+    });
+  }
+  return boundary;
+});
 
 // A CollabSession normally opens a WebSocket through Hocuspocus; stand in a provider that only
 // supplies the awareness instance so the find model can drive the bar offline (as session-find.test.ts).
@@ -78,6 +109,7 @@ const session = (role: "owner" | "viewer", docId?: string) => {
 };
 
 afterEach(() => {
+  ownerRealmRead.enter = null;
   for (const root of directRoots) {
     act(() => root.unmount());
   }
@@ -208,6 +240,35 @@ type BarKeyHandler = (event: {
 }) => void;
 type ElementRef<T extends HTMLElement> = (element: T | null) => void;
 type NativeBarKeyHandler = (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+type ReactProps = Record<string, unknown>;
+
+function reactPropsEntry(element: HTMLElement) {
+  const key = Object.keys(element).find((name) => name.startsWith("__reactProps$"));
+  if (!key) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
+  const record = element as unknown as Record<string, ReactProps>;
+  const props = record[key];
+  if (!props) throw new Error("React props were empty");
+  return { key, record, props };
+}
+
+/** Replaces the whole published props object so a frozen development props record stays intact. */
+function interceptReactProp<T extends (...args: never[]) => unknown>(
+  element: HTMLElement,
+  property: string,
+  invoke: (current: T, ...args: Parameters<T>) => unknown,
+) {
+  const { key, record, props } = reactPropsEntry(element);
+  const current = props[property];
+  if (typeof current !== "function") throw new Error(`${property} was not published`);
+  const intercepted: ReactProps = {
+    ...props,
+    [property]: (...args: Parameters<T>) => invoke(current as T, ...args),
+  };
+  record[key] = intercepted;
+  return () => {
+    if (record[key] === intercepted) record[key] = props;
+  };
+}
 
 function reactRef<T extends HTMLElement>(element: T): ElementRef<T> {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
@@ -274,6 +335,26 @@ function invokeChange(handler: ChangeHandler, currentTarget: HTMLInputElement, v
   currentTarget.value = value;
   handler({ currentTarget });
   currentTarget.value = previous;
+}
+
+function trackActionFocus() {
+  const calls: { element: HTMLElement; options: FocusOptions | undefined }[] = [];
+  const focus = HTMLElement.prototype.focus;
+  vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (
+    this: HTMLElement,
+    options?: FocusOptions,
+  ) {
+    calls.push({ element: this, options });
+    focus.call(this, options);
+  });
+  return {
+    calls,
+    reset: () => {
+      calls.length = 0;
+    },
+    /** Only the navigation focus asks for `{ preventScroll: true }`; plain test focus does not. */
+    moves: () => calls.filter(({ options }) => options !== undefined),
+  };
 }
 
 describe("FindBar session ownership", () => {
@@ -1993,6 +2074,3295 @@ describe("FindBar F3 navigation", () => {
     expect(stepFind).toHaveBeenCalledOnce();
     expect(staleReveal).not.toHaveBeenCalled();
     expect(currentReveal).toHaveBeenCalledOnce();
+  });
+});
+
+describe("FindBar first-row action navigation", () => {
+  type ActionCallbacks = {
+    onReplaceVisible: FindBarProps["onReplaceVisible"];
+    onReveal: FindBarProps["onReveal"];
+    onClose: FindBarProps["onClose"];
+  };
+
+  function renderActionBar(
+    s: CollabSession,
+    callbacks: ActionCallbacks,
+    {
+      replaceVisible = true,
+      key = "current",
+      host: suppliedHost,
+    }: {
+      replaceVisible?: boolean;
+      key?: string;
+      host?: HTMLDivElement;
+    } = {},
+  ) {
+    const host = suppliedHost ?? document.createElement("div");
+    if (!host.isConnected) document.body.append(host);
+    const root = createRoot(host);
+    directRoots.add(root);
+    act(() => {
+      root.render(
+        <StrictMode>
+          <TooltipProvider>
+            <FindBar
+              key={key}
+              session={s}
+              replaceVisible={replaceVisible}
+              focusNonce={0}
+              {...callbacks}
+            />
+          </TooltipProvider>
+        </StrictMode>,
+      );
+    });
+    const element = <T extends HTMLElement>(testId: string) => {
+      const match = host.querySelector(`[data-testid="${testId}"]`);
+      if (!(match instanceof HTMLElement)) throw new Error(`Missing ${testId}`);
+      return match as T;
+    };
+    const action = (testId: string) => element<HTMLButtonElement>(testId);
+    return { host, root, element, action };
+  }
+
+  function silentCallbacks(): ActionCallbacks {
+    return { onReplaceVisible: vi.fn(), onReveal: vi.fn(), onClose: vi.fn() };
+  }
+
+  function actionKey(target: HTMLElement, key: string, init: KeyboardEventInit = {}) {
+    return findKey(target, { key, code: key, ...init });
+  }
+
+  function dispatchActionKey(
+    target: HTMLElement,
+    key: string,
+    init: KeyboardEventInit = {},
+  ) {
+    const event = actionKey(target, key, init);
+    act(() => {
+      target.focus();
+      target.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  function dispatchExactKey(target: HTMLElement, event: KeyboardEvent, focus = true) {
+    act(() => {
+      if (focus) target.focus();
+      target.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  const NAVIGATION_CASES = [
+    ["find-prev", "ArrowRight", "find-next"],
+    ["find-prev", "ArrowDown", "find-next"],
+    ["find-prev", "End", "find-close"],
+    ["find-prev", "ArrowLeft", null],
+    ["find-prev", "ArrowUp", null],
+    ["find-prev", "Home", null],
+    ["find-next", "ArrowLeft", "find-prev"],
+    ["find-next", "ArrowUp", "find-prev"],
+    ["find-next", "ArrowRight", "find-toggle-replace"],
+    ["find-next", "ArrowDown", "find-toggle-replace"],
+    ["find-next", "Home", "find-prev"],
+    ["find-next", "End", "find-close"],
+    ["find-toggle-replace", "ArrowLeft", "find-next"],
+    ["find-toggle-replace", "ArrowUp", "find-next"],
+    ["find-toggle-replace", "ArrowRight", "find-close"],
+    ["find-toggle-replace", "ArrowDown", "find-close"],
+    ["find-toggle-replace", "Home", "find-prev"],
+    ["find-toggle-replace", "End", "find-close"],
+    ["find-close", "ArrowLeft", "find-toggle-replace"],
+    ["find-close", "ArrowUp", "find-toggle-replace"],
+    ["find-close", "ArrowRight", null],
+    ["find-close", "ArrowDown", null],
+    ["find-close", "Home", "find-prev"],
+    ["find-close", "End", null],
+  ] as const;
+
+  const NUMPAD_CASES = [
+    ["ArrowLeft", "Numpad4", "find-next", "find-prev"],
+    ["ArrowUp", "Numpad8", "find-next", "find-prev"],
+    ["ArrowRight", "Numpad6", "find-prev", "find-next"],
+    ["ArrowDown", "Numpad2", "find-prev", "find-next"],
+    ["Home", "Numpad7", "find-close", "find-prev"],
+    ["End", "Numpad1", "find-prev", "find-close"],
+  ] as const;
+
+  it("moves focus to the exact bounded destination for every accepted key from every current enabled action", async () => {
+    const s = session("owner", "actions-matrix");
+    const focus = trackActionFocus();
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const replaceActive = vi.spyOn(s, "replaceActive");
+    const replaceAll = vi.spyOn(s, "replaceAll");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks);
+    await act(async () => {});
+    const counter = view.element("find-count").textContent;
+
+    for (const [sourceId, key, destinationId] of NAVIGATION_CASES) {
+      const source = view.action(sourceId);
+      focus.reset();
+      const event = dispatchActionKey(source, key);
+      const moves = focus.moves();
+      expect([sourceId, key, event.defaultPrevented]).toEqual([
+        sourceId,
+        key,
+        destinationId !== null,
+      ]);
+      expect([sourceId, key, moves.length]).toEqual([
+        sourceId,
+        key,
+        destinationId === null ? 0 : 1,
+      ]);
+      if (destinationId) {
+        expect(moves[0]?.element).toBe(view.action(destinationId));
+        expect(moves[0]?.options).toEqual({ preventScroll: true });
+        expect(document.activeElement).toBe(view.action(destinationId));
+      } else {
+        expect(document.activeElement).toBe(source);
+      }
+      await act(async () => {});
+    }
+
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(replaceActive).not.toHaveBeenCalled();
+    expect(replaceAll).not.toHaveBeenCalled();
+    expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(view.element("find-count").textContent).toBe(counter);
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it.each(NUMPAD_CASES)(
+    "accepts semantic %s with an unrestricted %s code and numpad location",
+    async (key, code, sourceId, destinationId) => {
+      const s = session("owner", `actions-${code}`);
+      const focus = trackActionFocus();
+      const view = renderActionBar(s, silentCallbacks());
+      await act(async () => {});
+      const source = view.action(sourceId);
+      focus.reset();
+
+      const event = dispatchActionKey(source, key, { code, location: 3 });
+
+      expect(event.code).toBe(code);
+      expect(event.location).toBe(3);
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action(destinationId));
+    },
+  );
+
+  it("prevents once through the public bubble wrapper and focuses once with prevent scroll", async () => {
+    const s = session("owner", "actions-single-effect");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-next");
+    const prevented: { receiver: unknown; args: unknown[] }[] = [];
+    const restore = interceptReactProp<(event: ReactKeyboardEvent<HTMLButtonElement>) => void>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        const original = event.preventDefault as (...args: unknown[]) => unknown;
+        Object.defineProperty(event, "preventDefault", {
+          configurable: true,
+          writable: true,
+          value: function (this: unknown, ...args: unknown[]) {
+            prevented.push({ receiver: this, args });
+            return original.apply(this, args);
+          },
+        });
+        current(event);
+        expect(event.isDefaultPrevented()).toBe(true);
+        expect(event.isPropagationStopped()).toBe(false);
+        expect(event.defaultPrevented).toBe(true);
+        expect(event.nativeEvent.defaultPrevented).toBe(true);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(prevented).toHaveLength(1);
+      expect(prevented[0]?.args).toEqual([]);
+      expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+      expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("performs one final public DOM walk in capture, pre-claim, and pre-focus phases", async () => {
+    const implementation = readFileSync(path.resolve(__dirname, "find-bar.tsx"), "utf8");
+    const afterClaim = implementation.slice(
+      implementation.indexOf("if (!claimFirstRowMovement("),
+      implementation.indexOf("  const createRuntime ="),
+    );
+    expect(afterClaim).toMatch(
+      /const finalProofRetained = finalMovementRetained &&\s+nav\.listener\.retains\(pair\.proof, publication\);/,
+    );
+    expect(afterClaim).not.toContain(".proofFor(");
+
+    const s = session("owner", "actions-one-public-walk");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-prev");
+    const lastPublished = view.action("replace-all");
+    const readAttributes = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "attributes",
+    )?.get;
+    if (!readAttributes) throw new Error("The realm publishes no attributes getter");
+    const walks = { capture: 0, preClaim: 0, preFocus: 0 };
+    const preventions: { receiver: unknown; wrapper: object; args: unknown[] }[] = [];
+    let phase: "capture" | "bubble" | null = null;
+    let nativeEvent: Event | null = null;
+
+    Object.defineProperty(lastPublished, "attributes", {
+      configurable: true,
+      get(this: Element) {
+        if (phase === "capture") walks.capture += 1;
+        if (phase === "bubble") {
+          if (nativeEvent?.defaultPrevented) walks.preFocus += 1;
+          else walks.preClaim += 1;
+        }
+        return readAttributes.call(this) as NamedNodeMap;
+      },
+    });
+    const restoreCapture = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, event) => {
+        phase = "capture";
+        nativeEvent = event.nativeEvent;
+        try {
+          current(event);
+        } finally {
+          phase = null;
+        }
+      },
+    );
+    const restoreBubble = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        phase = "bubble";
+        nativeEvent = event.nativeEvent;
+        const preventDefault = event.preventDefault;
+        event.preventDefault = function (this: ReactKeyboardEvent<HTMLButtonElement>, ...args: unknown[]) {
+          preventions.push({ receiver: this, wrapper: event, args });
+          return Reflect.apply(preventDefault, this, args);
+        };
+        try {
+          current(event);
+          current(event);
+        } finally {
+          phase = null;
+        }
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(walks).toEqual({ capture: 1, preClaim: 1, preFocus: 1 });
+      expect(preventions).toHaveLength(1);
+      expect(preventions[0]?.receiver).toBe(preventions[0]?.wrapper);
+      expect(preventions[0]?.args).toEqual([]);
+      expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+      expect(document.activeElement).toBe(view.action("find-next"));
+    } finally {
+      restoreBubble();
+      restoreCapture();
+      Reflect.deleteProperty(lastPublished, "attributes");
+    }
+  });
+
+  it("performs no search, replacement, storage, timer, network, or scroll work before activation", async () => {
+    const s = session("owner", "actions-zero-work");
+    const frames = frameEnvironment();
+    const focus = trackActionFocus();
+    const fetchStub = vi.fn();
+    const scrollTo = vi.fn();
+    vi.stubGlobal("fetch", fetchStub);
+    vi.stubGlobal("scrollTo", scrollTo);
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const replaceActive = vi.spyOn(s, "replaceActive");
+    const replaceAll = vi.spyOn(s, "replaceAll");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks);
+    await act(async () => {});
+    const bar = view.element<HTMLDivElement>("find-bar");
+    const row = view.element<HTMLDivElement>("find-actions");
+    const search = view.element<HTMLInputElement>("find-input");
+    const replacement = view.element<HTMLInputElement>("replace-input");
+    fireEvent.change(replacement, { target: { value: "kept replacement" } });
+    await act(async () => {});
+    const pressed = ["find-match-case", "find-whole-word", "find-regex"].map((testId) =>
+      view.action(testId).getAttribute("aria-pressed"));
+    frames.reset();
+    focus.reset();
+
+    const event = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(replaceActive).not.toHaveBeenCalled();
+    expect(replaceAll).not.toHaveBeenCalled();
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(frames.request).not.toHaveBeenCalled();
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(scrollTo).not.toHaveBeenCalled();
+    expect(setItem).not.toHaveBeenCalled();
+    expect(search).toHaveValue("cat");
+    expect(replacement).toHaveValue("kept replacement");
+    expect(["find-match-case", "find-whole-word", "find-regex"].map((testId) =>
+      view.action(testId).getAttribute("aria-pressed"))).toEqual(pressed);
+    expect(bar.scrollTop).toBe(0);
+    expect(bar.scrollLeft).toBe(0);
+    expect(row.scrollTop).toBe(0);
+    expect(row.scrollLeft).toBe(0);
+    expect(document.documentElement.scrollTop).toBe(0);
+    expect(window.scrollX).toBe(0);
+    expect(window.scrollY).toBe(0);
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it("skips disabled Previous and Next and never wraps past the shortened group", async () => {
+    const s = session("owner", "actions-disabled-steps");
+    s.setFind("missing");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    expect(view.action("find-prev")).toBeDisabled();
+    expect(view.action("find-next")).toBeDisabled();
+
+    focus.reset();
+    const fromDisabled = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fromDisabled.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    focus.reset();
+    const forward = dispatchActionKey(view.action("find-toggle-replace"), "ArrowRight");
+    expect(forward.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-close"));
+    await act(async () => {});
+
+    focus.reset();
+    const backward = dispatchActionKey(view.action("find-close"), "Home");
+    expect(backward.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+    await act(async () => {});
+
+    focus.reset();
+    const bounded = dispatchActionKey(view.action("find-toggle-replace"), "ArrowLeft");
+    expect(bounded.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+  });
+
+  it("rejects an ancestor-disabled group even when public attribute methods hide it", async () => {
+    const s = session("owner", "actions-disabled-facade");
+    const focus = trackActionFocus();
+    const host = document.createElement("div");
+    host.setAttribute("aria-disabled", "true");
+    Object.defineProperties(host, {
+      hasAttribute: {
+        configurable: true,
+        value: () => false,
+      },
+      getAttribute: {
+        configurable: true,
+        value: () => null,
+      },
+    });
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks, { host, key: "disabled-facade" });
+    await act(async () => {});
+    const source = view.action("find-prev");
+    focus.reset();
+
+    const rejected = dispatchActionKey(source, "ArrowRight");
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(source);
+
+    Reflect.deleteProperty(host, "hasAttribute");
+    Reflect.deleteProperty(host, "getAttribute");
+    host.removeAttribute("aria-disabled");
+    renderActionSuccessor(view, s, callbacks, "enabled-successor");
+    await act(async () => {});
+    focus.reset();
+
+    const recovered = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it("fails closed on a non-terminating public ancestry facade", async () => {
+    const s = session("owner", "actions-cyclic-ancestry");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const bar = view.element<HTMLDivElement>("find-bar");
+    const retiredHandler = reactHandler<NativeBarKeyHandler>(bar, "onKeyDown");
+    const source = view.action("find-prev");
+    Object.defineProperty(source, "parentElement", {
+      configurable: true,
+      get: () => source,
+    });
+    focus.reset();
+
+    const rejected = dispatchActionKey(source, "ArrowRight");
+
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(source);
+
+    Reflect.deleteProperty(source, "parentElement");
+    await waitFor(() => {
+      expect(reactHandler<NativeBarKeyHandler>(
+        view.element<HTMLDivElement>("find-bar"),
+        "onKeyDown",
+      )).not.toBe(retiredHandler);
+    });
+    focus.reset();
+    const recovered = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it("releases an exact unclaimed capture proof so the same native event can recover", async () => {
+    const s = session("owner", "actions-unclaimed-proof");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    act(() => view.action("find-prev").focus());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-prev");
+    const event = actionKey(source, "ArrowRight");
+    const restore = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, wrapper) => {
+        Object.defineProperty(wrapper, "isPropagationStopped", {
+          configurable: true,
+          writable: true,
+          value: () => true,
+        });
+        current(wrapper);
+      },
+    );
+    focus.reset();
+
+    try {
+      dispatchExactKey(source, event, false);
+      expect(event.defaultPrevented).toBe(false);
+      expect(focus.moves()).toHaveLength(0);
+      expect(document.activeElement).toBe(source);
+    } finally {
+      restore();
+    }
+
+    focus.reset();
+    dispatchExactKey(source, event, false);
+    expect(event.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+    expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+    expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+  });
+
+  it("does not release a pending pair when capture is delivered again", async () => {
+    const s = session("owner", "actions-pending-proof");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-prev");
+    const restore = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, event) => {
+        current(event);
+        current(event);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("does not release a pending proof when a rejected bubble precedes its rightful bubble", async () => {
+    const s = session("owner", "actions-rejected-bubble-proof");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const crossed = view.action("find-close");
+    const restore = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        current({
+          nativeEvent: event.nativeEvent,
+          currentTarget: crossed,
+        } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+        current(event);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("steps across an absent Replace toggle for a viewer", async () => {
+    const s = session("viewer", "actions-absent-toggle");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    expect(view.host.querySelector('[data-testid="find-toggle-replace"]')).toBeNull();
+
+    focus.reset();
+    const forward = dispatchActionKey(view.action("find-next"), "ArrowRight");
+    expect(forward.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-close"));
+    await act(async () => {});
+
+    focus.reset();
+    const backward = dispatchActionKey(view.action("find-close"), "ArrowLeft");
+    expect(backward.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it("accepts no movement when only one current enabled action remains", async () => {
+    const s = session("viewer", "actions-single");
+    s.setFind("missing");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const close = view.action("find-close");
+
+    for (const key of ["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Home", "End"]) {
+      focus.reset();
+      const event = dispatchActionKey(close, key);
+      expect([key, event.defaultPrevented]).toEqual([key, false]);
+      expect([key, focus.moves().length]).toEqual([key, 0]);
+      expect(document.activeElement).toBe(close);
+    }
+  });
+
+  it.each([
+    "find-input",
+    "find-match-case",
+    "find-whole-word",
+    "find-regex",
+    "replace-input",
+    "replace-one",
+    "replace-all",
+  ])("ignores navigation keys from %s", async (testId) => {
+    const s = session("owner", `actions-isolated-${testId}`);
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.element(testId);
+
+    focus.reset();
+    const right = dispatchActionKey(source, "ArrowRight");
+    const home = dispatchActionKey(source, "Home");
+
+    expect(right.defaultPrevented).toBe(false);
+    expect(home.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(source);
+  });
+
+  it("rejects modified, repeated, composing, untrusted, uncancelable, nonbubbling, unfocused, and foreign deliveries", async () => {
+    const s = session("owner", "actions-provenance");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const foreignWindow = frame.contentWindow;
+    if (!foreignWindow) throw new Error("The foreign realm was not created");
+    const ownerWindow = source.ownerDocument.defaultView;
+    if (!ownerWindow) throw new Error("The Find bar has no owner window");
+
+    const rejected = [
+      actionKey(source, "ArrowRight", { ctrlKey: true }),
+      actionKey(source, "ArrowRight", { altKey: true }),
+      actionKey(source, "ArrowRight", { metaKey: true }),
+      actionKey(source, "ArrowRight", { shiftKey: true }),
+      actionKey(source, "ArrowRight", { repeat: true }),
+      actionKey(source, "ArrowRight", { isComposing: true }),
+      actionKey(source, "ArrowRight", { cancelable: false }),
+      actionKey(source, "ArrowRight", { bubbles: false }),
+      actionKey(source, "ArrowRight", {
+        view: foreignWindow as Window & typeof globalThis,
+      }),
+      new ownerWindow.KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "ArrowRight",
+        code: "ArrowRight",
+        view: keyboardEventView(ownerWindow),
+      }),
+    ];
+    focus.reset();
+    for (const event of rejected) {
+      dispatchExactKey(source, event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(source);
+    }
+
+    const grafted = new (foreignWindow as Window & typeof globalThis).KeyboardEvent(
+      "keydown",
+      { bubbles: true, cancelable: true, key: "ArrowRight", code: "ArrowRight" },
+    );
+    Object.setPrototypeOf(grafted, ownerWindow.KeyboardEvent.prototype);
+    dispatchExactKey(source, grafted);
+    expect(grafted.defaultPrevented).toBe(false);
+
+    const prevented = actionKey(source, "ArrowRight");
+    prevented.preventDefault();
+    dispatchExactKey(source, prevented);
+    expect(document.activeElement).toBe(source);
+
+    const stopped = actionKey(source, "ArrowRight");
+    stopped.stopPropagation();
+    dispatchExactKey(source, stopped);
+    expect(stopped.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(source);
+
+    view.action("find-close").focus();
+    const unfocused = actionKey(source, "ArrowRight");
+    dispatchExactKey(source, unfocused, false);
+    expect(unfocused.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(view.action("find-close"));
+    expect(focus.moves()).toHaveLength(0);
+
+    await act(async () => {});
+    const accepted = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+    frame.remove();
+  });
+
+  it("rejects a fabricated wrapper, a foreign row, and a structural Window lookalike", async () => {
+    const s = session("owner", "actions-fabricated");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-prev");
+    const capture = reactHandler<NativeBarKeyHandler>(row, "onKeyDownCapture");
+    const bubble = reactHandler<(event: ReactKeyboardEvent<HTMLButtonElement>) => void>(
+      source,
+      "onKeyDown",
+    );
+    const native = actionKey(source, "ArrowRight");
+    const preventDefault = vi.fn();
+    const fabricated = {
+      type: "keydown",
+      key: "ArrowRight",
+      code: "ArrowRight",
+      location: 0,
+      repeat: false,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      bubbles: true,
+      cancelable: true,
+      defaultPrevented: false,
+      eventPhase: 1,
+      isTrusted: true,
+      view: null,
+      currentTarget: row,
+      target: source,
+      nativeEvent: native,
+      preventDefault,
+      stopPropagation: vi.fn(),
+      isDefaultPrevented: () => false,
+      isPropagationStopped: () => false,
+    } as unknown as ReactKeyboardEvent<HTMLDivElement>;
+    focus.reset();
+
+    act(() => {
+      source.focus();
+      capture(fabricated);
+      bubble(fabricated as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+    });
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(native.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(source);
+
+    const lookalike = { document, window: {}, self: {} };
+    const structural = actionKey(source, "ArrowRight");
+    Object.defineProperty(structural, "view", { configurable: true, value: lookalike });
+    dispatchExactKey(source, structural);
+    expect(structural.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    await act(async () => {});
+    const recovered = dispatchActionKey(source, "ArrowRight");
+    expect(recovered.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it("accepts a distinct bubble wrapper with an unrelated prototype and absent persist and stopPropagation", async () => {
+    const s = session("owner", "actions-unrelated-wrapper");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-next");
+    const wrappers: unknown[] = [];
+    const restoreCapture = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, event) => {
+        wrappers.push(event);
+        Object.defineProperty(event, "persist", { configurable: true, value: undefined });
+        current(event);
+      },
+    );
+    const restoreBubble = interceptReactProp<(event: ReactKeyboardEvent<HTMLButtonElement>) => void>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        wrappers.push(event);
+        const clone = Object.create(Object.create(null)) as Record<string, unknown>;
+        for (const property of [
+          "nativeEvent",
+          "type",
+          "target",
+          "currentTarget",
+          "eventPhase",
+          "bubbles",
+          "cancelable",
+          "defaultPrevented",
+          "isTrusted",
+          "key",
+          "code",
+          "location",
+          "altKey",
+          "ctrlKey",
+          "metaKey",
+          "shiftKey",
+          "repeat",
+          "view",
+        ]) {
+          clone[property] = (event as unknown as Record<string, unknown>)[property];
+        }
+        clone.preventDefault = function (this: Record<string, unknown>) {
+          event.preventDefault();
+          this.defaultPrevented = true;
+          this.isDefaultPrevented = () => true;
+        };
+        clone.isDefaultPrevented = () => false;
+        clone.isPropagationStopped = () => false;
+        current(clone as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+
+      expect(wrappers).toHaveLength(2);
+      expect(wrappers[0]).not.toBe(wrappers[1]);
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+  });
+
+  it.each([
+    ["replaced", (): unknown => vi.fn()],
+    ["non-function", (): unknown => 7],
+    ["absent", (): unknown => undefined],
+  ] as const)("accepts %s persist and stopPropagation on both wrappers", async (label, make) => {
+    const s = session("owner", `actions-optional-${label}`);
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-next");
+    const shadow = (event: object) => {
+      for (const property of ["persist", "stopPropagation", "isPersistent"]) {
+        Object.defineProperty(event, property, { configurable: true, value: make() });
+      }
+    };
+    const restoreCapture = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, event) => {
+        shadow(event);
+        current(event);
+      },
+    );
+    const restoreBubble = interceptReactProp<(event: ReactKeyboardEvent<HTMLButtonElement>) => void>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        shadow(event);
+        current(event);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowLeft");
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action("find-prev"));
+    } finally {
+      restoreBubble();
+      restoreCapture();
+    }
+  });
+
+  it.each([1, 3])(
+    "retains the exact native pair through %i nested microtask checkpoint(s) between capture and bubble",
+    async (checkpoints) => {
+      const s = session("owner", `actions-microtask-${checkpoints}`);
+      const focus = trackActionFocus();
+      const view = renderActionBar(s, silentCallbacks());
+      await act(async () => {});
+      const source = view.action("find-next");
+      let observed = 0;
+      source.addEventListener("keydown", () => {
+        const checkpoint = () => {
+          observed += 1;
+          if (observed < checkpoints) queueMicrotask(checkpoint);
+        };
+        queueMicrotask(checkpoint);
+        vi.runAllTicks();
+      }, { capture: true, once: true });
+      focus.reset();
+
+      vi.useFakeTimers({ toFake: ["queueMicrotask"] });
+      try {
+        const event = dispatchActionKey(source, "ArrowRight");
+        expect(observed).toBe(checkpoints);
+        expect(event.defaultPrevented).toBe(true);
+        expect(focus.moves()).toHaveLength(1);
+        expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+      } finally {
+        vi.runAllTicks();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("claims one delivery once across replay and reentrancy, then accepts a fresh successor event", async () => {
+    const s = session("owner", "actions-replay");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const reentered: unknown[] = [];
+    const restore = interceptReactProp<(event: ReactKeyboardEvent<HTMLButtonElement>) => void>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        current(event);
+        reentered.push(event);
+        current(event);
+      },
+    );
+    focus.reset();
+
+    try {
+      const replayed = actionKey(source, "ArrowRight");
+      act(() => {
+        source.focus();
+        source.dispatchEvent(replayed);
+        source.dispatchEvent(replayed);
+      });
+
+      expect(reentered).toHaveLength(2);
+      expect(replayed.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action("find-next"));
+    } finally {
+      restore();
+    }
+
+    await act(async () => {});
+    focus.reset();
+    const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+  });
+
+  it("rejects facts changed between capture and bubble, then admits a fresh publication", async () => {
+    const s = session("owner", "actions-stale-facts");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    source.addEventListener("keydown", () => {
+      s.setFind("mat");
+    }, { capture: true, once: true });
+    focus.reset();
+
+    const stale = dispatchActionKey(source, "ArrowRight");
+
+    expect(stale.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    await waitFor(() => expect(view.element("find-input")).toHaveValue("mat"));
+    focus.reset();
+    const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it.each(["attribute restore", "detach and restore"] as const)(
+    "rejects %s DOM history and admits a fresh successor",
+    async (scenario) => {
+      const s = session("owner", `actions-${scenario.replaceAll(" ", "-")}`);
+      const focus = trackActionFocus();
+      const view = renderActionBar(s, silentCallbacks());
+      await act(async () => {});
+      const bar = view.element<HTMLDivElement>("find-bar");
+      const source = view.action("find-prev");
+      const staleHandler = reactHandler<NativeBarKeyHandler>(bar, "onKeyDown");
+
+      if (scenario === "attribute restore") {
+        bar.setAttribute("data-history", "changed");
+        bar.removeAttribute("data-history");
+      } else {
+        const parent = bar.parentNode;
+        const previous = bar.previousSibling;
+        const next = bar.nextSibling;
+        if (!parent) throw new Error("FindBar has no committed parent");
+        bar.remove();
+        focus.reset();
+        const detached = actionKey(source, "ArrowRight");
+        act(() => source.dispatchEvent(detached));
+        expect(detached.defaultPrevented).toBe(false);
+        parent.insertBefore(bar, next);
+        // Exactly where it was: placement alone passes, so only the history proof can reject it.
+        expect(bar.parentNode).toBe(parent);
+        expect(bar.previousSibling).toBe(previous);
+        expect(bar.nextSibling).toBe(next);
+      }
+      focus.reset();
+      const restored = actionKey(source, "ArrowRight");
+      act(() => {
+        source.focus();
+        source.dispatchEvent(restored);
+      });
+      expect(restored.defaultPrevented).toBe(false);
+      expect(focus.moves()).toHaveLength(0);
+
+      await waitFor(() => {
+        expect(reactHandler<NativeBarKeyHandler>(bar, "onKeyDown")).not.toBe(staleHandler);
+      });
+      focus.reset();
+      const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+      expect(fresh.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(view.action("find-next"));
+    },
+  );
+
+  it("rejects a partial Strict Mode ref replay before a clean keyed successor recovers", async () => {
+    const s = session("owner", "actions-partial-replay");
+    const focus = trackActionFocus();
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks, { key: "stale" });
+    await act(async () => {});
+    const bar = view.element<HTMLDivElement>("find-bar");
+    const barRef = reactRef(bar);
+    act(() => {
+      barRef(null);
+      barRef(bar);
+    });
+    focus.reset();
+
+    const replayed = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(replayed.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    act(() => {
+      view.root.render(
+        <StrictMode>
+          <TooltipProvider>
+            <FindBar
+              key="current"
+              session={s}
+              replaceVisible
+              focusNonce={0}
+              {...callbacks}
+            />
+          </TooltipProvider>
+        </StrictMode>,
+      );
+    });
+    await act(async () => {});
+    focus.reset();
+
+    const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it("stops navigating after cleanup", async () => {
+    const s = session("owner", "actions-cleanup");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const destination = view.action("find-next");
+    act(() => view.root.unmount());
+    directRoots.delete(view.root);
+    document.body.append(source, destination);
+    focus.reset();
+
+    const event = actionKey(source, "ArrowRight");
+    act(() => {
+      source.focus();
+      source.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(source);
+    source.remove();
+    destination.remove();
+    view.host.remove();
+  });
+
+  type ActionKeyHandler = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  type AnyPredicate = (...args: unknown[]) => boolean;
+
+  function renderActionSuccessor(
+    view: ReturnType<typeof renderActionBar>,
+    s: CollabSession,
+    callbacks: ActionCallbacks,
+    key: string,
+  ) {
+    act(() => {
+      view.root.render(
+        <StrictMode>
+          <TooltipProvider>
+            <FindBar key={key} session={s} replaceVisible focusNonce={0} {...callbacks} />
+          </TooltipProvider>
+        </StrictMode>,
+      );
+    });
+  }
+
+  describe("public-accessor authentication", () => {
+    const PUBLIC_FIELDS = [
+      "nativeEvent", "type", "target", "currentTarget", "eventPhase", "bubbles",
+      "cancelable", "defaultPrevented", "key", "code", "location", "altKey",
+      "ctrlKey", "metaKey", "shiftKey", "repeat", "view", "preventDefault",
+      "isDefaultPrevented", "isPropagationStopped",
+    ] as const;
+    type PublicField = typeof PUBLIC_FIELDS[number];
+    type Phase = "capture" | "bubble";
+    type Placement = "own" | "inherited";
+
+    function accessorWrapper<T extends HTMLElement>(
+      original: ReactKeyboardEvent<T>,
+      placement: Placement,
+    ) {
+      const values: Record<string, unknown> = Object.fromEntries(PUBLIC_FIELDS.map((key) => [key, original[key]]));
+      const reads: Partial<Record<PublicField, number>> = {};
+      const preventions: { receiver: unknown; args: unknown[] }[] = [];
+      const initialTarget = original.currentTarget;
+      const nativeEvent = original.nativeEvent;
+      const prevent = original.preventDefault;
+      const hooks: {
+        read: ((key: PublicField, value: unknown) => unknown) | null;
+      } = { read: null };
+      values.preventDefault = function (this: unknown, ...args: unknown[]) {
+        preventions.push({ receiver: this, args });
+        Reflect.apply(prevent, original, args);
+        values.defaultPrevented = true;
+        values.isDefaultPrevented = () => true;
+      };
+      values.isDefaultPrevented = () => values.defaultPrevented === true;
+      values.isPropagationStopped = () => false;
+      const properties = Object.create(null) as object;
+      const wrapper = (placement === "own" ? properties : Object.create(properties)) as ReactKeyboardEvent<T>;
+      for (const key of PUBLIC_FIELDS) {
+        Object.defineProperty(properties, key, {
+          configurable: true,
+          get() {
+            reads[key] = (reads[key] ?? 0) + 1;
+            const value = key === "currentTarget" && values[key] === initialTarget
+              ? original.currentTarget
+              : values[key];
+            return hooks.read ? hooks.read(key, value) : value;
+          },
+        });
+      }
+      let forbiddenReads = 0;
+      for (const key of [
+        "persist", "stopPropagation", "isPersistent", "_reactName", "_targetInst", "constructor",
+      ]) {
+        Object.defineProperty(wrapper, key, {
+          get() {
+            forbiddenReads += 1;
+            throw new Error(`Unsupported private/optional read: ${key}`);
+          },
+        });
+      }
+      return {
+        event: wrapper, nativeEvent, values, reads, hooks, preventions,
+        forbiddenReads: () => forbiddenReads,
+      };
+    }
+
+    type AccessorWrapper = ReturnType<typeof accessorWrapper>;
+
+    function interceptAccessors(
+      view: ReturnType<typeof renderActionBar>,
+      placement: Placement,
+      configure?: (
+        phase: Phase,
+        wrapper: AccessorWrapper,
+        wrappers: Partial<Record<Phase, AccessorWrapper>>,
+        deliver: () => void,
+      ) => void,
+    ) {
+      const wrappers: Partial<Record<Phase, AccessorWrapper>> = {};
+      const restoreCapture = interceptReactProp<NativeBarKeyHandler>(
+        view.element<HTMLDivElement>("find-actions"), "onKeyDownCapture", (current, event) => {
+          const wrapper = accessorWrapper(event, placement);
+          wrappers.capture = wrapper;
+          const deliver = () => current(wrapper.event);
+          configure?.("capture", wrapper, wrappers, deliver);
+          deliver();
+        },
+      );
+      const restoreBubble = interceptReactProp<ActionKeyHandler>(
+        view.action("find-prev"), "onKeyDown", (current, event) => {
+          const wrapper = accessorWrapper(event, placement);
+          wrappers.bubble = wrapper;
+          const deliver = () => current(wrapper.event);
+          configure?.("bubble", wrapper, wrappers, deliver);
+          deliver();
+        },
+      );
+      return {
+        wrappers,
+        restore() {
+          restoreBubble();
+          restoreCapture();
+        },
+      };
+    }
+
+    function expectOneAccessorMove(
+      delivery: ReturnType<typeof interceptAccessors>,
+      focus: ReturnType<typeof trackActionFocus>,
+      destination: HTMLButtonElement,
+    ) {
+      const { capture, bubble } = delivery.wrappers;
+      expect(capture).toBeDefined();
+      expect(bubble).toBeDefined();
+      // Keep assertion-library constructor probes outside the guarded public-wrapper contract.
+      expect(capture?.event === bubble?.event).toBe(false);
+      for (const wrapper of [capture, bubble]) {
+        for (const key of PUBLIC_FIELDS) expect(wrapper?.reads[key], key).toBeGreaterThan(0);
+        expect(wrapper?.forbiddenReads()).toBe(0);
+      }
+      expect(capture?.preventions).toHaveLength(0);
+      expect(bubble?.preventions).toHaveLength(1);
+      expect(bubble?.preventions[0]?.receiver === bubble?.event).toBe(true);
+      expect(bubble?.preventions[0]?.args).toEqual([]);
+      expect(focus.moves()).toEqual([{ element: destination, options: { preventScroll: true } }]);
+      expect(document.activeElement).toBe(destination);
+    }
+
+    it.each(["own", "inherited"] as const)(
+      "accepts independent wrappers with every required public field as an %s accessor",
+      async (placement) => {
+        const s = session("owner", `actions-accessors-${placement}`);
+        const focus = trackActionFocus();
+        const callbacks = silentCallbacks();
+        const methods = ["setFind", "stepFind", "replaceActive", "replaceAll"] as const;
+        const work = methods.map((method) => vi.spyOn(s, method));
+        const storage = vi.spyOn(Storage.prototype, "setItem");
+        const fetch = vi.fn();
+        vi.stubGlobal("fetch", fetch);
+        const view = renderActionBar(s, callbacks);
+        await act(async () => {});
+        const delivery = interceptAccessors(view, placement);
+        focus.reset();
+        try {
+          const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(native.defaultPrevented).toBe(true);
+          expectOneAccessorMove(delivery, focus, view.action("find-next"));
+          for (const spy of work) expect(spy).not.toHaveBeenCalled();
+          expect(storage).not.toHaveBeenCalled();
+          expect(fetch).not.toHaveBeenCalled();
+          expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+          expect(callbacks.onReveal).not.toHaveBeenCalled();
+          expect(callbacks.onClose).not.toHaveBeenCalled();
+          expect(s.ytext.toString()).toBe(TEXT);
+        } finally {
+          delivery.restore();
+        }
+      },
+    );
+
+    const INVALID_ACCESSORS = (["capture", "bubble"] as const).flatMap((phase) =>
+      (["nativeEvent", "currentTarget", "key", "preventDefault"] as const).flatMap((field) =>
+        (["throwing", "wrong"] as const).map((fault) => ({ phase, field, fault }))));
+
+    it.each(INVALID_ACCESSORS)(
+      "rejects a $fault $phase $field accessor, then accepts a stable accessor successor",
+      async ({ phase, field, fault }) => {
+        const s = session("owner", "actions-invalid-accessor");
+        const focus = trackActionFocus();
+        const callbacks = silentCallbacks();
+        const view = renderActionBar(s, callbacks);
+        await act(async () => {});
+        let badReads = 0;
+        const delivery = interceptAccessors(view, "inherited", (currentPhase, wrapper) => {
+          if (currentPhase !== phase) return;
+          wrapper.hooks.read = (key, value) => {
+            if (key !== field) return value;
+            badReads += 1;
+            if (fault === "throwing") throw new Error("Public accessor refused");
+            return field === "nativeEvent" ? {} : field === "key" ? "ArrowLeft" : null;
+          };
+        });
+        focus.reset();
+        try {
+          const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(badReads).toBeGreaterThan(0);
+          expect(native.defaultPrevented).toBe(false);
+          expect(delivery.wrappers.capture?.preventions).toHaveLength(0);
+          expect(delivery.wrappers.bubble?.preventions).toHaveLength(0);
+          expect(focus.moves()).toHaveLength(0);
+        } finally {
+          delivery.restore();
+        }
+        renderActionSuccessor(view, s, callbacks, "accessor-successor");
+        await act(async () => {});
+        const successor = interceptAccessors(view, "own");
+        focus.reset();
+        try {
+          dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expectOneAccessorMove(successor, focus, view.action("find-next"));
+        } finally {
+          successor.restore();
+        }
+        expect(callbacks.onReveal).not.toHaveBeenCalled();
+        expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+        expect(callbacks.onClose).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["nativeEvent", "key", "isDefaultPrevented", "preventDefault"] as const)(
+      "excludes both routes before a reentrant %s accessor is read",
+      async (field) => {
+        const s = session("owner", "actions-reentrant-accessor");
+        const focus = trackActionFocus();
+        const view = renderActionBar(s, silentCallbacks());
+        await act(async () => {});
+        const entries = { capture: 0, bubble: 0 };
+        const delivery = interceptAccessors(view, "own", (phase, wrapper, _wrappers, deliver) => {
+          wrapper.hooks.read = (key, value) => {
+            if (key === field && entries[phase] === 0) {
+              entries[phase] += 1;
+              deliver();
+              expect(wrapper.preventions).toHaveLength(0);
+              expect(focus.moves()).toHaveLength(0);
+            }
+            return value;
+          };
+        });
+        focus.reset();
+        try {
+          dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(entries).toEqual({ capture: 1, bubble: 1 });
+          expectOneAccessorMove(delivery, focus, view.action("find-next"));
+        } finally {
+          delivery.restore();
+        }
+      },
+    );
+
+    const METHOD_DRIFTS = (["pre-claim", "post-prevention"] as const).flatMap((stage) =>
+      (["capture", "bubble"] as const).flatMap((phase) =>
+        (["accessor", "query"] as const).flatMap((callback) =>
+          (["preventDefault", "isDefaultPrevented", "isPropagationStopped"] as const)
+            .map((method) => ({ stage, phase, callback, method })))));
+
+    it.each(METHOD_DRIFTS)(
+      "rejects $stage $phase $callback cross-wrapper public method drift of $method",
+      async ({ stage, phase, callback, method }) => {
+        const s = session("owner", "actions-accessor-cross-drift");
+        const focus = trackActionFocus();
+        const callbacks = silentCallbacks();
+        const view = renderActionBar(s, callbacks);
+        await act(async () => {});
+        const replacement = vi.fn(() => false);
+        let changed = false;
+        const delivery = interceptAccessors(view, "inherited", (currentPhase, wrapper, wrappers) => {
+          if (currentPhase !== phase) return;
+          const mutate = () => {
+            const other = wrappers[phase === "capture" ? "bubble" : "capture"];
+            if (!other || changed || wrapper.nativeEvent.defaultPrevented !== (stage === "post-prevention")) return;
+            changed = true;
+            other.values[method] = replacement;
+          };
+          if (callback === "accessor") {
+            wrapper.hooks.read = (key, value) => {
+              if (key === "key") mutate();
+              return value;
+            };
+          } else {
+            wrapper.values.isPropagationStopped = () => {
+              mutate();
+              return false;
+            };
+          }
+        });
+        focus.reset();
+        try {
+          const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(changed).toBe(true);
+          expect(native.defaultPrevented).toBe(stage === "post-prevention");
+          expect(delivery.wrappers.bubble?.preventions).toHaveLength(stage === "post-prevention" ? 1 : 0);
+          expect(replacement).not.toHaveBeenCalled();
+          expect(focus.moves()).toHaveLength(0);
+          expect(callbacks.onReveal).not.toHaveBeenCalled();
+          expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+          expect(callbacks.onClose).not.toHaveBeenCalled();
+        } finally {
+          delivery.restore();
+        }
+        renderActionSuccessor(view, s, callbacks, "no-drift");
+        await act(async () => {});
+        const successor = interceptAccessors(view, "inherited");
+        focus.reset();
+        try {
+          dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expectOneAccessorMove(successor, focus, view.action("find-next"));
+        } finally {
+          successor.restore();
+        }
+      },
+    );
+
+    it.each(["capture at prevention", "bubble scalar getter", "bubble query getter"] as const)(
+      "does not adopt a later or cross-phase default query from %s",
+      async (drift) => {
+        const s = session("owner", "actions-default-query-accessor");
+        const focus = trackActionFocus();
+        const view = renderActionBar(s, silentCallbacks());
+        await act(async () => {});
+        const replacement = vi.fn(() => drift !== "capture at prevention");
+        let changed = false;
+        let queryReadsAfterPrevention = 0;
+        const delivery = interceptAccessors(view, "own", (phase, wrapper, wrappers) => {
+          if (phase !== "bubble") return;
+          const prevent = wrapper.values.preventDefault as () => void;
+          wrapper.values.preventDefault = function (this: unknown) {
+            Reflect.apply(prevent, this, []);
+            if (drift === "capture at prevention" && wrappers.capture) {
+              wrappers.capture.values.isDefaultPrevented = replacement;
+              changed = true;
+            }
+          };
+          wrapper.hooks.read = (key, value) => {
+            if (!wrapper.nativeEvent.defaultPrevented) return value;
+            if (key === "isDefaultPrevented") queryReadsAfterPrevention += 1;
+            if (!changed && (
+              (drift === "bubble scalar getter" && key === "key") ||
+              (drift === "bubble query getter" && key === "isDefaultPrevented" && queryReadsAfterPrevention === 2)
+            )) {
+              changed = true;
+              wrapper.values.isDefaultPrevented = replacement;
+              if (key === "isDefaultPrevented") return replacement;
+            }
+            return value;
+          };
+        });
+        focus.reset();
+        try {
+          const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(changed).toBe(true);
+          expect(native.defaultPrevented).toBe(true);
+          expect(delivery.wrappers.bubble?.preventions).toHaveLength(1);
+          expect(queryReadsAfterPrevention).toBeGreaterThan(0);
+          expect(replacement).not.toHaveBeenCalled();
+          expect(focus.moves()).toHaveLength(0);
+        } finally {
+          delivery.restore();
+        }
+      },
+    );
+
+    it.each(["capture", "bubble"] as const)(
+      "never calls the replaced propagation method after the %s default predicate returns",
+      async (phase) => {
+        const s = session("owner", "actions-self-query-drift");
+        const focus = trackActionFocus();
+        const view = renderActionBar(s, silentCallbacks());
+        await act(async () => {});
+        const replaced = vi.fn(() => false);
+        const replacement = vi.fn(() => false);
+        let changed = false;
+        const delivery = interceptAccessors(view, "own", (currentPhase, wrapper) => {
+          if (currentPhase !== phase) return;
+          wrapper.values.isPropagationStopped = replaced;
+          wrapper.values.isDefaultPrevented = () => {
+            changed = true;
+            wrapper.values.isPropagationStopped = replacement;
+            return false;
+          };
+        });
+        focus.reset();
+        try {
+          const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+          expect(changed).toBe(true);
+          expect(native.defaultPrevented).toBe(false);
+          expect(replaced).not.toHaveBeenCalled();
+          expect(replacement).not.toHaveBeenCalled();
+          expect(focus.moves()).toHaveLength(0);
+        } finally {
+          delivery.restore();
+        }
+      },
+    );
+
+    it.each((["pre-claim", "post-prevention"] as const).flatMap((stage) =>
+      (["find state", "focus", "restored DOM"] as const).map((drift) => ({ stage, drift }))))(
+      "rejects $stage $drift changes from final public accessor reads after the DOM walk",
+      async ({ stage, drift }) => {
+        const s = session("owner", "actions-final-accessor");
+        const focus = trackActionFocus();
+        const view = renderActionBar(s, silentCallbacks());
+        await act(async () => {});
+        const source = view.action("find-prev");
+        const destination = view.action("find-next");
+        const lastPublished = view.action("replace-all");
+        const find = s.find;
+        const attributes = Object.getOwnPropertyDescriptor(Element.prototype, "attributes")?.get;
+        if (!attributes) throw new Error("The realm publishes no attributes getter");
+        let armed = false;
+        let changed = false;
+        const delivery = interceptAccessors(view, "inherited", (phase, wrapper) => {
+          if (phase !== "bubble") return;
+          Object.defineProperty(lastPublished, "attributes", {
+            configurable: true,
+            get(this: Element) {
+              if (wrapper.nativeEvent.defaultPrevented === (stage === "post-prevention")) armed = true;
+              return Reflect.apply(attributes, this, []);
+            },
+          });
+          wrapper.hooks.read = (key, value) => {
+            if (key !== "preventDefault" || !armed || changed) return value;
+            changed = true;
+            if (drift === "find state") {
+              if (!find) throw new Error("No published find state");
+              s.find = { ...find };
+            } else if (drift === "focus") {
+              view.element<HTMLInputElement>("find-input").focus();
+            } else {
+              const parent = destination.parentNode;
+              const next = destination.nextSibling;
+              if (!parent) throw new Error("No destination parent");
+              destination.remove();
+              parent.insertBefore(destination, next);
+            }
+            return value;
+          };
+        });
+        focus.reset();
+        try {
+          const native = dispatchActionKey(source, "ArrowRight");
+          expect(armed).toBe(true);
+          expect(changed).toBe(true);
+          expect(native.defaultPrevented).toBe(stage === "post-prevention");
+          expect(delivery.wrappers.bubble?.preventions).toHaveLength(stage === "post-prevention" ? 1 : 0);
+          expect(focus.moves()).toHaveLength(0);
+        } finally {
+          delivery.restore();
+          Reflect.deleteProperty(lastPublished, "attributes");
+          s.find = find;
+        }
+      },
+    );
+
+    it("keeps the same native dispatch usable after malformed accessor capture", async () => {
+      const s = session("owner", "actions-malformed-accessor");
+      const focus = trackActionFocus();
+      const view = renderActionBar(s, silentCallbacks());
+      await act(async () => {});
+      let malformedReads = 0;
+      const restore = interceptReactProp<NativeBarKeyHandler>(
+        view.element<HTMLDivElement>("find-actions"), "onKeyDownCapture", (current, event) => {
+          const malformed = accessorWrapper(event, "inherited");
+          malformed.hooks.read = (key, value) => {
+            if (key === "eventPhase") {
+              malformedReads += 1;
+              return 3;
+            }
+            return value;
+          };
+          current(malformed.event);
+          expect(malformed.preventions).toHaveLength(0);
+          current(event);
+        },
+      );
+      focus.reset();
+      try {
+        const native = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+        expect(malformedReads).toBeGreaterThan(0);
+        expect(native.defaultPrevented).toBe(true);
+        expect(focus.moves()).toHaveLength(1);
+        expect(document.activeElement).toBe(view.action("find-next"));
+      } finally {
+        restore();
+      }
+    });
+  });
+
+  it.each(["phase", "target", "key", "view", "method"] as const)(
+    "keeps the rightful pair through malformed %s capture, crossed, throwing, duplicate, and reentrant attempts",
+    async (malformedField) => {
+    const s = session("owner", "actions-rejected-attempts");
+    const focus = trackActionFocus();
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks);
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-prev");
+    const crossed = view.action("find-close");
+    const capture = reactHandler<NativeBarKeyHandler>(row, "onKeyDownCapture");
+    const crossedBubble = reactHandler<ActionKeyHandler>(crossed, "onKeyDown");
+    const elementMatches = Element.prototype.matches;
+    const malformedPrevent = vi.fn();
+    const reentered: string[] = [];
+    const thrown: { error: unknown } = { error: null };
+    let reentrantArmed = false;
+
+    const restoreCapture = interceptReactProp<NativeBarKeyHandler>(
+      row,
+      "onKeyDownCapture",
+      (current, event) => {
+        const native = event.nativeEvent;
+        const malformed = {
+          nativeEvent: native,
+          currentTarget: row,
+          target: source,
+          type: "keydown",
+          key: "ArrowRight",
+          code: "ArrowRight",
+          location: 0,
+          repeat: false,
+          altKey: false,
+          ctrlKey: false,
+          metaKey: false,
+          shiftKey: false,
+          bubbles: true,
+          cancelable: true,
+          defaultPrevented: false,
+          eventPhase: 1,
+          isTrusted: true,
+          view: null,
+          preventDefault: malformedPrevent,
+          stopPropagation: vi.fn(),
+          isDefaultPrevented: () => false,
+          isPropagationStopped: () => false,
+        } as unknown as ReactKeyboardEvent<HTMLDivElement>;
+        const malformedValues = {
+          phase: ["eventPhase", 3],
+          target: ["target", crossed],
+          key: ["key", "ArrowLeft"],
+          view: ["view", undefined],
+          method: ["preventDefault", 7],
+        } as const;
+        const [property, value] = malformedValues[malformedField];
+        Object.defineProperty(malformed, property, { configurable: true, value });
+        current(malformed);
+        crossedBubble(event as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+        current(event);
+        current(event);
+      },
+    );
+    const restoreBubble = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        const native = event.nativeEvent;
+        crossedBubble(event);
+        current({
+          nativeEvent: native,
+          currentTarget: crossed,
+        } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+        try {
+          current({
+            nativeEvent: native,
+            get currentTarget(): HTMLButtonElement {
+              throw new Error("currentTarget is gone");
+            },
+          } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+        } catch (error) {
+          thrown.error = error;
+        }
+        Object.defineProperty(crossed, "matches", {
+          configurable: true,
+          value: function (this: Element, selector: string) {
+            if (reentrantArmed) {
+              reentrantArmed = false;
+              reentered.push("reentrant");
+              crossedBubble(event);
+              capture(event as unknown as ReactKeyboardEvent<HTMLDivElement>);
+            }
+            return elementMatches.call(this, selector) as boolean;
+          },
+          },
+        );
+        reentrantArmed = true;
+        current(event);
+        current(event);
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+
+      expect(malformedPrevent).not.toHaveBeenCalled();
+      expect(thrown.error).toBeNull();
+      expect(reentered).toEqual(["reentrant"]);
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+      expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+      expect(document.activeElement).toBe(view.action("find-next"));
+    } finally {
+      restoreBubble();
+      restoreCapture();
+      Reflect.deleteProperty(crossed, "matches");
+    }
+
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onReplaceVisible).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  const FINAL_QUERY_DRIFTS = [
+    "wrapper method",
+    "source focus",
+    "destination owner",
+    "destination disabled",
+    "committed order",
+    "detach and restore",
+    "live query",
+    "live options",
+    "live can edit",
+    "can-edit accessor",
+    "session method",
+  ] as const;
+
+  it.each(FINAL_QUERY_DRIFTS)(
+    "focuses nothing and leaves a clean successor when the last mutation-capable query changes %s",
+    async (drift) => {
+      const s = session("owner", `actions-final-${drift.replaceAll(" ", "-")}`);
+      const focus = trackActionFocus();
+      const callbacks = silentCallbacks();
+      const view = renderActionBar(s, callbacks, { key: "drifting" });
+      await act(async () => {});
+      const group = view.element<HTMLDivElement>("find-row");
+      const source = view.action("find-prev");
+      const destination = view.action("find-next");
+      const searchInput = view.element<HTMLInputElement>("find-input");
+      const closeAction = view.action("find-close");
+      // The last element of the published tree, so the walk never re-reads what the drift changed.
+      const lastPublished = view.action("replace-all");
+      const held: { event: ReactKeyboardEvent<HTMLButtonElement> | null } = { event: null };
+      const destinationRef = reactRef(destination);
+      const readParentNode = Object.getOwnPropertyDescriptor(
+        Node.prototype,
+        "parentNode",
+      )?.get;
+      const readAttributes = Object.getOwnPropertyDescriptor(
+        Element.prototype,
+        "attributes",
+      )?.get;
+      const canEditPrototype = Object.getPrototypeOf(s) as object;
+      const canEditDescriptor = Object.getOwnPropertyDescriptor(
+        canEditPrototype,
+        "canEdit",
+      );
+      if (
+        !readParentNode ||
+        !readAttributes ||
+        !canEditDescriptor ||
+        typeof canEditDescriptor.get !== "function"
+      ) {
+        throw new Error("The realm publishes no node getters");
+      }
+      const readCanEdit = canEditDescriptor.get;
+      let armed = false;
+      let delivering = false;
+      let walks = 0;
+      let driftedOnWalk = 0;
+      let restoredInPlace = false;
+      const prevented = () => held.event?.nativeEvent.defaultPrevented === true;
+      const applyDrift = () => {
+        const event = held.event;
+        if (!event) return;
+        if (drift === "wrapper method") {
+          Object.defineProperty(event, "preventDefault", {
+            configurable: true,
+            writable: true,
+            value: () => {},
+          });
+        } else if (drift === "source focus") {
+          searchInput.focus();
+        } else if (drift === "destination owner") {
+          destinationRef(null);
+        } else if (drift === "destination disabled") {
+          destination.disabled = true;
+        } else if (drift === "committed order") {
+          group.insertBefore(destination, source);
+        } else if (drift === "live query") {
+          s.setFind("mat");
+        } else if (drift === "live options") {
+          const current = s.find;
+          if (!current) throw new Error("The session published no find state");
+          s.setFind(current.query, { ...current.options, matchCase: !current.options.matchCase });
+        } else if (drift === "live can edit") {
+          Object.defineProperty(s, "canEdit", { configurable: true, get: () => false });
+        } else if (drift === "can-edit accessor") {
+          Object.defineProperty(canEditPrototype, "canEdit", {
+            ...canEditDescriptor,
+            get(this: CollabSession) {
+              return readCanEdit.call(this) as boolean;
+            },
+          });
+        } else if (drift === "session method") {
+          Object.defineProperty(s, "stepFind", {
+            configurable: true,
+            writable: true,
+            value: vi.fn(),
+          });
+        } else {
+          // Reinserted at its exact original parent and sibling position, so every placement read
+          // still accepts it and only the permanent mutation history can reject the detach.
+          const before = destination.previousSibling;
+          const after = destination.nextSibling;
+          destination.remove();
+          group.insertBefore(destination, after);
+          restoredInPlace =
+            destination.parentNode === group &&
+            destination.previousSibling === before &&
+            destination.nextSibling === after;
+        }
+      };
+
+      // The committed first-row re-read is the only query that walks a control's public parentNode,
+      // so arming here proves the drift below lands in the published DOM walk that follows it — the
+      // last mutation-capable query of all, and the one the old order ran after its wrapper checks.
+      Object.defineProperty(closeAction, "parentNode", {
+        configurable: true,
+        get(this: Node) {
+          if (prevented()) armed = true;
+          return readParentNode.call(this) as ParentNode | null;
+        },
+      });
+      Object.defineProperty(lastPublished, "attributes", {
+        configurable: true,
+        get(this: Element) {
+          if (delivering) walks += 1;
+          if (delivering && armed && driftedOnWalk === 0) {
+            driftedOnWalk = walks;
+            applyDrift();
+          }
+          return readAttributes.call(this) as NamedNodeMap;
+        },
+      });
+      const restore = interceptReactProp<ActionKeyHandler>(
+        source,
+        "onKeyDown",
+        (current, event) => {
+          held.event = event;
+          delivering = true;
+          try {
+            current(event);
+          } finally {
+            delivering = false;
+          }
+        },
+      );
+      focus.reset();
+
+      try {
+        const event = dispatchActionKey(source, "ArrowRight");
+
+        expect(armed).toBe(true);
+        expect(walks).toBe(2);
+        // The drift landed in the last published DOM walk; no mutable query ran after it.
+        expect(driftedOnWalk).toBe(walks);
+        if (drift === "detach and restore") expect(restoredInPlace).toBe(true);
+        expect(event.defaultPrevented).toBe(true);
+        expect(focus.moves()).toHaveLength(0);
+        expect(document.activeElement).toBe(
+          drift === "source focus" ? searchInput : source,
+        );
+      } finally {
+        restore();
+        Reflect.deleteProperty(closeAction, "parentNode");
+        Reflect.deleteProperty(lastPublished, "attributes");
+        Reflect.deleteProperty(s, "canEdit");
+        Reflect.deleteProperty(s, "stepFind");
+        if (drift === "can-edit accessor") {
+          Object.defineProperty(canEditPrototype, "canEdit", canEditDescriptor);
+        }
+      }
+
+      renderActionSuccessor(view, s, callbacks, "recovered");
+      await act(async () => {});
+      focus.reset();
+
+      const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+      expect(fresh.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action("find-next"));
+      expect(callbacks.onReveal).not.toHaveBeenCalled();
+      expect(callbacks.onClose).not.toHaveBeenCalled();
+      expect(s.ytext.toString()).toBe(TEXT);
+    },
+  );
+
+  it("retains the rightful pair when the last pre-claim query replaces the bubble wrapper's prevention", async () => {
+    const s = session("owner", "actions-pre-claim-drift");
+    const focus = trackActionFocus();
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks, { key: "pre-claim" });
+    await act(async () => {});
+    const source = view.action("find-prev");
+    // The last element of the published tree, so the drift lands in the pre-claim DOM walk that
+    // runs after the wrapper was already authenticated and before anything is consumed.
+    const lastPublished = view.action("replace-all");
+    const readAttributes = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "attributes",
+    )?.get;
+    if (!readAttributes) throw new Error("The realm publishes no attributes getter");
+    const held: { event: ReactKeyboardEvent<HTMLButtonElement> | null } = { event: null };
+    const retained: { preventDefault: unknown } = { preventDefault: null };
+    let delivering = false;
+    let drifted = false;
+    const walks = { preClaim: 0, postPrevention: 0 };
+
+    Object.defineProperty(lastPublished, "attributes", {
+      configurable: true,
+      get(this: Element) {
+        const event = held.event;
+        if (delivering && event) {
+          if (event.nativeEvent.defaultPrevented) walks.postPrevention += 1;
+          else walks.preClaim += 1;
+        }
+        if (delivering && !drifted && event && !event.nativeEvent.defaultPrevented) {
+          drifted = true;
+          retained.preventDefault = event.preventDefault;
+          Object.defineProperty(event, "preventDefault", {
+            configurable: true,
+            writable: true,
+            value: () => {},
+          });
+        }
+        return readAttributes.call(this) as NamedNodeMap;
+      },
+    });
+    const restore = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        held.event = event;
+        delivering = true;
+        try {
+          current(event);
+          expect(drifted).toBe(true);
+          expect(walks).toEqual({ preClaim: 1, postPrevention: 0 });
+          expect(event.nativeEvent.defaultPrevented).toBe(false);
+          expect(focus.moves()).toHaveLength(0);
+          // Nothing was consumed: put the exact prevention back and let the rightful bubble of the
+          // same native event run again, which must now authenticate and move focus exactly once.
+          Object.defineProperty(event, "preventDefault", {
+            configurable: true,
+            writable: true,
+            value: retained.preventDefault,
+          });
+          current(event);
+        } finally {
+          delivering = false;
+        }
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+
+      expect(drifted).toBe(true);
+      expect(walks).toEqual({ preClaim: 2, postPrevention: 1 });
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+      expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+      expect(document.activeElement).toBe(view.action("find-next"));
+    } finally {
+      restore();
+      Reflect.deleteProperty(lastPublished, "attributes");
+    }
+
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it("drains through the owner realm and rejects a detach and restore hidden behind a replaced takeRecords", async () => {
+    const s = session("owner", "actions-laundered-drain");
+    const focus = trackActionFocus();
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks, { key: "laundered" });
+    await act(async () => {});
+    const group = view.element<HTMLDivElement>("find-row");
+    const source = view.action("find-prev");
+    const destination = view.action("find-next");
+    // The last element of the published tree, so the detach lands in the walk that runs last.
+    const lastPublished = view.action("replace-all");
+    const readAttributes = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "attributes",
+    )?.get;
+    const drain = Object.getOwnPropertyDescriptor(
+      MutationObserver.prototype,
+      "takeRecords",
+    );
+    if (!readAttributes || typeof drain?.value !== "function") {
+      throw new Error("The realm publishes no attributes getter or observer drain");
+    }
+    const takeRecords = drain.value as (this: MutationObserver) => MutationRecord[];
+    const held: { event: ReactKeyboardEvent<HTMLButtonElement> | null } = { event: null };
+    let delivering = false;
+    let armed = false;
+    let replaced = false;
+    let publicDrains = 0;
+    let laundered = 0;
+    let restoredInPlace = false;
+
+    const restoreDrain = () => {
+      if (!replaced) return;
+      replaced = false;
+      Object.defineProperty(MutationObserver.prototype, "takeRecords", drain);
+    };
+    // A public `observer.takeRecords()` would be answered with an empty list after the real queue was
+    // quietly emptied and the exact descriptor put back, so the detach below would leave no trace at
+    // all. Only a drain that never looks the method up publicly can still see it.
+    const replaceDrain = () => {
+      replaced = true;
+      Object.defineProperty(MutationObserver.prototype, "takeRecords", {
+        configurable: true,
+        writable: true,
+        value: function (this: MutationObserver) {
+          publicDrains += 1;
+          laundered += takeRecords.call(this).length;
+          restoreDrain();
+          return [] as MutationRecord[];
+        },
+      });
+    };
+
+    Object.defineProperty(lastPublished, "attributes", {
+      configurable: true,
+      get(this: Element) {
+        if (delivering && !armed && held.event?.nativeEvent.defaultPrevented === true) {
+          armed = true;
+          replaceDrain();
+          // Reinserted at its exact original parent and sibling position, so every placement read
+          // still accepts it and only the observed mutation history can reject the detach.
+          const before = destination.previousSibling;
+          const after = destination.nextSibling;
+          destination.remove();
+          group.insertBefore(destination, after);
+          restoredInPlace =
+            destination.parentNode === group &&
+            destination.previousSibling === before &&
+            destination.nextSibling === after;
+        }
+        return readAttributes.call(this) as NamedNodeMap;
+      },
+    });
+    const restore = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        held.event = event;
+        delivering = true;
+        try {
+          current(event);
+        } finally {
+          delivering = false;
+        }
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+
+      expect(armed).toBe(true);
+      expect(restoredInPlace).toBe(true);
+      // The replacement is irrelevant: nothing ever looks the drain up, so it never answers and
+      // never launders, and the mutation it offered to hide is still in the permanent history.
+      expect(publicDrains).toBe(0);
+      expect(laundered).toBe(0);
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(0);
+      expect(document.activeElement).toBe(source);
+    } finally {
+      restore();
+      Reflect.deleteProperty(lastPublished, "attributes");
+      restoreDrain();
+    }
+
+    renderActionSuccessor(view, s, callbacks, "recovered");
+    await act(async () => {});
+    focus.reset();
+
+    const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+    expect(document.activeElement).toBe(view.action("find-next"));
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it.each(["pre-claim", "final"] as const)(
+    "rejects a %s delivery when a session method getter moves the live find behind the public pass",
+    async (phase) => {
+      const s = session("owner", `actions-live-getter-${phase}`);
+      const focus = trackActionFocus();
+      const callbacks = silentCallbacks();
+      const view = renderActionBar(s, callbacks, { key: `live-getter-${phase}` });
+      await act(async () => {});
+      const source = view.action("find-prev");
+      const destination = view.action("find-next");
+      // The last element of the published tree, so the getter is installed by the last DOM walk of
+      // the phase and answers the live pass that runs right after it.
+      const lastPublished = view.action("replace-all");
+      const readAttributes = Object.getOwnPropertyDescriptor(
+        Element.prototype,
+        "attributes",
+      )?.get;
+      if (!readAttributes) throw new Error("The realm publishes no attributes getter");
+      const publishedFind = s.find;
+      if (!publishedFind) throw new Error("The session published no find state");
+      const stepFind = s.stepFind;
+      const held: { event: ReactKeyboardEvent<HTMLButtonElement> | null } = { event: null };
+      let delivering = false;
+      let installed = false;
+      let methodReads = 0;
+
+      const install = () => {
+        installed = true;
+        Object.defineProperty(s, "stepFind", {
+          configurable: true,
+          get: () => {
+            methodReads += 1;
+            // The live pass read `find` before it read this method: one pass cannot see that the
+            // reading it already took is now stale.
+            s.find = { ...publishedFind };
+            return stepFind;
+          },
+        });
+      };
+      const restoreSession = () => {
+        Reflect.deleteProperty(s, "stepFind");
+        s.find = publishedFind;
+      };
+
+      Object.defineProperty(lastPublished, "attributes", {
+        configurable: true,
+        get(this: Element) {
+          const prevented = held.event?.nativeEvent.defaultPrevented === true;
+          if (delivering && !installed && prevented === (phase === "final")) install();
+          return readAttributes.call(this) as NamedNodeMap;
+        },
+      });
+      const restore = interceptReactProp<ActionKeyHandler>(
+        source,
+        "onKeyDown",
+        (current, event) => {
+          held.event = event;
+          delivering = true;
+          try {
+            current(event);
+            if (phase !== "pre-claim") return;
+            expect(methodReads).toBeGreaterThan(0);
+            expect(event.nativeEvent.defaultPrevented).toBe(false);
+            expect(focus.moves()).toHaveLength(0);
+            // Nothing was consumed: with the session exactly itself again, the rightful bubble of
+            // this exact native event authenticates and moves focus once.
+            restoreSession();
+            current(event);
+          } finally {
+            delivering = false;
+          }
+        },
+      );
+      focus.reset();
+
+      try {
+        const event = dispatchActionKey(source, "ArrowRight");
+
+        expect(installed).toBe(true);
+        expect(methodReads).toBeGreaterThan(0);
+        expect(event.defaultPrevented).toBe(true);
+        if (phase === "pre-claim") {
+          expect(focus.moves()).toHaveLength(1);
+          expect(focus.moves()[0]?.element).toBe(destination);
+          expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+          expect(document.activeElement).toBe(destination);
+        } else {
+          expect(focus.moves()).toHaveLength(0);
+          expect(document.activeElement).toBe(source);
+        }
+      } finally {
+        restore();
+        Reflect.deleteProperty(lastPublished, "attributes");
+        restoreSession();
+      }
+
+      if (phase === "final") {
+        renderActionSuccessor(view, s, callbacks, "recovered");
+        await act(async () => {});
+        focus.reset();
+
+        const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+        expect(fresh.defaultPrevented).toBe(true);
+        expect(focus.moves()).toHaveLength(1);
+        expect(document.activeElement).toBe(view.action("find-next"));
+      }
+      expect(callbacks.onReveal).not.toHaveBeenCalled();
+      expect(callbacks.onClose).not.toHaveBeenCalled();
+      expect(s.ytext.toString()).toBe(TEXT);
+    },
+  );
+
+  it("calls no replaced Array method after the last live reading and still navigates once", async () => {
+    const s = session("owner", "actions-array-poison");
+    const callbacks = silentCallbacks();
+    const moves: { element: HTMLElement; options: FocusOptions | undefined }[] = [];
+    const nativeFocus = HTMLElement.prototype.focus;
+    const arrayIndexOf = Array.prototype.indexOf;
+    const arrayEvery = Array.prototype.every;
+    const applyIndexOf = arrayIndexOf as unknown as (
+      this: unknown[],
+      ...values: unknown[]
+    ) => number;
+    const applyEvery = arrayEvery as unknown as (
+      this: unknown[],
+      ...values: unknown[]
+    ) => boolean;
+    const canEdit = s.canEdit;
+    let delivering = false;
+    let installed = false;
+    let armed = false;
+    let dispatches = 0;
+    let dispatchesBeforeMove = -1;
+    let sabotaged = false;
+
+    vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (
+      this: HTMLElement,
+      options?: FocusOptions,
+    ) {
+      if (options !== undefined) {
+        // The gate ends the moment the retained focus intrinsic is applied; whatever the realm's own
+        // focus implementation does with arrays afterwards is not the final path.
+        dispatchesBeforeMove = dispatches;
+        armed = false;
+        moves.push({ element: this, options });
+      }
+      nativeFocus.call(this, options);
+    });
+
+    const view = renderActionBar(s, callbacks, { key: "array-poison" });
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const destination = view.action("find-next");
+    const lastPublished = view.action("replace-all");
+    const readAttributes = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "attributes",
+    )?.get;
+    if (!readAttributes) throw new Error("The realm publishes no attributes getter");
+    const publishedFind = s.find;
+    if (!publishedFind) throw new Error("The session published no find state");
+    const held: { event: ReactKeyboardEvent<HTMLButtonElement> | null } = { event: null };
+
+    // Called only if the final path dispatches through a mutable Array method: it rewrites the
+    // destination, the wrapper, and the live authority underneath it, so such a call would both be
+    // counted and change what the delivery is allowed to do.
+    const sabotage = () => {
+      dispatches += 1;
+      if (sabotaged) return;
+      sabotaged = true;
+      destination.disabled = true;
+      s.find = { ...publishedFind };
+      const event = held.event;
+      if (event) {
+        Object.defineProperty(event, "preventDefault", {
+          configurable: true,
+          writable: true,
+          value: () => {},
+        });
+      }
+    };
+    const poison = () => {
+      Object.defineProperty(Array.prototype, "indexOf", {
+        configurable: true,
+        writable: true,
+        value: function (this: unknown[], ...args: unknown[]) {
+          if (armed) sabotage();
+          return Reflect.apply(applyIndexOf, this, args);
+        },
+      });
+      Object.defineProperty(Array.prototype, "every", {
+        configurable: true,
+        writable: true,
+        value: function (this: unknown[], ...args: unknown[]) {
+          if (armed) sabotage();
+          return Reflect.apply(applyEvery, this, args);
+        },
+      });
+    };
+    const unpoison = () => {
+      Object.defineProperty(Array.prototype, "indexOf", {
+        configurable: true,
+        writable: true,
+        enumerable: false,
+        value: arrayIndexOf,
+      });
+      Object.defineProperty(Array.prototype, "every", {
+        configurable: true,
+        writable: true,
+        enumerable: false,
+        value: arrayEvery,
+      });
+    };
+
+    Object.defineProperty(lastPublished, "attributes", {
+      configurable: true,
+      get(this: Element) {
+        if (delivering && !installed && held.event?.nativeEvent.defaultPrevented === true) {
+          installed = true;
+          // A one-shot reading that removes itself as it answers: the last public pass asks the
+          // session for can-edit, so everything the delivery does after this point is the final
+          // path, and the session it leaves behind is exactly ordinary again.
+          Object.defineProperty(s, "canEdit", {
+            configurable: true,
+            get: () => {
+              Reflect.deleteProperty(s, "canEdit");
+              armed = true;
+              return canEdit;
+            },
+          });
+        }
+        return readAttributes.call(this) as NamedNodeMap;
+      },
+    });
+    const restore = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        held.event = event;
+        delivering = true;
+        poison();
+        try {
+          current(event);
+        } finally {
+          unpoison();
+          delivering = false;
+        }
+      },
+    );
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+
+      expect(installed).toBe(true);
+      expect(dispatchesBeforeMove).toBe(0);
+      expect(sabotaged).toBe(false);
+      expect(destination.disabled).toBe(false);
+      expect(s.find).toBe(publishedFind);
+      expect(event.defaultPrevented).toBe(true);
+      expect(moves).toHaveLength(1);
+      expect(moves[0]?.element).toBe(destination);
+      expect(moves[0]?.options).toEqual({ preventScroll: true });
+      expect(document.activeElement).toBe(destination);
+    } finally {
+      restore();
+      unpoison();
+      Reflect.deleteProperty(lastPublished, "attributes");
+      Reflect.deleteProperty(s, "canEdit");
+      s.find = publishedFind;
+    }
+
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it.each([
+    { predicatePhase: "capture", wrapperOwner: "its own" },
+    { predicatePhase: "bubble", wrapperOwner: "the capture" },
+  ] as const)(
+    "focuses nothing when the $predicatePhase predicate replaces $wrapperOwner wrapper's prevention after the effect",
+    async ({ predicatePhase }) => {
+      const s = session("owner", `actions-predicate-${predicatePhase}`);
+      const focus = trackActionFocus();
+      const callbacks = silentCallbacks();
+      const view = renderActionBar(s, callbacks, { key: "predicate" });
+      await act(async () => {});
+      const row = view.element<HTMLDivElement>("find-actions");
+      const source = view.action("find-prev");
+      const wrappers: { capture: object | null } = { capture: null };
+      const native: { event: Event | null } = { event: null };
+      let preventedCalls = 0;
+      let mutated = false;
+      let delivering = false;
+
+      // Count only the handler's query, not React's subsequent dispatch propagation check.
+      const installPredicate = (wrapper: object) => {
+        const original = (wrapper as { isPropagationStopped: AnyPredicate })
+          .isPropagationStopped;
+        Object.defineProperty(wrapper, "isPropagationStopped", {
+          configurable: true,
+          writable: true,
+          value: function (this: unknown, ...args: unknown[]) {
+            const stopped = original.apply(this, args);
+            if (delivering && native.event?.defaultPrevented === true) {
+              preventedCalls += 1;
+              const target = wrappers.capture;
+              if (preventedCalls === 1 && !mutated && target) {
+                mutated = true;
+                Object.defineProperty(target, "preventDefault", {
+                  configurable: true,
+                  writable: true,
+                  value: () => {},
+                });
+              }
+            }
+            return stopped;
+          },
+        });
+      };
+      const restoreCapture = interceptReactProp<NativeBarKeyHandler>(
+        row,
+        "onKeyDownCapture",
+        (current, event) => {
+          wrappers.capture = event;
+          native.event = event.nativeEvent;
+          if (predicatePhase === "capture") installPredicate(event);
+          delivering = true;
+          try {
+            current(event);
+          } finally {
+            delivering = false;
+          }
+        },
+      );
+      const restoreBubble = interceptReactProp<ActionKeyHandler>(
+        source,
+        "onKeyDown",
+        (current, event) => {
+          if (predicatePhase === "bubble") installPredicate(event);
+          delivering = true;
+          try {
+            current(event);
+          } finally {
+            delivering = false;
+          }
+        },
+      );
+      focus.reset();
+
+      try {
+        const event = dispatchActionKey(source, "ArrowRight");
+
+        expect(preventedCalls).toBe(1);
+        expect(mutated).toBe(true);
+        expect(event.defaultPrevented).toBe(true);
+        expect(focus.moves()).toHaveLength(0);
+        expect(document.activeElement).toBe(source);
+      } finally {
+        restoreBubble();
+        restoreCapture();
+      }
+
+      renderActionSuccessor(view, s, callbacks, "recovered");
+      await act(async () => {});
+      focus.reset();
+
+      const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+      expect(fresh.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action("find-next"));
+      expect(callbacks.onReveal).not.toHaveBeenCalled();
+      expect(callbacks.onClose).not.toHaveBeenCalled();
+      expect(s.ytext.toString()).toBe(TEXT);
+    },
+  );
+
+  it("rejects an undefined published view and accepts an exactly absent one", async () => {
+    const s = session("owner", "actions-view-ownership");
+    const focus = trackActionFocus();
+    const view = renderActionBar(s, silentCallbacks());
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const restore = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        Object.defineProperty(event, "view", {
+          configurable: true,
+          writable: true,
+          value: undefined,
+        });
+        current(event);
+      },
+    );
+    focus.reset();
+
+    try {
+      const undefinedView = dispatchActionKey(source, "ArrowRight");
+      expect(undefinedView.defaultPrevented).toBe(false);
+      expect(focus.moves()).toHaveLength(0);
+      expect(document.activeElement).toBe(source);
+    } finally {
+      restore();
+    }
+
+    await act(async () => {});
+    focus.reset();
+
+    const absentView = dispatchActionKey(view.action("find-prev"), "ArrowRight", {
+      view: null,
+    });
+    expect(absentView.view).toBeNull();
+    expect(absentView.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+    expect(document.activeElement).toBe(view.action("find-next"));
+  });
+
+  it("releases a held pending pair at retirement and retains no publication work through cleanup", async () => {
+    const s = session("owner", "actions-revoked-pair");
+    const focus = trackActionFocus();
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks);
+    await act(async () => {});
+    const bar = view.element<HTMLDivElement>("find-bar");
+    const source = view.action("find-prev");
+    const staleHandler = reactHandler<NativeBarKeyHandler>(bar, "onKeyDown");
+
+    // The capture authenticates its pair; the rightful bubble never runs, so nothing consumes it and
+    // the pair stays pending while the native event that keys it stays live.
+    const restore = interceptReactProp<ActionKeyHandler>(source, "onKeyDown", () => {});
+    const held = actionKey(source, "ArrowRight");
+    dispatchExactKey(source, held);
+    restore();
+    expect(held.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    // While the publication still owns it, the held pair makes the exact event inert.
+    focus.reset();
+    dispatchExactKey(source, held);
+    expect(held.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    bar.setAttribute("data-history", "changed");
+    bar.removeAttribute("data-history");
+    await waitFor(() => {
+      expect(reactHandler<NativeBarKeyHandler>(
+        view.element<HTMLDivElement>("find-bar"),
+        "onKeyDown",
+      )).not.toBe(staleHandler);
+    });
+    const recoveredHandler = reactHandler<NativeBarKeyHandler>(
+      view.element<HTMLDivElement>("find-bar"),
+      "onKeyDown",
+    );
+    focus.reset();
+
+    // Retirement revoked the held pair even though the native event is still live: the successor
+    // finds no retired pair in the map and authenticates the exact event from scratch.
+    dispatchExactKey(view.action("find-prev"), held);
+    expect(held.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+    expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+    expect(document.activeElement).toBe(view.action("find-next"));
+
+    // Consumed once: the replay of the same native event stays inert.
+    focus.reset();
+    dispatchExactKey(view.action("find-prev"), held);
+    expect(focus.moves()).toHaveLength(0);
+
+    await waitFor(() => {
+      expect(reactHandler<NativeBarKeyHandler>(
+        view.element<HTMLDivElement>("find-bar"),
+        "onKeyDown",
+      )).not.toBe(recoveredHandler);
+    });
+    focus.reset();
+    const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+
+    const retired = view.action("find-prev");
+    const destination = view.action("find-next");
+    act(() => view.root.unmount());
+    directRoots.delete(view.root);
+    document.body.append(retired, destination);
+    focus.reset();
+
+    const afterCleanup = actionKey(retired, "ArrowRight");
+    dispatchExactKey(retired, afterCleanup);
+    expect(afterCleanup.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(retired);
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    retired.remove();
+    destination.remove();
+    view.host.remove();
+  });
+
+  it("claims through retained collection intrinsics: a rejected pre-claim attempt keeps the pair and a poisoned Set, Map, WeakMap, WeakSet, and global Boolean are never called", async () => {
+    const s = session("owner", "actions-collection-poison");
+    const focus = trackActionFocus();
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks, { key: "collection-poison" });
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const destination = view.action("find-next");
+    // The last element of the published tree, so both installations land in the walk that runs last
+    // before the callback-free pre-claim gate and the claim boundary behind it.
+    const lastPublished = view.action("replace-all");
+    const readAttributes = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "attributes",
+    )?.get;
+    if (!readAttributes) throw new Error("The realm publishes no attributes getter");
+    const publishedFind = s.find;
+    if (!publishedFind) throw new Error("The session published no find state");
+    const canEdit = s.canEdit;
+    const mutators: readonly (readonly [object, string])[] = [
+      [Set.prototype, "add"],
+      [Set.prototype, "delete"],
+      [Set.prototype, "clear"],
+      [Map.prototype, "set"],
+      [Map.prototype, "delete"],
+      [Map.prototype, "clear"],
+      [WeakMap.prototype, "set"],
+      [WeakMap.prototype, "delete"],
+      [WeakSet.prototype, "add"],
+      [WeakSet.prototype, "delete"],
+    ];
+    const exactMutators = mutators.map(([target, property]) => {
+      const descriptor = Object.getOwnPropertyDescriptor(target, property);
+      if (typeof descriptor?.value !== "function") {
+        throw new Error(`The realm publishes no ${property}`);
+      }
+      return {
+        target,
+        property,
+        descriptor,
+        value: descriptor.value as (...args: unknown[]) => unknown,
+      };
+    });
+    const exactSize = Object.getOwnPropertyDescriptor(Set.prototype, "size");
+    const readSize = exactSize?.get;
+    if (!exactSize || !readSize) throw new Error("The realm publishes no Set size getter");
+    // The one callable mutable global an authentication path could still reach for: nothing in the
+    // gate, the claim, or anything either reaches may coerce through `Boolean`.
+    const exactBooleanBinding = Object.getOwnPropertyDescriptor(globalThis, "Boolean");
+    const exactBoolean = Boolean;
+    if (!exactBooleanBinding?.configurable) {
+      throw new Error("The realm publishes no configurable Boolean binding");
+    }
+    const held: { event: ReactKeyboardEvent<HTMLButtonElement> | null } = { event: null };
+    const retained: { preventDefault: unknown } = { preventDefault: null };
+    let pass = 0;
+    let delivering = false;
+    let drifted = false;
+    let installed = false;
+    let armed = false;
+    let probing = false;
+    let poisonCalls = 0;
+    let sabotaged = false;
+    const nativeReads = { activeElement: 0, isConnected: 0 };
+    const poisonTrace: {
+      first: { operation: string; receiver: unknown; phase: string; error: Error } | null;
+    } = { first: null };
+
+    // Called only if the claim boundary looks a mutating collection method or the `size` accessor up
+    // on a prototype page code owns, or coerces through the mutable global `Boolean`: such a call is
+    // both counted and allowed to rewrite what the delivery may still do, so a consumed pair with no
+    // effect would be impossible to miss.
+    const sabotage = (operation: string, receiver: unknown) => {
+      poisonCalls += 1;
+      if (!probing && !poisonTrace.first) {
+        poisonTrace.first = { operation, receiver, phase: `pre-claim pass ${pass}`, error: new Error("First poisoned call") };
+      }
+      if (probing || sabotaged) return;
+      sabotaged = true;
+      destination.disabled = true;
+      s.find = { ...publishedFind };
+    };
+    const poison = () => {
+      for (const entry of exactMutators) {
+        Object.defineProperty(entry.target, entry.property, {
+          configurable: true,
+          writable: true,
+          enumerable: false,
+          value: function (this: unknown, ...args: unknown[]) {
+            if (armed) sabotage(entry.property, this);
+            return Reflect.apply(entry.value, this, args);
+          },
+        });
+      }
+      Object.defineProperty(Set.prototype, "size", {
+        configurable: true,
+        enumerable: false,
+        get: function (this: Set<unknown>) {
+          if (armed) sabotage("Set.size", this);
+          return Reflect.apply(readSize, this, []) as number;
+        },
+      });
+      const poisonedBoolean = function (value?: unknown) {
+        if (armed) sabotage("Boolean", globalThis);
+        return exactBoolean(value);
+      };
+      poisonedBoolean.prototype = exactBoolean.prototype;
+      Object.defineProperty(globalThis, "Boolean", {
+        configurable: true,
+        writable: true,
+        enumerable: exactBooleanBinding.enumerable,
+        value: poisonedBoolean,
+      });
+    };
+    const unpoison = () => {
+      for (const entry of exactMutators) {
+        Object.defineProperty(entry.target, entry.property, entry.descriptor);
+      }
+      Object.defineProperty(Set.prototype, "size", exactSize);
+      Object.defineProperty(globalThis, "Boolean", exactBooleanBinding);
+    };
+
+    ownerRealmRead.enter = (property) => {
+      if (!armed) return;
+      const poisonedBinding = Object.getOwnPropertyDescriptor(globalThis, "Boolean");
+      if (!poisonedBinding) throw new Error("The Boolean poison binding is missing");
+      nativeReads[property] += 1;
+      Object.defineProperty(globalThis, "Boolean", exactBooleanBinding);
+      return () => Object.defineProperty(globalThis, "Boolean", poisonedBinding);
+    };
+
+    Object.defineProperty(lastPublished, "attributes", {
+      configurable: true,
+      get(this: Element) {
+        const event = held.event;
+        if (delivering && event && !event.nativeEvent.defaultPrevented) {
+          if (pass === 1 && !drifted) {
+            // The last pre-claim query replaces the retained bubble prevention behind the gate's
+            // back, so the attempt is rejected with nothing consumed.
+            drifted = true;
+            retained.preventDefault = event.preventDefault;
+            Object.defineProperty(event, "preventDefault", {
+              configurable: true,
+              writable: true,
+              value: () => {},
+            });
+          } else if (pass === 2 && !installed) {
+            installed = true;
+            // A one-shot reading that removes itself as it answers: the last public pass asks the
+            // session for can-edit, so everything after it is the callback-free gate and the claim,
+            // and the session it leaves behind is exactly ordinary again.
+            Object.defineProperty(s, "canEdit", {
+              configurable: true,
+              get: () => {
+                Reflect.deleteProperty(s, "canEdit");
+                armed = true;
+                return canEdit;
+              },
+            });
+          }
+        }
+        return readAttributes.call(this) as NamedNodeMap;
+      },
+    });
+    const restore = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        held.event = event;
+        delivering = true;
+        try {
+          pass = 1;
+          current(event);
+          expect(drifted).toBe(true);
+          expect(event.nativeEvent.defaultPrevented).toBe(false);
+          expect(focus.moves()).toHaveLength(0);
+          // Nothing was consumed: with the exact prevention back — behind a wrapper that closes the
+          // poisoned window as soon as the claim has committed — the rightful bubble of this exact
+          // native event must authenticate, consume once, and move focus once.
+          const exact = retained.preventDefault as (...args: unknown[]) => unknown;
+          Object.defineProperty(event, "preventDefault", {
+            configurable: true,
+            writable: true,
+            value: function (this: unknown, ...args: unknown[]) {
+              armed = false;
+              return Reflect.apply(exact, this, args);
+            },
+          });
+          pass = 2;
+          poison();
+          try {
+            // A live probe: the poison answers for ordinary collections, so the zero count below is
+            // the claim boundary never asking, not a poison that was never installed.
+            probing = true;
+            armed = true;
+            const probe = new Set<number>();
+            probe.add(1);
+            probe.delete(1);
+            expect(probe.size).toBe(0);
+            new Map<number, number>().set(1, 1);
+            new WeakSet<object>().add(probe);
+            new WeakMap<object, number>().set(probe, 1);
+            expect(Boolean(1)).toBe(true);
+            armed = false;
+            probing = false;
+            expect(poisonCalls).toBeGreaterThan(0);
+            poisonCalls = 0;
+            current(event);
+          } finally {
+            armed = false;
+            probing = false;
+            unpoison();
+          }
+        } finally {
+          delivering = false;
+        }
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+
+      expect(installed).toBe(true);
+      expect(nativeReads).toEqual({ activeElement: 1, isConnected: 12 });
+      const trace = poisonTrace.first;
+      expect(poisonCalls, trace
+        ? `${trace.operation} on ${Object.prototype.toString.call(trace.receiver)} in ${trace.phase}\n${trace.error.stack}`
+        : undefined).toBe(0);
+      expect(sabotaged).toBe(false);
+      expect(destination.disabled).toBe(false);
+      expect(s.find).toBe(publishedFind);
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(focus.moves()[0]?.element).toBe(destination);
+      expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+      expect(document.activeElement).toBe(destination);
+    } finally {
+      ownerRealmRead.enter = null;
+      restore();
+      unpoison();
+      Reflect.deleteProperty(lastPublished, "attributes");
+      Reflect.deleteProperty(s, "canEdit");
+      s.find = publishedFind;
+    }
+
+    // Consumed exactly once, with no search, replacement, or callback work before activation.
+    expect(Boolean).toBe(exactBoolean);
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it("rejects a stateful Window constructor accessor installed by the last mutable query without ever invoking it", async () => {
+    const s = session("owner", "actions-window-accessor");
+    const focus = trackActionFocus();
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks, { key: "window-accessor" });
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const destination = view.action("find-next");
+    // The last element of the published tree, so the accessor is installed by the last mutable query
+    // of the final phase and is in place for everything the delivery does afterwards.
+    const lastPublished = view.action("replace-all");
+    const ownerWindow = source.ownerDocument.defaultView;
+    const publishedBinding = ownerWindow &&
+      Object.getOwnPropertyDescriptor(ownerWindow, "HTMLElement");
+    const readAttributes = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "attributes",
+    )?.get;
+    if (!ownerWindow || !publishedBinding?.configurable || !readAttributes) {
+      throw new Error("The owner realm publishes no configurable HTMLElement binding");
+    }
+    const exactConstructor = ownerWindow.HTMLElement;
+    const held: { event: ReactKeyboardEvent<HTMLButtonElement> | null } = { event: null };
+    let delivering = false;
+    let installed = false;
+    let restored = false;
+    let constructorReads = 0;
+
+    // The accessor answers with the exact retained constructor, so a gate that resolved the binding
+    // by reading the Window property would accept it — after it had already disabled the
+    // destination, replaced the wrapper's prevention, and moved focus itself.
+    const install = () => {
+      installed = true;
+      restored = false;
+      Object.defineProperty(ownerWindow, "HTMLElement", {
+        configurable: true,
+        enumerable: publishedBinding.enumerable,
+        get: () => {
+          constructorReads += 1;
+          destination.disabled = true;
+          destination.focus({ preventScroll: true });
+          const event = held.event;
+          if (event) {
+            Object.defineProperty(event, "preventDefault", {
+              configurable: true,
+              writable: true,
+              value: () => {},
+            });
+          }
+          return exactConstructor;
+        },
+      });
+    };
+    const restoreWindow = () => {
+      if (!installed || restored) return;
+      restored = true;
+      Object.defineProperty(ownerWindow, "HTMLElement", publishedBinding);
+    };
+
+    Object.defineProperty(lastPublished, "attributes", {
+      configurable: true,
+      get(this: Element) {
+        if (delivering && !installed && held.event?.nativeEvent.defaultPrevented === true) {
+          install();
+        }
+        return readAttributes.call(this) as NamedNodeMap;
+      },
+    });
+    const restore = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        held.event = event;
+        delivering = true;
+        try {
+          current(event);
+        } finally {
+          delivering = false;
+          restoreWindow();
+        }
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+
+      expect(installed).toBe(true);
+      // Descriptor drift alone rejects the delivery: every check reached after the wrapper reads
+      // compares captured descriptors and prototype links, so the accessor is never applied and
+      // never gets to move focus, disable the destination, or replace the prevention.
+      expect(constructorReads).toBe(0);
+      expect(destination.disabled).toBe(false);
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(0);
+      expect(document.activeElement).toBe(source);
+    } finally {
+      restore();
+      Reflect.deleteProperty(lastPublished, "attributes");
+      restoreWindow();
+    }
+
+    expect(ownerWindow.HTMLElement).toBe(exactConstructor);
+    renderActionSuccessor(view, s, callbacks, "recovered");
+    await act(async () => {});
+    focus.reset();
+
+    const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+    expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+    expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+    expect(document.activeElement).toBe(view.action("find-next"));
+    expect(constructorReads).toBe(0);
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it("proves keyboard trust by descriptor and never applies a stateful Window KeyboardEvent accessor installed by the last mutable query", async () => {
+    const s = session("owner", "actions-keyboard-accessor");
+    const focus = trackActionFocus();
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks, { key: "keyboard-accessor" });
+    await act(async () => {});
+    const source = view.action("find-prev");
+    const destination = view.action("find-next");
+    // The last element of the published tree, so the accessor is installed by the last mutable query
+    // of the final phase and is in place for every currentness question asked afterwards.
+    const lastPublished = view.action("replace-all");
+    const ownerWindow = source.ownerDocument.defaultView;
+    // `KeyboardEvent` is held only by the shared keyboard-trust intrinsics, whose currentness walk
+    // resolves an accessor-backed Window constructor by applying its captured getter. Nothing the
+    // final phase reaches may do that, so the drift has to be caught by descriptor alone.
+    const publishedBinding = ownerWindow &&
+      Object.getOwnPropertyDescriptor(ownerWindow, "KeyboardEvent");
+    const readAttributes = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      "attributes",
+    )?.get;
+    if (!ownerWindow || !publishedBinding?.configurable || !readAttributes) {
+      throw new Error("The owner realm publishes no configurable KeyboardEvent binding");
+    }
+    const exactConstructor = ownerWindow.KeyboardEvent;
+    const lookalikeConstructor = function () {} as unknown as typeof exactConstructor;
+    const held: { event: ReactKeyboardEvent<HTMLButtonElement> | null } = { event: null };
+    let delivering = false;
+    let installed = false;
+    let restored = false;
+    let constructorReads = 0;
+
+    // Stateful on purpose: the first application answers with the exact retained constructor — after
+    // it has disabled the destination, moved focus itself, and replaced the wrapper's prevention —
+    // and every later one answers with a lookalike, so any gate that resolved the binding by reading
+    // the Window property would both be deceived and be observed doing it.
+    const install = () => {
+      installed = true;
+      restored = false;
+      Object.defineProperty(ownerWindow, "KeyboardEvent", {
+        configurable: true,
+        enumerable: publishedBinding.enumerable,
+        get: () => {
+          constructorReads += 1;
+          destination.disabled = true;
+          destination.focus({ preventScroll: true });
+          const event = held.event;
+          if (event) {
+            Object.defineProperty(event, "preventDefault", {
+              configurable: true,
+              writable: true,
+              value: () => {},
+            });
+          }
+          return constructorReads === 1 ? exactConstructor : lookalikeConstructor;
+        },
+      });
+    };
+    const restoreWindow = () => {
+      if (!installed || restored) return;
+      restored = true;
+      Object.defineProperty(ownerWindow, "KeyboardEvent", publishedBinding);
+    };
+
+    Object.defineProperty(lastPublished, "attributes", {
+      configurable: true,
+      get(this: Element) {
+        if (delivering && !installed && held.event?.nativeEvent.defaultPrevented === true) {
+          install();
+        }
+        return readAttributes.call(this) as NamedNodeMap;
+      },
+    });
+    const restore = interceptReactProp<ActionKeyHandler>(
+      source,
+      "onKeyDown",
+      (current, event) => {
+        held.event = event;
+        delivering = true;
+        try {
+          current(event);
+        } finally {
+          delivering = false;
+          restoreWindow();
+        }
+      },
+    );
+    focus.reset();
+
+    try {
+      const event = dispatchActionKey(source, "ArrowRight");
+
+      expect(installed).toBe(true);
+      // Descriptor drift alone rejects the delivery: the accessor is never applied, so it never gets
+      // to move focus, disable the destination, or replace the prevention.
+      expect(constructorReads).toBe(0);
+      expect(destination.disabled).toBe(false);
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(0);
+      expect(document.activeElement).toBe(source);
+    } finally {
+      restore();
+      Reflect.deleteProperty(lastPublished, "attributes");
+      restoreWindow();
+    }
+
+    expect(ownerWindow.KeyboardEvent).toBe(exactConstructor);
+    renderActionSuccessor(view, s, callbacks, "recovered");
+    await act(async () => {});
+    focus.reset();
+
+    const fresh = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+    expect(fresh.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+    expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+    expect(focus.moves()[0]?.options).toEqual({ preventScroll: true });
+    expect(document.activeElement).toBe(view.action("find-next"));
+    expect(constructorReads).toBe(0);
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it("constructs mutation history from the exact retained owner-realm binding", async () => {
+    const ownerWindow = document.defaultView as
+      | (Window & typeof globalThis)
+      | null;
+    const publishedBinding = ownerWindow &&
+      Object.getOwnPropertyDescriptor(ownerWindow, "MutationObserver");
+    if (!ownerWindow || !publishedBinding?.configurable) {
+      throw new Error("The owner realm publishes no configurable MutationObserver binding");
+    }
+    const exactConstructor = ownerWindow.MutationObserver;
+    let constructorReads = 0;
+    Object.defineProperty(ownerWindow, "MutationObserver", {
+      configurable: true,
+      enumerable: publishedBinding.enumerable,
+      get: () => {
+        constructorReads += 1;
+        return exactConstructor;
+      },
+    });
+
+    const s = session("owner", "actions-retained-observer");
+    const focus = trackActionFocus();
+    let view: ReturnType<typeof renderActionBar> | null = null;
+    try {
+      view = renderActionBar(s, silentCallbacks(), { key: "retained-observer" });
+      await act(async () => {});
+      focus.reset();
+
+      const event = dispatchActionKey(view.action("find-prev"), "ArrowRight");
+
+      // Root Strict Mode establishes, retires, and re-establishes the publication.
+      expect(constructorReads).toBe(2);
+      expect(event.defaultPrevented).toBe(true);
+      expect(focus.moves()).toHaveLength(1);
+      expect(document.activeElement).toBe(view.action("find-next"));
+    } finally {
+      Object.defineProperty(ownerWindow, "MutationObserver", publishedBinding);
+    }
+  });
+
+  it("drops every listener proof at release so a held native event and a stale handler retain no retired publication work", async () => {
+    const s = session("owner", "actions-released-proofs");
+    const focus = trackActionFocus();
+    const setFind = vi.spyOn(s, "setFind");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks, { key: "released-proofs" });
+    await act(async () => {});
+    const bar = view.element<HTMLDivElement>("find-bar");
+    const row = view.element<HTMLDivElement>("find-actions");
+    const source = view.action("find-prev");
+    // Everything the retirement must not leave usable, held directly across it: the exact native
+    // event that keys the Window proof, and the retiring publication's own capture and bubble
+    // handlers.
+    const staleCapture = reactHandler<NativeBarKeyHandler>(row, "onKeyDownCapture");
+    const staleBubble = reactHandler<ActionKeyHandler>(source, "onKeyDown");
+    const staleBarKeyDown = reactHandler<NativeBarKeyHandler>(bar, "onKeyDown");
+
+    // The capture registers the Window proof and the pending pair; the rightful bubble never runs,
+    // so nothing consumes either and both stay reachable through the still-live native event.
+    const restore = interceptReactProp<ActionKeyHandler>(source, "onKeyDown", () => {});
+    const held = actionKey(source, "ArrowRight");
+    dispatchExactKey(source, held);
+    restore();
+    expect(held.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    bar.setAttribute("data-history", "changed");
+    bar.removeAttribute("data-history");
+    await waitFor(() => {
+      expect(reactHandler<NativeBarKeyHandler>(
+        view.element<HTMLDivElement>("find-bar"),
+        "onKeyDown",
+      )).not.toBe(staleBarKeyDown);
+    });
+    focus.reset();
+
+    // Retirement released the listener and dropped every proof it had registered: the stale handlers
+    // reach no pair, no proof, and no publication through the held native event, and they cannot
+    // register a new one either.
+    const stale = {
+      nativeEvent: held,
+      currentTarget: row,
+      target: source,
+    } as unknown as ReactKeyboardEvent<HTMLDivElement>;
+    act(() => {
+      staleCapture(stale);
+      staleBubble(stale as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+    });
+    expect(held.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+
+    // The successor authenticates the very same native event from scratch, through its own listener.
+    dispatchExactKey(view.action("find-prev"), held);
+    expect(held.defaultPrevented).toBe(true);
+    expect(focus.moves()).toHaveLength(1);
+    expect(focus.moves()[0]?.element).toBe(view.action("find-next"));
+    expect(document.activeElement).toBe(view.action("find-next"));
+
+    // Consumed once: neither a replay of the exact event nor the stale handlers can move again.
+    focus.reset();
+    dispatchExactKey(view.action("find-prev"), held);
+    act(() => {
+      staleCapture(stale);
+      staleBubble(stale as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+    });
+    expect(focus.moves()).toHaveLength(0);
+
+    const retired = view.action("find-prev");
+    const destination = view.action("find-next");
+    act(() => view.root.unmount());
+    directRoots.delete(view.root);
+    document.body.append(retired, destination);
+    focus.reset();
+
+    // Cleanup released the successor's listener too: a fresh native event registers no proof at all.
+    const afterCleanup = actionKey(retired, "ArrowRight");
+    dispatchExactKey(retired, afterCleanup);
+    act(() => {
+      staleCapture(stale);
+      staleBubble(stale as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+    });
+    expect(afterCleanup.defaultPrevented).toBe(false);
+    expect(focus.moves()).toHaveLength(0);
+    expect(document.activeElement).toBe(retired);
+    expect(setFind).not.toHaveBeenCalled();
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(callbacks.onReveal).not.toHaveBeenCalled();
+    expect(callbacks.onClose).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+    retired.remove();
+    destination.remove();
+    view.host.remove();
+  });
+
+  it("keeps Escape, native Tab order, click, Enter, and Space behavior", async () => {
+    const s = session("owner", "actions-retained-behavior");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const callbacks = silentCallbacks();
+    const view = renderActionBar(s, callbacks);
+    await act(async () => {});
+    const row = view.element<HTMLDivElement>("find-actions");
+    const next = view.action("find-next");
+    const order = [...row.querySelectorAll<HTMLButtonElement>("button")]
+      .map((button) => button.dataset.testid)
+      .filter((testId) => testId?.startsWith("find-prev") || testId?.startsWith("find-next") ||
+        testId?.startsWith("find-toggle-replace") || testId?.startsWith("find-close"));
+    expect(order).toEqual(["find-prev", "find-next", "find-toggle-replace", "find-close"]);
+    for (const testId of order) {
+      expect(view.action(testId!)).not.toHaveAttribute("tabindex");
+    }
+
+    fireEvent.keyDown(next, { key: "Enter" });
+    fireEvent.keyDown(next, { key: " ", code: "Space" });
+    expect(stepFind).not.toHaveBeenCalled();
+
+    fireEvent.click(next);
+    expect(stepFind).toHaveBeenCalledOnce();
+    await act(async () => {});
+
+    fireEvent.keyDown(view.action("find-close"), { key: "Escape" });
+    expect(callbacks.onClose).toHaveBeenCalledOnce();
   });
 });
 
