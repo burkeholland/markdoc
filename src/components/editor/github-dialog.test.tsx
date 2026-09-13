@@ -2560,6 +2560,472 @@ describe("GitHubPicker source focus navigation", () => {
     }
   });
 
+  it("authenticates four independent public wrappers and ignores private compatibility shape", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const view = await renderStrictPicker(
+      <GitHubPicker mode="import" githubAvailable githubConfigured />,
+    );
+    try {
+      const group = view.picker.getByRole("group", {
+        name: "GitHub source",
+      });
+      const source = view.picker.getByTestId(
+        "picker-tab-gist",
+      ) as HTMLButtonElement;
+      const destination = view.picker.getByTestId(
+        "picker-tab-repo",
+      ) as HTMLButtonElement;
+      const stages = [
+        {
+          element: group,
+          prop: "onKeyDownCapture",
+          handler: reactProp<PickerKeyHandler<HTMLDivElement>>(
+            group,
+            "onKeyDownCapture",
+          ),
+        },
+        {
+          element: source,
+          prop: "onKeyDownCapture",
+          handler: reactProp<PickerKeyHandler<HTMLButtonElement>>(
+            source,
+            "onKeyDownCapture",
+          ),
+        },
+        {
+          element: source,
+          prop: "onKeyDown",
+          handler: reactProp<PickerKeyHandler<HTMLButtonElement>>(
+            source,
+            "onKeyDown",
+          ),
+        },
+        {
+          element: group,
+          prop: "onKeyDown",
+          handler: reactProp<PickerKeyHandler<HTMLDivElement>>(
+            group,
+            "onKeyDown",
+          ),
+        },
+      ] as const;
+      const wrappers: ReactKeyboardEvent<HTMLElement>[] = [];
+      const prototypes: object[] = [];
+      const methodSets: Array<{
+        preventDefault: ReturnType<typeof vi.fn>;
+        isDefaultPrevented: ReturnType<typeof vi.fn>;
+        isPropagationStopped: ReturnType<typeof vi.fn>;
+      }> = [];
+      const preventionReceivers: object[] = [];
+      const scalarReads: string[] = [];
+      const reentrantEvents: KeyboardEvent[] = [];
+      let outerNativeEvent: Event | null = null;
+      const restorers = stages.map((stage, index) =>
+        replaceReactProp(
+          stage.element,
+          stage.prop,
+          (actual: ReactKeyboardEvent<HTMLElement>) => {
+            outerNativeEvent ??= actual.nativeEvent;
+            if (actual.nativeEvent !== outerNativeEvent) {
+              stage.handler(
+                actual as ReactKeyboardEvent<
+                  HTMLDivElement & HTMLButtonElement
+                >,
+              );
+              return;
+            }
+            const prototype = Object.create(null) as object;
+            Object.defineProperty(prototype, "constructor", {
+              get: () => {
+                throw new Error("source navigation read a wrapper constructor");
+              },
+            });
+            const wrapper = Object.create(
+              prototype,
+            ) as ReactKeyboardEvent<HTMLElement>;
+            const scalarNames = [
+              "nativeEvent",
+              "type",
+              "target",
+              "currentTarget",
+              "eventPhase",
+              "bubbles",
+              "cancelable",
+              "defaultPrevented",
+              "isTrusted",
+              "key",
+              "code",
+              "location",
+              "repeat",
+              "ctrlKey",
+              "altKey",
+              "metaKey",
+              "shiftKey",
+              "view",
+              "detail",
+            ] as const;
+            const scalarValues = new Map<string, unknown>(
+              scalarNames.map((name) => [name, actual[name]]),
+            );
+            let publicDefaultPrevented = actual.defaultPrevented;
+            for (const name of scalarNames) {
+              Object.defineProperty(wrapper, name, {
+                configurable: true,
+                get: () => {
+                  scalarReads.push(`${index}:${name}`);
+                  return name === "defaultPrevented"
+                    ? publicDefaultPrevented
+                    : scalarValues.get(name);
+                },
+              });
+            }
+            const reenter = () => {
+              stage.handler(
+                wrapper as ReactKeyboardEvent<
+                  HTMLDivElement & HTMLButtonElement
+                >,
+              );
+              const nested = pickerKeyboardEvent(source, "ArrowRight");
+              reentrantEvents.push(nested);
+              source.dispatchEvent(nested);
+            };
+            const methods = {
+              preventDefault: vi.fn(function (this: object) {
+                preventionReceivers.push(this);
+                reenter();
+                publicDefaultPrevented = true;
+                return actual.preventDefault();
+              }),
+              isDefaultPrevented: vi.fn(function (this: object) {
+                expect(this).toBe(wrapper);
+                reenter();
+                return publicDefaultPrevented;
+              }),
+              isPropagationStopped: vi.fn(function (this: object) {
+                expect(this).toBe(wrapper);
+                reenter();
+                return actual.isPropagationStopped();
+              }),
+            };
+            Object.defineProperties(wrapper, {
+              preventDefault: { configurable: true, value: methods.preventDefault },
+              isDefaultPrevented: {
+                configurable: true,
+                value: methods.isDefaultPrevented,
+              },
+              isPropagationStopped: {
+                configurable: true,
+                value: methods.isPropagationStopped,
+              },
+              _reactName: {
+                configurable: true,
+                get: () => {
+                  throw new Error("source navigation read _reactName");
+                },
+              },
+              stopPropagation: {
+                configurable: true,
+                get: () => {
+                  throw new Error("source navigation read stopPropagation");
+                },
+              },
+              persist: { configurable: true, value: 17 },
+              isPersistent: { configurable: true, value: null },
+            });
+            wrappers.push(wrapper);
+            prototypes.push(prototype);
+            methodSets.push(methods);
+            stage.handler(
+              wrapper as ReactKeyboardEvent<
+                HTMLDivElement & HTMLButtonElement
+              >,
+            );
+          },
+        ),
+      );
+      source.focus();
+      focus.mockClear();
+      nativePreventDefault.mockClear();
+
+      const event = pickerKey(source, "ArrowRight");
+
+      expect(wrappers).toHaveLength(4);
+      expect(new Set(wrappers)).toHaveLength(4);
+      expect(new Set(prototypes)).toHaveLength(4);
+      expect(
+        new Set(methodSets.flatMap((methods) => Object.values(methods))),
+      ).toHaveLength(12);
+      expect(methodSets.map((methods) => methods.preventDefault.mock.calls.length)).toEqual([
+        0,
+        0,
+        0,
+        1,
+      ]);
+      expect(
+        methodSets.map(
+          (methods) => methods.isDefaultPrevented.mock.calls.length,
+        ),
+      ).toEqual([1, 1, 1, 2]);
+      expect(
+        methodSets.map(
+          (methods) => methods.isPropagationStopped.mock.calls.length,
+        ),
+      ).toEqual([1, 1, 1, 2]);
+      expect(preventionReceivers).toEqual([wrappers[3]]);
+      expect(reentrantEvents).toHaveLength(11);
+      expect(reentrantEvents.every((entry) => !entry.defaultPrevented)).toBe(
+        true,
+      );
+      expect(scalarReads).toContain("0:key");
+      expect(scalarReads).toContain("3:defaultPrevented");
+      expect(nativePreventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(event.defaultPrevented).toBe(true);
+      expect(destination).toHaveFocus();
+      for (const restore of restorers.reverse()) restore();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  it.each([
+    [0, "isDefaultPrevented"],
+    [0, "isPropagationStopped"],
+    [1, "isDefaultPrevented"],
+    [1, "isPropagationStopped"],
+    [2, "isDefaultPrevented"],
+    [2, "isPropagationStopped"],
+    [3, "isDefaultPrevented"],
+    [3, "isPropagationStopped"],
+  ] as const)(
+    "rejects a next-method replacement after stage %s %s and admits a clean successor",
+    async (driftStage, driftQuery) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = await renderStrictPicker(
+        <GitHubPicker mode="import" githubAvailable githubConfigured />,
+      );
+      try {
+        const group = view.picker.getByRole("group", {
+          name: "GitHub source",
+        });
+        const source = view.picker.getByTestId(
+          "picker-tab-gist",
+        ) as HTMLButtonElement;
+        const destination = view.picker.getByTestId(
+          "picker-tab-repo",
+        ) as HTMLButtonElement;
+        const stages = [
+          {
+            element: group,
+            prop: "onKeyDownCapture",
+            handler: reactProp<PickerKeyHandler<HTMLDivElement>>(
+              group,
+              "onKeyDownCapture",
+            ),
+          },
+          {
+            element: source,
+            prop: "onKeyDownCapture",
+            handler: reactProp<PickerKeyHandler<HTMLButtonElement>>(
+              source,
+              "onKeyDownCapture",
+            ),
+          },
+          {
+            element: source,
+            prop: "onKeyDown",
+            handler: reactProp<PickerKeyHandler<HTMLButtonElement>>(
+              source,
+              "onKeyDown",
+            ),
+          },
+          {
+            element: group,
+            prop: "onKeyDown",
+            handler: reactProp<PickerKeyHandler<HTMLDivElement>>(
+              group,
+              "onKeyDown",
+            ),
+          },
+        ] as const;
+        let sabotage = true;
+        const restorers = stages.map((stage, stageIndex) =>
+          replaceReactProp(
+            stage.element,
+            stage.prop,
+            (actual: ReactKeyboardEvent<HTMLElement>) => {
+              const publicPreventDefault = vi.fn(function (this: object) {
+                Object.defineProperty(this, "defaultPrevented", {
+                  configurable: true,
+                  value: true,
+                });
+                return actual.preventDefault();
+              });
+              const publicIsPropagationStopped = vi.fn(function (
+                this: object,
+              ) {
+                if (
+                  sabotage &&
+                  stageIndex === driftStage &&
+                  driftQuery === "isPropagationStopped"
+                ) {
+                  Object.defineProperty(this, "preventDefault", {
+                    configurable: true,
+                    value: vi.fn(),
+                  });
+                }
+                return false;
+              });
+              const publicIsDefaultPrevented = vi.fn(function (this: object) {
+                if (
+                  sabotage &&
+                  stageIndex === driftStage &&
+                  driftQuery === "isDefaultPrevented"
+                ) {
+                  Object.defineProperty(this, "isPropagationStopped", {
+                    configurable: true,
+                    value: vi.fn(() => false),
+                  });
+                }
+                return Boolean(
+                  (this as { defaultPrevented?: boolean }).defaultPrevented,
+                );
+              });
+              const wrapper = clonePickerSyntheticEvent(
+                actual,
+                {
+                  currentTarget: actual.currentTarget,
+                  preventDefault: publicPreventDefault,
+                  isDefaultPrevented: publicIsDefaultPrevented,
+                  isPropagationStopped: publicIsPropagationStopped,
+                },
+                class {},
+              );
+              stage.handler(
+                wrapper as ReactKeyboardEvent<
+                  HTMLDivElement & HTMLButtonElement
+                >,
+              );
+            },
+          ),
+        );
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const rejected = pickerKey(source, "ArrowRight");
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+
+        sabotage = false;
+        const accepted = pickerKey(source, "ArrowRight");
+
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(destination).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        for (const restore of restorers.reverse()) restore();
+      } finally {
+        await view.unmount();
+      }
+    },
+  );
+
+  it.each(["missing-stage", "crossed-native", "throwing-query"] as const)(
+    "keeps a %s partial route inert and accepts the next clean event",
+    async (failure) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = await renderStrictPicker(
+        <GitHubPicker mode="import" githubAvailable githubConfigured />,
+      );
+      try {
+        const group = view.picker.getByRole("group", {
+          name: "GitHub source",
+        });
+        const source = view.picker.getByTestId(
+          "picker-tab-gist",
+        ) as HTMLButtonElement;
+        const destination = view.picker.getByTestId(
+          "picker-tab-repo",
+        ) as HTMLButtonElement;
+        const groupCapture = reactProp<PickerKeyHandler<HTMLDivElement>>(
+          group,
+          "onKeyDownCapture",
+        );
+        const sourceCapture = reactProp<PickerKeyHandler<HTMLButtonElement>>(
+          source,
+          "onKeyDownCapture",
+        );
+        let reject = true;
+        const restoreGroup = replaceReactProp(
+          group,
+          "onKeyDownCapture",
+          (event: ReactKeyboardEvent<HTMLDivElement>) => {
+            if (reject && failure === "throwing-query") {
+              groupCapture(
+                clonePickerSyntheticEvent(event, {
+                  isDefaultPrevented: vi.fn(() => {
+                    throw new Error("query failed");
+                  }),
+                }),
+              );
+              return;
+            }
+            groupCapture(event);
+          },
+        );
+        const restoreSource = replaceReactProp(
+          source,
+          "onKeyDownCapture",
+          (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+            if (reject && failure === "missing-stage") return;
+            if (reject && failure === "crossed-native") {
+              sourceCapture(
+                clonePickerSyntheticEvent(event, {
+                  nativeEvent: pickerKeyboardEvent(source, "ArrowRight"),
+                }),
+              );
+              return;
+            }
+            sourceCapture(event);
+          },
+        );
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const rejected = pickerKey(source, "ArrowRight");
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+
+        reject = false;
+        const accepted = pickerKey(source, "ArrowRight");
+
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(destination).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        restoreSource();
+        restoreGroup();
+      } finally {
+        await view.unmount();
+      }
+    },
+  );
+
   it("uses distinct capture and bubble wrappers, ignores persist compatibility drift, and calls public prevention once", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
@@ -2700,7 +3166,6 @@ describe("GitHubPicker source focus navigation", () => {
 
   it.each([
     "preventDefault",
-    "stopPropagation",
     "isDefaultPrevented",
     "isPropagationStopped",
   ] as const)(
