@@ -3597,13 +3597,13 @@ function ActivityPanelForDocument({ session, onClose }: ActivityPanelProps) {
                         <ActorAvatar item={item} />
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-baseline gap-x-1.5 text-[13px] leading-5 text-ink-2">
-                            <span className="font-medium text-ink">{item.actorName}</span>
+                            <span className="wrap-anywhere font-medium text-ink">{item.actorName}</span>
                             {item.actorKind === "agent" && (
                               <span className="rounded bg-violet-100 px-1 py-px text-[10px] font-semibold uppercase tracking-wide text-violet-700" data-testid="activity-agent-chip">
                                 agent
                               </span>
                             )}
-                            <span className="break-words">{describeActivity(item)}</span>
+                            <span className="wrap-anywhere">{describeActivity(item)}</span>
                           </div>
                           <div className="mt-0.5 text-xs text-ink-3">
                             <time dateTime={item.createdAt} title={formatDateTime(item.createdAt)}>
