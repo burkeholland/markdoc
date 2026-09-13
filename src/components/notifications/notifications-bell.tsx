@@ -291,9 +291,23 @@ interface NotificationKeyboardClaim {
   readonly nativeEvent: KeyboardEvent;
 }
 
+interface NotificationKeyboardPublicationAccess {
+  readonly current: () => NotificationPublication | null;
+  readonly retire: () => void;
+}
+
+interface NotificationReactKeyboardSnapshot {
+  readonly event: ReactKeyboardEvent<HTMLElement>;
+  readonly isDefaultPrevented: ReactKeyboardEvent<HTMLElement>["isDefaultPrevented"];
+  readonly isPropagationStopped: ReactKeyboardEvent<HTMLElement>["isPropagationStopped"];
+  readonly defaultPrevented: false;
+  readonly propagationStopped: false;
+}
+
 interface NotificationKeyboardDelivery {
   readonly snapshot: NotificationKeyboardSnapshot;
-  reactEvent: object | null;
+  readonly access: NotificationKeyboardPublicationAccess;
+  react: NotificationReactKeyboardSnapshot | null;
   reactCount: number;
   invalid: boolean;
 }
@@ -324,7 +338,7 @@ interface NotificationPublication {
   contentPlacement: BellPlacement | null;
   domGuard: BellDomGuard | null;
   keyboardAuthority: NotificationKeyboardAuthority | null;
-  keyboardEvents: Set<KeyboardEvent>;
+  keyboardAccess: NotificationKeyboardPublicationAccess | null;
   successorRequested: boolean;
   rowClaimed: boolean;
   openDirectional: (disclosure: NotificationDisclosureAuthority) => void;
@@ -1201,20 +1215,16 @@ class NotificationPublicationCoordinator {
   #currentOutsideEvent: OutsideEventProvenance | null = null;
 
   clearKeyboardEvent(
-    publication: NotificationPublication,
     event: KeyboardEvent,
     delivery?: NotificationKeyboardDelivery,
   ) {
     const current = this.#keyboardDeliveries.get(event);
     if (!delivery || current === delivery) this.#keyboardDeliveries.delete(event);
-    publication.keyboardEvents.delete(event);
   }
 
-  clearKeyboardEvents(publication: NotificationPublication) {
-    for (const event of publication.keyboardEvents) {
-      this.#keyboardDeliveries.delete(event);
-    }
-    publication.keyboardEvents.clear();
+  retireKeyboardAccess(publication: NotificationPublication) {
+    publication.keyboardAccess?.retire();
+    publication.keyboardAccess = null;
   }
 
   clearOutsideEvent(publication?: NotificationPublication) {
@@ -1232,14 +1242,17 @@ class NotificationPublicationCoordinator {
   endLease(lease: number) {
     queueMicrotask(() => {
       if (this.#lease !== lease) return;
-      this.#current?.domGuard?.release();
+      const current = this.#current;
+      if (current) {
+        this.retireKeyboardAccess(current);
+        current.domGuard?.release();
+      }
       this.#replay?.release();
       this.#current = null;
       this.#successorOf = null;
       this.#replay = null;
       this.#proof = null;
       this.clearOutsideEvent();
-      if (this.#current) this.clearKeyboardEvents(this.#current);
     });
   }
 
@@ -1424,6 +1437,7 @@ class NotificationPublicationCoordinator {
     if (!publication) return false;
     if (reason === "layout" && domain) publication.layoutRetired.add(domain);
     this.clearOutsideEvent(publication);
+    this.retireKeyboardAccess(publication);
     if (publication.retired) return false;
     publication.retired = true;
     publication.retirement = reason;
@@ -1727,6 +1741,14 @@ class NotificationPublicationCoordinator {
       return false;
     }
     const keyboardAuthority = captureNotificationKeyboardAuthority(document, ownerWindow);
+    let accessiblePublication: NotificationPublication | null = publication;
+    const keyboardAccess: NotificationKeyboardPublicationAccess = Object.freeze({
+      current: () => accessiblePublication,
+      retire: () => {
+        accessiblePublication = null;
+      },
+    });
+    publication.keyboardAccess = keyboardAccess;
     let guardReleased = false;
     let deferredPointerEvent: Event | null = null;
     const keyboardListeners: {
@@ -1819,7 +1841,7 @@ class NotificationPublicationCoordinator {
         guardReleased = true;
         deferredPointerEvent = null;
         this.clearOutsideEvent(publication);
-        this.clearKeyboardEvents(publication);
+        this.retireKeyboardAccess(publication);
         if (keyboardAuthority) {
           for (const { element, listener, capture } of keyboardListeners) {
             notificationReflectApply(
@@ -1880,30 +1902,44 @@ class NotificationPublicationCoordinator {
     return true;
   }
 
-  keyboardSnapshotMatches(delivery: NotificationKeyboardDelivery) {
-    const { snapshot } = delivery;
-    const { publication, event, source } = snapshot;
-    const authority = publication.keyboardAuthority;
-    const routeMatches =
-      snapshot.kind === "row"
-        ? this.actionMatches(publication, snapshot.action) &&
+  keyboardRouteMatches(
+    publication: NotificationPublication,
+    snapshot: NotificationKeyboardSnapshot,
+  ) {
+    const { source } = snapshot;
+    return snapshot.kind === "row"
+      ? this.actionMatches(publication, snapshot.action) &&
           this.actionMatches(publication, snapshot.destinationAction) &&
           this.rowMovementMatches(publication, snapshot) &&
           snapshot.action.element === source &&
           snapshot.destinationAction.element === snapshot.destination
-        : !publication.open &&
+      : !publication.open &&
           publication.disclosure === null &&
           publication.current.disclosure() === null &&
           publication.elements.trigger === source &&
           this.triggerMatches(publication);
+  }
+
+  keyboardNativeSnapshotMatches(
+    delivery: NotificationKeyboardDelivery,
+    defaultPrevented: boolean,
+  ) {
+    const { snapshot } = delivery;
+    const publication = delivery.access.current();
+    if (
+      !publication ||
+      publication !== snapshot.publication ||
+      publication.keyboardAccess !== delivery.access
+    ) {
+      return false;
+    }
+    const { event, source } = snapshot;
+    const authority = publication.keyboardAuthority;
     if (
       !authority ||
-      this.#keyboardDeliveries.get(event) !== delivery ||
       !(event instanceof authority.KeyboardEvent) ||
-      this.#claimedEvents.has(event) ||
-      this.#keyboardClaims.has(event) ||
       !this.matches(publication) ||
-      !routeMatches ||
+      !this.keyboardRouteMatches(publication, snapshot) ||
       notificationActiveElement(authority) !== source
     ) {
       return false;
@@ -1920,7 +1956,7 @@ class NotificationPublicationCoordinator {
       notificationNativeValue<EventTarget | null>(eventGetters.target, event) ===
         source &&
       notificationNativeValue<boolean>(eventGetters.defaultPrevented, event) ===
-        false &&
+        defaultPrevented &&
       notificationNativeValue<boolean>(eventGetters.bubbles, event) ===
         snapshot.bubbles &&
       notificationNativeValue<boolean>(eventGetters.cancelable, event) ===
@@ -1947,6 +1983,16 @@ class NotificationPublicationCoordinator {
       notificationNativeValue<Window | null>(ui.view, event) === snapshot.view &&
       path.length === snapshot.path.length &&
       path.every((entry, index) => entry === snapshot.path[index])
+    );
+  }
+
+  keyboardSnapshotMatches(delivery: NotificationKeyboardDelivery) {
+    const { event } = delivery.snapshot;
+    return (
+      this.#keyboardDeliveries.get(event) === delivery &&
+      !this.#claimedEvents.has(event) &&
+      !this.#keyboardClaims.has(event) &&
+      this.keyboardNativeSnapshotMatches(delivery, false)
     );
   }
 
@@ -2092,15 +2138,12 @@ class NotificationPublicationCoordinator {
     });
     const delivery: NotificationKeyboardDelivery = {
       snapshot,
-      reactEvent: null,
+      access: publication.keyboardAccess!,
+      react: null,
       reactCount: 0,
       invalid: false,
     };
     this.#keyboardDeliveries.set(event, delivery);
-    publication.keyboardEvents.add(event);
-    queueMicrotask(() =>
-      this.clearKeyboardEvent(publication, event, delivery),
-    );
   }
 
   captureRowKey(
@@ -2226,29 +2269,22 @@ class NotificationPublicationCoordinator {
     });
     const delivery: NotificationKeyboardDelivery = {
       snapshot,
-      reactEvent: null,
+      access: publication.keyboardAccess!,
+      react: null,
       reactCount: 0,
       invalid: false,
     };
     this.#keyboardDeliveries.set(event, delivery);
-    publication.keyboardEvents.add(event);
-    queueMicrotask(() => this.clearKeyboardEvent(publication, event, delivery));
   }
 
-  reactKeyboardEventMatches(
+  reactKeyboardPublicValuesMatch(
     delivery: NotificationKeyboardDelivery,
     event: ReactKeyboardEvent<HTMLElement>,
-    currentTarget: HTMLElement,
+    currentTarget: EventTarget | null,
   ) {
     const { snapshot } = delivery;
     const publication = snapshot.publication;
     const authority = publication.keyboardAuthority;
-    const reactEvent = event as ReactKeyboardEvent<HTMLElement> & {
-      _reactName?: unknown;
-      isDefaultPrevented?: unknown;
-      isPropagationStopped?: unknown;
-      persist?: unknown;
-    };
     return Boolean(
       authority &&
         event.nativeEvent === snapshot.event &&
@@ -2256,6 +2292,7 @@ class NotificationPublicationCoordinator {
         event.type === "keydown" &&
         event.currentTarget === currentTarget &&
         event.target === snapshot.source &&
+        event.eventPhase === authority.Event.BUBBLING_PHASE &&
         event.key === snapshot.key &&
         event.code === snapshot.code &&
         event.location === snapshot.location &&
@@ -2267,15 +2304,97 @@ class NotificationPublicationCoordinator {
         event.bubbles === snapshot.bubbles &&
         event.cancelable === snapshot.cancelable &&
         event.isTrusted === snapshot.trust.value &&
-        !event.defaultPrevented &&
+        event.defaultPrevented === false &&
         event.timeStamp === snapshot.timeStamp &&
-        reactEvent._reactName === "onKeyDown" &&
-        typeof reactEvent.isDefaultPrevented === "function" &&
-        !reactEvent.isDefaultPrevented() &&
-        typeof reactEvent.isPropagationStopped === "function" &&
-        !reactEvent.isPropagationStopped() &&
-        typeof reactEvent.persist === "function" &&
-        this.keyboardSnapshotMatches(delivery)
+        event.detail === snapshot.detail &&
+        (event.view as unknown) === snapshot.view
+    );
+  }
+
+  captureReactKeyboardSnapshot(
+    delivery: NotificationKeyboardDelivery,
+    event: ReactKeyboardEvent<HTMLElement>,
+    currentTarget: HTMLElement,
+  ): NotificationReactKeyboardSnapshot | null {
+    if (
+      !this.keyboardSnapshotMatches(delivery) ||
+      !this.reactKeyboardPublicValuesMatch(delivery, event, currentTarget)
+    ) {
+      return null;
+    }
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
+    if (
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function"
+    ) {
+      return null;
+    }
+    try {
+      if (
+        notificationReflectApply(isDefaultPrevented, event, []) !== false ||
+        notificationReflectApply(isPropagationStopped, event, []) !== false
+      ) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    return Object.freeze({
+      event,
+      isDefaultPrevented,
+      isPropagationStopped,
+      defaultPrevented: false,
+      propagationStopped: false,
+    });
+  }
+
+  reactKeyboardSnapshotMatches(
+    delivery: NotificationKeyboardDelivery,
+    event: ReactKeyboardEvent<HTMLElement>,
+    currentTarget: EventTarget | null,
+    react: NotificationReactKeyboardSnapshot,
+  ) {
+    if (
+      event !== react.event ||
+      event.isDefaultPrevented !== react.isDefaultPrevented ||
+      event.isPropagationStopped !== react.isPropagationStopped ||
+      !this.reactKeyboardPublicValuesMatch(delivery, event, currentTarget)
+    ) {
+      return false;
+    }
+    try {
+      return (
+        notificationReflectApply(react.isDefaultPrevented, event, []) ===
+          react.defaultPrevented &&
+        notificationReflectApply(react.isPropagationStopped, event, []) ===
+          react.propagationStopped
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  retireKeyboardDelivery(
+    event: KeyboardEvent,
+    delivery: NotificationKeyboardDelivery,
+  ) {
+    if (this.#keyboardDeliveries.get(event) !== delivery) return false;
+    this.clearKeyboardEvent(event, delivery);
+    this.#claimedEvents.add(event);
+    return true;
+  }
+
+  claimedKeyboardSnapshotMatches(
+    delivery: NotificationKeyboardDelivery,
+    claim: NotificationKeyboardClaim,
+  ) {
+    const { event } = delivery.snapshot;
+    return (
+      this.#keyboardDeliveries.get(event) === undefined &&
+      this.#claimedEvents.has(event) &&
+      this.#keyboardClaims.get(event) === claim &&
+      this.keyboardNativeSnapshotMatches(delivery, true)
     );
   }
 
@@ -2297,20 +2416,29 @@ class NotificationPublicationCoordinator {
       !snapshot ||
       snapshot.kind !== "trigger" ||
       snapshot.publication !== publication ||
-      !this.reactKeyboardEventMatches(delivery, event, snapshot.source)
+      delivery.access.current() !== publication
     ) {
       if (delivery) delivery.invalid = true;
+      return;
+    }
+    const react = this.captureReactKeyboardSnapshot(
+      delivery,
+      event,
+      snapshot.source,
+    );
+    if (!react) {
+      delivery.invalid = true;
       return;
     }
     delivery.reactCount += 1;
     if (
       delivery.reactCount !== 1 ||
-      (delivery.reactEvent !== null && delivery.reactEvent !== event)
+      (delivery.react !== null && delivery.react.event !== event)
     ) {
       delivery.invalid = true;
       return;
     }
-    delivery.reactEvent = event;
+    delivery.react = react;
   }
 
   stageRowKey(
@@ -2330,25 +2458,42 @@ class NotificationPublicationCoordinator {
       snapshot.kind !== "row" ||
       snapshot.publication !== publication ||
       snapshot.action !== action ||
-      !this.reactKeyboardEventMatches(delivery, event, snapshot.source)
+      delivery.access.current() !== publication
     ) {
+      if (delivery && snapshot?.publication === publication) {
+        delivery.invalid = true;
+      }
+      return;
+    }
+    const react = this.captureReactKeyboardSnapshot(
+      delivery,
+      event,
+      snapshot.source,
+    );
+    if (!react) {
+      delivery.invalid = true;
       return;
     }
     delivery.reactCount += 1;
     if (
       delivery.reactCount !== 1 ||
-      (delivery.reactEvent !== null && delivery.reactEvent !== event)
+      (delivery.react !== null && delivery.react.event !== event)
     ) {
       delivery.invalid = true;
       return;
     }
-    delivery.reactEvent = event;
+    delivery.react = react;
   }
 
   claimRowKey(
     publication: NotificationPublication,
     event: ReactKeyboardEvent<HTMLUListElement>,
-  ): NotificationRowKeyboardSnapshot | null {
+  ): {
+    snapshot: NotificationRowKeyboardSnapshot;
+    delivery: NotificationKeyboardDelivery;
+    react: NotificationReactKeyboardSnapshot;
+    claim: NotificationKeyboardClaim;
+  } | null {
     if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) {
       return null;
     }
@@ -2361,15 +2506,33 @@ class NotificationPublicationCoordinator {
       !snapshot ||
       snapshot.kind !== "row" ||
       !list ||
-      delivery.invalid ||
-      delivery.reactCount !== 1 ||
-      delivery.reactEvent !== event ||
       snapshot.publication !== publication ||
-      !this.reactKeyboardEventMatches(delivery, event, list)
+      delivery.access.current() !== publication ||
+      event.nativeEvent !== snapshot.event ||
+      event.type !== "keydown" ||
+      event.currentTarget !== list ||
+      event.eventPhase !== publication.keyboardAuthority?.Event.BUBBLING_PHASE
     ) {
       return null;
     }
-    const claim = Object.freeze({
+    const react = delivery.react;
+    const matches = Boolean(
+      react &&
+        !delivery.invalid &&
+        delivery.reactCount === 1 &&
+        this.keyboardSnapshotMatches(delivery) &&
+        this.reactKeyboardSnapshotMatches(delivery, event, list, react),
+    );
+    if (!this.retireKeyboardDelivery(nativeEvent, delivery) || !matches || !react) {
+      return null;
+    }
+    if (
+      this.#claimedReactEvents.has(event) ||
+      this.#keyboardClaims.has(nativeEvent)
+    ) {
+      return null;
+    }
+    const claim: NotificationKeyboardClaim = Object.freeze({
       publication: publication.identity,
       source: snapshot.action.identity,
       key: snapshot.key,
@@ -2380,9 +2543,7 @@ class NotificationPublicationCoordinator {
     });
     this.#keyboardClaims.set(nativeEvent, claim);
     this.#claimedReactEvents.add(event);
-    this.#claimedEvents.add(nativeEvent);
-    this.clearKeyboardEvent(publication, nativeEvent, delivery);
-    return snapshot;
+    return { snapshot, delivery, react, claim };
   }
 
   finishTriggerKey(
@@ -2399,17 +2560,15 @@ class NotificationPublicationCoordinator {
     }
     const delivery = this.#keyboardDeliveries.get(event);
     const snapshot = delivery?.snapshot;
-    const reactEvent = delivery?.reactEvent;
+    const react = delivery?.react;
     const domGuard = publication.domGuard;
     if (
       !delivery ||
       !snapshot ||
       snapshot.kind !== "trigger" ||
-      !reactEvent ||
       !domGuard ||
-      delivery.invalid ||
-      delivery.reactCount !== 1 ||
       snapshot.publication !== publication ||
+      delivery.access.current() !== publication ||
       snapshot.event !== event ||
       notificationNativeValue<EventTarget | null>(
         authority.event.currentTarget,
@@ -2418,17 +2577,50 @@ class NotificationPublicationCoordinator {
       notificationNativeValue<number>(
         authority.event.eventPhase,
         event,
-      ) !== authority.Event.BUBBLING_PHASE ||
-      notificationNativeValue<boolean>(
-        authority.event.cancelBubble,
-        event,
-      ) ||
-      !this.keyboardSnapshotMatches(delivery)
+      ) !== authority.Event.BUBBLING_PHASE
+    ) {
+      return;
+    }
+    const matches = Boolean(
+      react &&
+        !delivery.invalid &&
+        delivery.reactCount === 1 &&
+        this.keyboardSnapshotMatches(delivery) &&
+        this.reactKeyboardSnapshotMatches(delivery, react.event, null, react),
+    );
+    if (!this.retireKeyboardDelivery(event, delivery) || !matches || !react) {
+      return;
+    }
+    if (
+      this.#claimedReactEvents.has(react.event) ||
+      this.#keyboardClaims.has(event)
     ) {
       return;
     }
     const historyIsClean = () =>
       domGuard.isClean() && authority.historyIsClean();
+    const claim: NotificationKeyboardClaim = Object.freeze({
+      publication: publication.identity,
+      source: publication.identity,
+      key: snapshot.key,
+      movement: null,
+      destination: null,
+      reactEvent: react.event,
+      nativeEvent: event,
+    });
+    this.#keyboardClaims.set(event, claim);
+    this.#claimedReactEvents.add(react.event);
+
+    notificationReflectApply(authority.preventDefault, event, []);
+    if (
+      !this.claimedKeyboardSnapshotMatches(delivery, claim) ||
+      !this.reactKeyboardSnapshotMatches(delivery, react.event, null, react) ||
+      !historyIsClean() ||
+      !this.matches(publication)
+    ) {
+      return;
+    }
+    publication.consumed = true;
     const focus: NotificationDirectionalFocus = Object.freeze({
       sourcePublication: publication.identity,
       visit: publication.visit,
@@ -2441,33 +2633,6 @@ class NotificationPublicationCoordinator {
       direction: snapshot.direction,
       historyIsClean,
     });
-    const claim = Object.freeze({
-      publication: publication.identity,
-      source: publication.identity,
-      key: snapshot.key,
-      movement: null,
-      destination: null,
-      reactEvent,
-      nativeEvent: event,
-    });
-    this.#keyboardClaims.set(event, claim);
-    this.#claimedReactEvents.add(reactEvent);
-    this.#claimedEvents.add(event);
-    publication.consumed = true;
-    this.clearKeyboardEvent(publication, event, delivery);
-
-    notificationReflectApply(authority.preventDefault, event, []);
-    if (
-      notificationNativeValue<boolean>(
-        authority.event.defaultPrevented,
-        event,
-      ) !== true ||
-      notificationActiveElement(authority) !== snapshot.source ||
-      !historyIsClean() ||
-      !this.matches(publication)
-    ) {
-      return;
-    }
     const disclosure = Object.freeze({
       identity: Symbol("notification-disclosure"),
       visit: publication.visit,
@@ -2481,15 +2646,19 @@ class NotificationPublicationCoordinator {
     publication: NotificationPublication,
     event: ReactKeyboardEvent<HTMLUListElement>,
   ) {
-    const snapshot = this.claimRowKey(publication, event);
+    const claimed = this.claimRowKey(publication, event);
     const authority = publication.keyboardAuthority;
-    if (!snapshot || !authority) return;
+    if (!claimed || !authority) return;
+    const { snapshot, delivery, react, claim } = claimed;
     notificationReflectApply(authority.preventDefault, snapshot.event, []);
     if (
-      notificationNativeValue<boolean>(
-        authority.event.defaultPrevented,
-        snapshot.event,
-      ) !== true
+      !this.claimedKeyboardSnapshotMatches(delivery, claim) ||
+      !this.reactKeyboardSnapshotMatches(
+        delivery,
+        react.event,
+        publication.elements.list,
+        react,
+      )
     ) {
       return;
     }
@@ -2992,7 +3161,7 @@ function createPublication({
     contentPlacement: null,
     domGuard: null,
     keyboardAuthority: null,
-    keyboardEvents: new Set<KeyboardEvent>(),
+    keyboardAccess: null,
     successorRequested: false,
     rowClaimed: false,
     openDirectional,
