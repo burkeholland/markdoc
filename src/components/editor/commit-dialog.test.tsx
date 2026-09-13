@@ -2176,6 +2176,7 @@ describe("CommitDialog visit authority", () => {
       host: HTMLDivElement,
       hook?: (delivery: Delivery, handler: Handler) => boolean | void,
       accessor = false,
+      forwarding = false,
     ) {
       const bridge = commitBridge(host);
       const input = message();
@@ -2190,13 +2191,20 @@ describe("CommitDialog visit authority", () => {
         [bridge, "onSubmit", "submit bridge"],
       ];
       const deliveries: Delivery[] = [];
+      const sourcePreventions = new WeakMap<PublicEvent, Delivery["prevent"]>();
       const restores = bindings.map(([element, prop, stage]) => {
         const handler = reactProp<Handler>(element, prop);
         const wrapped = (source: PublicEvent) => {
-          const event = publicEvent(source);
-          const originalPrevent = event.preventDefault;
-          const prevent = vi.fn(() => originalPrevent());
-          event.preventDefault = prevent;
+          const event = forwarding ? new Proxy(source, {}) : publicEvent(source);
+          let prevent = forwarding ? sourcePreventions.get(source) : undefined;
+          if (!prevent) {
+            const originalPrevent = event.preventDefault;
+            prevent = vi.fn(function (this: PublicEvent) {
+              Reflect.apply(originalPrevent, this, []);
+            });
+            event.preventDefault = prevent;
+            if (forwarding) sourcePreventions.set(source, prevent);
+          }
           if (accessor) {
             const prototype = Object.create(null);
             for (const key of Object.keys(event)) {
@@ -2216,12 +2224,12 @@ describe("CommitDialog visit authority", () => {
           try {
             if (hook?.(delivery, handler) !== true) handler(event);
           } finally {
-            Reflect.set(event, "currentTarget", null);
+            if (!forwarding) Reflect.set(event, "currentTarget", null);
           }
         };
         setReactProp(element, prop, wrapped);
         return () => {
-          if (reactProp<Handler>(element, prop) === wrapped) {
+          if (element.isConnected && reactProp<Handler>(element, prop) === wrapped) {
             setReactProp(element, prop, handler);
           }
         };
@@ -2237,7 +2245,8 @@ describe("CommitDialog visit authority", () => {
           return event;
         },
         preventionCount: () =>
-          deliveries.reduce((count, { prevent }) => count + prevent.mock.calls.length, 0),
+          [...new Set(deliveries.map(({ prevent }) => prevent))]
+            .reduce((count, prevent) => count + prevent.mock.calls.length, 0),
       };
     }
 
@@ -2309,6 +2318,358 @@ describe("CommitDialog visit authority", () => {
         }
       },
     );
+
+    describe("revision four corrections", () => {
+      it.each(["accepted", "blank", "malformed", "unfinished"] as const)(
+        "keeps %s Enter authority across native implicit-style button activation",
+        async (kind) => {
+          const first = deferred<void>();
+          const second = deferred<void>();
+          const current = actions(first.promise, second.promise);
+          const { host, root } = createHost();
+          try {
+            await render(root, {
+              visit: "implicit",
+              doc: repoDocument("implicit-enter", "implicit.md"),
+              actions: current,
+            });
+            const text = kind === "blank" ? " \t " : "  Implicit commit  ";
+            fireEvent.change(message(), { target: { value: text } });
+            await flushPublication();
+            const form = commitForm();
+            const button = screen.getByTestId<HTMLButtonElement>("commit-submit");
+            const submitted: SubmitEvent[] = [];
+            const observeSubmit = (event: Event) => {
+              expect(event).toBeInstanceOf(SubmitEvent);
+              submitted.push(event as SubmitEvent);
+            };
+            form.addEventListener("submit", observeSubmit, true);
+            const delivery = probe(host, ({ stage, event }) => {
+              if (stage !== "key input") return;
+              if (kind === "unfinished") return true;
+              if (kind === "malformed") Reflect.set(event, "code", "Space");
+            });
+            try {
+              const key = delivery.key();
+              expect(key.defaultPrevented).toBe(false);
+              expect(delivery.preventionCount()).toBe(0);
+              expect(current.onCommit).not.toHaveBeenCalled();
+              expect(document.activeElement).toBe(message());
+              // jsdom supplies a genuine submit from this native click's default
+              // activation. This is not OS-trusted implicit keyboard activation.
+              const click = new MouseEvent("click", {
+                bubbles: true, cancelable: true, detail: 0, button: 0,
+              });
+              fireEvent(button, click);
+              expect(click.defaultPrevented).toBe(false);
+              expect(submitted).toHaveLength(1);
+              expect(submitted[0].submitter).toBe(button);
+              expect(submitted[0].defaultPrevented).toBe(kind === "accepted");
+              expect(delivery.preventionCount()).toBe(kind === "accepted" ? 1 : 0);
+              if (kind === "accepted") {
+                expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Implicit commit");
+                expect(delivery.deliveries.at(-1)?.prevent).toHaveBeenCalledOnce();
+              } else {
+                expect(current.onCommit).not.toHaveBeenCalled();
+                expect(document.activeElement).toBe(message());
+              }
+            } finally {
+              form.removeEventListener("submit", observeSubmit, true);
+              delivery.restore();
+            }
+            if (kind === "accepted") {
+              await resolve(first);
+            } else {
+              // Independent pointer activation retains the ordinary blank-message
+              // semantics, rather than inheriting the rejected Enter claim.
+              fireEvent.click(button, { detail: 1 });
+              expect(current.onCommit).toHaveBeenCalledExactlyOnceWith(text.trim());
+              await reject(first, "Try the focused button");
+              await flushPublication();
+              const rejected = probe(host);
+              try {
+                rejected.key({ repeat: true });
+                expect(rejected.preventionCount()).toBe(0);
+              } finally {
+                rejected.restore();
+              }
+              button.focus();
+              fireEvent.click(button, { detail: 0 });
+              expect(current.onCommit).toHaveBeenCalledTimes(2);
+              expect(current.onCommit).toHaveBeenLastCalledWith(text.trim());
+              await resolve(second);
+            }
+          } finally {
+            await act(async () => root.unmount());
+            host.remove();
+          }
+        },
+      );
+
+      it.each([false, true])(
+        "accepts live forwarding aliases at all seven boundaries but rejects later Q2 drift=%s",
+        async (drift) => {
+          const pending = deferred<void>();
+          const current = actions(pending.promise);
+          const { host, root } = createHost();
+          try {
+            await render(root, {
+              visit: "forwarding",
+              doc: repoDocument("forwarding-enter", "forwarding.md"),
+              actions: current,
+            });
+            fireEvent.change(message(), { target: { value: "  Forwarded commit  " } });
+            await flushPublication();
+            const prior = new Map<string, PublicEvent>();
+            let immediateQuery: PublicEvent["isDefaultPrevented"] | undefined;
+            const laterQuery = vi.fn(() => true);
+            let prevented = false;
+            let replaying = false;
+            const delivery = probe(host, ({ stage, event }) => {
+              if (replaying) return;
+              const phase = `${event.type}:${event.eventPhase}`;
+              const earlier = prior.get(phase);
+              if (earlier) {
+                expect(earlier).not.toBe(event);
+                expect(earlier.currentTarget).toBe(event.currentTarget);
+                expect(earlier.preventDefault).toBe(event.preventDefault);
+                expect(earlier.isDefaultPrevented).toBe(event.isDefaultPrevented);
+              }
+              prior.set(phase, event);
+              if (stage !== "submit form") return;
+              const prevent = event.preventDefault;
+              event.preventDefault = function (this: PublicEvent) {
+                Reflect.apply(prevent, this, []);
+                immediateQuery = this.isDefaultPrevented;
+                prevented = true;
+              };
+              if (drift) {
+                const native = event.nativeEvent;
+                const nativeDefault = Object.getOwnPropertyDescriptor(
+                  Event.prototype, "defaultPrevented",
+                )!.get!;
+                Object.defineProperty(native, "defaultPrevented", {
+                  get: () => {
+                    if (prevented) event.isDefaultPrevented = laterQuery;
+                    return Reflect.apply(nativeDefault, native, []);
+                  },
+                });
+              }
+            }, false, true);
+            try {
+              expect(delivery.key().defaultPrevented).toBe(false);
+              expect(delivery.preventionCount()).toBe(0);
+              expect(current.onCommit).not.toHaveBeenCalled();
+              const submitted = delivery.submit();
+              expect(submitted.defaultPrevented).toBe(true);
+              expect(delivery.deliveries).toHaveLength(7);
+              expect(new Set(delivery.deliveries.map(({ event }) => event)).size).toBe(7);
+              expect(delivery.preventionCount()).toBe(1);
+              const final = delivery.deliveries.at(-1)!;
+              expect(final.prevent.mock.contexts).toEqual([final.event]);
+              expect(immediateQuery).toBeTypeOf("function");
+              expect(laterQuery).not.toHaveBeenCalled();
+              if (drift) {
+                expect(current.onCommit).not.toHaveBeenCalled();
+              } else {
+                const formDelivery = delivery.deliveries[5];
+                expect(formDelivery.event.isDefaultPrevented).toBe(immediateQuery);
+                expect(formDelivery.event.defaultPrevented).toBe(true);
+                expect(delivery.deliveries[4].event.defaultPrevented).toBe(false);
+                expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Forwarded commit");
+              }
+              replaying = true;
+              fireEvent(commitForm(), submitted);
+              expect(delivery.preventionCount()).toBe(1);
+              expect(current.onCommit).toHaveBeenCalledTimes(drift ? 0 : 1);
+            } finally {
+              delivery.restore();
+            }
+            if (drift) await cleanSuccessor(host, current);
+            await resolve(pending);
+          } finally {
+            await act(async () => root.unmount());
+            host.remove();
+          }
+        },
+      );
+
+      it.each(["malformed form", "malformed bridge", "incomplete bridge"] as const)(
+        "releases an ended %s submit while retaining the same completed key",
+        async (failure) => {
+          const pending = deferred<void>();
+          const current = actions(pending.promise);
+          const { host, root } = createHost();
+          try {
+            await render(root, {
+              visit: "candidate",
+              doc: repoDocument("candidate-enter", "candidate.md"),
+              actions: current,
+            });
+            let abandoned: Event | undefined;
+            const delivery = probe(host, ({ stage, event }) => {
+              if (!stage.startsWith("submit")) return;
+              abandoned ??= event.nativeEvent;
+              if (event.nativeEvent !== abandoned) return;
+              if (stage === "submit form" && failure === "malformed form") {
+                event.type = "keydown";
+              }
+              if (stage === "submit bridge") {
+                if (failure === "incomplete bridge") return true;
+                if (failure === "malformed bridge") event.currentTarget = document.body;
+              }
+            });
+            try {
+              const key = delivery.key();
+              expect(key.defaultPrevented).toBe(false);
+              const first = delivery.submit();
+              expect(first).toBe(abandoned);
+              expect(first.eventPhase).toBe(Event.NONE);
+              expect(first.defaultPrevented).toBe(false);
+              expect(delivery.preventionCount()).toBe(0);
+              expect(current.onCommit).not.toHaveBeenCalled();
+              fireEvent(commitForm(), first);
+              expect(delivery.preventionCount()).toBe(0);
+              expect(current.onCommit).not.toHaveBeenCalled();
+              const second = delivery.submit();
+              expect(second).not.toBe(first);
+              expect(second.defaultPrevented).toBe(true);
+              expect(delivery.preventionCount()).toBe(1);
+              expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Update candidate.md");
+              expect(delivery.deliveries.filter(({ stage }) => stage.startsWith("key")))
+                .toHaveLength(4);
+              fireEvent(commitForm(), first);
+              fireEvent(commitForm(), second);
+              expect(first.defaultPrevented).toBe(false);
+              expect(delivery.preventionCount()).toBe(1);
+              expect(current.onCommit).toHaveBeenCalledOnce();
+            } finally {
+              delivery.restore();
+            }
+            await resolve(pending);
+          } finally {
+            await act(async () => root.unmount());
+            host.remove();
+          }
+        },
+      );
+
+      it("does not displace a still-dispatching selected submit with a crossed candidate", async () => {
+        const first = deferred<void>();
+        const second = deferred<void>();
+        const current = actions(first.promise, second.promise);
+        const { host, root } = createHost();
+        try {
+          await render(root, {
+            visit: "live-candidate",
+            doc: repoDocument("live-candidate-enter", "live-candidate.md"),
+            actions: current,
+          });
+          let crossing = false;
+          let crossed: SubmitEvent | undefined;
+          const delivery = probe(host, ({ stage, event }) => {
+            if (stage !== "submit form" || crossing) return;
+            crossing = true;
+            expect(event.nativeEvent.eventPhase).toBe(Event.BUBBLING_PHASE);
+            crossed = delivery.submit();
+            expect(crossed.defaultPrevented).toBe(false);
+            expect(delivery.preventionCount()).toBe(0);
+            expect(current.onCommit).not.toHaveBeenCalled();
+          });
+          try {
+            delivery.key();
+            expect(delivery.submit().defaultPrevented).toBe(true);
+            expect(crossed).toBeInstanceOf(SubmitEvent);
+            expect(delivery.preventionCount()).toBe(1);
+            expect(current.onCommit).toHaveBeenCalledOnce();
+            fireEvent(commitForm(), crossed!);
+            expect(delivery.preventionCount()).toBe(1);
+            expect(current.onCommit).toHaveBeenCalledOnce();
+          } finally {
+            delivery.restore();
+          }
+          await reject(first, "Clean candidate successor");
+          await cleanSuccessor(host, current);
+          await resolve(second);
+        } finally {
+          await act(async () => root.unmount());
+          host.remove();
+        }
+      });
+
+      it.each(["unmount", "replacement"] as const)(
+        "does not read or call Q1 after final prevention causes %s",
+        async (change) => {
+          const pending = deferred<void>();
+          const current = actions(pending.promise);
+          const doc = repoDocument("retired-query-enter", "retired-query.md");
+          const { host, root } = createHost();
+          const retiredReads = vi.fn();
+          const retiredCalls = vi.fn();
+          let retired = false;
+          try {
+            await render(root, { visit: "first", doc, actions: current });
+            const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+            const delivery = probe(host, ({ stage, event }) => {
+              if (stage !== "submit bridge") return;
+              let query = event.isDefaultPrevented;
+              Object.defineProperty(event, "isDefaultPrevented", {
+                get: () => {
+                  if (retired) retiredReads();
+                  return query;
+                },
+                set: (next: PublicEvent["isDefaultPrevented"]) => {
+                  query = function (this: PublicEvent) {
+                    if (retired) retiredCalls();
+                    return Reflect.apply(next, this, []);
+                  };
+                },
+              });
+              const prevent = event.preventDefault;
+              event.preventDefault = () => {
+                prevent();
+                flushSync(() => root.render(
+                  <StrictMode>
+                    <CommitBoundary
+                      visit="replacement"
+                      doc={{ ...doc }}
+                      actions={current}
+                      present={change !== "unmount"}
+                    />
+                  </StrictMode>,
+                ));
+                // The fixture's replacement may manage focus; only effects
+                // after it retires this delivery belong to the assertion.
+                focus.mockClear();
+                retired = true;
+              };
+            });
+            try {
+              delivery.key();
+              expect(delivery.submit().defaultPrevented).toBe(true);
+              expect(retired).toBe(true);
+              expect(delivery.preventionCount()).toBe(1);
+              expect(retiredReads).not.toHaveBeenCalled();
+              expect(retiredCalls).not.toHaveBeenCalled();
+              expect(current.onCommit).not.toHaveBeenCalled();
+              expect(current.onOpenChange).not.toHaveBeenCalled();
+              expect(focus).not.toHaveBeenCalled();
+            } finally {
+              delivery.restore();
+              focus.mockRestore();
+            }
+            await render(root, { visit: "successor", doc: { ...doc }, actions: current });
+            await cleanSuccessor(host, current);
+            await resolve(pending);
+            expect(retiredReads).not.toHaveBeenCalled();
+            expect(retiredCalls).not.toHaveBeenCalled();
+          } finally {
+            await act(async () => root.unmount());
+            host.remove();
+          }
+        },
+      );
+    });
 
     const malformed: Array<[string, Record<string, unknown>]> = [
       ["key", { key: "Escape" }],
@@ -2551,7 +2912,6 @@ describe("CommitDialog visit authority", () => {
             omit = false;
             if (submit) fireEvent(commitForm(), submit);
             else fireEvent(message(), key);
-            delivery.submit();
             expect(delivery.preventionCount()).toBe(0);
             expect(current.onCommit).not.toHaveBeenCalled();
           } finally {
@@ -2858,7 +3218,7 @@ describe("CommitDialog visit authority", () => {
       },
     );
 
-    it.each(["independent capture", "later final query"] as const)(
+    it.each(["independent capture", "independent bubble", "later final query"] as const)(
       "does not adopt an unrelated %s replacement after exact prevention",
       async (replacement) => {
         const pending = deferred<void>();
@@ -2873,7 +3233,8 @@ describe("CommitDialog visit authority", () => {
             actions: current,
           });
           const delivery = probe(host, ({ stage, event }) => {
-            if (stage === "submit bridge capture") capture = event;
+            if (stage === (replacement === "independent bubble"
+              ? "submit form" : "submit bridge capture")) capture = event;
             if (stage !== "submit bridge") return;
             const native = event.nativeEvent;
             const nativeDefault = Object.getOwnPropertyDescriptor(Event.prototype, "defaultPrevented")!.get!;
@@ -2883,7 +3244,7 @@ describe("CommitDialog visit authority", () => {
               prevent();
               event.isDefaultPrevented = allowedQuery;
               prevented = true;
-              if (replacement === "independent capture" && capture) {
+              if (replacement !== "later final query" && capture) {
                 capture.isDefaultPrevented = () => false;
               }
             };

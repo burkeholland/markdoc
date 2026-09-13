@@ -8615,6 +8615,7 @@ interface CommitEnterDelivery {
   queryDefault: CommitEnterWrapper["isDefaultPrevented"];
   readonly queryPropagation: CommitEnterWrapper["isPropagationStopped"];
   prevented: boolean;
+  forwarding: CommitEnterDelivery | null;
 }
 
 interface CommitEnterNative {
@@ -8788,19 +8789,30 @@ function createCommitEnterRoute(
     delivery.event.preventDefault === delivery.prevent &&
     delivery.event.isDefaultPrevented === delivery.queryDefault &&
     delivery.event.isPropagationStopped === delivery.queryPropagation;
+  const sharesPhase = (earlier: CommitEnterDelivery, active: CommitEnterDelivery) =>
+    earlier.nativeEvent === active.nativeEvent &&
+    earlier.phase === active.phase &&
+    earlier.target === active.target &&
+    earlier.prevent === active.prevent &&
+    earlier.queryDefault === active.queryDefault &&
+    earlier.queryPropagation === active.queryPropagation;
   const deliveryMatches = (
     delivery: CommitEnterDelivery,
-    currentEvent: CommitEnterWrapper | null,
+    active: CommitEnterDelivery | null,
     currentTarget: HTMLElement | null,
   ) => {
     const event = delivery.event;
     const native = delivery.nativeEvent;
     const keyboard = native instanceof Keyboard;
     const key = event as ReactKeyboardEvent<HTMLElement>;
+    const target = event.currentTarget;
     return (
       event.nativeEvent === native &&
       event.target === delivery.target &&
-      event.currentTarget === (event === currentEvent ? currentTarget : null) &&
+      (event === active?.event
+        ? target === currentTarget
+        : target === null ||
+          (!!active && sharesPhase(delivery, active) && target === currentTarget)) &&
       event.type === (keyboard ? "keydown" : "submit") &&
       event.eventPhase === delivery.phase &&
       event.bubbles === true &&
@@ -8823,7 +8835,7 @@ function createCommitEnterRoute(
     claim: CommitEnterClaim,
     proof: CommitEnterNative,
     deliveries: readonly CommitEnterDelivery[],
-    currentEvent: CommitEnterWrapper | null,
+    active: CommitEnterDelivery | null,
     currentTarget: HTMLElement | null,
     prevented = false,
   ) => {
@@ -8838,7 +8850,7 @@ function createCommitEnterRoute(
           claim.submit.get()?.deref() === proof.event &&
           nativeMatches(proof, prevented, true))) &&
       deliveries.every((entry) =>
-        deliveryMatches(entry, currentEvent, currentTarget),
+        deliveryMatches(entry, active, currentTarget),
       ) &&
       internal() &&
       retains(claim);
@@ -8889,6 +8901,7 @@ function createCommitEnterRoute(
       queryDefault,
       queryPropagation,
       prevented: false,
+      forwarding: null,
     };
   };
   const deliver = (
@@ -8926,7 +8939,7 @@ function createCommitEnterRoute(
       previous &&
       (previous.event === event ||
         deliveryMatches(previous, null, null) ||
-        deliveryMatches(previous, previous.event, currentTarget))
+        deliveryMatches(previous, previous, currentTarget))
     ) {
       return;
     }
@@ -8939,7 +8952,15 @@ function createCommitEnterRoute(
         : [...proof.deliveries.values()].filter((entry) => entry !== previous)),
       delivery,
     ];
-    if (!validate(claim, proof, deliveries, event, currentTarget)) return;
+    // Distinct public aliases can forward React's live per-phase currentTarget.
+    // Record only this observed transition, not an assumed hidden backing object.
+    const forwarding = deliveries.filter((entry) =>
+      entry !== delivery &&
+      sharesPhase(entry, delivery) &&
+      entry.event.currentTarget === currentTarget,
+    );
+    if (!validate(claim, proof, deliveries, delivery, currentTarget)) return;
+    for (const entry of forwarding) entry.forwarding = delivery;
     wrappers.set(event, delivery);
     proof.deliveries.set(boundary, delivery);
   };
@@ -9007,6 +9028,21 @@ function createCommitEnterRoute(
       } else {
         coordinator.noteEnterSubmit(event);
         const claim = pending();
+        const selected = claim?.submit.get()?.deref();
+        if (
+          claim &&
+          selected &&
+          selected.eventPhase === EventConstructor.NONE &&
+          retains(claim) &&
+          pending() === claim &&
+          claim.submit.get()?.deref() === selected
+        ) {
+          // An ended attempt must not reserve a good key indefinitely. Keep its
+          // native identity rejected, without displacing a still-live dispatch.
+          replayed.add(selected);
+          submits.delete(selected);
+          claim.submit.set(null);
+        }
         if (claim && !claim.submit.get()?.deref()) {
           submits.set(event, claim);
           claim.attempt.set(new WeakRef(event));
@@ -9065,10 +9101,16 @@ function createCommitEnterRoute(
       }
       if (!methodsMatch(final) || !retains(claim)) return;
       apply(final.prevent, final.event, []);
+      if (!retains(claim)) return;
       // React 19 changes this callable during preventDefault. Adopt only this
-      // immediate result, for this exact wrapper (including same-object aliases).
+      // immediate result, including the previously observed live phase aliases.
       const queryDefault = final.event.isDefaultPrevented;
-      if (typeof queryDefault !== "function") return;
+      if (!retains(claim) || typeof queryDefault !== "function") return;
+      for (const delivery of deliveries) {
+        if (delivery.forwarding !== final) continue;
+        delivery.queryDefault = queryDefault;
+        delivery.prevented = true;
+      }
       final.queryDefault = queryDefault;
       final.prevented = true;
       if (!validate(claim, proof, deliveries, null, null, true)) return;
@@ -9108,7 +9150,6 @@ function createCommitEnterRoute(
       }),
     submit: submitBoundary,
     finish,
-    hasPendingKey: () => pending()?.ready === true,
     clear: () => {
       forms.delete(dom.form);
       coordinator.clearEnterForm(dom.form);
@@ -10802,7 +10843,7 @@ function createCommitDialogRender(
     if (
       nativeEvent.detail > 0 ||
       dom.form.ownerDocument.activeElement === dom.submit ||
-      !enterRoute?.hasPendingKey()
+      !coordinator.enterOwnsForm(dom.form)
     ) {
       enterRoute?.clear();
       coordinator.clearEnterForm(dom.form);
