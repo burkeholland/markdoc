@@ -15,7 +15,7 @@ import { ReaderCopyLink } from "./copy-link";
 
 const DOC_ID = "doc-919";
 const NEXT_DOC_ID = "doc-920";
-const MANUAL_COPY_INSTRUCTION = "Press Ctrl+C to copy";
+const MANUAL_COPY_INSTRUCTION = "Press Ctrl+C (Command+C on Mac) to copy";
 const readerUrl = (docId = DOC_ID) => `${window.location.origin}/p/${docId}`;
 
 interface CopyClickEvent {
@@ -324,10 +324,14 @@ describe("ReaderCopyLink presentation", () => {
     expect(fallback).toHaveValue(readerUrl());
     expect(fallback).toHaveAttribute("readonly");
     expect(fallback).toHaveAccessibleDescription(MANUAL_COPY_INSTRUCTION);
+    expect(fallback).toHaveAccessibleDescription(/Ctrl\+C/);
+    expect(fallback).toHaveAccessibleDescription(/Command\+C on Mac/);
     expect(fallback.getAttribute("aria-describedby")?.trim().split(/\s+/)).toEqual([
       instruction.id,
     ]);
     expect(instruction).toBeVisible();
+    expect(instruction).toHaveTextContent("Ctrl+C");
+    expect(instruction).toHaveTextContent("Command+C on Mac");
     expect(instruction).toHaveAttribute("role", "status");
     expect(instruction).toHaveAttribute("aria-live", "polite");
     expect(instruction).toHaveAttribute("aria-atomic", "true");
