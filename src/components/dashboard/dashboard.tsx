@@ -7280,6 +7280,68 @@ interface FilterReplay {
   readonly release: () => void;
 }
 
+interface FilterReactKeyMethods {
+  readonly preventDefault: (...args: never[]) => unknown;
+  readonly isDefaultPrevented: (...args: never[]) => unknown;
+  readonly isPropagationStopped: (...args: never[]) => unknown;
+}
+
+interface FilterReactKeyProof {
+  readonly event: ReactKeyboardEvent<HTMLElement>;
+  readonly nativeEvent: KeyboardEvent;
+  readonly target: HTMLButtonElement;
+  readonly currentTarget: HTMLElement;
+  readonly type: "keydown";
+  readonly phase: number;
+  readonly bubbles: true;
+  readonly cancelable: true;
+  readonly defaultPrevented: false;
+  readonly trusted: true;
+  readonly view: unknown;
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly charCode: number;
+  readonly keyCode: number;
+  readonly repeat: false;
+  readonly composing: false | undefined;
+  readonly ctrlKey: false;
+  readonly metaKey: false;
+  readonly altKey: false;
+  readonly shiftKey: false;
+  readonly detail: number;
+  readonly methods: FilterReactKeyMethods;
+}
+
+interface FilterDocumentKeyProof {
+  readonly event: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly phase: number;
+}
+
+interface FilterWindowKeyProof {
+  readonly publication: FilterPublication;
+  readonly event: KeyboardEvent;
+  readonly listener: EventListener;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+  readonly phase: number;
+  readonly addEventListener: Window["addEventListener"];
+  readonly removeEventListener: Window["removeEventListener"];
+}
+
+interface FilterKeyboardMovement {
+  readonly identity: symbol;
+  readonly publication: FilterPublication;
+  readonly definitions: readonly FilterDefinition[];
+  readonly source: FilterEntryPublication;
+  readonly destination: FilterEntryPublication;
+  readonly key: string;
+}
+
 interface FilterNativeKeyProof {
   readonly identity: symbol;
   readonly event: KeyboardEvent;
@@ -7288,35 +7350,75 @@ interface FilterNativeKeyProof {
   readonly action: FilterActionPublication;
   readonly target: HTMLButtonElement;
   readonly path: readonly EventTarget[];
+  readonly windowReceiver: EventTarget;
   readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly charCode: number;
+  readonly keyCode: number;
   readonly ctrlKey: boolean;
   readonly metaKey: boolean;
   readonly altKey: boolean;
   readonly shiftKey: boolean;
   readonly repeat: boolean;
   readonly composing: boolean;
+  readonly bubbles: true;
+  readonly cancelable: true;
+  readonly composed: boolean;
+  readonly timeStamp: number;
+  readonly view: Window | null;
+  readonly detail: number;
   readonly destination: Filter;
   readonly destinationButton: HTMLButtonElement;
   readonly trusted: true;
-  readonly propagationStopped: () => boolean;
-  crossed: boolean;
+  readonly documentCapture: FilterDocumentKeyProof;
+  readonly movement: FilterKeyboardMovement;
 }
 
-interface FilterTerminalKeyProof {
+interface FilterKeyPair {
   readonly native: FilterNativeKeyProof;
-  readonly reactCaptureEvent: object;
-  readonly reactBubbleEvent: object;
+  readonly token: symbol;
+  state: "staged" | "paired" | "finalizing" | "consumed" | "replayed";
+  buttonBoundary: FilterDocumentKeyProof | null;
+  groupCapture: FilterReactKeyProof | null;
+  buttonCapture: FilterReactKeyProof | null;
+  buttonBubble: FilterReactKeyProof | null;
+  bubbleDefaultQuery: ((...args: never[]) => unknown) | null;
+  documentBubble: FilterDocumentKeyProof | null;
+  windowProof: FilterWindowKeyProof | null;
+}
+
+interface FilterKeyClaim {
+  readonly pair: FilterKeyPair;
+  readonly native: FilterNativeKeyProof;
+  readonly publication: FilterPublication;
+  readonly definitions: readonly FilterDefinition[];
+  readonly source: FilterEntryPublication;
+  readonly destination: FilterEntryPublication;
+  readonly movement: FilterKeyboardMovement;
+  readonly groupCapture: FilterReactKeyProof;
+  readonly buttonCapture: FilterReactKeyProof;
+  readonly buttonBubble: FilterReactKeyProof;
+  readonly documentCapture: FilterDocumentKeyProof;
+  readonly buttonBoundary: FilterDocumentKeyProof;
+  readonly documentBubble: FilterDocumentKeyProof;
+  readonly windowProof: FilterWindowKeyProof;
+  readonly authority: FilterAuthority;
+  readonly changeFilter: (next: Filter) => void;
+  readonly requestSuccessor: () => void;
+  readonly focusContinuation: object;
+  readonly bubbleDefaultQuery: (...args: never[]) => unknown;
 }
 
 interface FilterFocusRequest {
+  readonly claim: FilterKeyClaim;
   readonly source: FilterPublication;
   readonly authority: FilterAuthority;
   readonly changeFilter: (next: Filter) => void;
-  readonly destination: Filter;
+  readonly destination: FilterEntryPublication;
   readonly button: HTMLButtonElement;
   readonly nativeEvent: KeyboardEvent;
-  readonly reactCaptureEvent: object;
-  readonly reactBubbleEvent: object;
+  readonly continuation: object;
 }
 
 interface FilterPublicationCells {
@@ -7330,6 +7432,9 @@ interface FilterPublicationCells {
   readonly claimedActions: WeakSet<FilterActionPublication>;
   readonly claimedReactEvents: WeakSet<object>;
   readonly claimedNativeEvents: WeakSet<Event>;
+  readonly claimedMovements: WeakSet<object>;
+  readonly claimedWindowProofs: WeakSet<FilterWindowKeyProof>;
+  readonly claimedFocusRequests: WeakSet<FilterFocusRequest>;
   readonly attemptedReactEvents: WeakSet<object>;
   readonly attemptedNativeEvents: WeakSet<Event>;
 }
@@ -7531,7 +7636,10 @@ function filterDestination(
   return null;
 }
 
-function filterRenderIsExact(render: FilterRenderPublication) {
+function filterRenderIsExact(
+  render: FilterRenderPublication,
+  currentFilter: Filter = render.filter,
+) {
   return (
     Object.isFrozen(render) &&
     Object.isFrozen(render.authority) &&
@@ -7547,7 +7655,7 @@ function filterRenderIsExact(render: FilterRenderPublication) {
         definition === FILTERS[index] &&
         Object.isFrozen(definition),
     ) &&
-    render.currentFilter() === render.filter
+    render.currentFilter() === currentFilter
   );
 }
 
@@ -7721,12 +7829,13 @@ function createFilterPublication(
   function filterElementsAreExact(
     publicationRender: FilterRenderPublication,
     publicationOwners: typeof owners,
+    currentFilter: Filter = publicationRender.filter,
   ) {
     const group = publicationOwners.group.element();
     const ownerDocument = group?.ownerDocument;
     const ownerWindow = ownerDocument?.defaultView;
     if (
-      !filterRenderIsExact(publicationRender) ||
+      !filterRenderIsExact(publicationRender, currentFilter) ||
       !ownerDocument ||
       !ownerWindow ||
       !(group instanceof ownerWindow.HTMLDivElement) ||
@@ -7814,6 +7923,14 @@ function createFilterPublication(
       ownerWindow.Event.prototype,
       "cancelable",
     );
+    const eventComposed = capturePrototypeGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "composed",
+    );
+    const eventTimeStamp = capturePrototypeGetter<number>(
+      ownerWindow.Event.prototype,
+      "timeStamp",
+    );
     const eventCancelBubble = capturePrototypeGetter<boolean>(
       ownerWindow.Event.prototype,
       "cancelBubble",
@@ -7846,49 +7963,40 @@ function createFilterPublication(
       ownerWindow.KeyboardEvent.prototype,
       "isComposing",
     );
+    const keyboardCode = capturePrototypeGetter<string>(
+      ownerWindow.KeyboardEvent.prototype,
+      "code",
+    );
+    const keyboardLocation = capturePrototypeGetter<number>(
+      ownerWindow.KeyboardEvent.prototype,
+      "location",
+    );
+    const keyboardCharCode = capturePrototypeGetter<number>(
+      ownerWindow.KeyboardEvent.prototype,
+      "charCode",
+    );
+    const keyboardKeyCode = capturePrototypeGetter<number>(
+      ownerWindow.KeyboardEvent.prototype,
+      "keyCode",
+    );
+    const uiView = capturePrototypeGetter<Window | null>(
+      ownerWindow.UIEvent.prototype,
+      "view",
+    );
+    const uiDetail = capturePrototypeGetter<number>(
+      ownerWindow.UIEvent.prototype,
+      "detail",
+    );
     const composedPath = capturePrototypeMethod<
       (event: Event) => EventTarget[]
     >(ownerWindow.Event.prototype, "composedPath");
-    const addEventListener = capturePrototypeMethod<
-      (
-        target: EventTarget,
-        type: string,
-        listener: (event: Event) => void,
-        options?: boolean | AddEventListenerOptions,
-      ) => void
-    >(ownerWindow.EventTarget.prototype, "addEventListener");
-    const removeEventListener = capturePrototypeMethod<
-      (
-        target: EventTarget,
-        type: string,
-        listener: (event: Event) => void,
-        options?: boolean | EventListenerOptions,
-      ) => void
-    >(ownerWindow.EventTarget.prototype, "removeEventListener");
-    const addWindowEventListener =
-      capturePrototypeGetter<Window["addEventListener"]>(
-        ownerWindow,
-        "addEventListener",
-      )?.(ownerWindow) ?? null;
-    const removeWindowEventListener =
-      capturePrototypeGetter<Window["removeEventListener"]>(
-        ownerWindow,
-        "removeEventListener",
-      )?.(ownerWindow) ?? null;
-    const preventDefault = capturePrototypeMethod<(event: Event) => void>(
-      ownerWindow.Event.prototype,
-      "preventDefault",
-    );
-    const stopPropagation = capturePrototypeMethod<(event: Event) => void>(
-      ownerWindow.Event.prototype,
-      "stopPropagation",
-    );
-    const stopImmediatePropagation = capturePrototypeMethod<
-      (event: Event) => void
-    >(ownerWindow.Event.prototype, "stopImmediatePropagation");
-    const focus = capturePrototypeMethod<
-      (element: HTMLElement, options?: FocusOptions) => void
-    >(ownerWindow.HTMLElement.prototype, "focus");
+    const eventTargetPrototype = ownerWindow.EventTarget.prototype;
+    const addEventListener = eventTargetPrototype.addEventListener;
+    const removeEventListener = eventTargetPrototype.removeEventListener;
+    const addWindowEventListener = ownerWindow.addEventListener;
+    const removeWindowEventListener = ownerWindow.removeEventListener;
+    const focus = ownerWindow.HTMLElement.prototype.focus;
+    const apply = ownerWindow.Reflect.apply;
     if (
       !eventCurrentTarget ||
       !trustedAuthority ||
@@ -7899,6 +8007,8 @@ function createFilterPublication(
       !eventPhase ||
       !eventBubbles ||
       !eventCancelable ||
+      !eventComposed ||
+      !eventTimeStamp ||
       !eventCancelBubble ||
       !keyboardKey ||
       !keyboardCtrl ||
@@ -7907,18 +8017,27 @@ function createFilterPublication(
       !keyboardShift ||
       !keyboardRepeat ||
       !keyboardComposing ||
+      !keyboardCode ||
+      !keyboardLocation ||
+      !keyboardCharCode ||
+      !keyboardKeyCode ||
+      !uiView ||
+      !uiDetail ||
       !composedPath ||
-      !addEventListener ||
-      !removeEventListener ||
-      !addWindowEventListener ||
-      !removeWindowEventListener ||
-      !preventDefault ||
-      !stopPropagation ||
-      !stopImmediatePropagation ||
-      !focus
+      typeof addEventListener !== "function" ||
+      typeof removeEventListener !== "function" ||
+      typeof addWindowEventListener !== "function" ||
+      typeof removeWindowEventListener !== "function" ||
+      typeof focus !== "function"
     ) {
       return null;
     }
+    const nativeOwnerWindow = ownerWindow;
+    const nativeEventCurrentTarget = eventCurrentTarget;
+    const nativeEventPhase = eventPhase;
+    const nativeEventDefaultPrevented = eventDefaultPrevented;
+    const nativeEventCancelBubble = eventCancelBubble;
+    const nativeComposedPath = composedPath;
     let keyboardAuthorityHistoryIsClean = true;
     const keyboardAuthorityIsCurrent = () => {
       if (!keyboardAuthorityHistoryIsClean) return false;
@@ -7927,6 +8046,24 @@ function createFilterPublication(
         trustedAuthority.isCurrent() &&
         activeElementAuthority.isCurrent();
       return keyboardAuthorityHistoryIsClean;
+    };
+    let listenerAuthorityHistoryIsClean = true;
+    const listenerAuthorityIsCurrent = () => {
+      if (!listenerAuthorityHistoryIsClean) return false;
+      try {
+        listenerAuthorityHistoryIsClean =
+          ownerDocument.defaultView === ownerWindow &&
+          ownerWindow.EventTarget.prototype === eventTargetPrototype &&
+          eventTargetPrototype.addEventListener === addEventListener &&
+          eventTargetPrototype.removeEventListener === removeEventListener &&
+          ownerWindow.addEventListener === addWindowEventListener &&
+          ownerWindow.removeEventListener === removeWindowEventListener &&
+          ownerWindow.HTMLElement.prototype.focus === focus &&
+          ownerWindow.Reflect.apply === apply;
+      } catch {
+        listenerAuthorityHistoryIsClean = false;
+      }
+      return listenerAuthorityHistoryIsClean;
     };
 
     const placement = searchControlPlacement(group);
@@ -7969,14 +8106,11 @@ function createFilterPublication(
     let established = false;
     let refs: FilterRefReplay[] = [];
     let guard: SearchControlDomGuard | null = null;
-    let nativeProof: FilterNativeKeyProof | null = null;
-    let reactGroupProof: object | null = null;
-    let reactCaptureProof: object | null = null;
-    let reactBubbleProof: object | null = null;
-    let boundaryProof: FilterNativeKeyProof | null = null;
-    let terminal: FilterTerminalKeyProof | null = null;
-    let windowTerminal: FilterTerminalKeyProof | null = null;
-    let terminalWindow: Window | null = null;
+    let keyPairs: WeakMap<KeyboardEvent, FilterKeyPair> | null = new WeakMap();
+    let seenNativeEvents: WeakSet<Event> | null = new WeakSet();
+    let publicCallbackPair: FilterKeyPair | null = null;
+    let windowListenerAttached = false;
+    let listenersAttached = false;
 
     const publication: FilterPublication = Object.freeze({
       identity,
@@ -7994,24 +8128,9 @@ function createFilterPublication(
       guard?.release();
       guard = null;
     };
-    const removeWindowListener = () => {
-      if (!terminalWindow) return;
-      TRUSTED_REFLECT_APPLY(removeWindowEventListener, terminalWindow, [
-        "keydown",
-        onNativeWindowBubble,
-      ]);
-      terminalWindow = null;
-    };
-    const clearProof = (proof?: FilterNativeKeyProof) => {
-      if (proof && nativeProof !== proof) return;
-      removeWindowListener();
-      nativeProof = null;
-      reactGroupProof = null;
-      reactCaptureProof = null;
-      reactBubbleProof = null;
-      boundaryProof = null;
-      terminal = null;
-      windowTerminal = null;
+    const revokePairingAccess = () => {
+      keyPairs = null;
+      seenNativeEvents = null;
     };
     const retire = (reason: Retirement) => {
       if (reason === "layout") layoutRetired = true;
@@ -8027,7 +8146,7 @@ function createFilterPublication(
       }
       retired = true;
       retirement = reason;
-      clearProof();
+      revokePairingAccess();
       releaseNativeListeners();
       if (cells.active === publication) {
         cells.active = null;
@@ -8091,400 +8210,1137 @@ function createFilterPublication(
         publishedEntries.find(({ element }) => element === target) ?? null
       );
     };
-    const nativeStillMatches = (proof: FilterNativeKeyProof) =>
-      keyboardAuthorityIsCurrent() &&
-      trustedAuthority.matches(proof.event) &&
-      trustedAuthority.read(proof.event) === proof.trusted &&
-      eventTarget(proof.event) === proof.target &&
-      eventType(proof.event) === "keydown" &&
-      eventBubbles(proof.event) &&
-      eventCancelable(proof.event) &&
-      keyboardKey(proof.event) === proof.key &&
-      keyboardCtrl(proof.event) === proof.ctrlKey &&
-      keyboardMeta(proof.event) === proof.metaKey &&
-      keyboardAlt(proof.event) === proof.altKey &&
-      keyboardShift(proof.event) === proof.shiftKey &&
-      keyboardRepeat(proof.event) === proof.repeat &&
-      keyboardComposing(proof.event) === proof.composing;
+    const pathsMatch = (
+      expected: readonly EventTarget[],
+      current: readonly EventTarget[],
+    ) =>
+      expected.length === current.length &&
+      expected.every((entry, index) => current[index] === entry);
+    const nativeStillMatches = (
+      proof: FilterNativeKeyProof,
+      expectedDefaultPrevented = false,
+      completedDispatch = false,
+    ) => {
+      try {
+        const path = composedPath(proof.event);
+        const view = uiView(proof.event);
+        const pathIsCurrent =
+          pathsMatch(proof.path, path) &&
+          path.at(-2) === ownerDocument &&
+          path.at(-1) === proof.windowReceiver;
+        const dispatchIsComplete =
+          completedDispatch &&
+          path.length === 0 &&
+          eventCurrentTarget(proof.event) === null &&
+          eventPhase(proof.event) === ownerWindow.Event.NONE;
+        return (
+          keyboardAuthorityIsCurrent() &&
+          listenerAuthorityIsCurrent() &&
+          proof.event instanceof ownerWindow.KeyboardEvent &&
+          TRUSTED_OBJECT_GET_PROTOTYPE_OF(proof.event) ===
+            ownerWindow.KeyboardEvent.prototype &&
+          trustedAuthority.matches(proof.event) &&
+          trustedAuthority.read(proof.event) === proof.trusted &&
+          eventTarget(proof.event) === proof.target &&
+          eventType(proof.event) === "keydown" &&
+          eventBubbles(proof.event) === proof.bubbles &&
+          eventCancelable(proof.event) === proof.cancelable &&
+          eventComposed(proof.event) === proof.composed &&
+          eventTimeStamp(proof.event) === proof.timeStamp &&
+          eventDefaultPrevented(proof.event) === expectedDefaultPrevented &&
+          eventCancelBubble(proof.event) === false &&
+          keyboardKey(proof.event) === proof.key &&
+          keyboardCode(proof.event) === proof.code &&
+          keyboardLocation(proof.event) === proof.location &&
+          keyboardCharCode(proof.event) === proof.charCode &&
+          keyboardKeyCode(proof.event) === proof.keyCode &&
+          keyboardCtrl(proof.event) === proof.ctrlKey &&
+          keyboardMeta(proof.event) === proof.metaKey &&
+          keyboardAlt(proof.event) === proof.altKey &&
+          keyboardShift(proof.event) === proof.shiftKey &&
+          keyboardRepeat(proof.event) === proof.repeat &&
+          keyboardComposing(proof.event) === proof.composing &&
+          uiDetail(proof.event) === proof.detail &&
+          Object.is(view, proof.view) &&
+          (view === null ||
+            view === ownerWindow ||
+            view === proof.windowReceiver) &&
+          (pathIsCurrent || dispatchIsComplete)
+        );
+      } catch {
+        return false;
+      }
+    };
 
     const exactNativeEvent = (
       event: Event,
       entry: FilterEntryPublication,
-    ): FilterNativeKeyProof | null => {
-      if (
-        !publicationOwnsCurrentDom() ||
-        !keyboardAuthorityIsCurrent() ||
-        !trustedAuthority.matches(event) ||
-        trustedAuthority.read(event) !== true ||
-        eventCurrentTarget(event) !== ownerDocument ||
-        eventPhase(event) !== ownerWindow.Event.CAPTURING_PHASE ||
-        !eventBubbles(event) ||
-        !eventCancelable(event) ||
-        eventDefaultPrevented(event) ||
-        eventCancelBubble(event) ||
-        activeElementAuthority.read(ownerDocument) !== entry.element ||
-        entry.publicationIdentity !== identity ||
-        entry.action.publicationIdentity !== identity ||
-        entry.action.entryIdentity !== entry.identity ||
-        render.filter !== entry.definition.value ||
-        render.currentFilter() !== render.filter
-      ) {
+    ): FilterKeyPair | null => {
+      try {
+        if (
+          !publicationOwnsCurrentDom() ||
+          !keyboardAuthorityIsCurrent() ||
+          !listenerAuthorityIsCurrent() ||
+          !(event instanceof ownerWindow.KeyboardEvent) ||
+          TRUSTED_OBJECT_GET_PROTOTYPE_OF(event) !==
+            ownerWindow.KeyboardEvent.prototype ||
+          !trustedAuthority.matches(event) ||
+          trustedAuthority.read(event) !== true ||
+          eventCurrentTarget(event) !== ownerDocument ||
+          eventPhase(event) !== ownerWindow.Event.CAPTURING_PHASE ||
+          !eventBubbles(event) ||
+          !eventCancelable(event) ||
+          eventDefaultPrevented(event) ||
+          eventCancelBubble(event) ||
+          activeElementAuthority.read(ownerDocument) !== entry.element ||
+          entry.publicationIdentity !== identity ||
+          entry.action.publicationIdentity !== identity ||
+          entry.action.entryIdentity !== entry.identity ||
+          render.filter !== entry.definition.value ||
+          render.currentFilter() !== render.filter
+        ) {
+          return null;
+        }
+        const key = keyboardKey(event);
+        const destinationIndex = filterDestination(key, entry.index);
+        const destination =
+          destinationIndex === null ? null : publishedEntries[destinationIndex];
+        const path = composedPath(event);
+        const view = uiView(event);
+        if (
+          !destination ||
+          keyboardCtrl(event) ||
+          keyboardMeta(event) ||
+          keyboardAlt(event) ||
+          keyboardShift(event) ||
+          keyboardRepeat(event) ||
+          keyboardComposing(event) ||
+          path.length !== entry.path.length ||
+          !entry.path
+            .slice(0, -1)
+            .every((target, index) => path[index] === target) ||
+          path.at(-2) !== ownerDocument ||
+          !path.at(-1) ||
+          (view !== null &&
+            view !== ownerWindow &&
+            view !== path.at(-1))
+        ) {
+          return null;
+        }
+        const nativeEvent = event as KeyboardEvent;
+        const documentCapture = Object.freeze<FilterDocumentKeyProof>({
+          event: nativeEvent,
+          receiver: ownerDocument,
+          currentTarget: ownerDocument,
+          phase: ownerWindow.Event.CAPTURING_PHASE,
+        });
+        const movement = Object.freeze<FilterKeyboardMovement>({
+          identity: Symbol("dashboard-filter-keyboard-movement"),
+          publication,
+          definitions: render.definitions,
+          source: entry,
+          destination,
+          key,
+        });
+        const native = Object.freeze<FilterNativeKeyProof>({
+          identity: Symbol("dashboard-filter-native-key"),
+          event: nativeEvent,
+          publication,
+          entry,
+          action: entry.action,
+          target: entry.element,
+          path: Object.freeze([...path]),
+          windowReceiver: path.at(-1)!,
+          key,
+          code: keyboardCode(event),
+          location: keyboardLocation(event),
+          charCode: keyboardCharCode(event),
+          keyCode: keyboardKeyCode(event),
+          ctrlKey: false,
+          metaKey: false,
+          altKey: false,
+          shiftKey: false,
+          repeat: false,
+          composing: false,
+          bubbles: true,
+          cancelable: true,
+          composed: eventComposed(event),
+          timeStamp: eventTimeStamp(event),
+          view,
+          detail: uiDetail(event),
+          destination: destination.definition.value,
+          destinationButton: destination.element,
+          trusted: true,
+          documentCapture,
+          movement,
+        });
+        return {
+          native,
+          token: Symbol("dashboard-filter-keyboard-delivery"),
+          state: "staged",
+          buttonBoundary: null,
+          groupCapture: null,
+          buttonCapture: null,
+          buttonBubble: null,
+          bubbleDefaultQuery: null,
+          documentBubble: null,
+          windowProof: null,
+        };
+      } catch {
         return null;
       }
-      const key = keyboardKey(event);
-      const destinationIndex = filterDestination(key, entry.index);
-      const destination = destinationIndex === null
-        ? null
-        : publishedEntries[destinationIndex];
-      if (
-        !destination ||
-        keyboardCtrl(event) ||
-        keyboardMeta(event) ||
-        keyboardAlt(event) ||
-        keyboardShift(event) ||
-        keyboardRepeat(event) ||
-        keyboardComposing(event) ||
-        !searchControlPathMatches(
-          entry.path,
-          composedPath(event),
-          ownerDocument,
-        ) ||
-        TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
-          event,
-          "stopPropagation",
-        ) ||
-        TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
-          event,
-          "stopImmediatePropagation",
-        )
-      ) {
-        return null;
-      }
-      let propagationStopped = false;
-      if (
-        !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopPropagation", {
-          configurable: false,
-          enumerable: false,
-          writable: false,
-          value: () => {
-            propagationStopped = true;
-            stopPropagation(event);
-          },
-        }) ||
-        !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopImmediatePropagation", {
-          configurable: false,
-          enumerable: false,
-          writable: false,
-          value: () => {
-            propagationStopped = true;
-            stopImmediatePropagation(event);
-          },
-        })
-      ) {
-        return null;
-      }
-      return {
-        identity: Symbol("dashboard-filter-native-key"),
-        event: event as KeyboardEvent,
-        publication,
-        entry,
-        action: entry.action,
-        target: entry.element,
-        path: entry.path,
-        key,
-        ctrlKey: false,
-        metaKey: false,
-        altKey: false,
-        shiftKey: false,
-        repeat: false,
-        composing: false,
-        destination: destination.definition.value,
-        destinationButton: destination.element,
-        trusted: true,
-        propagationStopped: () => propagationStopped,
-        crossed: false,
-      };
     };
 
     const beginNativeEvent = (event: Event) => {
-      const entry = entryForEvent(event);
-      if (!entry) return null;
-      if (nativeProof) {
-        if (nativeProof.event === event) return nativeProof;
-        nativeProof.crossed = true;
-        cells.attemptedNativeEvents.add(event);
+      const pairs = keyPairs;
+      const seen = seenNativeEvents;
+      if (
+        !pairs ||
+        !seen ||
+        retired ||
+        publicCallbackPair !== null ||
+        cells.delivery !== null ||
+        cells.claimedNativeEvents.has(event)
+      ) {
         return null;
       }
-      if (cells.attemptedNativeEvents.has(event)) return null;
-      cells.attemptedNativeEvents.add(event);
-      const proof = exactNativeEvent(event, entry);
-      if (!proof) return null;
-      nativeProof = proof;
+      const entry = entryForEvent(event);
+      if (!entry) return null;
+      const existing = pairs.get(event as KeyboardEvent);
+      if (existing) {
+        existing.state = "replayed";
+        return null;
+      }
+      if (seen.has(event)) return null;
+      const pair = exactNativeEvent(event, entry);
+      if (!pair || keyPairs !== pairs || seenNativeEvents !== seen) return null;
+      seen.add(event);
+      pairs.set(pair.native.event, pair);
+      try {
+        apply(addWindowEventListener, ownerWindow, [
+          "keydown",
+          onNativeWindowBubble,
+        ]);
+        windowListenerAttached = true;
+      } catch {
+        abandonPair(pair);
+        return null;
+      }
+      if (!listenerAuthorityIsCurrent()) {
+        releaseWindowListener();
+        abandonPair(pair);
+        return null;
+      }
+      cells.delivery = pair.token;
+      // Interrupted propagation must not strand route exclusion; the weak pair remains.
       queueMicrotask(() => {
-        if (nativeProof !== proof || terminal) return;
-        clearProof(proof);
-        publication.retire();
-        requestSuccessor();
+        if (cells.delivery === pair.token) cells.delivery = null;
+        if (pair.windowProof === null) releaseWindowListener();
       });
-      return proof;
+      return pair;
+    };
+    const abandonPair = (pair: FilterKeyPair) => {
+      if (keyPairs?.get(pair.native.event) === pair) {
+        keyPairs.delete(pair.native.event);
+      }
+      pair.state = "consumed";
+      if (cells.delivery === pair.token) cells.delivery = null;
     };
 
-    const reactEventMatches = (
-      event: object,
-      proof: FilterNativeKeyProof,
-      currentTarget: Element,
+    const captureReactProof = (
+      event: ReactKeyboardEvent<HTMLElement>,
+      pair: FilterKeyPair,
+      currentTarget: HTMLElement,
+      phase: number,
+    ): FilterReactKeyProof | null => {
+      try {
+        const methods = Object.freeze<FilterReactKeyMethods>({
+          preventDefault: event.preventDefault as (...args: never[]) => unknown,
+          isDefaultPrevented: event.isDefaultPrevented as (
+            ...args: never[]
+          ) => unknown,
+          isPropagationStopped: event.isPropagationStopped as (
+            ...args: never[]
+          ) => unknown,
+        });
+        const view: unknown = event.view;
+        const eventWithComposing = event as ReactKeyboardEvent<HTMLElement> & {
+          readonly isComposing?: unknown;
+        };
+        const composing =
+          eventWithComposing.isComposing === undefined
+            ? undefined
+            : eventWithComposing.isComposing;
+        if (
+          event.nativeEvent !== pair.native.event ||
+          event.type !== "keydown" ||
+          event.target !== pair.native.target ||
+          event.currentTarget !== currentTarget ||
+          event.eventPhase !== phase ||
+          event.bubbles !== true ||
+          event.cancelable !== true ||
+          event.defaultPrevented !== false ||
+          event.isTrusted !== true ||
+          event.key !== pair.native.key ||
+          event.code !== pair.native.code ||
+          event.location !== pair.native.location ||
+          event.charCode !== pair.native.charCode ||
+          event.keyCode !== pair.native.keyCode ||
+          event.repeat !== false ||
+          (composing !== undefined && composing !== false) ||
+          event.ctrlKey !== false ||
+          event.metaKey !== false ||
+          event.altKey !== false ||
+          event.shiftKey !== false ||
+          event.detail !== pair.native.detail ||
+          !Object.is(view, pair.native.view) ||
+          (view !== null &&
+            view !== ownerWindow &&
+            view !== pair.native.windowReceiver) ||
+          typeof methods.preventDefault !== "function" ||
+          typeof methods.isDefaultPrevented !== "function" ||
+          typeof methods.isPropagationStopped !== "function"
+        ) {
+          return null;
+        }
+        return Object.freeze({
+          event,
+          nativeEvent: pair.native.event,
+          target: pair.native.target,
+          currentTarget,
+          type: "keydown",
+          phase,
+          bubbles: true,
+          cancelable: true,
+          defaultPrevented: false,
+          trusted: true,
+          view,
+          key: pair.native.key,
+          code: pair.native.code,
+          location: pair.native.location,
+          charCode: pair.native.charCode,
+          keyCode: pair.native.keyCode,
+          repeat: false,
+          composing,
+          ctrlKey: false,
+          metaKey: false,
+          altKey: false,
+          shiftKey: false,
+          detail: pair.native.detail,
+          methods,
+        });
+      } catch {
+        return null;
+      }
+    };
+
+    const reactProofIsCurrent = (
+      proof: FilterReactKeyProof,
+      expectedDefaultPrevented = false,
+      defaultQuery: (...args: never[]) => unknown =
+        proof.methods.isDefaultPrevented,
+      atDelivery = false,
     ) => {
-      const composing = searchControlOwnValue(event, "isComposing");
-      return (
-        searchControlOwnValue(event, "_reactName") === "onKeyDown" &&
-        searchControlOwnValue(event, "type") === "keydown" &&
-        searchControlOwnValue(event, "nativeEvent") === proof.event &&
-        searchControlOwnValue(event, "target") === proof.target &&
-        searchControlOwnValue(event, "currentTarget") === currentTarget &&
-        searchControlOwnValue(event, "bubbles") === true &&
-        searchControlOwnValue(event, "cancelable") === true &&
-        searchControlOwnValue(event, "defaultPrevented") === false &&
-        searchControlOwnValue(event, "isTrusted") === proof.trusted &&
-        searchControlOwnValue(event, "key") === proof.key &&
-        searchControlOwnValue(event, "ctrlKey") === false &&
-        searchControlOwnValue(event, "metaKey") === false &&
-        searchControlOwnValue(event, "altKey") === false &&
-        searchControlOwnValue(event, "shiftKey") === false &&
-        searchControlOwnValue(event, "repeat") === false &&
-        (composing === SEARCH_CONTROL_MISSING || composing === false)
+      try {
+        const event = proof.event;
+        return (
+          event.nativeEvent === proof.nativeEvent &&
+          event.type === proof.type &&
+          event.target === proof.target &&
+          (!atDelivery || event.currentTarget === proof.currentTarget) &&
+          event.eventPhase === proof.phase &&
+          event.bubbles === proof.bubbles &&
+          event.cancelable === proof.cancelable &&
+          event.defaultPrevented === expectedDefaultPrevented &&
+          event.isTrusted === proof.trusted &&
+          Object.is(event.view, proof.view) &&
+          event.key === proof.key &&
+          event.code === proof.code &&
+          event.location === proof.location &&
+          event.charCode === proof.charCode &&
+          event.keyCode === proof.keyCode &&
+          event.repeat === proof.repeat &&
+          (event as ReactKeyboardEvent<HTMLElement> & {
+            readonly isComposing?: unknown;
+          }).isComposing === proof.composing &&
+          event.ctrlKey === proof.ctrlKey &&
+          event.metaKey === proof.metaKey &&
+          event.altKey === proof.altKey &&
+          event.shiftKey === proof.shiftKey &&
+          event.detail === proof.detail &&
+          event.preventDefault === proof.methods.preventDefault &&
+          event.isDefaultPrevented === defaultQuery &&
+          event.isPropagationStopped ===
+            proof.methods.isPropagationStopped
+        );
+      } catch {
+        return false;
+      }
+    };
+
+    const pairBaseIsCurrent = (
+      pair: FilterKeyPair,
+      expectedDefaultPrevented = false,
+      expectedFilter: Filter = render.filter,
+    ) => {
+      const pairs = keyPairs;
+      const native = pair.native;
+      return Boolean(
+        pairs &&
+          pairs.get(native.event) === pair &&
+          pair.state !== "replayed" &&
+          currentRuntime?.publication === publication &&
+          listenersAttached &&
+          (cells.delivery === null || cells.delivery === pair.token) &&
+          native.publication === publication &&
+          native.entry === pair.native.movement.source &&
+          native.action === native.entry.action &&
+          native.destination === native.movement.destination.definition.value &&
+          native.destinationButton === native.movement.destination.element &&
+          native.movement.publication === publication &&
+          native.movement.definitions === render.definitions &&
+          native.movement.key === native.key &&
+          render.definitions === FILTERS &&
+          render.currentFilter() === expectedFilter &&
+          filterElementsAreExact(render, owners, expectedFilter) &&
+          publicationOwnsCurrentDom() &&
+          activeElementAuthority.read(ownerDocument) === native.target &&
+          nativeStillMatches(
+            native,
+            expectedDefaultPrevented,
+            pair.windowProof !== null,
+          ),
       );
     };
 
-    const captureGroup = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const storedReactProofsAreCurrent = (
+      pair: FilterKeyPair,
+      expectedDefaultPrevented = false,
+      bubbleDefaultQuery?: (...args: never[]) => unknown,
+    ) => {
+      const bubble = pair.buttonBubble;
+      const proofs = [
+        pair.groupCapture,
+        pair.buttonCapture,
+        bubble,
+      ].filter((proof): proof is FilterReactKeyProof => proof !== null);
+      return proofs.every((proof) => {
+        const isBubbleEvent = Boolean(
+          bubble && proof.event === bubble.event && expectedDefaultPrevented,
+        );
+        return reactProofIsCurrent(
+          proof,
+          isBubbleEvent,
+          isBubbleEvent && bubbleDefaultQuery
+            ? bubbleDefaultQuery
+            : proof.methods.isDefaultPrevented,
+        );
+      });
+    };
+
+    const invokePairPublic = (
+      pair: FilterKeyPair,
+      callback: (...args: never[]) => unknown,
+      receiver: object,
+    ): { readonly value: unknown } | null => {
+      if (
+        publicCallbackPair !== null ||
+        (cells.delivery !== null && cells.delivery !== pair.token)
+      ) {
+        return null;
+      }
+      const acquired = cells.delivery === null;
+      if (acquired) cells.delivery = pair.token;
+      publicCallbackPair = pair;
+      try {
+        return Object.freeze({
+          value: apply(callback, receiver, []),
+        });
+      } catch {
+        return null;
+      } finally {
+        if (publicCallbackPair === pair) publicCallbackPair = null;
+        if (acquired && cells.delivery === pair.token) cells.delivery = null;
+      }
+    };
+
+    const authenticateReactDelivery = (
+      pair: FilterKeyPair,
+      event: ReactKeyboardEvent<HTMLElement>,
+      currentTarget: HTMLElement,
+      phase: number,
+    ) => {
       if (
         !event ||
         typeof event !== "object" ||
         cells.claimedReactEvents.has(event) ||
-        cells.attemptedReactEvents.has(event)
+        !pairBaseIsCurrent(pair) ||
+        !storedReactProofsAreCurrent(pair)
       ) {
-        return;
+        return null;
       }
-      cells.attemptedReactEvents.add(event);
-      const proof = nativeProof;
+      const proof = captureReactProof(event, pair, currentTarget, phase);
+      if (!proof || !reactProofIsCurrent(proof, false, undefined, true)) {
+        return null;
+      }
+      const defaultResult = invokePairPublic(
+        pair,
+        proof.methods.isDefaultPrevented,
+        proof.event,
+      );
       if (
-        !proof ||
-        reactGroupProof ||
-        !reactEventMatches(event, proof, group) ||
-        !publicationOwnsCurrentDom()
+        defaultResult?.value !== false ||
+        !pairBaseIsCurrent(pair) ||
+        !storedReactProofsAreCurrent(pair) ||
+        !reactProofIsCurrent(proof, false, undefined, true)
+      ) {
+        return null;
+      }
+      const propagationResult = invokePairPublic(
+        pair,
+        proof.methods.isPropagationStopped,
+        proof.event,
+      );
+      if (
+        propagationResult?.value !== false ||
+        !pairBaseIsCurrent(pair) ||
+        !storedReactProofsAreCurrent(pair) ||
+        !reactProofIsCurrent(proof, false, undefined, true)
+      ) {
+        return null;
+      }
+      return proof;
+    };
+
+    const captureGroup = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (publicCallbackPair !== null) return;
+      let nativeEvent: KeyboardEvent;
+      try {
+        nativeEvent = event.nativeEvent;
+      } catch {
+        return;
+      }
+      const pair = keyPairs?.get(nativeEvent);
+      if (
+        !pair ||
+        pair.groupCapture ||
+        pair.buttonCapture ||
+        pair.buttonBubble
       ) {
         return;
       }
-      reactGroupProof = event;
+      const proof = authenticateReactDelivery(
+        pair,
+        event,
+        group,
+        ownerWindow.Event.CAPTURING_PHASE,
+      );
+      if (proof && keyPairs?.get(nativeEvent) === pair) {
+        pair.groupCapture = proof;
+      }
     };
     const captureButton = (
       filter: Filter,
       event: ReactKeyboardEvent<HTMLButtonElement>,
     ) => {
-      const proof = nativeProof;
+      if (publicCallbackPair !== null) return;
+      let nativeEvent: KeyboardEvent;
+      try {
+        nativeEvent = event.nativeEvent;
+      } catch {
+        return;
+      }
+      const pair = keyPairs?.get(nativeEvent);
       if (
-        !proof ||
-        !reactGroupProof ||
-        reactCaptureProof ||
-        event !== reactGroupProof ||
-        proof.entry.definition.value !== filter ||
-        !reactEventMatches(event, proof, proof.entry.element)
+        !pair ||
+        !pair.groupCapture ||
+        pair.buttonCapture ||
+        pair.buttonBubble ||
+        pair.native.entry.definition.value !== filter
       ) {
         return;
       }
-      reactCaptureProof = event;
+      const proof = authenticateReactDelivery(
+        pair,
+        event,
+        pair.native.target,
+        ownerWindow.Event.CAPTURING_PHASE,
+      );
+      if (proof && keyPairs?.get(nativeEvent) === pair) {
+        pair.buttonCapture = proof;
+      }
     };
     const bubbleButton = (
       filter: Filter,
       event: ReactKeyboardEvent<HTMLButtonElement>,
     ) => {
-      const proof = nativeProof;
-      const isNewWrapper =
-        Boolean(event) &&
-        typeof event === "object" &&
-        event !== reactCaptureProof;
+      if (publicCallbackPair !== null) return;
+      let nativeEvent: KeyboardEvent;
+      try {
+        nativeEvent = event.nativeEvent;
+      } catch {
+        return;
+      }
+      const pair = keyPairs?.get(nativeEvent);
       if (
-        !proof ||
-        !reactCaptureProof ||
-        reactBubbleProof ||
-        (isNewWrapper &&
-          (cells.claimedReactEvents.has(event) ||
-            cells.attemptedReactEvents.has(event))) ||
-        proof.entry.definition.value !== filter ||
-        !reactEventMatches(event, proof, proof.entry.element)
+        !pair ||
+        !pair.groupCapture ||
+        !pair.buttonCapture ||
+        pair.buttonBubble ||
+        pair.native.entry.definition.value !== filter
       ) {
         return;
       }
-      if (isNewWrapper) cells.attemptedReactEvents.add(event);
-      reactBubbleProof = event;
+      const proof = authenticateReactDelivery(
+        pair,
+        event,
+        pair.native.target,
+        ownerWindow.Event.BUBBLING_PHASE,
+      );
+      if (
+        proof &&
+        keyPairs?.get(nativeEvent) === pair &&
+        storedReactProofsAreCurrent(pair)
+      ) {
+        pair.buttonBubble = proof;
+        pair.bubbleDefaultQuery = proof.methods.isDefaultPrevented;
+        pair.state = "paired";
+        if (pair.documentBubble && pair.windowProof) finalizePair(pair);
+      }
     };
 
-    const claim = (proof: FilterTerminalKeyProof) => {
-      const native = proof.native;
+    const pairIsCompleteAndCurrent = (
+      pair: FilterKeyPair,
+      expectedDefaultPrevented = false,
+      bubbleDefaultQuery?: (...args: never[]) => unknown,
+    ) =>
+      Boolean(
+        pair.state !== "replayed" &&
+          pair.buttonBoundary &&
+          pair.groupCapture &&
+          pair.buttonCapture &&
+          pair.buttonBubble &&
+          pair.documentBubble &&
+          pair.windowProof &&
+          pairBaseIsCurrent(pair, expectedDefaultPrevented) &&
+          storedReactProofsAreCurrent(
+            pair,
+            expectedDefaultPrevented,
+            bubbleDefaultQuery,
+          ),
+      );
+
+    const claimPair = (pair: FilterKeyPair): FilterKeyClaim | null => {
+      const pairs = keyPairs;
+      const native = pair.native;
+      const groupCapture = pair.groupCapture;
+      const buttonCapture = pair.buttonCapture;
+      const buttonBubble = pair.buttonBubble;
+      const buttonBoundary = pair.buttonBoundary;
+      const documentBubble = pair.documentBubble;
+      const windowProof = pair.windowProof;
       if (
+        !pairs ||
+        !groupCapture ||
+        !buttonCapture ||
+        !buttonBubble ||
+        !buttonBoundary ||
+        !documentBubble ||
+        !windowProof ||
+        !pairIsCompleteAndCurrent(pair) ||
         cells.claimedPublications.has(publication) ||
         cells.claimedEntries.has(native.entry) ||
         cells.claimedActions.has(native.action) ||
         cells.claimedNativeEvents.has(native.event) ||
-        cells.claimedReactEvents.has(proof.reactCaptureEvent) ||
-        cells.claimedReactEvents.has(proof.reactBubbleEvent)
+        cells.claimedMovements.has(native.movement) ||
+        cells.claimedWindowProofs.has(windowProof) ||
+        cells.claimedReactEvents.has(groupCapture.event) ||
+        cells.claimedReactEvents.has(buttonCapture.event) ||
+        cells.claimedReactEvents.has(buttonBubble.event)
       ) {
-        return false;
+        return null;
       }
+      const focusContinuation = Object.freeze({
+        publication,
+        movement: native.movement,
+        destination: native.movement.destination,
+        changeFilter: render.changeFilter,
+      });
+      const claim = Object.freeze<FilterKeyClaim>({
+        pair,
+        native,
+        publication,
+        definitions: render.definitions,
+        source: native.entry,
+        destination: native.movement.destination,
+        movement: native.movement,
+        groupCapture,
+        buttonCapture,
+        buttonBubble,
+        documentCapture: native.documentCapture,
+        buttonBoundary,
+        documentBubble,
+        windowProof,
+        authority: render.authority,
+        changeFilter: render.changeFilter,
+        requestSuccessor,
+        focusContinuation,
+        bubbleDefaultQuery: buttonBubble.methods.isDefaultPrevented,
+      });
+      const focusRequest = Object.freeze<FilterFocusRequest>({
+        claim,
+        source: publication,
+        authority: render.authority,
+        changeFilter: render.changeFilter,
+        destination: native.movement.destination,
+        button: native.destinationButton,
+        nativeEvent: native.event,
+        continuation: focusContinuation,
+      });
+      if (!pairs.delete(native.event)) return null;
+      pair.state = "finalizing";
       cells.claimedPublications.add(publication);
       cells.claimedEntries.add(native.entry);
       cells.claimedActions.add(native.action);
       cells.claimedNativeEvents.add(native.event);
-      cells.claimedReactEvents.add(proof.reactCaptureEvent);
-      cells.claimedReactEvents.add(proof.reactBubbleEvent);
-      return true;
+      cells.claimedMovements.add(native.movement);
+      cells.claimedWindowProofs.add(windowProof);
+      cells.claimedReactEvents.add(groupCapture.event);
+      cells.claimedReactEvents.add(buttonCapture.event);
+      cells.claimedReactEvents.add(buttonBubble.event);
+      cells.pendingFocus = focusRequest;
+      return claim;
     };
 
-    const authenticateTerminal = (proof: FilterNativeKeyProof) => {
+    const claimIsCurrent = (
+      claim: FilterKeyClaim,
+      expectedDefaultPrevented: boolean,
+      bubbleDefaultQuery: (...args: never[]) => unknown,
+      expectedFilter: Filter = render.filter,
+    ) => {
+      const pair = claim.pair;
+      const pending = cells.pendingFocus;
+      return Boolean(
+        cells.delivery === pair.token &&
+          pair.state === "finalizing" &&
+          keyPairs?.has(claim.native.event) === false &&
+          claim.native === pair.native &&
+          claim.publication === publication &&
+          claim.definitions === render.definitions &&
+          claim.source === claim.native.entry &&
+          claim.destination === claim.movement.destination &&
+          claim.movement === claim.native.movement &&
+          claim.groupCapture === pair.groupCapture &&
+          claim.buttonCapture === pair.buttonCapture &&
+          claim.buttonBubble === pair.buttonBubble &&
+          claim.documentCapture === claim.native.documentCapture &&
+          claim.buttonBoundary === pair.buttonBoundary &&
+          claim.documentBubble === pair.documentBubble &&
+          claim.windowProof === pair.windowProof &&
+          claim.authority === render.authority &&
+          claim.changeFilter === render.changeFilter &&
+          claim.requestSuccessor === requestSuccessor &&
+          pair.bubbleDefaultQuery === bubbleDefaultQuery &&
+          pending?.claim === claim &&
+          pending.source === publication &&
+          pending.authority === render.authority &&
+          pending.changeFilter === render.changeFilter &&
+          pending.destination === claim.destination &&
+          pending.button === claim.destination.element &&
+          pending.nativeEvent === claim.native.event &&
+          pending.continuation === claim.focusContinuation &&
+          cells.claimedPublications.has(publication) &&
+          cells.claimedEntries.has(claim.source) &&
+          cells.claimedActions.has(claim.source.action) &&
+          cells.claimedNativeEvents.has(claim.native.event) &&
+          cells.claimedMovements.has(claim.movement) &&
+          cells.claimedWindowProofs.has(claim.windowProof) &&
+          cells.claimedReactEvents.has(claim.groupCapture.event) &&
+          cells.claimedReactEvents.has(claim.buttonCapture.event) &&
+          cells.claimedReactEvents.has(claim.buttonBubble.event) &&
+          listenersAttached &&
+          listenerAuthorityIsCurrent() &&
+          currentRuntime?.publication === publication &&
+          render.currentFilter() === expectedFilter &&
+          filterElementsAreExact(render, owners, expectedFilter) &&
+          groupMatches() &&
+          Boolean(guard?.unchanged()) &&
+          activeElementAuthority.read(ownerDocument) === claim.source.element &&
+          nativeStillMatches(claim.native, expectedDefaultPrevented, true) &&
+          storedReactProofsAreCurrent(
+            pair,
+            expectedDefaultPrevented,
+            bubbleDefaultQuery,
+          ) &&
+          ((eventCurrentTarget(claim.native.event) ===
+            claim.native.windowReceiver &&
+            eventPhase(claim.native.event) ===
+              ownerWindow.Event.BUBBLING_PHASE) ||
+            (eventCurrentTarget(claim.native.event) === null &&
+              eventPhase(claim.native.event) === ownerWindow.Event.NONE)) &&
+          claim.windowProof.receiver === claim.native.windowReceiver &&
+          claim.windowProof.currentTarget === claim.native.windowReceiver &&
+          claim.windowProof.terminal === claim.native.windowReceiver &&
+          claim.windowProof.listener === onNativeWindowBubble &&
+          claim.windowProof.addEventListener === addWindowEventListener &&
+          claim.windowProof.removeEventListener === removeWindowEventListener,
+      );
+    };
+
+    const invokeClaimPublic = <Args extends readonly unknown[]>(
+      claim: FilterKeyClaim,
+      callback: (...args: Args) => unknown,
+      receiver: unknown,
+      args: Args,
+    ): { readonly value: unknown } | null => {
       if (
-        proof.crossed ||
-        boundaryProof !== proof ||
-        !reactGroupProof ||
-        reactCaptureProof !== reactGroupProof ||
-        !reactBubbleProof ||
-        !nativeStillMatches(proof) ||
-        !publicationOwnsCurrentDom() ||
-        activeElementAuthority.read(ownerDocument) !== proof.target
+        publicCallbackPair !== null ||
+        cells.delivery !== claim.pair.token
       ) {
         return null;
       }
-      return Object.freeze({
-        native: proof,
-        reactCaptureEvent: reactGroupProof,
-        reactBubbleEvent: reactBubbleProof,
-      });
-    };
-
-    const settleTerminal = (proof: FilterTerminalKeyProof) => {
-      const native = proof.native;
-      if (
-        terminal !== proof ||
-        windowTerminal !== proof ||
-        nativeProof !== native ||
-        cells.delivery !== null ||
-        cells.active !== publication ||
-        eventCurrentTarget(native.event) !== null ||
-        eventPhase(native.event) !== ownerWindow.Event.NONE ||
-        eventDefaultPrevented(native.event) ||
-        eventCancelBubble(native.event) ||
-        native.propagationStopped() ||
-        native.crossed ||
-        activeElementAuthority.read(ownerDocument) !== native.target ||
-        render.currentFilter() !== render.filter ||
-        !nativeStillMatches(native) ||
-        !publicationOwnsCurrentDom() ||
-        !claim(proof)
-      ) {
-        clearProof(native);
-        publication.retire();
-        requestSuccessor();
-        return;
-      }
-      cells.delivery = publication.identity;
-      cells.pendingFocus = Object.freeze({
-        source: publication,
-        authority: render.authority,
-        changeFilter: render.changeFilter,
-        destination: native.destination,
-        button: native.destinationButton,
-        nativeEvent: native.event,
-        reactCaptureEvent: proof.reactCaptureEvent,
-        reactBubbleEvent: proof.reactBubbleEvent,
-      });
-      publication.retire();
+      publicCallbackPair = claim.pair;
       try {
-        preventDefault(native.event);
-        render.changeFilter(native.destination);
-        requestSuccessor();
+        return Object.freeze({ value: apply(callback, receiver, args) });
+      } catch {
+        return null;
       } finally {
-        if (cells.delivery === publication.identity) cells.delivery = null;
+        if (publicCallbackPair === claim.pair) publicCallbackPair = null;
       }
     };
 
-    const onNativeWindowBubble = (event: Event) => {
-      if (
-        !terminal ||
-        terminal.native.event !== event ||
-        eventCurrentTarget(event) === null ||
-        eventPhase(event) !== ownerWindow.Event.BUBBLING_PHASE ||
-        eventDefaultPrevented(event) ||
-        eventCancelBubble(event) ||
-        terminal.native.propagationStopped() ||
-        !searchControlPathMatches(
-          terminal.native.path,
-          composedPath(event),
-          ownerDocument,
-        )
-      ) {
-        return;
-      };
-      windowTerminal = terminal;
-    }
-    const onNativeCapture = (event: Event) => {
-      beginNativeEvent(event);
+    const postCleanupClaimIsCurrent = (
+      claim: FilterKeyClaim,
+      bubbleDefaultQuery: (...args: never[]) => unknown,
+    ) => {
+      const pending = cells.pendingFocus;
+      return Boolean(
+        cells.delivery === claim.pair.token &&
+          claim.pair.state === "finalizing" &&
+          publication.isRetired() &&
+          currentRuntime?.publication !== publication &&
+          cells.active !== publication &&
+          cells.successorOf === publication &&
+          keyPairs === null &&
+          seenNativeEvents === null &&
+          !listenersAttached &&
+          render.currentFilter() === claim.destination.definition.value &&
+          render.changeFilter === claim.changeFilter &&
+          pending?.claim === claim &&
+          pending.source === publication &&
+          pending.destination === claim.destination &&
+          pending.button === claim.destination.element &&
+          pending.continuation === claim.focusContinuation &&
+          cells.claimedNativeEvents.has(claim.native.event) &&
+          cells.claimedMovements.has(claim.movement) &&
+          cells.claimedWindowProofs.has(claim.windowProof) &&
+          nativeStillMatches(claim.native, true, true) &&
+          storedReactProofsAreCurrent(
+            claim.pair,
+            true,
+            bubbleDefaultQuery,
+          ),
+      );
     };
-    const onNativeBubble = (event: Event) => {
-      const proof = nativeProof;
-      if (
-        !proof ||
-        proof.event !== event ||
-        eventCurrentTarget(event) !== ownerDocument ||
-        eventPhase(event) !== ownerWindow.Event.BUBBLING_PHASE ||
-        eventDefaultPrevented(event) ||
-        eventCancelBubble(event)
-      ) {
+
+    const finalizePair = (pair: FilterKeyPair) => {
+      if (cells.delivery !== null && cells.delivery !== pair.token) return;
+      cells.delivery = pair.token;
+      const claim = claimPair(pair);
+      if (!claim) {
+        if (cells.delivery === pair.token) cells.delivery = null;
         return;
       }
-      const authenticated = authenticateTerminal(proof);
-      const windowTarget = proof.path.at(-1);
-      if (!authenticated || windowTarget !== ownerWindow) {
-        return;
-      }
-      terminal = authenticated;
-      terminalWindow = ownerWindow;
-      TRUSTED_REFLECT_APPLY(addWindowEventListener, ownerWindow, [
-        "keydown",
-        onNativeWindowBubble,
-      ]);
-      queueMicrotask(() => {
-        if (terminal === authenticated) settleTerminal(authenticated);
-      });
-    };
-    const boundaryListeners = publishedEntries.map((entry) => {
-      const listener = (event: Event) => {
+      let selected = false;
+      let requested = false;
+      let bubbleDefaultQuery = claim.bubbleDefaultQuery;
+      try {
+        if (!claimIsCurrent(claim, false, bubbleDefaultQuery)) return;
+        const prevented = invokeClaimPublic(
+          claim,
+          claim.buttonBubble.methods.preventDefault,
+          claim.buttonBubble.event,
+          [],
+        );
+        if (!prevented) return;
+        try {
+          bubbleDefaultQuery = claim.buttonBubble.event
+            .isDefaultPrevented as (...args: never[]) => unknown;
+        } catch {
+          return;
+        }
         if (
-          nativeProof?.event === event &&
-          nativeProof.entry === entry &&
-          eventCurrentTarget(event) === entry.element &&
-          (eventPhase(event) === ownerWindow.Event.CAPTURING_PHASE ||
-            eventPhase(event) === ownerWindow.Event.AT_TARGET) &&
+          typeof bubbleDefaultQuery !== "function" ||
+          claim.buttonBubble.event.preventDefault !==
+            claim.buttonBubble.methods.preventDefault ||
+          claim.buttonBubble.event.isPropagationStopped !==
+            claim.buttonBubble.methods.isPropagationStopped
+        ) {
+          return;
+        }
+        pair.bubbleDefaultQuery = bubbleDefaultQuery;
+        if (!claimIsCurrent(claim, true, bubbleDefaultQuery)) return;
+        const defaultResult = invokeClaimPublic(
+          claim,
+          bubbleDefaultQuery,
+          claim.buttonBubble.event,
+          [],
+        );
+        if (
+          defaultResult?.value !== true ||
+          !claimIsCurrent(claim, true, bubbleDefaultQuery)
+        ) {
+          return;
+        }
+        const propagationResult = invokeClaimPublic(
+          claim,
+          claim.buttonBubble.methods.isPropagationStopped,
+          claim.buttonBubble.event,
+          [],
+        );
+        if (
+          propagationResult?.value !== false ||
+          !claimIsCurrent(claim, true, bubbleDefaultQuery)
+        ) {
+          return;
+        }
+        const changed = invokeClaimPublic(
+          claim,
+          claim.changeFilter,
+          undefined,
+          [claim.destination.definition.value],
+        );
+        if (
+          !changed ||
+          !claimIsCurrent(
+            claim,
+            true,
+            bubbleDefaultQuery,
+            claim.destination.definition.value,
+          )
+        ) {
+          return;
+        }
+        selected = true;
+        publication.retire();
+        if (!postCleanupClaimIsCurrent(claim, bubbleDefaultQuery)) return;
+        requested = true;
+        if (
+          !invokeClaimPublic(
+            claim,
+            claim.requestSuccessor,
+            undefined,
+            [],
+          ) ||
+          !postCleanupClaimIsCurrent(claim, bubbleDefaultQuery)
+        ) {
+          return;
+        }
+      } finally {
+        pair.state = "consumed";
+        if (!selected) {
+          if (cells.pendingFocus?.claim === claim) cells.pendingFocus = null;
+          publication.retire();
+          if (!requested && render.currentFilter() === render.filter) {
+            requested = true;
+            invokeClaimPublic(
+              claim,
+              claim.requestSuccessor,
+              undefined,
+              [],
+            );
+          }
+        }
+        if (cells.delivery === pair.token) cells.delivery = null;
+      }
+    };
+
+    function onNativeWindowBubble(this: EventTarget, event: Event) {
+      const pairs = keyPairs;
+      if (
+        !pairs ||
+        retired ||
+        publicCallbackPair !== null ||
+        cells.claimedNativeEvents.has(event) ||
+        !(event instanceof nativeOwnerWindow.KeyboardEvent)
+      ) {
+        return;
+      }
+      const pair = pairs.get(event);
+      if (!pair || cells.delivery !== pair.token) return;
+      if (
+        (pair.state !== "staged" && pair.state !== "paired") ||
+        !pair.buttonBoundary ||
+        !pair.documentBubble ||
+        pair.windowProof ||
+        nativeEventCurrentTarget(event) !== this ||
+        this !== pair.native.windowReceiver ||
+        nativeEventPhase(event) !== nativeOwnerWindow.Event.BUBBLING_PHASE ||
+        nativeEventDefaultPrevented(event) ||
+        nativeEventCancelBubble(event) ||
+        !pairBaseIsCurrent(pair)
+      ) {
+        releaseWindowListener();
+        abandonPair(pair);
+        return;
+      }
+      const path = nativeComposedPath(event);
+      if (
+        !pathsMatch(pair.native.path, path) ||
+        path.at(-2) !== ownerDocument ||
+        path.at(-1) !== this
+      ) {
+        releaseWindowListener();
+        abandonPair(pair);
+        return;
+      }
+      pair.windowProof = Object.freeze({
+        publication,
+        event,
+        listener: onNativeWindowBubble,
+        receiver: this,
+        currentTarget: this,
+        terminal: path.at(-1)!,
+        path: Object.freeze([...path]),
+        phase: nativeOwnerWindow.Event.BUBBLING_PHASE,
+        addEventListener: addWindowEventListener,
+        removeEventListener: removeWindowEventListener,
+      });
+      releaseWindowListener();
+      if (
+        pair.state === "paired" &&
+        pair.groupCapture &&
+        pair.buttonCapture &&
+        pair.buttonBubble &&
+        storedReactProofsAreCurrent(pair)
+      ) {
+        finalizePair(pair);
+      } else if (cells.delivery === pair.token) {
+        cells.delivery = null;
+      }
+    }
+
+    function onNativeCapture(this: EventTarget, event: Event) {
+      if (
+        publicCallbackPair !== null ||
+        this !== ownerDocument ||
+        nativeEventCurrentTarget(event) !== ownerDocument ||
+        nativeEventPhase(event) !== nativeOwnerWindow.Event.CAPTURING_PHASE
+      ) {
+        return;
+      }
+      beginNativeEvent(event);
+    }
+    function onNativeBubble(this: EventTarget, event: Event) {
+      if (publicCallbackPair !== null) return;
+      const pair = keyPairs?.get(event as KeyboardEvent);
+      if (
+        !pair ||
+        (pair.state !== "staged" && pair.state !== "paired") ||
+        !pair.buttonBoundary ||
+        pair.documentBubble ||
+        this !== ownerDocument ||
+        nativeEventCurrentTarget(event) !== ownerDocument ||
+        nativeEventPhase(event) !== nativeOwnerWindow.Event.BUBBLING_PHASE ||
+        nativeEventDefaultPrevented(event) ||
+        nativeEventCancelBubble(event) ||
+        !pairBaseIsCurrent(pair)
+      ) {
+        if (pair) abandonPair(pair);
+        return;
+      }
+      pair.documentBubble = Object.freeze({
+        event: pair.native.event,
+        receiver: ownerDocument,
+        currentTarget: ownerDocument,
+        phase: nativeOwnerWindow.Event.BUBBLING_PHASE,
+      });
+    }
+    const boundaryListeners = publishedEntries.map((entry) => {
+      const listener = function (this: EventTarget, event: Event) {
+        if (publicCallbackPair !== null) return;
+        const pair = keyPairs?.get(event as KeyboardEvent);
+        if (
+          pair &&
+          !pair.buttonBoundary &&
+          pair.native.entry === entry &&
+          this === entry.element &&
+          nativeEventCurrentTarget(event) === entry.element &&
+          (nativeEventPhase(event) ===
+            nativeOwnerWindow.Event.CAPTURING_PHASE ||
+            nativeEventPhase(event) === nativeOwnerWindow.Event.AT_TARGET) &&
+          pairBaseIsCurrent(pair) &&
           publicationOwnsCurrentDom() &&
           keyboardAuthorityIsCurrent() &&
           activeElementAuthority.read(ownerDocument) === entry.element
         ) {
-          boundaryProof = nativeProof;
+          pair.buttonBoundary = Object.freeze({
+            event: pair.native.event,
+            receiver: entry.element,
+            currentTarget: entry.element,
+            phase: eventPhase(event),
+          });
         }
       };
       return Object.freeze({ entry, listener });
     });
     const addNativeListeners = () => {
-      addEventListener(ownerDocument, "keydown", onNativeCapture, true);
-      addEventListener(ownerDocument, "keydown", onNativeBubble);
-      for (const { entry, listener } of boundaryListeners) {
-        addEventListener(entry.element, "keydown", listener, true);
+      if (listenersAttached || !listenerAuthorityIsCurrent()) return false;
+      try {
+        apply(addEventListener, ownerDocument, [
+          "keydown",
+          onNativeCapture,
+          true,
+        ]);
+        apply(addEventListener, ownerDocument, ["keydown", onNativeBubble]);
+        for (const { entry, listener } of boundaryListeners) {
+          apply(addEventListener, entry.element, ["keydown", listener, true]);
+        }
+        listenersAttached = true;
+        if (listenerAuthorityIsCurrent()) return true;
+        releaseNativeListeners();
+        return false;
+      } catch {
+        releaseNativeListeners();
+        return false;
       }
     };
-    const releaseNativeListeners = () => {
-      removeEventListener(ownerDocument, "keydown", onNativeCapture, true);
-      removeEventListener(ownerDocument, "keydown", onNativeBubble);
-      removeWindowListener();
-      for (const { entry, listener } of boundaryListeners) {
-        removeEventListener(entry.element, "keydown", listener, true);
-      };
+    function releaseWindowListener() {
+      if (!windowListenerAttached) return;
+      windowListenerAttached = false;
+      try {
+        apply(removeWindowEventListener, ownerWindow, [
+          "keydown",
+          onNativeWindowBubble,
+        ]);
+      } catch {
+        listenerAuthorityHistoryIsClean = false;
+      }
+    }
+    function releaseNativeListeners() {
+      releaseWindowListener();
+      if (!listenersAttached) return;
+      listenersAttached = false;
+      try {
+        apply(removeEventListener, ownerDocument, [
+          "keydown",
+          onNativeCapture,
+          true,
+        ]);
+        apply(removeEventListener, ownerDocument, [
+          "keydown",
+          onNativeBubble,
+        ]);
+        for (const { entry, listener } of boundaryListeners) {
+          apply(removeEventListener, entry.element, [
+            "keydown",
+            listener,
+            true,
+          ]);
+        }
+      } catch {
+        listenerAuthorityHistoryIsClean = false;
+      }
     }
 
     const completePendingFocus = () => {
@@ -8493,26 +9349,81 @@ function createFilterPublication(
         ({ definition }) => definition.value === render.filter,
       );
       if (!pending) return;
+      const claim = pending.claim;
+      const bubbleDefaultQuery = claim.pair.bubbleDefaultQuery;
       if (
+        !destination ||
+        typeof bubbleDefaultQuery !== "function" ||
+        pending.claim !== claim ||
         pending.authority !== render.authority ||
         pending.changeFilter !== render.changeFilter ||
-        pending.destination !== render.filter ||
-        pending.button !== destination?.element ||
+        pending.destination.definition.value !== render.filter ||
+        pending.destination !== claim.destination ||
+        pending.button !== destination.element ||
+        pending.button !== claim.destination.element ||
         pending.source.ownerDocument !== ownerDocument ||
+        pending.source.group !== group ||
         !pending.source.isRetired() ||
+        claim.pair.state !== "consumed" ||
+        claim.publication !== pending.source ||
+        claim.authority !== render.authority ||
+        claim.changeFilter !== render.changeFilter ||
+        claim.destination.definition.value !== render.filter ||
+        claim.destination.element !== destination.element ||
+        claim.focusContinuation !== pending.continuation ||
+        claim.native.destinationButton !== destination.element ||
         !cells.claimedPublications.has(pending.source) ||
         !cells.claimedNativeEvents.has(pending.nativeEvent) ||
-        !cells.claimedReactEvents.has(pending.reactCaptureEvent) ||
-        !cells.claimedReactEvents.has(pending.reactBubbleEvent) ||
+        !cells.claimedEntries.has(claim.source) ||
+        !cells.claimedActions.has(claim.source.action) ||
+        !cells.claimedMovements.has(claim.movement) ||
+        !cells.claimedWindowProofs.has(claim.windowProof) ||
+        !cells.claimedReactEvents.has(claim.groupCapture.event) ||
+        !cells.claimedReactEvents.has(claim.buttonCapture.event) ||
+        !cells.claimedReactEvents.has(claim.buttonBubble.event) ||
+        cells.claimedFocusRequests.has(pending) ||
         cells.active !== publication ||
         cells.delivery !== null ||
+        currentRuntime?.publication !== publication ||
+        render.currentFilter() !== render.filter ||
+        activeElementAuthority.read(ownerDocument) !== claim.source.element ||
+        !storedReactProofsAreCurrent(claim.pair, true, bubbleDefaultQuery) ||
+        !listenerAuthorityIsCurrent() ||
         !publicationOwnsCurrentDom()
       ) {
         cells.pendingFocus = null;
         return;
       }
+      cells.claimedFocusRequests.add(pending);
       cells.pendingFocus = null;
-      focus(destination.element, { preventScroll: true });
+      cells.delivery = claim.pair.token;
+      try {
+        const focused = invokeClaimPublic(
+          claim,
+          focus,
+          destination.element,
+          [{ preventScroll: true }],
+        );
+        if (
+          !focused ||
+          cells.delivery !== claim.pair.token ||
+          cells.pendingFocus !== null ||
+          !cells.claimedFocusRequests.has(pending) ||
+          cells.active !== publication ||
+          currentRuntime?.publication !== publication ||
+          render.currentFilter() !== render.filter ||
+          activeElementAuthority.read(ownerDocument) !== destination.element ||
+          !storedReactProofsAreCurrent(claim.pair, true, bubbleDefaultQuery) ||
+          !listenerAuthorityIsCurrent() ||
+          !publicationOwnsCurrentDom()
+        ) {
+          return;
+        }
+      } catch {
+        return;
+      } finally {
+        if (cells.delivery === claim.pair.token) cells.delivery = null;
+      }
     };
 
     const runtime: FilterPublicationRuntime = Object.freeze({
@@ -8550,7 +9461,11 @@ function createFilterPublication(
         cells.active = publication;
         cells.successorOf = null;
         cells.replay = null;
-        addNativeListeners();
+        if (!addNativeListeners()) {
+          if (cells.active === publication) cells.active = null;
+          releaseGuard();
+          return false;
+        }
         completePendingFocus();
         return true;
       },
@@ -10348,6 +11263,9 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     claimedActions: new WeakSet(),
     claimedReactEvents: new WeakSet(),
     claimedNativeEvents: new WeakSet(),
+    claimedMovements: new WeakSet(),
+    claimedWindowProofs: new WeakSet(),
+    claimedFocusRequests: new WeakSet(),
     attemptedReactEvents: new WeakSet(),
     attemptedNativeEvents: new WeakSet(),
   }));
