@@ -11190,7 +11190,6 @@ interface PublishMenuKeyboardAuthority {
   readonly getOwnPropertyDescriptor: typeof Object.getOwnPropertyDescriptor;
   readonly getPrototypeOf: typeof Object.getPrototypeOf;
   readonly apply: typeof Reflect.apply;
-  readonly set: typeof Reflect.set;
   readonly trusted: PublishMenuTrustedAuthority;
   readonly event: Readonly<{
     type: PublishMenuNativeGetter;
@@ -11288,23 +11287,26 @@ interface PublishMenuNativeSnapshot {
 }
 
 interface PublishMenuReactProof {
-  readonly prototype: object;
-  readonly descriptors: readonly PublishMenuCapturedDescriptor[];
+  readonly event: React.KeyboardEvent<HTMLButtonElement>;
+  readonly phase: "capture" | "bubble";
   readonly preventDefault: PublishMenuNativeMethod;
-  readonly stopPropagation: PublishMenuNativeMethod;
   readonly isDefaultPrevented: PublishMenuNativeMethod;
   readonly isPropagationStopped: PublishMenuNativeMethod;
-  readonly persist: PublishMenuNativeMethod;
-  readonly isPersistent: PublishMenuNativeMethod;
 }
+
+type PublishMenuReactBoundary = "captureTrigger" | "captureBoundary" | "bubbleTrigger" | "bubbleBoundary";
 
 interface PublishMenuKeyboardDelivery {
   readonly snapshot: PublishMenuNativeSnapshot;
-  reactEvent: React.KeyboardEvent<HTMLButtonElement> | null;
-  reactProof: PublishMenuReactProof | null;
-  bubbleCurrentTarget: EventTarget | null;
-  reactCount: number;
-  invalid: boolean;
+  readonly proofs: Partial<Record<PublishMenuReactBoundary, PublishMenuReactProof>>;
+  delegationTarget: EventTarget | null;
+  claimed: boolean;
+}
+
+interface PublishMenuKeyboardStorage {
+  current: WeakMap<KeyboardEvent, PublishMenuKeyboardDelivery> | null;
+  readonly seen: WeakSet<KeyboardEvent>;
+  reading: boolean;
 }
 
 interface PublishMenuClaimedArrow {
@@ -11315,6 +11317,8 @@ interface PublishMenuClaimedArrow {
   readonly nativeEvent: KeyboardEvent;
   readonly reactEvent: React.KeyboardEvent<HTMLButtonElement>;
   readonly reactProof: PublishMenuReactProof;
+  readonly delivery: PublishMenuKeyboardDelivery;
+  readonly retains: () => boolean;
 }
 
 interface PublishMenuOpenGuard {
@@ -11352,7 +11356,7 @@ interface PublishMenuPublication {
   readonly dom: PublishMenuDom;
   readonly keyboardAuthority: PublishMenuKeyboardAuthority | null;
   readonly keyboardListener: PublishMenuKeyboardListenerRegistration | null;
-  readonly keyboardEvents: Set<KeyboardEvent>;
+  readonly keyboardEvents: PublishMenuKeyboardStorage;
   readonly arrows: Readonly<Record<PublishMenuArrowKey, PublishMenuArrowAction>>;
   readonly triggerSnapshot: ModeSwitcherDomSnapshot;
   readonly contentSnapshot: ModeSwitcherDomSnapshot | null;
@@ -11380,6 +11384,8 @@ interface PublishMenuPresentation {
   readonly captureContent: React.RefCallback<HTMLDivElement>;
   readonly captureActions: Readonly<Record<PublishMenuActionName, React.RefCallback<HTMLDivElement>>>;
   readonly establish: () => (() => void) | undefined;
+  readonly onTriggerKeyDownCapture: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  readonly onBoundaryKeyDownCapture: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   readonly onTriggerKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   readonly onTriggerArrowKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
   readonly onOpenChange: (open: boolean) => void;
@@ -11444,7 +11450,6 @@ interface PublishMenuOwners {
 class PublishMenuPublicationCoordinator {
   #active: PublishMenuPublication | null = null;
   #successorOf: PublishMenuPublication | null = null;
-  #deliveries = new WeakMap<KeyboardEvent, PublishMenuKeyboardDelivery>();
   #claimedNativeEvents = new WeakSet<Event>();
   #claimedReactEvents = new WeakSet<object>();
   #claimedPublications = new WeakSet<PublishMenuPublication>();
@@ -11485,6 +11490,7 @@ class PublishMenuPublicationCoordinator {
 
   retire(publication: PublishMenuPublication) {
     if (this.#active !== publication) return false;
+    this.clearKeyboardEvents(publication);
     this.#active = null;
     this.#successorOf = publication;
     queueMicrotask(() => {
@@ -11515,18 +11521,32 @@ class PublishMenuPublicationCoordinator {
   }
 
   clearKeyboardEvents(publication: PublishMenuPublication) {
-    for (const event of publication.keyboardEvents) this.#deliveries.delete(event);
-    publication.keyboardEvents.clear();
+    publication.keyboardEvents.current = null;
   }
 
-  #clearKeyboardEvent(
+  runKeyboardDelivery<Value>(
     publication: PublishMenuPublication,
-    event: KeyboardEvent,
-    delivery?: PublishMenuKeyboardDelivery,
-  ) {
-    const current = this.#deliveries.get(event);
-    if (!delivery || current === delivery) this.#deliveries.delete(event);
-    publication.keyboardEvents.delete(event);
+    callback: () => Value,
+  ): Value | null {
+    const storage = publication.keyboardEvents;
+    if (this.#active !== publication || !storage.current || storage.reading) return null;
+    storage.reading = true;
+    try {
+      return callback();
+    } catch {
+      // Throwing public event accessors cannot authorize this delivery.
+      return null;
+    } finally {
+      storage.reading = false;
+    }
+  }
+
+  #retains(publication: PublishMenuPublication, delivery: PublishMenuKeyboardDelivery) {
+    return (
+      this.#active === publication
+      && publication.keyboardEvents.current?.get(delivery.snapshot.event) === delivery
+      && delivery.snapshot.publication === publication
+    );
   }
 
   stageNative(
@@ -11535,75 +11555,94 @@ class PublishMenuPublicationCoordinator {
     receiver: EventTarget,
     event: Event,
   ) {
-    const authority = publication.keyboardAuthority;
-    if (
-      this.#active === publication
-      && (!publication.isExact() || (authority !== null && !authority.historyIsClean()))
-    ) {
-      publication.retire();
-      return;
-    }
-    if (
-      !authority
-      || publication.keyboardListener !== registration
-      || !registration.isCurrent()
-      || !(event instanceof authority.ownerWindow.KeyboardEvent)
-      || this.#deliveries.has(event)
-      || this.#claimedNativeEvents.has(event)
-      || this.#claimedPublications.has(publication)
-      || this.#active !== publication
-    ) {
-      return;
-    }
-    const snapshot = readPublishMenuNativeEvent(
-      publication,
-      authority,
-      registration,
-      receiver,
-      event,
-    );
-    if (!snapshot) return;
-    const delivery: PublishMenuKeyboardDelivery = {
-      snapshot,
-      reactEvent: null,
-      reactProof: null,
-      bubbleCurrentTarget: null,
-      reactCount: 0,
-      invalid: false,
-    };
-    this.#deliveries.set(event, delivery);
-    publication.keyboardEvents.add(event);
-    queueMicrotask(() => this.#clearKeyboardEvent(publication, event, delivery));
+    return this.runKeyboardDelivery(publication, () => {
+      const authority = publication.keyboardAuthority;
+      if (
+        this.#active === publication
+        && (!publication.isExact() || (authority !== null && !authority.historyIsClean()))
+      ) {
+        publication.retire();
+        return;
+      }
+      if (
+        !authority
+        || publication.keyboardListener !== registration
+        || !registration.isCurrent()
+        || !(event instanceof authority.ownerWindow.KeyboardEvent)
+        || this.#claimedNativeEvents.has(event)
+        || this.#claimedPublications.has(publication)
+        || this.#active !== publication
+      ) {
+        return;
+      }
+      const snapshot = readPublishMenuNativeEvent(
+        publication,
+        authority,
+        registration,
+        receiver,
+        event,
+      );
+      if (!snapshot) return;
+      const storage = publication.keyboardEvents;
+      if (this.#active !== publication || !storage.current) return;
+      if (storage.seen.has(snapshot.event)) {
+        // Only an authenticated new Window capture can release an abandoned pair.
+        const previous = storage.current.get(snapshot.event);
+        if (previous?.proofs.captureTrigger) storage.current.delete(snapshot.event);
+        return;
+      }
+      const delivery: PublishMenuKeyboardDelivery = {
+        snapshot,
+        proofs: {},
+        delegationTarget: null,
+        claimed: false,
+      };
+      storage.seen.add(snapshot.event);
+      storage.current.set(snapshot.event, delivery);
+    });
   }
 
   stageReact(
     publication: PublishMenuPublication,
+    boundary: PublishMenuReactBoundary,
     event: React.KeyboardEvent<HTMLButtonElement>,
   ) {
-    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return;
-    const delivery = this.#deliveries.get(event.nativeEvent);
-    const proof = capturePublishMenuReactProof(event, publication.keyboardAuthority);
+    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return null;
+    const nativeEvent = event.nativeEvent;
+    const delivery = publication.keyboardEvents.current?.get(nativeEvent);
+    const authority = publication.keyboardAuthority;
+    const phase = boundary === "captureTrigger" || boundary === "captureBoundary"
+      ? "capture" : "bubble";
     if (
       !delivery
-      || delivery.invalid
-      || !proof
-      || delivery.snapshot.publication !== publication
-      || !publishMenuReactEventMatches(delivery, event, proof)
+      || !authority
+      || delivery.claimed
+      || delivery.proofs[boundary]
+      || !this.#retains(publication, delivery)
+      || (boundary === "captureBoundary" && !delivery.proofs.captureTrigger)
+      || (phase === "bubble" && !delivery.proofs.captureBoundary)
+      || (boundary === "bubbleBoundary" && !delivery.proofs.bubbleTrigger)
     ) {
-      return;
+      return null;
     }
-    delivery.reactCount += 1;
-    if (delivery.reactCount !== 1 || (delivery.reactEvent && delivery.reactEvent !== event)) {
-      delivery.invalid = true;
-      return;
+    const retains = () => this.#retains(publication, delivery) && !delivery.claimed;
+    const proof = capturePublishMenuReactProof(event, phase);
+    if (
+      !proof
+      || !publishMenuReactDeliveryMatches(delivery, phase, retains, proof)
+      || !retains()
+    ) {
+      return null;
     }
-    delivery.reactEvent = event;
-    delivery.reactProof = proof;
-    delivery.bubbleCurrentTarget = publishMenuNativeValue<EventTarget | null>(
-      publication.keyboardAuthority!.event.currentTarget,
-      event.nativeEvent,
-      publication.keyboardAuthority!,
+    const currentTarget = publishMenuNativeValue<EventTarget | null>(
+      authority.event.currentTarget,
+      nativeEvent,
+      authority,
     );
+    if (!retains() || currentTarget === null) return null;
+    delivery.delegationTarget = currentTarget;
+    delivery.proofs[boundary] = proof;
+    return delivery;
   }
 
   claim(
@@ -11611,10 +11650,10 @@ class PublishMenuPublicationCoordinator {
     event: React.KeyboardEvent<HTMLButtonElement>,
   ): PublishMenuClaimedArrow | null {
     if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) return null;
-    const nativeEvent = event.nativeEvent;
-    const delivery = this.#deliveries.get(nativeEvent);
+    const delivery = this.stageReact(publication, "bubbleBoundary", event);
     const snapshot = delivery?.snapshot;
-    const proof = delivery?.reactProof;
+    const nativeEvent = snapshot?.event;
+    const proof = delivery?.proofs.bubbleBoundary;
     const authority = publication.keyboardAuthority;
     const listenerProof = snapshot?.listenerProof;
     if (
@@ -11623,9 +11662,7 @@ class PublishMenuPublicationCoordinator {
       || !proof
       || !authority
       || !listenerProof
-      || delivery.invalid
-      || delivery.reactCount !== 1
-      || delivery.reactEvent !== event
+      || !nativeEvent
       || snapshot.publication !== publication
       || this.#claimedPublications.has(publication)
       || this.#claimedDirections.has(snapshot.action)
@@ -11637,17 +11674,27 @@ class PublishMenuPublicationCoordinator {
         nativeEvent,
         true,
       )
-      || !publishMenuReactEventMatches(delivery, event, proof)
-      || !publishMenuArrowIsCurrent(publication, snapshot.action)
-      || !publication.isExact()
+      || !publishMenuReactDeliveryMatches(
+        delivery,
+        "bubble",
+        () => this.#retains(publication, delivery) && !delivery.claimed,
+      )
+      || !this.#retains(publication, delivery)
+      || delivery.claimed
     ) {
+      if (delivery && !delivery.claimed && delivery.proofs.bubbleBoundary === proof) {
+        delete delivery.proofs.bubbleBoundary;
+      }
       return null;
     }
     this.#claimedPublications.add(publication);
     this.#claimedDirections.add(snapshot.action);
     this.#claimedReactEvents.add(event);
+    for (const participant of Object.values(delivery.proofs)) {
+      this.#claimedReactEvents.add(participant.event);
+    }
     this.#claimedNativeEvents.add(nativeEvent);
-    this.#clearKeyboardEvent(publication, nativeEvent, delivery);
+    delivery.claimed = true;
     return Object.freeze({
       publication,
       action: snapshot.action,
@@ -11656,13 +11703,23 @@ class PublishMenuPublicationCoordinator {
       nativeEvent,
       reactEvent: event,
       reactProof: proof,
+      delivery,
+      retains: () => (
+        this.#retains(publication, delivery)
+        && delivery.claimed
+        && this.#claimedPublications.has(publication)
+        && this.#claimedDirections.has(snapshot.action)
+        && this.#claimedNativeEvents.has(nativeEvent)
+        && this.#claimedReactEvents.has(event)
+      ),
     });
   }
 
   prepareOpen(claim: PublishMenuClaimedArrow) {
     const publication = claim.publication;
     if (
-      publication.render.open
+      !claim.retains()
+      || publication.render.open
       || this.#active !== publication
       || !this.#claimedPublications.has(publication)
       || !this.#claimedDirections.has(claim.action)
@@ -11679,6 +11736,10 @@ class PublishMenuPublicationCoordinator {
     }
     const guard = createPublishMenuOpenGuard(publication);
     if (!guard) return false;
+    if (!claim.retains()) {
+      guard.dispose();
+      return false;
+    }
     if (this.#openIntent) this.#clearOpenIntent(this.#openIntent);
     this.#openIntent = Object.freeze({
       source: publication,
@@ -11694,6 +11755,14 @@ class PublishMenuPublicationCoordinator {
 
   cancelOpen(publication: PublishMenuPublication) {
     if (this.#openIntent?.source === publication) this.#clearOpenIntent(this.#openIntent);
+  }
+
+  canCommitOpen(publication: PublishMenuPublication) {
+    return (
+      this.#active === null
+      && this.#successorOf === publication
+      && this.#openIntent?.source === publication
+    );
   }
 
   consumeOpen(publication: PublishMenuPublication, event: Event) {
@@ -11854,7 +11923,6 @@ function capturePublishMenuKeyboardAuthority(
   const getOwnPropertyDescriptor = ownerWindow.Object.getOwnPropertyDescriptor;
   const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
   const apply = ownerWindow.Reflect.apply;
-  const set = ownerWindow.Reflect.set;
   const eventPrototype = ownerWindow.Event.prototype;
   const customEventPrototype = ownerWindow.CustomEvent.prototype;
   const keyboardPrototype = ownerWindow.KeyboardEvent.prototype;
@@ -11925,7 +11993,6 @@ function capturePublishMenuKeyboardAuthority(
       && ownerWindow.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor
       && ownerWindow.Object.getPrototypeOf === getPrototypeOf
       && ownerWindow.Reflect.apply === apply
-      && ownerWindow.Reflect.set === set
       && ownerWindow.Event.prototype === eventPrototype
       && ownerWindow.CustomEvent.prototype === customEventPrototype
       && ownerWindow.KeyboardEvent.prototype === keyboardPrototype
@@ -11950,7 +12017,6 @@ function capturePublishMenuKeyboardAuthority(
     getOwnPropertyDescriptor,
     getPrototypeOf,
     apply,
-    set,
     trusted,
     event: Object.freeze({
       type: captures.type!.getter,
@@ -12357,68 +12423,34 @@ function readPublishMenuNativeEvent(
   }
 }
 
-function capturePublishMenuReactMethod(
-  value: object,
-  property: PropertyKey,
-  authority: PublishMenuKeyboardAuthority,
-) {
-  let current: object | null = value;
-  while (current && current !== authority.ownerWindow.Object.prototype) {
-    const capture = capturePublishMenuDescriptor(
-      current,
-      property,
-      authority.getOwnPropertyDescriptor,
-    );
-    if (capture) {
-      const method = capture.descriptor.value;
-      return typeof method === "function"
-        ? Object.freeze({ capture, method: method as PublishMenuNativeMethod })
-        : null;
-    }
-    current = authority.getPrototypeOf(current);
-  }
-  return null;
-}
-
 function capturePublishMenuReactProof(
   event: React.KeyboardEvent<HTMLButtonElement>,
-  authority: PublishMenuKeyboardAuthority | null,
+  phase: PublishMenuReactProof["phase"],
 ): PublishMenuReactProof | null {
-  if (!authority || !event || typeof event !== "object") return null;
-  const prototype = authority.getPrototypeOf(event);
-  if (!prototype || prototype === authority.ownerWindow.Object.prototype) return null;
-  const preventDefault = capturePublishMenuReactMethod(event, "preventDefault", authority);
-  const stopPropagation = capturePublishMenuReactMethod(event, "stopPropagation", authority);
-  const isDefaultPrevented = capturePublishMenuReactMethod(event, "isDefaultPrevented", authority);
-  const isPropagationStopped = capturePublishMenuReactMethod(
-    event,
-    "isPropagationStopped",
-    authority,
-  );
-  const persist = capturePublishMenuReactMethod(event, "persist", authority);
-  const isPersistent = capturePublishMenuReactMethod(event, "isPersistent", authority);
-  const methods = [
-    preventDefault,
-    stopPropagation,
-    isDefaultPrevented,
-    isPropagationStopped,
-    persist,
-    isPersistent,
-  ];
-  if (methods.some((method) => method === null)) return null;
-  return Object.freeze({
-    prototype,
-    descriptors: Object.freeze(methods.map((method) => method!.capture)),
-    preventDefault: preventDefault!.method,
-    stopPropagation: stopPropagation!.method,
-    isDefaultPrevented: isDefaultPrevented!.method,
-    isPropagationStopped: isPropagationStopped!.method,
-    persist: persist!.method,
-    isPersistent: isPersistent!.method,
-  });
+  if (!event || typeof event !== "object") return null;
+  try {
+    const preventDefault = event.preventDefault;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
+    if (
+      typeof preventDefault !== "function"
+      || typeof isDefaultPrevented !== "function"
+      || typeof isPropagationStopped !== "function"
+    ) {
+      return null;
+    }
+    return Object.freeze({ event, phase, preventDefault, isDefaultPrevented, isPropagationStopped });
+  } catch {
+    return null;
+  }
 }
 
-function publishMenuNativeEventMatches(delivery: PublishMenuKeyboardDelivery) {
+function publishMenuNativeEventMatches(
+  delivery: PublishMenuKeyboardDelivery,
+  phase: PublishMenuReactProof["phase"],
+  defaultPrevented: boolean,
+  requireCurrent = true,
+) {
   const { snapshot } = delivery;
   const { event, publication } = snapshot;
   const authority = publication.keyboardAuthority;
@@ -12429,7 +12461,7 @@ function publishMenuNativeEventMatches(delivery: PublishMenuKeyboardDelivery) {
       snapshot.listenerProof,
       publication,
       event,
-      true,
+      requireCurrent,
     )
     || authority.getPrototypeOf(event) !== authority.keyboardPrototype
     || !authority.trusted.matches(event)
@@ -12461,10 +12493,12 @@ function publishMenuNativeEventMatches(delivery: PublishMenuKeyboardDelivery) {
         authority.event.eventPhase,
         event,
         authority,
-      ) === authority.ownerWindow.Event.BUBBLING_PHASE
+      ) === (phase === "capture"
+        ? authority.ownerWindow.Event.CAPTURING_PHASE
+        : authority.ownerWindow.Event.BUBBLING_PHASE)
       && currentTarget !== null
       && path.includes(currentTarget)
-      && (!delivery.bubbleCurrentTarget || delivery.bubbleCurrentTarget === currentTarget)
+      && (!delivery.delegationTarget || delivery.delegationTarget === currentTarget)
       && publishMenuNativeValue<boolean>(
         authority.event.bubbles,
         event,
@@ -12475,7 +12509,9 @@ function publishMenuNativeEventMatches(delivery: PublishMenuKeyboardDelivery) {
         event,
         authority,
       ) === snapshot.cancelable
-      && !publishMenuNativeValue<boolean>(authority.event.defaultPrevented, event, authority)
+      && publishMenuNativeValue<boolean>(
+        authority.event.defaultPrevented, event, authority,
+      ) === defaultPrevented
       && !publishMenuNativeValue<boolean>(authority.event.cancelBubble, event, authority)
       && publishMenuNativeValue<boolean>(
         authority.event.composed,
@@ -12512,26 +12548,46 @@ function publishMenuNativeEventMatches(delivery: PublishMenuKeyboardDelivery) {
   }
 }
 
-function publishMenuReactEventMatches(
-  delivery: PublishMenuKeyboardDelivery,
-  event: React.KeyboardEvent<HTMLButtonElement>,
+function publishMenuReactMethodsMatch(
   proof: PublishMenuReactProof,
+  defaultQuery = proof.isDefaultPrevented,
+) {
+  const event = proof.event;
+  return (
+    event.preventDefault === proof.preventDefault
+    && event.isDefaultPrevented === defaultQuery
+    && event.isPropagationStopped === proof.isPropagationStopped
+  );
+}
+
+function publishMenuReactValuesMatch(
+  delivery: PublishMenuKeyboardDelivery,
+  proof: PublishMenuReactProof,
+  phase: PublishMenuReactProof["phase"],
+  currentDelivery: boolean,
+  defaultPrevented: boolean,
+  defaultQuery: PublishMenuNativeMethod,
 ) {
   const { snapshot } = delivery;
+  const { event } = proof;
   const authority = snapshot.publication.keyboardAuthority;
   if (!authority) return false;
-  try {
-    return Boolean(
-      authority.getPrototypeOf(event) === proof.prototype
-      && proof.descriptors.every((descriptor) => descriptor.isCurrent())
+  const currentTarget = event.currentTarget;
+  return (
+      event !== (snapshot.event as unknown)
       && event.nativeEvent === snapshot.event
       && event.type === snapshot.type
-      && event.currentTarget === snapshot.publication.dom.trigger
+      && (
+        currentTarget === snapshot.publication.dom.trigger
+        || (!currentDelivery && proof.phase === "capture" && phase === "bubble" && currentTarget === null)
+      )
       && event.target === snapshot.publication.dom.trigger
-      && event.eventPhase === authority.ownerWindow.Event.BUBBLING_PHASE
+      && event.eventPhase === (proof.phase === "capture"
+        ? authority.ownerWindow.Event.CAPTURING_PHASE
+        : authority.ownerWindow.Event.BUBBLING_PHASE)
       && event.bubbles === snapshot.bubbles
       && event.cancelable === snapshot.cancelable
-      && !event.defaultPrevented
+      && event.defaultPrevented === defaultPrevented
       && event.isTrusted === snapshot.isTrusted
       && event.timeStamp === snapshot.timeStamp
       && event.key === snapshot.key
@@ -12544,114 +12600,99 @@ function publishMenuReactEventMatches(
       && event.repeat === snapshot.repeat
       && event.detail === snapshot.detail
       && Object.is(event.view, snapshot.view)
-      && publishMenuNativeCall<boolean>(
-        proof.isDefaultPrevented,
-        event,
-        [],
-        authority,
-      ) === false
-      && publishMenuNativeCall<boolean>(
-        proof.isPropagationStopped,
-        event,
-        [],
-        authority,
-      ) === false
-      && publishMenuNativeCall<boolean>(proof.isPersistent, event, [], authority) === true
-      && publishMenuNativeEventMatches(delivery)
+      && publishMenuReactMethodsMatch(proof, defaultQuery)
+  );
+}
+
+function publishMenuReactDeliveryMatches(
+  delivery: PublishMenuKeyboardDelivery,
+  phase: PublishMenuReactProof["phase"],
+  retains: () => boolean,
+  candidate?: PublishMenuReactProof,
+  prevented?: Readonly<{
+    event: React.KeyboardEvent<HTMLButtonElement>;
+    isDefaultPrevented: PublishMenuNativeMethod;
+  }>,
+) {
+  const authority = delivery.snapshot.publication.keyboardAuthority;
+  if (!authority || !retains()) return false;
+  try {
+    const proofs = Object.values(delivery.proofs);
+    if (candidate) proofs.push(candidate);
+    const isPrevented = (proof: PublishMenuReactProof) => proof.event === prevented?.event;
+    const defaultQuery = (proof: PublishMenuReactProof) => (
+      isPrevented(proof) ? prevented!.isDefaultPrevented : proof.isDefaultPrevented
     );
+    const valuesMatch = () => proofs.every((proof) => (
+      retains()
+      && publishMenuReactValuesMatch(
+        delivery, proof, phase, proof === candidate, isPrevented(proof), defaultQuery(proof),
+      )
+      && retains()
+    ));
+    const methodsMatch = () => proofs.every((proof) => (
+      publishMenuReactMethodsMatch(proof, defaultQuery(proof)) && retains()
+    ));
+    // As in the other public keyboard routes, exclude reentry and revalidate all
+    // participants between queries; one wrapper's query may change another's methods.
+    const revalidate = () => (
+      retains()
+      && valuesMatch()
+      && publishMenuNativeEventMatches(delivery, phase, prevented !== undefined)
+      && valuesMatch()
+      && methodsMatch()
+      && publishMenuNativeEventMatches(delivery, phase, prevented !== undefined)
+      && retains()
+    );
+    if (!revalidate()) return false;
+    const queried = new Set<object>();
+    for (const proof of proofs) {
+      if (queried.has(proof.event)) continue;
+      queried.add(proof.event);
+      const query = defaultQuery(proof);
+      if (
+        !revalidate()
+        || proof.event.isDefaultPrevented !== query
+        || !retains()
+        || publishMenuNativeCall<boolean>(query, proof.event, [], authority) !== isPrevented(proof)
+        || !revalidate()
+        || proof.event.isPropagationStopped !== proof.isPropagationStopped
+        || !retains()
+        || publishMenuNativeCall<boolean>(
+          proof.isPropagationStopped, proof.event, [], authority,
+        ) !== false
+        || !revalidate()
+      ) {
+        return false;
+      }
+    }
+    return revalidate();
   } catch {
     return false;
   }
 }
 
 function preventPublishMenuArrow(claim: PublishMenuClaimedArrow) {
-  const {
-    authority,
-    listenerProof,
-    nativeEvent,
-    publication,
-    reactEvent,
-    reactProof,
-  } = claim;
-  const syntheticDefault = authority.getOwnPropertyDescriptor(reactEvent, "defaultPrevented");
+  const { authority, delivery, reactEvent, reactProof, retains } = claim;
   if (
-    !authority.historyIsClean()
-    || !publishMenuNativeListenerProofMatches(
-      listenerProof,
-      publication,
-      nativeEvent,
-      true,
-    )
-    || !reactProof.descriptors.every((descriptor) => descriptor.isCurrent())
-    || publishMenuNativeValue<boolean>(
-      authority.event.defaultPrevented,
-      nativeEvent,
-      authority,
-    )
-    || !syntheticDefault
-    || !("value" in syntheticDefault)
-    || syntheticDefault.value !== false
-    || syntheticDefault.writable !== true
+    !publishMenuReactDeliveryMatches(delivery, "bubble", retains)
+    || reactEvent.preventDefault !== reactProof.preventDefault
+    || !retains()
   ) {
     return false;
   }
-  publishMenuNativeCall<void>(
-    authority.event.preventDefault,
-    nativeEvent,
-    [],
-    authority,
+  publishMenuNativeCall<void>(reactProof.preventDefault, reactEvent, [], authority);
+  // React replaces this query on the prevented wrapper only. Retain it before
+  // calling any other public getter/query, never by adopting all current methods.
+  const isDefaultPrevented = reactEvent.isDefaultPrevented;
+  return (
+    typeof isDefaultPrevented === "function"
+    && retains()
+    && publishMenuReactDeliveryMatches(
+      delivery, "bubble", retains, undefined, { event: reactEvent, isDefaultPrevented },
+    )
+    && retains()
   );
-  if (
-    !publishMenuNativeValue<boolean>(
-      authority.event.defaultPrevented,
-      nativeEvent,
-      authority,
-    )
-    || !authority.set(reactEvent, "defaultPrevented", true, reactEvent)
-  ) {
-    return false;
-  }
-  return authority.getOwnPropertyDescriptor(reactEvent, "defaultPrevented")?.value === true;
-}
-
-function suppressPublishMenuRadixArrowDown(
-  publication: PublishMenuPublication,
-  event: React.KeyboardEvent<HTMLButtonElement>,
-) {
-  const authority = publication.keyboardAuthority;
-  const nativeEvent = event.nativeEvent;
-  if (
-    !authority
-    || !(nativeEvent instanceof authority.ownerWindow.KeyboardEvent)
-    || authority.getPrototypeOf(nativeEvent) !== authority.keyboardPrototype
-    || event.type !== "keydown"
-    || event.currentTarget !== publication.dom.trigger
-  ) {
-    return false;
-  }
-  try {
-    const syntheticDefault = authority.getOwnPropertyDescriptor(event, "defaultPrevented");
-    if (
-      publishMenuNativeValue<string>(authority.event.type, nativeEvent, authority) !== "keydown"
-      || publishMenuNativeValue<string>(
-        authority.keyboard.key,
-        nativeEvent,
-        authority,
-      ) !== "ArrowDown"
-      || !syntheticDefault
-      || !("value" in syntheticDefault)
-      || syntheticDefault.value !== false
-      || syntheticDefault.writable !== true
-    ) {
-      return false;
-    }
-    return (
-      authority.set(event, "defaultPrevented", true, event)
-      && authority.getOwnPropertyDescriptor(event, "defaultPrevented")?.value === true
-    );
-  } catch {
-    return false;
-  }
 }
 
 function createPublishMenuOpenGuard(source: PublishMenuPublication): PublishMenuOpenGuard | null {
@@ -13185,7 +13226,11 @@ function createPublishMenuPresentation({
           ownerWindow as Window & typeof globalThis,
         )
       : null;
-    const keyboardEvents = new Set<KeyboardEvent>();
+    const keyboardEvents: PublishMenuKeyboardStorage = {
+      current: new WeakMap(),
+      seen: new WeakSet(),
+      reading: false,
+    };
     const identity = Object.freeze({});
     const first = render.enabledActions.at(0) ?? null;
     const last = render.enabledActions.at(-1) ?? null;
@@ -13336,35 +13381,45 @@ function createPublishMenuPresentation({
       ? publication
       : null;
   };
-  const onTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    const publication = currentPublication();
-    if (publication) coordinator.stageReact(publication, event);
+  const stageReact = (
+    boundary: PublishMenuReactBoundary,
+    event: React.KeyboardEvent<HTMLButtonElement>,
+  ) => {
+    const publication = runtimeState.current?.publication;
+    if (!publication) return;
+    coordinator.runKeyboardDelivery(publication, () => {
+      if (currentPublication() === publication) coordinator.stageReact(publication, boundary, event);
+    });
   };
+  const onTriggerKeyDownCapture = (event: React.KeyboardEvent<HTMLButtonElement>) =>
+    stageReact("captureTrigger", event);
+  const onBoundaryKeyDownCapture = (event: React.KeyboardEvent<HTMLButtonElement>) =>
+    stageReact("captureBoundary", event);
+  const onTriggerKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) =>
+    stageReact("bubbleTrigger", event);
   const onTriggerArrowKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-    const publication = currentPublication();
-    const candidate = publication ?? runtimeState.last?.publication ?? null;
-    if (!publication) {
-      if (candidate) suppressPublishMenuRadixArrowDown(candidate, event);
-      return;
-    }
-    const claim = coordinator.claim(publication, event);
-    if (!claim) {
-      suppressPublishMenuRadixArrowDown(publication, event);
-      return;
-    }
-    if (!coordinator.prepareOpen(claim) || !preventPublishMenuArrow(claim)) {
-      coordinator.cancelOpen(publication);
-      suppressPublishMenuRadixArrowDown(publication, event);
-      return;
-    }
-    if (!publication.retire()) {
-      coordinator.cancelOpen(publication);
-      return;
-    }
-    commitOpen(Object.freeze({ visit: render.visit, open: true }));
+    const publication = runtimeState.current?.publication;
+    if (!publication) return;
+    const opened = coordinator.runKeyboardDelivery(publication, () => {
+      if (currentPublication() !== publication) return false;
+      const claim = coordinator.claim(publication, event);
+      if (!claim) return false;
+      if (!coordinator.prepareOpen(claim) || !preventPublishMenuArrow(claim)) return false;
+      if (
+        !claim.retains()
+        || !publication.retire()
+        || !publishMenuNativeEventMatches(claim.delivery, "bubble", true, false)
+        || !coordinator.canCommitOpen(publication)
+      ) {
+        return false;
+      }
+      commitOpen(Object.freeze({ visit: render.visit, open: true }));
+      return true;
+    });
+    if (!opened && !publication.keyboardEvents.reading) coordinator.cancelOpen(publication);
   };
   const onOpenChange = (open: boolean) => {
+    if (runtimeState.current?.publication.keyboardEvents.reading) return;
     if (render.open === open) return;
     const publication = currentPublication();
     if (publication) publication.retire();
@@ -13456,6 +13511,8 @@ function createPublishMenuPresentation({
       ) as Record<PublishMenuActionName, React.RefCallback<HTMLDivElement>>,
     ),
     establish,
+    onTriggerKeyDownCapture,
+    onBoundaryKeyDownCapture,
     onTriggerKeyDown,
     onTriggerArrowKeyDown,
     onOpenChange,
@@ -13466,6 +13523,59 @@ function createPublishMenuPresentation({
 function PublishMenuOpenCommit({ presentation }: { presentation: PublishMenuPresentation }) {
   useLayoutEffect(() => presentation.establish(), [presentation]);
   return null;
+}
+
+function PublishMenuTriggerButton({
+  onKeyDownCapture,
+  onKeyDown,
+  onDirectionalKeyDownCapture,
+  onDirectionalTriggerKeyDown,
+  onDirectionalKeyDown,
+  ...props
+}: React.ComponentProps<"button"> & {
+  onDirectionalKeyDownCapture: React.KeyboardEventHandler<HTMLButtonElement>;
+  onDirectionalTriggerKeyDown: React.KeyboardEventHandler<HTMLButtonElement>;
+  onDirectionalKeyDown: React.KeyboardEventHandler<HTMLButtonElement>;
+}) {
+  const handlingKey = useRef(false);
+  return (
+    <button
+      {...props}
+      onKeyDownCapture={(event) => {
+        if (handlingKey.current) return;
+        handlingKey.current = true;
+        try {
+          onDirectionalKeyDownCapture(event);
+          onKeyDownCapture?.(event);
+        } finally {
+          handlingKey.current = false;
+        }
+      }}
+      onKeyDown={(event) => {
+        if (handlingKey.current) return;
+        handlingKey.current = true;
+        try {
+          let directional: boolean;
+          try {
+            const key = event.key;
+            const nativeKey = event.nativeEvent.key;
+            directional = key === "ArrowDown" || key === "ArrowUp"
+              || nativeKey === "ArrowDown" || nativeKey === "ArrowUp";
+          } catch {
+            return;
+          }
+          if (directional) {
+            onDirectionalTriggerKeyDown(event);
+            onDirectionalKeyDown(event);
+          } else {
+            onKeyDown?.(event);
+          }
+        } finally {
+          handlingKey.current = false;
+        }
+      }}
+    />
+  );
 }
 
 function PublishMenu({ props }: { props: HeaderProps }) {
@@ -13530,6 +13640,8 @@ function PublishMenu({ props }: { props: HeaderProps }) {
       download: captureDownload,
       share: captureShare,
     },
+    onTriggerKeyDownCapture,
+    onBoundaryKeyDownCapture,
     onTriggerKeyDown,
     onTriggerArrowKeyDown,
     onOpenChange,
@@ -13550,18 +13662,20 @@ function PublishMenu({ props }: { props: HeaderProps }) {
             </button>
           </MenuTrigger>
         )}
-        <MenuTrigger asChild onKeyDown={onTriggerArrowKeyDown}>
-          <button
+        <MenuTrigger asChild onKeyDownCapture={onBoundaryKeyDownCapture}>
+          <PublishMenuTriggerButton
             ref={captureTrigger}
             type="button"
             className="btn btn-primary rounded-l-none border-l border-white/20 px-1.5"
             disabled={props.publishing}
             aria-label="Publish options"
             data-testid="publish-menu"
-            onKeyDown={onTriggerKeyDown}
+            onDirectionalKeyDownCapture={onTriggerKeyDownCapture}
+            onDirectionalTriggerKeyDown={onTriggerKeyDown}
+            onDirectionalKeyDown={onTriggerArrowKeyDown}
           >
             <ChevronDown size={16} className="opacity-80" />
-          </button>
+          </PublishMenuTriggerButton>
         </MenuTrigger>
       </div>
       {state.open && (
