@@ -216,19 +216,84 @@ const settle = async (ms = SUGGEST_DEBOUNCE_MS) => {
 const options = () => screen.queryAllByTestId("share-login-option").map((el) => el.getAttribute("data-login"));
 /** The listbox's options only (the harness select has <option>s of its own). */
 const listOptions = () => within(screen.getByTestId("share-login-suggestions")).getAllByRole("option");
-const dispatchKeyDown = (
+function keyboardEventImplementation(event: Event) {
+  return Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) =>
+        (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (
+        candidate,
+      ): candidate is {
+        isTrusted: boolean;
+        view: Window | null;
+      } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        typeof candidate.isTrusted === "boolean" &&
+        "view" in candidate,
+    );
+}
+
+function requiredKeyboardEventImplementation(event: Event) {
+  const implementation = keyboardEventImplementation(event);
+  if (!implementation) {
+    throw new Error("The jsdom event implementation was unavailable");
+  }
+  return implementation;
+}
+
+function markKeyboardEventTrusted(event: Event) {
+  const implementation = requiredKeyboardEventImplementation(event);
+  const descriptor = Object.getOwnPropertyDescriptor(
+    implementation,
+    "isTrusted",
+  );
+  if (!descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
+const keyboardEvent = (
   target: HTMLElement,
   key: string,
   init: KeyboardEventInit = {},
+  trusted = true,
 ) => {
   const ownerWindow = target.ownerDocument.defaultView;
   if (!ownerWindow) throw new Error("The keyboard target has no owner window");
+  const { view: eventView, ...eventInit } = init;
   const event = new ownerWindow.KeyboardEvent("keydown", {
     bubbles: true,
     cancelable: true,
     key,
-    ...init,
+    ...eventInit,
   });
+  const implementation = requiredKeyboardEventImplementation(event);
+  implementation.view =
+    "view" in init ? (eventView ?? null) : ownerWindow;
+  if (trusted) markKeyboardEventTrusted(event);
+  return event;
+};
+
+const dispatchKeyDown = (
+  target: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) => {
+  const event = keyboardEvent(target, key, init, trusted);
   act(() => {
     target.dispatchEvent(event);
   });
@@ -263,6 +328,114 @@ function interceptReactHandler<E>(
   return () => {
     if (record[propsKey] === intercepted) record[propsKey] = props;
   };
+}
+
+const REACT_KEY_PUBLIC_SCALARS = [
+  "type",
+  "nativeEvent",
+  "target",
+  "currentTarget",
+  "eventPhase",
+  "bubbles",
+  "cancelable",
+  "defaultPrevented",
+  "isTrusted",
+  "key",
+  "code",
+  "location",
+  "locale",
+  "charCode",
+  "keyCode",
+  "which",
+  "detail",
+  "timeStamp",
+  "ctrlKey",
+  "metaKey",
+  "altKey",
+  "shiftKey",
+  "repeat",
+  "isComposing",
+  "view",
+] as const;
+
+const REACT_KEY_REQUIRED_METHODS = [
+  "preventDefault",
+  "isDefaultPrevented",
+  "isPropagationStopped",
+] as const;
+
+function exposeReactKeyScalarsAsAccessors(event: object) {
+  const record = event as Record<PropertyKey, unknown>;
+  for (const property of REACT_KEY_PUBLIC_SCALARS) {
+    let value = record[property];
+    Object.defineProperty(event, property, {
+      configurable: true,
+      enumerable: true,
+      get: () => value,
+      set: (next) => {
+        value = next;
+      },
+    });
+  }
+}
+
+function isolateReactKeyWrapper(
+  event: object,
+  prototype: object | null,
+  wrapMethods = false,
+) {
+  const record = event as Record<PropertyKey, unknown>;
+  for (const property of REACT_KEY_REQUIRED_METHODS) {
+    const original = record[property];
+    if (typeof original !== "function") {
+      throw new Error(`React ${property} was unavailable`);
+    }
+    Object.defineProperty(event, property, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: wrapMethods
+        ? function (this: object) {
+            return Reflect.apply(original, this, []);
+          }
+        : original,
+    });
+  }
+  Object.setPrototypeOf(event, prototype);
+}
+
+function alterNonPublicReactKeyFields(
+  event: object,
+  state: "absent" | "replaced" | "non-function",
+) {
+  const record = event as Record<PropertyKey, unknown>;
+  for (const property of [
+    "_reactName",
+    "persist",
+    "isPersistent",
+    "stopPropagation",
+  ]) {
+    if (state === "absent") {
+      Reflect.deleteProperty(event, property);
+    } else {
+      Object.defineProperty(event, property, {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value:
+          state === "replaced"
+            ? property === "_reactName"
+              ? Symbol("unrelated React name")
+              : vi.fn()
+            : null,
+      });
+    }
+    expect(
+      state === "absent"
+        ? property in event
+        : record[property] !== undefined,
+    ).toBe(state !== "absent");
+  }
 }
 
 function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
@@ -403,7 +576,7 @@ describe("CollaboratorLoginInput", () => {
 
     await settle();
     expect(searchUsers).toHaveBeenCalledTimes(1);
-    expect(fireEvent.keyDown(input(), { key: "Enter" })).toBe(true);
+    expect(dispatchKeyDown(input(), "Enter").defaultPrevented).toBe(false);
     fireEvent.submit(input().closest("form")!);
     expect(onSubmit).toHaveBeenCalledWith("octo");
 
@@ -497,22 +670,22 @@ describe("CollaboratorLoginInput", () => {
     await settle();
     expect(options()).toHaveLength(3);
 
-    fireEvent.keyDown(input(), { key: "ArrowDown" });
+    dispatchKeyDown(input(), "ArrowDown");
     let selected = listOptions().filter((o) => o.getAttribute("aria-selected") === "true");
     expect(selected.map((o) => o.getAttribute("data-login"))).toEqual(["octocat"]);
     expect(input().getAttribute("aria-activedescendant")).toBe(selected[0].id);
 
-    fireEvent.keyDown(input(), { key: "ArrowDown" });
-    fireEvent.keyDown(input(), { key: "ArrowDown" });
-    fireEvent.keyDown(input(), { key: "ArrowDown" }); // wraps back to the first
-    fireEvent.keyDown(input(), { key: "ArrowUp" }); // …and up wraps to the last
+    dispatchKeyDown(input(), "ArrowDown");
+    dispatchKeyDown(input(), "ArrowDown");
+    dispatchKeyDown(input(), "ArrowDown"); // wraps back to the first
+    dispatchKeyDown(input(), "ArrowUp"); // …and up wraps to the last
     selected = listOptions().filter((o) => o.getAttribute("aria-selected") === "true");
     expect(selected.map((o) => o.getAttribute("data-login"))).toEqual(["octofox"]);
-    fireEvent.keyDown(input(), { key: "ArrowUp" });
-    fireEvent.keyDown(input(), { key: "ArrowUp" });
+    dispatchKeyDown(input(), "ArrowUp");
+    dispatchKeyDown(input(), "ArrowUp");
 
-    const notSubmitted = fireEvent.keyDown(input(), { key: "Enter" });
-    expect(notSubmitted).toBe(false); // preventDefault: the form does not submit
+    const notSubmitted = dispatchKeyDown(input(), "Enter");
+    expect(notSubmitted.defaultPrevented).toBe(true); // preventDefault: the form does not submit
     expect(input().value).toBe("octocat");
     expect(onPick).toHaveBeenCalledWith("octocat");
     expect(onSubmit).not.toHaveBeenCalled();
@@ -521,6 +694,575 @@ describe("CollaboratorLoginInput", () => {
     // The picked login is not searched again.
     await settle(1000);
     expect(searchUsers).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses React-public keydown authority for wraps, boundaries, pick, native Enter, and Escape isolation", async () => {
+    searchUsers.mockImplementation(() =>
+      answer("octocat", "octodog", "octofox"),
+    );
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    const onSubmit = vi.fn();
+    const onRoleChange = vi.fn();
+    const onDialogClose = vi.fn();
+    const preventDefault = vi.spyOn(
+      window.Event.prototype,
+      "preventDefault",
+    );
+    const focus = vi.spyOn(window.HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <KeyboardHarness
+              onChange={onChange}
+              onPick={onPick}
+              onSubmit={onSubmit}
+              onRoleChange={onRoleChange}
+              onDialogClose={onDialogClose}
+            />
+          </StrictMode>,
+        );
+      });
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      preventDefault.mockClear();
+      focus.mockClear();
+      document.documentElement.scrollTop = 23;
+
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onRoleChange).not.toHaveBeenCalled();
+      expect(onDialogClose).not.toHaveBeenCalled();
+      expect(searchUsers).toHaveBeenCalledOnce();
+
+      const move = (key: string, destination: number) => {
+        preventDefault.mockClear();
+        const event = dispatchKeyDown(exactInput, key);
+        expect(event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(listOptions()[destination]).toHaveAttribute(
+          "aria-selected",
+          "true",
+        );
+        expect(exactInput).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(document.documentElement.scrollTop).toBe(23);
+      };
+
+      move("ArrowUp", 2);
+      move("ArrowDown", 0);
+      move("End", 2);
+      move("Home", 0);
+      expect(searchUsers).toHaveBeenCalledOnce();
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onDialogClose).not.toHaveBeenCalled();
+
+      preventDefault.mockClear();
+      const closed = dispatchKeyDown(exactInput, "Escape");
+      expect(closed.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+      expect(onDialogClose).not.toHaveBeenCalled();
+
+      preventDefault.mockClear();
+      const dialogEscape = dispatchKeyDown(exactInput, "Escape");
+      expect(dialogEscape.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(onDialogClose).toHaveBeenCalledOnce();
+
+      move("ArrowDown", 0);
+      preventDefault.mockClear();
+      const picked = dispatchKeyDown(exactInput, "Enter");
+      expect(picked.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(onChange).toHaveBeenCalledExactlyOnceWith("octocat");
+      expect(onPick).toHaveBeenCalledExactlyOnceWith("octocat");
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onRoleChange).not.toHaveBeenCalled();
+      expect(exactInput).toHaveValue("octocat");
+
+      preventDefault.mockClear();
+      const nativeEnter = dispatchKeyDown(exactInput, "Enter");
+      expect(nativeEnter.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      fireEvent.submit(exactInput.closest("form")!);
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith("octocat");
+      expect(searchUsers).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("accepts independent capture and bubble wrappers, public methods, and scalar accessors", async () => {
+    searchUsers.mockImplementation(() =>
+      answer("octocat", "octodog", "octofox"),
+    );
+    const onChange = vi.fn();
+    const onPick = vi.fn();
+    const preventDefault = vi.spyOn(
+      window.Event.prototype,
+      "preventDefault",
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <DirectHarness
+              initialValue="octo"
+              onChange={onChange}
+              onPick={onPick}
+            />
+          </StrictMode>,
+        );
+      });
+      const exactInput = input();
+      const inputRoot = exactInput.parentElement;
+      if (!inputRoot) throw new Error("The input root was unavailable");
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      const capturePrototype = Object.create(null);
+      const bubblePrototype = Object.create(null);
+      let captureWrapper: object | null = null;
+      let bubbleWrapper: object | null = null;
+      const restoreCapture = interceptReactHandler<
+        KeyboardEvent<HTMLDivElement>
+      >(
+        inputRoot,
+        "onKeyDownCapture",
+        (original, event) => {
+          captureWrapper = event;
+          exposeReactKeyScalarsAsAccessors(event);
+          isolateReactKeyWrapper(event, capturePrototype);
+          alterNonPublicReactKeyFields(event, "replaced");
+          original(event);
+        },
+      );
+      const restoreBubble = interceptReactHandler<
+        KeyboardEvent<HTMLInputElement>
+      >(
+        exactInput,
+        "onKeyDown",
+        (original, event) => {
+          bubbleWrapper = event;
+          exposeReactKeyScalarsAsAccessors(event);
+          isolateReactKeyWrapper(event, bubblePrototype, true);
+          alterNonPublicReactKeyFields(event, "non-function");
+          original(event);
+        },
+      );
+      preventDefault.mockClear();
+
+      const event = dispatchKeyDown(exactInput, "Home");
+      restoreCapture();
+      restoreBubble();
+
+      expect(captureWrapper).not.toBeNull();
+      expect(bubbleWrapper).not.toBeNull();
+      expect(captureWrapper).not.toBe(bubbleWrapper);
+      expect(Object.getPrototypeOf(captureWrapper)).toBe(
+        capturePrototype,
+      );
+      expect(Object.getPrototypeOf(bubbleWrapper)).toBe(
+        bubblePrototype,
+      );
+      for (const wrapper of [captureWrapper, bubbleWrapper]) {
+        for (const property of REACT_KEY_PUBLIC_SCALARS) {
+          expect(
+            Object.getOwnPropertyDescriptor(wrapper!, property)?.get,
+          ).toBeTypeOf("function");
+        }
+      }
+      expect(event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(listOptions()[0]).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(onChange).not.toHaveBeenCalled();
+      expect(onPick).not.toHaveBeenCalled();
+      expect(searchUsers).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["absent", "replaced", "non-function"] as const)(
+    "does not depend on %s private or optional React wrapper fields",
+    async (state) => {
+      searchUsers.mockImplementation(() =>
+        answer("octocat", "octodog", "octofox"),
+      );
+      const onChange = vi.fn();
+      const preventDefault = vi.spyOn(
+        window.Event.prototype,
+        "preventDefault",
+      );
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <DirectHarness
+                initialValue="octo"
+                onChange={onChange}
+              />
+            </StrictMode>,
+          );
+        });
+        const exactInput = input();
+        const inputRoot = exactInput.parentElement;
+        if (!inputRoot) {
+          throw new Error("The input root was unavailable");
+        }
+        exactInput.focus();
+        await settle();
+        fireEvent.mouseOver(listOptions()[1]);
+        const alter = <E,>(
+          original: (event: E) => void,
+          event: E,
+        ) => {
+          if (state === "absent") {
+            isolateReactKeyWrapper(event as object, null);
+          }
+          alterNonPublicReactKeyFields(event as object, state);
+          original(event);
+        };
+        const restoreCapture = interceptReactHandler<
+          KeyboardEvent<HTMLDivElement>
+        >(inputRoot, "onKeyDownCapture", alter);
+        const restoreBubble = interceptReactHandler<
+          KeyboardEvent<HTMLInputElement>
+        >(exactInput, "onKeyDown", alter);
+        preventDefault.mockClear();
+
+        const event = dispatchKeyDown(exactInput, "End");
+        restoreCapture();
+        restoreBubble();
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(listOptions()[2]).toHaveAttribute(
+          "aria-selected",
+          "true",
+        );
+        expect(onChange).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each([1, 2] as const)(
+    "keeps the exact keyboard pair through %s nested microtask checkpoint(s)",
+    async (checkpoints) => {
+      searchUsers.mockImplementation(() =>
+        answer("octocat", "octodog", "octofox"),
+      );
+      const onChange = vi.fn();
+      const preventDefault = vi.spyOn(
+        window.Event.prototype,
+        "preventDefault",
+      );
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <DirectHarness
+                initialValue="octo"
+                onChange={onChange}
+              />
+            </StrictMode>,
+          );
+        });
+        const exactInput = input();
+        exactInput.focus();
+        await settle();
+        fireEvent.mouseOver(listOptions()[1]);
+        const queued: VoidFunction[] = [];
+        vi.spyOn(globalThis, "queueMicrotask").mockImplementation(
+          (callback) => {
+            queued.push(callback);
+          },
+        );
+        for (let checkpoint = 0; checkpoint < checkpoints; checkpoint++) {
+          queueMicrotask(() => undefined);
+        }
+        exactInput.addEventListener(
+          "keydown",
+          () => {
+            for (
+              let checkpoint = 0;
+              checkpoint < checkpoints;
+              checkpoint++
+            ) {
+              queued.splice(0).forEach((callback) => callback());
+            }
+          },
+          { capture: true, once: true },
+        );
+        preventDefault.mockClear();
+        const event = keyboardEvent(exactInput, "Home");
+
+        act(() => {
+          exactInput.dispatchEvent(event);
+          while (queued.length > 0) {
+            queued.splice(0).forEach((callback) => callback());
+          }
+        });
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(listOptions()[0]).toHaveAttribute(
+          "aria-selected",
+          "true",
+        );
+        expect(onChange).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(REACT_KEY_REQUIRED_METHODS)(
+    "rejects bubble-phase %s drift and accepts a clean successor",
+    async (method) => {
+      searchUsers.mockImplementation(() =>
+        answer("octocat", "octodog", "octofox"),
+      );
+      const onChange = vi.fn();
+      const preventDefault = vi.spyOn(
+        window.Event.prototype,
+        "preventDefault",
+      );
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <DirectHarness
+                initialValue="octo"
+                onChange={onChange}
+              />
+            </StrictMode>,
+          );
+        });
+        const exactInput = input();
+        exactInput.focus();
+        await settle();
+        fireEvent.mouseOver(listOptions()[1]);
+        const restore = interceptReactHandler<
+          KeyboardEvent<HTMLInputElement>
+        >(exactInput, "onKeyDown", (original, event) => {
+          original(event);
+          Object.defineProperty(event, method, {
+            configurable: true,
+            enumerable: true,
+            writable: true,
+            value:
+              method === "preventDefault"
+                ? vi.fn()
+                : vi.fn(() => false),
+          });
+        });
+        preventDefault.mockClear();
+
+        const rejected = dispatchKeyDown(exactInput, "Home");
+        restore();
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(listOptions()[1]).toHaveAttribute(
+          "aria-selected",
+          "true",
+        );
+        expect(onChange).not.toHaveBeenCalled();
+
+        const recovered = dispatchKeyDown(exactInput, "Home");
+        expect(recovered.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(listOptions()[0]).toHaveAttribute(
+          "aria-selected",
+          "true",
+        );
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("fences public prevention reentry without duplicating state or poisoning a clean successor", async () => {
+    searchUsers.mockImplementation(() =>
+      answer("octocat", "octodog", "octofox"),
+    );
+    const onChange = vi.fn();
+    const preventDefault = vi.spyOn(
+      window.Event.prototype,
+      "preventDefault",
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <DirectHarness
+              initialValue="octo"
+              onChange={onChange}
+            />
+          </StrictMode>,
+        );
+      });
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      let reentered = false;
+      const restore = interceptReactHandler<
+        KeyboardEvent<HTMLInputElement>
+      >(exactInput, "onKeyDown", (original, event) => {
+        const retainedPreventDefault = event.preventDefault;
+        Object.defineProperty(event, "preventDefault", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: function (this: object) {
+            if (!reentered) {
+              reentered = true;
+              original(event);
+            }
+            return Reflect.apply(retainedPreventDefault, this, []);
+          },
+        });
+        original(event);
+      });
+      preventDefault.mockClear();
+
+      const handled = dispatchKeyDown(exactInput, "Home");
+      restore();
+
+      expect(reentered).toBe(true);
+      expect(handled.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(listOptions()[0]).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(onChange).not.toHaveBeenCalled();
+
+      preventDefault.mockClear();
+      const recovered = dispatchKeyDown(exactInput, "Home");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(listOptions()[0]).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("accepts the event-proven backing Window receiver behind the public owner Window", async () => {
+    searchUsers.mockImplementation(() =>
+      answer("octocat", "octodog", "octofox"),
+    );
+    const onChange = vi.fn();
+    const preventDefault = vi.spyOn(
+      window.Event.prototype,
+      "preventDefault",
+    );
+    const actualWindow = window as Window & typeof globalThis;
+    const publicWindow = new Proxy(actualWindow, {});
+    Object.defineProperty(document, "defaultView", {
+      configurable: true,
+      value: publicWindow,
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <DirectHarness
+              initialValue="octo"
+              onChange={onChange}
+            />
+          </StrictMode>,
+        );
+      });
+      const exactInput = input();
+      exactInput.focus();
+      await settle();
+      fireEvent.mouseOver(listOptions()[1]);
+      preventDefault.mockClear();
+      let backingReceiverObserved = false;
+      actualWindow.addEventListener(
+        "keydown",
+        function (event) {
+          expect(this).not.toBe(publicWindow);
+          backingReceiverObserved = true;
+          requiredKeyboardEventImplementation(event).view =
+            this as Window;
+        },
+        { capture: true, once: true },
+      );
+      const event = keyboardEvent(exactInput, "Home", {
+        view: null,
+      });
+
+      act(() => {
+        exactInput.dispatchEvent(event);
+      });
+      expect(document.defaultView).toBe(publicWindow);
+      expect(document.defaultView).toBe(publicWindow);
+      expect(backingReceiverObserved).toBe(true);
+      expect(event.composedPath()).toEqual([]);
+      expect(event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(listOptions()[0]).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(onChange).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      Reflect.deleteProperty(document, "defaultView");
+    }
   });
 
   it.each([
@@ -834,7 +1576,7 @@ describe("CollaboratorLoginInput", () => {
     { key: "Home", destination: 0 },
     { key: "End", destination: 2 },
   ])(
-    "$key accepts one exact React wrapper and native event while rejecting crossed wrappers and replay",
+    "$key rejects proxy, clone, and duplicate wrapper attempts without poisoning a clean successor",
     async ({ key, destination }) => {
       searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
       const onChange = vi.fn();
@@ -875,12 +1617,17 @@ describe("CollaboratorLoginInput", () => {
         const event = dispatchKeyDown(exactInput, key);
         restore();
 
-        expect(event.defaultPrevented).toBe(true);
-        expect(preventDefault).toHaveBeenCalledOnce();
-        expect(listOptions()[destination]).toHaveAttribute("aria-selected", "true");
+        expect(event.defaultPrevented).toBe(false);
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(listOptions()[1]).toHaveAttribute("aria-selected", "true");
         expect(onChange).not.toHaveBeenCalled();
         expect(onPick).not.toHaveBeenCalled();
         expect(searchUsers).toHaveBeenCalledOnce();
+
+        const recovered = dispatchKeyDown(exactInput, key);
+        expect(recovered.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(listOptions()[destination]).toHaveAttribute("aria-selected", "true");
       } finally {
         await act(async () => root.unmount());
         host.remove();
@@ -1268,18 +2015,18 @@ describe("CollaboratorLoginInput", () => {
     await settle();
     expect(options()).toEqual(["octocat"]);
 
-    const escaped = fireEvent.keyDown(input(), { key: "Escape" });
-    expect(escaped).toBe(false); // claimed, so the dialog does not close on this Escape
+    const escaped = dispatchKeyDown(input(), "Escape");
+    expect(escaped.defaultPrevented).toBe(true); // claimed, so the dialog does not close on this Escape
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
     expect(input().value).toBe("octo");
     // With the list closed, Escape is left to the dialog.
-    expect(fireEvent.keyDown(input(), { key: "Escape" })).toBe(true);
+    expect(dispatchKeyDown(input(), "Escape").defaultPrevented).toBe(false);
 
     // ↓ reopens the list without another request; the arrows wrap, so one option is always active from here on.
-    fireEvent.keyDown(input(), { key: "ArrowDown" });
+    dispatchKeyDown(input(), "ArrowDown");
     expect(options()).toEqual(["octocat"]);
-    fireEvent.keyDown(input(), { key: "ArrowUp" });
-    fireEvent.keyDown(input(), { key: "ArrowDown" });
+    dispatchKeyDown(input(), "ArrowUp");
+    dispatchKeyDown(input(), "ArrowDown");
     expect(listOptions().filter((o) => o.getAttribute("aria-selected") === "true")).toHaveLength(1);
     expect(searchUsers).toHaveBeenCalledTimes(1);
 
@@ -1287,9 +2034,9 @@ describe("CollaboratorLoginInput", () => {
     type("octopus");
     await settle();
     expect(listOptions().filter((o) => o.getAttribute("aria-selected") === "true")).toHaveLength(0);
-    fireEvent.keyDown(input(), { key: "Escape" });
-    const submitted = fireEvent.keyDown(input(), { key: "Enter" });
-    expect(submitted).toBe(true);
+    dispatchKeyDown(input(), "Escape");
+    const submitted = dispatchKeyDown(input(), "Enter");
+    expect(submitted.defaultPrevented).toBe(false);
     fireEvent.submit(input().closest("form")!);
     expect(onSubmit).toHaveBeenCalledWith("octopus");
   });
@@ -1395,7 +2142,7 @@ describe("CollaboratorLoginInput", () => {
     expect(alert).toHaveTextContent("GitHub suggestions for @octo: GitHub account search is unavailable");
     const retry = within(alert).getByRole("button", { name: "Retry" });
     expect(retry).not.toBeDisabled();
-    expect(fireEvent.keyDown(input(), { key: "Enter" })).toBe(true);
+    expect(dispatchKeyDown(input(), "Enter").defaultPrevented).toBe(false);
     fireEvent.submit(input().closest("form")!);
     expect(onSubmit).toHaveBeenCalledWith("octo");
 
@@ -2039,9 +2786,9 @@ describe("CollaboratorLoginInput", () => {
       <AuthorityBoundary instance="same" value="octo" onChange={onChange} onPick={onPick} exclude={[]} />,
     );
     expect(input()).toBe(exactInput);
-    expect(fireEvent.keyDown(exactInput, { key: "ArrowDown" })).toBe(false);
+    expect(dispatchKeyDown(exactInput, "ArrowDown").defaultPrevented).toBe(true);
     expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
-    expect(fireEvent.keyDown(exactInput, { key: "Enter" })).toBe(false);
+    expect(dispatchKeyDown(exactInput, "Enter").defaultPrevented).toBe(true);
     expect(onChange).toHaveBeenCalledOnce();
     expect(onChange).toHaveBeenCalledWith("octocat");
     expect(onPick).toHaveBeenCalledOnce();
@@ -2499,7 +3246,7 @@ describe("CollaboratorLoginInput", () => {
         "onKeyDown",
       );
 
-      expect(fireEvent.keyDown(exactInput, { key: "ArrowDown" })).toBe(false);
+      expect(dispatchKeyDown(exactInput, "ArrowDown").defaultPrevented).toBe(true);
       expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
       act(() => {
         staleKeydown({
@@ -2519,7 +3266,7 @@ describe("CollaboratorLoginInput", () => {
           current(event);
         },
       );
-      expect(fireEvent.keyDown(exactInput, { key: "Enter" })).toBe(false);
+      expect(dispatchKeyDown(exactInput, "Enter").defaultPrevented).toBe(true);
       restoreKeydown();
       expect(onChange).toHaveBeenCalledOnce();
       expect(onChange).toHaveBeenCalledWith("octocat");
