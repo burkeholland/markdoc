@@ -2560,7 +2560,7 @@ describe("GitHubPicker source focus navigation", () => {
     }
   });
 
-  it("uses distinct capture and bubble wrappers and calls the retained public bubble prevention once", async () => {
+  it("uses distinct capture and bubble wrappers, ignores persist compatibility drift, and calls public prevention once", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const view = await renderStrictPicker(
@@ -2596,10 +2596,32 @@ describe("GitHubPicker source focus navigation", () => {
       let bubbleWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
       const publicPreventDefaults: Array<ReturnType<typeof vi.fn>> = [];
       const reentrantEvents: KeyboardEvent[] = [];
+      const capturePersist = vi.fn();
+      const bubblePersist = vi.fn();
+      const incompatiblePersist = Object.freeze({ compatibility: false });
+      const persistValues: unknown[] = [];
+      let trackedNativeEvent: Event | null = null;
+      const replacePersist = (
+        event: ReactKeyboardEvent<HTMLElement>,
+        value: unknown,
+      ) => {
+        trackedNativeEvent ??= event.nativeEvent;
+        Object.defineProperty(event, "persist", {
+          configurable: true,
+          writable: true,
+          value,
+        });
+        if (event.nativeEvent === trackedNativeEvent) {
+          persistValues.push(
+            (event as unknown as { persist?: unknown }).persist,
+          );
+        }
+      };
       replaceReactProp(
         group,
         "onKeyDownCapture",
         (event: ReactKeyboardEvent<HTMLDivElement>) => {
+          replacePersist(event, undefined);
           captureWrapper = event;
           groupCapture(event);
         },
@@ -2609,6 +2631,7 @@ describe("GitHubPicker source focus navigation", () => {
         "onKeyDownCapture",
         (event: ReactKeyboardEvent<HTMLButtonElement>) => {
           expect(event).toBe(captureWrapper);
+          replacePersist(event, capturePersist);
           buttonCapture(event);
         },
       );
@@ -2616,6 +2639,7 @@ describe("GitHubPicker source focus navigation", () => {
         gistTab,
         "onKeyDown",
         (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+          replacePersist(event, incompatiblePersist);
           bubbleWrapper = event;
           const original = event.preventDefault;
           const publicPreventDefault = vi.fn(function (
@@ -2641,6 +2665,7 @@ describe("GitHubPicker source focus navigation", () => {
         "onKeyDown",
         (event: ReactKeyboardEvent<HTMLDivElement>) => {
           expect(event).toBe(bubbleWrapper);
+          replacePersist(event, bubblePersist);
           groupBubble(event);
         },
       );
@@ -2653,6 +2678,12 @@ describe("GitHubPicker source focus navigation", () => {
       expect(captureWrapper).not.toBeNull();
       expect(bubbleWrapper).not.toBeNull();
       expect(captureWrapper).not.toBe(bubbleWrapper);
+      expect(persistValues).toEqual([
+        undefined,
+        capturePersist,
+        incompatiblePersist,
+        bubblePersist,
+      ]);
       expect(publicPreventDefaults).toHaveLength(2);
       expect(publicPreventDefaults[0]).toHaveBeenCalledOnce();
       expect(publicPreventDefaults[1]).not.toHaveBeenCalled();
@@ -2666,6 +2697,75 @@ describe("GitHubPicker source focus navigation", () => {
       await view.unmount();
     }
   });
+
+  it.each([
+    "preventDefault",
+    "stopPropagation",
+    "isDefaultPrevented",
+    "isPropagationStopped",
+  ] as const)(
+    "rejects retained %s drift and admits a clean successor",
+    async (method) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const view = await renderStrictPicker(
+        <GitHubPicker mode="import" githubAvailable githubConfigured />,
+      );
+      try {
+        const group = view.picker.getByRole("group", {
+          name: "GitHub source",
+        });
+        const source = view.picker.getByTestId(
+          "picker-tab-gist",
+        ) as HTMLButtonElement;
+        const destination = view.picker.getByTestId(
+          "picker-tab-repo",
+        ) as HTMLButtonElement;
+        const groupCapture = reactProp<PickerKeyHandler<HTMLDivElement>>(
+          group,
+          "onKeyDownCapture",
+        );
+        let drift = true;
+        replaceReactProp(
+          group,
+          "onKeyDownCapture",
+          (event: ReactKeyboardEvent<HTMLDivElement>) => {
+            groupCapture(event);
+            if (!drift) return;
+            Object.defineProperty(event, method, {
+              configurable: true,
+              writable: true,
+              value: vi.fn(() =>
+                method.startsWith("is") ? false : undefined,
+              ),
+            });
+          },
+        );
+        source.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const rejected = pickerKey(source, "ArrowRight");
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+
+        drift = false;
+        const accepted = pickerKey(source, "ArrowRight");
+
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(destination).toHaveFocus();
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+      } finally {
+        await view.unmount();
+      }
+    },
+  );
 
   it("accepts the genuine Window receiver while rejecting an exact structural facade", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");

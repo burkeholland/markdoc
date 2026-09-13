@@ -1840,7 +1840,6 @@ interface PickerSourceReactMethods {
   readonly stopPropagation: (...args: never[]) => unknown;
   readonly isDefaultPrevented: (...args: never[]) => unknown;
   readonly isPropagationStopped: (...args: never[]) => unknown;
-  readonly persist: (...args: never[]) => unknown;
 }
 
 interface PickerSourceReactDelivery {
@@ -6688,14 +6687,12 @@ function capturePickerSourceReactDelivery(
       stopPropagation: candidate.stopPropagation,
       isDefaultPrevented: candidate.isDefaultPrevented,
       isPropagationStopped: candidate.isPropagationStopped,
-      persist: candidate.persist,
     };
     if (
       typeof methods.preventDefault !== "function" ||
       typeof methods.stopPropagation !== "function" ||
       typeof methods.isDefaultPrevented !== "function" ||
-      typeof methods.isPropagationStopped !== "function" ||
-      typeof methods.persist !== "function"
+      typeof methods.isPropagationStopped !== "function"
     ) {
       return null;
     }
@@ -6704,7 +6701,6 @@ function capturePickerSourceReactDelivery(
       stopPropagation: methods.stopPropagation,
       isDefaultPrevented: methods.isDefaultPrevented,
       isPropagationStopped: methods.isPropagationStopped,
-      persist: methods.persist,
     });
     if (
       !authority.reactMethodMatches(event, "preventDefault", captured.preventDefault) ||
@@ -6719,7 +6715,6 @@ function capturePickerSourceReactDelivery(
         "isPropagationStopped",
         captured.isPropagationStopped,
       ) ||
-      !authority.reactMethodMatches(event, "persist", captured.persist) ||
       authority.apply(captured.isDefaultPrevented, event, []) !== false ||
       authority.apply(captured.isPropagationStopped, event, []) !== false ||
       event.nativeEvent !== native.event ||
@@ -6790,7 +6785,6 @@ function pickerSourceReactDeliveryRemains(
       (defaultPrevented ||
         wrapper.isDefaultPrevented === methods.isDefaultPrevented) &&
       wrapper.isPropagationStopped === methods.isPropagationStopped &&
-      wrapper.persist === methods.persist &&
       authority.reactMethodMatches(wrapper, "preventDefault", methods.preventDefault) &&
       authority.reactMethodMatches(wrapper, "stopPropagation", methods.stopPropagation) &&
       authority.reactMethodMatches(
@@ -6803,7 +6797,6 @@ function pickerSourceReactDeliveryRemains(
         "isPropagationStopped",
         methods.isPropagationStopped,
       ) &&
-      authority.reactMethodMatches(wrapper, "persist", methods.persist) &&
       authority.apply(isDefaultPrevented, wrapper, []) ===
         defaultPrevented &&
       authority.apply(methods.isPropagationStopped, wrapper, []) === false &&
