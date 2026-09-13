@@ -175,6 +175,7 @@ interface PendingSourceHighlightActivation {
   doc: Text;
   activationVersion: number;
   selection: EditorSelection;
+  confirmed: boolean;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -199,6 +200,21 @@ function samePositionedTarget(a: PositionedHighlightTarget, b: PositionedHighlig
 function movedPastClickTolerance(start: MouseEvent, current: MouseEvent): boolean {
   return Math.abs(start.clientX - current.clientX) > DRAG_TOLERANCE_PX ||
     Math.abs(start.clientY - current.clientY) > DRAG_TOLERANCE_PX;
+}
+
+function isPointerSelectionUpdate(update: ViewUpdate): boolean {
+  return update.selectionSet &&
+    update.transactions.length > 0 &&
+    update.transactions.every((transaction) => transaction.isUserEvent("select.pointer"));
+}
+
+function sourceSelectionMatchesTarget(
+  selection: EditorSelection,
+  target: PositionedHighlightTarget,
+): boolean {
+  return selection.ranges.length === 1 &&
+    selection.main.empty &&
+    selection.main.head === target.sourcePosition;
 }
 
 function installSourceHighlightActivation(
@@ -261,10 +277,12 @@ function installSourceHighlightActivation(
       doc: current.doc,
       activationVersion: current.activationVersion,
       selection: view.state.selection,
+      confirmed: false,
       timer: setTimeout(() => {
         if (pending !== activation) return;
         pending = null;
         if (
+          !activation.confirmed ||
           !dom.isConnected ||
           activation.doc !== view.state.doc ||
           activation.activationVersion !== currentHighlights()?.activationVersion ||
@@ -351,6 +369,7 @@ function installSourceHighlightActivation(
       return;
     }
     pending.selection = view.state.selection;
+    pending.confirmed = true;
   };
 
   dom.addEventListener("pointerdown", pointerDown, true);
@@ -365,6 +384,19 @@ function installSourceHighlightActivation(
     update(update) {
       const highlights = currentHighlights();
       if (press && (update.docChanged || press.activationVersion !== highlights?.activationVersion)) clearPress();
+      if (
+        pending &&
+        !pending.confirmed &&
+        press?.released &&
+        pending.target === press.target &&
+        !pending.selection.eq(update.state.selection) &&
+        isPointerSelectionUpdate(update) &&
+        sourceSelectionMatchesTarget(update.state.selection, pending.target)
+      ) {
+        // CodeMirror may commit this gesture's native selection after our document-level
+        // mouseup listener. The exact click below still has to confirm the same target.
+        pending.selection = update.state.selection;
+      }
       if (
         pending &&
         (update.docChanged ||

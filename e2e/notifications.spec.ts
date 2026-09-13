@@ -2,6 +2,8 @@ import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, focusRichEnd, uniqueLogin, type User } from "./helpers";
 
+test.use({ screenshot: "off", trace: "off", video: "off" });
+
 /** Pull the notifications store now instead of waiting for the 30 s poll. */
 const refresh = (page: Page) =>
   page.evaluate(() => (window as unknown as { __markdocNotificationsRefresh?: () => Promise<void> }).__markdocNotificationsRefresh?.());
@@ -217,5 +219,198 @@ test.describe("notifications", () => {
     const body = (await alias.json()) as { items: unknown[]; unreadCount: number; mentions: unknown[] };
     expect(Array.isArray(body.items)).toBe(true);
     expect(Array.isArray(body.mentions)).toBe(true);
+  });
+});
+
+test.describe("notification keyboard browsing selector", () => {
+  test.skip(
+    process.env.TASK_3472_BROWSER !== "1",
+    "Run locally with TASK_3472_BROWSER=1 after acquiring the shared browser slot",
+  );
+
+  test("trusted navigation keys move focus without notification work and preserve native activation", async ({
+    browser,
+  }) => {
+    const owner = await signIn(browser, uniqueLogin("keyboard-owner"));
+    const recipient = await signIn(browser, uniqueLogin("keyboard-recipient"));
+    const documents: { id: string; title: string }[] = [];
+    const readRequests: string[] = [];
+    const isSingleRead = (url: string, method: string) =>
+      method === "POST" &&
+      /^\/api\/notifications\/[^/]+\/read$/.test(new URL(url).pathname);
+    recipient.page.on("request", (request) => {
+      if (isSingleRead(request.url(), request.method())) {
+        readRequests.push(new URL(request.url()).pathname);
+      }
+    });
+
+    const installProbes = async () => {
+      await recipient.page.evaluate(() => {
+        type ProbeWindow = Window & {
+          __task3472Focuses?: number[];
+          __task3472Keys?: {
+            key: string;
+            defaultPrevented: boolean;
+            isTrusted: boolean;
+          }[];
+        };
+        const probeWindow = window as ProbeWindow;
+        probeWindow.__task3472Focuses = [];
+        probeWindow.__task3472Keys = [];
+        document.addEventListener("focusin", (event) => {
+          if (
+            event.target instanceof HTMLElement &&
+            event.target.matches('[data-testid="notification-open"]')
+          ) {
+            probeWindow.__task3472Focuses!.push(
+              Array.from(
+                document.querySelectorAll('[data-testid="notification-open"]'),
+              ).indexOf(event.target),
+            );
+          }
+        });
+        document.addEventListener("keydown", (event) => {
+          if (
+            event.target instanceof HTMLElement &&
+            event.target.matches('[data-testid="notification-open"]')
+          ) {
+            probeWindow.__task3472Keys!.push({
+              key: event.key,
+              defaultPrevented: event.defaultPrevented,
+              isTrusted: event.isTrusted,
+            });
+          }
+        });
+      });
+    };
+    const resetProbes = () =>
+      recipient.page.evaluate(() => {
+        const probeWindow = window as Window & {
+          __task3472Focuses?: number[];
+          __task3472Keys?: unknown[];
+        };
+        probeWindow.__task3472Focuses = [];
+        probeWindow.__task3472Keys = [];
+      });
+    const probeResults = () =>
+      recipient.page.evaluate(() => {
+        const probeWindow = window as Window & {
+          __task3472Focuses?: number[];
+          __task3472Keys?: {
+            key: string;
+            defaultPrevented: boolean;
+            isTrusted: boolean;
+          }[];
+        };
+        return {
+          focuses: probeWindow.__task3472Focuses ?? [],
+          keys: probeWindow.__task3472Keys ?? [],
+        };
+      });
+
+    try {
+      for (const suffix of ["first", "second", "third"]) {
+        const title = `Keyboard ${suffix}`;
+        const id = await createDocument(
+          owner.page,
+          `# ${title}\n\nTrusted keyboard navigation.\n`,
+          title,
+        );
+        documents.push({ id, title });
+        await shareWith(owner.page, id, recipient.login, "viewer");
+      }
+      await expect.poll(() => unreadCount(recipient.page)).toBe(3);
+      await recipient.page.goto("/");
+      await refresh(recipient.page);
+
+      const strip = recipient.page.getByTestId("notifications-strip");
+      const rows = strip.getByTestId("notification-item");
+      const controls = strip.getByTestId("notification-open");
+      await expect(rows).toHaveCount(3);
+      await installProbes();
+      await controls.nth(1).focus();
+
+      const move = async (key: "ArrowDown" | "ArrowUp" | "Home" | "End", to: number) => {
+        await resetProbes();
+        await recipient.page.keyboard.press(key);
+        await expect(controls.nth(to)).toBeFocused();
+        expect(await probeResults()).toEqual({
+          focuses: [to],
+          keys: [{ key, defaultPrevented: true, isTrusted: true }],
+        });
+      };
+
+      await move("ArrowDown", 2);
+      await move("ArrowUp", 1);
+      await move("Home", 0);
+      await move("End", 2);
+      await move("ArrowDown", 0);
+      await move("ArrowUp", 2);
+      expect(readRequests).toHaveLength(0);
+      expect(await unreadCount(recipient.page)).toBe(3);
+      await expect(rows).toHaveCount(3);
+      expect(new URL(recipient.page.url()).pathname).toBe("/");
+
+      const activate = async (key: "Enter" | "Space") => {
+        const focusedText = await recipient.page
+          .locator('[data-testid="notification-open"]:focus')
+          .innerText();
+        const selected = documents.find(({ title }) =>
+          focusedText.includes(title),
+        );
+        if (!selected) {
+          throw new Error(`Focused notification did not identify a test document: ${focusedText}`);
+        }
+        readRequests.length = 0;
+        const readResponse = recipient.page.waitForResponse((response) =>
+          isSingleRead(response.url(), response.request().method()),
+        );
+        await recipient.page.keyboard.press(key);
+        expect((await readResponse).ok()).toBeTruthy();
+        await recipient.page.waitForURL(`**/d/${selected.id}`);
+        expect(readRequests).toHaveLength(1);
+      };
+
+      await activate("Enter");
+      await recipient.page.goto("/");
+      await refresh(recipient.page);
+      await expect(
+        recipient.page.getByTestId("notification-open"),
+      ).toHaveCount(2);
+      await installProbes();
+      const remaining = recipient.page.getByTestId("notification-open");
+      await remaining.nth(0).focus();
+      await resetProbes();
+      await recipient.page.keyboard.press("ArrowDown");
+      await expect(remaining.nth(1)).toBeFocused();
+      expect(await probeResults()).toEqual({
+        focuses: [1],
+        keys: [
+          { key: "ArrowDown", defaultPrevented: true, isTrusted: true },
+        ],
+      });
+      await activate("Space");
+
+      await recipient.page.goto("/");
+      await refresh(recipient.page);
+      const only = recipient.page.getByTestId("notification-open");
+      await expect(only).toHaveCount(1);
+      await installProbes();
+      await only.focus();
+      await resetProbes();
+      readRequests.length = 0;
+      await recipient.page.keyboard.press("Home");
+      await expect(only).toBeFocused();
+      expect(await probeResults()).toEqual({
+        focuses: [],
+        keys: [{ key: "Home", defaultPrevented: true, isTrusted: true }],
+      });
+      expect(readRequests).toHaveLength(0);
+      expect(await unreadCount(recipient.page)).toBe(1);
+      expect(new URL(recipient.page.url()).pathname).toBe("/");
+    } finally {
+      await recipient.context.close();
+      await owner.context.close();
+    }
   });
 });

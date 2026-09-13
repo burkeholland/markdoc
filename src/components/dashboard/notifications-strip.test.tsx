@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
-import { StrictMode, useEffect, useLayoutEffect, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useLayoutEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { act, cleanup, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NotificationDto } from "@/lib/api";
 
@@ -48,9 +55,11 @@ interface NotificationSnapshot {
 
 type Router = ReturnType<typeof createRouter>;
 type ClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
+type KeyHandler = (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 
 interface CapturedActions {
   open: ClickHandler;
+  keyDown: KeyHandler;
   dismiss: ClickHandler;
   readAll: ClickHandler;
   section: HTMLElement;
@@ -69,6 +78,7 @@ interface DirectView {
 type CapturedPart = "section" | "readAllButton" | "list" | "item" | "openButton" | "dismissButton";
 type ReactPropsRecord = Record<string, unknown> & {
   onClick?: ClickHandler;
+  onKeyDown?: KeyHandler;
   ref?: unknown;
 };
 
@@ -102,6 +112,13 @@ const ITEM_TWO: NotificationDto = {
   documentId: "document-two",
   documentTitle: "Release notes",
   refId: "thread-two",
+};
+const ITEM_THREE: NotificationDto = {
+  ...ITEM,
+  id: "notification-three",
+  documentId: "document-three",
+  documentTitle: "Launch checklist",
+  refId: "thread-three",
 };
 const SAME_ID_REPLACEMENT: NotificationDto = {
   id: ITEM.id,
@@ -161,6 +178,14 @@ function reactHandler(element: HTMLElement, name = "onClick"): ClickHandler {
   return handler as ClickHandler;
 }
 
+function reactKeyHandler(element: HTMLElement): KeyHandler {
+  const { props } = reactPropsEntry(element);
+  if (typeof props.onKeyDown !== "function") {
+    throw new Error(`onKeyDown was not attached to ${element.dataset.testid ?? element.tagName}`);
+  }
+  return props.onKeyDown;
+}
+
 function reactRef<T extends HTMLElement>(element: T): (node: T | null) => void {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   const props = propsKey
@@ -191,6 +216,7 @@ function captureActions(rowIndex = 0, container: HTMLElement = document.body): C
     throw new Error("Notification strip hierarchy was incomplete");
   }
   const open = reactHandler(openButton);
+  const keyDown = reactKeyHandler(openButton);
   const dismiss = reactHandler(dismissButton);
   const readAll = reactHandler(readAllButton);
   clickTargets.set(open, openButton);
@@ -198,6 +224,7 @@ function captureActions(rowIndex = 0, container: HTMLElement = document.body): C
   clickTargets.set(readAll, readAllButton);
   return {
     open,
+    keyDown,
     dismiss,
     readAll,
     section,
@@ -230,7 +257,7 @@ function invoke(callback: ClickHandler, currentTarget = clickTargets.get(callbac
 function click(callback: ClickHandler) {
   const currentTarget = clickTargets.get(callback);
   if (!currentTarget) throw new Error("Click target was not captured");
-  currentTarget.click();
+  dispatchTrustedClick(currentTarget);
 }
 
 function interceptClick(
@@ -251,12 +278,80 @@ function interceptClick(
   };
 }
 
+function interceptKeyDown(
+  element: HTMLButtonElement,
+  invokeHandler: (
+    original: KeyHandler,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void,
+) {
+  const { propsKey, record, props } = reactPropsEntry(element);
+  const original = props.onKeyDown;
+  if (!original) throw new Error("The button did not have an onKeyDown handler");
+  record[propsKey] = {
+    ...props,
+    onKeyDown: ((event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      invokeHandler(original, event);
+    }) as KeyHandler,
+  };
+  return () => {
+    record[propsKey] = props;
+  };
+}
+
 function connectedButton(label = "Other") {
   const button = document.createElement("button");
   button.type = "button";
   button.setAttribute("aria-label", label);
   document.body.append(button);
   return button;
+}
+
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
+function dispatchTrustedClick(
+  source: HTMLButtonElement,
+  target: HTMLElement = source,
+) {
+  const view = source.ownerDocument.defaultView;
+  if (!view) throw new Error("Notification control has no owner window");
+  const ownerWindow = view as Window & typeof globalThis;
+  const event = new ownerWindow.MouseEvent("click", {
+    bubbles: true,
+    button: 0,
+    buttons: 0,
+    cancelable: true,
+  });
+  markJsdomEventTrusted(event);
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
 }
 
 function PassiveCleanupProbe({ generation, onCleanup }: { generation: string; onCleanup: () => void }) {
@@ -317,6 +412,52 @@ function createDirectView(router: Router, notificationSnapshot: NotificationSnap
   return view;
 }
 
+function createStrictView(router: Router, notificationSnapshot: NotificationSnapshot) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = { root: createRoot(host), host };
+  directViews.push(view);
+  currentRouter = router;
+  currentSnapshot = notificationSnapshot;
+  act(() => view.root.render(
+    <StrictMode>
+      <NotificationsStrip />
+    </StrictMode>,
+  ));
+  return view;
+}
+
+function renderStrictGeneration(
+  view: DirectView,
+  router: Router,
+  notificationSnapshot: NotificationSnapshot,
+  generation: string,
+) {
+  currentRouter = router;
+  currentSnapshot = notificationSnapshot;
+  act(() => {
+    view.root.render(
+      <StrictMode>
+        <div key={generation}>
+          <NotificationsStrip />
+        </div>
+      </StrictMode>,
+    );
+  });
+}
+
+function createStrictGenerationView(
+  router: Router,
+  notificationSnapshot: NotificationSnapshot,
+) {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const view = { root: createRoot(host), host };
+  directViews.push(view);
+  renderStrictGeneration(view, router, notificationSnapshot, "initial");
+  return view;
+}
+
 function renderDirect(
   view: DirectView,
   router: Router,
@@ -358,6 +499,72 @@ function expectStaleInert(actions: CapturedActions, view: DirectView, routers: R
   expect(view.host.innerHTML).toBe(html);
   expect(document.activeElement).toBe(focusTarget);
   focusTarget.remove();
+}
+
+function openButtons(container: HTMLElement = document.body) {
+  return Array.from(
+    container.querySelectorAll<HTMLButtonElement>('[data-testid="notification-open"]'),
+  );
+}
+
+function dispatchKey(
+  source: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  focus = true,
+) {
+  if (focus) source.focus();
+  const view = source.ownerDocument.defaultView;
+  if (!view) throw new Error("Notification control has no owner window");
+  const ownerWindow = view as Window & typeof globalThis;
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    ...init,
+  });
+  let allowed = true;
+  act(() => {
+    allowed = source.dispatchEvent(event);
+  });
+  return { event, allowed };
+}
+
+function dispatchTrustedKey(
+  source: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  focus = true,
+) {
+  if (focus) source.focus();
+  const view = source.ownerDocument.defaultView;
+  if (!view) throw new Error("Notification control has no owner window");
+  const ownerWindow = view as Window & typeof globalThis;
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key,
+    ...init,
+  });
+  markJsdomEventTrusted(event);
+  let allowed = true;
+  act(() => {
+    allowed = source.dispatchEvent(event);
+  });
+  return { event, allowed };
+}
+
+function dispatchTrustedDelete(
+  source: HTMLButtonElement,
+  init: KeyboardEventInit = {},
+  focus = true,
+) {
+  return dispatchTrustedKey(
+    source,
+    "Delete",
+    { code: "Delete", ...init },
+    focus,
+  );
 }
 
 beforeEach(() => {
@@ -594,18 +801,18 @@ describe("notification strip current actions", () => {
     const order: string[] = [];
     store.markNotificationRead.mockImplementation((id) => {
       order.push(`mark:${id}`);
-      if (id === ITEM.id) currentOpen.openButton.click();
-      if (id === ITEM_TWO.id) currentDismiss.dismissButton.click();
+      if (id === ITEM.id) dispatchTrustedClick(currentOpen.openButton);
+      if (id === ITEM_TWO.id) dispatchTrustedClick(currentDismiss.dismissButton);
       return Promise.resolve();
     });
     store.markAllNotificationsRead.mockImplementation(() => {
       order.push("mark-all");
-      currentReadAll.readAllButton.click();
+      dispatchTrustedClick(currentReadAll.readAllButton);
       return Promise.resolve();
     });
     router.push.mockImplementation((href) => {
       order.push(`push:${href}`);
-      currentOpen.openButton.click();
+      dispatchTrustedClick(currentOpen.openButton);
     });
 
     const restoreOpen = interceptClick(currentOpen.openButton, (original, event) => {
@@ -623,16 +830,16 @@ describe("notification strip current actions", () => {
       original(event);
       original(event);
     });
-    currentOpen.openButton.click();
-    currentDismiss.dismissButton.click();
-    currentReadAll.readAllButton.click();
+    dispatchTrustedClick(currentOpen.openButton);
+    dispatchTrustedClick(currentDismiss.dismissButton);
+    dispatchTrustedClick(currentReadAll.readAllButton);
     restoreOpen();
     restoreDismiss();
     restoreReadAll();
 
-    currentOpen.openButton.click();
-    currentDismiss.dismissButton.click();
-    currentReadAll.readAllButton.click();
+    dispatchTrustedClick(currentOpen.openButton);
+    dispatchTrustedClick(currentDismiss.dismissButton);
+    dispatchTrustedClick(currentReadAll.readAllButton);
     expect(order).toEqual([
       `mark:${ITEM.id}`,
       `push:/d/${ITEM.documentId}?thread=${ITEM.refId}`,
@@ -656,10 +863,10 @@ describe("notification strip current actions", () => {
       new MouseEvent("click", { bubbles: true, cancelable: true, button: 1 }),
     );
     current.openButton.setAttribute("aria-disabled", "true");
-    current.openButton.click();
+    dispatchTrustedClick(current.openButton);
     current.openButton.removeAttribute("aria-disabled");
     current.item.setAttribute("inert", "");
-    current.openButton.click();
+    dispatchTrustedClick(current.openButton);
     current.item.removeAttribute("inert");
 
     const restore = interceptClick(current.openButton, (original, event) => {
@@ -673,7 +880,7 @@ describe("notification strip current actions", () => {
       original(mismatchedTarget);
       original(event);
     });
-    current.openButton.click();
+    dispatchTrustedClick(current.openButton);
     restore();
 
     expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
@@ -695,22 +902,22 @@ describe("notification strip current actions", () => {
     const rowKind = first.item.dataset.kind;
 
     first.section.className = `${sectionClass} changed`;
-    first.openButton.click();
+    dispatchTrustedClick(first.openButton);
     first.section.className = sectionClass;
     first.list.className = `${listClass} changed`;
-    first.openButton.click();
+    dispatchTrustedClick(first.openButton);
     first.list.className = listClass;
     first.item.dataset.kind = "reply";
-    first.openButton.click();
+    dispatchTrustedClick(first.openButton);
     first.item.dataset.kind = rowKind;
 
     first.list.append(first.item);
-    first.openButton.click();
+    dispatchTrustedClick(first.openButton);
     first.list.insertBefore(first.item, second.item);
 
     const replacement = first.item.cloneNode(true) as HTMLLIElement;
     first.item.replaceWith(replacement);
-    first.openButton.click();
+    dispatchTrustedClick(first.openButton);
     replacement.replaceWith(first.item);
 
     expect(store.markNotificationRead).not.toHaveBeenCalled();
@@ -719,7 +926,7 @@ describe("notification strip current actions", () => {
 
     const target = first.openButton.querySelector("span");
     if (!target) throw new Error("The Open control had no committed descendant target");
-    target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+    dispatchTrustedClick(first.openButton, target);
     expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
     expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM.documentId}?thread=${ITEM.refId}`);
   });
@@ -758,7 +965,7 @@ describe("notification strip current actions", () => {
         dismissRef(stale.dismissButton);
       }
 
-      stale.openButton.click();
+      dispatchTrustedClick(stale.openButton);
       expect(store.markNotificationRead).not.toHaveBeenCalled();
       expect(router.push).not.toHaveBeenCalled();
 
@@ -771,11 +978,1164 @@ describe("notification strip current actions", () => {
           current = captureActions();
         },
       });
-      current.openButton.click();
+      dispatchTrustedClick(current.openButton);
       expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
       expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM.documentId}?thread=${ITEM.refId}`);
     },
   );
+
+  it.each(["open", "dismiss", "read-all"] as const)(
+    "rejects an untrusted owner-realm %s click and accepts one trusted successor",
+    (action) => {
+      const router = createRouter(`click-trust-${action}`);
+      const view = createStrictView(router, snapshot([ITEM]));
+      const current = captureActions(0, view.host);
+      const source =
+        action === "open"
+          ? current.openButton
+          : action === "dismiss"
+            ? current.dismissButton
+            : current.readAllButton;
+      const ownerWindow = source.ownerDocument.defaultView as
+        | (Window & typeof globalThis)
+        | null;
+      if (!ownerWindow) throw new Error("The click source has no owner window");
+      const untrusted = new ownerWindow.MouseEvent("click", {
+        bubbles: true,
+        button: 0,
+        buttons: 0,
+        cancelable: true,
+      });
+
+      act(() => {
+        source.dispatchEvent(untrusted);
+      });
+
+      expect(untrusted.isTrusted).toBe(false);
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+
+      dispatchTrustedClick(source);
+
+      if (action === "read-all") {
+        expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+        expect(store.markNotificationRead).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+      } else {
+        expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+          ITEM.id,
+        );
+        expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+        if (action === "open") {
+          expect(router.push).toHaveBeenCalledExactlyOnceWith(
+            `/d/${ITEM.documentId}?thread=${ITEM.refId}`,
+          );
+        } else {
+          expect(router.push).not.toHaveBeenCalled();
+        }
+      }
+    },
+  );
+
+  it("rejects replacement click wrapper trust, fields, and predicates before trusted recovery", () => {
+    const router = createRouter("click-wrapper-parity");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const current = captureActions(0, view.host);
+    const restore = interceptClick(current.openButton, (original, event) => {
+      original(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "isTrusted") return false;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+      original(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "button") return 1;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+      original(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "isDefaultPrevented") return () => false;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      original(event);
+    });
+    try {
+      dispatchTrustedClick(current.openButton);
+    } finally {
+      restore();
+    }
+
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(
+      `/d/${ITEM.documentId}?thread=${ITEM.refId}`,
+    );
+  });
+
+  it("accepts a trusted click independently of its React wrapper constructor name", () => {
+    const router = createRouter("click-constructor-name");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const current = captureActions(0, view.host);
+    const restore = interceptClick(current.openButton, (original, event) => {
+      const constructor = Object.getPrototypeOf(event)?.constructor;
+      const descriptor = constructor
+        ? Object.getOwnPropertyDescriptor(constructor, "name")
+        : undefined;
+      if (!constructor || !descriptor?.configurable) {
+        throw new Error("The React event constructor name is not replaceable");
+      }
+      Object.defineProperty(constructor, "name", {
+        ...descriptor,
+        value: "M",
+      });
+      try {
+        original(event);
+      } finally {
+        Object.defineProperty(constructor, "name", descriptor);
+      }
+    });
+    try {
+      dispatchTrustedClick(current.openButton);
+    } finally {
+      restore();
+    }
+
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(
+      `/d/${ITEM.documentId}?thread=${ITEM.refId}`,
+    );
+  });
+});
+
+describe("notification strip keyboard browsing", () => {
+  it.each([
+    ["ArrowDown", 2, 0],
+    ["ArrowUp", 0, 2],
+    ["Home", 1, 0],
+    ["End", 1, 2],
+  ] as const)(
+    "uses one trusted %s to prevent once and move focus from row %i to row %i only",
+    (key, sourceIndex, destinationIndex) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const router = createRouter(`trusted-${key}`);
+      try {
+        const view = createStrictView(
+          router,
+          snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+        );
+        const controls = openButtons(view.host);
+        const source = controls[sourceIndex]!;
+        const destination = controls[destinationIndex]!;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+
+        const result = dispatchTrustedKey(source, key, {}, false);
+
+        expect(result.allowed).toBe(false);
+        expect(result.event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(focus).toHaveBeenCalledOnce();
+        expect(destination).toHaveFocus();
+        expect(store.markNotificationRead).not.toHaveBeenCalled();
+        expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+      } finally {
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it("rejects untrusted keyboard input and replacement wrapper facts before trusted recovery", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const router = createRouter("keyboard-wrapper-parity");
+    try {
+      const view = createStrictView(
+        router,
+        snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+      );
+      const controls = openButtons(view.host);
+      const source = controls[1]!;
+      source.focus();
+      preventDefault.mockClear();
+      focus.mockClear();
+
+      const untrusted = dispatchKey(source, "ArrowDown", {}, false);
+      expect(untrusted.event.isTrusted).toBe(false);
+      expect(untrusted.allowed).toBe(true);
+
+      const handler = reactKeyHandler(source);
+      const restore = interceptKeyDown(source, (original, event) => {
+        original(new Proxy(event, {
+          get(target, property, receiver) {
+            if (property === "isTrusted") return false;
+            return Reflect.get(target, property, receiver);
+          },
+        }));
+        original(new Proxy(event, {
+          get(target, property, receiver) {
+            if (property === "key") return "ArrowUp";
+            return Reflect.get(target, property, receiver);
+          },
+        }));
+        original(new Proxy(event, {
+          get(target, property, receiver) {
+            if (property === "isPropagationStopped") return () => false;
+            return Reflect.get(target, property, receiver);
+          },
+        }));
+        expect(handler).toBe(original);
+      });
+      try {
+        const replaced = dispatchTrustedKey(
+          source,
+          "ArrowDown",
+          {},
+          false,
+        );
+        expect(replaced.allowed).toBe(true);
+        expect(replaced.event.defaultPrevented).toBe(false);
+      } finally {
+        restore();
+      }
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      expect(source).toHaveFocus();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+
+      const recovered = dispatchTrustedKey(
+        source,
+        "ArrowDown",
+        {},
+        false,
+      );
+      expect(recovered.allowed).toBe(false);
+      expect(recovered.event.defaultPrevented).toBe(true);
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(focus).toHaveBeenCalledOnce();
+      expect(controls[2]).toHaveFocus();
+    } finally {
+      preventDefault.mockRestore();
+      focus.mockRestore();
+    }
+  });
+
+  it("accepts trusted navigation independently of its React wrapper constructor name", () => {
+    const router = createRouter("keyboard-constructor-name");
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const controls = openButtons(view.host);
+    const source = controls[0]!;
+    source.focus();
+    const restore = interceptKeyDown(source, (original, event) => {
+      const constructor = Object.getPrototypeOf(event)?.constructor;
+      const descriptor = constructor
+        ? Object.getOwnPropertyDescriptor(constructor, "name")
+        : undefined;
+      if (!constructor || !descriptor?.configurable) {
+        throw new Error("The React event constructor name is not replaceable");
+      }
+      Object.defineProperty(constructor, "name", {
+        ...descriptor,
+        value: "K",
+      });
+      try {
+        original(event);
+      } finally {
+        Object.defineProperty(constructor, "name", descriptor);
+      }
+    });
+    try {
+      const result = dispatchTrustedKey(source, "ArrowDown", {}, false);
+      expect(result.allowed).toBe(false);
+      expect(result.event.defaultPrevented).toBe(true);
+    } finally {
+      restore();
+    }
+
+    expect(controls[1]).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("recognizes isTrusted as a keyboard-specific own descriptor, not a prototype getter", () => {
+    const firstProbe = new window.KeyboardEvent("keydown");
+    const secondProbe = new window.KeyboardEvent("keydown");
+    const synthetic = new window.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "ArrowDown",
+    });
+    const firstDescriptor = Object.getOwnPropertyDescriptor(
+      firstProbe,
+      "isTrusted",
+    );
+    const secondDescriptor = Object.getOwnPropertyDescriptor(
+      secondProbe,
+      "isTrusted",
+    );
+    const syntheticDescriptor = Object.getOwnPropertyDescriptor(
+      synthetic,
+      "isTrusted",
+    );
+
+    expect(Object.hasOwn(firstProbe, "isTrusted")).toBe(true);
+    expect(
+      Object.getOwnPropertyDescriptor(window.Event.prototype, "isTrusted"),
+    ).toBeUndefined();
+    expect(firstDescriptor?.get).toBeTypeOf("function");
+    expect(secondDescriptor).toMatchObject({
+      get: firstDescriptor?.get,
+      set: firstDescriptor?.set,
+      configurable: firstDescriptor?.configurable,
+      enumerable: firstDescriptor?.enumerable,
+    });
+    expect(syntheticDescriptor).toMatchObject({
+      get: firstDescriptor?.get,
+      set: firstDescriptor?.set,
+      configurable: firstDescriptor?.configurable,
+      enumerable: firstDescriptor?.enumerable,
+    });
+    const plainDescriptor = Object.getOwnPropertyDescriptor(
+      new window.Event("plain-event-probe"),
+      "isTrusted",
+    );
+    if (plainDescriptor?.get !== firstDescriptor?.get) {
+      expect(plainDescriptor?.get).not.toBe(firstDescriptor?.get);
+    }
+
+    const router = createRouter("trusted-own-descriptor");
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const controls = openButtons(view.host);
+    controls[0]!.focus();
+    expect(controls[0]!.dispatchEvent(synthetic)).toBe(true);
+    expect(controls[0]).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "ArrowDown",
+    "ArrowUp",
+    "Home",
+    "End",
+  ] as const)("rejects an untrusted synthetic %s event without changing focus", (key) => {
+    const router = createRouter(`synthetic-${key}`);
+    const view = createStrictView(
+      router,
+      snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+    );
+    const controls = openButtons(view.host);
+    const source = controls[1]!;
+
+    const result = dispatchKey(source, key);
+
+    expect(result.event.isTrusted).toBe(false);
+    expect(result.allowed).toBe(true);
+    expect(source).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("keeps every open control in tab order when untrusted wrap attempts are rejected", () => {
+    const router = createRouter("synthetic-wrap");
+    const view = createStrictView(
+      router,
+      snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+    );
+    const controls = openButtons(view.host);
+    const tabOrder = Array.from(
+      view.host.querySelectorAll<HTMLButtonElement>("button"),
+    );
+
+    expect(dispatchKey(controls[2]!, "ArrowDown").allowed).toBe(true);
+    expect(controls[2]).toHaveFocus();
+    expect(dispatchKey(controls[0]!, "ArrowUp").allowed).toBe(true);
+    expect(controls[0]).toHaveFocus();
+    expect(tabOrder).toEqual([
+      screen.getByTestId("notifications-strip-read-all"),
+      controls[0],
+      screen.getAllByTestId("notification-dismiss")[0],
+      controls[1],
+      screen.getAllByTestId("notification-dismiss")[1],
+      controls[2],
+      screen.getAllByTestId("notification-dismiss")[2],
+    ]);
+    expect(tabOrder.every((button) => button.tabIndex === 0)).toBe(true);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("does not claim or refocus a synthetic one-row no-op", () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const router = createRouter("one-row");
+    const view = createStrictView(router, snapshot([ITEM]));
+    const current = captureActions(0, view.host);
+    current.openButton.focus();
+    focus.mockClear();
+
+    try {
+      const result = dispatchKey(current.openButton, "Home", {}, false);
+      expect(result.allowed).toBe(true);
+      expect(current.openButton).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+    } finally {
+      focus.mockRestore();
+    }
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Enter", "{Enter}"],
+    ["Space", " "],
+  ] as const)("keeps script-created %s activation inert before trusted click recovery", async (_name, activation) => {
+    const user = userEvent.setup();
+    const router = createRouter(`activation-${_name}`);
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const controls = openButtons(view.host);
+
+    expect(dispatchKey(controls[0]!, "ArrowDown").allowed).toBe(true);
+    expect(controls[0]).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    await user.keyboard(activation);
+
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+
+    dispatchTrustedClick(controls[0]!);
+
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(
+      `/d/${ITEM.documentId}?thread=${ITEM.refId}`,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Ctrl", { ctrlKey: true }],
+    ["Alt", { altKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Shift", { shiftKey: true }],
+    ["repeat", { repeat: true }],
+    ["composition", { isComposing: true }],
+  ] as const)("rejects trusted %s and accepts a later unmodified navigation", (_name, init) => {
+    const router = createRouter(`reject-${_name}`);
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const controls = openButtons(view.host);
+
+    expect(dispatchTrustedKey(controls[0]!, "ArrowDown", init).allowed).toBe(true);
+    expect(controls[0]).toHaveFocus();
+    expect(dispatchTrustedKey(controls[0]!, "ArrowDown").allowed).toBe(false);
+    expect(controls[1]).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("rejects canceled, stopped, foreign-realm, fabricated, dismiss, read-all, and unfocused events", () => {
+    const router = createRouter("event-provenance");
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const current = captureActions(0, view.host);
+    const controls = openButtons(view.host);
+    const sentinel = connectedButton("Focus sentinel");
+
+    const cancel = (event: KeyboardEvent) => event.preventDefault();
+    current.openButton.addEventListener("keydown", cancel, { capture: true, once: true });
+    expect(dispatchTrustedKey(current.openButton, "ArrowDown").allowed).toBe(false);
+    expect(current.openButton).toHaveFocus();
+
+    const stop = (event: KeyboardEvent) => event.stopPropagation();
+    current.openButton.addEventListener("keydown", stop, { capture: true, once: true });
+    expect(dispatchTrustedKey(current.openButton, "ArrowDown").allowed).toBe(true);
+    expect(current.openButton).toHaveFocus();
+
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const foreignWindow = iframe.contentWindow as
+      | (Window & typeof globalThis)
+      | null;
+    if (!foreignWindow) throw new Error("Foreign realm was not created");
+    current.openButton.focus();
+    const foreign = new foreignWindow.KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "ArrowDown",
+      view: foreignWindow,
+    });
+    // jsdom rejects a same-origin Window from another realm during Web IDL
+    // conversion, so set the initialized slot to model the browser-valid input.
+    const implementationSymbol = Object.getOwnPropertySymbols(foreign).find(
+      (symbol) => String(symbol) === "Symbol(impl)",
+    );
+    if (!implementationSymbol) {
+      throw new Error("Foreign event implementation slot was not available");
+    }
+    const implementation = (
+      foreign as unknown as Record<symbol, { view: Window | null }>
+    )[implementationSymbol];
+    implementation.view = window;
+    Object.setPrototypeOf(foreign, window.KeyboardEvent.prototype);
+    expect(current.openButton.dispatchEvent(foreign)).toBe(true);
+    expect(current.openButton).toHaveFocus();
+    iframe.remove();
+
+    sentinel.focus();
+    current.keyDown({
+      type: "keydown",
+      key: "ArrowDown",
+      target: current.openButton,
+      currentTarget: current.openButton,
+      nativeEvent: new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "ArrowDown",
+      }),
+      preventDefault: vi.fn(),
+      isDefaultPrevented: () => false,
+      isPropagationStopped: () => false,
+      persist: vi.fn(),
+    } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+    expect(sentinel).toHaveFocus();
+
+    for (const outside of [current.dismissButton, current.readAllButton]) {
+      const { propsKey, record, props } = reactPropsEntry(outside);
+      record[propsKey] = { ...props, onKeyDown: current.keyDown };
+      try {
+        expect(dispatchTrustedKey(outside, "ArrowDown").allowed).toBe(true);
+        expect(outside).toHaveFocus();
+      } finally {
+        record[propsKey] = props;
+      }
+    }
+
+    sentinel.focus();
+    expect(dispatchTrustedKey(controls[0]!, "ArrowDown", {}, false).allowed).toBe(true);
+    expect(sentinel).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    sentinel.remove();
+  });
+
+  it.each([
+    [
+      "slotless owner-prototype object",
+      () => Object.create(window.KeyboardEvent.prototype) as object,
+    ],
+    [
+      "proxy whose native getters throw",
+      () =>
+        new Proxy(
+          new KeyboardEvent("keydown", {
+            bubbles: true,
+            cancelable: true,
+            key: "ArrowDown",
+          }),
+          {},
+        ),
+    ],
+  ] as const)("fails closed without throwing for a %s", (_name, nativeEvent) => {
+    const router = createRouter(`forged-${_name}`);
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const current = captureActions(0, view.host);
+    const sentinel = connectedButton("Forgery sentinel");
+    const preventDefault = vi.fn();
+    sentinel.focus();
+
+    expect(() =>
+      current.keyDown({
+        type: "keydown",
+        key: "ArrowDown",
+        target: current.openButton,
+        currentTarget: current.openButton,
+        nativeEvent: nativeEvent(),
+        preventDefault,
+        isDefaultPrevented: () => false,
+        isPropagationStopped: () => false,
+        persist: vi.fn(),
+      } as unknown as ReactKeyboardEvent<HTMLButtonElement>),
+    ).not.toThrow();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(sentinel).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    sentinel.remove();
+  });
+
+  it("keeps clicks exact when a trusted getter changed before publication", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      KeyboardEvent.prototype,
+      "key",
+    );
+    if (!descriptor?.get) throw new Error("KeyboardEvent.key getter is unavailable");
+    Object.defineProperty(KeyboardEvent.prototype, "key", {
+      ...descriptor,
+      get() {
+        return descriptor.get!.call(this);
+      },
+    });
+    const router = createRouter("descriptor-before");
+    let view!: DirectView;
+    try {
+      view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    } finally {
+      Object.defineProperty(KeyboardEvent.prototype, "key", descriptor);
+    }
+    const current = captureActions(0, view.host);
+
+    expect(dispatchKey(current.openButton, "ArrowDown").allowed).toBe(true);
+    expect(current.openButton).toHaveFocus();
+    dispatchTrustedClick(current.openButton);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(
+      `/d/${ITEM.documentId}?thread=${ITEM.refId}`,
+    );
+  });
+
+  it("does not revive keyboard custody after a post-publication descriptor change", () => {
+    const router = createRouter("descriptor-after");
+    const view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+    const current = captureActions(0, view.host);
+    const descriptor = Object.getOwnPropertyDescriptor(
+      KeyboardEvent.prototype,
+      "key",
+    );
+    if (!descriptor?.get) throw new Error("KeyboardEvent.key getter is unavailable");
+    Object.defineProperty(KeyboardEvent.prototype, "key", {
+      ...descriptor,
+      get() {
+        return descriptor.get!.call(this);
+      },
+    });
+    try {
+      expect(dispatchKey(current.openButton, "ArrowDown").allowed).toBe(true);
+      expect(current.openButton).toHaveFocus();
+    } finally {
+      Object.defineProperty(KeyboardEvent.prototype, "key", descriptor);
+    }
+
+    expect(dispatchKey(current.openButton, "ArrowDown").allowed).toBe(true);
+    expect(current.openButton).toHaveFocus();
+    dispatchTrustedClick(current.openButton);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(
+      `/d/${ITEM.documentId}?thread=${ITEM.refId}`,
+    );
+  });
+
+  it.each([
+    ["row reorder", (first: CapturedActions, second: CapturedActions) => {
+      first.list.append(first.item);
+      first.list.insertBefore(first.item, second.item);
+    }],
+    ["row removal", (first: CapturedActions) => {
+      first.item.remove();
+      first.list.prepend(first.item);
+    }],
+    ["row replacement", (first: CapturedActions) => {
+      const replacement = first.item.cloneNode(true) as HTMLLIElement;
+      first.item.replaceWith(replacement);
+      replacement.replaceWith(first.item);
+    }],
+    ["mutation restore", (first: CapturedActions) => {
+      const className = first.openButton.className;
+      first.openButton.className = `${className} changed`;
+      first.openButton.className = className;
+    }],
+    ["detach and reinsert", (first: CapturedActions, _second: CapturedActions, view: DirectView) => {
+      first.section.remove();
+      view.host.append(first.section);
+    }],
+  ] as const)("keeps a restored %s history inert and permits a fresh successor", (_name, tamper) => {
+    const router = createRouter(`history-${_name}`);
+    const sharedSnapshot = snapshot([ITEM, ITEM_TWO], 2);
+    const view = createDirectView(router, sharedSnapshot);
+    const first = captureActions(0, view.host);
+    const second = captureActions(1, view.host);
+
+    tamper(first, second, view);
+    first.openButton.focus();
+    expect(dispatchTrustedKey(first.openButton, "ArrowDown", {}, false).allowed).toBe(true);
+    expect(first.openButton).toHaveFocus();
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    let current!: CapturedActions;
+    renderDirect(view, router, sharedSnapshot, {
+      mount: "replacement",
+      boundary: 1,
+      passiveGeneration: `fresh-${_name}`,
+      onPassiveCleanup: vi.fn(),
+      onBoundary: () => {
+        current = captureActions(0, view.host);
+      },
+    });
+    expect(current.openButton).not.toBe(first.openButton);
+    const currentControls = openButtons(view.host);
+    expect(dispatchTrustedKey(currentControls[0]!, "ArrowDown").allowed).toBe(false);
+    expect(currentControls[1]).toHaveFocus();
+    dispatchTrustedClick(current.openButton);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(
+      `/d/${ITEM.documentId}?thread=${ITEM.refId}`,
+    );
+  });
+
+  it("rejects partial ref replay, then recovers click authority with a complete generation", () => {
+    const router = createRouter("partial-replay");
+    const sharedSnapshot = snapshot([ITEM, ITEM_TWO], 2);
+    const view = createDirectView(router, sharedSnapshot);
+    const stale = captureActions(0, view.host);
+    const staleOpenRef = reactRef(stale.openButton);
+
+    staleOpenRef(null);
+    staleOpenRef(stale.openButton);
+    stale.openButton.focus();
+    expect(dispatchTrustedKey(stale.openButton, "ArrowDown", {}, false).allowed).toBe(true);
+    expect(stale.openButton).toHaveFocus();
+
+    let current!: CapturedActions;
+    renderDirect(view, router, sharedSnapshot, {
+      boundary: 1,
+      passiveGeneration: "complete-replay",
+      onPassiveCleanup: vi.fn(),
+      onBoundary: () => {
+        current = captureActions(0, view.host);
+      },
+    });
+    const currentControls = openButtons(view.host);
+    expect(dispatchTrustedKey(currentControls[0]!, "ArrowDown").allowed).toBe(false);
+    expect(currentControls[1]).toHaveFocus();
+    dispatchTrustedClick(current.openButton);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(
+      `/d/${ITEM.documentId}?thread=${ITEM.refId}`,
+    );
+  });
+
+  it("retires cleanup observers and leaves removed publication handlers inert", async () => {
+    const NativeMutationObserver = window.MutationObserver;
+    const active = new Set<MutationObserver>();
+    class TrackingMutationObserver extends NativeMutationObserver {
+      constructor(callback: MutationCallback) {
+        super(callback);
+        active.add(this);
+      }
+
+      override disconnect() {
+        active.delete(this);
+        super.disconnect();
+      }
+    }
+    window.MutationObserver = TrackingMutationObserver;
+    const router = createRouter("cleanup");
+    let view: DirectView | null = null;
+    try {
+      view = createStrictView(router, snapshot([ITEM, ITEM_TWO], 2));
+      const stale = captureActions(0, view.host);
+      const removed = stale.section;
+      expect(active.size).toBe(1);
+
+      await act(async () => {
+        view!.root.unmount();
+        await Promise.resolve();
+      });
+      const index = directViews.indexOf(view);
+      if (index >= 0) directViews.splice(index, 1);
+      expect(active.size).toBe(0);
+
+      view.host.append(removed);
+      const sentinel = connectedButton("Cleanup sentinel");
+      sentinel.focus();
+      stale.keyDown({
+        currentTarget: stale.openButton,
+        nativeEvent: new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "ArrowDown",
+        }),
+      } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
+      expect(sentinel).toHaveFocus();
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      sentinel.remove();
+    } finally {
+      window.MutationObserver = NativeMutationObserver;
+      view?.host.remove();
+    }
+  });
+});
+
+describe("notification strip Delete dismissal", () => {
+  it.each([
+    ["first", 0, ITEM.id],
+    ["middle", 1, ITEM_TWO.id],
+    ["last", 2, ITEM_THREE.id],
+  ] as const)(
+    "marks only the %s focused row read after one trusted prevention",
+    (_position, sourceIndex, expectedId) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const router = createRouter(`delete-${sourceIndex}`);
+      const scroll = { x: window.scrollX, y: window.scrollY };
+      try {
+        const view = createStrictView(
+          router,
+          snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+        );
+        const controls = openButtons(view.host);
+        const source = controls[sourceIndex]!;
+        source.focus();
+        preventDefault.mockClear();
+        focus.mockClear();
+        store.markNotificationRead.mockImplementation((id) => {
+          expect(id).toBe(expectedId);
+          expect(document.activeElement).toBe(source);
+          expect(focus).not.toHaveBeenCalled();
+          return Promise.resolve();
+        });
+
+        const result = dispatchTrustedDelete(source, {}, false);
+
+        expect(result.allowed).toBe(false);
+        expect(result.event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+          expectedId,
+        );
+        expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(source).toHaveFocus();
+        expect(window.scrollX).toBe(scroll.x);
+        expect(window.scrollY).toBe(scroll.y);
+      } finally {
+        preventDefault.mockRestore();
+        focus.mockRestore();
+      }
+    },
+  );
+
+  it("rejects untrusted, inexact, modified, repeated, composing, canceled, stopped, and unfocused Delete input", () => {
+    const router = createRouter("delete-rejections");
+    const view = createStrictView(
+      router,
+      snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+    );
+    const current = captureActions(1, view.host);
+    const source = current.openButton;
+    const sentinel = connectedButton("Delete focus sentinel");
+
+    expect(dispatchKey(source, "Delete", { code: "Delete" }).allowed).toBe(true);
+    for (const init of [
+      { code: "Backspace" },
+      { code: "Delete", location: 1 },
+      { code: "Delete", ctrlKey: true },
+      { code: "Delete", altKey: true },
+      { code: "Delete", metaKey: true },
+      { code: "Delete", shiftKey: true },
+      { code: "Delete", repeat: true },
+      { code: "Delete", isComposing: true },
+    ] satisfies KeyboardEventInit[]) {
+      const result = dispatchTrustedKey(source, "Delete", init);
+      expect(result.allowed).toBe(true);
+      expect(result.event.defaultPrevented).toBe(false);
+      expect(source).toHaveFocus();
+    }
+
+    const cancel = (event: KeyboardEvent) => event.preventDefault();
+    source.addEventListener("keydown", cancel, { capture: true, once: true });
+    expect(dispatchTrustedDelete(source).allowed).toBe(false);
+    expect(source).toHaveFocus();
+
+    const stop = (event: KeyboardEvent) => event.stopPropagation();
+    source.addEventListener("keydown", stop, { capture: true, once: true });
+    expect(dispatchTrustedDelete(source).allowed).toBe(true);
+    expect(source).toHaveFocus();
+
+    sentinel.focus();
+    const unfocused = dispatchTrustedDelete(source, {}, false);
+    expect(unfocused.allowed).toBe(true);
+    expect(unfocused.event.defaultPrevented).toBe(false);
+    expect(sentinel).toHaveFocus();
+
+    for (const outside of [current.dismissButton, current.readAllButton]) {
+      const { propsKey, record, props } = reactPropsEntry(outside);
+      record[propsKey] = { ...props, onKeyDown: current.keyDown };
+      try {
+        const result = dispatchTrustedDelete(outside);
+        expect(result.allowed).toBe(true);
+        expect(result.event.defaultPrevented).toBe(false);
+        expect(outside).toHaveFocus();
+      } finally {
+        record[propsKey] = props;
+      }
+    }
+
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    const recovered = dispatchTrustedDelete(source);
+    expect(recovered.allowed).toBe(false);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+      ITEM_TWO.id,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    sentinel.remove();
+  });
+
+  it("claims the exact React wrapper, native event, row, action, and publication once before reentry", () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const router = createRouter("delete-one-use");
+    const view = createStrictView(
+      router,
+      snapshot([ITEM, ITEM_TWO, ITEM_THREE], 3),
+    );
+    const current = captureActions(1, view.host);
+    let reenter: () => void = () => undefined;
+    store.markNotificationRead.mockImplementation(() => {
+      reenter();
+      return Promise.resolve();
+    });
+    current.openButton.focus();
+    preventDefault.mockClear();
+    const restore = interceptKeyDown(current.openButton, (original, event) => {
+      original({ ...event } as ReactKeyboardEvent<HTMLButtonElement>);
+      original(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "isTrusted") return false;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+      original(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "view") return undefined;
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+      original(new Proxy(event, {
+        get(target, property, receiver) {
+          if (property === "code") return "Backspace";
+          return Reflect.get(target, property, receiver);
+        },
+      }));
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      reenter = () => original(event);
+      original(event);
+      original(event);
+    });
+    try {
+      const result = dispatchTrustedDelete(current.openButton, {}, false);
+      expect(result.allowed).toBe(false);
+      expect(result.event.defaultPrevented).toBe(true);
+    } finally {
+      restore();
+      preventDefault.mockRestore();
+    }
+
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+      ITEM_TWO.id,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("keeps stale item, router, and row-order facts inert before a complete clean successor", () => {
+    const first = { ...ITEM };
+    const second = { ...ITEM_TWO };
+    const third = { ...ITEM_THREE };
+    const items = [first, second, third];
+    const current = snapshot(items, 3);
+    const router = createRouter("delete-stale");
+    const view = createStrictGenerationView(router, current);
+    const stale = captureActions(0, view.host);
+
+    first.documentTitle = "Mutated title";
+    items.reverse();
+    router.push = vi.fn();
+    stale.openButton.focus();
+    const rejected = dispatchTrustedDelete(stale.openButton, {}, false);
+
+    expect(rejected.allowed).toBe(true);
+    expect(rejected.event.defaultPrevented).toBe(false);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    renderStrictGeneration(view, router, current, "successor");
+    const successor = captureActions(0, view.host);
+    expect(successor.item).toHaveAttribute(
+      "data-notification-id",
+      ITEM_THREE.id,
+    );
+    const accepted = dispatchTrustedDelete(successor.openButton);
+    expect(accepted.allowed).toBe(false);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+      ITEM_THREE.id,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["reordered row", (first: CapturedActions, second: CapturedActions) => {
+      first.list.append(first.item);
+      first.list.insertBefore(first.item, second.item);
+    }],
+    ["detached row", (first: CapturedActions) => {
+      first.item.remove();
+      first.list.prepend(first.item);
+    }],
+    ["replaced row", (first: CapturedActions) => {
+      const replacement = first.item.cloneNode(true) as HTMLLIElement;
+      first.item.replaceWith(replacement);
+      replacement.replaceWith(first.item);
+    }],
+    ["restored attribute", (first: CapturedActions) => {
+      const className = first.openButton.className;
+      first.openButton.className = `${className} changed`;
+      first.openButton.className = className;
+    }],
+    ["detached strip", (first: CapturedActions, _second: CapturedActions, view: DirectView) => {
+      first.section.remove();
+      view.host.append(first.section);
+    }],
+  ] as const)(
+    "rejects a restored %s DOM history and lets a distinct clean successor recover",
+    (_scenario, tamper) => {
+      const router = createRouter(`delete-history-${_scenario}`);
+      const current = snapshot([ITEM, ITEM_TWO], 2);
+      const view = createStrictGenerationView(router, current);
+      const first = captureActions(0, view.host);
+      const second = captureActions(1, view.host);
+
+      tamper(first, second, view);
+      const rejected = dispatchTrustedDelete(first.openButton);
+      expect(rejected.allowed).toBe(true);
+      expect(rejected.event.defaultPrevented).toBe(false);
+      expect(store.markNotificationRead).not.toHaveBeenCalled();
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+
+      renderStrictGeneration(view, router, current, `successor-${_scenario}`);
+      const sections = view.host.querySelectorAll<HTMLElement>(
+        '[data-testid="notifications-strip"]',
+      );
+      const successor = captureActions(0, sections[sections.length - 1]!);
+      const accepted = dispatchTrustedDelete(successor.openButton);
+      expect(accepted.allowed).toBe(false);
+      expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+        ITEM.id,
+      );
+      expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not revive Delete authority after a keyboard descriptor is replaced and restored", () => {
+    const router = createRouter("delete-descriptor");
+    const current = snapshot([ITEM, ITEM_TWO], 2);
+    const view = createStrictGenerationView(router, current);
+    const stale = captureActions(0, view.host);
+    const descriptor = Object.getOwnPropertyDescriptor(
+      KeyboardEvent.prototype,
+      "code",
+    );
+    if (!descriptor?.get) {
+      throw new Error("KeyboardEvent.code getter is unavailable");
+    }
+    Object.defineProperty(KeyboardEvent.prototype, "code", {
+      ...descriptor,
+      get() {
+        return descriptor.get!.call(this);
+      },
+    });
+    try {
+      expect(dispatchTrustedDelete(stale.openButton).allowed).toBe(true);
+    } finally {
+      Object.defineProperty(KeyboardEvent.prototype, "code", descriptor);
+    }
+
+    expect(dispatchTrustedDelete(stale.openButton).allowed).toBe(true);
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    renderStrictGeneration(view, router, current, "descriptor-successor");
+    const successor = captureActions(0, view.host);
+    expect(dispatchTrustedDelete(successor.openButton).allowed).toBe(false);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+      ITEM.id,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("retires a cleaned-up Delete handler and accepts a later complete mount", async () => {
+    const router = createRouter("delete-cleanup");
+    const current = snapshot([ITEM, ITEM_TWO], 2);
+    const view = createStrictView(router, current);
+    const stale = captureActions(0, view.host);
+    const staleInput: {
+      event?: ReactKeyboardEvent<HTMLButtonElement>;
+    } = {};
+    const restore = interceptKeyDown(stale.openButton, (original, event) => {
+      expect(original).toBe(stale.keyDown);
+      staleInput.event = event;
+    });
+    dispatchTrustedDelete(stale.openButton);
+    restore();
+    const removed = stale.section;
+
+    await act(async () => {
+      view.root.unmount();
+      await Promise.resolve();
+    });
+    const index = directViews.indexOf(view);
+    if (index >= 0) directViews.splice(index, 1);
+    view.host.append(removed);
+    if (!staleInput.event) {
+      throw new Error("The stale Delete event was not captured");
+    }
+    stale.keyDown(staleInput.event);
+
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+
+    const successor = createStrictView(router, current);
+    const active = captureActions(1, successor.host);
+    expect(dispatchTrustedDelete(active.openButton).allowed).toBe(false);
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(
+      ITEM_TWO.id,
+    );
+    expect(store.markAllNotificationsRead).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    view.host.remove();
+  });
 });
 
 describe("notification strip snapshot authority", () => {

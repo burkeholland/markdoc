@@ -7,6 +7,7 @@ import {
   useMemo,
   useState,
   type ComponentPropsWithoutRef,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
@@ -24,7 +25,7 @@ import {
   sentence,
   type NotificationReadError,
 } from "@/lib/notifications-store";
-import { cn } from "@/lib/utils";
+import { clamp, cn } from "@/lib/utils";
 
 const ICONS: Record<NotificationKind, React.ComponentType<{ size?: number; className?: string }>> = {
   mention: AtSign,
@@ -84,6 +85,7 @@ type BellActionKind = "read-retry" | "load-retry" | "read-all" | "row";
 type BellLayoutDomain = "trigger" | "portal";
 type BellRetirement = "element" | "layout" | "mutation" | "other";
 const TOOLTIP_TRIGGER_DESCRIPTION_ATTRIBUTE = "aria-describedby";
+const NOTIFICATION_PAGE_ROW_OFFSET = 10;
 
 interface NotificationBellVisit {
   identity: symbol;
@@ -95,6 +97,7 @@ interface NotificationBellVisit {
 interface NotificationDisclosureAuthority {
   identity: symbol;
   visit: NotificationBellVisit;
+  focus: NotificationDirectionalFocus | null;
 }
 
 interface NotificationDisclosureState {
@@ -125,6 +128,21 @@ interface NotificationFacts {
   presentation: NotificationPresentation;
 }
 
+type NotificationFocusDirection = "first" | "last";
+
+interface NotificationDirectionalFocus {
+  readonly sourcePublication: symbol;
+  readonly visit: NotificationBellVisit;
+  readonly source: NotificationState;
+  readonly facts: NotificationFacts;
+  readonly trigger: HTMLButtonElement;
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly focus: HTMLElement["focus"];
+  readonly direction: NotificationFocusDirection;
+  readonly historyIsClean: () => boolean;
+}
+
 interface BellElements {
   trigger: HTMLButtonElement | null;
   content: HTMLDivElement | null;
@@ -140,6 +158,144 @@ interface NotificationAction {
   rowIndex: number | null;
   element: HTMLButtonElement | null;
   claimed: boolean;
+}
+
+type NotificationKeyboardEventField =
+  | "type"
+  | "target"
+  | "currentTarget"
+  | "eventPhase"
+  | "bubbles"
+  | "cancelable"
+  | "defaultPrevented"
+  | "cancelBubble"
+  | "composed"
+  | "timeStamp";
+type NotificationKeyboardField =
+  | "key"
+  | "code"
+  | "location"
+  | "repeat"
+  | "isComposing"
+  | "ctrlKey"
+  | "shiftKey"
+  | "altKey"
+  | "metaKey";
+type NotificationNativeGetter = () => unknown;
+type NotificationNativeGetters<Field extends string> = Readonly<
+  Record<Field, NotificationNativeGetter>
+>;
+
+interface NotificationNativeGetterAuthority<Field extends string> {
+  readonly getters: NotificationNativeGetters<Field>;
+  readonly isCurrent: () => boolean;
+}
+
+interface NotificationUnforgeableGetter {
+  readonly getter: NotificationNativeGetter;
+  readonly isCurrent: () => boolean;
+  readonly matches: (value: object) => boolean;
+  readonly read: (value: object) => unknown;
+}
+
+interface NotificationKeyboardAuthority {
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Object: ObjectConstructor;
+  readonly Event: typeof Event;
+  readonly UIEvent: typeof UIEvent;
+  readonly KeyboardEvent: typeof KeyboardEvent;
+  readonly Node: typeof Node;
+  readonly event: NotificationNativeGetters<NotificationKeyboardEventField>;
+  readonly keyboard: NotificationNativeGetters<NotificationKeyboardField>;
+  readonly ui: NotificationNativeGetters<"detail" | "view">;
+  readonly document: NotificationNativeGetters<"activeElement">;
+  readonly composedPath: Event["composedPath"];
+  readonly preventDefault: Event["preventDefault"];
+  readonly focus: HTMLElement["focus"];
+  readonly addEventListener: EventTarget["addEventListener"];
+  readonly removeEventListener: EventTarget["removeEventListener"];
+  readonly trusted: NotificationUnforgeableGetter;
+  readonly historyIsClean: () => boolean;
+}
+
+interface NotificationEventTrust {
+  readonly getter: NotificationNativeGetter;
+  readonly value: true;
+}
+
+interface NotificationKeyboardSnapshotBase {
+  readonly event: KeyboardEvent;
+  readonly publication: NotificationPublication;
+  readonly source: HTMLButtonElement;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly code: string;
+  readonly location: number;
+  readonly repeat: boolean;
+  readonly isComposing: boolean;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+  readonly altKey: boolean;
+  readonly metaKey: boolean;
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly cancelBubble: boolean;
+  readonly composed: boolean;
+  readonly timeStamp: number;
+  readonly detail: number;
+  readonly view: Window | null;
+  readonly trust: NotificationEventTrust;
+}
+
+interface NotificationRowKeyboardSnapshot
+  extends NotificationKeyboardSnapshotBase {
+  readonly kind: "row";
+  readonly action: NotificationAction;
+  readonly movement: NotificationRowMovement;
+  readonly destinationAction: NotificationAction;
+  readonly destination: HTMLButtonElement;
+}
+
+interface NotificationTriggerKeyboardSnapshot
+  extends NotificationKeyboardSnapshotBase {
+  readonly kind: "trigger";
+  readonly direction: NotificationFocusDirection;
+}
+
+type NotificationKeyboardSnapshot =
+  | NotificationRowKeyboardSnapshot
+  | NotificationTriggerKeyboardSnapshot;
+
+type NotificationRowNavigationKey =
+  | "ArrowDown"
+  | "ArrowUp"
+  | "Home"
+  | "End"
+  | "PageDown"
+  | "PageUp";
+
+interface NotificationRowMovement {
+  readonly key: NotificationRowNavigationKey;
+  readonly sourceIndex: number;
+  readonly destinationIndex: number;
+}
+
+interface NotificationKeyboardClaim {
+  readonly publication: symbol;
+  readonly source: symbol;
+  readonly key: string;
+  readonly movement: NotificationRowMovement | null;
+  readonly destination: symbol | null;
+  readonly reactEvent: object;
+  readonly nativeEvent: KeyboardEvent;
+}
+
+interface NotificationKeyboardDelivery {
+  readonly snapshot: NotificationKeyboardSnapshot;
+  reactEvent: object | null;
+  reactCount: number;
+  invalid: boolean;
 }
 
 interface NotificationPublication {
@@ -167,8 +323,11 @@ interface NotificationPublication {
   contentDom: BellDomSnapshot | null;
   contentPlacement: BellPlacement | null;
   domGuard: BellDomGuard | null;
+  keyboardAuthority: NotificationKeyboardAuthority | null;
+  keyboardEvents: Set<KeyboardEvent>;
   successorRequested: boolean;
   rowClaimed: boolean;
+  openDirectional: (disclosure: NotificationDisclosureAuthority) => void;
   requestSuccessor: () => void;
   current: NotificationBellCurrent;
 }
@@ -226,6 +385,11 @@ interface BellRefReplay {
 }
 
 type OutsideInteractionEvent = CustomEvent<{ originalEvent: Event }>;
+const notificationReflectApply = Reflect.apply;
+const notificationGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const notificationGetPrototypeOf = Object.getPrototypeOf;
+const notificationReflectConstruct = Reflect.construct;
+const NOTIFICATION_PREVENT_SCROLL = Object.freeze({ preventScroll: true });
 
 interface OutsideEventProvenance {
   readonly publication: NotificationPublication;
@@ -233,6 +397,412 @@ interface OutsideEventProvenance {
   readonly provenanceEvent: Event;
   readonly ownerWindow: Window;
   timeoutId: number;
+}
+
+function captureNotificationGetters<const Fields extends readonly string[]>(
+  prototype: object | null,
+  fields: Fields,
+): NotificationNativeGetterAuthority<Fields[number]> | null {
+  if (!prototype) return null;
+  const entries: [Fields[number], NotificationNativeGetter][] = [];
+  const descriptors: [Fields[number], PropertyDescriptor][] = [];
+  for (const field of fields) {
+    const descriptor = notificationReflectApply(
+      notificationGetOwnPropertyDescriptor,
+      Object,
+      [prototype, field],
+    ) as PropertyDescriptor | undefined;
+    if (
+      !descriptor ||
+      typeof descriptor.get !== "function" ||
+      "value" in descriptor ||
+      "writable" in descriptor
+    ) {
+      return null;
+    }
+    entries.push([field, descriptor.get]);
+    descriptors.push([field, Object.freeze({ ...descriptor })]);
+  }
+  const getters = Object.freeze(
+    Object.fromEntries(entries),
+  ) as NotificationNativeGetters<Fields[number]>;
+  return Object.freeze({
+    getters,
+    isCurrent: () =>
+      descriptors.every(([field, expected]) => {
+        const current = notificationReflectApply(
+          notificationGetOwnPropertyDescriptor,
+          Object,
+          [prototype, field],
+        ) as PropertyDescriptor | undefined;
+        return notificationDescriptorsMatch(current, expected);
+      }),
+  });
+}
+
+function captureNotificationMethod<Method>(
+  prototype: object,
+  name: string,
+): Method | null {
+  const descriptor = notificationReflectApply(
+    notificationGetOwnPropertyDescriptor,
+    Object,
+    [prototype, name],
+  ) as PropertyDescriptor | undefined;
+  return typeof descriptor?.value === "function" ? (descriptor.value as Method) : null;
+}
+
+function notificationDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (
+    !current ||
+    current.configurable !== expected.configurable ||
+    current.enumerable !== expected.enumerable ||
+    ("value" in current) !== ("value" in expected) ||
+    ("writable" in current) !== ("writable" in expected) ||
+    ("get" in current) !== ("get" in expected) ||
+    ("set" in current) !== ("set" in expected)
+  ) {
+    return false;
+  }
+  return "value" in expected
+    ? current.value === expected.value && current.writable === expected.writable
+    : current.get === expected.get && current.set === expected.set;
+}
+
+function captureNotificationDescriptor(
+  owner: object | null,
+  property: PropertyKey,
+) {
+  if (!owner) return null;
+  const descriptor = notificationReflectApply(
+    notificationGetOwnPropertyDescriptor,
+    Object,
+    [owner, property],
+  ) as PropertyDescriptor | undefined;
+  if (!descriptor) return null;
+  const expected = Object.freeze({ ...descriptor });
+  return Object.freeze({
+    isCurrent: () => {
+      const current = notificationReflectApply(
+        notificationGetOwnPropertyDescriptor,
+        Object,
+        [owner, property],
+      ) as PropertyDescriptor | undefined;
+      return notificationDescriptorsMatch(current, expected);
+    },
+  });
+}
+
+function captureNotificationUnforgeableGetter(
+  owner: object | null,
+  property: PropertyKey,
+): NotificationUnforgeableGetter | null {
+  if (!owner) return null;
+  const descriptor = notificationReflectApply(
+    notificationGetOwnPropertyDescriptor,
+    Object,
+    [owner, property],
+  ) as PropertyDescriptor | undefined;
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    descriptor.enumerable !== true ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined ||
+    "value" in descriptor ||
+    "writable" in descriptor
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (value: object) => {
+    const current = notificationReflectApply(
+      notificationGetOwnPropertyDescriptor,
+      Object,
+      [value, property],
+    ) as PropertyDescriptor | undefined;
+    return notificationDescriptorsMatch(current, expected);
+  };
+  return Object.freeze({
+    getter: descriptor.get,
+    isCurrent: () => matches(owner),
+    matches,
+    read: (value: object) =>
+      notificationReflectApply(descriptor.get as NotificationNativeGetter, value, []),
+  });
+}
+
+const NOTIFICATION_EVENT_CONSTRUCTOR =
+  typeof Event === "undefined" ? null : Event;
+const NOTIFICATION_UI_EVENT_CONSTRUCTOR =
+  typeof UIEvent === "undefined" ? null : UIEvent;
+const NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR =
+  typeof KeyboardEvent === "undefined" ? null : KeyboardEvent;
+const NOTIFICATION_DOCUMENT_CONSTRUCTOR =
+  typeof Document === "undefined" ? null : Document;
+const NOTIFICATION_HTML_ELEMENT_CONSTRUCTOR =
+  typeof HTMLElement === "undefined" ? null : HTMLElement;
+const NOTIFICATION_EVENT_TARGET_CONSTRUCTOR =
+  typeof EventTarget === "undefined" ? null : EventTarget;
+const NOTIFICATION_NODE_CONSTRUCTOR =
+  typeof Node === "undefined" ? null : Node;
+const NOTIFICATION_EVENT_PROTOTYPE =
+  NOTIFICATION_EVENT_CONSTRUCTOR?.prototype ?? null;
+const NOTIFICATION_UI_EVENT_PROTOTYPE =
+  NOTIFICATION_UI_EVENT_CONSTRUCTOR?.prototype ?? null;
+const NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE =
+  NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR?.prototype ?? null;
+const NOTIFICATION_DOCUMENT_PROTOTYPE =
+  NOTIFICATION_DOCUMENT_CONSTRUCTOR?.prototype ?? null;
+const NOTIFICATION_HTML_ELEMENT_PROTOTYPE =
+  NOTIFICATION_HTML_ELEMENT_CONSTRUCTOR?.prototype ?? null;
+const NOTIFICATION_EVENT_TARGET_PROTOTYPE =
+  NOTIFICATION_EVENT_TARGET_CONSTRUCTOR?.prototype ?? null;
+
+const NOTIFICATION_EVENT_GETTERS = captureNotificationGetters(
+  NOTIFICATION_EVENT_PROTOTYPE,
+  [
+    "type",
+    "target",
+    "currentTarget",
+    "eventPhase",
+    "bubbles",
+    "cancelable",
+    "defaultPrevented",
+    "cancelBubble",
+    "composed",
+    "timeStamp",
+  ] as const,
+);
+const NOTIFICATION_KEYBOARD_GETTERS = captureNotificationGetters(
+  NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
+  [
+    "key",
+    "code",
+    "location",
+    "repeat",
+    "isComposing",
+    "ctrlKey",
+    "shiftKey",
+    "altKey",
+    "metaKey",
+  ] as const,
+);
+const NOTIFICATION_UI_GETTERS = captureNotificationGetters(
+  NOTIFICATION_UI_EVENT_PROTOTYPE,
+  ["detail", "view"] as const,
+);
+const NOTIFICATION_REALM_DESCRIPTORS = Object.freeze([
+  captureNotificationDescriptor(NOTIFICATION_EVENT_CONSTRUCTOR, "prototype"),
+  captureNotificationDescriptor(NOTIFICATION_UI_EVENT_CONSTRUCTOR, "prototype"),
+  captureNotificationDescriptor(
+    NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR,
+    "prototype",
+  ),
+  captureNotificationDescriptor(NOTIFICATION_EVENT_PROTOTYPE, "constructor"),
+  captureNotificationDescriptor(NOTIFICATION_UI_EVENT_PROTOTYPE, "constructor"),
+  captureNotificationDescriptor(
+    NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE,
+    "constructor",
+  ),
+]);
+
+function notificationPrototypeOf(value: object) {
+  return notificationReflectApply(notificationGetPrototypeOf, Object, [
+    value,
+  ]) as object | null;
+}
+
+function notificationKeyboardRealmIsCurrent(
+  ownerWindow: Window & typeof globalThis,
+) {
+  return (
+    ownerWindow.Object === Object &&
+    ownerWindow.Reflect.apply === notificationReflectApply &&
+    ownerWindow.Reflect.construct === notificationReflectConstruct &&
+    ownerWindow.Object.getOwnPropertyDescriptor ===
+      notificationGetOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === notificationGetPrototypeOf &&
+    ownerWindow.Event === NOTIFICATION_EVENT_CONSTRUCTOR &&
+    ownerWindow.UIEvent === NOTIFICATION_UI_EVENT_CONSTRUCTOR &&
+    ownerWindow.KeyboardEvent === NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR &&
+    ownerWindow.Document === NOTIFICATION_DOCUMENT_CONSTRUCTOR &&
+    ownerWindow.HTMLElement === NOTIFICATION_HTML_ELEMENT_CONSTRUCTOR &&
+    ownerWindow.EventTarget === NOTIFICATION_EVENT_TARGET_CONSTRUCTOR &&
+    ownerWindow.Node === NOTIFICATION_NODE_CONSTRUCTOR &&
+    ownerWindow.Event.prototype === NOTIFICATION_EVENT_PROTOTYPE &&
+    ownerWindow.UIEvent.prototype === NOTIFICATION_UI_EVENT_PROTOTYPE &&
+    ownerWindow.KeyboardEvent.prototype ===
+      NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE &&
+    ownerWindow.Document.prototype === NOTIFICATION_DOCUMENT_PROTOTYPE &&
+    ownerWindow.HTMLElement.prototype ===
+      NOTIFICATION_HTML_ELEMENT_PROTOTYPE &&
+    ownerWindow.EventTarget.prototype ===
+      NOTIFICATION_EVENT_TARGET_PROTOTYPE &&
+    !!NOTIFICATION_EVENT_PROTOTYPE &&
+    !!NOTIFICATION_UI_EVENT_PROTOTYPE &&
+    !!NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE &&
+    notificationPrototypeOf(NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE) ===
+      NOTIFICATION_UI_EVENT_PROTOTYPE &&
+    notificationPrototypeOf(NOTIFICATION_UI_EVENT_PROTOTYPE) ===
+      NOTIFICATION_EVENT_PROTOTYPE &&
+    notificationPrototypeOf(NOTIFICATION_EVENT_PROTOTYPE) === Object.prototype &&
+    NOTIFICATION_REALM_DESCRIPTORS.every(
+      (descriptor) => descriptor?.isCurrent() === true,
+    ) &&
+    NOTIFICATION_EVENT_GETTERS?.isCurrent() === true &&
+    NOTIFICATION_KEYBOARD_GETTERS?.isCurrent() === true &&
+    NOTIFICATION_UI_GETTERS?.isCurrent() === true
+  );
+}
+
+function captureNotificationKeyboardAuthority(
+  ownerDocument: Document,
+  ownerWindow: Window & typeof globalThis,
+): NotificationKeyboardAuthority | null {
+  const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+  const construct = ownerWindow.Reflect.construct;
+  if (
+    !NOTIFICATION_EVENT_GETTERS ||
+    !NOTIFICATION_KEYBOARD_GETTERS ||
+    !NOTIFICATION_UI_GETTERS ||
+    KeyboardEventConstructor !== NOTIFICATION_KEYBOARD_EVENT_CONSTRUCTOR ||
+    construct !== notificationReflectConstruct ||
+    !notificationKeyboardRealmIsCurrent(ownerWindow)
+  ) {
+    return null;
+  }
+  let probe: KeyboardEvent;
+  try {
+    probe = notificationReflectApply(construct, ownerWindow.Reflect, [
+      KeyboardEventConstructor,
+      ["notification-keyboard-intrinsic"],
+      KeyboardEventConstructor,
+    ]) as KeyboardEvent;
+  } catch {
+    return null;
+  }
+  const trusted = captureNotificationUnforgeableGetter(probe, "isTrusted");
+  if (
+    !trusted ||
+    notificationPrototypeOf(probe) !== NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE ||
+    !notificationKeyboardRealmIsCurrent(ownerWindow)
+  ) {
+    return null;
+  }
+  try {
+    if (trusted.read(probe) !== false) return null;
+  } catch {
+    return null;
+  }
+  const document = captureNotificationGetters(ownerWindow.Document.prototype, [
+    "activeElement",
+  ] as const);
+  const composedPath = captureNotificationMethod<Event["composedPath"]>(
+    ownerWindow.Event.prototype,
+    "composedPath",
+  );
+  const preventDefault = captureNotificationMethod<Event["preventDefault"]>(
+    ownerWindow.Event.prototype,
+    "preventDefault",
+  );
+  const focus = captureNotificationMethod<HTMLElement["focus"]>(
+    ownerWindow.HTMLElement.prototype,
+    "focus",
+  );
+  const addEventListener = captureNotificationMethod<EventTarget["addEventListener"]>(
+    ownerWindow.EventTarget.prototype,
+    "addEventListener",
+  );
+  const removeEventListener = captureNotificationMethod<
+    EventTarget["removeEventListener"]
+  >(ownerWindow.EventTarget.prototype, "removeEventListener");
+  if (
+    !document ||
+    !composedPath ||
+    !preventDefault ||
+    !focus ||
+    !addEventListener ||
+    !removeEventListener
+  ) {
+    return null;
+  }
+  let historyIsClean = true;
+  const checkHistory = () => {
+    if (!historyIsClean) return false;
+    historyIsClean =
+      notificationKeyboardRealmIsCurrent(ownerWindow) &&
+      document.isCurrent() &&
+      notificationPrototypeOf(probe) === NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE &&
+      trusted.isCurrent();
+    return historyIsClean;
+  };
+  return Object.freeze({
+    ownerDocument,
+    ownerWindow,
+    Object: ownerWindow.Object,
+    Event: ownerWindow.Event,
+    UIEvent: ownerWindow.UIEvent,
+    KeyboardEvent: ownerWindow.KeyboardEvent,
+    Node: ownerWindow.Node,
+    event: NOTIFICATION_EVENT_GETTERS.getters,
+    keyboard: NOTIFICATION_KEYBOARD_GETTERS.getters,
+    ui: NOTIFICATION_UI_GETTERS.getters,
+    document: document.getters,
+    composedPath,
+    preventDefault,
+    focus,
+    addEventListener,
+    removeEventListener,
+    trusted,
+    historyIsClean: checkHistory,
+  });
+}
+
+function notificationNativeValue<Value>(
+  getter: NotificationNativeGetter,
+  event: Event,
+): Value {
+  return notificationReflectApply(getter, event, []) as Value;
+}
+
+function notificationActiveElement(
+  authority: NotificationKeyboardAuthority,
+): Element | null {
+  return notificationReflectApply(
+    authority.document.activeElement,
+    authority.ownerDocument,
+    [],
+  ) as Element | null;
+}
+
+function notificationEventPath(
+  authority: NotificationKeyboardAuthority,
+  event: Event,
+): EventTarget[] {
+  return notificationReflectApply(authority.composedPath, event, []) as EventTarget[];
+}
+
+function captureNotificationEventTrust(
+  authority: NotificationKeyboardAuthority,
+  event: Event,
+): NotificationEventTrust | null {
+  if (
+    !authority.historyIsClean() ||
+    notificationPrototypeOf(event) !== NOTIFICATION_KEYBOARD_EVENT_PROTOTYPE ||
+    !authority.trusted.matches(event)
+  ) {
+    return null;
+  }
+  try {
+    if (authority.trusted.read(event) !== true) return null;
+  } catch {
+    return null;
+  }
+  return Object.freeze({ getter: authority.trusted.getter, value: true });
 }
 
 function freezeNotification(notification: NotificationDto): NotificationDto {
@@ -534,6 +1104,45 @@ function isEffectivelyEnabled(element: HTMLElement) {
   return true;
 }
 
+function notificationRowMovement(
+  key: string,
+  sourceIndex: number,
+  rowCount: number,
+): NotificationRowMovement | null {
+  if (rowCount === 0 || sourceIndex < 0 || sourceIndex >= rowCount) return null;
+  let destinationIndex: number;
+  if (key === "ArrowDown") {
+    destinationIndex = (sourceIndex + 1) % rowCount;
+  } else if (key === "ArrowUp") {
+    destinationIndex = (sourceIndex - 1 + rowCount) % rowCount;
+  } else if (key === "Home") {
+    destinationIndex = 0;
+  } else if (key === "End") {
+    destinationIndex = rowCount - 1;
+  } else if (key === "PageDown") {
+    destinationIndex = clamp(
+      sourceIndex + NOTIFICATION_PAGE_ROW_OFFSET,
+      0,
+      rowCount - 1,
+    );
+    if (destinationIndex === sourceIndex) return null;
+  } else if (key === "PageUp") {
+    destinationIndex = clamp(
+      sourceIndex - NOTIFICATION_PAGE_ROW_OFFSET,
+      0,
+      rowCount - 1,
+    );
+    if (destinationIndex === sourceIndex) return null;
+  } else {
+    return null;
+  }
+  return Object.freeze({
+    key,
+    sourceIndex,
+    destinationIndex,
+  });
+}
+
 class NotificationBellCurrent {
   #visit: NotificationBellVisit | null = null;
   #disclosure: NotificationDisclosureAuthority | null = null;
@@ -585,7 +1194,28 @@ class NotificationPublicationCoordinator {
   #elementOwners = new WeakMap<HTMLElement, BellElementOwner>();
   #proof: DisclosureProof | null = null;
   #claimedEvents = new WeakSet<Event>();
+  #claimedReactEvents = new WeakSet<object>();
+  #keyboardDeliveries = new WeakMap<KeyboardEvent, NotificationKeyboardDelivery>();
+  #keyboardClaims = new WeakMap<KeyboardEvent, NotificationKeyboardClaim>();
+  #focusedDisclosures = new WeakSet<NotificationDisclosureAuthority>();
   #currentOutsideEvent: OutsideEventProvenance | null = null;
+
+  clearKeyboardEvent(
+    publication: NotificationPublication,
+    event: KeyboardEvent,
+    delivery?: NotificationKeyboardDelivery,
+  ) {
+    const current = this.#keyboardDeliveries.get(event);
+    if (!delivery || current === delivery) this.#keyboardDeliveries.delete(event);
+    publication.keyboardEvents.delete(event);
+  }
+
+  clearKeyboardEvents(publication: NotificationPublication) {
+    for (const event of publication.keyboardEvents) {
+      this.#keyboardDeliveries.delete(event);
+    }
+    publication.keyboardEvents.clear();
+  }
 
   clearOutsideEvent(publication?: NotificationPublication) {
     const current = this.#currentOutsideEvent;
@@ -609,6 +1239,7 @@ class NotificationPublicationCoordinator {
       this.#replay = null;
       this.#proof = null;
       this.clearOutsideEvent();
+      if (this.#current) this.clearKeyboardEvents(this.#current);
     });
   }
 
@@ -1095,8 +1726,52 @@ class NotificationPublicationCoordinator {
       mutationGuard.release();
       return false;
     }
+    const keyboardAuthority = captureNotificationKeyboardAuthority(document, ownerWindow);
     let guardReleased = false;
     let deferredPointerEvent: Event | null = null;
+    const keyboardListeners: {
+      element: EventTarget;
+      listener: (event: Event) => void;
+      capture: boolean;
+    }[] = [];
+    if (keyboardAuthority) {
+      const triggerListener = (event: Event) =>
+        this.captureTriggerKey(publication, event);
+      notificationReflectApply(
+        keyboardAuthority.addEventListener,
+        trigger,
+        ["keydown", triggerListener, true],
+      );
+      keyboardListeners.push({
+        element: trigger,
+        listener: triggerListener,
+        capture: true,
+      });
+      for (const action of publication.rows) {
+        const element = action.element;
+        if (!element) continue;
+        const listener = (event: Event) =>
+          this.captureRowKey(publication, action, event);
+        notificationReflectApply(
+          keyboardAuthority.addEventListener,
+          element,
+          ["keydown", listener, true],
+        );
+        keyboardListeners.push({ element, listener, capture: true });
+      }
+      const finishTriggerKey = (event: Event) =>
+        this.finishTriggerKey(publication, event);
+      notificationReflectApply(
+        keyboardAuthority.addEventListener,
+        document,
+        ["keydown", finishTriggerKey, false],
+      );
+      keyboardListeners.push({
+        element: document,
+        listener: finishTriggerKey,
+        capture: false,
+      });
+    }
     const activateOutsideEvent = (originalEvent: Event, provenanceEvent: Event) => {
       this.clearOutsideEvent();
       const proof: OutsideEventProvenance = {
@@ -1144,6 +1819,16 @@ class NotificationPublicationCoordinator {
         guardReleased = true;
         deferredPointerEvent = null;
         this.clearOutsideEvent(publication);
+        this.clearKeyboardEvents(publication);
+        if (keyboardAuthority) {
+          for (const { element, listener, capture } of keyboardListeners) {
+            notificationReflectApply(
+              keyboardAuthority.removeEventListener,
+              element,
+              ["keydown", listener, capture],
+            );
+          }
+        }
         document.removeEventListener("pointerdown", notePointerDown, true);
         document.removeEventListener("pointercancel", cancelDeferredPointer, true);
         document.removeEventListener("click", noteClick, true);
@@ -1159,6 +1844,7 @@ class NotificationPublicationCoordinator {
     publication.contentDom = content ? snapshotBellDom(content) : null;
     publication.contentPlacement = contentPlacement;
     publication.domGuard = guard;
+    publication.keyboardAuthority = keyboardAuthority;
     const portalRefs: [BellElementRole | NotificationAction, HTMLElement][] = [];
     const addPortalRef = (
       key: BellElementRole | NotificationAction | null,
@@ -1192,6 +1878,624 @@ class NotificationPublicationCoordinator {
       })),
     ];
     return true;
+  }
+
+  keyboardSnapshotMatches(delivery: NotificationKeyboardDelivery) {
+    const { snapshot } = delivery;
+    const { publication, event, source } = snapshot;
+    const authority = publication.keyboardAuthority;
+    const routeMatches =
+      snapshot.kind === "row"
+        ? this.actionMatches(publication, snapshot.action) &&
+          this.actionMatches(publication, snapshot.destinationAction) &&
+          this.rowMovementMatches(publication, snapshot) &&
+          snapshot.action.element === source &&
+          snapshot.destinationAction.element === snapshot.destination
+        : !publication.open &&
+          publication.disclosure === null &&
+          publication.current.disclosure() === null &&
+          publication.elements.trigger === source &&
+          this.triggerMatches(publication);
+    if (
+      !authority ||
+      this.#keyboardDeliveries.get(event) !== delivery ||
+      !(event instanceof authority.KeyboardEvent) ||
+      this.#claimedEvents.has(event) ||
+      this.#keyboardClaims.has(event) ||
+      !this.matches(publication) ||
+      !routeMatches ||
+      notificationActiveElement(authority) !== source
+    ) {
+      return false;
+    }
+    const trust = captureNotificationEventTrust(authority, event);
+    const { event: eventGetters, keyboard, ui } = authority;
+    const path = notificationEventPath(authority, event);
+    return (
+      trust?.getter === snapshot.trust.getter &&
+      trust.value === snapshot.trust.value &&
+      notificationNativeValue<string>(eventGetters.type, event) === "keydown" &&
+      notificationNativeValue<number>(eventGetters.eventPhase, event) ===
+        authority.Event.BUBBLING_PHASE &&
+      notificationNativeValue<EventTarget | null>(eventGetters.target, event) ===
+        source &&
+      notificationNativeValue<boolean>(eventGetters.defaultPrevented, event) ===
+        false &&
+      notificationNativeValue<boolean>(eventGetters.bubbles, event) ===
+        snapshot.bubbles &&
+      notificationNativeValue<boolean>(eventGetters.cancelable, event) ===
+        snapshot.cancelable &&
+      notificationNativeValue<boolean>(eventGetters.cancelBubble, event) ===
+        snapshot.cancelBubble &&
+      notificationNativeValue<boolean>(eventGetters.composed, event) ===
+        snapshot.composed &&
+      notificationNativeValue<number>(eventGetters.timeStamp, event) ===
+        snapshot.timeStamp &&
+      notificationNativeValue<string>(keyboard.key, event) === snapshot.key &&
+      notificationNativeValue<string>(keyboard.code, event) === snapshot.code &&
+      notificationNativeValue<number>(keyboard.location, event) ===
+        snapshot.location &&
+      notificationNativeValue<boolean>(keyboard.repeat, event) === snapshot.repeat &&
+      notificationNativeValue<boolean>(keyboard.isComposing, event) ===
+        snapshot.isComposing &&
+      notificationNativeValue<boolean>(keyboard.ctrlKey, event) === snapshot.ctrlKey &&
+      notificationNativeValue<boolean>(keyboard.shiftKey, event) ===
+        snapshot.shiftKey &&
+      notificationNativeValue<boolean>(keyboard.altKey, event) === snapshot.altKey &&
+      notificationNativeValue<boolean>(keyboard.metaKey, event) === snapshot.metaKey &&
+      notificationNativeValue<number>(ui.detail, event) === snapshot.detail &&
+      notificationNativeValue<Window | null>(ui.view, event) === snapshot.view &&
+      path.length === snapshot.path.length &&
+      path.every((entry, index) => entry === snapshot.path[index])
+    );
+  }
+
+  rowMovementMatches(
+    publication: NotificationPublication,
+    snapshot: NotificationRowKeyboardSnapshot,
+  ) {
+    const { action, destinationAction, movement } = snapshot;
+    const currentMovement =
+      action.rowIndex === null
+        ? null
+        : notificationRowMovement(
+            snapshot.key,
+            action.rowIndex,
+            publication.rows.length,
+          );
+    return Boolean(
+      currentMovement &&
+        currentMovement.key === movement.key &&
+        currentMovement.sourceIndex === movement.sourceIndex &&
+        currentMovement.destinationIndex === movement.destinationIndex &&
+        publication.rows[movement.sourceIndex] === action &&
+        publication.rows[movement.destinationIndex] === destinationAction,
+    );
+  }
+
+  captureTriggerKey(
+    publication: NotificationPublication,
+    event: Event,
+  ) {
+    const authority = publication.keyboardAuthority;
+    const source = publication.elements.trigger;
+    if (
+      !authority ||
+      !source ||
+      publication.open ||
+      publication.disclosure ||
+      publication.current.disclosure() ||
+      this.#keyboardDeliveries.has(event as KeyboardEvent) ||
+      !(event instanceof authority.KeyboardEvent) ||
+      this.#claimedEvents.has(event) ||
+      this.#keyboardClaims.has(event)
+    ) {
+      return;
+    }
+    const trust = captureNotificationEventTrust(authority, event);
+    if (!trust) return;
+    const { event: eventGetters, keyboard, ui } = authority;
+    const key = notificationNativeValue<string>(keyboard.key, event);
+    const direction =
+      key === "ArrowDown" ? "first" : key === "ArrowUp" ? "last" : null;
+    if (!direction) return;
+    const path = notificationEventPath(authority, event);
+    const target = notificationNativeValue<EventTarget | null>(
+      eventGetters.target,
+      event,
+    );
+    const currentTarget = notificationNativeValue<EventTarget | null>(
+      eventGetters.currentTarget,
+      event,
+    );
+    const view = notificationNativeValue<Window | null>(ui.view, event);
+    const repeat = notificationNativeValue<boolean>(keyboard.repeat, event);
+    const isComposing = notificationNativeValue<boolean>(
+      keyboard.isComposing,
+      event,
+    );
+    const ctrlKey = notificationNativeValue<boolean>(keyboard.ctrlKey, event);
+    const shiftKey = notificationNativeValue<boolean>(keyboard.shiftKey, event);
+    const altKey = notificationNativeValue<boolean>(keyboard.altKey, event);
+    const metaKey = notificationNativeValue<boolean>(keyboard.metaKey, event);
+    const bubbles = notificationNativeValue<boolean>(
+      eventGetters.bubbles,
+      event,
+    );
+    const cancelable = notificationNativeValue<boolean>(
+      eventGetters.cancelable,
+      event,
+    );
+    const cancelBubble = notificationNativeValue<boolean>(
+      eventGetters.cancelBubble,
+      event,
+    );
+    if (
+      notificationNativeValue<string>(eventGetters.type, event) !==
+        "keydown" ||
+      notificationNativeValue<number>(eventGetters.eventPhase, event) !==
+        authority.Event.AT_TARGET ||
+      target !== source ||
+      currentTarget !== source ||
+      !bubbles ||
+      !cancelable ||
+      cancelBubble ||
+      notificationNativeValue<boolean>(
+        eventGetters.defaultPrevented,
+        event,
+      ) ||
+      repeat ||
+      isComposing ||
+      ctrlKey ||
+      shiftKey ||
+      altKey ||
+      metaKey ||
+      (view !== null && view !== authority.ownerWindow) ||
+      notificationActiveElement(authority) !== source ||
+      path[0] !== source ||
+      !path.includes(authority.ownerDocument) ||
+      !this.matches(publication) ||
+      !this.triggerMatches(publication)
+    ) {
+      return;
+    }
+    const snapshot: NotificationTriggerKeyboardSnapshot = Object.freeze({
+      kind: "trigger",
+      event,
+      publication,
+      source,
+      direction,
+      path: Object.freeze([...path]),
+      key,
+      code: notificationNativeValue<string>(keyboard.code, event),
+      location: notificationNativeValue<number>(keyboard.location, event),
+      repeat,
+      isComposing,
+      ctrlKey,
+      shiftKey,
+      altKey,
+      metaKey,
+      bubbles,
+      cancelable,
+      cancelBubble,
+      composed: notificationNativeValue<boolean>(
+        eventGetters.composed,
+        event,
+      ),
+      timeStamp: notificationNativeValue<number>(
+        eventGetters.timeStamp,
+        event,
+      ),
+      detail: notificationNativeValue<number>(ui.detail, event),
+      view,
+      trust,
+    });
+    const delivery: NotificationKeyboardDelivery = {
+      snapshot,
+      reactEvent: null,
+      reactCount: 0,
+      invalid: false,
+    };
+    this.#keyboardDeliveries.set(event, delivery);
+    publication.keyboardEvents.add(event);
+    queueMicrotask(() =>
+      this.clearKeyboardEvent(publication, event, delivery),
+    );
+  }
+
+  captureRowKey(
+    publication: NotificationPublication,
+    action: NotificationAction,
+    event: Event,
+  ) {
+    const authority = publication.keyboardAuthority;
+    const source = action.element;
+    if (
+      !authority ||
+      !source ||
+      this.#keyboardDeliveries.has(event as KeyboardEvent) ||
+      !(event instanceof authority.KeyboardEvent) ||
+      this.#claimedEvents.has(event) ||
+      this.#keyboardClaims.has(event)
+    ) {
+      return;
+    }
+    const trust = captureNotificationEventTrust(authority, event);
+    if (!trust) return;
+    const { event: eventGetters, keyboard, ui } = authority;
+    const key = notificationNativeValue<string>(keyboard.key, event);
+    const rowIndex = action.rowIndex;
+    if (rowIndex === null || publication.rows.length === 0) return;
+    const movement = notificationRowMovement(
+      key,
+      rowIndex,
+      publication.rows.length,
+    );
+    if (!movement) return;
+    const destinationAction = publication.rows[movement.destinationIndex];
+    const destination = destinationAction?.element;
+    const path = notificationEventPath(authority, event);
+    const target = notificationNativeValue<EventTarget | null>(
+      eventGetters.target,
+      event,
+    );
+    const currentTarget = notificationNativeValue<EventTarget | null>(
+      eventGetters.currentTarget,
+      event,
+    );
+    const view = notificationNativeValue<Window | null>(ui.view, event);
+    const repeat = notificationNativeValue<boolean>(keyboard.repeat, event);
+    const isComposing = notificationNativeValue<boolean>(
+      keyboard.isComposing,
+      event,
+    );
+    const ctrlKey = notificationNativeValue<boolean>(keyboard.ctrlKey, event);
+    const shiftKey = notificationNativeValue<boolean>(keyboard.shiftKey, event);
+    const altKey = notificationNativeValue<boolean>(keyboard.altKey, event);
+    const metaKey = notificationNativeValue<boolean>(keyboard.metaKey, event);
+    const bubbles = notificationNativeValue<boolean>(eventGetters.bubbles, event);
+    const cancelable = notificationNativeValue<boolean>(
+      eventGetters.cancelable,
+      event,
+    );
+    const cancelBubble = notificationNativeValue<boolean>(
+      eventGetters.cancelBubble,
+      event,
+    );
+    if (
+      !destinationAction ||
+      !destination ||
+      notificationNativeValue<string>(eventGetters.type, event) !== "keydown" ||
+      notificationNativeValue<number>(eventGetters.eventPhase, event) !==
+        authority.Event.AT_TARGET ||
+      target !== source ||
+      currentTarget !== source ||
+      !bubbles ||
+      !cancelable ||
+      cancelBubble ||
+      notificationNativeValue<boolean>(
+        eventGetters.defaultPrevented,
+        event,
+      ) ||
+      repeat ||
+      isComposing ||
+      ctrlKey ||
+      shiftKey ||
+      altKey ||
+      metaKey ||
+      (view !== null && view !== authority.ownerWindow) ||
+      notificationActiveElement(authority) !== source ||
+      !path.includes(source) ||
+      !path.includes(publication.elements.list as EventTarget) ||
+      !path.includes(publication.elements.root as EventTarget) ||
+      !path.includes(publication.elements.content as EventTarget) ||
+      !path.includes(authority.ownerDocument) ||
+      !this.matches(publication) ||
+      !this.actionMatches(publication, action) ||
+      !this.actionMatches(publication, destinationAction)
+    ) {
+      return;
+    }
+    const snapshot: NotificationRowKeyboardSnapshot = Object.freeze({
+      kind: "row",
+      event,
+      publication,
+      action,
+      source,
+      movement,
+      destinationAction,
+      destination,
+      path: Object.freeze([...path]),
+      key,
+      code: notificationNativeValue<string>(keyboard.code, event),
+      location: notificationNativeValue<number>(keyboard.location, event),
+      repeat,
+      isComposing,
+      ctrlKey,
+      shiftKey,
+      altKey,
+      metaKey,
+      bubbles,
+      cancelable,
+      cancelBubble,
+      composed: notificationNativeValue<boolean>(eventGetters.composed, event),
+      timeStamp: notificationNativeValue<number>(eventGetters.timeStamp, event),
+      detail: notificationNativeValue<number>(ui.detail, event),
+      view,
+      trust,
+    });
+    const delivery: NotificationKeyboardDelivery = {
+      snapshot,
+      reactEvent: null,
+      reactCount: 0,
+      invalid: false,
+    };
+    this.#keyboardDeliveries.set(event, delivery);
+    publication.keyboardEvents.add(event);
+    queueMicrotask(() => this.clearKeyboardEvent(publication, event, delivery));
+  }
+
+  reactKeyboardEventMatches(
+    delivery: NotificationKeyboardDelivery,
+    event: ReactKeyboardEvent<HTMLElement>,
+    currentTarget: HTMLElement,
+  ) {
+    const { snapshot } = delivery;
+    const publication = snapshot.publication;
+    const authority = publication.keyboardAuthority;
+    const reactEvent = event as ReactKeyboardEvent<HTMLElement> & {
+      _reactName?: unknown;
+      isDefaultPrevented?: unknown;
+      isPropagationStopped?: unknown;
+      persist?: unknown;
+    };
+    return Boolean(
+      authority &&
+        event.nativeEvent === snapshot.event &&
+        event.nativeEvent instanceof authority.KeyboardEvent &&
+        event.type === "keydown" &&
+        event.currentTarget === currentTarget &&
+        event.target === snapshot.source &&
+        event.key === snapshot.key &&
+        event.code === snapshot.code &&
+        event.location === snapshot.location &&
+        event.repeat === snapshot.repeat &&
+        event.ctrlKey === snapshot.ctrlKey &&
+        event.shiftKey === snapshot.shiftKey &&
+        event.altKey === snapshot.altKey &&
+        event.metaKey === snapshot.metaKey &&
+        event.bubbles === snapshot.bubbles &&
+        event.cancelable === snapshot.cancelable &&
+        event.isTrusted === snapshot.trust.value &&
+        !event.defaultPrevented &&
+        event.timeStamp === snapshot.timeStamp &&
+        reactEvent._reactName === "onKeyDown" &&
+        typeof reactEvent.isDefaultPrevented === "function" &&
+        !reactEvent.isDefaultPrevented() &&
+        typeof reactEvent.isPropagationStopped === "function" &&
+        !reactEvent.isPropagationStopped() &&
+        typeof reactEvent.persist === "function" &&
+        this.keyboardSnapshotMatches(delivery)
+    );
+  }
+
+  stageTriggerKey(
+    publication: NotificationPublication,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (
+      !event ||
+      typeof event !== "object" ||
+      this.#claimedReactEvents.has(event)
+    ) {
+      return;
+    }
+    const delivery = this.#keyboardDeliveries.get(event.nativeEvent);
+    const snapshot = delivery?.snapshot;
+    if (
+      !delivery ||
+      !snapshot ||
+      snapshot.kind !== "trigger" ||
+      snapshot.publication !== publication ||
+      !this.reactKeyboardEventMatches(delivery, event, snapshot.source)
+    ) {
+      if (delivery) delivery.invalid = true;
+      return;
+    }
+    delivery.reactCount += 1;
+    if (
+      delivery.reactCount !== 1 ||
+      (delivery.reactEvent !== null && delivery.reactEvent !== event)
+    ) {
+      delivery.invalid = true;
+      return;
+    }
+    delivery.reactEvent = event;
+  }
+
+  stageRowKey(
+    publication: NotificationPublication,
+    action: NotificationAction,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) {
+      return;
+    }
+    const nativeEvent = event.nativeEvent;
+    const delivery = this.#keyboardDeliveries.get(nativeEvent);
+    const snapshot = delivery?.snapshot;
+    if (
+      !delivery ||
+      !snapshot ||
+      snapshot.kind !== "row" ||
+      snapshot.publication !== publication ||
+      snapshot.action !== action ||
+      !this.reactKeyboardEventMatches(delivery, event, snapshot.source)
+    ) {
+      return;
+    }
+    delivery.reactCount += 1;
+    if (
+      delivery.reactCount !== 1 ||
+      (delivery.reactEvent !== null && delivery.reactEvent !== event)
+    ) {
+      delivery.invalid = true;
+      return;
+    }
+    delivery.reactEvent = event;
+  }
+
+  claimRowKey(
+    publication: NotificationPublication,
+    event: ReactKeyboardEvent<HTMLUListElement>,
+  ): NotificationRowKeyboardSnapshot | null {
+    if (!event || typeof event !== "object" || this.#claimedReactEvents.has(event)) {
+      return null;
+    }
+    const nativeEvent = event.nativeEvent;
+    const delivery = this.#keyboardDeliveries.get(nativeEvent);
+    const snapshot = delivery?.snapshot;
+    const list = publication.elements.list;
+    if (
+      !delivery ||
+      !snapshot ||
+      snapshot.kind !== "row" ||
+      !list ||
+      delivery.invalid ||
+      delivery.reactCount !== 1 ||
+      delivery.reactEvent !== event ||
+      snapshot.publication !== publication ||
+      !this.reactKeyboardEventMatches(delivery, event, list)
+    ) {
+      return null;
+    }
+    const claim = Object.freeze({
+      publication: publication.identity,
+      source: snapshot.action.identity,
+      key: snapshot.key,
+      movement: snapshot.movement,
+      destination: snapshot.destinationAction.identity,
+      reactEvent: event,
+      nativeEvent,
+    });
+    this.#keyboardClaims.set(nativeEvent, claim);
+    this.#claimedReactEvents.add(event);
+    this.#claimedEvents.add(nativeEvent);
+    this.clearKeyboardEvent(publication, nativeEvent, delivery);
+    return snapshot;
+  }
+
+  finishTriggerKey(
+    publication: NotificationPublication,
+    event: Event,
+  ) {
+    const authority = publication.keyboardAuthority;
+    if (
+      !authority ||
+      !(event instanceof authority.KeyboardEvent) ||
+      this.#claimedEvents.has(event)
+    ) {
+      return;
+    }
+    const delivery = this.#keyboardDeliveries.get(event);
+    const snapshot = delivery?.snapshot;
+    const reactEvent = delivery?.reactEvent;
+    const domGuard = publication.domGuard;
+    if (
+      !delivery ||
+      !snapshot ||
+      snapshot.kind !== "trigger" ||
+      !reactEvent ||
+      !domGuard ||
+      delivery.invalid ||
+      delivery.reactCount !== 1 ||
+      snapshot.publication !== publication ||
+      snapshot.event !== event ||
+      notificationNativeValue<EventTarget | null>(
+        authority.event.currentTarget,
+        event,
+      ) !== authority.ownerDocument ||
+      notificationNativeValue<number>(
+        authority.event.eventPhase,
+        event,
+      ) !== authority.Event.BUBBLING_PHASE ||
+      notificationNativeValue<boolean>(
+        authority.event.cancelBubble,
+        event,
+      ) ||
+      !this.keyboardSnapshotMatches(delivery)
+    ) {
+      return;
+    }
+    const historyIsClean = () =>
+      domGuard.isClean() && authority.historyIsClean();
+    const focus: NotificationDirectionalFocus = Object.freeze({
+      sourcePublication: publication.identity,
+      visit: publication.visit,
+      source: publication.source,
+      facts: publication.facts,
+      trigger: snapshot.source,
+      ownerDocument: authority.ownerDocument,
+      ownerWindow: authority.ownerWindow,
+      focus: authority.focus,
+      direction: snapshot.direction,
+      historyIsClean,
+    });
+    const claim = Object.freeze({
+      publication: publication.identity,
+      source: publication.identity,
+      key: snapshot.key,
+      movement: null,
+      destination: null,
+      reactEvent,
+      nativeEvent: event,
+    });
+    this.#keyboardClaims.set(event, claim);
+    this.#claimedReactEvents.add(reactEvent);
+    this.#claimedEvents.add(event);
+    publication.consumed = true;
+    this.clearKeyboardEvent(publication, event, delivery);
+
+    notificationReflectApply(authority.preventDefault, event, []);
+    if (
+      notificationNativeValue<boolean>(
+        authority.event.defaultPrevented,
+        event,
+      ) !== true ||
+      notificationActiveElement(authority) !== snapshot.source ||
+      !historyIsClean() ||
+      !this.matches(publication)
+    ) {
+      return;
+    }
+    const disclosure = Object.freeze({
+      identity: Symbol("notification-disclosure"),
+      visit: publication.visit,
+      focus,
+    });
+    if (!publication.current.publishDisclosure(disclosure)) return;
+    publication.openDirectional(disclosure);
+  }
+
+  browseRows(
+    publication: NotificationPublication,
+    event: ReactKeyboardEvent<HTMLUListElement>,
+  ) {
+    const snapshot = this.claimRowKey(publication, event);
+    const authority = publication.keyboardAuthority;
+    if (!snapshot || !authority) return;
+    notificationReflectApply(authority.preventDefault, snapshot.event, []);
+    if (
+      notificationNativeValue<boolean>(
+        authority.event.defaultPrevented,
+        snapshot.event,
+      ) !== true
+    ) {
+      return;
+    }
+    notificationReflectApply(authority.focus, snapshot.destination, [
+      NOTIFICATION_PREVENT_SCROLL,
+    ]);
   }
 
   exactRefReplay(publication: NotificationPublication, domain: BellLayoutDomain) {
@@ -1261,6 +2565,96 @@ class NotificationPublicationCoordinator {
     this.requestSuccessor(publication);
   }
 
+  focusDirectionalDisclosure(publication: NotificationPublication) {
+    const disclosure = publication.disclosure;
+    const focus = disclosure?.focus;
+    const trigger = publication.elements.trigger;
+    const keyboardAuthority = publication.keyboardAuthority;
+    if (!disclosure || !focus) return;
+    const destinationIndex =
+      focus.direction === "first" ? 0 : publication.rows.length - 1;
+    const destinationAction =
+      destinationIndex >= 0 ? publication.rows[destinationIndex] : null;
+    const destination = destinationAction?.element ?? null;
+    if (
+      this.#focusedDisclosures.has(disclosure) ||
+      publication.identity === focus.sourcePublication ||
+      publication.visit !== focus.visit ||
+      publication.source !== focus.source ||
+      !this.factsEqual(publication.facts, focus.facts) ||
+      !publication.open ||
+      !publication.current.ownsDisclosure(disclosure) ||
+      !keyboardAuthority ||
+      !trigger ||
+      trigger !== focus.trigger ||
+      trigger.ownerDocument !== focus.ownerDocument ||
+      focus.ownerDocument.defaultView !== focus.ownerWindow ||
+      notificationActiveElement(keyboardAuthority) !== trigger ||
+      !focus.historyIsClean() ||
+      !this.matches(publication) ||
+      (publication.rows.length > 0 &&
+        (!destinationAction ||
+          !destination ||
+          !this.actionMatches(publication, destinationAction)))
+    ) {
+      return;
+    }
+    this.#focusedDisclosures.add(disclosure);
+    if (!destination) return;
+    notificationReflectApply(focus.focus, destination, [
+      NOTIFICATION_PREVENT_SCROLL,
+    ]);
+  }
+
+  preventEmptyDirectionalAutoFocus(
+    publication: NotificationPublication,
+    event: Event,
+  ) {
+    const disclosure = publication.disclosure;
+    const focus = disclosure?.focus;
+    const authority = publication.keyboardAuthority;
+    const content = publication.elements.content;
+    if (
+      !disclosure ||
+      !focus ||
+      !authority ||
+      !content ||
+      publication.rows.length !== 0 ||
+      !this.#focusedDisclosures.has(disclosure) ||
+      this.#claimedEvents.has(event) ||
+      !(event instanceof focus.ownerWindow.CustomEvent) ||
+      notificationNativeValue<string>(authority.event.type, event) !==
+        "focusScope.autoFocusOnMount" ||
+      notificationNativeValue<EventTarget | null>(
+        authority.event.target,
+        event,
+      ) !== content ||
+      notificationNativeValue<EventTarget | null>(
+        authority.event.currentTarget,
+        event,
+      ) !== content ||
+      notificationNativeValue<number>(
+        authority.event.eventPhase,
+        event,
+      ) !== authority.Event.AT_TARGET ||
+      !notificationNativeValue<boolean>(
+        authority.event.cancelable,
+        event,
+      ) ||
+      notificationNativeValue<boolean>(
+        authority.event.defaultPrevented,
+        event,
+      ) ||
+      notificationActiveElement(authority) !== focus.trigger ||
+      !focus.historyIsClean() ||
+      !this.matches(publication)
+    ) {
+      return;
+    }
+    this.#claimedEvents.add(event);
+    notificationReflectApply(authority.preventDefault, event, []);
+  }
+
   publish(publication: NotificationPublication) {
     const replay = this.#replay;
     if (!this.canPublish(publication)) {
@@ -1301,6 +2695,7 @@ class NotificationPublicationCoordinator {
     }
     this.#current = publication;
     this.#successorOf = null;
+    this.focusDirectionalDisclosure(publication);
     return true;
   }
 
@@ -1407,6 +2802,17 @@ class NotificationPublicationCoordinator {
     const { content, trigger } = publication.elements;
     const document = content?.ownerDocument;
     const ownerWindow = document?.defaultView;
+    const target = event.target;
+    const path = event.composedPath();
+    const disclosure = publication.disclosure;
+    const directionalEmpty =
+      disclosure?.focus &&
+      publication.rows.length === 0 &&
+      trigger !== null &&
+      this.#focusedDisclosures.has(disclosure) &&
+      target === trigger &&
+      document?.activeElement === trigger &&
+      path.includes(trigger);
     if (
       !content ||
       !trigger ||
@@ -1419,10 +2825,10 @@ class NotificationPublicationCoordinator {
       event.defaultPrevented ||
       this.#claimedEvents.has(event) ||
       event.currentTarget !== document ||
-      !isNodeFromDocument(event.target, document) ||
-      !content.contains(event.target) ||
-      !event.composedPath().includes(content) ||
-      !event.composedPath().includes(document) ||
+      !isNodeFromDocument(target, document) ||
+      (!directionalEmpty &&
+        (!content.contains(target) || !path.includes(content))) ||
+      !path.includes(document) ||
       !this.matches(publication) ||
       !publication.open
     ) {
@@ -1541,6 +2947,7 @@ function createPublication({
   disclosure,
   open,
   source,
+  openDirectional,
   requestSuccessor,
   current,
 }: {
@@ -1549,6 +2956,7 @@ function createPublication({
   disclosure: NotificationDisclosureAuthority | null;
   open: boolean;
   source: NotificationState;
+  openDirectional: (disclosure: NotificationDisclosureAuthority) => void;
   requestSuccessor: () => void;
   current: NotificationBellCurrent;
 }) {
@@ -1583,8 +2991,11 @@ function createPublication({
     contentDom: null,
     contentPlacement: null,
     domGuard: null,
+    keyboardAuthority: null,
+    keyboardEvents: new Set<KeyboardEvent>(),
     successorRequested: false,
     rowClaimed: false,
+    openDirectional,
     requestSuccessor,
     current,
   };
@@ -1636,15 +3047,23 @@ interface NotificationItemProps {
   currentDocId: string | undefined;
   captureButton: (element: HTMLButtonElement | null) => void;
   onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 }
 
-function NotificationItem({ notification, currentDocId, captureButton, onClick }: NotificationItemProps) {
+function NotificationItem({
+  notification,
+  currentDocId,
+  captureButton,
+  onClick,
+  onKeyDown,
+}: NotificationItemProps) {
   return (
     <button
       ref={captureButton}
       type="button"
       className={cn("flex w-full items-start gap-2.5 px-3 py-2 text-left hover:bg-surface-2", !notification.readAt && "bg-accent-soft/30")}
       onClick={onClick}
+      onKeyDown={onKeyDown}
       data-testid="notification-item"
       data-notification-id={notification.id}
       data-document-id={notification.documentId}
@@ -1721,6 +3140,19 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
     setPublicationRevision((revision) => revision + 1);
   }, []);
 
+  const openDirectional = useCallback(
+    (authority: NotificationDisclosureAuthority) => {
+      if (
+        authority.visit !== visit ||
+        !current.ownsDisclosure(authority)
+      ) {
+        return;
+      }
+      setDisclosureState({ visit, authority, open: true });
+    },
+    [current, visit],
+  );
+
   useLayoutEffect(() => {
     const lease = coordinator.beginLease();
     return () => coordinator.endLease(lease);
@@ -1763,6 +3195,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
     disclosure: renderedDisclosure,
     open,
     source: notificationState,
+    openDirectional,
     requestSuccessor,
     current,
   });
@@ -1782,6 +3215,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
       const authority = Object.freeze({
         identity: Symbol("notification-disclosure"),
         visit,
+        focus: null,
       });
       if (!current.publishDisclosure(authority)) return;
       setDisclosureState({ visit, authority, open: true });
@@ -1837,6 +3271,9 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
             data-testid="notifications-bell"
             data-unread={facts.unreadCount}
             onClick={(event) => coordinator.mintTrigger(publication, event)}
+            onKeyDown={(event) =>
+              coordinator.stageTriggerKey(publication, event)
+            }
           >
             <Bell size={20} />
             {presentation.badgeText !== null && (
@@ -1856,6 +3293,9 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
           collisionPadding={8}
           className="w-[min(380px,calc(100vw-16px))] p-0"
           data-testid="notifications-popover"
+          onOpenAutoFocus={(event) =>
+            coordinator.preventEmptyDirectionalAutoFocus(publication, event)
+          }
           onEscapeKeyDown={(event) => coordinator.mintEscape(publication, event)}
           onInteractOutside={(event) => coordinator.mintOutside(publication, event)}
         >
@@ -1872,7 +3312,12 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
                 </span>
               )}
             </div>
-            <ul ref={captureList} className="scrollbar-thin max-h-[420px] overflow-y-auto py-1" aria-label="Notifications">
+            <ul
+              ref={captureList}
+              className="scrollbar-thin max-h-[420px] overflow-y-auto py-1"
+              aria-label="Notifications"
+              onKeyDown={(event) => coordinator.browseRows(publication, event)}
+            >
               {facts.readError && readRetry && (
                 <li className="px-3 py-2">
                   <div className="flex items-center justify-between gap-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" aria-atomic="true">
@@ -1922,6 +3367,9 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
                       currentDocId={visit.currentDocId}
                       captureButton={captureAction(action)}
                       onClick={(event) => activate(action, event)}
+                      onKeyDown={(event) =>
+                        coordinator.stageRowKey(publication, action, event)
+                      }
                     />
                   </li>
                 ) : null;

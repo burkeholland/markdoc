@@ -1,6 +1,15 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { StrictMode, createElement, startTransition, useEffect, useLayoutEffect, useState } from "react";
+import {
+  StrictMode,
+  createElement,
+  startTransition,
+  useEffect,
+  useLayoutEffect,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import { flushSync } from "react-dom";
 import { createRoot, hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
@@ -20,12 +29,16 @@ const purgeDocument = vi.fn<(id: string, options?: { permanent?: boolean }) => P
 const starDocument = vi.fn<(id: string) => Promise<{ starred: true }>>();
 const unstarDocument = vi.fn<(id: string) => Promise<{ starred: false }>>();
 const takePendingNotice = vi.fn<() => PendingNotice | null>();
+const signOutSafely = vi.fn<() => Promise<boolean>>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
 
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
 vi.mock("@/components/dashboard/notifications-strip", () => ({ NotificationsStrip: () => null }));
 vi.mock("@/components/ui/theme-toggle", () => ({ ThemeToggle: () => null }));
 vi.mock("@/lib/notice", () => ({ takePendingNotice: () => takePendingNotice() }));
+vi.mock("@/lib/sign-out", () => ({
+  signOutSafely: () => signOutSafely(),
+}));
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
@@ -46,7 +59,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
-import { ApiError } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import { PICKER_TEMPLATES, type Template } from "@/lib/templates";
 import { Dashboard, TemplateGrid, TrashView } from "./dashboard";
 
@@ -432,6 +445,20 @@ function interceptReactHandler(
   };
 }
 
+function cloneReactEventWithView(event: unknown, view: unknown) {
+  if (!event || typeof event !== "object") {
+    throw new Error("The React keyboard event was not an object");
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(event);
+  descriptors.view = {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: view,
+  };
+  return Object.create(Object.getPrototypeOf(event), descriptors);
+}
+
 function captureReactClick(element: HTMLButtonElement): CapturedReactClick {
   const onClick = reactProps(element).onClick;
   if (!onClick) throw new Error("The button did not have an onClick handler");
@@ -514,10 +541,443 @@ function directRetryButton(host: HTMLElement): HTMLButtonElement {
   return button;
 }
 
+type TrashNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+function createTrashKeyboardEvent(
+  target: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = target.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The Trash key target has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: ownerWindow,
+    ...init,
+  });
+  if (trusted) markSearchResultEventTrusted(event, ownerWindow);
+  return event;
+}
+
+function dispatchTrashKey(
+  target: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const event = createTrashKeyboardEvent(target, key, init, trusted);
+  act(() => {
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
+const first = trashedDoc("keyboard-first", "Keyboard first");
+const second = trashedDoc("keyboard-second", "Keyboard second");
+const trash = (
+  documents: DocumentSummaryDto[] = [first, second],
+  busy: string | null = null,
+  error: string | null = "Trash warning",
+  callbacks: {
+    onRetry: () => void;
+    onRestore: (document: DocumentSummaryDto) => void;
+    onPurge: (document: DocumentSummaryDto) => void;
+  } = {
+    onRetry: () => {},
+    onRestore: () => {},
+    onPurge: () => {},
+  },
+  key?: string,
+) => (
+  <StrictMode>
+    <TrashView
+      key={key}
+      documents={documents}
+      busy={busy}
+      loading={false}
+      error={error}
+      onRetry={callbacks.onRetry}
+      onRestore={callbacks.onRestore}
+      onPurge={callbacks.onPurge}
+    />
+  </StrictMode>
+);
+
+function renderTrashKeyboard<Setup>(
+  node: ReactNode,
+  setup: (ownerWindow: Window & typeof globalThis) => Setup,
+) {
+  const frame = document.createElement("iframe");
+  document.body.append(frame);
+  const ownerDocument = frame.contentDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (!ownerDocument || !ownerWindow) {
+    frame.remove();
+    throw new Error("The Trash keyboard frame has no owner realm");
+  }
+  const host = ownerDocument.createElement("div");
+  ownerDocument.body.append(host);
+  const configured = setup(ownerWindow);
+  const root = createRoot(host);
+  act(() => root.render(node));
+  return {
+    frame,
+    host,
+    ownerDocument,
+    ownerWindow,
+    root,
+    setup: configured,
+    dispose: () => {
+      act(() => root.unmount());
+      frame.remove();
+    },
+  };
+}
+
+function trackTrashNavigationEffects(
+  ownerWindow: Window & typeof globalThis,
+) {
+  const nativePreventDefault =
+    ownerWindow.Event.prototype.preventDefault;
+  const nativeFocus = ownerWindow.HTMLElement.prototype.focus;
+  const focusCalls: {
+    target: HTMLElement;
+    options: FocusOptions | undefined;
+  }[] = [];
+  const preventDefault = vi
+    .spyOn(ownerWindow.Event.prototype, "preventDefault")
+    .mockImplementation(function (this: Event) {
+      Reflect.apply(nativePreventDefault, this, []);
+    });
+  const focus = vi
+    .spyOn(ownerWindow.HTMLElement.prototype, "focus")
+    .mockImplementation(function (
+      this: HTMLElement,
+      options?: FocusOptions,
+    ) {
+      focusCalls.push({ target: this, options });
+      Reflect.apply(
+        nativeFocus,
+        this,
+        options === undefined ? [] : [options],
+      );
+    });
+  const scrollTo = vi
+    .spyOn(ownerWindow, "scrollTo")
+    .mockImplementation(() => undefined);
+  const scrollBy = vi
+    .spyOn(ownerWindow, "scrollBy")
+    .mockImplementation(() => undefined);
+  return {
+    nativePreventDefault,
+    nativeFocus,
+    preventDefault,
+    focus,
+    focusCalls,
+    scrollTo,
+    scrollBy,
+  };
+}
+
+function dispatchTrashKeyWithReactPairMutation(
+  card: HTMLLIElement,
+  target: HTMLButtonElement,
+  key: TrashNavigationKey,
+  mutations: {
+    captureAfter?: (
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => void;
+    bubbleBefore?: (
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => void;
+  } = {},
+) {
+  const entry = reactPropsEntry(card);
+  const capture = entry.props.onKeyDownCapture;
+  const bubble = entry.props.onKeyDown;
+  const ownerWindow = target.ownerDocument.defaultView;
+  const nativeCurrentTargetGetter = ownerWindow
+    ? Object.getOwnPropertyDescriptor(
+        ownerWindow.Event.prototype,
+        "currentTarget",
+      )?.get
+    : null;
+  if (
+    typeof capture !== "function" ||
+    typeof bubble !== "function" ||
+    !nativeCurrentTargetGetter
+  ) {
+    throw new Error("The Trash card has no complete key delivery pair");
+  }
+  const delivery: {
+    capture: ReactKeyboardEvent<HTMLLIElement> | null;
+    bubble: ReactKeyboardEvent<HTMLLIElement> | null;
+    captureTarget: EventTarget | null;
+    bubbleTarget: EventTarget | null;
+    nativeCaptureTarget: EventTarget | null;
+    nativeBubbleTarget: EventTarget | null;
+    capturePhase: number;
+    bubblePhase: number;
+  } = {
+    capture: null,
+    bubble: null,
+    captureTarget: null,
+    bubbleTarget: null,
+    nativeCaptureTarget: null,
+    nativeBubbleTarget: null,
+    capturePhase: Event.NONE,
+    bubblePhase: Event.NONE,
+  };
+  const wrapped = {
+    ...entry.props,
+    onKeyDownCapture: (value: unknown) => {
+      const event = value as ReactKeyboardEvent<HTMLLIElement>;
+      delivery.capture = event;
+      delivery.captureTarget = event.currentTarget;
+      delivery.nativeCaptureTarget = Reflect.apply(
+        nativeCurrentTargetGetter,
+        event.nativeEvent,
+        [],
+      ) as EventTarget | null;
+      delivery.capturePhase = event.eventPhase;
+      capture(event);
+      mutations.captureAfter?.(event);
+    },
+    onKeyDown: (value: unknown) => {
+      const event = value as ReactKeyboardEvent<HTMLLIElement>;
+      delivery.bubble = event;
+      delivery.bubbleTarget = event.currentTarget;
+      delivery.nativeBubbleTarget = Reflect.apply(
+        nativeCurrentTargetGetter,
+        event.nativeEvent,
+        [],
+      ) as EventTarget | null;
+      delivery.bubblePhase = event.eventPhase;
+      mutations.bubbleBefore?.(event);
+      bubble(event);
+    },
+  };
+  entry.record[entry.key] = wrapped;
+  let nativeEvent: KeyboardEvent;
+  try {
+    nativeEvent = dispatchTrashKey(target, key);
+  } finally {
+    if (entry.record[entry.key] === wrapped) {
+      entry.record[entry.key] = entry.props;
+    }
+  }
+  if (!delivery.capture || !delivery.bubble) {
+    throw new Error("React did not deliver both Trash key phases");
+  }
+  return {
+    nativeEvent,
+    captureEvent: delivery.capture,
+    bubbleEvent: delivery.bubble,
+    captureTarget: delivery.captureTarget,
+    bubbleTarget: delivery.bubbleTarget,
+    nativeCaptureTarget: delivery.nativeCaptureTarget,
+    nativeBubbleTarget: delivery.nativeBubbleTarget,
+    capturePhase: delivery.capturePhase,
+    bubblePhase: delivery.bubblePhase,
+  };
+}
+
 function templateButton(host: HTMLElement, id: string): HTMLButtonElement {
   const button = host.querySelector<HTMLButtonElement>(`[data-testid="template-${id}"]`);
   if (!button) throw new Error(`Template button ${id} was not rendered`);
   return button;
+}
+
+type CreateControlTestId = "new-document" | "start-guided-doc";
+type FilterValue = "all" | "mine" | "shared" | "starred" | "trash";
+
+function directCreateButton(host: HTMLElement, testid: CreateControlTestId): HTMLButtonElement {
+  const button = host.querySelector<HTMLButtonElement>(`[data-testid="${testid}"]`);
+  if (!button) throw new Error(`${testid} was not rendered`);
+  return button;
+}
+
+function filterGroup(host: ParentNode = document): HTMLDivElement {
+  const group = host.querySelector<HTMLDivElement>(
+    '[role="toolbar"][aria-label="Document filters"]',
+  );
+  if (!group) throw new Error("The document filter toolbar was not rendered");
+  return group;
+}
+
+function directFilterButton(
+  host: ParentNode,
+  filter: FilterValue,
+): HTMLButtonElement {
+  const button = host.querySelector<HTMLButtonElement>(
+    `[data-testid="filter-${filter}"]`,
+  );
+  if (!button) throw new Error(`The ${filter} filter was not rendered`);
+  return button;
+}
+
+function filterRefBindings(host: ParentNode) {
+  const group = filterGroup(host);
+  return [group, ...Array.from(group.children)].map((element) => ({
+    element,
+    ref: captureReactRef(element),
+  }));
+}
+
+function markFilterEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) => (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event trust slot");
+  }
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) {
+    throw new Error("The jsdom event trust slot did not update");
+  }
+}
+
+function markSearchResultEventTrusted(
+  event: KeyboardEvent,
+  ownerWindow: Window,
+) {
+  markFilterEventTrusted(event);
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map(
+      (symbol) => (event as unknown as Record<symbol, unknown>)[symbol],
+    )
+    .find(
+      (candidate): candidate is { isTrusted: boolean; view: unknown } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === true &&
+        "view" in candidate,
+    );
+  const descriptor = implementation
+    ? Object.getOwnPropertyDescriptor(implementation, "view")
+    : undefined;
+  if (!implementation || !descriptor?.writable) {
+    throw new Error("Unable to set jsdom's internal event view slot");
+  }
+  implementation.view = ownerWindow;
+  if (event.view !== ownerWindow) {
+    throw new Error("The jsdom event view slot did not update");
+  }
+}
+
+async function dispatchFilterKey(
+  button: HTMLButtonElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const KeyboardEventConstructor =
+    button.ownerDocument.defaultView!.KeyboardEvent;
+  const event = new KeyboardEventConstructor("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  markFilterEventTrusted(event);
+  await act(async () => {
+    button.dispatchEvent(event);
+    await Promise.resolve();
+  });
+  return event;
+}
+
+function expectCurrentFilter(
+  host: ParentNode,
+  filter: FilterValue,
+) {
+  const group = filterGroup(host);
+  const buttons = Array.from(
+    group.querySelectorAll<HTMLButtonElement>("button"),
+  );
+  expect(buttons).toHaveLength(5);
+  expect(buttons.filter((button) => button.tabIndex === 0)).toEqual([
+    directFilterButton(host, filter),
+  ]);
+  for (const button of buttons) {
+    expect(button).toHaveAttribute(
+      "aria-pressed",
+      String(button === directFilterButton(host, filter)),
+    );
+  }
+}
+
+function createCardRoot(host: HTMLElement): HTMLDivElement {
+  const card = directCreateButton(host, "new-document").parentElement;
+  if (!(card instanceof HTMLDivElement)) throw new Error("The create card was not rendered");
+  return card;
+}
+
+function guidedRootElement(host: HTMLElement): HTMLDivElement {
+  const guided = directCreateButton(host, "start-guided-doc").parentElement;
+  if (!(guided instanceof HTMLDivElement)) throw new Error("The guided block was not rendered");
+  return guided;
+}
+
+function createRootFor(host: HTMLElement, testid: CreateControlTestId): HTMLDivElement {
+  return testid === "new-document" ? createCardRoot(host) : guidedRootElement(host);
+}
+
+function createRefBindings(host: HTMLElement) {
+  const blank = directCreateButton(host, "new-document");
+  const frame = blank.children.item(0);
+  const label = blank.children.item(1);
+  const welcome = directCreateButton(host, "start-guided-doc");
+  const guided = guidedRootElement(host);
+  const elements = [
+    createCardRoot(host),
+    blank,
+    frame,
+    frame?.firstElementChild ?? null,
+    label,
+    label?.children.item(0) ?? null,
+    label?.children.item(1) ?? null,
+    guided,
+    guided.children.item(0),
+    guided.children.item(1),
+    guided.children.item(2),
+    welcome,
+    welcome.children.item(0),
+  ];
+  if (elements.some((element) => !element)) {
+    throw new Error("Create control refs were incomplete");
+  }
+  return (elements as Element[]).map((element) => ({
+    element,
+    ref: captureReactRef(element),
+  }));
 }
 
 function templateGrid(host: HTMLElement): HTMLUListElement {
@@ -717,6 +1177,125 @@ function searchRefBindings(
   }));
 }
 
+function searchResultLinks(host: ParentNode = document) {
+  return Array.from(
+    host.querySelectorAll<HTMLAnchorElement>(
+      '[data-testid="search-result"] > a[data-testid="document-card"]',
+    ),
+  );
+}
+
+function searchResultRefBindings(input: HTMLInputElement) {
+  const list = input.ownerDocument.querySelector<HTMLUListElement>(
+    '[data-testid="document-list"]',
+  );
+  const links = searchResultLinks(input.ownerDocument);
+  if (!list || links.length === 0) {
+    throw new Error("Search result refs were incomplete");
+  }
+  return [list, ...links].map((element) => ({
+    element,
+    ref: captureReactRef(element),
+  }));
+}
+
+async function dispatchSearchResultKey(
+  source: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const event = searchResultKeyEvent(source, key, init);
+  await act(async () => {
+    source.dispatchEvent(event);
+    await Promise.resolve();
+  });
+  return event;
+}
+
+function searchResultKeyEvent(
+  source: HTMLElement,
+  key: string,
+  init: KeyboardEventInit = {},
+) {
+  const ownerWindow = source.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The search key source has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    bubbles: true,
+    cancelable: true,
+    ...init,
+  });
+  markSearchResultEventTrusted(event, ownerWindow);
+  return event;
+}
+
+function accountTrigger(host: ParentNode = document): HTMLButtonElement {
+  const trigger = host.querySelector<HTMLButtonElement>(
+    'button[aria-label="Account"]',
+  );
+  if (!trigger) throw new Error("The Account trigger was not rendered");
+  return trigger;
+}
+
+function accountMenuItem(name: "Agents & API tokens" | "Sign out") {
+  const item = screen.getByRole("menuitem", { name });
+  if (!(item instanceof HTMLDivElement)) {
+    throw new Error(`The ${name} Account item was not a div`);
+  }
+  return item;
+}
+
+function accountKeyEvent(
+  trigger: HTMLButtonElement,
+  key: "ArrowDown" | "ArrowUp",
+  init: KeyboardEventInit = {},
+  trusted = true,
+) {
+  const ownerWindow = trigger.ownerDocument.defaultView;
+  if (!ownerWindow) throw new Error("The Account trigger has no owner window");
+  const event = new ownerWindow.KeyboardEvent("keydown", {
+    key,
+    code: key,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    location: 0,
+    ...init,
+  });
+  if (trusted) markFilterEventTrusted(event);
+  return event;
+}
+
+function accountViewedKeyEvent(
+  trigger: HTMLButtonElement,
+  key: "ArrowDown" | "ArrowUp",
+  view: Window,
+) {
+  try {
+    const event = accountKeyEvent(trigger, key, { view });
+    return event.view === view ? event : null;
+  } catch (error) {
+    if (error instanceof TypeError) return null;
+    throw error;
+  }
+}
+
+async function dispatchAccountKey(
+  trigger: HTMLButtonElement,
+  keyOrEvent: "ArrowDown" | "ArrowUp" | KeyboardEvent,
+  init: KeyboardEventInit = {},
+) {
+  const event =
+    typeof keyOrEvent === "string"
+      ? accountKeyEvent(trigger, keyOrEvent, init)
+      : keyOrEvent;
+  await act(async () => {
+    trigger.dispatchEvent(event);
+    await Promise.resolve();
+  });
+  return event;
+}
+
 type KeydownCallback = (event: KeyboardEvent) => void;
 
 function eventCapture(options?: boolean | AddEventListenerOptions | EventListenerOptions): boolean {
@@ -764,6 +1343,8 @@ beforeEach(() => {
   unstarDocument.mockResolvedValue({ starred: false });
   takePendingNotice.mockReset();
   takePendingNotice.mockReturnValue(null);
+  signOutSafely.mockReset();
+  signOutSafely.mockResolvedValue(true);
   router.push.mockReset();
   router.replace.mockReset();
   router.refresh.mockReset();
@@ -777,6 +1358,1586 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe("dashboard Account menu directional publication", () => {
+  it("re-establishes exactly one zero-ref Strict layout replay with distinct listener ownership", async () => {
+    const addEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "addEventListener",
+    );
+    const removeEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "removeEventListener",
+    );
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    const addedTo = (trigger: HTMLButtonElement) =>
+      addEventListener.mock.calls.flatMap(
+        ([type, listener, options], index) =>
+          addEventListener.mock.contexts[index] === trigger &&
+          type === "keydown" &&
+          typeof listener === "function"
+            ? [{ listener, capture: eventCapture(options) }]
+            : [],
+      );
+    const removedFrom = (trigger: HTMLButtonElement) =>
+      removeEventListener.mock.calls.flatMap(
+        ([type, listener, options], index) =>
+          removeEventListener.mock.contexts[index] === trigger &&
+          type === "keydown" &&
+          typeof listener === "function"
+            ? [{ listener, capture: eventCapture(options) }]
+            : [],
+      );
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const trigger = accountTrigger(host);
+      const added = addedTo(trigger);
+      const removed = removedFrom(trigger);
+
+      expect(added).toHaveLength(4);
+      expect(new Set(added.map(({ listener }) => listener)).size).toBe(4);
+      expect(added.map(({ capture }) => capture)).toEqual([
+        true,
+        false,
+        true,
+        false,
+      ]);
+      expect(removed).toEqual(added.slice(0, 2));
+
+      trigger.focus();
+      const event = await dispatchAccountKey(trigger, "ArrowDown");
+      expect(event.view).toBeNull();
+      expect(event.defaultPrevented).toBe(true);
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+
+      await act(async () => root.unmount());
+      expect(removedFrom(trigger)).toEqual(added);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("accepts an exact non-null owner view when jsdom can construct one", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const trigger = accountTrigger(host);
+      const ownerWindow = trigger.ownerDocument.defaultView;
+      if (!ownerWindow) throw new Error("The Account trigger has no owner window");
+      trigger.focus();
+      const event = accountViewedKeyEvent(trigger, "ArrowUp", ownerWindow);
+      if (event) {
+        await dispatchAccountKey(trigger, event);
+        expect(event.defaultPrevented).toBe(true);
+        expect(accountMenuItem("Sign out")).toHaveFocus();
+      } else {
+        expect(event).toBeNull();
+      }
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a non-null foreign native view when jsdom can construct one", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const iframe = document.createElement("iframe");
+    document.body.append(host, iframe);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const trigger = accountTrigger(host);
+      const foreignWindow = iframe.contentWindow as
+        | (Window & typeof globalThis)
+        | null;
+      if (!foreignWindow) throw new Error("The iframe has no content window");
+      const event = accountViewedKeyEvent(trigger, "ArrowDown", foreignWindow);
+      if (event) {
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        await dispatchAccountKey(trigger, event);
+        expect(event.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+      } else {
+        expect(event).toBeNull();
+      }
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      iframe.remove();
+    }
+  });
+
+  it.each(["foreign owner realm", "window lookalike"] as const)(
+    "rejects a null-view native event paired with a non-null %s React view",
+    async (viewKind) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      const iframe = document.createElement("iframe");
+      document.body.append(host, iframe);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard
+                user={USER}
+                documents={DOCUMENTS}
+                githubAvailable
+                githubConfigured
+              />
+            </StrictMode>,
+          );
+        });
+        const trigger = accountTrigger(host);
+        const foreignWindow = iframe.contentWindow;
+        if (!foreignWindow) throw new Error("The iframe has no content window");
+        const rejectedView =
+          viewKind === "foreign owner realm"
+            ? foreignWindow
+            : Object.freeze({ document: trigger.ownerDocument });
+        const restore = interceptReactHandler(
+          trigger,
+          "onKeyDown",
+          (original, event) => {
+            original(cloneReactEventWithView(event, rejectedView));
+          },
+        );
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = accountKeyEvent(trigger, "ArrowDown");
+        expect(event.view).toBeNull();
+        try {
+          await dispatchAccountKey(trigger, event);
+        } finally {
+          restore();
+        }
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(focus).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(signOutSafely).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+        iframe.remove();
+      }
+    },
+  );
+
+  it("rejects partial ref replay after the zero-ref Strict replay and permits a clean successor", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      const content = screen.getByRole("menu");
+      const contentRef = captureReactRef(content);
+      const staleHandler = captureReactHandler(trigger, "onKeyDown");
+      preventDefault.mockClear();
+
+      act(() => {
+        contentRef(null);
+        contentRef(content);
+      });
+      await act(async () => {});
+      const staleNative = accountKeyEvent(trigger, "ArrowDown");
+      staleHandler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: staleNative,
+        currentTarget: trigger,
+        target: trigger,
+      });
+      expect(staleNative.defaultPrevented).toBe(false);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+
+      const settings = accountMenuItem("Agents & API tokens");
+      settings.focus();
+      fireEvent.keyDown(settings, { key: "Escape", code: "Escape" });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const recovered = await dispatchAccountKey(trigger, "ArrowUp");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(accountMenuItem("Sign out")).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter(
+          (receiver) => receiver === recovered,
+        ),
+      ).toHaveLength(1);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["ArrowDown", "Agents & API tokens"],
+    ["ArrowUp", "Sign out"],
+  ] as const)(
+    "opens with %s and focuses only %s through direct-root Strict Mode replay",
+    async (key, destinationName) => {
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const scrollIntoView = vi.spyOn(
+        Element.prototype,
+        "scrollIntoView",
+      );
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard
+                user={USER}
+                documents={DOCUMENTS}
+                githubAvailable
+                githubConfigured
+              />
+            </StrictMode>,
+          );
+        });
+        const trigger = accountTrigger(host);
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = await dispatchAccountKey(trigger, key);
+        const destination = accountMenuItem(destinationName);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(trigger).toHaveAttribute("aria-expanded", "true");
+        expect(destination).toHaveFocus();
+        expect(
+          preventDefault.mock.contexts.filter((receiver) => receiver === event),
+        ).toHaveLength(1);
+        expect(
+          preventDefault.mock.contexts.filter(
+            (receiver) =>
+              receiver instanceof Event &&
+              receiver.type === "focusScope.autoFocusOnMount",
+          ),
+        ).toHaveLength(1);
+        const destinationFocuses = focus.mock.calls.filter(
+          (_, index) => focus.mock.contexts[index] === destination,
+        );
+        expect(destinationFocuses).toEqual([[{ preventScroll: true }]]);
+        expect(router.push).not.toHaveBeenCalled();
+        expect(signOutSafely).not.toHaveBeenCalled();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect(searchDocuments).not.toHaveBeenCalled();
+        expect(createDocument).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+});
+
+function registerTrashKeyboardProvenanceTests() {
+  it("rejects a crossed card delivery without consuming a clean successor event", () => {
+    const view = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const firstCard = directTrashCard(view.host, first.title);
+      const secondCard = directTrashCard(view.host, second.title);
+      const secondCapture =
+        reactProps(secondCard).onKeyDownCapture;
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      if (typeof secondCapture !== "function") {
+        throw new Error("The second Trash card has no capture handler");
+      }
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+
+      const crossed = dispatchTrashKeyWithReactPairMutation(
+        firstCard,
+        restore,
+        "ArrowRight",
+        {
+          captureAfter: (event) => secondCapture(event),
+        },
+      ).nativeEvent;
+      expect(crossed.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+      expect(restore).toHaveFocus();
+
+      const accepted = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(purge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it.each(["card-detach", "action-reorder"] as const)(
+    "permanently rejects restored DOM history after %s and recovers on a keyed mount",
+    (history) => {
+      const view = renderTrashKeyboard(
+        trash(),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const card = directTrashCard(view.host, first.title);
+        const restore = directTrashButton(
+          view.host,
+          first.title,
+          "restore-button",
+        );
+        const purge = directTrashButton(
+          view.host,
+          first.title,
+          "purge-button",
+        );
+        if (history === "card-detach") {
+          const parent = card.parentNode;
+          const next = card.nextSibling;
+          if (!parent) throw new Error("The Trash card has no parent");
+          card.remove();
+          parent.insertBefore(card, next);
+        } else {
+          const parent = restore.parentNode;
+          if (!parent) {
+            throw new Error("The Trash actions have no parent");
+          }
+          parent.append(restore);
+          parent.insertBefore(restore, purge);
+        }
+        restore.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+
+        const restored = dispatchTrashKey(
+          restore,
+          "ArrowRight",
+        );
+        expect(restored.defaultPrevented).toBe(false);
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+        expect(restore).toHaveFocus();
+
+        const replay = dispatchTrashKey(
+          restore,
+          "ArrowRight",
+        );
+        expect(replay.defaultPrevented).toBe(false);
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+
+        act(() => {
+          view.root.render(
+            trash(
+              [first, second],
+              null,
+              "Trash warning",
+              undefined,
+              `successor-${history}`,
+            ),
+          );
+        });
+        const successorRestore = directTrashButton(
+          view.host,
+          first.title,
+          "restore-button",
+        );
+        const successorPurge = directTrashButton(
+          view.host,
+          first.title,
+          "purge-button",
+        );
+        successorRestore.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+
+        const accepted = dispatchTrashKey(
+          successorRestore,
+          "ArrowRight",
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(successorPurge).toHaveFocus();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it("keeps descriptor-restored authority stale until a clean keyed generation", () => {
+    const view = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const descriptor = Object.getOwnPropertyDescriptor(
+        view.ownerWindow.Event.prototype,
+        "preventDefault",
+      );
+      if (!descriptor) {
+        throw new Error("Event.preventDefault has no descriptor");
+      }
+      Object.defineProperty(
+        view.ownerWindow.Event.prototype,
+        "preventDefault",
+        {
+          ...descriptor,
+          value: vi.fn(),
+        },
+      );
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      const changed = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+      expect(changed.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+
+      Object.defineProperty(
+        view.ownerWindow.Event.prototype,
+        "preventDefault",
+        descriptor,
+      );
+      const restored = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+      expect(restored.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+
+      act(() => {
+        view.root.render(
+          trash(
+            [first, second],
+            null,
+            "Trash warning",
+            undefined,
+            "descriptor-successor",
+          ),
+        );
+      });
+      const successorRestore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const successorPurge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      successorRestore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      const accepted = dispatchTrashKey(
+        successorRestore,
+        "ArrowRight",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(successorPurge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it("claims before prevention reentry and focuses only the outer destination", () => {
+    const view = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      const nested: KeyboardEvent[] = [];
+      view.setup.preventDefault.mockImplementationOnce(function (
+        this: Event,
+      ) {
+        Reflect.apply(
+          view.setup.nativePreventDefault,
+          this,
+          [],
+        );
+        const nestedEvent = createTrashKeyboardEvent(
+          restore,
+          "ArrowRight",
+        );
+        nested.push(nestedEvent);
+        restore.dispatchEvent(nestedEvent);
+      });
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      view.setup.focusCalls.length = 0;
+
+      const outer = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+
+      expect(outer.defaultPrevented).toBe(true);
+      expect(nested).toHaveLength(1);
+      expect(nested[0]?.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(view.setup.focusCalls).toEqual([
+        { target: purge, options: { preventScroll: true } },
+      ]);
+      expect(purge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it("releases keyboard authority on cleanup and lets a fresh Strict root recover", () => {
+    const retired = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    const restore = directTrashButton(
+      retired.host,
+      first.title,
+      "restore-button",
+    );
+    restore.focus();
+    const afterCleanup = createTrashKeyboardEvent(
+      restore,
+      "ArrowRight",
+    );
+    retired.setup.preventDefault.mockClear();
+    retired.setup.focus.mockClear();
+    retired.dispose();
+    restore.dispatchEvent(afterCleanup);
+    expect(afterCleanup.defaultPrevented).toBe(false);
+    expect(retired.setup.preventDefault).not.toHaveBeenCalled();
+    expect(retired.setup.focus).not.toHaveBeenCalled();
+
+    const successor = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const currentRestore = directTrashButton(
+        successor.host,
+        first.title,
+        "restore-button",
+      );
+      const currentPurge = directTrashButton(
+        successor.host,
+        first.title,
+        "purge-button",
+      );
+      currentRestore.focus();
+      successor.setup.preventDefault.mockClear();
+      successor.setup.focus.mockClear();
+      const accepted = dispatchTrashKey(
+        currentRestore,
+        "ArrowRight",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(successor.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(successor.setup.focus).toHaveBeenCalledTimes(1);
+      expect(currentPurge).toHaveFocus();
+    } finally {
+      successor.dispose();
+    }
+  });
+}
+
+function registerTrashKeyboardNativeAuthorityTests() {
+  it("binds an accepted key to the event-local backing Window receiver, currentTarget, and path terminal", () => {
+    const view = renderTrashKeyboard(
+      trash(),
+      (ownerWindow) => {
+        const effects = trackTrashNavigationEffects(ownerWindow);
+        const currentTargetDescriptor =
+          Object.getOwnPropertyDescriptor(
+            ownerWindow.Event.prototype,
+            "currentTarget",
+          );
+        const composedPath =
+          ownerWindow.Event.prototype.composedPath;
+        if (typeof currentTargetDescriptor?.get !== "function") {
+          throw new Error("Event.currentTarget has no getter");
+        }
+        const observations: {
+          receiver: EventTarget;
+          currentTarget: EventTarget | null;
+          terminal: EventTarget | undefined;
+        }[] = [];
+        ownerWindow.addEventListener(
+          "keydown",
+          function (this: EventTarget, event: Event) {
+            observations.push({
+              receiver: this,
+              currentTarget: Reflect.apply(
+                currentTargetDescriptor.get!,
+                event,
+                [],
+              ) as EventTarget | null,
+              terminal: (
+                Reflect.apply(
+                  composedPath,
+                  event,
+                  [],
+                ) as EventTarget[]
+              ).at(-1),
+            });
+          },
+          true,
+        );
+        const implementationSymbol =
+          Object.getOwnPropertySymbols(ownerWindow.document).find(
+            (symbol) => String(symbol) === "Symbol(impl)",
+          );
+        const backingReceiver = implementationSymbol
+          ? (
+              ownerWindow.document as unknown as Record<
+                symbol,
+                { _globalObject: EventTarget }
+              >
+            )[implementationSymbol]._globalObject
+          : ownerWindow;
+        return { ...effects, observations, backingReceiver };
+      },
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+
+      const event = dispatchTrashKey(restore, "ArrowRight");
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(view.setup.observations).toHaveLength(1);
+      expect(view.setup.observations[0]).toEqual({
+        receiver: view.setup.backingReceiver,
+        currentTarget: view.setup.backingReceiver,
+        terminal: view.setup.backingReceiver,
+      });
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it.each(["same-prototype", "structural"] as const)(
+    "rejects a %s Window-shaped terminal and then accepts the genuine terminal",
+    (kind) => {
+      const view = renderTrashKeyboard(
+        trash(),
+        (ownerWindow) => {
+          const effects =
+            trackTrashNavigationEffects(ownerWindow);
+          const nativePath =
+            ownerWindow.Event.prototype.composedPath;
+          const lookalike = Object.create(
+            kind === "same-prototype"
+              ? ownerWindow.Window.prototype
+              : null,
+          ) as Window & Record<string, unknown>;
+          Object.defineProperties(lookalike, {
+            document: {
+              configurable: true,
+              value: ownerWindow.document,
+            },
+            window: { configurable: true, value: lookalike },
+            self: { configurable: true, value: lookalike },
+            Event: {
+              configurable: true,
+              value: ownerWindow.Event,
+            },
+            KeyboardEvent: {
+              configurable: true,
+              value: ownerWindow.KeyboardEvent,
+            },
+            Object: {
+              configurable: true,
+              value: ownerWindow.Object,
+            },
+            Reflect: {
+              configurable: true,
+              value: ownerWindow.Reflect,
+            },
+          });
+          let spoof = true;
+          vi.spyOn(
+            ownerWindow.Event.prototype,
+            "composedPath",
+          ).mockImplementation(function (this: Event) {
+            const path = Reflect.apply(
+              nativePath,
+              this,
+              [],
+            ) as EventTarget[];
+            return spoof
+              ? [...path.slice(0, -1), lookalike]
+              : path;
+          });
+          return {
+            ...effects,
+            lookalike,
+            acceptGenuineTerminal: () => {
+              spoof = false;
+            },
+          };
+        },
+      );
+      try {
+        const restore = directTrashButton(
+          view.host,
+          first.title,
+          "restore-button",
+        );
+        const purge = directTrashButton(
+          view.host,
+          first.title,
+          "purge-button",
+        );
+        restore.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        expect(view.setup.lookalike).not.toBe(view.ownerWindow);
+        expect(view.setup.lookalike.document).toBe(
+          view.ownerDocument,
+        );
+
+        const rejected = dispatchTrashKey(
+          restore,
+          "ArrowRight",
+        );
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+        expect(restore).toHaveFocus();
+
+        view.setup.acceptGenuineTerminal();
+        const accepted = dispatchTrashKey(
+          restore,
+          "ArrowRight",
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(purge).toHaveFocus();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it("rejects untrusted, modified, repeated, composing, cancelled, foreign, wrong-focus, and non-navigation keys without poisoning recovery", () => {
+    const onRetry = vi.fn();
+    const onRestore = vi.fn();
+    const onPurge = vi.fn();
+    const view = renderTrashKeyboard(
+      trash([first, second], null, "Trash warning", {
+        onRetry,
+        onRestore,
+        onPurge,
+      }),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      const outsider =
+        view.ownerDocument.createElement("button");
+      view.ownerDocument.body.append(outsider);
+      const rejected: KeyboardEvent[] = [];
+      const reject = (
+        key: string,
+        init: KeyboardEventInit = {},
+        trusted = true,
+      ) => {
+        restore.focus();
+        view.setup.focus.mockClear();
+        view.setup.preventDefault.mockClear();
+        const event = dispatchTrashKey(
+          restore,
+          key,
+          init,
+          trusted,
+        );
+        rejected.push(event);
+        expect(event.defaultPrevented).toBe(false);
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+        expect(restore).toHaveFocus();
+      };
+      reject("ArrowRight", {}, false);
+      reject("ArrowRight", { ctrlKey: true });
+      reject("ArrowRight", { metaKey: true });
+      reject("ArrowRight", { altKey: true });
+      reject("ArrowRight", { shiftKey: true });
+      reject("ArrowRight", { repeat: true });
+      reject("ArrowRight", { isComposing: true });
+      reject("6", {
+        code: "Numpad6",
+        location:
+          view.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+      });
+      reject("Tab");
+      reject("Enter");
+      reject(" ");
+
+      restore.focus();
+      const previouslyPrevented = createTrashKeyboardEvent(
+        restore,
+        "ArrowRight",
+      );
+      previouslyPrevented.preventDefault();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      act(() => restore.dispatchEvent(previouslyPrevented));
+      expect(previouslyPrevented.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+
+      const previouslyStopped = createTrashKeyboardEvent(
+        restore,
+        "ArrowRight",
+      );
+      previouslyStopped.stopPropagation();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      act(() => restore.dispatchEvent(previouslyStopped));
+      expect(previouslyStopped.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+
+      outsider.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      const wrongFocus = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+      expect(outsider).toHaveFocus();
+
+      const foreignFrame =
+        view.ownerDocument.createElement("iframe");
+      view.ownerDocument.body.append(foreignFrame);
+      const foreignDocument = foreignFrame.contentDocument;
+      const foreignWindow = foreignDocument?.defaultView;
+      if (!foreignDocument || !foreignWindow) {
+        throw new Error("The foreign key realm is unavailable");
+      }
+      const foreignTarget =
+        foreignDocument.createElement("button");
+      foreignDocument.body.append(foreignTarget);
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        code: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+        view: foreignWindow,
+      });
+      markSearchResultEventTrusted(foreign, foreignWindow);
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      act(() => foreignTarget.dispatchEvent(foreign));
+      expect(foreign.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+      foreignFrame.remove();
+
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      const accepted = dispatchTrashKey(
+        restore,
+        "ArrowRight",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(purge).toHaveFocus();
+      expect(rejected).toHaveLength(11);
+      expect(onRetry).not.toHaveBeenCalled();
+      expect(onRestore).not.toHaveBeenCalled();
+      expect(onPurge).not.toHaveBeenCalled();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it("preserves disabled, Enter, Space, Tab, and click behavior", () => {
+    const onRetry = vi.fn();
+    const onRestore = vi.fn();
+    const onPurge = vi.fn();
+    const callbacks = { onRetry, onRestore, onPurge };
+    const view = renderTrashKeyboard(
+      trash([first], first.id, null, callbacks),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const disabledRestore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const disabledPurge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      expect(disabledRestore).toBeDisabled();
+      expect(disabledPurge).toBeDisabled();
+      const disabledEvent = dispatchTrashKey(
+        disabledRestore,
+        "ArrowRight",
+      );
+      expect(disabledEvent.defaultPrevented).toBe(false);
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+
+      act(() => {
+        view.root.render(
+          trash([first], null, null, callbacks, "enabled"),
+        );
+      });
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      expect(restore.tabIndex).toBe(0);
+      expect(purge.tabIndex).toBe(0);
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      for (const key of ["Enter", " ", "Tab"]) {
+        const event = dispatchTrashKey(restore, key);
+        expect(event.defaultPrevented, key).toBe(false);
+      }
+      expect(view.setup.preventDefault).not.toHaveBeenCalled();
+      expect(view.setup.focus).not.toHaveBeenCalled();
+      expect(onRestore).not.toHaveBeenCalled();
+      expect(onPurge).not.toHaveBeenCalled();
+
+      restore.click();
+      purge.click();
+      expect(onRestore).toHaveBeenCalledExactlyOnceWith(first);
+      expect(onPurge).toHaveBeenCalledExactlyOnceWith(first);
+      expect(onRetry).not.toHaveBeenCalled();
+    } finally {
+      view.dispose();
+    }
+  });
+}
+
+describe("dashboard Account menu directional publication", () => {
+  it("retains pointer, Enter, Space, activation, Escape, and outside dismissal", async () => {
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    outside.textContent = "Outside Account menu";
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    const closeWithEscape = async () => {
+      const item = accountMenuItem("Agents & API tokens");
+      item.focus();
+      fireEvent.keyDown(item, { key: "Escape", code: "Escape" });
+      await act(async () => {
+        vi.advanceTimersByTime(0);
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(accountTrigger(host)).toHaveFocus();
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(screen.getByRole("menu")).toHaveFocus();
+      await closeWithEscape();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: "Enter", code: "Enter" });
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+      await closeWithEscape();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: " ", code: "Space" });
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+      fireEvent.click(accountMenuItem("Agents & API tokens"));
+      expect(router.push).toHaveBeenCalledExactlyOnceWith("/settings");
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      trigger = accountTrigger(host);
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      fireEvent.click(accountMenuItem("Sign out"));
+      expect(signOutSafely).toHaveBeenCalledOnce();
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      trigger = accountTrigger(host);
+      fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+      await act(async () => {
+        vi.advanceTimersByTime(0);
+        await Promise.resolve();
+      });
+      fireEvent.pointerDown(outside, { button: 0, ctrlKey: false });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects modified, repeated, composing, canceled, untrusted, wrong-code, wrong-target, and wrong-focus keys", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const rejected: KeyboardEvent[] = [
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { ctrlKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { metaKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { altKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { shiftKey: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", { repeat: true }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", {
+          isComposing: true,
+        }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", {
+          code: "ArrowUp",
+        }),
+        accountKeyEvent(accountTrigger(host), "ArrowDown", {}, false),
+      ];
+      for (const event of rejected) {
+        const trigger = accountTrigger(host);
+        trigger.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        await dispatchAccountKey(trigger, event);
+        expect(event.defaultPrevented).toBe(false);
+        expect(screen.queryByRole("menu")).toBeNull();
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+      }
+
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      const canceled = accountKeyEvent(trigger, "ArrowDown");
+      canceled.preventDefault();
+      preventDefault.mockClear();
+      await dispatchAccountKey(trigger, canceled);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      trigger = accountTrigger(host);
+      outside.focus();
+      focus.mockClear();
+      const wrongFocus = await dispatchAccountKey(trigger, "ArrowDown");
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expect(outside).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      const avatar = trigger.firstElementChild;
+      if (!(avatar instanceof HTMLElement)) {
+        throw new Error("The Account avatar was not rendered");
+      }
+      const wrongTarget = accountKeyEvent(trigger, "ArrowDown");
+      await act(async () => {
+        avatar.dispatchEvent(wrongTarget);
+        await Promise.resolve();
+      });
+      expect(wrongTarget.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(focus).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects fabricated, foreign, mismatched React/native, replayed, and cleanup delivery before a clean successor", async () => {
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const iframe = document.createElement("iframe");
+    document.body.append(host, iframe);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const fabricatedNative = accountKeyEvent(trigger, "ArrowDown");
+      captureReactHandler(trigger, "onKeyDown")({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: fabricatedNative,
+        currentTarget: trigger,
+        target: trigger,
+        key: "ArrowDown",
+        code: "ArrowDown",
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const foreignWindow = iframe.contentWindow as
+        | (Window & typeof globalThis)
+        | null;
+      if (!foreignWindow) throw new Error("The iframe has no content window");
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        code: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      });
+      markSearchResultEventTrusted(foreign, foreignWindow);
+      await act(async () => {
+        trigger.dispatchEvent(foreign);
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const restore = interceptReactHandler(
+        trigger,
+        "onKeyDown",
+        (original, event) => {
+          if (!event || typeof event !== "object") {
+            throw new Error("The React keyboard event was not an object");
+          }
+          original(
+            Object.create(
+              Object.getPrototypeOf(event),
+              Object.getOwnPropertyDescriptors(event),
+            ),
+          );
+        },
+      );
+      const mismatched = accountKeyEvent(trigger, "ArrowDown");
+      try {
+        await dispatchAccountKey(trigger, mismatched);
+      } finally {
+        restore();
+      }
+      expect(mismatched.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const accepted = accountKeyEvent(trigger, "ArrowDown");
+      await dispatchAccountKey(trigger, accepted);
+      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+      fireEvent.keyDown(accountMenuItem("Agents & API tokens"), {
+        key: "Escape",
+        code: "Escape",
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      focus.mockClear();
+      preventDefault.mockClear();
+      trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      await dispatchAccountKey(trigger, accepted);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      const staleHandler = captureReactHandler(trigger, "onKeyDown");
+      await act(async () => root.unmount());
+      staleHandler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: accountKeyEvent(trigger, "ArrowDown"),
+        currentTarget: trigger,
+        target: trigger,
+      });
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      iframe.remove();
+    }
+  });
+
+  it("retains descriptor, DOM, callback, and ref history while a complete clean successor recovers", async () => {
+    const addEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "addEventListener",
+    );
+    const removeEventListener = vi.spyOn(
+      EventTarget.prototype,
+      "removeEventListener",
+    );
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const activeKeydownListeners = (element: HTMLButtonElement) =>
+      addEventListener.mock.calls.flatMap(
+        ([type, listener, options], index) => {
+          if (
+            addEventListener.mock.contexts[index] !== element ||
+            type !== "keydown" ||
+            typeof listener !== "function"
+          ) {
+            return [];
+          }
+          const capture = eventCapture(options);
+          const removed = removeEventListener.mock.calls.some(
+            ([removedType, removedListener, removedOptions], removedIndex) =>
+              removeEventListener.mock.contexts[removedIndex] === element &&
+              removedType === type &&
+              removedListener === listener &&
+              eventCapture(removedOptions) === capture,
+          );
+          return removed ? [] : [{ listener, capture }];
+        },
+      );
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      let trigger = accountTrigger(host);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const originalClass = trigger.className;
+      trigger.className = `${originalClass} changed`;
+      trigger.className = originalClass;
+      const restoredDom = await dispatchAccountKey(trigger, "ArrowDown");
+      expect(restoredDom.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      const keyDescriptor = Object.getOwnPropertyDescriptor(
+        KeyboardEvent.prototype,
+        "key",
+      );
+      if (!keyDescriptor?.get) {
+        throw new Error("KeyboardEvent.key has no getter");
+      }
+      Object.defineProperty(KeyboardEvent.prototype, "key", {
+        ...keyDescriptor,
+        get() {
+          return keyDescriptor.get!.call(this);
+        },
+      });
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const replacedDescriptor = accountKeyEvent(trigger, "ArrowDown");
+      try {
+        await dispatchAccountKey(trigger, replacedDescriptor);
+      } finally {
+        Object.defineProperty(
+          KeyboardEvent.prototype,
+          "key",
+          keyDescriptor,
+        );
+      }
+      expect(replacedDescriptor.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      const originalPush = router.push;
+      router.push = vi.fn();
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      let staleCallback: KeyboardEvent | null = null;
+      try {
+        staleCallback = await dispatchAccountKey(trigger, "ArrowDown");
+      } finally {
+        router.push = originalPush;
+      }
+      if (!staleCallback) throw new Error("The stale callback key was not dispatched");
+      expect(staleCallback.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      const retiredHandler = captureReactHandler(trigger, "onKeyDown");
+      const triggerRef = captureReactRef(trigger);
+      const retiredListeners = activeKeydownListeners(trigger);
+      expect(retiredListeners).toHaveLength(2);
+      act(() => triggerRef(null));
+      expect(activeKeydownListeners(trigger)).toHaveLength(0);
+      retiredHandler({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: accountKeyEvent(trigger, "ArrowDown"),
+        currentTarget: trigger,
+        target: trigger,
+      });
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+
+      act(() => triggerRef(trigger));
+      await act(async () => Promise.resolve());
+      trigger = accountTrigger(host);
+      expect(captureReactHandler(trigger, "onKeyDown")).not.toBe(
+        retiredHandler,
+      );
+      const replayedListeners = activeKeydownListeners(trigger);
+      expect(replayedListeners).toHaveLength(2);
+      expect(replayedListeners.map(({ capture }) => capture)).toEqual([
+        true,
+        false,
+      ]);
+      expect(
+        new Set(replayedListeners.map(({ listener }) => listener)).size,
+      ).toBe(2);
+      expect(
+        replayedListeners.every(
+          ({ listener }) =>
+            !retiredListeners.some(
+              ({ listener: retired }) => listener === retired,
+            ),
+        ),
+      ).toBe(true);
+      trigger.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const recovered = await dispatchAccountKey(trigger, "ArrowUp");
+      expect(recovered.defaultPrevented).toBe(true);
+      expect(accountMenuItem("Sign out")).toHaveFocus();
+      expect(
+        preventDefault.mock.contexts.filter(
+          (receiver) => receiver === recovered,
+        ),
+      ).toHaveLength(1);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(signOutSafely).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
 
 describe("TemplateGrid publication ownership", () => {
@@ -3275,7 +5436,7 @@ describe("dashboard search controls", () => {
     }
   });
 
-  it("requires complete current refs for full and partial replay successors", async () => {
+  it("requires complete current refs for replay and recovers from a partial replay on a clean render", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -3305,6 +5466,18 @@ describe("dashboard search controls", () => {
         for (const binding of partial.toReversed()) binding.ref(binding.element);
       });
 
+      await dispatchSearchAction(() => {
+        fireEvent.click(screen.getByTestId("search-clear"));
+      });
+      expect(search).toHaveValue("alpha");
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
       await dispatchSearchAction(() => {
         fireEvent.click(screen.getByTestId("search-clear"));
       });
@@ -3716,6 +5889,912 @@ describe("dashboard search controls", () => {
       await act(async () => root.unmount());
       host.remove();
     }
+  });
+});
+
+describe("dashboard search result keyboard focus", () => {
+  it.each([
+    ["ArrowDown", 0],
+    ["ArrowUp", 1],
+  ] as const)(
+    "focuses the exact %s result once without navigation, scrolling, or search work",
+    async (key, destination) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const search = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, { target: { value: "n" } });
+        });
+        const links = searchResultLinks(host);
+        expect(links).toHaveLength(2);
+        search.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const scrollIntoView = Element.prototype
+          .scrollIntoView as ReturnType<typeof vi.fn>;
+        scrollIntoView.mockClear();
+        const beforeScroll = { x: window.scrollX, y: window.scrollY };
+        const requestCount = searchDocuments.mock.calls.length;
+
+        const event = await dispatchSearchResultKey(search, key);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(preventDefault.mock.instances[0]).toBe(event);
+        expect(links[destination]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(focus.mock.instances[0]).toBe(links[destination]);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+        expect(search).toHaveValue("n");
+        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+        expect(listDocuments).not.toHaveBeenCalled();
+        expect(createDocument).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(router.replace).not.toHaveBeenCalled();
+        expect(router.refresh).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["empty", "loading", "error"] as const)(
+    "leaves an %s-only search native",
+    async (state) => {
+      if (state === "error") {
+        searchDocuments.mockRejectedValueOnce(
+          new ApiError(503, "Search unavailable"),
+        );
+      }
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard
+                user={USER}
+                documents={state === "empty" ? DOCUMENTS : []}
+                githubAvailable
+                githubConfigured
+              />
+            </StrictMode>,
+          );
+        });
+        const search = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, {
+            target: { value: state === "empty" ? "q" : "zz" },
+          });
+        });
+        if (state === "error") await settleSearch();
+        const requestCount = searchDocuments.mock.calls.length;
+        expect(searchResultLinks(host)).toHaveLength(0);
+        search.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+
+        const event = await dispatchSearchResultKey(search, "ArrowDown");
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(search).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+        expect(router.push).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects untrusted, modified, repeated, composing, canceled, and wrong-source keys", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    outside.textContent = "Outside result focus";
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      const links = searchResultLinks(host);
+      const rejected: KeyboardEventInit[] = [
+        { ctrlKey: true },
+        { metaKey: true },
+        { altKey: true },
+        { shiftKey: true },
+        { repeat: true },
+        { isComposing: true },
+        { bubbles: false },
+        { cancelable: false },
+      ];
+      for (const init of rejected) {
+        search.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const event = await dispatchSearchResultKey(search, "ArrowDown", init);
+        expect(event.defaultPrevented).toBe(false);
+        expect(search).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+      }
+
+      search.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const untrusted = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => {
+        search.dispatchEvent(untrusted);
+        await Promise.resolve();
+      });
+      expect(untrusted.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      const canceled = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      markSearchResultEventTrusted(canceled, window);
+      canceled.preventDefault();
+      preventDefault.mockClear();
+      await act(async () => {
+        search.dispatchEvent(canceled);
+        await Promise.resolve();
+      });
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      outside.focus();
+      focus.mockClear();
+      const wrongFocus = await dispatchSearchResultKey(search, "ArrowDown");
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expect(outside).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+
+      links[0]!.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const wrongSource = await dispatchSearchResultKey(
+        links[0]!,
+        "ArrowDown",
+      );
+      expect(wrongSource.defaultPrevented).toBe(false);
+      expect(links[0]).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects fabricated, foreign, crossed, and replayed delivery before a clean successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    const iframe = document.createElement("iframe");
+    document.body.append(host, iframe);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      const handler = captureReactHandler(search, "onKeyDown");
+      search.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      handler({
+        get nativeEvent() {
+          throw new Error("fabricated native event getter must not run");
+        },
+      });
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      const foreignWindow = iframe.contentWindow as Window & typeof globalThis;
+      const foreign = new foreignWindow.KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      markSearchResultEventTrusted(foreign, foreignWindow);
+      await act(async () => {
+        search.dispatchEvent(foreign);
+        await Promise.resolve();
+      });
+      expect(foreign.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      const outer = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      const inner = new KeyboardEvent("keydown", {
+        key: "ArrowUp",
+        bubbles: true,
+        cancelable: true,
+      });
+      markSearchResultEventTrusted(outer, window);
+      markSearchResultEventTrusted(inner, window);
+      search.addEventListener(
+        "keydown",
+        () => {
+          search.dispatchEvent(inner);
+        },
+        { capture: true, once: true },
+      );
+      await act(async () => {
+        search.dispatchEvent(outer);
+        await Promise.resolve();
+      });
+      expect(outer.defaultPrevented).toBe(false);
+      expect(inner.defaultPrevented).toBe(false);
+      expect(search).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+
+      let wrapper: unknown = null;
+      const acceptedHandler: { current: CapturedReactClick | null } = {
+        current: null,
+      };
+      const restore = interceptReactHandler(search, "onKeyDown", (original, event) => {
+        acceptedHandler.current = original;
+        wrapper = event;
+        original(event);
+      });
+      const accepted = await dispatchSearchResultKey(search, "ArrowDown");
+      restore();
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(searchResultLinks(host)[0]).toHaveFocus();
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+
+      acceptedHandler.current?.(wrapper);
+      await act(async () => {
+        search.dispatchEvent(accepted);
+        await Promise.resolve();
+      });
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      iframe.remove();
+    }
+  });
+
+  it.each([
+    "preventDefault",
+    "stopPropagation",
+    "stopImmediatePropagation",
+  ] as const)(
+    "rejects downstream %s before focus and accepts a distinct clean event",
+    async (method) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const search = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, { target: { value: "n" } });
+        });
+        search.focus();
+        focus.mockClear();
+        const stop = (event: Event) => event[method]();
+        search.addEventListener("keydown", stop, { once: true });
+
+        const rejected = await dispatchSearchResultKey(search, "ArrowDown");
+
+        search.removeEventListener("keydown", stop);
+        expect(focus).not.toHaveBeenCalled();
+        expect(search).toHaveFocus();
+        if (method === "preventDefault") {
+          expect(rejected.defaultPrevented).toBe(true);
+        }
+
+        const accepted = await dispatchSearchResultKey(search, "ArrowDown");
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(searchResultLinks(host)[0]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects replaced key authority and a fabricated React trust wrapper before clean recovery", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      const keyDescriptor = Object.getOwnPropertyDescriptor(
+        KeyboardEvent.prototype,
+        "key",
+      );
+      if (!keyDescriptor?.get) {
+        throw new Error("KeyboardEvent.key getter was unavailable");
+      }
+      const replaced = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      markSearchResultEventTrusted(replaced, window);
+      search.focus();
+      focus.mockClear();
+      Object.defineProperty(KeyboardEvent.prototype, "key", {
+        ...keyDescriptor,
+        get: () => "ArrowDown",
+      });
+      try {
+        await act(async () => {
+          search.dispatchEvent(replaced);
+          await Promise.resolve();
+        });
+      } finally {
+        Object.defineProperty(
+          KeyboardEvent.prototype,
+          "key",
+          keyDescriptor,
+        );
+      }
+      expect(replaced.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const currentSearch = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      const restore = interceptReactHandler(
+        currentSearch,
+        "onKeyDown",
+        (original, event) => {
+          if (!event || typeof event !== "object") return;
+          const descriptors = Object.getOwnPropertyDescriptors(event);
+          descriptors.isTrusted = {
+            configurable: true,
+            enumerable: true,
+            value: false,
+            writable: true,
+          };
+          original(
+            Object.create(
+              Object.getPrototypeOf(event),
+              descriptors,
+            ) as object,
+          );
+        },
+      );
+      currentSearch.focus();
+      focus.mockClear();
+      const fabricatedWrapper = await dispatchSearchResultKey(
+        currentSearch,
+        "ArrowDown",
+      );
+      restore();
+      expect(fabricatedWrapper.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      currentSearch.focus();
+      focus.mockClear();
+      const accepted = await dispatchSearchResultKey(
+        currentSearch,
+        "ArrowDown",
+      );
+      expect(accepted.defaultPrevented).toBe(true);
+      expect(searchResultLinks(host)[0]).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a request settlement during delivery and focuses the clean current result", async () => {
+    const request = controlledSearch<SearchResponse>();
+    searchDocuments.mockReturnValueOnce(request.promise);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "alpha" } });
+      });
+      await settleSearch();
+      expect(searchDocuments).toHaveBeenCalledOnce();
+      expect(searchResultLinks(host)).toHaveLength(1);
+      search.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      search.addEventListener(
+        "keydown",
+        () => {
+          flushSync(() => {
+            request.resolve({
+              query: "alpha",
+              documents: [
+                result(
+                  "settled-result",
+                  "Settled alpha result",
+                  "Current alpha content",
+                ),
+              ],
+            });
+            request.finalize();
+          });
+        },
+        { capture: true, once: true },
+      );
+
+      const stale = await dispatchSearchResultKey(search, "ArrowDown");
+
+      expect(stale.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(screen.getByRole("link", { name: /Settled alpha result/ })).toBeInTheDocument();
+      expect(searchDocuments).toHaveBeenCalledOnce();
+
+      search.focus();
+      focus.mockClear();
+      const current = await dispatchSearchResultKey(search, "ArrowDown");
+      expect(current.defaultPrevented).toBe(true);
+      expect(screen.getByRole("link", { name: /Settled alpha result/ })).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(searchDocuments).toHaveBeenCalledOnce();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("keeps stale query, result-order, and user handlers inert beside the exact current handler", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const replacement = {
+      ...USER,
+      id: "search-result-replacement",
+      login: "search-result-replacement",
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      expect(searchResultLinks(host)).toHaveLength(2);
+      const staleOrder = captureReactHandler(search, "onKeyDown");
+
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "planning" } });
+      });
+      expect(searchResultLinks(host)).toHaveLength(1);
+      const staleUser = captureReactHandler(search, "onKeyDown");
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={replacement} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const currentSearch = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      const restore = interceptReactHandler(
+        currentSearch,
+        "onKeyDown",
+        (original, event) => {
+          staleOrder(event);
+          staleUser(event);
+          original(event);
+        },
+      );
+      currentSearch.focus();
+      focus.mockClear();
+      const event = await dispatchSearchResultKey(
+        currentSearch,
+        "ArrowDown",
+      );
+      restore();
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(searchResultLinks(host)).toHaveLength(1);
+      expect(searchResultLinks(host)[0]).toHaveFocus();
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+      expect(searchDocuments).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    "restored result attribute",
+    "restored result order",
+    "restored result replacement",
+    "restored result root",
+  ] as const)(
+    "rejects %s history once and mints a clean successor without an external render",
+    async (scenario) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const search = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        await dispatchSearchAction(() => {
+          fireEvent.change(search, { target: { value: "n" } });
+        });
+        const list = host.querySelector<HTMLUListElement>(
+          '[data-testid="document-list"]',
+        )!;
+        const links = searchResultLinks(host);
+        if (scenario === "restored result attribute") {
+          links[0]!.setAttribute("data-search-result-attack", "1");
+          links[0]!.removeAttribute("data-search-result-attack");
+        } else if (scenario === "restored result order") {
+          const items = Array.from(list.children);
+          list.append(items[0]!);
+          for (const item of items) list.append(item);
+        } else if (scenario === "restored result replacement") {
+          const clone = links[0]!.cloneNode(true) as HTMLAnchorElement;
+          links[0]!.replaceWith(clone);
+          clone.replaceWith(links[0]!);
+        } else {
+          const parent = list.parentNode!;
+          const next = list.nextSibling;
+          list.remove();
+          parent.insertBefore(list, next);
+        }
+        await act(async () => {});
+        search.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const scrollIntoView = Element.prototype
+          .scrollIntoView as ReturnType<typeof vi.fn>;
+        scrollIntoView.mockClear();
+        const beforeScroll = { x: window.scrollX, y: window.scrollY };
+        const requestCount = searchDocuments.mock.calls.length;
+        const staleHandler = captureReactHandler(search, "onKeyDown");
+
+        const rejected = await dispatchSearchResultKey(search, "ArrowDown");
+
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(search).toHaveFocus();
+        expect(focus).not.toHaveBeenCalled();
+        expect(preventDefault).not.toHaveBeenCalled();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+        expect(search).toHaveValue("n");
+        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+        expect(router.push).not.toHaveBeenCalled();
+        expect(router.replace).not.toHaveBeenCalled();
+        expect(router.refresh).not.toHaveBeenCalled();
+
+        const currentSearch = screen.getByRole("textbox", {
+          name: "Search documents",
+        }) as HTMLInputElement;
+        expect(captureReactHandler(currentSearch, "onKeyDown")).not.toBe(
+          staleHandler,
+        );
+        currentSearch.focus();
+        focus.mockClear();
+        preventDefault.mockClear();
+        const accepted = await dispatchSearchResultKey(
+          currentSearch,
+          "ArrowDown",
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(searchResultLinks(host)[0]).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+        expect(currentSearch).toHaveValue("n");
+        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+        expect(listDocuments).not.toHaveBeenCalled();
+        expect(createDocument).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(router.replace).not.toHaveBeenCalled();
+        expect(router.refresh).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("releases a queued DOM-barrier successor when cleanup wins", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let mounted = true;
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const search = screen.getByRole("textbox", {
+        name: "Search documents",
+      }) as HTMLInputElement;
+      await dispatchSearchAction(() => {
+        fireEvent.change(search, { target: { value: "n" } });
+      });
+      const link = searchResultLinks(host)[0]!;
+      link.setAttribute("data-search-result-attack", "1");
+      link.removeAttribute("data-search-result-attack");
+      await act(async () => {});
+      search.focus();
+      focus.mockClear();
+      preventDefault.mockClear();
+      const requestCount = searchDocuments.mock.calls.length;
+      const event = searchResultKeyEvent(search, "ArrowDown");
+
+      act(() => {
+        search.dispatchEvent(event);
+        root.unmount();
+      });
+      mounted = false;
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(host).toBeEmptyDOMElement();
+      expect(focus).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
+      expect(router.push).not.toHaveBeenCalled();
+      expect(router.replace).not.toHaveBeenCalled();
+      expect(router.refresh).not.toHaveBeenCalled();
+    } finally {
+      if (mounted) await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects partial ref replay and cleanup while complete replay mints a usable successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+        </StrictMode>,
+      );
+    });
+    const search = screen.getByRole("textbox", {
+      name: "Search documents",
+    }) as HTMLInputElement;
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "n" } });
+    });
+    const partial = searchResultRefBindings(search)[0]!;
+    act(() => {
+      partial.ref(null);
+      partial.ref(partial.element);
+    });
+    await act(async () => {});
+    search.focus();
+    focus.mockClear();
+    preventDefault.mockClear();
+    const rejected = await dispatchSearchResultKey(search, "ArrowDown");
+    expect(rejected.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
+        </StrictMode>,
+      );
+    });
+    const recovered = screen.getByRole("textbox", {
+      name: "Search documents",
+    }) as HTMLInputElement;
+    const beforeReplay = captureReactHandler(recovered, "onKeyDown");
+    const complete = [
+      ...searchRefBindings(recovered, true),
+      ...searchResultRefBindings(recovered),
+    ];
+    act(() => {
+      for (const binding of complete) binding.ref(null);
+      for (const binding of complete) binding.ref(binding.element);
+    });
+    await act(async () => {});
+    expect(captureReactHandler(recovered, "onKeyDown")).not.toBe(beforeReplay);
+    recovered.focus();
+    focus.mockClear();
+    const accepted = await dispatchSearchResultKey(recovered, "ArrowUp");
+    expect(accepted.defaultPrevented).toBe(true);
+    expect(searchResultLinks(host).at(-1)).toHaveFocus();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({
+      preventScroll: true,
+    });
+
+    const stale = captureReactHandler(recovered, "onKeyDown");
+    await act(async () => root.unmount());
+    const removedMarkup = host.innerHTML;
+    focus.mockClear();
+    preventDefault.mockClear();
+    stale({
+      _reactName: "onKeyDown",
+      type: "keydown",
+      nativeEvent: new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+      target: recovered,
+      currentTarget: recovered,
+      bubbles: true,
+      cancelable: true,
+      defaultPrevented: false,
+      isTrusted: true,
+      key: "ArrowDown",
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      repeat: false,
+      isComposing: false,
+      view: window,
+    });
+    expect(host.innerHTML).toBe(removedMarkup);
+    expect(focus).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+    host.remove();
   });
 });
 
@@ -4588,6 +7667,906 @@ describe("dashboard create ownership", () => {
     });
     expect(router.push).toHaveBeenCalledTimes(1);
     expect(router.push).toHaveBeenLastCalledWith("/d/current-created");
+  });
+});
+
+describe("dashboard direct create control ownership", () => {
+  const DIRECT_CONTROLS = [
+    {
+      name: "New document",
+      testid: "new-document" as CreateControlTestId,
+      body: {} as Record<string, string>,
+      created: "blank-created",
+    },
+    {
+      name: "Start with a guided doc",
+      testid: "start-guided-doc" as CreateControlTestId,
+      body: { template: "welcome" } as Record<string, string>,
+      created: "welcome-created",
+    },
+  ];
+
+  it.each(DIRECT_CONTROLS)(
+    "issues one exact $name create and navigation through direct-root Strict Mode replay",
+    async ({ testid, body, created }) => {
+      const pending = deferred<CreateResponse>();
+      createDocument.mockReturnValueOnce(pending.promise);
+      const host = document.createElement("div");
+      const focusOwner = document.createElement("button");
+      document.body.append(focusOwner, host);
+      const root = createRoot(host);
+      const passiveCleanup = vi.fn();
+      let firstSetupHandler: CapturedReactClick | null = null;
+      let layoutSetups = 0;
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <DashboardBoundary
+                documents={[]}
+                boundary={1}
+                onPassiveCleanup={passiveCleanup}
+                onBoundary={() => {
+                  layoutSetups += 1;
+                  firstSetupHandler ??= captureReactClick(
+                    directCreateButton(host, testid),
+                  );
+                }}
+              />
+            </StrictMode>,
+          );
+        });
+
+        const control = directCreateButton(host, testid);
+        const currentHandler = captureReactClick(control);
+        expect(layoutSetups).toBeGreaterThanOrEqual(2);
+        expect(passiveCleanup).toHaveBeenCalled();
+        expect(currentHandler).not.toBe(firstSetupHandler);
+        expect(control).toBeEnabled();
+        expect(control).not.toHaveAttribute("aria-busy");
+
+        focusOwner.focus();
+        expectInertTemplateCall(
+          firstSetupHandler!,
+          fabricatedTemplateClick(control),
+          host,
+        );
+        expect(createDocument).not.toHaveBeenCalled();
+
+        await act(async () => {
+          control.click();
+        });
+        expect(createDocument).toHaveBeenCalledTimes(1);
+        expect(createDocument).toHaveBeenLastCalledWith(body);
+        expect(directCreateButton(host, "new-document")).toBeDisabled();
+        expect(directCreateButton(host, "start-guided-doc")).toBeDisabled();
+        expect(templateButton(host, "meeting-notes")).toBeDisabled();
+        expect(document.activeElement).toBe(focusOwner);
+
+        await act(async () => {
+          control.click();
+          directCreateButton(host, "new-document").click();
+        });
+        expect(createDocument).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+          pending.resolve({ document: { id: created, title: "Untitled" } });
+          await pending.promise;
+        });
+        expect(router.push).toHaveBeenCalledTimes(1);
+        expect(router.push).toHaveBeenLastCalledWith(`/d/${created}`);
+        expect(host.querySelector('[data-testid="toast"]')).toBeNull();
+      } finally {
+        await act(async () => root.unmount());
+        focusOwner.remove();
+        host.remove();
+      }
+    },
+  );
+
+  it.each(["crossed-before-current", "current-before-crossed"] as const)(
+    "rejects a %s sibling activation and keeps the genuine control exact",
+    async (order) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const blank = directCreateButton(host, "new-document");
+        const welcome = directCreateButton(host, "start-guided-doc");
+        const crossed = captureReactClick(welcome);
+        const restore = interceptReactClick(blank, (original, event) => {
+          if (order === "crossed-before-current") {
+            crossed(event);
+            original(event);
+          } else {
+            original(event);
+            crossed(event);
+          }
+        });
+        try {
+          await act(async () => {
+            blank.click();
+          });
+        } finally {
+          restore();
+        }
+
+        expect(createDocument).toHaveBeenCalledTimes(1);
+        expect(createDocument).toHaveBeenLastCalledWith({});
+        expect(router.push).toHaveBeenCalledTimes(1);
+        expect(router.push).toHaveBeenLastCalledWith("/d/created");
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("keeps stale user and key handlers inert while the current control stays exact", async () => {
+    const stale = deferred<CreateResponse>();
+    const current = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(stale.promise).mockReturnValueOnce(current.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const replacement = { ...USER, id: "create-replacement", login: "create-replacement" };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const staleBlank = directCreateButton(host, "new-document");
+      const staleHandler = captureReactClick(staleBlank);
+      await act(async () => {
+        staleBlank.click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={replacement} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const currentBlank = directCreateButton(host, "new-document");
+      expect(currentBlank).toBe(staleBlank);
+      expect(currentBlank).toBeEnabled();
+      expectInertTemplateCall(
+        staleHandler,
+        fabricatedTemplateClick(currentBlank),
+        host,
+      );
+      expect(createDocument).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        directCreateButton(host, "start-guided-doc").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(2);
+      expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
+
+      await act(async () => {
+        stale.resolve({ document: { id: "stale-created", title: "Stale" } });
+        await stale.promise;
+      });
+      expect(router.push).not.toHaveBeenCalled();
+
+      await act(async () => {
+        current.resolve({ document: { id: "current-created", title: "Current" } });
+        await current.promise;
+      });
+      expect(router.push).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenLastCalledWith("/d/current-created");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("claims the wrapper and native click before duplicate or reentrant delivery", async () => {
+    const pending = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(pending.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const welcome = directCreateButton(host, "start-guided-doc");
+      const claimed: { handler: CapturedReactClick | null; wrapper: unknown } = {
+        handler: null,
+        wrapper: null,
+      };
+      const restore = interceptReactClick(welcome, (original, event) => {
+        claimed.handler = original;
+        claimed.wrapper = event;
+        original({ ...(event as Record<string, unknown>) });
+        expect(createDocument).not.toHaveBeenCalled();
+        original(event);
+        original(event);
+      });
+      try {
+        await act(async () => {
+          welcome.click();
+        });
+      } finally {
+        restore();
+      }
+
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
+      claimed.handler?.(claimed.wrapper);
+      claimed.handler?.({
+        get nativeEvent() {
+          throw new Error("fabricated native event getter must not run");
+        },
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        pending.resolve({ document: { id: "welcome-created", title: "Welcome" } });
+        await pending.promise;
+      });
+      expect(router.push).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenLastCalledWith("/d/welcome-created");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    "canceled",
+    "stopped",
+    "non-primary",
+    "fabricated wrapper",
+    "fabricated native click",
+  ] as const)("does no create work for a %s activation and recovers", async (scenario) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const cancel = (event: Event) => {
+      event.preventDefault();
+    };
+    const stop = (event: Event) => {
+      event.stopPropagation();
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const blank = directCreateButton(host, "new-document");
+
+      if (scenario === "canceled") {
+        blank.addEventListener("click", cancel, true);
+        await act(async () => {
+          blank.click();
+        });
+        blank.removeEventListener("click", cancel, true);
+      } else if (scenario === "stopped") {
+        document.addEventListener("click", stop, true);
+        await act(async () => {
+          blank.click();
+        });
+        document.removeEventListener("click", stop, true);
+      } else if (scenario === "non-primary") {
+        await act(async () => {
+          blank.dispatchEvent(
+            new MouseEvent("click", {
+              bubbles: true,
+              cancelable: true,
+              button: 1,
+              buttons: 0,
+              detail: 1,
+            }),
+          );
+        });
+      } else if (scenario === "fabricated wrapper") {
+        await act(async () => {
+          captureReactClick(blank)(fabricatedTemplateClick(blank));
+        });
+      } else {
+        await act(async () => {
+          const traversal = reactProps(blank).onClickCapture;
+          const wrapper = fabricatedTemplateClick(blank);
+          traversal?.(wrapper);
+          captureReactClick(blank)(wrapper);
+        });
+      }
+
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(host.querySelector('[data-testid="toast"]')).toBeNull();
+      expect(directCreateButton(host, "new-document")).toBeEnabled();
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      await act(async () => {
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener("click", stop, true);
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    ["Control", { ctrlKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Alt", { altKey: true }],
+    ["Shift", { shiftKey: true }],
+  ] as const)("rejects a %s-modified primary click and recovers", async (_name, modifier) => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const blank = directCreateButton(host, "new-document");
+      await act(async () => {
+        blank.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            buttons: 0,
+            detail: 1,
+            ...modifier,
+          }),
+        );
+      });
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(host.querySelector('[data-testid="toast"]')).toBeNull();
+
+      await act(async () => {
+        blank.click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each(["API callback", "router callback"] as const)(
+    "retires %s identity drift before create and recovers with restored identities",
+    async (identity) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+      const originalCreate = api.documents.create;
+      const originalPush = router.push;
+      let blank: HTMLButtonElement | null = null;
+      const drift = () => {
+        if (identity === "API callback") {
+          api.documents.create = vi.fn(originalCreate);
+        } else {
+          router.push = vi.fn();
+        }
+      };
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const currentBlank = directCreateButton(host, "new-document");
+        blank = currentBlank;
+        currentBlank.addEventListener("click", drift, { capture: true, once: true });
+        await act(async () => {
+          currentBlank.click();
+        });
+        expect(createDocument).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(host.querySelector('[data-testid="toast"]')).toBeNull();
+
+        api.documents.create = originalCreate;
+        router.push = originalPush;
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        await act(async () => {
+          directCreateButton(host, "new-document").click();
+        });
+        expect(createDocument).toHaveBeenCalledTimes(1);
+        expect(createDocument).toHaveBeenLastCalledWith({});
+        expect(router.push).toHaveBeenCalledTimes(1);
+      } finally {
+        blank?.removeEventListener("click", drift, true);
+        api.documents.create = originalCreate;
+        router.push = originalPush;
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("keeps both handlers from a keyed dashboard replacement inert", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard key="first" user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const staleBlank = directCreateButton(host, "new-document");
+      const staleWelcome = directCreateButton(host, "start-guided-doc");
+      const staleBlankHandler = captureReactClick(staleBlank);
+      const staleWelcomeHandler = captureReactClick(staleWelcome);
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard key="second" user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const currentBlank = directCreateButton(host, "new-document");
+      expect(currentBlank).not.toBe(staleBlank);
+      expectInertTemplateCall(
+        staleBlankHandler,
+        fabricatedTemplateClick(currentBlank),
+        host,
+      );
+      expectInertTemplateCall(
+        staleWelcomeHandler,
+        fabricatedTemplateClick(
+          directCreateButton(host, "start-guided-doc"),
+        ),
+        host,
+      );
+      expect(createDocument).not.toHaveBeenCalled();
+
+      await act(async () => {
+        currentBlank.click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("claims one native event permanently and accepts a distinct clean successor event", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const repeated = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 0,
+      detail: 1,
+    });
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const blank = directCreateButton(host, "new-document");
+      await act(async () => {
+        blank.dispatchEvent(repeated);
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        blank.dispatchEvent(repeated);
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(2);
+      expect(router.push).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    { scenario: "restored descendant mutation", testid: "new-document" as CreateControlTestId },
+    { scenario: "restored clone replacement", testid: "new-document" as CreateControlTestId },
+    { scenario: "restored control replacement", testid: "new-document" as CreateControlTestId },
+    { scenario: "restored child reorder", testid: "start-guided-doc" as CreateControlTestId },
+    { scenario: "root detach and reinsert", testid: "start-guided-doc" as CreateControlTestId },
+  ])(
+    "permanently retires a generation after $scenario and lets a distinct clean successor create",
+    async ({ scenario, testid }) => {
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const control = directCreateButton(host, testid);
+        const staleHandler = captureReactClick(control);
+        const controlRoot = createRootFor(host, testid);
+        const icon = control.children.item(0)!;
+
+        if (scenario === "restored descendant mutation") {
+          icon.setAttribute("data-create-attack", "1");
+          icon.removeAttribute("data-create-attack");
+        } else if (scenario === "restored clone replacement") {
+          const clone = icon.cloneNode(true) as Element;
+          icon.replaceWith(clone);
+          clone.replaceWith(icon);
+        } else if (scenario === "restored control replacement") {
+          const clone = control.cloneNode(true) as HTMLButtonElement;
+          control.replaceWith(clone);
+          clone.replaceWith(control);
+        } else if (scenario === "restored child reorder") {
+          const next = control.nextSibling;
+          control.remove();
+          controlRoot.insertBefore(control, next);
+        } else {
+          const parent = controlRoot.parentNode!;
+          const next = controlRoot.nextSibling;
+          controlRoot.remove();
+          parent.insertBefore(controlRoot, next);
+        }
+
+        await act(async () => {
+          directCreateButton(host, testid).click();
+        });
+        expect(createDocument).not.toHaveBeenCalled();
+        expect(router.push).not.toHaveBeenCalled();
+        expect(host.querySelector('[data-testid="toast"]')).toBeNull();
+        expect(directCreateButton(host, testid)).toBeEnabled();
+
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        const successor = directCreateButton(host, testid);
+        expectInertTemplateCall(
+          staleHandler,
+          fabricatedTemplateClick(successor),
+          host,
+        );
+        expect(createDocument).not.toHaveBeenCalled();
+
+        await act(async () => {
+          successor.click();
+        });
+        expect(createDocument).toHaveBeenCalledTimes(1);
+        expect(createDocument).toHaveBeenLastCalledWith(
+          testid === "new-document" ? {} : { template: "welcome" },
+        );
+        expect(router.push).toHaveBeenCalledTimes(1);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("mints an exact successor for a complete create ref replay", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const full = createRefBindings(host);
+      await act(async () => {
+        for (const binding of full) binding.ref(null);
+        for (const binding of full) binding.ref(binding.element);
+      });
+
+      await act(async () => {
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("mints an exact successor for a partial create ref replay", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const partial = createRefBindings(host).slice(-2);
+      await act(async () => {
+        for (const binding of partial) binding.ref(null);
+        for (const binding of partial.toReversed()) binding.ref(binding.element);
+      });
+
+      await act(async () => {
+        directCreateButton(host, "start-guided-doc").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects an incomplete create ref replay and recovers on a fresh render", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const partial = createRefBindings(host).slice(-2);
+      await act(async () => {
+        for (const binding of partial) binding.ref(null);
+      });
+      await act(async () => {
+        directCreateButton(host, "start-guided-doc").click();
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      await act(async () => {
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      expect(router.push).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects both controls while one create is busy and restores them on failure", async () => {
+    const failing = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(failing.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      await act(async () => {
+        directCreateButton(host, "start-guided-doc").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      const busyWelcome = directCreateButton(host, "start-guided-doc");
+      expect(busyWelcome).toHaveAttribute("aria-busy", "true");
+      expect(busyWelcome).toBeDisabled();
+      expect(directCreateButton(host, "new-document")).toBeDisabled();
+
+      await act(async () => {
+        fireEvent.click(busyWelcome);
+        fireEvent.click(directCreateButton(host, "new-document"));
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(router.push).not.toHaveBeenCalled();
+
+      await act(async () => {
+        failing.reject(new ApiError(503, "Create service unavailable"));
+        await Promise.allSettled([failing.promise]);
+      });
+      const toast = host.querySelector('[data-testid="toast"]');
+      expect(toast).toHaveAttribute("data-kind", "error");
+      expect(toast).toHaveTextContent("Create service unavailable");
+      expect(directCreateButton(host, "new-document")).toBeEnabled();
+      expect(directCreateButton(host, "start-guided-doc")).toBeEnabled();
+      expect(directCreateButton(host, "start-guided-doc")).not.toHaveAttribute("aria-busy");
+
+      await act(async () => {
+        directCreateButton(host, "new-document").click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(2);
+      expect(createDocument).toHaveBeenLastCalledWith({});
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(router.push).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenLastCalledWith("/d/created");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("leaves both captured create handlers inert after layout cleanup", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const blank = directCreateButton(host, "new-document");
+      const welcome = directCreateButton(host, "start-guided-doc");
+      const blankHandler = captureReactClick(blank);
+      const welcomeHandler = captureReactClick(welcome);
+
+      await act(async () => root.unmount());
+
+      await act(async () => {
+        blankHandler(fabricatedTemplateClick(blank));
+        welcomeHandler(fabricatedTemplateClick(welcome));
+        blank.click();
+        welcome.click();
+      });
+      expect(createDocument).not.toHaveBeenCalled();
+      expect(router.push).not.toHaveBeenCalled();
+      expect(host.innerHTML).toBe("");
+    } finally {
+      host.remove();
+    }
+  });
+
+  it("preserves the create card, empty state, and templates around a genuine guided create", async () => {
+    const pending = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(pending.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+          </StrictMode>,
+        );
+      });
+      const card = createCardRoot(host);
+      expect(Array.from(card.children, (child) => child.getAttribute("data-testid"))).toEqual([
+        "new-document",
+        "new-from-template",
+        "open-file",
+      ]);
+      const blank = directCreateButton(host, "new-document");
+      expect(blank).toHaveTextContent("New document");
+      expect(blank).toHaveTextContent("Start with a blank Markdown page.");
+      expect(blank.querySelector("svg")).toHaveClass("lucide-file-plus-corner");
+
+      const guided = guidedRootElement(host);
+      expect(guided).toHaveTextContent("No documents yet");
+      expect(guided).toHaveTextContent(
+        "Start with a short guided document, pick a template, or open a Markdown file from GitHub.",
+      );
+      const welcome = directCreateButton(host, "start-guided-doc");
+      expect(welcome).toHaveTextContent("Start with a guided doc");
+      expect(welcome.querySelector("svg")).toHaveClass("lucide-sparkles");
+      expect(Array.from(templateGrid(host).children, (li) => li.firstElementChild?.getAttribute("data-testid"))).toEqual(
+        PICKER_TEMPLATES.map((template) => `template-${template.id}`),
+      );
+
+      await act(async () => {
+        welcome.click();
+      });
+      expect(createDocument).toHaveBeenCalledTimes(1);
+      expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
+      expect(
+        directCreateButton(host, "start-guided-doc").querySelector("svg"),
+      ).toHaveClass("lucide-loader-circle", "animate-spin");
+      await act(async () => {
+        pending.resolve({ document: { id: "guided-created", title: "Welcome" } });
+        await pending.promise;
+      });
+      expect(router.push).toHaveBeenCalledTimes(1);
+      expect(router.push).toHaveBeenLastCalledWith("/d/guided-created");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
   });
 });
 
@@ -6008,6 +9987,1243 @@ describe("TrashView publication ownership", () => {
       act(() => root.unmount());
       host.remove();
     }
+  });
+});
+
+describe("TrashView per-card keyboard navigation", () => {
+  registerTrashKeyboardProvenanceTests();
+  registerTrashKeyboardNativeAuthorityTests();
+
+  it.each([
+    ["restore-button", "purge-button", "ArrowRight"],
+    ["restore-button", "purge-button", "ArrowDown"],
+    ["restore-button", "purge-button", "End"],
+    ["purge-button", "restore-button", "ArrowLeft"],
+    ["purge-button", "restore-button", "ArrowUp"],
+    ["purge-button", "restore-button", "Home"],
+  ] as const)(
+    "moves from %s to %s with %s exactly once without action or scroll work",
+    (sourceId, destinationId, key) => {
+      const onRetry = vi.fn();
+      const onRestore = vi.fn();
+      const onPurge = vi.fn();
+      const view = renderTrashKeyboard(
+        trash([first, second], null, "Trash warning", {
+          onRetry,
+          onRestore,
+          onPurge,
+        }),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const card = directTrashCard(view.host, first.title);
+        const source = card.querySelector<HTMLButtonElement>(
+          `[data-testid="${sourceId}"]`,
+        )!;
+        const destination = card.querySelector<HTMLButtonElement>(
+          `[data-testid="${destinationId}"]`,
+        )!;
+        source.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        view.setup.focusCalls.length = 0;
+        view.setup.scrollTo.mockClear();
+        view.setup.scrollBy.mockClear();
+        const markup = view.host.innerHTML;
+        const before = {
+          x: view.ownerWindow.scrollX,
+          y: view.ownerWindow.scrollY,
+          cardTop: card.scrollTop,
+          cardLeft: card.scrollLeft,
+        };
+
+        const event = dispatchTrashKey(source, key);
+
+        expect(event.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(view.setup.focusCalls).toEqual([
+          { target: destination, options: { preventScroll: true } },
+        ]);
+        expect(destination).toHaveFocus();
+        expect(view.setup.scrollTo).not.toHaveBeenCalled();
+        expect(view.setup.scrollBy).not.toHaveBeenCalled();
+        expect({
+          x: view.ownerWindow.scrollX,
+          y: view.ownerWindow.scrollY,
+          cardTop: card.scrollTop,
+          cardLeft: card.scrollLeft,
+        }).toEqual(before);
+        expect(onRetry).not.toHaveBeenCalled();
+        expect(onRestore).not.toHaveBeenCalled();
+        expect(onPurge).not.toHaveBeenCalled();
+        expect(view.host.innerHTML).toBe(markup);
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it.each([
+    ["purge-button", "restore-button", "ArrowLeft", "Numpad4"],
+    ["purge-button", "restore-button", "ArrowUp", "Numpad8"],
+    ["restore-button", "purge-button", "ArrowRight", "Numpad6"],
+    ["restore-button", "purge-button", "ArrowDown", "Numpad2"],
+    ["purge-button", "restore-button", "Home", "Numpad7"],
+    ["restore-button", "purge-button", "End", "Numpad1"],
+  ] as const)(
+    "moves from %s to %s by semantic %s with physical %s",
+    (sourceId, destinationId, key, code) => {
+      const onRetry = vi.fn();
+      const onRestore = vi.fn();
+      const onPurge = vi.fn();
+      const view = renderTrashKeyboard(
+        trash([first, second], null, "Trash warning", {
+          onRetry,
+          onRestore,
+          onPurge,
+        }),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const card = directTrashCard(view.host, first.title);
+        const source = card.querySelector<HTMLButtonElement>(
+          `[data-testid="${sourceId}"]`,
+        )!;
+        const destination = card.querySelector<HTMLButtonElement>(
+          `[data-testid="${destinationId}"]`,
+        )!;
+        source.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        view.setup.focusCalls.length = 0;
+
+        const event = dispatchTrashKey(source, key, {
+          code,
+          location:
+            view.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+        });
+
+        expect(event.code).toBe(code);
+        expect(event.location).toBe(
+          view.ownerWindow.KeyboardEvent.DOM_KEY_LOCATION_NUMPAD,
+        );
+        expect(event.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(view.setup.focusCalls).toEqual([
+          { target: destination, options: { preventScroll: true } },
+        ]);
+        expect(destination).toHaveFocus();
+        expect(directTrashButton(
+          view.host,
+          second.title,
+          destinationId,
+        )).not.toHaveFocus();
+        expect(onRetry).not.toHaveBeenCalled();
+        expect(onRestore).not.toHaveBeenCalled();
+        expect(onPurge).not.toHaveBeenCalled();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it.each([
+    ["restore-button", "ArrowLeft"],
+    ["restore-button", "ArrowUp"],
+    ["restore-button", "Home"],
+    ["purge-button", "ArrowRight"],
+    ["purge-button", "ArrowDown"],
+    ["purge-button", "End"],
+  ] as const)(
+    "leaves the %s %s boundary unprevented without wrapping or crossing cards",
+    (sourceId, key) => {
+      const view = renderTrashKeyboard(
+        trash(),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const firstCard = directTrashCard(view.host, first.title);
+        const source = firstCard.querySelector<HTMLButtonElement>(
+          `[data-testid="${sourceId}"]`,
+        )!;
+        const secondRestore = directTrashButton(
+          view.host,
+          second.title,
+          "restore-button",
+        );
+        source.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        view.setup.focusCalls.length = 0;
+
+        const event = dispatchTrashKey(source, key);
+
+        expect(event.defaultPrevented).toBe(false);
+        expect(source).toHaveFocus();
+        expect(secondRestore).not.toHaveFocus();
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+
+  it("attests distinct card wrappers and their shared delegated native root without private fields", () => {
+    const view = renderTrashKeyboard(
+      trash(),
+      trackTrashNavigationEffects,
+    );
+    try {
+      const card = directTrashCard(view.host, first.title);
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+      view.setup.focusCalls.length = 0;
+      const delivery = dispatchTrashKeyWithReactPairMutation(
+        card,
+        restore,
+        "ArrowRight",
+        {
+          captureAfter: (event) => {
+            const alternate = Object.create(
+              Object.getPrototypeOf(event),
+            );
+            Object.setPrototypeOf(event, alternate);
+            Reflect.deleteProperty(event, "_reactName");
+          },
+          bubbleBefore: (event) => {
+            expect(event.defaultPrevented).toBe(false);
+            expect(
+              Reflect.apply(
+                event.isDefaultPrevented,
+                event,
+                [],
+              ),
+            ).toBe(false);
+            const alternate = Object.create(
+              Object.getPrototypeOf(event),
+            );
+            Object.setPrototypeOf(event, alternate);
+            Object.defineProperty(event, "_reactName", {
+              configurable: true,
+              value: Symbol("ignored-private-field"),
+            });
+          },
+        },
+      );
+
+      expect(delivery.captureEvent).not.toBe(delivery.bubbleEvent);
+      expect(delivery.captureEvent.nativeEvent).toBe(
+        delivery.nativeEvent,
+      );
+      expect(delivery.bubbleEvent.nativeEvent).toBe(
+        delivery.nativeEvent,
+      );
+      expect(Object.getPrototypeOf(delivery.captureEvent)).not.toBe(
+        Object.getPrototypeOf(delivery.bubbleEvent),
+      );
+      expect(delivery.captureTarget).toBe(card);
+      expect(delivery.bubbleTarget).toBe(card);
+      expect(delivery.nativeCaptureTarget).toBe(view.host);
+      expect(delivery.nativeCaptureTarget).not.toBe(card);
+      expect(delivery.nativeBubbleTarget).toBe(
+        delivery.nativeCaptureTarget,
+      );
+      expect(delivery.capturePhase).toBe(Event.CAPTURING_PHASE);
+      expect(delivery.bubblePhase).toBe(Event.BUBBLING_PHASE);
+      expect(
+        Reflect.apply(
+          delivery.captureEvent.isDefaultPrevented,
+          delivery.captureEvent,
+          [],
+        ),
+      ).toBe(false);
+      expect(
+        Reflect.apply(
+          delivery.captureEvent.isPropagationStopped,
+          delivery.captureEvent,
+          [],
+        ),
+      ).toBe(false);
+      expect(
+        Reflect.apply(
+          delivery.bubbleEvent.isDefaultPrevented,
+          delivery.bubbleEvent,
+          [],
+        ),
+      ).toBe(true);
+      expect(
+        Reflect.apply(
+          delivery.bubbleEvent.isPropagationStopped,
+          delivery.bubbleEvent,
+          [],
+        ),
+      ).toBe(false);
+      expect(delivery.bubbleEvent.defaultPrevented).toBe(true);
+      expect(delivery.nativeEvent.defaultPrevented).toBe(true);
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(purge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it("exposes public prevention to a same-root synthetic ancestor", () => {
+    const onAncestorAction = vi.fn();
+    const onRetry = vi.fn();
+    const onRestore = vi.fn();
+    const onPurge = vi.fn();
+    const ancestorObservations: {
+      defaultPrevented: boolean;
+      queried: boolean;
+    }[] = [];
+    const view = renderTrashKeyboard(
+      <div
+        onKeyDown={(event) => {
+          ancestorObservations.push({
+            defaultPrevented: event.defaultPrevented,
+            queried: event.isDefaultPrevented(),
+          });
+          if (!event.defaultPrevented) onAncestorAction();
+        }}
+      >
+        {trash([first, second], null, "Trash warning", {
+          onRetry,
+          onRestore,
+          onPurge,
+        })}
+      </div>,
+      trackTrashNavigationEffects,
+    );
+    try {
+      const restore = directTrashButton(
+        view.host,
+        first.title,
+        "restore-button",
+      );
+      const purge = directTrashButton(
+        view.host,
+        first.title,
+        "purge-button",
+      );
+      restore.focus();
+      view.setup.preventDefault.mockClear();
+      view.setup.focus.mockClear();
+
+      const event = dispatchTrashKey(restore, "ArrowRight");
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(ancestorObservations).toEqual([
+        { defaultPrevented: true, queried: true },
+      ]);
+      expect(onAncestorAction).not.toHaveBeenCalled();
+      expect(onRetry).not.toHaveBeenCalled();
+      expect(onRestore).not.toHaveBeenCalled();
+      expect(onPurge).not.toHaveBeenCalled();
+      expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+      expect(view.setup.focus).toHaveBeenCalledTimes(1);
+      expect(purge).toHaveFocus();
+    } finally {
+      view.dispose();
+    }
+  });
+
+  it.each([
+    ["capture", "isDefaultPrevented"],
+    ["capture", "isPropagationStopped"],
+    ["bubble", "isDefaultPrevented"],
+    ["bubble", "isPropagationStopped"],
+  ] as const)(
+    "rejects %s-wrapper %s drift and admits a distinct clean event",
+    (phase, property) => {
+      const view = renderTrashKeyboard(
+        trash(),
+        trackTrashNavigationEffects,
+      );
+      try {
+        const card = directTrashCard(view.host, first.title);
+        const restore = directTrashButton(
+          view.host,
+          first.title,
+          "restore-button",
+        );
+        const purge = directTrashButton(
+          view.host,
+          first.title,
+          "purge-button",
+        );
+        restore.focus();
+        view.setup.preventDefault.mockClear();
+        view.setup.focus.mockClear();
+        view.setup.focusCalls.length = 0;
+        const replacement = vi.fn(() => false);
+
+        const rejected = dispatchTrashKeyWithReactPairMutation(
+          card,
+          restore,
+          "ArrowRight",
+          phase === "capture"
+            ? {
+                captureAfter: (event) => {
+                  Object.defineProperty(event, property, {
+                    configurable: true,
+                    value: replacement,
+                  });
+                },
+              }
+            : {
+                bubbleBefore: (event) => {
+                  const original = event[property];
+                  let reads = 0;
+                  Object.defineProperty(event, property, {
+                    configurable: true,
+                    get: () => {
+                      reads += 1;
+                      return reads === 1
+                        ? original
+                        : replacement;
+                    },
+                  });
+                },
+              },
+        ).nativeEvent;
+        expect(rejected.defaultPrevented).toBe(false);
+        expect(restore).toHaveFocus();
+        expect(view.setup.preventDefault).not.toHaveBeenCalled();
+        expect(view.setup.focus).not.toHaveBeenCalled();
+
+        const accepted = dispatchTrashKey(
+          restore,
+          "ArrowRight",
+        );
+        expect(accepted.defaultPrevented).toBe(true);
+        expect(view.setup.preventDefault).toHaveBeenCalledTimes(1);
+        expect(view.setup.focus).toHaveBeenCalledTimes(1);
+        expect(purge).toHaveFocus();
+      } finally {
+        view.dispose();
+      }
+    },
+  );
+});
+
+describe("dashboard filter keyboard navigation", () => {
+  const navigationCases = [
+    ["ArrowRight", "all", "mine", 0],
+    ["ArrowDown", "all", "mine", 0],
+    ["ArrowLeft", "mine", "all", 0],
+    ["ArrowUp", "mine", "all", 0],
+    ["Home", "starred", "all", 0],
+    ["End", "all", "trash", 1],
+    ["ArrowRight", "trash", "all", 0],
+    ["ArrowLeft", "all", "trash", 1],
+  ] as const;
+
+  it.each(navigationCases)(
+    "selects and focuses exactly once for %s from %s to %s",
+    async (key, initial, destination, trashRequests) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard
+                user={USER}
+                documents={DOCUMENTS}
+                githubAvailable
+                githubConfigured
+              />
+            </StrictMode>,
+          );
+        });
+        expect(filterGroup(host)).toHaveAttribute("role", "toolbar");
+        expect(filterGroup(host)).toHaveAccessibleName("Document filters");
+        expectCurrentFilter(host, "all");
+
+        if (initial !== "all") {
+          act(() => directFilterButton(host, initial).click());
+          await act(async () => {});
+        }
+        expectCurrentFilter(host, initial);
+        listDocuments.mockClear();
+
+        const source = directFilterButton(host, initial);
+        source.focus();
+        focus.mockClear();
+        const scrollIntoView = Element.prototype
+          .scrollIntoView as ReturnType<typeof vi.fn>;
+        scrollIntoView.mockClear();
+        const beforeScroll = { x: window.scrollX, y: window.scrollY };
+        const event = await dispatchFilterKey(source, key);
+        const target = directFilterButton(host, destination);
+
+        expect(event.defaultPrevented).toBe(true);
+        expectCurrentFilter(host, destination);
+        expect(target).toHaveFocus();
+        expect(focus).toHaveBeenCalledExactlyOnceWith({
+          preventScroll: true,
+        });
+        expect(focus.mock.instances[0]).toBe(target);
+        expect(scrollIntoView).not.toHaveBeenCalled();
+        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
+        expect(listDocuments).toHaveBeenCalledTimes(trashRequests);
+        if (trashRequests) {
+          expect(listDocuments).toHaveBeenLastCalledWith({ trash: true });
+        }
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("keeps one Trash request on entry and cancels its late result on keyboard exit", async () => {
+    const pending = deferred<ListResponse>();
+    listDocuments.mockReturnValueOnce(pending.promise);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <StrictMode>
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />
+          </StrictMode>,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      all.focus();
+      await dispatchFilterKey(all, "End");
+      expectCurrentFilter(host, "trash");
+      expect(listDocuments).toHaveBeenCalledExactlyOnceWith({ trash: true });
+      expect(host).toHaveTextContent("Loading trash…");
+
+      await dispatchFilterKey(directFilterButton(host, "trash"), "ArrowLeft");
+      expectCurrentFilter(host, "starred");
+      expect(listDocuments).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        pending.resolve({
+          documents: [trashedDoc("late-filter-row", "Late filter row")],
+        });
+        await pending.promise;
+      });
+      expect(host).not.toHaveTextContent("Late filter row");
+      expect(host.querySelector('[data-testid="trash-view"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("preserves native click selection without keyboard prevention or focus work", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      all.focus();
+      await dispatchFilterKey(all, "ArrowRight");
+      expectCurrentFilter(host, "mine");
+
+      focus.mockClear();
+      const shared = directFilterButton(host, "shared");
+      const click = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => shared.dispatchEvent(click));
+      await act(async () => {});
+
+      expect(click.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "shared");
+      expect(focus).not.toHaveBeenCalled();
+      expect(listDocuments).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects a directly dispatched untrusted owner-realm key before accepting a trusted successor", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      all.focus();
+      focus.mockClear();
+      const untrusted = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => {
+        all.dispatchEvent(untrusted);
+        await Promise.resolve();
+      });
+
+      expect(untrusted.isTrusted).toBe(false);
+      expect(untrusted.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const trusted = await dispatchFilterKey(all, "ArrowRight");
+      expect(trusted.isTrusted).toBe(true);
+      expect(trusted.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects replaced active-element authority and React trust wrappers before clean successors", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      const activeElementDescriptor = Object.getOwnPropertyDescriptor(
+        Document.prototype,
+        "activeElement",
+      );
+      if (!activeElementDescriptor?.get) {
+        throw new Error("Document.activeElement getter was unavailable");
+      }
+      const replacedGetter = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(replacedGetter);
+      all.focus();
+      focus.mockClear();
+      await act(async () => {
+        Object.defineProperty(Document.prototype, "activeElement", {
+          ...activeElementDescriptor,
+          get: () => all,
+        });
+        try {
+          all.dispatchEvent(replacedGetter);
+        } finally {
+          Object.defineProperty(
+            Document.prototype,
+            "activeElement",
+            activeElementDescriptor,
+          );
+        }
+        await Promise.resolve();
+      });
+      expect(replacedGetter.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const successor = directFilterButton(host, "all");
+      const restore = interceptReactHandler(
+        successor,
+        "onKeyDown",
+        (original, event) => {
+          if (!event || typeof event !== "object") return;
+          const descriptors = Object.getOwnPropertyDescriptors(event);
+          descriptors.isTrusted = {
+            configurable: true,
+            enumerable: true,
+            value: false,
+            writable: true,
+          };
+          original(
+            Object.create(
+              Object.getPrototypeOf(event),
+              descriptors,
+            ) as object,
+          );
+        },
+      );
+      successor.focus();
+      focus.mockClear();
+      const replacedWrapper = await dispatchFilterKey(
+        successor,
+        "ArrowRight",
+      );
+      restore();
+      expect(replacedWrapper.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const current = directFilterButton(host, "all");
+      current.focus();
+      focus.mockClear();
+      const accepted = await dispatchFilterKey(current, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+      expect(focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("rejects modified, repeated, composing, canceled, non-bubbling, non-cancelable, and wrong-focus keys with zero work", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const outside = document.createElement("button");
+    document.body.append(outside, host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      const rejected: Array<[string, KeyboardEventInit]> = [
+        ["ArrowRight", { ctrlKey: true }],
+        ["ArrowRight", { metaKey: true }],
+        ["ArrowRight", { altKey: true }],
+        ["ArrowRight", { shiftKey: true }],
+        ["ArrowRight", { repeat: true }],
+        ["ArrowRight", { isComposing: true }],
+        ["Home", {}],
+        ["PageDown", {}],
+        ["ArrowRight", { bubbles: false }],
+        ["ArrowRight", { cancelable: false }],
+      ];
+      for (const [key, init] of rejected) {
+        all.focus();
+        focus.mockClear();
+        const event = await dispatchFilterKey(all, key, init);
+        expect(event.defaultPrevented).toBe(false);
+        expectCurrentFilter(host, "all");
+        expect(focus).not.toHaveBeenCalled();
+      }
+
+      all.focus();
+      focus.mockClear();
+      const canceled = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(canceled);
+      canceled.preventDefault();
+      await act(async () => {
+        all.dispatchEvent(canceled);
+        await Promise.resolve();
+      });
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      all.focus();
+      focus.mockClear();
+      const canceledDuringDelivery = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(canceledDuringDelivery);
+      all.addEventListener(
+        "keydown",
+        (event) => event.preventDefault(),
+        { once: true },
+      );
+      await act(async () => {
+        all.dispatchEvent(canceledDuringDelivery);
+        await Promise.resolve();
+      });
+      expect(canceledDuringDelivery.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      outside.focus();
+      focus.mockClear();
+      const wrongFocus = await dispatchFilterKey(all, "ArrowRight");
+      expect(wrongFocus.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(outside).toHaveFocus();
+      expect(focus).not.toHaveBeenCalled();
+      expect(listDocuments).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      outside.remove();
+    }
+  });
+
+  it("rejects fabricated, foreign, replayed, and crossed event delivery while a clean successor remains usable", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    const iframe = document.createElement("iframe");
+    document.body.append(host, iframe);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const all = directFilterButton(host, "all");
+      const handler = captureReactHandler(all, "onKeyDown");
+      const fabricatedNative = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      all.focus();
+      focus.mockClear();
+      act(() => {
+        handler({
+          _reactName: "onKeyDown",
+          type: "keydown",
+          nativeEvent: fabricatedNative,
+          target: all,
+          currentTarget: all,
+          bubbles: true,
+          cancelable: true,
+          defaultPrevented: false,
+          key: "ArrowRight",
+          ctrlKey: false,
+          metaKey: false,
+          altKey: false,
+          shiftKey: false,
+          repeat: false,
+          isComposing: false,
+        });
+      });
+      expectCurrentFilter(host, "all");
+      expect(fabricatedNative.defaultPrevented).toBe(false);
+      expect(focus).not.toHaveBeenCalled();
+
+      const foreignWindow = iframe.contentWindow as Window & typeof globalThis;
+      const ForeignKeyboardEvent = foreignWindow.KeyboardEvent;
+      const foreign = new ForeignKeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(foreign);
+      await act(async () => {
+        all.dispatchEvent(foreign);
+        await Promise.resolve();
+      });
+      expectCurrentFilter(host, "all");
+      expect(foreign.defaultPrevented).toBe(false);
+
+      const first = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(first);
+      await act(async () => {
+        all.dispatchEvent(first);
+        await Promise.resolve();
+      });
+      expectCurrentFilter(host, "mine");
+      focus.mockClear();
+      await act(async () => {
+        directFilterButton(host, "mine").dispatchEvent(first);
+        await Promise.resolve();
+      });
+      expectCurrentFilter(host, "mine");
+      expect(focus).not.toHaveBeenCalled();
+
+      act(() => directFilterButton(host, "all").click());
+      await act(async () => {});
+      const crossedSource = directFilterButton(host, "all");
+      crossedSource.focus();
+      focus.mockClear();
+      const outer = new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      });
+      const inner = new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      });
+      markFilterEventTrusted(outer);
+      markFilterEventTrusted(inner);
+      let reentered = false;
+      crossedSource.addEventListener(
+        "keydown",
+        () => {
+          if (reentered) return;
+          reentered = true;
+          crossedSource.dispatchEvent(inner);
+        },
+        { capture: true, once: true },
+      );
+      await act(async () => {
+        crossedSource.dispatchEvent(outer);
+        await Promise.resolve();
+      });
+      expect(outer.defaultPrevented).toBe(false);
+      expect(inner.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+      expect(focus).not.toHaveBeenCalled();
+
+      const recovered = await dispatchFilterKey(
+        directFilterButton(host, "all"),
+        "ArrowRight",
+      );
+      expect(recovered.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      iframe.remove();
+    }
+  });
+
+  it("keeps stale user and filter handlers inert while current exact handlers navigate once", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const replacementUser = {
+      ...USER,
+      id: "replacement-filter-user",
+      login: "replacement-filter-user",
+    };
+
+    try {
+      await act(async () => {
+        root.render(
+          <DashboardBoundary
+            user={USER}
+          />,
+        );
+      });
+      const staleUserHandler = captureReactHandler(
+        directFilterButton(host, "all"),
+        "onKeyDown",
+      );
+      await act(async () => {
+        root.render(
+          <DashboardBoundary
+            user={replacementUser}
+            boundary={1}
+          />,
+        );
+      });
+      const currentAll = directFilterButton(host, "all");
+      currentAll.focus();
+      focus.mockClear();
+      const restoreUser = interceptReactHandler(
+        currentAll,
+        "onKeyDown",
+        (original, event) => {
+          staleUserHandler(event);
+          original(event);
+        },
+      );
+      const userEvent = await dispatchFilterKey(currentAll, "ArrowRight");
+      restoreUser();
+      expect(userEvent.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+      expect(focus).toHaveBeenCalledTimes(1);
+
+      const staleFilterHandler = captureReactHandler(
+        directFilterButton(host, "mine"),
+        "onKeyDown",
+      );
+      act(() => directFilterButton(host, "shared").click());
+      await act(async () => {});
+      const currentShared = directFilterButton(host, "shared");
+      currentShared.focus();
+      focus.mockClear();
+      const restoreFilter = interceptReactHandler(
+        currentShared,
+        "onKeyDown",
+        (original, event) => {
+          staleFilterHandler(event);
+          original(event);
+        },
+      );
+      const filterEvent = await dispatchFilterKey(
+        currentShared,
+        "ArrowRight",
+      );
+      restoreFilter();
+      expect(filterEvent.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "starred");
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(listDocuments).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it.each([
+    "restored attribute",
+    "detached and restored group",
+    "reordered and restored controls",
+    "replaced and restored control",
+  ] as const)(
+    "retires mutation history for a %s and recovers with a fresh exact publication",
+    async (change) => {
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <Dashboard
+              user={USER}
+              documents={DOCUMENTS}
+              githubAvailable
+              githubConfigured
+            />,
+          );
+        });
+        const group = filterGroup(host);
+        const all = directFilterButton(host, "all");
+        const stale = captureReactHandler(all, "onKeyDown");
+        if (change === "restored attribute") {
+          all.setAttribute("data-filter-tamper", "true");
+          all.removeAttribute("data-filter-tamper");
+        } else if (change === "detached and restored group") {
+          const parent = group.parentNode!;
+          const next = group.nextSibling;
+          group.remove();
+          parent.insertBefore(group, next);
+        } else if (change === "reordered and restored controls") {
+          const original = Array.from(group.children);
+          group.insertBefore(original.at(-1)!, original[0]!);
+          for (const child of original) group.append(child);
+        } else {
+          const clone = all.cloneNode(true);
+          if (!(clone instanceof HTMLButtonElement)) {
+            throw new Error("The cloned filter was not a button");
+          }
+          all.replaceWith(clone);
+          clone.replaceWith(all);
+        }
+        await act(async () => {});
+
+        const current = directFilterButton(host, "all");
+        const currentHandler = captureReactHandler(current, "onKeyDown");
+        expect(currentHandler).not.toBe(stale);
+        current.focus();
+        focus.mockClear();
+        const restore = interceptReactHandler(
+          current,
+          "onKeyDown",
+          (original, event) => {
+            stale(event);
+            original(event);
+          },
+        );
+        const event = await dispatchFilterKey(current, "ArrowRight");
+        restore();
+        expect(event.defaultPrevented).toBe(true);
+        expectCurrentFilter(host, "mine");
+        expect(focus).toHaveBeenCalledTimes(1);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it("rejects partial ref replay, recovers on a clean render, and mints a successor after complete replay", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const initial = directFilterButton(host, "all");
+      const stale = captureReactHandler(initial, "onKeyDown");
+      const partial = filterRefBindings(host)[0]!;
+      act(() => {
+        partial.ref(null);
+        partial.ref(partial.element);
+      });
+      await act(async () => {});
+      initial.focus();
+      const rejected = await dispatchFilterKey(initial, "ArrowRight");
+      expect(rejected.defaultPrevented).toBe(false);
+      expectCurrentFilter(host, "all");
+
+      await act(async () => {
+        root.render(
+          <Dashboard
+            user={USER}
+            documents={DOCUMENTS}
+            githubAvailable
+            githubConfigured
+          />,
+        );
+      });
+      const recovered = directFilterButton(host, "all");
+      const recoveredHandler = captureReactHandler(recovered, "onKeyDown");
+      expect(recoveredHandler).not.toBe(stale);
+
+      const complete = filterRefBindings(host);
+      act(() => {
+        for (const { ref } of complete) ref(null);
+        for (const { element, ref } of complete) ref(element);
+      });
+      await act(async () => {});
+      const successor = directFilterButton(host, "all");
+      expect(captureReactHandler(successor, "onKeyDown")).not.toBe(
+        recoveredHandler,
+      );
+      successor.focus();
+      const accepted = await dispatchFilterKey(successor, "ArrowRight");
+      expect(accepted.defaultPrevented).toBe(true);
+      expectCurrentFilter(host, "mine");
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("retires captured handlers and pending focus before layout unmount", async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(
+        <Dashboard
+          user={USER}
+          documents={DOCUMENTS}
+          githubAvailable
+          githubConfigured
+        />,
+      );
+    });
+    const all = directFilterButton(host, "all");
+    const stale = captureReactHandler(all, "onKeyDown");
+    const native = new KeyboardEvent("keydown", {
+      key: "End",
+      bubbles: true,
+      cancelable: true,
+    });
+    all.focus();
+    focus.mockClear();
+    await act(async () => root.unmount());
+    const removedMarkup = host.innerHTML;
+    act(() => {
+      stale({
+        _reactName: "onKeyDown",
+        type: "keydown",
+        nativeEvent: native,
+        target: all,
+        currentTarget: all,
+        bubbles: true,
+        cancelable: true,
+        defaultPrevented: false,
+        key: "End",
+        ctrlKey: false,
+        metaKey: false,
+        altKey: false,
+        shiftKey: false,
+        repeat: false,
+        isComposing: false,
+      });
+    });
+    await act(async () => {});
+
+    expect(host.innerHTML).toBe(removedMarkup);
+    expect(native.defaultPrevented).toBe(false);
+    expect(focus).not.toHaveBeenCalled();
+    expect(listDocuments).not.toHaveBeenCalled();
+    host.remove();
   });
 });
 

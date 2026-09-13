@@ -4,6 +4,7 @@ import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
 import {
+  forwardRef,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -11,6 +12,7 @@ import {
   useRef,
   useState,
   type ChangeEvent as ReactChangeEvent,
+  type ComponentPropsWithoutRef,
   type Dispatch,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -93,6 +95,7 @@ const TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR =
   Object.getOwnPropertyDescriptor.bind(Object);
 const TRUSTED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf.bind(Object);
 const TRUSTED_REFLECT_DEFINE_PROPERTY = Reflect.defineProperty.bind(Reflect);
+const TRUSTED_REFLECT_APPLY = Reflect.apply.bind(Reflect);
 const TRUSTED_IS_PROTOTYPE_OF = Function.prototype.call.bind(
   Object.prototype.isPrototypeOf,
 ) as (prototype: object, value: object) => boolean;
@@ -204,6 +207,22 @@ const TRUSTED_MOUSE_BUTTON = capturePrototypeGetter<number>(
 const TRUSTED_MOUSE_BUTTONS = capturePrototypeGetter<number>(
   MOUSE_EVENT_PROTOTYPE,
   "buttons",
+);
+const TRUSTED_MOUSE_CTRL = capturePrototypeGetter<boolean>(
+  MOUSE_EVENT_PROTOTYPE,
+  "ctrlKey",
+);
+const TRUSTED_MOUSE_META = capturePrototypeGetter<boolean>(
+  MOUSE_EVENT_PROTOTYPE,
+  "metaKey",
+);
+const TRUSTED_MOUSE_ALT = capturePrototypeGetter<boolean>(
+  MOUSE_EVENT_PROTOTYPE,
+  "altKey",
+);
+const TRUSTED_MOUSE_SHIFT = capturePrototypeGetter<boolean>(
+  MOUSE_EVENT_PROTOTYPE,
+  "shiftKey",
 );
 const TRUSTED_UI_DETAIL = capturePrototypeGetter<number>(
   UI_EVENT_PROTOTYPE,
@@ -2339,6 +2358,7 @@ interface SearchError {
 type SearchControlActionKind =
   | "change"
   | "escape"
+  | "focus-result"
   | "inline-clear"
   | "empty-clear"
   | "retry";
@@ -2358,7 +2378,9 @@ type SearchControlElementRole =
   | "empty-icon"
   | "empty-primary"
   | "empty-secondary"
-  | "empty-clear";
+  | "empty-clear"
+  | "result-root"
+  | "result-link";
 
 interface SearchControlRenderPublication {
   readonly identity: symbol;
@@ -2376,6 +2398,7 @@ interface SearchControlRenderPublication {
   readonly pending: boolean;
   readonly filter: Filter;
   readonly filtered: readonly (Doc & { snippet?: string | null })[];
+  readonly resultOrder: readonly (Doc & { snippet?: string | null })[];
   readonly setQuery: Dispatch<SetStateAction<string>>;
   readonly retry: () => void;
 }
@@ -2404,6 +2427,7 @@ interface SearchControlPublication {
   readonly ownerDocument: Document;
   readonly searchRoot: HTMLDivElement;
   readonly input: HTMLInputElement;
+  readonly resultLinks: readonly HTMLAnchorElement[];
   readonly controls: ReadonlyMap<
     SearchControlActionKind,
     SearchPublishedControl
@@ -2424,8 +2448,8 @@ interface SearchPublishedControl {
 }
 
 interface SearchControlRootPublication {
-  readonly role: "search-root" | "error-root" | "empty-root";
-  readonly element: HTMLDivElement;
+  readonly role: "search-root" | "error-root" | "empty-root" | "result-root";
+  readonly element: HTMLDivElement | HTMLUListElement;
   readonly dom: TemplateGridDomSnapshot;
   readonly placement: TemplateGridPlacement;
 }
@@ -2437,10 +2461,17 @@ interface SearchControlReplay {
   readonly release: () => void;
 }
 
+interface SearchControlDomBarrier {
+  readonly attempted: () => boolean;
+  readonly noteAttempt: () => void;
+  readonly release: () => void;
+}
+
 interface SearchControlPublicationCells {
   active: SearchControlPublication | null;
   successorOf: SearchControlPublication | null;
   replay: SearchControlReplay | null;
+  domBarrier: SearchControlDomBarrier | null;
   delivery: symbol | null;
   readonly claimedPublications: WeakSet<SearchControlPublication>;
   readonly claimedControls: WeakSet<SearchPublishedControl>;
@@ -2474,7 +2505,11 @@ interface SearchNativeEventProof {
   readonly button: number | null;
   readonly buttons: number | null;
   readonly detail: number | null;
+  readonly trusted: boolean | null;
+  readonly view: Window | null;
+  readonly focusDestination: HTMLAnchorElement | null;
   readonly propagationStopped: () => boolean;
+  crossed: boolean;
 }
 
 interface SearchReactEventProof {
@@ -2500,10 +2535,12 @@ interface SearchControlPublicationRuntime {
     element: Element | null,
     previous: Element | null,
   ) => void;
+  readonly canSettleSynchronousRefReplay: () => boolean;
+  readonly settleSynchronousRefReplay: () => boolean;
   readonly isExactReplay: () => boolean;
   readonly replay: () => SearchControlReplay | null;
   readonly captureRoot: (
-    role: "search-root" | "error-root" | "empty-root",
+    role: "search-root" | "error-root" | "empty-root" | "result-root",
     event: ReactSyntheticEvent,
   ) => void;
   readonly captureControl: (
@@ -2563,6 +2600,12 @@ interface SearchControlPublicationSet {
   readonly captureEmptyClear: (
     element: HTMLButtonElement | null,
   ) => void | (() => void);
+  readonly captureResultRoot: (
+    element: HTMLUListElement | null,
+  ) => void | (() => void);
+  readonly captureResultLinks: readonly ((
+    element: HTMLAnchorElement | null,
+  ) => void | (() => void))[];
   readonly captureRootChange: (
     event: ReactChangeEvent<HTMLDivElement>,
   ) => void;
@@ -2641,6 +2684,304 @@ class SearchControlElementOwner<T extends Element>
   };
 }
 
+interface SearchOwnerGetter<T> {
+  readonly read: (receiver: object) => T;
+  readonly isCurrent: () => boolean;
+}
+
+interface SearchOwnerMethod<Args extends unknown[], Result> {
+  readonly call: (receiver: object, args: Args) => Result;
+  readonly isCurrent: () => boolean;
+}
+
+interface SearchResultKeyboardAuthority {
+  readonly trusted: FilterTrustedAuthority;
+  readonly activeElement: FilterActiveElementAuthority;
+  readonly currentTarget: (event: Event) => EventTarget | null;
+  readonly defaultPrevented: (event: Event) => boolean;
+  readonly target: (event: Event) => EventTarget | null;
+  readonly type: (event: Event) => string;
+  readonly phase: (event: Event) => number;
+  readonly bubbles: (event: Event) => boolean;
+  readonly cancelable: (event: Event) => boolean;
+  readonly cancelBubble: (event: Event) => boolean;
+  readonly key: (event: Event) => string;
+  readonly ctrlKey: (event: Event) => boolean;
+  readonly metaKey: (event: Event) => boolean;
+  readonly altKey: (event: Event) => boolean;
+  readonly shiftKey: (event: Event) => boolean;
+  readonly repeat: (event: Event) => boolean;
+  readonly composing: (event: Event) => boolean;
+  readonly view: (event: Event) => Window | null;
+  readonly composedPath: (event: Event) => EventTarget[];
+  readonly preventDefault: (event: Event) => void;
+  readonly stopPropagation: (event: Event) => void;
+  readonly stopImmediatePropagation: (event: Event) => void;
+  readonly focus: (element: HTMLElement, options: FocusOptions) => void;
+  readonly isCurrent: () => boolean;
+}
+
+function captureSearchOwnerGetter<T>(
+  view: Window & typeof globalThis,
+  prototype: object,
+  property: PropertyKey,
+): SearchOwnerGetter<T> | null {
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  for (
+    let owner: object | null = prototype;
+    owner;
+    owner = getPrototypeOf(owner) as object | null
+  ) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (!descriptor) continue;
+    if (typeof descriptor.get !== "function") return null;
+    const expected = Object.freeze({ ...descriptor });
+    const getter = descriptor.get;
+    return Object.freeze({
+      read: (receiver: object) => apply(getter, receiver, []) as T,
+      isCurrent: () =>
+        view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+        view.Object.getPrototypeOf === getPrototypeOf &&
+        view.Reflect.apply === apply &&
+        filterDescriptorsMatch(
+          getOwnPropertyDescriptor(owner, property),
+          expected,
+        ),
+    });
+  }
+  return null;
+}
+
+function captureSearchOwnerMethod<Args extends unknown[], Result>(
+  view: Window & typeof globalThis,
+  prototype: object,
+  property: PropertyKey,
+): SearchOwnerMethod<Args, Result> | null {
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  for (
+    let owner: object | null = prototype;
+    owner;
+    owner = getPrototypeOf(owner) as object | null
+  ) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (!descriptor) continue;
+    if (!("value" in descriptor) || typeof descriptor.value !== "function") {
+      return null;
+    }
+    const expected = Object.freeze({ ...descriptor });
+    const method = descriptor.value as (...args: Args) => Result;
+    return Object.freeze({
+      call: (receiver: object, args: Args) => apply(method, receiver, args),
+      isCurrent: () =>
+        view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+        view.Object.getPrototypeOf === getPrototypeOf &&
+        view.Reflect.apply === apply &&
+        filterDescriptorsMatch(
+          getOwnPropertyDescriptor(owner, property),
+          expected,
+        ),
+    });
+  }
+  return null;
+}
+
+function captureSearchResultKeyboardAuthority(
+  view: Window & typeof globalThis,
+): SearchResultKeyboardAuthority | null {
+  const trusted = captureFilterTrustedAuthority(view);
+  const activeElement = captureFilterActiveElementAuthority(view);
+  const currentTarget = captureSearchOwnerGetter<EventTarget | null>(
+    view,
+    view.Event.prototype,
+    "currentTarget",
+  );
+  const defaultPrevented = captureSearchOwnerGetter<boolean>(
+    view,
+    view.Event.prototype,
+    "defaultPrevented",
+  );
+  const target = captureSearchOwnerGetter<EventTarget | null>(
+    view,
+    view.Event.prototype,
+    "target",
+  );
+  const type = captureSearchOwnerGetter<string>(
+    view,
+    view.Event.prototype,
+    "type",
+  );
+  const phase = captureSearchOwnerGetter<number>(
+    view,
+    view.Event.prototype,
+    "eventPhase",
+  );
+  const bubbles = captureSearchOwnerGetter<boolean>(
+    view,
+    view.Event.prototype,
+    "bubbles",
+  );
+  const cancelable = captureSearchOwnerGetter<boolean>(
+    view,
+    view.Event.prototype,
+    "cancelable",
+  );
+  const cancelBubble = captureSearchOwnerGetter<boolean>(
+    view,
+    view.Event.prototype,
+    "cancelBubble",
+  );
+  const key = captureSearchOwnerGetter<string>(
+    view,
+    view.KeyboardEvent.prototype,
+    "key",
+  );
+  const ctrlKey = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "ctrlKey",
+  );
+  const metaKey = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "metaKey",
+  );
+  const altKey = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "altKey",
+  );
+  const shiftKey = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "shiftKey",
+  );
+  const repeat = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "repeat",
+  );
+  const composing = captureSearchOwnerGetter<boolean>(
+    view,
+    view.KeyboardEvent.prototype,
+    "isComposing",
+  );
+  const eventView = captureSearchOwnerGetter<Window | null>(
+    view,
+    view.UIEvent.prototype,
+    "view",
+  );
+  const composedPath = captureSearchOwnerMethod<[], EventTarget[]>(
+    view,
+    view.Event.prototype,
+    "composedPath",
+  );
+  const preventDefault = captureSearchOwnerMethod<[], void>(
+    view,
+    view.Event.prototype,
+    "preventDefault",
+  );
+  const stopPropagation = captureSearchOwnerMethod<[], void>(
+    view,
+    view.Event.prototype,
+    "stopPropagation",
+  );
+  const stopImmediatePropagation = captureSearchOwnerMethod<[], void>(
+    view,
+    view.Event.prototype,
+    "stopImmediatePropagation",
+  );
+  const focus = captureSearchOwnerMethod<[FocusOptions?], void>(
+    view,
+    view.HTMLElement.prototype,
+    "focus",
+  );
+  if (
+    !trusted ||
+    !activeElement ||
+    !currentTarget ||
+    !defaultPrevented ||
+    !target ||
+    !type ||
+    !phase ||
+    !bubbles ||
+    !cancelable ||
+    !cancelBubble ||
+    !key ||
+    !ctrlKey ||
+    !metaKey ||
+    !altKey ||
+    !shiftKey ||
+    !repeat ||
+    !composing ||
+    !eventView ||
+    !composedPath ||
+    !preventDefault ||
+    !stopPropagation ||
+    !stopImmediatePropagation ||
+    !focus
+  ) {
+    return null;
+  }
+  const authorities = [
+    currentTarget,
+    defaultPrevented,
+    target,
+    type,
+    phase,
+    bubbles,
+    cancelable,
+    cancelBubble,
+    key,
+    ctrlKey,
+    metaKey,
+    altKey,
+    shiftKey,
+    repeat,
+    composing,
+    eventView,
+    composedPath,
+    preventDefault,
+    stopPropagation,
+    stopImmediatePropagation,
+    focus,
+  ];
+  return Object.freeze({
+    trusted,
+    activeElement,
+    currentTarget: (event: Event) => currentTarget.read(event),
+    defaultPrevented: (event: Event) => defaultPrevented.read(event),
+    target: (event: Event) => target.read(event),
+    type: (event: Event) => type.read(event),
+    phase: (event: Event) => phase.read(event),
+    bubbles: (event: Event) => bubbles.read(event),
+    cancelable: (event: Event) => cancelable.read(event),
+    cancelBubble: (event: Event) => cancelBubble.read(event),
+    key: (event: Event) => key.read(event),
+    ctrlKey: (event: Event) => ctrlKey.read(event),
+    metaKey: (event: Event) => metaKey.read(event),
+    altKey: (event: Event) => altKey.read(event),
+    shiftKey: (event: Event) => shiftKey.read(event),
+    repeat: (event: Event) => repeat.read(event),
+    composing: (event: Event) => composing.read(event),
+    view: (event: Event) => eventView.read(event),
+    composedPath: (event: Event) => composedPath.call(event, []),
+    preventDefault: (event: Event) => preventDefault.call(event, []),
+    stopPropagation: (event: Event) => stopPropagation.call(event, []),
+    stopImmediatePropagation: (event: Event) =>
+      stopImmediatePropagation.call(event, []),
+    focus: (element: HTMLElement, options: FocusOptions) =>
+      focus.call(element, [options]),
+    isCurrent: () =>
+      trusted.isCurrent() &&
+      activeElement.isCurrent() &&
+      authorities.every((authority) => authority.isCurrent()),
+  });
+}
+
 const SEARCH_CONTROL_MISSING = Symbol("search-control-missing");
 
 function searchControlOwnValue(
@@ -2698,7 +3039,12 @@ function searchControlRenderIsExact(render: SearchControlRenderPublication) {
     render.searching === (render.request !== null) &&
     (render.error === null ||
       (render.error.authority === render.authority &&
-        render.error.query === render.trimmed))
+        render.error.query === render.trimmed)) &&
+    Object.isFrozen(render.resultOrder) &&
+    render.resultOrder.length === render.filtered.length &&
+    render.resultOrder.every(
+      (document, index) => document === render.filtered[index],
+    )
   );
 }
 
@@ -2721,6 +3067,7 @@ function searchControlRendersMatch(
     previous.pending === current.pending &&
     previous.filter === current.filter &&
     previous.filtered === current.filtered &&
+    previous.resultOrder === current.resultOrder &&
     previous.setQuery === current.setQuery &&
     previous.retry === current.retry &&
     searchControlRenderIsExact(previous) &&
@@ -2762,6 +3109,20 @@ interface SearchControlOwners {
   readonly emptyPrimary: SearchControlElementOwner<HTMLParagraphElement>;
   readonly emptySecondary: SearchControlElementOwner<HTMLParagraphElement>;
   readonly emptyClear: SearchControlElementOwner<HTMLButtonElement>;
+  readonly resultRoot: SearchControlElementOwner<HTMLUListElement>;
+  readonly resultLinks: readonly {
+    readonly index: number;
+    readonly document: Doc & { snippet?: string | null };
+    readonly owner: SearchControlElementOwner<HTMLAnchorElement>;
+  }[];
+}
+
+function searchControlHasResults(render: SearchControlRenderPublication) {
+  return (
+    render.filter !== "trash" &&
+    render.trimmed.length > 0 &&
+    render.resultOrder.length > 0
+  );
 }
 
 function searchControlHasEmptyState(render: SearchControlRenderPublication) {
@@ -2796,6 +3157,12 @@ function searchControlExpectedOwners(
           owners.emptyPrimary,
           owners.emptySecondary,
           ...(searchControlHasEmptyClear(render) ? [owners.emptyClear] : []),
+        ]
+      : []),
+    ...(searchControlHasResults(render)
+      ? [
+          owners.resultRoot,
+          ...owners.resultLinks.map(({ owner }) => owner),
         ]
       : []),
   ]);
@@ -2866,6 +3233,8 @@ function searchControlElementsAreExact(
   const emptyPrimary = owners.emptyPrimary.element();
   const emptySecondary = owners.emptySecondary.element();
   const emptyClear = owners.emptyClear.element();
+  const resultRoot = owners.resultRoot.element();
+  const resultLinks = owners.resultLinks.map(({ owner }) => owner.element());
   const ownerDocument = searchRoot?.ownerDocument;
   const ownerWindow = ownerDocument?.defaultView;
   if (
@@ -3064,6 +3433,48 @@ function searchControlElementsAreExact(
     return false;
   }
 
+  if (searchControlHasResults(render)) {
+    if (
+      !(resultRoot instanceof ownerWindow.HTMLUListElement) ||
+      !resultRoot.isConnected ||
+      resultRoot.ownerDocument !== ownerDocument ||
+      resultRoot.className !== "grid gap-3 sm:grid-cols-2 lg:grid-cols-3" ||
+      resultRoot.dataset.testid !== "document-list" ||
+      resultRoot.children.length !== render.resultOrder.length ||
+      owners.resultLinks.length !== render.resultOrder.length
+    ) {
+      return false;
+    }
+    for (const entry of owners.resultLinks) {
+      const item: Element | null = resultRoot.children.item(entry.index);
+      const link = entry.owner.element();
+      if (
+        entry.document !== render.resultOrder[entry.index] ||
+        !(item instanceof ownerWindow.HTMLLIElement) ||
+        !(link instanceof ownerWindow.HTMLAnchorElement) ||
+        item.parentElement !== resultRoot ||
+        item.className !== "group relative min-w-0" ||
+        item.dataset.testid !== "search-result" ||
+        item.children.item(0) !== link ||
+        link.parentElement !== item ||
+        link.ownerDocument !== ownerDocument ||
+        link.getAttribute("href") !== `/d/${entry.document.id}` ||
+        link.className !==
+          "flex h-full flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm transition hover:border-accent hover:shadow-md" ||
+        link.dataset.testid !== "document-card" ||
+        !searchControlAncestorsAreEnabled(link, resultRoot)
+      ) {
+        return false;
+      }
+    }
+  } else if (
+    resultRoot !== null ||
+    owners.resultLinks.length !== 0 ||
+    resultLinks.some((link) => link !== null)
+  ) {
+    return false;
+  }
+
   const expectedOwners = searchControlExpectedOwners(render, owners);
   const elements = expectedOwners.map((owner) => owner.element());
   return (
@@ -3250,6 +3661,75 @@ function searchControlNativeSupportIsAvailable() {
   );
 }
 
+function armSearchControlDomBarrier(
+  cells: SearchControlPublicationCells,
+  ownerDocument: Document,
+  roots: readonly SearchControlRootPublication[],
+  requestSuccessor: () => void,
+) {
+  cells.domBarrier?.release();
+  const ownerWindow = ownerDocument.defaultView;
+  if (!ownerWindow) return;
+  let attempted = false;
+  let successorQueued = false;
+  let released = false;
+  const noteAttempt = () => {
+    if (released || attempted) return;
+    attempted = true;
+    successorQueued = true;
+    queueMicrotask(() => {
+      if (
+        released ||
+        !successorQueued ||
+        cells.domBarrier !== barrier
+      ) {
+        return;
+      }
+      successorQueued = false;
+      requestSuccessor();
+    });
+  };
+  const listener = (event: Event) => {
+    if (
+      released ||
+      !TRUSTED_EVENT_TARGET ||
+      !TRUSTED_EVENT_TYPE ||
+      !["input", "change", "keydown", "click"].includes(
+        TRUSTED_EVENT_TYPE(event),
+      )
+    ) {
+      return;
+    }
+    const target = TRUSTED_EVENT_TARGET(event);
+    if (
+      target !== null &&
+      TRUSTED_IS_PROTOTYPE_OF(ownerWindow.Node.prototype, target) &&
+      (target as Node).ownerDocument === ownerDocument &&
+      roots.some(({ element }) => element.contains(target as Node))
+    ) {
+      noteAttempt();
+    }
+  };
+  const barrier: SearchControlDomBarrier = Object.freeze({
+    attempted: () => attempted,
+    noteAttempt,
+    release: () => {
+      if (released) return;
+      released = true;
+      successorQueued = false;
+      for (const type of ["input", "change", "keydown", "click"]) {
+        TRUSTED_REMOVE_EVENT_LISTENER(ownerDocument, type, listener, true);
+      }
+    },
+  });
+  for (const type of ["input", "change", "keydown", "click"]) {
+    TRUSTED_ADD_EVENT_LISTENER(ownerDocument, type, listener, true);
+  }
+  cells.domBarrier = barrier;
+  cells.replay?.release();
+  cells.replay = null;
+}
+
 function createSearchControlPublication(
   render: SearchControlRenderPublication,
   cells: SearchControlPublicationCells,
@@ -3258,6 +3738,7 @@ function createSearchControlPublication(
   let currentRuntime: SearchControlPublicationRuntime | null = null;
   let lastRuntime: SearchControlPublicationRuntime | null = null;
   let successorRequested = false;
+  let synchronousRefCheckRuntime: SearchControlPublicationRuntime | null = null;
 
   const onElementChange = (
     owner: SearchControlElementOwnerView,
@@ -3271,8 +3752,36 @@ function createSearchControlPublication(
       element === null ||
       (element !== null && last !== null && element !== last)
     ) {
-      currentRuntime?.retireForElement();
-      currentRuntime = null;
+      const retiringRuntime = currentRuntime;
+      if (
+        element === null &&
+        retiringRuntime?.canSettleSynchronousRefReplay()
+      ) {
+        if (!synchronousRefCheckRuntime) {
+          synchronousRefCheckRuntime = retiringRuntime;
+          queueMicrotask(() => {
+            if (synchronousRefCheckRuntime !== retiringRuntime) return;
+            synchronousRefCheckRuntime = null;
+            if (
+              currentRuntime === retiringRuntime &&
+              retiringRuntime.settleSynchronousRefReplay()
+            ) {
+              return;
+            }
+            retiringRuntime.retireForElement();
+            if (currentRuntime === retiringRuntime) currentRuntime = null;
+          });
+        }
+      } else {
+        retiringRuntime?.retireForElement();
+        if (currentRuntime === retiringRuntime) currentRuntime = null;
+      }
+    }
+    if (
+      element !== null &&
+      currentRuntime?.settleSynchronousRefReplay()
+    ) {
+      synchronousRefCheckRuntime = null;
     }
     if (
       !successorRequested &&
@@ -3353,6 +3862,20 @@ function createSearchControlPublication(
       "empty-clear",
       onElementChange,
     ),
+    resultRoot: new SearchControlElementOwner<HTMLUListElement>(
+      "result-root",
+      onElementChange,
+    ),
+    resultLinks: searchControlHasResults(render)
+      ? render.resultOrder.map((document, index) => ({
+          index,
+          document,
+          owner: new SearchControlElementOwner<HTMLAnchorElement>(
+            "result-link",
+            onElementChange,
+          ),
+        }))
+      : [],
   };
 
   const createRuntime = (): SearchControlPublicationRuntime | null => {
@@ -3406,6 +3929,10 @@ function createSearchControlPublication(
           "stopImmediatePropagation",
         )
       : null;
+    const resultKeyboardAuthority =
+      ownerWindow && searchControlHasResults(render)
+        ? captureSearchResultKeyboardAuthority(ownerWindow)
+        : null;
     if (
       !ownerWindow ||
       !addOwnerWindowListener ||
@@ -3413,14 +3940,24 @@ function createSearchControlPublication(
       !preventOwnerDefault ||
       !stopOwnerPropagation ||
       !stopOwnerImmediatePropagation ||
+      (searchControlHasResults(render) && !resultKeyboardAuthority) ||
       !(searchRoot instanceof ownerWindow.HTMLDivElement) ||
       !(input instanceof ownerWindow.HTMLInputElement)
     ) {
       return null;
     }
+    let resultKeyboardAuthorityHistoryIsClean = true;
+    const resultKeyboardAuthorityIsCurrent = () => {
+      if (!resultKeyboardAuthority) return false;
+      resultKeyboardAuthorityHistoryIsClean =
+        resultKeyboardAuthorityHistoryIsClean &&
+        ownerDocument.defaultView === ownerWindow &&
+        resultKeyboardAuthority.isCurrent();
+      return resultKeyboardAuthorityHistoryIsClean;
+    };
     const rootEntries: [
       SearchControlRootPublication["role"],
-      HTMLDivElement | null,
+      HTMLDivElement | HTMLUListElement | null,
     ][] = [
       ["search-root", searchRoot],
       [
@@ -3433,6 +3970,12 @@ function createSearchControlPublication(
         "empty-root",
         searchControlHasEmptyState(render)
           ? (owners.emptyRoot.element() as HTMLDivElement | null)
+          : null,
+      ],
+      [
+        "result-root",
+        searchControlHasResults(render)
+          ? owners.resultRoot.element()
           : null,
       ],
     ];
@@ -3454,6 +3997,21 @@ function createSearchControlPublication(
     if (!searchControlRootsMatch(ownerDocument, publishedRoots)) return null;
 
     const identity = Symbol("dashboard-search-controls-publication");
+    const resultLinks = owners.resultLinks.map(({ owner }) => owner.element());
+    if (
+      searchControlHasResults(render) &&
+      resultLinks.some(
+        (link) => !(link instanceof ownerWindow.HTMLAnchorElement),
+      )
+    ) {
+      return null;
+    }
+    const publishedResultLinks = Object.freeze(
+      resultLinks.filter(
+        (link): link is HTMLAnchorElement =>
+          link instanceof ownerWindow.HTMLAnchorElement,
+      ),
+    );
     const controls = new Map<SearchControlActionKind, SearchPublishedControl>();
     const addControl = (
       kind: SearchControlActionKind,
@@ -3490,6 +4048,24 @@ function createSearchControlPublication(
     ) {
       return null;
     }
+    if (
+      searchControlHasResults(render) &&
+      !addControl("focus-result", input, searchRoot)
+    ) {
+      return null;
+    }
+    const focusWindowTarget = searchControlHasResults(render)
+      ? (controls.get("focus-result")?.paths.get(input)?.at(-1) ?? null)
+      : null;
+    if (searchControlHasResults(render) && !focusWindowTarget) {
+      return null;
+    }
+    const addFocusWindowEventListener = focusWindowTarget
+      ? focusWindowTarget.addEventListener.bind(focusWindowTarget)
+      : null;
+    const removeFocusWindowEventListener = focusWindowTarget
+      ? focusWindowTarget.removeEventListener.bind(focusWindowTarget)
+      : null;
     const inlineClear = owners.inlineClear.element();
     if (
       render.query &&
@@ -3521,8 +4097,9 @@ function createSearchControlPublication(
 
     let retired = false;
     let retirement: Retirement | null = null;
-    let layoutRetired = false;
     let established = false;
+    let partialReplayWindowOpen = false;
+    let synchronousRefReplayPending = false;
     let refs: SearchControlRefReplay[] = [];
     let guard: SearchControlDomGuard | null = null;
     let nativeProof: SearchNativeEventProof | null = null;
@@ -3536,12 +4113,14 @@ function createSearchControlPublication(
       target: EventTarget;
       type: string;
     }> | null = null;
+    let focusWindowListenerAttached = false;
     const publication: SearchControlPublication = Object.freeze({
       identity,
       render,
       ownerDocument,
       searchRoot,
       input,
+      resultLinks: publishedResultLinks,
       controls,
       roots: publishedRoots,
       retire: () => retire("other"),
@@ -3573,7 +4152,6 @@ function createSearchControlPublication(
       guard = null;
     };
     const retire = (reason: Retirement) => {
-      if (reason === "layout") layoutRetired = true;
       if (retired) return false;
       retired = true;
       retirement = reason;
@@ -3623,7 +4201,22 @@ function createSearchControlPublication(
         return controls.get("change") ?? null;
       }
       if (type === "keydown" && target === input) {
-        return controls.get("escape") ?? null;
+        if (
+          resultKeyboardAuthority &&
+          resultKeyboardAuthorityIsCurrent() &&
+          TRUSTED_IS_PROTOTYPE_OF(
+            ownerWindow.KeyboardEvent.prototype,
+            event,
+          )
+        ) {
+          const key = resultKeyboardAuthority.key(event);
+          if (key === "ArrowDown" || key === "ArrowUp") {
+            return controls.get("focus-result") ?? null;
+          }
+        }
+        return TRUSTED_KEYBOARD_KEY?.(event) === "Escape"
+          ? (controls.get("escape") ?? null)
+          : null;
       }
       if (type !== "click") return null;
       for (const kind of [
@@ -3641,6 +4234,7 @@ function createSearchControlPublication(
       origin: SearchNativeEventProof["origin"],
       control: SearchPublishedControl,
     ): SearchNativeEventProof | null => {
+      const isResultFocus = control.action.kind === "focus-result";
       if (
         !TRUSTED_EVENT_CURRENT_TARGET ||
         !TRUSTED_EVENT_DEFAULT_PREVENTED ||
@@ -3652,23 +4246,57 @@ function createSearchControlPublication(
         !TRUSTED_EVENT_CANCEL_BUBBLE ||
         !TRUSTED_INPUT_VALUE ||
         !TRUSTED_IS_PROTOTYPE_OF(ownerWindow.Event.prototype, event) ||
+        (isResultFocus && !resultKeyboardAuthorityIsCurrent()) ||
         !publicationOwnsCurrentDom(control.action.kind === "change")
       ) {
         return null;
       }
-      const type = TRUSTED_EVENT_TYPE(event);
-      const target = TRUSTED_EVENT_TARGET(event);
+      const type =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.type(event)
+          : TRUSTED_EVENT_TYPE(event);
+      const target =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.target(event)
+          : TRUSTED_EVENT_TARGET(event);
       if (!(target instanceof ownerWindow.Node)) return null;
       const expectedPath = control.paths.get(target);
-      const path = TRUSTED_EVENT_COMPOSED_PATH(event);
+      const path =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.composedPath(event)
+          : TRUSTED_EVENT_COMPOSED_PATH(event);
+      const currentTarget =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.currentTarget(event)
+          : TRUSTED_EVENT_CURRENT_TARGET(event);
+      const phase =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.phase(event)
+          : TRUSTED_EVENT_PHASE(event);
+      const bubbles =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.bubbles(event)
+          : TRUSTED_EVENT_BUBBLES(event);
+      const cancelable =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.cancelable(event)
+          : TRUSTED_EVENT_CANCELABLE(event);
+      const defaultPrevented =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.defaultPrevented(event)
+          : TRUSTED_EVENT_DEFAULT_PREVENTED(event);
+      const cancelBubble =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.cancelBubble(event)
+          : TRUSTED_EVENT_CANCEL_BUBBLE(event);
       if (
         !expectedPath ||
         !searchControlPathMatches(expectedPath, path, ownerDocument) ||
-        TRUSTED_EVENT_CURRENT_TARGET(event) !== ownerDocument ||
-        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.CAPTURING_PHASE ||
-        !TRUSTED_EVENT_BUBBLES(event) ||
-        TRUSTED_EVENT_DEFAULT_PREVENTED(event) ||
-        TRUSTED_EVENT_CANCEL_BUBBLE(event) ||
+        currentTarget !== ownerDocument ||
+        phase !== ownerWindow.Event.CAPTURING_PHASE ||
+        !bubbles ||
+        defaultPrevented ||
+        cancelBubble ||
         control.publicationIdentity !== identity ||
         control.action.publicationIdentity !== identity ||
         control.action.controlIdentity !== control.identity ||
@@ -3688,6 +4316,9 @@ function createSearchControlPublication(
       let button: number | null = null;
       let buttons: number | null = null;
       let detail: number | null = null;
+      let trusted: boolean | null = null;
+      let view: Window | null = null;
+      let focusDestination: HTMLAnchorElement | null = null;
       if (control.action.kind === "change") {
         if (type !== "input" && type !== "change") return null;
         value = TRUSTED_INPUT_VALUE(input);
@@ -3699,30 +4330,77 @@ function createSearchControlPublication(
         ) {
           composing = TRUSTED_INPUT_COMPOSING(event);
         }
-      } else if (control.action.kind === "escape") {
+      } else if (
+        control.action.kind === "escape" ||
+        control.action.kind === "focus-result"
+      ) {
         if (
           type !== "keydown" ||
-          !TRUSTED_IS_PROTOTYPE_OF(ownerWindow.KeyboardEvent.prototype, event) ||
-          !TRUSTED_KEYBOARD_KEY ||
-          !TRUSTED_KEYBOARD_CTRL ||
-          !TRUSTED_KEYBOARD_META ||
-          !TRUSTED_KEYBOARD_ALT ||
-          !TRUSTED_KEYBOARD_SHIFT ||
-          !TRUSTED_KEYBOARD_REPEAT ||
-          !TRUSTED_KEYBOARD_COMPOSING ||
-          !TRUSTED_UI_DETAIL
+          !TRUSTED_IS_PROTOTYPE_OF(ownerWindow.KeyboardEvent.prototype, event)
         ) {
           return null;
         }
-        key = TRUSTED_KEYBOARD_KEY(event);
-        ctrlKey = TRUSTED_KEYBOARD_CTRL(event);
-        metaKey = TRUSTED_KEYBOARD_META(event);
-        altKey = TRUSTED_KEYBOARD_ALT(event);
-        shiftKey = TRUSTED_KEYBOARD_SHIFT(event);
-        repeat = TRUSTED_KEYBOARD_REPEAT(event);
-        composing = TRUSTED_KEYBOARD_COMPOSING(event);
-        detail = TRUSTED_UI_DETAIL(event);
-        if (key !== "Escape" || repeat || composing) return null;
+        if (control.action.kind === "escape") {
+          if (
+            !TRUSTED_KEYBOARD_KEY ||
+            !TRUSTED_KEYBOARD_CTRL ||
+            !TRUSTED_KEYBOARD_META ||
+            !TRUSTED_KEYBOARD_ALT ||
+            !TRUSTED_KEYBOARD_SHIFT ||
+            !TRUSTED_KEYBOARD_REPEAT ||
+            !TRUSTED_KEYBOARD_COMPOSING ||
+            !TRUSTED_UI_DETAIL
+          ) {
+            return null;
+          }
+          key = TRUSTED_KEYBOARD_KEY(event);
+          ctrlKey = TRUSTED_KEYBOARD_CTRL(event);
+          metaKey = TRUSTED_KEYBOARD_META(event);
+          altKey = TRUSTED_KEYBOARD_ALT(event);
+          shiftKey = TRUSTED_KEYBOARD_SHIFT(event);
+          repeat = TRUSTED_KEYBOARD_REPEAT(event);
+          composing = TRUSTED_KEYBOARD_COMPOSING(event);
+          detail = TRUSTED_UI_DETAIL(event);
+          if (key !== "Escape" || repeat || composing) return null;
+        } else {
+          if (
+            !resultKeyboardAuthority ||
+            !resultKeyboardAuthorityIsCurrent() ||
+            !resultKeyboardAuthority.trusted.matches(event) ||
+            resultKeyboardAuthority.trusted.read(event) !== true ||
+            !cancelable ||
+            resultKeyboardAuthority.activeElement.read(ownerDocument) !== input
+          ) {
+            return null;
+          }
+          key = resultKeyboardAuthority.key(event);
+          ctrlKey = resultKeyboardAuthority.ctrlKey(event);
+          metaKey = resultKeyboardAuthority.metaKey(event);
+          altKey = resultKeyboardAuthority.altKey(event);
+          shiftKey = resultKeyboardAuthority.shiftKey(event);
+          repeat = resultKeyboardAuthority.repeat(event);
+          composing = resultKeyboardAuthority.composing(event);
+          trusted = true;
+          view = resultKeyboardAuthority.view(event);
+          focusDestination =
+            key === "ArrowDown"
+              ? (publication.resultLinks[0] ?? null)
+              : key === "ArrowUp"
+                ? (publication.resultLinks.at(-1) ?? null)
+                : null;
+          if (
+            !focusDestination ||
+            ctrlKey ||
+            metaKey ||
+            altKey ||
+            shiftKey ||
+            repeat ||
+            composing ||
+            view !== ownerWindow
+          ) {
+            return null;
+          }
+        }
       } else {
         if (
           type !== "click" ||
@@ -3753,11 +4431,19 @@ function createSearchControlPublication(
       let propagationStopped = false;
       const stopPropagation = () => {
         propagationStopped = true;
-        stopOwnerPropagation(event);
+        if (isResultFocus && resultKeyboardAuthority) {
+          resultKeyboardAuthority.stopPropagation(event);
+        } else {
+          stopOwnerPropagation(event);
+        }
       };
       const stopImmediatePropagation = () => {
         propagationStopped = true;
-        stopOwnerImmediatePropagation(event);
+        if (isResultFocus && resultKeyboardAuthority) {
+          resultKeyboardAuthority.stopImmediatePropagation(event);
+        } else {
+          stopOwnerImmediatePropagation(event);
+        }
       };
       if (
         !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopPropagation", {
@@ -3775,7 +4461,7 @@ function createSearchControlPublication(
       ) {
         return null;
       }
-      return Object.freeze({
+      return {
         identity: Symbol("dashboard-search-native-event"),
         origin,
         event,
@@ -3785,8 +4471,8 @@ function createSearchControlPublication(
         target,
         path: Object.freeze([...path]),
         type,
-        bubbles: true,
-        cancelable: TRUSTED_EVENT_CANCELABLE(event),
+        bubbles,
+        cancelable,
         value,
         composing,
         key,
@@ -3798,8 +4484,12 @@ function createSearchControlPublication(
         button,
         buttons,
         detail,
+        trusted,
+        view,
+        focusDestination,
         propagationStopped: () => propagationStopped,
-      });
+        crossed: false,
+      };
     };
 
     const blockCrossedEvent = (event: Event) => {
@@ -3812,21 +4502,36 @@ function createSearchControlPublication(
     ) => {
       if (nativeProof) {
         if (nativeProof.event === event) return nativeProof;
-        if (controlForNative(event)) {
+        const crossedControl = controlForNative(event);
+        if (crossedControl) {
+          if (
+            nativeProof.action.kind === "focus-result" ||
+            crossedControl.action.kind === "focus-result"
+          ) {
+            nativeProof.crossed = true;
+          }
           cells.attemptedNativeEvents.add(event);
-          blockCrossedEvent(event);
+          if (
+            nativeProof.action.kind !== "focus-result" &&
+            crossedControl.action.kind !== "focus-result"
+          ) {
+            blockCrossedEvent(event);
+          }
         }
         return null;
       }
       const control = controlForNative(event);
       if (!control) return null;
       if (cells.attemptedNativeEvents.has(event)) {
-        blockCrossedEvent(event);
+        if (control.action.kind !== "focus-result") blockCrossedEvent(event);
         return null;
       }
       cells.attemptedNativeEvents.add(event);
       const proof = exactNativeEvent(event, origin, control);
-      if (!proof) return null;
+      if (!proof) {
+        cells.domBarrier?.noteAttempt();
+        return null;
+      }
       nativeProof = proof;
       queueMicrotask(() => {
         if (nativeProof !== proof || terminal !== null) return;
@@ -3838,6 +4543,41 @@ function createSearchControlPublication(
     };
 
     const nativeEventStillMatches = (proof: SearchNativeEventProof) => {
+      if (proof.action.kind === "focus-result") {
+        if (
+          !resultKeyboardAuthority ||
+          !resultKeyboardAuthorityIsCurrent() ||
+          !resultKeyboardAuthority.trusted.matches(proof.event) ||
+          resultKeyboardAuthority.trusted.read(proof.event) !== proof.trusted ||
+          resultKeyboardAuthority.target(proof.event) !== proof.target ||
+          resultKeyboardAuthority.type(proof.event) !== proof.type ||
+          resultKeyboardAuthority.bubbles(proof.event) !== proof.bubbles ||
+          resultKeyboardAuthority.cancelable(proof.event) !== proof.cancelable ||
+          resultKeyboardAuthority.key(proof.event) !== proof.key ||
+          resultKeyboardAuthority.ctrlKey(proof.event) !== proof.ctrlKey ||
+          resultKeyboardAuthority.metaKey(proof.event) !== proof.metaKey ||
+          resultKeyboardAuthority.altKey(proof.event) !== proof.altKey ||
+          resultKeyboardAuthority.shiftKey(proof.event) !== proof.shiftKey ||
+          resultKeyboardAuthority.repeat(proof.event) !== proof.repeat ||
+          resultKeyboardAuthority.composing(proof.event) !== proof.composing ||
+          resultKeyboardAuthority.view(proof.event) !== proof.view ||
+          resultKeyboardAuthority.activeElement.read(ownerDocument) !== input ||
+          proof.crossed
+        ) {
+          return false;
+        }
+        const destination =
+          proof.key === "ArrowDown"
+            ? publication.resultLinks[0]
+            : publication.resultLinks.at(-1);
+        const resultRoot = owners.resultRoot.element();
+        return Boolean(
+          destination &&
+            destination === proof.focusDestination &&
+            resultRoot &&
+            searchControlAncestorsAreEnabled(destination, resultRoot),
+        );
+      }
       if (
         !TRUSTED_EVENT_TARGET ||
         !TRUSTED_EVENT_TYPE ||
@@ -3850,6 +4590,7 @@ function createSearchControlPublication(
       ) {
         return false;
       }
+      if (proof.crossed) return false;
       if (proof.action.kind === "escape") {
         return Boolean(
           TRUSTED_KEYBOARD_KEY &&
@@ -3897,13 +4638,13 @@ function createSearchControlPublication(
     const expectedReactName = (kind: SearchControlActionKind) =>
       kind === "change"
         ? "onChange"
-        : kind === "escape"
+        : kind === "escape" || kind === "focus-result"
           ? "onKeyDown"
           : "onClick";
     const expectedReactType = (kind: SearchControlActionKind) =>
       kind === "change"
         ? "change"
-        : kind === "escape"
+        : kind === "escape" || kind === "focus-result"
           ? "keydown"
           : "click";
     const reactEventMatches = (
@@ -3922,17 +4663,28 @@ function createSearchControlPublication(
         searchControlOwnValue(event, "nativeEvent") !== proof.event ||
         searchControlOwnValue(event, "target") !== proof.target ||
         searchControlOwnValue(event, "currentTarget") !== currentTarget ||
-        searchControlOwnValue(event, "bubbles") !== proof.bubbles ||
-        searchControlOwnValue(event, "defaultPrevented") !==
-          TRUSTED_EVENT_DEFAULT_PREVENTED(proof.event)
+        searchControlOwnValue(event, "bubbles") !== proof.bubbles
       ) {
         return null;
       }
-      const dispatchTarget = TRUSTED_EVENT_CURRENT_TARGET(proof.event);
-      const nativePhase = TRUSTED_EVENT_PHASE(proof.event);
+      const isResultFocus = proof.action.kind === "focus-result";
+      const dispatchTarget =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.currentTarget(proof.event)
+          : TRUSTED_EVENT_CURRENT_TARGET(proof.event);
+      const nativePhase =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.phase(proof.event)
+          : TRUSTED_EVENT_PHASE(proof.event);
+      const nativeDefaultPrevented =
+        isResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.defaultPrevented(proof.event)
+          : TRUSTED_EVENT_DEFAULT_PREVENTED(proof.event);
       if (
         !dispatchTarget ||
         nativePhase === ownerWindow.Event.NONE ||
+        searchControlOwnValue(event, "defaultPrevented") !==
+          nativeDefaultPrevented ||
         (dispatchTarget !== ownerDocument &&
           (!(dispatchTarget instanceof ownerWindow.Node) ||
             dispatchTarget.ownerDocument !== ownerDocument ||
@@ -3940,7 +4692,10 @@ function createSearchControlPublication(
       ) {
         return null;
       }
-      if (proof.action.kind === "escape") {
+      if (
+        proof.action.kind === "escape" ||
+        proof.action.kind === "focus-result"
+      ) {
         const reactComposing = searchControlOwnValue(event, "isComposing");
         if (
           searchControlOwnValue(event, "key") !== proof.key ||
@@ -3951,6 +4706,14 @@ function createSearchControlPublication(
           searchControlOwnValue(event, "repeat") !== proof.repeat ||
           (reactComposing !== SEARCH_CONTROL_MISSING &&
             reactComposing !== proof.composing)
+        ) {
+          return null;
+        }
+        if (
+          proof.action.kind === "focus-result" &&
+          (searchControlOwnValue(event, "cancelable") !== proof.cancelable ||
+            searchControlOwnValue(event, "isTrusted") !== proof.trusted ||
+            searchControlOwnValue(event, "view") !== proof.view)
         ) {
           return null;
         }
@@ -3987,19 +4750,29 @@ function createSearchControlPublication(
       return true;
     };
     const captureRoot = (
-      role: "search-root" | "error-root" | "empty-root",
+      role: "search-root" | "error-root" | "empty-root" | "result-root",
       event: ReactSyntheticEvent,
     ) => {
       if (!event || typeof event !== "object") return;
       if (!startReactWrapper(event, null)) return;
       const nativeEvent = searchControlOwnValue(event, "nativeEvent");
       if (!(nativeEvent instanceof ownerWindow.Event)) return;
+      const candidate = controlForNative(nativeEvent);
+      const candidateIsResultFocus =
+        candidate?.action.kind === "focus-result";
+      const nativeCurrentTarget =
+        candidateIsResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.currentTarget(nativeEvent)
+          : TRUSTED_EVENT_CURRENT_TARGET?.(nativeEvent);
+      const nativePhase =
+        candidateIsResultFocus && resultKeyboardAuthority
+          ? resultKeyboardAuthority.phase(nativeEvent)
+          : TRUSTED_EVENT_PHASE?.(nativeEvent);
       const proof =
         nativeProof?.event === nativeEvent
           ? nativeProof
-          : TRUSTED_EVENT_CURRENT_TARGET?.(nativeEvent) === ownerDocument &&
-              TRUSTED_EVENT_PHASE?.(nativeEvent) ===
-                ownerWindow.Event.CAPTURING_PHASE
+          : nativeCurrentTarget === ownerDocument &&
+              nativePhase === ownerWindow.Event.CAPTURING_PHASE
             ? beginNativeEvent(nativeEvent, "document-root-react-capture")
             : null;
       if (
@@ -4161,6 +4934,19 @@ function createSearchControlPublication(
             TRUSTED_BLUR?.(publication.input);
             requestSuccessor();
           }
+        } else if (native.action.kind === "focus-result") {
+          if (
+            !resultKeyboardAuthority ||
+            !native.focusDestination ||
+            !resultKeyboardAuthorityIsCurrent()
+          ) {
+            return false;
+          }
+          resultKeyboardAuthority.preventDefault(native.event);
+          resultKeyboardAuthority.focus(native.focusDestination, {
+            preventScroll: true,
+          });
+          requestSuccessor();
         } else if (
           native.action.kind === "inline-clear" ||
           native.action.kind === "empty-clear"
@@ -4182,6 +4968,26 @@ function createSearchControlPublication(
       publication.retire();
       requestSuccessor();
     };
+    const proofCurrentTarget = (proof: SearchNativeEventProof) =>
+      proof.action.kind === "focus-result" && resultKeyboardAuthority
+        ? resultKeyboardAuthority.currentTarget(proof.event)
+        : TRUSTED_EVENT_CURRENT_TARGET?.(proof.event);
+    const proofPhase = (proof: SearchNativeEventProof) =>
+      proof.action.kind === "focus-result" && resultKeyboardAuthority
+        ? resultKeyboardAuthority.phase(proof.event)
+        : TRUSTED_EVENT_PHASE?.(proof.event);
+    const proofDefaultPrevented = (proof: SearchNativeEventProof) =>
+      proof.action.kind === "focus-result" && resultKeyboardAuthority
+        ? resultKeyboardAuthority.defaultPrevented(proof.event)
+        : TRUSTED_EVENT_DEFAULT_PREVENTED?.(proof.event);
+    const proofCancelBubble = (proof: SearchNativeEventProof) =>
+      proof.action.kind === "focus-result" && resultKeyboardAuthority
+        ? resultKeyboardAuthority.cancelBubble(proof.event)
+        : TRUSTED_EVENT_CANCEL_BUBBLE?.(proof.event);
+    const proofComposedPath = (proof: SearchNativeEventProof) =>
+      proof.action.kind === "focus-result" && resultKeyboardAuthority
+        ? resultKeyboardAuthority.composedPath(proof.event)
+        : TRUSTED_EVENT_COMPOSED_PATH(proof.event);
     const settleTerminal = (proof: SearchTerminalEventProof) => {
       const native = proof.native;
       if (
@@ -4194,10 +5000,10 @@ function createSearchControlPublication(
         !TRUSTED_EVENT_PHASE ||
         !TRUSTED_EVENT_DEFAULT_PREVENTED ||
         !TRUSTED_EVENT_CANCEL_BUBBLE ||
-        TRUSTED_EVENT_CURRENT_TARGET(native.event) !== null ||
-        TRUSTED_EVENT_PHASE(native.event) !== ownerWindow.Event.NONE ||
-        TRUSTED_EVENT_DEFAULT_PREVENTED(native.event) ||
-        TRUSTED_EVENT_CANCEL_BUBBLE(native.event) ||
+        proofCurrentTarget(native) !== null ||
+        proofPhase(native) !== ownerWindow.Event.NONE ||
+        proofDefaultPrevented(native) ||
+        proofCancelBubble(native) ||
         native.propagationStopped() ||
         !nativeEventStillMatches(native) ||
         !publicationOwnsCurrentDom(native.action.kind === "change") ||
@@ -4220,50 +5026,77 @@ function createSearchControlPublication(
       beginNativeEvent(event, "document-capture");
     };
     const onNativeBubble = (event: Event) => {
+      const proof = nativeProof;
       if (
-        !nativeProof ||
-        nativeProof.event !== event ||
+        !proof ||
+        proof.event !== event ||
         !TRUSTED_EVENT_CURRENT_TARGET ||
         !TRUSTED_EVENT_PHASE ||
         !TRUSTED_EVENT_DEFAULT_PREVENTED ||
         !TRUSTED_EVENT_CANCEL_BUBBLE ||
-        TRUSTED_EVENT_CURRENT_TARGET(event) !== ownerDocument ||
-        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.BUBBLING_PHASE ||
-        TRUSTED_EVENT_DEFAULT_PREVENTED(event) ||
-        TRUSTED_EVENT_CANCEL_BUBBLE(event)
+        proofCurrentTarget(proof) !== ownerDocument ||
+        proofPhase(proof) !== ownerWindow.Event.BUBBLING_PHASE ||
+        proofDefaultPrevented(proof) ||
+        proofCancelBubble(proof)
       ) {
         return;
       }
-      const authenticated = authenticateTerminal(nativeProof);
+      const authenticated = authenticateTerminal(proof);
       if (!authenticated) return;
       const windowTarget =
         authenticated.native.path[authenticated.native.path.length - 1];
       if (
         !windowTarget ||
-        !TRUSTED_IS_PROTOTYPE_OF(
-          ownerWindow.EventTarget.prototype,
-          windowTarget,
-        )
+        (authenticated.native.action.kind === "focus-result"
+          ? !focusWindowTarget ||
+            !searchControlPathMatches(
+              [focusWindowTarget],
+              [windowTarget],
+              ownerDocument,
+            )
+          : !TRUSTED_IS_PROTOTYPE_OF(
+              ownerWindow.EventTarget.prototype,
+              windowTarget,
+            ))
       ) {
         return;
       }
       terminal = authenticated;
-      removeTerminalWindowListener();
-      addOwnerWindowListener(
-        windowTarget,
-        authenticated.native.type,
-        onNativeWindowBubble,
-      );
-      terminalWindowListener = Object.freeze({
-        target: windowTarget,
-        type: authenticated.native.type,
-      });
+      if (authenticated.native.action.kind === "focus-result") {
+        if (
+          !focusWindowListenerAttached ||
+          !focusWindowTarget ||
+          !searchControlPathMatches(
+            [focusWindowTarget],
+            [windowTarget],
+            ownerDocument,
+          ) ||
+          authenticated.native.type !== "keydown"
+        ) {
+          terminal = null;
+          return;
+        }
+      } else {
+        removeTerminalWindowListener();
+        addOwnerWindowListener(
+          windowTarget,
+          authenticated.native.type,
+          onNativeWindowBubble,
+        );
+        terminalWindowListener = Object.freeze({
+          target: windowTarget,
+          type: authenticated.native.type,
+        });
+      }
       queueMicrotask(() => {
         if (terminal === authenticated) settleTerminal(authenticated);
       });
     };
     const onNativeWindowBubble = (event: Event) => {
       const authenticated = terminal;
+      const currentTarget = authenticated
+        ? proofCurrentTarget(authenticated.native)
+        : null;
       if (
         !authenticated ||
         authenticated.native.event !== event ||
@@ -4271,14 +5104,22 @@ function createSearchControlPublication(
         !TRUSTED_EVENT_PHASE ||
         !TRUSTED_EVENT_DEFAULT_PREVENTED ||
         !TRUSTED_EVENT_CANCEL_BUBBLE ||
-        TRUSTED_EVENT_CURRENT_TARGET(event) !== terminalWindowListener?.target ||
-        TRUSTED_EVENT_PHASE(event) !== ownerWindow.Event.BUBBLING_PHASE ||
-        TRUSTED_EVENT_DEFAULT_PREVENTED(event) ||
-        TRUSTED_EVENT_CANCEL_BUBBLE(event) ||
+        (authenticated.native.action.kind === "focus-result"
+          ? !focusWindowTarget ||
+            !currentTarget ||
+            !searchControlPathMatches(
+              [focusWindowTarget],
+              [currentTarget],
+              ownerDocument,
+            )
+          : currentTarget !== terminalWindowListener?.target) ||
+        proofPhase(authenticated.native) !== ownerWindow.Event.BUBBLING_PHASE ||
+        proofDefaultPrevented(authenticated.native) ||
+        proofCancelBubble(authenticated.native) ||
         authenticated.native.propagationStopped() ||
         !searchControlPathMatches(
           authenticated.native.path,
-          TRUSTED_EVENT_COMPOSED_PATH(event),
+          proofComposedPath(authenticated.native),
           ownerDocument,
         )
       ) {
@@ -4286,23 +5127,50 @@ function createSearchControlPublication(
       }
       windowTerminal = authenticated;
     };
+    const addFocusWindowListener = () => {
+      if (
+        focusWindowListenerAttached ||
+        !resultKeyboardAuthority ||
+        !focusWindowTarget ||
+        !addFocusWindowEventListener ||
+        !resultKeyboardAuthorityIsCurrent() ||
+        cells.active !== publication ||
+        resultKeyboardAuthority.activeElement.read(ownerDocument) !== input
+      ) {
+        return;
+      }
+      addFocusWindowEventListener("keydown", onNativeWindowBubble);
+      focusWindowListenerAttached = true;
+    };
+    const removeFocusWindowListener = () => {
+      if (!focusWindowListenerAttached) return;
+      removeFocusWindowEventListener?.("keydown", onNativeWindowBubble);
+      focusWindowListenerAttached = false;
+    };
+    const onInputFocus = () => addFocusWindowListener();
+    const onInputBlur = () => removeFocusWindowListener();
     const boundaryListeners = [...controls.values()].map((control) => {
       const type =
         control.action.kind === "change"
           ? ["input", "change"]
-          : control.action.kind === "escape"
+          : control.action.kind === "escape" ||
+              control.action.kind === "focus-result"
             ? ["keydown"]
             : ["click"];
       const listener = (event: Event) => {
         if (
           nativeProof?.event === event &&
           nativeProof.control === control &&
-          TRUSTED_EVENT_CURRENT_TARGET?.(event) === control.element &&
-          (TRUSTED_EVENT_PHASE?.(event) ===
+          proofCurrentTarget(nativeProof) === control.element &&
+          (proofPhase(nativeProof) ===
             ownerWindow.Event.CAPTURING_PHASE ||
-            TRUSTED_EVENT_PHASE?.(event) === ownerWindow.Event.AT_TARGET) &&
+            proofPhase(nativeProof) === ownerWindow.Event.AT_TARGET) &&
           publicationOwnsCurrentDom(control.action.kind === "change") &&
-          searchControlIsEnabled(control.element, control.root)
+          searchControlIsEnabled(control.element, control.root) &&
+          (control.action.kind !== "focus-result" ||
+            (resultKeyboardAuthorityIsCurrent() &&
+              resultKeyboardAuthority?.activeElement.read(ownerDocument) ===
+                input))
         ) {
           nativeBoundaryProof = nativeProof;
         }
@@ -4329,6 +5197,11 @@ function createSearchControlPublication(
           );
         }
       }
+      if (resultKeyboardAuthority) {
+        TRUSTED_ADD_EVENT_LISTENER(input, "focus", onInputFocus);
+        TRUSTED_ADD_EVENT_LISTENER(input, "blur", onInputBlur);
+        addFocusWindowListener();
+      }
     };
     const releaseNativeListeners = () => {
       for (const type of ["input", "change", "keydown", "click"]) {
@@ -4341,6 +5214,11 @@ function createSearchControlPublication(
         TRUSTED_REMOVE_EVENT_LISTENER(ownerDocument, type, onNativeBubble);
       }
       removeTerminalWindowListener();
+      if (resultKeyboardAuthority) {
+        TRUSTED_REMOVE_EVENT_LISTENER(input, "focus", onInputFocus);
+        TRUSTED_REMOVE_EVENT_LISTENER(input, "blur", onInputBlur);
+        removeFocusWindowListener();
+      }
       for (const { control, type, listener } of boundaryListeners) {
         for (const eventType of type) {
           TRUSTED_REMOVE_EVENT_LISTENER(
@@ -4357,6 +5235,10 @@ function createSearchControlPublication(
       publication,
       publish: () => {
         established = true;
+        partialReplayWindowOpen = true;
+        queueMicrotask(() => {
+          partialReplayWindowOpen = false;
+        });
         refs = searchControlExpectedOwners(render, owners).map((owner) => {
           const element = owner.element();
           if (!element) {
@@ -4369,7 +5251,18 @@ function createSearchControlPublication(
         guard = createSearchControlDomGuard(
           ownerDocument,
           publishedRoots,
-          () => retire("other"),
+          () => {
+            const ownedActivePublication = cells.active === publication;
+            retire("other");
+            if (ownedActivePublication) {
+              armSearchControlDomBarrier(
+                cells,
+                ownerDocument,
+                publishedRoots,
+                requestSuccessor,
+              );
+            }
+          },
           (records) =>
             ((nativeProof?.action.kind === "change" &&
               nativeBoundaryProof === nativeProof &&
@@ -4423,6 +5316,8 @@ function createSearchControlPublication(
           element === null &&
           previous === proof.element
         ) {
+          synchronousRefReplayPending =
+            synchronousRefReplayPending || partialReplayWindowOpen;
           proof.state = "detached";
         } else if (
           proof.state === "detached" &&
@@ -4434,20 +5329,31 @@ function createSearchControlPublication(
           proof.state = "invalid";
         }
       },
+      canSettleSynchronousRefReplay: () =>
+        established && partialReplayWindowOpen,
+      settleSynchronousRefReplay: () => {
+        const exact =
+          !retired &&
+          synchronousRefReplayPending &&
+          refs.some((entry) => entry.state === "reattached") &&
+          refs.every(
+            (entry) =>
+              entry.state === "attached" || entry.state === "reattached",
+          ) &&
+          refs.every((entry) => entry.owner.element() === entry.element) &&
+          searchControlElementsAreExact(render, owners) &&
+          searchControlRootsMatch(ownerDocument, publishedRoots) &&
+          Boolean(guard?.unchanged());
+        if (!exact) return false;
+        for (const entry of refs) entry.state = "attached";
+        synchronousRefReplayPending = false;
+        return true;
+      },
       isExactReplay: () =>
         retired &&
         established &&
-        ((layoutRetired &&
-          (retirement === "layout" || retirement === "element") &&
-          refs.every((entry) => entry.state === "reattached")) ||
-          (!layoutRetired &&
-            retirement === "element" &&
-            refs.some((entry) => entry.state === "reattached") &&
-            refs.every(
-              (entry) =>
-                entry.state === "attached" ||
-                entry.state === "reattached",
-            ))) &&
+        (retirement === "layout" || retirement === "element") &&
+        refs.every((entry) => entry.state === "reattached") &&
         refs.length === searchControlExpectedOwners(render, owners).length &&
         refs.every(
           (entry) =>
@@ -4473,6 +5379,13 @@ function createSearchControlPublication(
   };
 
   const establish = () => {
+    const domBarrier = cells.domBarrier;
+    if (domBarrier) {
+      if (!domBarrier.attempted()) return;
+      domBarrier.release();
+      cells.domBarrier = null;
+      cells.successorOf = null;
+    }
     if (lastRuntime) {
       if (
         !successorRequested &&
@@ -4504,7 +5417,9 @@ function createSearchControlPublication(
               ? owners.searchRoot.element()
               : root.role === "error-root"
                 ? owners.errorRoot.element()
-                : owners.emptyRoot.element();
+                : root.role === "empty-root"
+                  ? owners.emptyRoot.element()
+                  : owners.resultRoot.element();
           return (
             currentRoot === root.element &&
             publishedRootStillMatches(root)
@@ -4540,7 +5455,7 @@ function createSearchControlPublication(
   };
 
   const root = (
-    role: "search-root" | "error-root" | "empty-root",
+    role: "search-root" | "error-root" | "empty-root" | "result-root",
     event: ReactSyntheticEvent,
   ) => currentRuntime?.captureRoot(role, event);
   const capture = (
@@ -4569,6 +5484,10 @@ function createSearchControlPublication(
     captureEmptyPrimary: owners.emptyPrimary.capture,
     captureEmptySecondary: owners.emptySecondary.capture,
     captureEmptyClear: owners.emptyClear.capture,
+    captureResultRoot: owners.resultRoot.capture,
+    captureResultLinks: Object.freeze(
+      owners.resultLinks.map(({ owner }) => owner.capture),
+    ),
     captureRootChange: (event: ReactChangeEvent<HTMLDivElement>) =>
       root("search-root", event),
     captureInputChange: (event: ReactChangeEvent<HTMLInputElement>) =>
@@ -4577,10 +5496,14 @@ function createSearchControlPublication(
       bubble("change", event),
     captureRootKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) =>
       root("search-root", event),
-    captureInputKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) =>
-      capture("escape", event),
-    keyDownInput: (event: ReactKeyboardEvent<HTMLInputElement>) =>
-      bubble("escape", event),
+    captureInputKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) => {
+      capture("escape", event);
+      capture("focus-result", event);
+    },
+    keyDownInput: (event: ReactKeyboardEvent<HTMLInputElement>) => {
+      bubble("escape", event);
+      bubble("focus-result", event);
+    },
     captureSearchClick: (event: ReactMouseEvent<HTMLDivElement>) =>
       root("search-root", event),
     captureInlineClearClick: (event: ReactMouseEvent<HTMLButtonElement>) =>
@@ -4602,6 +5525,1664 @@ function createSearchControlPublication(
   });
 }
 
+/** The busy key `create()` publishes for a blank document (no template). */
+const CREATE_BLANK_KEY = "blank";
+const CREATE_CARD_CLASS =
+  "group flex items-stretch rounded-2xl border border-line bg-surface shadow-sm transition hover:border-accent hover:shadow-md";
+const CREATE_BLANK_BUTTON_CLASS =
+  "flex flex-1 items-center gap-4 rounded-l-2xl p-5 text-left";
+const CREATE_BLANK_ICON_FRAME_CLASS =
+  "flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-on-accent";
+const CREATE_BLANK_NAME_CLASS = "block text-[15px] font-semibold text-ink";
+const CREATE_BLANK_DESCRIPTION_CLASS = "block text-sm text-ink-3";
+const CREATE_BLANK_NAME_TEXT = "New document";
+const CREATE_BLANK_DESCRIPTION_TEXT = "Start with a blank Markdown page.";
+const CREATE_BLANK_ICON_CLASS = "lucide lucide-file-plus-corner";
+const CREATE_BUSY_ICON_CLASS = "lucide lucide-loader-circle animate-spin";
+const CREATE_GUIDED_ROOT_CLASS = "mb-5 text-center";
+const CREATE_GUIDED_ICON_CLASS =
+  "lucide lucide-file-text mx-auto mb-3 text-ink-4";
+const CREATE_GUIDED_PRIMARY_CLASS = "text-sm font-medium text-ink-2";
+const CREATE_GUIDED_SECONDARY_CLASS = "mt-1 text-sm text-ink-3";
+const CREATE_GUIDED_PRIMARY_TEXT = "No documents yet";
+const CREATE_GUIDED_SECONDARY_TEXT =
+  "Start with a short guided document, pick a template, or open a Markdown file from GitHub.";
+const CREATE_WELCOME_BUTTON_CLASS = "btn btn-primary mt-4 gap-2";
+const CREATE_WELCOME_ICON_CLASS = "lucide lucide-sparkles";
+const CREATE_WELCOME_LABEL_TEXT = " Start with a guided doc";
+
+type CreateControlActionKind = "blank" | "welcome";
+type CreateControlRootRole = "create-card" | "guided-root";
+
+type CreateControlElementRole =
+  | CreateControlRootRole
+  | "blank"
+  | "blank-icon-frame"
+  | "blank-icon"
+  | "blank-label"
+  | "blank-name"
+  | "blank-description"
+  | "guided-icon"
+  | "guided-primary"
+  | "guided-secondary"
+  | "welcome"
+  | "welcome-icon";
+
+interface CreateAuthority {
+  readonly mount: symbol;
+  readonly visit: symbol;
+  readonly user: DashboardProps["user"];
+  readonly userId: string;
+}
+
+interface CreateControlRenderPublication {
+  readonly identity: symbol;
+  readonly mount: symbol;
+  readonly authority: CreateAuthority;
+  readonly user: DashboardProps["user"];
+  readonly userId: string;
+  readonly create: (template?: Template) => Promise<void>;
+  readonly createDocument: typeof api.documents.create;
+  readonly router: ReturnType<typeof useRouter>;
+  readonly routerPush: ReturnType<typeof useRouter>["push"];
+  readonly operation: CreateOperation | null;
+  readonly creating: string | null;
+  readonly welcome: Template | undefined;
+  readonly hasGuided: boolean;
+}
+
+interface CreateControlElementOwnerView {
+  readonly role: CreateControlElementRole;
+  readonly element: () => Element | null;
+}
+
+interface CreateControlRefReplay {
+  readonly owner: CreateControlElementOwnerView;
+  readonly element: Element;
+  state: "attached" | "detached" | "reattached" | "invalid";
+}
+
+interface CreateControlActionPublication {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly controlIdentity: symbol;
+  readonly kind: CreateControlActionKind;
+  readonly template: Template | null;
+}
+
+interface CreatePublishedControl {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly kind: CreateControlActionKind;
+  readonly element: HTMLButtonElement;
+  readonly root: HTMLDivElement;
+  readonly targets: readonly Node[];
+  readonly paths: ReadonlyMap<Node, readonly EventTarget[]>;
+  readonly action: CreateControlActionPublication;
+}
+
+interface CreateControlRootPublication {
+  readonly role: CreateControlRootRole;
+  readonly element: HTMLDivElement;
+  readonly dom: TemplateGridDomSnapshot;
+  readonly placement: TemplateGridPlacement;
+}
+
+interface CreateControlPublication {
+  readonly identity: symbol;
+  readonly render: CreateControlRenderPublication;
+  readonly ownerDocument: Document;
+  readonly card: HTMLDivElement;
+  readonly controls: ReadonlyMap<CreateControlActionKind, CreatePublishedControl>;
+  readonly roots: readonly CreateControlRootPublication[];
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+}
+
+interface CreateControlReplay {
+  readonly source: CreateControlPublication;
+  readonly roots: readonly CreateControlRootPublication[];
+  readonly unchanged: () => boolean;
+  readonly release: () => void;
+}
+
+interface CreateControlPublicationCells {
+  active: CreateControlPublication | null;
+  successorOf: CreateControlPublication | null;
+  replay: CreateControlReplay | null;
+  delivery: symbol | null;
+  readonly claimedPublications: WeakSet<CreateControlPublication>;
+  readonly claimedControls: WeakSet<CreatePublishedControl>;
+  readonly claimedActions: WeakSet<CreateControlActionPublication>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+  readonly attemptedReactEvents: WeakSet<object>;
+  readonly attemptedNativeEvents: WeakSet<Event>;
+}
+
+interface CreateNativeClickProof {
+  readonly identity: symbol;
+  readonly origin: "document-capture" | "document-root-react-capture";
+  readonly event: MouseEvent;
+  readonly publication: CreateControlPublication;
+  readonly control: CreatePublishedControl;
+  readonly action: CreateControlActionPublication;
+  readonly target: Node;
+  readonly path: readonly EventTarget[];
+  readonly bubbles: boolean;
+  readonly cancelable: boolean;
+  readonly button: number;
+  readonly buttons: number;
+  readonly detail: number;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly altKey: boolean;
+  readonly shiftKey: boolean;
+  readonly propagationStopped: () => boolean;
+}
+
+interface CreateReactClickProof {
+  readonly event: object;
+  readonly native: CreateNativeClickProof;
+  readonly dispatchTarget: EventTarget;
+  readonly nativePhase: number;
+}
+
+interface CreateTerminalClickProof {
+  readonly native: CreateNativeClickProof;
+  readonly root: CreateReactClickProof;
+  readonly capture: CreateReactClickProof;
+  readonly bubble: CreateReactClickProof;
+}
+
+interface CreateControlDomGuard {
+  readonly unchanged: () => boolean;
+  readonly release: () => void;
+}
+
+interface CreateControlPublicationRuntime {
+  readonly publication: CreateControlPublication;
+  readonly publish: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: CreateControlElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+  ) => void;
+  readonly isExactReplay: () => boolean;
+  readonly replay: () => CreateControlReplay | null;
+  readonly captureRoot: (
+    role: CreateControlRootRole,
+    event: ReactSyntheticEvent,
+  ) => void;
+  readonly captureControl: (
+    kind: CreateControlActionKind,
+    event: ReactSyntheticEvent,
+  ) => void;
+  readonly activate: (
+    kind: CreateControlActionKind,
+    event: ReactSyntheticEvent,
+  ) => boolean;
+}
+
+interface CreateControlPublicationSet {
+  readonly establish: () => void | (() => void);
+  readonly captureCard: (element: HTMLDivElement | null) => void | (() => void);
+  readonly captureBlank: (
+    element: HTMLButtonElement | null,
+  ) => void | (() => void);
+  readonly captureBlankIconFrame: (
+    element: HTMLSpanElement | null,
+  ) => void | (() => void);
+  readonly captureBlankIcon: (
+    element: SVGSVGElement | null,
+  ) => void | (() => void);
+  readonly captureBlankLabel: (
+    element: HTMLSpanElement | null,
+  ) => void | (() => void);
+  readonly captureBlankName: (
+    element: HTMLSpanElement | null,
+  ) => void | (() => void);
+  readonly captureBlankDescription: (
+    element: HTMLSpanElement | null,
+  ) => void | (() => void);
+  readonly captureGuidedRoot: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureGuidedIcon: (
+    element: SVGSVGElement | null,
+  ) => void | (() => void);
+  readonly captureGuidedPrimary: (
+    element: HTMLParagraphElement | null,
+  ) => void | (() => void);
+  readonly captureGuidedSecondary: (
+    element: HTMLParagraphElement | null,
+  ) => void | (() => void);
+  readonly captureWelcome: (
+    element: HTMLButtonElement | null,
+  ) => void | (() => void);
+  readonly captureWelcomeIcon: (
+    element: SVGSVGElement | null,
+  ) => void | (() => void);
+  readonly captureCardClick: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  readonly captureBlankClick: (
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly activateBlank: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  readonly captureGuidedClick: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  readonly captureWelcomeClick: (
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
+  readonly activateWelcome: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+}
+
+class CreateControlElementOwner<T extends Element>
+  implements CreateControlElementOwnerView
+{
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    readonly role: CreateControlElementRole,
+    private readonly onChange: (
+      owner: CreateControlElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+    if (!element) return;
+    return () => {
+      if (this.current === element) this.capture(null);
+      else this.onChange(this, null, element, this.last);
+    };
+  };
+}
+
+interface CreateControlOwners {
+  readonly card: CreateControlElementOwner<HTMLDivElement>;
+  readonly blank: CreateControlElementOwner<HTMLButtonElement>;
+  readonly blankIconFrame: CreateControlElementOwner<HTMLSpanElement>;
+  readonly blankIcon: CreateControlElementOwner<SVGSVGElement>;
+  readonly blankLabel: CreateControlElementOwner<HTMLSpanElement>;
+  readonly blankName: CreateControlElementOwner<HTMLSpanElement>;
+  readonly blankDescription: CreateControlElementOwner<HTMLSpanElement>;
+  readonly guidedRoot: CreateControlElementOwner<HTMLDivElement>;
+  readonly guidedIcon: CreateControlElementOwner<SVGSVGElement>;
+  readonly guidedPrimary: CreateControlElementOwner<HTMLParagraphElement>;
+  readonly guidedSecondary: CreateControlElementOwner<HTMLParagraphElement>;
+  readonly welcome: CreateControlElementOwner<HTMLButtonElement>;
+  readonly welcomeIcon: CreateControlElementOwner<SVGSVGElement>;
+}
+
+function createControlRenderIsExact(render: CreateControlRenderPublication) {
+  return (
+    Object.isFrozen(render) &&
+    Object.isFrozen(render.authority) &&
+    render.authority.mount === render.mount &&
+    render.authority.user === render.user &&
+    render.authority.userId === render.userId &&
+    render.user.id === render.userId &&
+    typeof render.create === "function" &&
+    render.createDocument === api.documents.create &&
+    typeof render.router.push === "function" &&
+    render.router.push === render.routerPush &&
+    render.welcome === getTemplate(WELCOME_TEMPLATE_ID) &&
+    render.welcome?.id === WELCOME_TEMPLATE_ID &&
+    render.creating ===
+      (render.operation && render.operation.ownerId === render.userId
+        ? render.operation.key
+        : null)
+  );
+}
+
+function createControlRendersMatch(
+  previous: CreateControlRenderPublication,
+  current: CreateControlRenderPublication,
+) {
+  return (
+    previous.mount === current.mount &&
+    previous.authority === current.authority &&
+    previous.user === current.user &&
+    previous.userId === current.userId &&
+    previous.create === current.create &&
+    previous.createDocument === current.createDocument &&
+    previous.router === current.router &&
+    previous.routerPush === current.routerPush &&
+    previous.operation === current.operation &&
+    previous.creating === current.creating &&
+    previous.welcome === current.welcome &&
+    previous.hasGuided === current.hasGuided &&
+    createControlRenderIsExact(previous) &&
+    createControlRenderIsExact(current)
+  );
+}
+
+function createControlExpectedOwners(
+  render: CreateControlRenderPublication,
+  owners: CreateControlOwners,
+): readonly CreateControlElementOwnerView[] {
+  return Object.freeze([
+    owners.card,
+    owners.blank,
+    owners.blankIconFrame,
+    owners.blankIcon,
+    owners.blankLabel,
+    owners.blankName,
+    owners.blankDescription,
+    ...(render.hasGuided
+      ? [
+          owners.guidedRoot,
+          owners.guidedIcon,
+          owners.guidedPrimary,
+          owners.guidedSecondary,
+          owners.welcome,
+          owners.welcomeIcon,
+        ]
+      : []),
+  ]);
+}
+
+function createControlIsEnabled(
+  control: HTMLButtonElement,
+  root: HTMLElement,
+) {
+  return (
+    TRUSTED_BUTTON_DISABLED?.(control) === false &&
+    TRUSTED_ELEMENT_GET_ATTRIBUTE?.(control, "aria-busy")?.toLowerCase() !==
+      "true" &&
+    searchControlAncestorsAreEnabled(control, root)
+  );
+}
+
+function createControlIconIsExact(
+  icon: Element | null,
+  ownerWindow: Window & typeof globalThis,
+  className: string,
+  size: string,
+) {
+  return Boolean(
+    icon instanceof ownerWindow.SVGSVGElement &&
+      icon.namespaceURI === "http://www.w3.org/2000/svg" &&
+      icon.className.baseVal === className &&
+      icon.getAttribute("width") === size &&
+      icon.getAttribute("height") === size &&
+      icon.getAttribute("aria-hidden") === "true",
+  );
+}
+
+function createControlElementsAreExact(
+  render: CreateControlRenderPublication,
+  owners: CreateControlOwners,
+) {
+  if (!TRUSTED_BUTTON_DISABLED || !createControlRenderIsExact(render)) {
+    return false;
+  }
+  const card = owners.card.element();
+  const blank = owners.blank.element();
+  const blankIconFrame = owners.blankIconFrame.element();
+  const blankIcon = owners.blankIcon.element();
+  const blankLabel = owners.blankLabel.element();
+  const blankName = owners.blankName.element();
+  const blankDescription = owners.blankDescription.element();
+  const guidedRoot = owners.guidedRoot.element();
+  const guidedIcon = owners.guidedIcon.element();
+  const guidedPrimary = owners.guidedPrimary.element();
+  const guidedSecondary = owners.guidedSecondary.element();
+  const welcome = owners.welcome.element();
+  const welcomeIcon = owners.welcomeIcon.element();
+  const ownerDocument = card?.ownerDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  const busy = render.creating !== null;
+  if (
+    !ownerWindow ||
+    !(card instanceof ownerWindow.HTMLDivElement) ||
+    !card.isConnected ||
+    card.className !== CREATE_CARD_CLASS ||
+    !templateGridHasExactAttributes(card, [["class", CREATE_CARD_CLASS]]) ||
+    card.children.length !== 3
+  ) {
+    return false;
+  }
+
+  const templateTrigger = card.children.item(1);
+  const openFile = card.children.item(2);
+  if (
+    !(blank instanceof ownerWindow.HTMLButtonElement) ||
+    card.children.item(0) !== blank ||
+    blank.parentElement !== card ||
+    blank.type !== "button" ||
+    blank.className !== CREATE_BLANK_BUTTON_CLASS ||
+    blank.dataset.testid !== "new-document" ||
+    TRUSTED_BUTTON_DISABLED(blank) !== busy ||
+    blank.matches(":disabled") !== busy ||
+    !templateGridHasExactAttributes(blank, [
+      ["type", "button"],
+      ...(busy ? ([["disabled", ""]] as const) : []),
+      ["class", CREATE_BLANK_BUTTON_CLASS],
+      ["data-testid", "new-document"],
+    ]) ||
+    blank.childNodes.length !== 2 ||
+    blank.children.length !== 2 ||
+    !(templateTrigger instanceof ownerWindow.HTMLButtonElement) ||
+    templateTrigger.dataset.testid !== "new-from-template" ||
+    TRUSTED_BUTTON_DISABLED(templateTrigger) !== busy ||
+    !(openFile instanceof ownerWindow.HTMLButtonElement) ||
+    openFile.dataset.testid !== "open-file" ||
+    TRUSTED_BUTTON_DISABLED(openFile) !== busy
+  ) {
+    return false;
+  }
+
+  if (
+    !(blankIconFrame instanceof ownerWindow.HTMLSpanElement) ||
+    blank.children.item(0) !== blankIconFrame ||
+    blankIconFrame.parentElement !== blank ||
+    blankIconFrame.className !== CREATE_BLANK_ICON_FRAME_CLASS ||
+    !templateGridHasExactAttributes(blankIconFrame, [
+      ["class", CREATE_BLANK_ICON_FRAME_CLASS],
+    ]) ||
+    blankIconFrame.childNodes.length !== 1 ||
+    blankIconFrame.children.length !== 1 ||
+    blankIconFrame.firstElementChild !== blankIcon ||
+    blankIcon?.parentElement !== blankIconFrame ||
+    !createControlIconIsExact(
+      blankIcon,
+      ownerWindow,
+      render.creating === CREATE_BLANK_KEY
+        ? CREATE_BUSY_ICON_CLASS
+        : CREATE_BLANK_ICON_CLASS,
+      render.creating === CREATE_BLANK_KEY ? "24" : "22",
+    ) ||
+    !(blankLabel instanceof ownerWindow.HTMLSpanElement) ||
+    blank.children.item(1) !== blankLabel ||
+    blankLabel.parentElement !== blank ||
+    blankLabel.attributes.length !== 0 ||
+    blankLabel.childNodes.length !== 2 ||
+    blankLabel.children.length !== 2 ||
+    !(blankName instanceof ownerWindow.HTMLSpanElement) ||
+    blankLabel.children.item(0) !== blankName ||
+    blankName.parentElement !== blankLabel ||
+    blankName.className !== CREATE_BLANK_NAME_CLASS ||
+    !templateGridHasExactAttributes(blankName, [
+      ["class", CREATE_BLANK_NAME_CLASS],
+    ]) ||
+    !templateGridTextIsExact(blankName, CREATE_BLANK_NAME_TEXT) ||
+    !(blankDescription instanceof ownerWindow.HTMLSpanElement) ||
+    blankLabel.children.item(1) !== blankDescription ||
+    blankDescription.parentElement !== blankLabel ||
+    blankDescription.className !== CREATE_BLANK_DESCRIPTION_CLASS ||
+    !templateGridHasExactAttributes(blankDescription, [
+      ["class", CREATE_BLANK_DESCRIPTION_CLASS],
+    ]) ||
+    !templateGridTextIsExact(blankDescription, CREATE_BLANK_DESCRIPTION_TEXT) ||
+    createControlIsEnabled(blank, card) === busy
+  ) {
+    return false;
+  }
+
+  if (render.hasGuided) {
+    const welcomeBusy = render.creating === WELCOME_TEMPLATE_ID;
+    const label = welcome?.childNodes.item(1) ?? null;
+    if (
+      !(guidedRoot instanceof ownerWindow.HTMLDivElement) ||
+      !guidedRoot.isConnected ||
+      guidedRoot.ownerDocument !== ownerDocument ||
+      guidedRoot.className !== CREATE_GUIDED_ROOT_CLASS ||
+      !templateGridHasExactAttributes(guidedRoot, [
+        ["class", CREATE_GUIDED_ROOT_CLASS],
+      ]) ||
+      guidedRoot.childNodes.length !== 4 ||
+      guidedRoot.children.length !== 4 ||
+      guidedRoot.children.item(0) !== guidedIcon ||
+      guidedIcon?.parentElement !== guidedRoot ||
+      !createControlIconIsExact(
+        guidedIcon,
+        ownerWindow,
+        CREATE_GUIDED_ICON_CLASS,
+        "28",
+      ) ||
+      !(guidedPrimary instanceof ownerWindow.HTMLParagraphElement) ||
+      guidedRoot.children.item(1) !== guidedPrimary ||
+      guidedPrimary.parentElement !== guidedRoot ||
+      guidedPrimary.className !== CREATE_GUIDED_PRIMARY_CLASS ||
+      guidedPrimary.textContent !== CREATE_GUIDED_PRIMARY_TEXT ||
+      !(guidedSecondary instanceof ownerWindow.HTMLParagraphElement) ||
+      guidedRoot.children.item(2) !== guidedSecondary ||
+      guidedSecondary.parentElement !== guidedRoot ||
+      guidedSecondary.className !== CREATE_GUIDED_SECONDARY_CLASS ||
+      guidedSecondary.textContent !== CREATE_GUIDED_SECONDARY_TEXT ||
+      !(welcome instanceof ownerWindow.HTMLButtonElement) ||
+      guidedRoot.children.item(3) !== welcome ||
+      welcome.parentElement !== guidedRoot ||
+      welcome.type !== "button" ||
+      welcome.className !== CREATE_WELCOME_BUTTON_CLASS ||
+      welcome.dataset.testid !== "start-guided-doc" ||
+      TRUSTED_BUTTON_DISABLED(welcome) !== busy ||
+      welcome.matches(":disabled") !== busy ||
+      welcome.getAttribute("aria-busy") !== (welcomeBusy ? "true" : null) ||
+      !templateGridHasExactAttributes(welcome, [
+        ["type", "button"],
+        ["class", CREATE_WELCOME_BUTTON_CLASS],
+        ...(busy ? ([["disabled", ""]] as const) : []),
+        ...(welcomeBusy ? ([["aria-busy", "true"]] as const) : []),
+        ["data-testid", "start-guided-doc"],
+      ]) ||
+      welcome.childNodes.length !== 2 ||
+      welcome.children.length !== 1 ||
+      welcome.children.item(0) !== welcomeIcon ||
+      welcomeIcon?.parentElement !== welcome ||
+      !createControlIconIsExact(
+        welcomeIcon,
+        ownerWindow,
+        welcomeBusy ? CREATE_BUSY_ICON_CLASS : CREATE_WELCOME_ICON_CLASS,
+        "16",
+      ) ||
+      label === null ||
+      label.nodeType !== ownerWindow.Node.TEXT_NODE ||
+      label.nodeValue !== CREATE_WELCOME_LABEL_TEXT ||
+      createControlIsEnabled(welcome, guidedRoot) === busy
+    ) {
+      return false;
+    }
+  } else if (
+    guidedRoot !== null ||
+    guidedIcon !== null ||
+    guidedPrimary !== null ||
+    guidedSecondary !== null ||
+    welcome !== null ||
+    welcomeIcon !== null
+  ) {
+    return false;
+  }
+
+  const expectedOwners = createControlExpectedOwners(render, owners);
+  const elements = expectedOwners.map((owner) => owner.element());
+  return (
+    elements.every(
+      (element): element is Element =>
+        Boolean(
+          element &&
+            element.isConnected &&
+            element.ownerDocument === ownerDocument,
+        ),
+    ) && new Set(elements).size === elements.length
+  );
+}
+
+function createControlRootsMatch(
+  ownerDocument: Document,
+  roots: readonly CreateControlRootPublication[],
+) {
+  return roots.every(
+    ({ element, dom, placement }) =>
+      element.isConnected &&
+      element.ownerDocument === ownerDocument &&
+      dom.node === element &&
+      templateGridDomMatches(dom) &&
+      searchControlPlacementMatches(ownerDocument, placement),
+  );
+}
+
+function createControlDomGuard(
+  ownerDocument: Document,
+  roots: readonly CreateControlRootPublication[],
+  onMutation: () => void,
+): CreateControlDomGuard | null {
+  const MutationObserverConstructor =
+    ownerDocument.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const rootElements = roots.map(({ element }) => element);
+  const placements = roots.flatMap(({ placement }) => placement);
+  const relevant = (mutation: MutationRecord) => {
+    if (
+      rootElements.some(
+        (root) => mutation.target === root || root.contains(mutation.target),
+      )
+    ) {
+      return true;
+    }
+    if (mutation.type === "attributes") {
+      return (
+        (mutation.attributeName === "aria-disabled" ||
+          mutation.attributeName === "disabled" ||
+          mutation.attributeName === "hidden" ||
+          mutation.attributeName === "inert") &&
+        placements.some(({ node }) => mutation.target === node)
+      );
+    }
+    if (mutation.type !== "childList") return false;
+    return placements.some(
+      ({ node, parent }) =>
+        mutation.target === parent &&
+        (mutation.previousSibling === node ||
+          mutation.nextSibling === node ||
+          [...mutation.addedNodes, ...mutation.removedNodes].some(
+            (changedNode) =>
+              changedNode === node ||
+              (changedNode.nodeType === 1 &&
+                (changedNode as Element).contains(node)),
+          )),
+    );
+  };
+  const record = (records: readonly MutationRecord[]) => {
+    if (!changed && records.some(relevant)) {
+      changed = true;
+      onMutation();
+    }
+    return changed;
+  };
+  const observer = new MutationObserverConstructor(record);
+  observer.observe(ownerDocument, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  return Object.freeze({
+    unchanged: () => {
+      record(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      record(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function createControlNativeSupportIsAvailable() {
+  return Boolean(
+    TRUSTED_EVENT_CURRENT_TARGET &&
+      TRUSTED_EVENT_DEFAULT_PREVENTED &&
+      TRUSTED_EVENT_TARGET &&
+      TRUSTED_EVENT_TYPE &&
+      TRUSTED_EVENT_PHASE &&
+      TRUSTED_EVENT_BUBBLES &&
+      TRUSTED_EVENT_CANCELABLE &&
+      TRUSTED_EVENT_CANCEL_BUBBLE &&
+      TRUSTED_MOUSE_BUTTON &&
+      TRUSTED_MOUSE_BUTTONS &&
+      TRUSTED_MOUSE_CTRL &&
+      TRUSTED_MOUSE_META &&
+      TRUSTED_MOUSE_ALT &&
+      TRUSTED_MOUSE_SHIFT &&
+      TRUSTED_UI_DETAIL &&
+      TRUSTED_BUTTON_DISABLED &&
+      TRUSTED_ELEMENT_GET_ATTRIBUTE &&
+      TRUSTED_ELEMENT_HAS_ATTRIBUTE,
+  );
+}
+
+/**
+ * Publication authority for the two direct create buttons ("New document" and "Start with a guided
+ * doc"). Every activation must present the exact current user, callbacks, button, action, owner
+ * document, committed DOM, placement, enabled facts, React wrapper chain and genuine native click
+ * before the shared `create()` runs once.
+ */
+function createCreateControlPublication(
+  render: CreateControlRenderPublication,
+  cells: CreateControlPublicationCells,
+  requestSuccessor: () => void,
+): CreateControlPublicationSet {
+  let currentRuntime: CreateControlPublicationRuntime | null = null;
+  let lastRuntime: CreateControlPublicationRuntime | null = null;
+  let successorRequested = false;
+
+  const onElementChange = (
+    owner: CreateControlElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+    last: Element | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      element === null ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      currentRuntime?.retireForElement();
+      currentRuntime = null;
+    }
+    if (
+      !successorRequested &&
+      runtime?.isExactReplay() &&
+      cells.successorOf === runtime.publication
+    ) {
+      const replay = runtime.replay();
+      if (
+        replay &&
+        createControlElementsAreExact(render, owners) &&
+        replay.source.card === owners.card.element()
+      ) {
+        cells.replay = replay;
+        successorRequested = true;
+        requestSuccessor();
+      }
+    }
+  };
+
+  const owners: CreateControlOwners = {
+    card: new CreateControlElementOwner<HTMLDivElement>(
+      "create-card",
+      onElementChange,
+    ),
+    blank: new CreateControlElementOwner<HTMLButtonElement>(
+      "blank",
+      onElementChange,
+    ),
+    blankIconFrame: new CreateControlElementOwner<HTMLSpanElement>(
+      "blank-icon-frame",
+      onElementChange,
+    ),
+    blankIcon: new CreateControlElementOwner<SVGSVGElement>(
+      "blank-icon",
+      onElementChange,
+    ),
+    blankLabel: new CreateControlElementOwner<HTMLSpanElement>(
+      "blank-label",
+      onElementChange,
+    ),
+    blankName: new CreateControlElementOwner<HTMLSpanElement>(
+      "blank-name",
+      onElementChange,
+    ),
+    blankDescription: new CreateControlElementOwner<HTMLSpanElement>(
+      "blank-description",
+      onElementChange,
+    ),
+    guidedRoot: new CreateControlElementOwner<HTMLDivElement>(
+      "guided-root",
+      onElementChange,
+    ),
+    guidedIcon: new CreateControlElementOwner<SVGSVGElement>(
+      "guided-icon",
+      onElementChange,
+    ),
+    guidedPrimary: new CreateControlElementOwner<HTMLParagraphElement>(
+      "guided-primary",
+      onElementChange,
+    ),
+    guidedSecondary: new CreateControlElementOwner<HTMLParagraphElement>(
+      "guided-secondary",
+      onElementChange,
+    ),
+    welcome: new CreateControlElementOwner<HTMLButtonElement>(
+      "welcome",
+      onElementChange,
+    ),
+    welcomeIcon: new CreateControlElementOwner<SVGSVGElement>(
+      "welcome-icon",
+      onElementChange,
+    ),
+  };
+
+  const createRuntime = (): CreateControlPublicationRuntime | null => {
+    type Retirement = "element" | "layout" | "other";
+    if (
+      !createControlNativeSupportIsAvailable() ||
+      !createControlElementsAreExact(render, owners)
+    ) {
+      return null;
+    }
+    const nativeCurrentTarget = TRUSTED_EVENT_CURRENT_TARGET;
+    const nativeWasPrevented = TRUSTED_EVENT_DEFAULT_PREVENTED;
+    const nativeTarget = TRUSTED_EVENT_TARGET;
+    const nativeType = TRUSTED_EVENT_TYPE;
+    const nativePhaseOf = TRUSTED_EVENT_PHASE;
+    const nativeBubbles = TRUSTED_EVENT_BUBBLES;
+    const nativeCancelable = TRUSTED_EVENT_CANCELABLE;
+    const nativeCancelBubble = TRUSTED_EVENT_CANCEL_BUBBLE;
+    const nativeButton = TRUSTED_MOUSE_BUTTON;
+    const nativeButtons = TRUSTED_MOUSE_BUTTONS;
+    const nativeCtrl = TRUSTED_MOUSE_CTRL;
+    const nativeMeta = TRUSTED_MOUSE_META;
+    const nativeAlt = TRUSTED_MOUSE_ALT;
+    const nativeShift = TRUSTED_MOUSE_SHIFT;
+    const nativeDetail = TRUSTED_UI_DETAIL;
+    const card = owners.card.element();
+    const blank = owners.blank.element();
+    if (
+      !nativeCurrentTarget ||
+      !nativeWasPrevented ||
+      !nativeTarget ||
+      !nativeType ||
+      !nativePhaseOf ||
+      !nativeBubbles ||
+      !nativeCancelable ||
+      !nativeCancelBubble ||
+      !nativeButton ||
+      !nativeButtons ||
+      !nativeCtrl ||
+      !nativeMeta ||
+      !nativeAlt ||
+      !nativeShift ||
+      !nativeDetail ||
+      !card ||
+      !blank
+    ) {
+      return null;
+    }
+    const ownerDocument = card.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const stopOwnerPropagation = ownerWindow
+      ? capturePrototypeMethod<(event: Event) => void>(
+          ownerWindow.Event.prototype,
+          "stopPropagation",
+        )
+      : null;
+    const stopOwnerImmediatePropagation = ownerWindow
+      ? capturePrototypeMethod<(event: Event) => void>(
+          ownerWindow.Event.prototype,
+          "stopImmediatePropagation",
+        )
+      : null;
+    const preventOwnerDefault = ownerWindow
+      ? capturePrototypeMethod<(event: Event) => void>(
+          ownerWindow.Event.prototype,
+          "preventDefault",
+        )
+      : null;
+    if (
+      !ownerWindow ||
+      !stopOwnerPropagation ||
+      !stopOwnerImmediatePropagation ||
+      !preventOwnerDefault ||
+      !(card instanceof ownerWindow.HTMLDivElement) ||
+      !(blank instanceof ownerWindow.HTMLButtonElement)
+    ) {
+      return null;
+    }
+
+    const guidedRoot = owners.guidedRoot.element();
+    const welcome = owners.welcome.element();
+    if (
+      render.hasGuided &&
+      (!(guidedRoot instanceof ownerWindow.HTMLDivElement) ||
+        !(welcome instanceof ownerWindow.HTMLButtonElement))
+    ) {
+      return null;
+    }
+
+    const rootEntries: [CreateControlRootRole, HTMLDivElement | null][] = [
+      ["create-card", card],
+      [
+        "guided-root",
+        render.hasGuided ? (guidedRoot as HTMLDivElement | null) : null,
+      ],
+    ];
+    const roots: CreateControlRootPublication[] = [];
+    for (const [role, element] of rootEntries) {
+      if (!element) continue;
+      const placement = searchControlPlacement(element);
+      if (!placement) return null;
+      roots.push(
+        Object.freeze({
+          role,
+          element,
+          dom: snapshotTemplateGridDom(element),
+          placement,
+        }),
+      );
+    }
+    const publishedRoots = Object.freeze(roots);
+    if (!createControlRootsMatch(ownerDocument, publishedRoots)) return null;
+
+    const identity = Symbol("dashboard-create-controls-publication");
+    const controls = new Map<
+      CreateControlActionKind,
+      CreatePublishedControl
+    >();
+    const addControl = (
+      kind: CreateControlActionKind,
+      element: HTMLButtonElement,
+      root: HTMLDivElement,
+      template: Template | null,
+    ) => {
+      const targets = searchControlNodes(element);
+      const paths = searchControlPaths(ownerDocument, targets);
+      if (!paths) return false;
+      const controlIdentity = Symbol(`dashboard-create-${kind}-control`);
+      controls.set(
+        kind,
+        Object.freeze({
+          identity: controlIdentity,
+          publicationIdentity: identity,
+          kind,
+          element,
+          root,
+          targets,
+          paths,
+          action: Object.freeze({
+            identity: Symbol(`dashboard-create-${kind}-action`),
+            publicationIdentity: identity,
+            controlIdentity,
+            kind,
+            template,
+          }),
+        }),
+      );
+      return true;
+    };
+    if (!addControl("blank", blank, card, null)) return null;
+    if (
+      render.hasGuided &&
+      (!render.welcome ||
+        !addControl(
+          "welcome",
+          welcome as HTMLButtonElement,
+          guidedRoot as HTMLDivElement,
+          render.welcome,
+        ))
+    ) {
+      return null;
+    }
+
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let layoutRetired = false;
+    let established = false;
+    let refs: CreateControlRefReplay[] = [];
+    let guard: CreateControlDomGuard | null = null;
+    let nativeProof: CreateNativeClickProof | null = null;
+    let reactRootProof: CreateReactClickProof | null = null;
+    let reactCaptureProof: CreateReactClickProof | null = null;
+    let reactBubbleProof: CreateReactClickProof | null = null;
+    let nativeBoundaryProof: CreateNativeClickProof | null = null;
+
+    const publication: CreateControlPublication = Object.freeze({
+      identity,
+      render,
+      ownerDocument,
+      card,
+      controls,
+      roots: publishedRoots,
+      retire: () => retire("other"),
+      isRetired: () => retired,
+    });
+
+    const clearEventProof = (proof?: CreateNativeClickProof) => {
+      if (proof && nativeProof !== proof) return;
+      nativeProof = null;
+      reactRootProof = null;
+      reactCaptureProof = null;
+      reactBubbleProof = null;
+      nativeBoundaryProof = null;
+    };
+    const releaseGuard = () => {
+      guard?.release();
+      guard = null;
+    };
+    const retire = (reason: Retirement) => {
+      if (reason === "layout") layoutRetired = true;
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      clearEventProof();
+      releaseNativeListeners();
+      if (cells.active === publication) {
+        cells.active = null;
+        cells.successorOf = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      if (reason === "other") {
+        releaseGuard();
+      } else {
+        queueMicrotask(() => {
+          if (cells.replay?.source !== publication) releaseGuard();
+        });
+      }
+      return true;
+    };
+    const publicationOwnsCurrentDom = () => {
+      if (
+        retired ||
+        cells.active !== publication ||
+        publication.render !== render ||
+        !createControlRenderIsExact(render) ||
+        !createControlElementsAreExact(render, owners) ||
+        !createControlRootsMatch(ownerDocument, publishedRoots) ||
+        !guard?.unchanged()
+      ) {
+        retire("other");
+        return false;
+      }
+      return true;
+    };
+    const controlForNative = (event: Event): CreatePublishedControl | null => {
+      if (nativeType(event) !== "click") return null;
+      const target = nativeTarget(event);
+      if (!(target instanceof ownerWindow.Node)) return null;
+      for (const control of controls.values()) {
+        if (control.targets.includes(target)) return control;
+      }
+      return null;
+    };
+    const exactNativeClick = (
+      event: Event,
+      origin: CreateNativeClickProof["origin"],
+      control: CreatePublishedControl,
+    ): CreateNativeClickProof | null => {
+      if (
+        !TRUSTED_IS_PROTOTYPE_OF(ownerWindow.MouseEvent.prototype, event) ||
+        !publicationOwnsCurrentDom()
+      ) {
+        return null;
+      }
+      const target = nativeTarget(event);
+      if (!(target instanceof ownerWindow.Node)) return null;
+      const expectedPath = control.paths.get(target);
+      const path = TRUSTED_EVENT_COMPOSED_PATH(event);
+      const button = nativeButton(event);
+      const buttons = nativeButtons(event);
+      const ctrlKey = nativeCtrl(event);
+      const metaKey = nativeMeta(event);
+      const altKey = nativeAlt(event);
+      const shiftKey = nativeShift(event);
+      const detail = nativeDetail(event);
+      if (
+        !expectedPath ||
+        !searchControlPathMatches(expectedPath, path, ownerDocument) ||
+        nativeCurrentTarget(event) !== ownerDocument ||
+        nativePhaseOf(event) !== ownerWindow.Event.CAPTURING_PHASE ||
+        !nativeBubbles(event) ||
+        !nativeCancelable(event) ||
+        nativeWasPrevented(event) ||
+        nativeCancelBubble(event) ||
+        !target.isConnected ||
+        target.ownerDocument !== ownerDocument ||
+        button !== 0 ||
+        buttons !== 0 ||
+        ctrlKey ||
+        metaKey ||
+        altKey ||
+        shiftKey ||
+        detail < 0 ||
+        control.publicationIdentity !== identity ||
+        control.action.publicationIdentity !== identity ||
+        control.action.controlIdentity !== control.identity ||
+        control.action.kind !== control.kind ||
+        !createControlIsEnabled(control.element, control.root)
+      ) {
+        return null;
+      }
+      if (
+        TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(event, "stopPropagation") ||
+        TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+          event,
+          "stopImmediatePropagation",
+        )
+      ) {
+        return null;
+      }
+      let propagationStopped = false;
+      const stopPropagation = () => {
+        propagationStopped = true;
+        stopOwnerPropagation(event);
+      };
+      const stopImmediatePropagation = () => {
+        propagationStopped = true;
+        stopOwnerImmediatePropagation(event);
+      };
+      if (
+        !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopPropagation", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: stopPropagation,
+        }) ||
+        !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopImmediatePropagation", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: stopImmediatePropagation,
+        })
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        identity: Symbol("dashboard-create-native-click"),
+        origin,
+        event: event as MouseEvent,
+        publication,
+        control,
+        action: control.action,
+        target,
+        path: Object.freeze([...path]),
+        bubbles: true,
+        cancelable: nativeCancelable(event),
+        button,
+        buttons,
+        detail,
+        ctrlKey,
+        metaKey,
+        altKey,
+        shiftKey,
+        propagationStopped: () => propagationStopped,
+      });
+    };
+    const blockCrossedEvent = (event: Event) => {
+      preventOwnerDefault(event);
+      stopOwnerImmediatePropagation(event);
+    };
+    const beginNativeEvent = (
+      event: Event,
+      origin: CreateNativeClickProof["origin"],
+    ) => {
+      if (nativeProof) {
+        if (nativeProof.event === event) return nativeProof;
+        if (controlForNative(event)) {
+          cells.attemptedNativeEvents.add(event);
+          blockCrossedEvent(event);
+        }
+        return null;
+      }
+      const control = controlForNative(event);
+      if (!control) return null;
+      if (cells.attemptedNativeEvents.has(event)) {
+        blockCrossedEvent(event);
+        return null;
+      }
+      cells.attemptedNativeEvents.add(event);
+      const proof = exactNativeClick(event, origin, control);
+      if (!proof) return null;
+      nativeProof = proof;
+      queueMicrotask(() => {
+        if (nativeProof !== proof) return;
+        clearEventProof(proof);
+        publication.retire();
+        requestSuccessor();
+      });
+      return proof;
+    };
+    const nativeEventStillMatches = (proof: CreateNativeClickProof) =>
+      nativeTarget(proof.event) === proof.target &&
+      nativeType(proof.event) === "click" &&
+      nativeBubbles(proof.event) === proof.bubbles &&
+      nativeCancelable(proof.event) === proof.cancelable &&
+      nativeButton(proof.event) === proof.button &&
+      nativeButtons(proof.event) === proof.buttons &&
+      nativeCtrl(proof.event) === proof.ctrlKey &&
+      nativeMeta(proof.event) === proof.metaKey &&
+      nativeAlt(proof.event) === proof.altKey &&
+      nativeShift(proof.event) === proof.shiftKey &&
+      nativeDetail(proof.event) === proof.detail &&
+      !nativeWasPrevented(proof.event) &&
+      !nativeCancelBubble(proof.event) &&
+      !proof.propagationStopped() &&
+      searchControlPathMatches(
+        proof.path,
+        TRUSTED_EVENT_COMPOSED_PATH(proof.event),
+        ownerDocument,
+      );
+
+    const reactClickMatches = (
+      event: object,
+      proof: CreateNativeClickProof,
+      currentTarget: Element,
+    ): CreateReactClickProof | null => {
+      if (
+        searchControlOwnValue(event, "_reactName") !== "onClick" ||
+        searchControlOwnValue(event, "type") !== "click" ||
+        searchControlOwnValue(event, "nativeEvent") !== proof.event ||
+        searchControlOwnValue(event, "target") !== proof.target ||
+        searchControlOwnValue(event, "currentTarget") !== currentTarget ||
+        searchControlOwnValue(event, "bubbles") !== proof.bubbles ||
+        searchControlOwnValue(event, "cancelable") !== proof.cancelable ||
+        searchControlOwnValue(event, "button") !== proof.button ||
+        searchControlOwnValue(event, "buttons") !== proof.buttons ||
+        searchControlOwnValue(event, "ctrlKey") !== proof.ctrlKey ||
+        searchControlOwnValue(event, "metaKey") !== proof.metaKey ||
+        searchControlOwnValue(event, "altKey") !== proof.altKey ||
+        searchControlOwnValue(event, "shiftKey") !== proof.shiftKey ||
+        searchControlOwnValue(event, "detail") !== proof.detail ||
+        searchControlOwnValue(event, "defaultPrevented") !==
+          nativeWasPrevented(proof.event)
+      ) {
+        return null;
+      }
+      const dispatchTarget = nativeCurrentTarget(proof.event);
+      const nativePhase = nativePhaseOf(proof.event);
+      if (
+        !dispatchTarget ||
+        nativePhase === ownerWindow.Event.NONE ||
+        (dispatchTarget !== ownerDocument &&
+          (!(dispatchTarget instanceof ownerWindow.Node) ||
+            dispatchTarget.ownerDocument !== ownerDocument ||
+            !dispatchTarget.contains(proof.control.element)))
+      ) {
+        return null;
+      }
+      return Object.freeze({ event, native: proof, dispatchTarget, nativePhase });
+    };
+
+    const startReactWrapper = (event: object, allowCurrent: object | null) => {
+      if (event === allowCurrent) return true;
+      if (
+        cells.claimedReactEvents.has(event) ||
+        cells.attemptedReactEvents.has(event)
+      ) {
+        return false;
+      }
+      cells.attemptedReactEvents.add(event);
+      return true;
+    };
+    const rootForAction = (kind: CreateControlActionKind): CreateControlRootRole =>
+      kind === "welcome" ? "guided-root" : "create-card";
+    const captureRoot = (
+      role: CreateControlRootRole,
+      event: ReactSyntheticEvent,
+    ) => {
+      if (!event || typeof event !== "object") return;
+      if (!startReactWrapper(event, null)) return;
+      const nativeEvent = searchControlOwnValue(event, "nativeEvent");
+      if (!(nativeEvent instanceof ownerWindow.Event)) return;
+      const proof =
+        nativeProof?.event === nativeEvent
+          ? nativeProof
+          : nativeCurrentTarget(nativeEvent) === ownerDocument &&
+              nativePhaseOf(nativeEvent) === ownerWindow.Event.CAPTURING_PHASE
+            ? beginNativeEvent(nativeEvent, "document-root-react-capture")
+            : null;
+      if (
+        !proof ||
+        rootForAction(proof.action.kind) !== role ||
+        reactRootProof ||
+        !publicationOwnsCurrentDom()
+      ) {
+        return;
+      }
+      const matched = reactClickMatches(event, proof, proof.control.root);
+      if (matched) reactRootProof = matched;
+    };
+    const captureControl = (
+      kind: CreateControlActionKind,
+      event: ReactSyntheticEvent,
+    ) => {
+      if (
+        !event ||
+        typeof event !== "object" ||
+        !nativeProof ||
+        nativeProof.action.kind !== kind ||
+        !reactRootProof ||
+        reactRootProof.native !== nativeProof ||
+        reactCaptureProof ||
+        !startReactWrapper(event, reactRootProof.event)
+      ) {
+        return;
+      }
+      const matched = reactClickMatches(
+        event,
+        nativeProof,
+        nativeProof.control.element,
+      );
+      if (
+        matched &&
+        matched.event === reactRootProof.event &&
+        matched.dispatchTarget === reactRootProof.dispatchTarget &&
+        matched.nativePhase === reactRootProof.nativePhase
+      ) {
+        reactCaptureProof = matched;
+      }
+    };
+
+    const rejectTerminal = (proof: CreateNativeClickProof) => {
+      clearEventProof(proof);
+      publication.retire();
+      requestSuccessor();
+    };
+    const deliver = (terminal: CreateTerminalClickProof) => {
+      const { native, capture, bubble } = terminal;
+      const control = native.control;
+      const action = native.action;
+      const template = action.template;
+      if (
+        cells.delivery !== null ||
+        cells.active !== publication ||
+        retired ||
+        publication.render !== render ||
+        render.creating !== null ||
+        render.operation !== null ||
+        action.publicationIdentity !== identity ||
+        action.controlIdentity !== control.identity ||
+        action.kind !== control.kind ||
+        controls.get(action.kind) !== control ||
+        template !== (action.kind === "welcome" ? render.welcome : null) ||
+        (action.kind === "welcome" &&
+          (!render.hasGuided || template?.id !== WELCOME_TEMPLATE_ID)) ||
+        !publicationOwnsCurrentDom() ||
+        !nativeEventStillMatches(native) ||
+        !createControlIsEnabled(control.element, control.root) ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedControls.has(control) ||
+        cells.claimedActions.has(action) ||
+        cells.claimedNativeEvents.has(native.event) ||
+        cells.claimedReactEvents.has(capture.event) ||
+        cells.claimedReactEvents.has(bubble.event)
+      ) {
+        rejectTerminal(native);
+        return false;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedControls.add(control);
+      cells.claimedActions.add(action);
+      cells.claimedNativeEvents.add(native.event);
+      cells.claimedReactEvents.add(capture.event);
+      cells.claimedReactEvents.add(bubble.event);
+      cells.delivery = identity;
+      const create = render.create;
+      publication.retire();
+      clearEventProof();
+      try {
+        void create(template ?? undefined);
+      } finally {
+        if (cells.delivery === identity) cells.delivery = null;
+      }
+      return true;
+    };
+    const activate = (
+      kind: CreateControlActionKind,
+      event: ReactSyntheticEvent,
+    ) => {
+      const proof = nativeProof;
+      const rootProof = reactRootProof;
+      const captureProof = reactCaptureProof;
+      if (
+        !event ||
+        typeof event !== "object" ||
+        !proof ||
+        proof.action.kind !== kind ||
+        !rootProof ||
+        !captureProof ||
+        rootProof.native !== proof ||
+        captureProof.native !== proof ||
+        nativeBoundaryProof !== proof ||
+        reactBubbleProof ||
+        !startReactWrapper(event, captureProof.event)
+      ) {
+        return false;
+      }
+      if (
+        event !== captureProof.event &&
+        TRUSTED_OBJECT_GET_PROTOTYPE_OF(event) !==
+          TRUSTED_OBJECT_GET_PROTOTYPE_OF(captureProof.event)
+      ) {
+        return false;
+      }
+      const matched = reactClickMatches(event, proof, proof.control.element);
+      if (
+        !matched ||
+        matched.nativePhase !== ownerWindow.Event.BUBBLING_PHASE ||
+        (matched.event === captureProof.event &&
+          (matched.dispatchTarget !== captureProof.dispatchTarget ||
+            matched.nativePhase !== captureProof.nativePhase))
+      ) {
+        rejectTerminal(proof);
+        return false;
+      }
+      reactBubbleProof = matched;
+      return deliver(
+        Object.freeze({
+          native: proof,
+          root: rootProof,
+          capture: captureProof,
+          bubble: matched,
+        }),
+      );
+    };
+
+    const onNativeCapture = (event: Event) => {
+      beginNativeEvent(event, "document-capture");
+    };
+    const onNativeBubble = (event: Event) => {
+      if (nativeProof?.event !== event) return;
+      clearEventProof(nativeProof);
+    };
+    const boundaryListeners = [...controls.values()].map((control) => {
+      const listener = (event: Event) => {
+        if (
+          nativeProof?.event === event &&
+          nativeProof.control === control &&
+          nativeCurrentTarget(event) === control.element &&
+          (nativePhaseOf(event) === ownerWindow.Event.CAPTURING_PHASE ||
+            nativePhaseOf(event) === ownerWindow.Event.AT_TARGET) &&
+          publicationOwnsCurrentDom() &&
+          createControlIsEnabled(control.element, control.root)
+        ) {
+          nativeBoundaryProof = nativeProof;
+        }
+      };
+      return Object.freeze({ control, listener });
+    });
+    const addNativeListeners = () => {
+      TRUSTED_ADD_EVENT_LISTENER(ownerDocument, "click", onNativeCapture, true);
+      TRUSTED_ADD_EVENT_LISTENER(ownerDocument, "click", onNativeBubble);
+      for (const { control, listener } of boundaryListeners) {
+        TRUSTED_ADD_EVENT_LISTENER(control.element, "click", listener, true);
+      }
+    };
+    const releaseNativeListeners = () => {
+      TRUSTED_REMOVE_EVENT_LISTENER(
+        ownerDocument,
+        "click",
+        onNativeCapture,
+        true,
+      );
+      TRUSTED_REMOVE_EVENT_LISTENER(ownerDocument, "click", onNativeBubble);
+      for (const { control, listener } of boundaryListeners) {
+        TRUSTED_REMOVE_EVENT_LISTENER(control.element, "click", listener, true);
+      }
+    };
+
+    const runtime: CreateControlPublicationRuntime = Object.freeze({
+      publication,
+      publish: () => {
+        established = true;
+        refs = createControlExpectedOwners(render, owners).map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish dashboard create controls without every committed ref",
+            );
+          }
+          return { owner, element, state: "attached" as const };
+        });
+        guard = createControlDomGuard(ownerDocument, publishedRoots, () =>
+          retire("other"),
+        );
+        if (
+          !guard ||
+          cells.active ||
+          !createControlElementsAreExact(render, owners) ||
+          !createControlRootsMatch(ownerDocument, publishedRoots) ||
+          !guard.unchanged()
+        ) {
+          releaseGuard();
+          return false;
+        }
+        cells.active = publication;
+        cells.successorOf = null;
+        cells.replay = null;
+        addNativeListeners();
+        return true;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        retire("layout");
+      },
+      noteRef: (
+        owner: CreateControlElementOwnerView,
+        element: Element | null,
+        previous: Element | null,
+      ) => {
+        if (!established) return;
+        const proof = refs.find((entry) => entry.owner === owner);
+        if (!proof) return;
+        if (
+          proof.state === "attached" &&
+          element === null &&
+          previous === proof.element
+        ) {
+          proof.state = "detached";
+        } else if (
+          proof.state === "detached" &&
+          element === proof.element &&
+          previous === null
+        ) {
+          proof.state = "reattached";
+        } else if (element !== previous) {
+          proof.state = "invalid";
+        }
+      },
+      isExactReplay: () =>
+        retired &&
+        established &&
+        ((layoutRetired &&
+          (retirement === "layout" || retirement === "element") &&
+          refs.every((entry) => entry.state === "reattached")) ||
+          (!layoutRetired &&
+            retirement === "element" &&
+            refs.some((entry) => entry.state === "reattached") &&
+            refs.every(
+              (entry) =>
+                entry.state === "attached" || entry.state === "reattached",
+            ))) &&
+        refs.length === createControlExpectedOwners(render, owners).length &&
+        refs.every((entry) => entry.owner.element() === entry.element) &&
+        createControlElementsAreExact(render, owners) &&
+        createControlRootsMatch(ownerDocument, publishedRoots) &&
+        Boolean(guard?.unchanged()),
+      replay: () =>
+        guard
+          ? Object.freeze({
+              source: publication,
+              roots: publishedRoots,
+              unchanged: guard.unchanged,
+              release: releaseGuard,
+            })
+          : null,
+      captureRoot,
+      captureControl,
+      activate,
+    });
+    return runtime;
+  };
+
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        !successorRequested &&
+        lastRuntime.isExactReplay() &&
+        cells.successorOf === lastRuntime.publication
+      ) {
+        const replay = lastRuntime.replay();
+        if (replay) {
+          cells.replay = replay;
+          successorRequested = true;
+          requestSuccessor();
+        }
+      }
+      return;
+    }
+    if (!createControlElementsAreExact(render, owners)) return;
+    const replay = cells.replay;
+    if (replay) {
+      const sameFacts = createControlRendersMatch(replay.source.render, render);
+      const exact =
+        sameFacts &&
+        replay.source.isRetired() &&
+        cells.successorOf === replay.source &&
+        replay.unchanged() &&
+        replay.roots.length > 0 &&
+        replay.roots.every((root) => {
+          const currentRoot =
+            root.role === "create-card"
+              ? owners.card.element()
+              : owners.guidedRoot.element();
+          return (
+            currentRoot === root.element &&
+            root.dom.node === root.element &&
+            templateGridDomMatches(root.dom) &&
+            searchControlPlacementMatches(
+              root.element.ownerDocument,
+              root.placement,
+            )
+          );
+        });
+      cells.replay = null;
+      replay.release();
+      if (cells.successorOf === replay.source) cells.successorOf = null;
+      if (sameFacts && !exact) return;
+    }
+    const runtime = createRuntime();
+    if (!runtime) return;
+    const previous = cells.active;
+    if (previous) previous.retire();
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish()) {
+      runtime.retireForElement();
+      currentRuntime = null;
+      return;
+    }
+    return runtime.retireForLayout;
+  };
+
+  const root = (role: CreateControlRootRole, event: ReactSyntheticEvent) =>
+    currentRuntime?.captureRoot(role, event);
+  const capture = (
+    kind: CreateControlActionKind,
+    event: ReactSyntheticEvent,
+  ) => currentRuntime?.captureControl(kind, event);
+  const bubble = (kind: CreateControlActionKind, event: ReactSyntheticEvent) => {
+    currentRuntime?.activate(kind, event);
+  };
+
+  return Object.freeze({
+    establish,
+    captureCard: owners.card.capture,
+    captureBlank: owners.blank.capture,
+    captureBlankIconFrame: owners.blankIconFrame.capture,
+    captureBlankIcon: owners.blankIcon.capture,
+    captureBlankLabel: owners.blankLabel.capture,
+    captureBlankName: owners.blankName.capture,
+    captureBlankDescription: owners.blankDescription.capture,
+    captureGuidedRoot: owners.guidedRoot.capture,
+    captureGuidedIcon: owners.guidedIcon.capture,
+    captureGuidedPrimary: owners.guidedPrimary.capture,
+    captureGuidedSecondary: owners.guidedSecondary.capture,
+    captureWelcome: owners.welcome.capture,
+    captureWelcomeIcon: owners.welcomeIcon.capture,
+    captureCardClick: (event: ReactMouseEvent<HTMLDivElement>) =>
+      root("create-card", event),
+    captureBlankClick: (event: ReactMouseEvent<HTMLButtonElement>) =>
+      capture("blank", event),
+    activateBlank: (event: ReactMouseEvent<HTMLButtonElement>) =>
+      bubble("blank", event),
+    captureGuidedClick: (event: ReactMouseEvent<HTMLDivElement>) =>
+      root("guided-root", event),
+    captureWelcomeClick: (event: ReactMouseEvent<HTMLButtonElement>) =>
+      capture("welcome", event),
+    activateWelcome: (event: ReactMouseEvent<HTMLButtonElement>) =>
+      bubble("welcome", event),
+  });
+}
+
 interface NoticeAuthority {
   mount: symbol;
   userId: string;
@@ -4613,13 +7194,3024 @@ interface NoticePublication {
   timer: ReturnType<typeof setTimeout> | null;
 }
 
-const FILTERS: { value: Filter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "mine", label: "Owned by me" },
-  { value: "shared", label: "Shared with me" },
-  { value: "starred", label: "Starred" },
-  { value: "trash", label: "Trash" },
-];
+interface FilterAuthority {
+  readonly mount: symbol;
+  readonly visit: symbol;
+  readonly user: DashboardProps["user"];
+  readonly userId: string;
+}
+
+interface FilterDefinition {
+  readonly value: Filter;
+  readonly label: string;
+}
+
+interface FilterTrustedAuthority {
+  readonly matches: (event: object) => boolean;
+  readonly read: (event: object) => boolean;
+  readonly isCurrent: () => boolean;
+}
+
+interface FilterActiveElementAuthority {
+  readonly read: (document: Document) => Element | null;
+  readonly isCurrent: () => boolean;
+}
+
+interface FilterRenderPublication {
+  readonly identity: symbol;
+  readonly mount: symbol;
+  readonly authority: FilterAuthority;
+  readonly user: DashboardProps["user"];
+  readonly userId: string;
+  readonly definitions: readonly FilterDefinition[];
+  readonly filter: Filter;
+  readonly currentFilter: () => Filter;
+  readonly changeFilter: (next: Filter) => void;
+}
+
+type FilterElementRole = "group" | Filter;
+
+interface FilterElementOwnerView {
+  readonly role: FilterElementRole;
+  readonly element: () => Element | null;
+}
+
+interface FilterRefReplay {
+  readonly owner: FilterElementOwnerView;
+  readonly element: Element;
+  state: "attached" | "detached" | "reattached" | "invalid";
+}
+
+interface FilterActionPublication {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly entryIdentity: symbol;
+  readonly filter: Filter;
+  readonly index: number;
+}
+
+interface FilterEntryPublication {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly definition: FilterDefinition;
+  readonly index: number;
+  readonly element: HTMLButtonElement;
+  readonly path: readonly EventTarget[];
+  readonly action: FilterActionPublication;
+}
+
+interface FilterPublication {
+  readonly identity: symbol;
+  readonly render: FilterRenderPublication;
+  readonly ownerDocument: Document;
+  readonly group: HTMLDivElement;
+  readonly entries: readonly FilterEntryPublication[];
+  readonly dom: TemplateGridDomSnapshot;
+  readonly placement: TemplateGridPlacement;
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+}
+
+interface FilterReplay {
+  readonly source: FilterPublication;
+  readonly dom: TemplateGridDomSnapshot;
+  readonly placement: TemplateGridPlacement;
+  readonly unchanged: () => boolean;
+  readonly release: () => void;
+}
+
+interface FilterNativeKeyProof {
+  readonly identity: symbol;
+  readonly event: KeyboardEvent;
+  readonly publication: FilterPublication;
+  readonly entry: FilterEntryPublication;
+  readonly action: FilterActionPublication;
+  readonly target: HTMLButtonElement;
+  readonly path: readonly EventTarget[];
+  readonly key: string;
+  readonly ctrlKey: boolean;
+  readonly metaKey: boolean;
+  readonly altKey: boolean;
+  readonly shiftKey: boolean;
+  readonly repeat: boolean;
+  readonly composing: boolean;
+  readonly destination: Filter;
+  readonly destinationButton: HTMLButtonElement;
+  readonly trusted: true;
+  readonly propagationStopped: () => boolean;
+  crossed: boolean;
+}
+
+interface FilterTerminalKeyProof {
+  readonly native: FilterNativeKeyProof;
+  readonly reactCaptureEvent: object;
+  readonly reactBubbleEvent: object;
+}
+
+interface FilterFocusRequest {
+  readonly source: FilterPublication;
+  readonly authority: FilterAuthority;
+  readonly changeFilter: (next: Filter) => void;
+  readonly destination: Filter;
+  readonly button: HTMLButtonElement;
+  readonly nativeEvent: KeyboardEvent;
+  readonly reactCaptureEvent: object;
+  readonly reactBubbleEvent: object;
+}
+
+interface FilterPublicationCells {
+  active: FilterPublication | null;
+  successorOf: FilterPublication | null;
+  replay: FilterReplay | null;
+  delivery: symbol | null;
+  pendingFocus: FilterFocusRequest | null;
+  readonly claimedPublications: WeakSet<FilterPublication>;
+  readonly claimedEntries: WeakSet<FilterEntryPublication>;
+  readonly claimedActions: WeakSet<FilterActionPublication>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+  readonly attemptedReactEvents: WeakSet<object>;
+  readonly attemptedNativeEvents: WeakSet<Event>;
+}
+
+interface FilterPublicationRuntime {
+  readonly publication: FilterPublication;
+  readonly publish: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: FilterElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+  ) => void;
+  readonly isExactReplay: () => boolean;
+  readonly replay: () => FilterReplay | null;
+  readonly captureGroup: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  readonly captureButton: (
+    filter: Filter,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly bubbleButton: (
+    filter: Filter,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+}
+
+interface FilterPublicationSet {
+  readonly establish: () => void | (() => void);
+  readonly captureGroup: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureButtons: ReadonlyMap<
+    Filter,
+    (element: HTMLButtonElement | null) => void | (() => void)
+  >;
+  readonly captureGroupKeyDown: (
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => void;
+  readonly captureButtonKeyDown: (
+    filter: Filter,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly keyDownButton: (
+    filter: Filter,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+}
+
+class FilterElementOwner<T extends Element> implements FilterElementOwnerView {
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    readonly role: FilterElementRole,
+    private readonly onChange: (
+      owner: FilterElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+    if (!element) return;
+    return () => {
+      if (this.current === element) this.capture(null);
+      else this.onChange(this, null, element, this.last);
+    };
+  };
+}
+
+const FILTERS = Object.freeze([
+  Object.freeze({ value: "all", label: "All" }),
+  Object.freeze({ value: "mine", label: "Owned by me" }),
+  Object.freeze({ value: "shared", label: "Shared with me" }),
+  Object.freeze({ value: "starred", label: "Starred" }),
+  Object.freeze({ value: "trash", label: "Trash" }),
+] as const satisfies readonly FilterDefinition[]);
+const FILTER_GROUP_CLASS =
+  "flex shrink-0 rounded-lg border border-line bg-surface p-0.5 text-xs";
+const FILTER_GROUP_LABEL = "Document filters";
+
+function filterDescriptorsMatch(
+  current: PropertyDescriptor | undefined,
+  expected: PropertyDescriptor,
+) {
+  if (!current) return false;
+  return (
+    current.configurable === expected.configurable &&
+    current.enumerable === expected.enumerable &&
+    current.writable === expected.writable &&
+    current.value === expected.value &&
+    current.get === expected.get &&
+    current.set === expected.set
+  );
+}
+
+function captureFilterTrustedAuthority(
+  view: Window & typeof globalThis,
+): FilterTrustedAuthority | null {
+  let probe: KeyboardEvent;
+  try {
+    probe = new view.KeyboardEvent("dashboard-filter-keyboard-intrinsic");
+  } catch {
+    return null;
+  }
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const apply = view.Reflect.apply;
+  const descriptor = getOwnPropertyDescriptor(probe, "isTrusted");
+  if (
+    !descriptor ||
+    descriptor.configurable !== false ||
+    typeof descriptor.get !== "function" ||
+    descriptor.set !== undefined
+  ) {
+    return null;
+  }
+  const expected = Object.freeze({ ...descriptor });
+  const matches = (event: object) =>
+    filterDescriptorsMatch(
+      getOwnPropertyDescriptor(event, "isTrusted"),
+      expected,
+    );
+  return Object.freeze({
+    matches,
+    read: (event: object) =>
+      apply(descriptor.get as (this: object) => boolean, event, []),
+    isCurrent: () =>
+      view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+      view.Reflect.apply === apply &&
+      matches(probe),
+  });
+}
+
+function captureFilterActiveElementAuthority(
+  view: Window & typeof globalThis,
+): FilterActiveElementAuthority | null {
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  let owner: object | null = view.Document.prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, "activeElement");
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const descriptorOwner = owner;
+      const expected = Object.freeze({ ...descriptor });
+      return Object.freeze({
+        read: (document: Document) =>
+          apply(descriptor.get as (this: Document) => Element | null, document, []),
+        isCurrent: () =>
+          view.Object.getOwnPropertyDescriptor === getOwnPropertyDescriptor &&
+          view.Object.getPrototypeOf === getPrototypeOf &&
+          view.Reflect.apply === apply &&
+          filterDescriptorsMatch(
+            getOwnPropertyDescriptor(descriptorOwner, "activeElement"),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function filterButtonClass(selected: boolean) {
+  return cn(
+    "rounded-md px-2.5 py-1",
+    selected
+      ? "bg-inverse text-white"
+      : "text-ink-3 hover:text-ink",
+  );
+}
+
+function filterDestination(
+  key: string,
+  current: number,
+): number | null {
+  if (current < 0 || current >= FILTERS.length) return null;
+  if (key === "ArrowRight" || key === "ArrowDown") {
+    return (current + 1) % FILTERS.length;
+  }
+  if (key === "ArrowLeft" || key === "ArrowUp") {
+    return (current - 1 + FILTERS.length) % FILTERS.length;
+  }
+  if (key === "Home") return current === 0 ? null : 0;
+  if (key === "End") {
+    return current === FILTERS.length - 1 ? null : FILTERS.length - 1;
+  }
+  return null;
+}
+
+function filterRenderIsExact(render: FilterRenderPublication) {
+  return (
+    Object.isFrozen(render) &&
+    Object.isFrozen(render.authority) &&
+    render.mount === render.authority.mount &&
+    render.authority.user === render.user &&
+    render.authority.userId === render.userId &&
+    render.user.id === render.userId &&
+    render.definitions === FILTERS &&
+    Object.isFrozen(render.definitions) &&
+    render.definitions.length === 5 &&
+    render.definitions.every(
+      (definition, index) =>
+        definition === FILTERS[index] &&
+        Object.isFrozen(definition),
+    ) &&
+    render.currentFilter() === render.filter
+  );
+}
+
+function filterRendersMatch(
+  previous: FilterRenderPublication,
+  current: FilterRenderPublication,
+) {
+  return (
+    previous.mount === current.mount &&
+    previous.authority === current.authority &&
+    previous.user === current.user &&
+    previous.userId === current.userId &&
+    previous.definitions === current.definitions &&
+    previous.filter === current.filter &&
+    previous.currentFilter === current.currentFilter &&
+    previous.changeFilter === current.changeFilter &&
+    filterRenderIsExact(previous) &&
+    filterRenderIsExact(current)
+  );
+}
+
+function createFilterDomGuard(
+  ownerDocument: Document,
+  group: HTMLDivElement,
+  placement: TemplateGridPlacement,
+  onMutation: () => void,
+): SearchControlDomGuard | null {
+  const MutationObserverConstructor =
+    ownerDocument.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const relevant = (mutation: MutationRecord) => {
+    if (mutation.target === group || group.contains(mutation.target)) return true;
+    if (mutation.type === "attributes") {
+      return (
+        (mutation.attributeName === "aria-disabled" ||
+          mutation.attributeName === "hidden" ||
+          mutation.attributeName === "inert") &&
+        placement.some(({ node }) => mutation.target === node)
+      );
+    }
+    if (mutation.type !== "childList") return false;
+    return placement.some(
+      ({ node, parent }) =>
+        mutation.target === parent &&
+        (mutation.previousSibling === node ||
+          mutation.nextSibling === node ||
+          [...mutation.addedNodes, ...mutation.removedNodes].some(
+            (changedNode) =>
+              changedNode === node ||
+              (changedNode.nodeType === 1 &&
+                (changedNode as Element).contains(node)),
+          )),
+    );
+  };
+  const record = (records: readonly MutationRecord[]) => {
+    if (!changed && records.some(relevant)) {
+      changed = true;
+      onMutation();
+    }
+    return changed;
+  };
+  const observer = new MutationObserverConstructor(record);
+  observer.observe(ownerDocument, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  return Object.freeze({
+    unchanged: () => {
+      record(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      record(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function createFilterPublication(
+  render: FilterRenderPublication,
+  cells: FilterPublicationCells,
+  requestSuccessor: () => void,
+): FilterPublicationSet {
+  let currentRuntime: FilterPublicationRuntime | null = null;
+  let lastRuntime: FilterPublicationRuntime | null = null;
+  let successorRequested = false;
+
+  const onElementChange = (
+    owner: FilterElementOwnerView,
+    element: Element | null,
+    previous: Element | null,
+    last: Element | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      element === null ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      currentRuntime?.retireForElement();
+      currentRuntime = null;
+    }
+    if (
+      !successorRequested &&
+      runtime?.isExactReplay() &&
+      cells.successorOf === runtime.publication
+    ) {
+      const replay = runtime.replay();
+      if (
+        replay &&
+        filterElementsAreExact(render, owners) &&
+        replay.source.group === owners.group.element()
+      ) {
+        cells.replay = replay;
+        successorRequested = true;
+        requestSuccessor();
+      }
+    }
+  };
+
+  const owners = {
+    group: new FilterElementOwner<HTMLDivElement>("group", onElementChange),
+    buttons: new Map(
+      FILTERS.map(
+        ({ value }) =>
+          [
+            value,
+            new FilterElementOwner<HTMLButtonElement>(value, onElementChange),
+          ] as const,
+      ),
+    ),
+  };
+
+  const expectedOwners = () =>
+    Object.freeze([
+      owners.group,
+      ...FILTERS.map(({ value }) => owners.buttons.get(value)!),
+    ] as FilterElementOwnerView[]);
+
+  const filterAncestorsAreEnabled = (
+    element: HTMLElement,
+    ownerDocument: Document,
+  ) => {
+    if (!TRUSTED_ELEMENT_HAS_ATTRIBUTE || !TRUSTED_ELEMENT_GET_ATTRIBUTE) {
+      return false;
+    }
+    for (
+      let current: Element | null = element;
+      current;
+      current = current.parentElement
+    ) {
+      if (
+        TRUSTED_ELEMENT_HAS_ATTRIBUTE(current, "inert") ||
+        TRUSTED_ELEMENT_HAS_ATTRIBUTE(current, "hidden") ||
+        TRUSTED_ELEMENT_GET_ATTRIBUTE(
+          current,
+          "aria-disabled",
+        )?.toLowerCase() === "true"
+      ) {
+        return false;
+      }
+      if (current === ownerDocument.documentElement) return true;
+    }
+    return false;
+  };
+
+  function filterElementsAreExact(
+    publicationRender: FilterRenderPublication,
+    publicationOwners: typeof owners,
+  ) {
+    const group = publicationOwners.group.element();
+    const ownerDocument = group?.ownerDocument;
+    const ownerWindow = ownerDocument?.defaultView;
+    if (
+      !filterRenderIsExact(publicationRender) ||
+      !ownerDocument ||
+      !ownerWindow ||
+      !(group instanceof ownerWindow.HTMLDivElement) ||
+      !group.isConnected ||
+      group.className !== FILTER_GROUP_CLASS ||
+      TRUSTED_ELEMENT_GET_ATTRIBUTE?.(group, "role") !== "toolbar" ||
+      TRUSTED_ELEMENT_GET_ATTRIBUTE?.(group, "aria-label") !==
+        FILTER_GROUP_LABEL ||
+      group.children.length !== FILTERS.length ||
+      !filterAncestorsAreEnabled(group, ownerDocument)
+    ) {
+      return false;
+    }
+    const elements: HTMLButtonElement[] = [];
+    for (let index = 0; index < FILTERS.length; index++) {
+      const definition = FILTERS[index]!;
+      const button = publicationOwners.buttons.get(definition.value)?.element();
+      const selected = publicationRender.filter === definition.value;
+      if (
+        !(button instanceof ownerWindow.HTMLButtonElement) ||
+        !button.isConnected ||
+        button.ownerDocument !== ownerDocument ||
+        group.children.item(index) !== button ||
+        button.parentElement !== group ||
+        TRUSTED_BUTTON_DISABLED?.(button) !== false ||
+        TRUSTED_ELEMENT_GET_ATTRIBUTE?.(button, "type") !== "button" ||
+        TRUSTED_ELEMENT_GET_ATTRIBUTE?.(button, "data-testid") !==
+          `filter-${definition.value}` ||
+        TRUSTED_ELEMENT_GET_ATTRIBUTE?.(button, "aria-pressed") !==
+          String(selected) ||
+        TRUSTED_ELEMENT_GET_ATTRIBUTE?.(button, "tabindex") !==
+          (selected ? "0" : "-1") ||
+        button.className !== filterButtonClass(selected) ||
+        button.textContent !== definition.label ||
+        !filterAncestorsAreEnabled(button, ownerDocument)
+      ) {
+        return false;
+      }
+      elements.push(button);
+    }
+    return new Set(elements).size === FILTERS.length;
+  }
+
+  const createRuntime = (): FilterPublicationRuntime | null => {
+    type Retirement = "element" | "layout" | "other";
+    if (!filterElementsAreExact(render, owners)) return null;
+    const group = owners.group.element();
+    if (!group) return null;
+    const ownerDocument = group.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    if (
+      !ownerWindow ||
+      !(group instanceof ownerWindow.HTMLDivElement)
+    ) {
+      return null;
+    }
+    const trustedAuthority = captureFilterTrustedAuthority(ownerWindow);
+    const activeElementAuthority =
+      captureFilterActiveElementAuthority(ownerWindow);
+    const eventCurrentTarget = capturePrototypeGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "currentTarget",
+    );
+    const eventDefaultPrevented = capturePrototypeGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "defaultPrevented",
+    );
+    const eventTarget = capturePrototypeGetter<EventTarget | null>(
+      ownerWindow.Event.prototype,
+      "target",
+    );
+    const eventType = capturePrototypeGetter<string>(
+      ownerWindow.Event.prototype,
+      "type",
+    );
+    const eventPhase = capturePrototypeGetter<number>(
+      ownerWindow.Event.prototype,
+      "eventPhase",
+    );
+    const eventBubbles = capturePrototypeGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "bubbles",
+    );
+    const eventCancelable = capturePrototypeGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelable",
+    );
+    const eventCancelBubble = capturePrototypeGetter<boolean>(
+      ownerWindow.Event.prototype,
+      "cancelBubble",
+    );
+    const keyboardKey = capturePrototypeGetter<string>(
+      ownerWindow.KeyboardEvent.prototype,
+      "key",
+    );
+    const keyboardCtrl = capturePrototypeGetter<boolean>(
+      ownerWindow.KeyboardEvent.prototype,
+      "ctrlKey",
+    );
+    const keyboardMeta = capturePrototypeGetter<boolean>(
+      ownerWindow.KeyboardEvent.prototype,
+      "metaKey",
+    );
+    const keyboardAlt = capturePrototypeGetter<boolean>(
+      ownerWindow.KeyboardEvent.prototype,
+      "altKey",
+    );
+    const keyboardShift = capturePrototypeGetter<boolean>(
+      ownerWindow.KeyboardEvent.prototype,
+      "shiftKey",
+    );
+    const keyboardRepeat = capturePrototypeGetter<boolean>(
+      ownerWindow.KeyboardEvent.prototype,
+      "repeat",
+    );
+    const keyboardComposing = capturePrototypeGetter<boolean>(
+      ownerWindow.KeyboardEvent.prototype,
+      "isComposing",
+    );
+    const composedPath = capturePrototypeMethod<
+      (event: Event) => EventTarget[]
+    >(ownerWindow.Event.prototype, "composedPath");
+    const addEventListener = capturePrototypeMethod<
+      (
+        target: EventTarget,
+        type: string,
+        listener: (event: Event) => void,
+        options?: boolean | AddEventListenerOptions,
+      ) => void
+    >(ownerWindow.EventTarget.prototype, "addEventListener");
+    const removeEventListener = capturePrototypeMethod<
+      (
+        target: EventTarget,
+        type: string,
+        listener: (event: Event) => void,
+        options?: boolean | EventListenerOptions,
+      ) => void
+    >(ownerWindow.EventTarget.prototype, "removeEventListener");
+    const addWindowEventListener =
+      capturePrototypeGetter<Window["addEventListener"]>(
+        ownerWindow,
+        "addEventListener",
+      )?.(ownerWindow) ?? null;
+    const removeWindowEventListener =
+      capturePrototypeGetter<Window["removeEventListener"]>(
+        ownerWindow,
+        "removeEventListener",
+      )?.(ownerWindow) ?? null;
+    const preventDefault = capturePrototypeMethod<(event: Event) => void>(
+      ownerWindow.Event.prototype,
+      "preventDefault",
+    );
+    const stopPropagation = capturePrototypeMethod<(event: Event) => void>(
+      ownerWindow.Event.prototype,
+      "stopPropagation",
+    );
+    const stopImmediatePropagation = capturePrototypeMethod<
+      (event: Event) => void
+    >(ownerWindow.Event.prototype, "stopImmediatePropagation");
+    const focus = capturePrototypeMethod<
+      (element: HTMLElement, options?: FocusOptions) => void
+    >(ownerWindow.HTMLElement.prototype, "focus");
+    if (
+      !eventCurrentTarget ||
+      !trustedAuthority ||
+      !activeElementAuthority ||
+      !eventDefaultPrevented ||
+      !eventTarget ||
+      !eventType ||
+      !eventPhase ||
+      !eventBubbles ||
+      !eventCancelable ||
+      !eventCancelBubble ||
+      !keyboardKey ||
+      !keyboardCtrl ||
+      !keyboardMeta ||
+      !keyboardAlt ||
+      !keyboardShift ||
+      !keyboardRepeat ||
+      !keyboardComposing ||
+      !composedPath ||
+      !addEventListener ||
+      !removeEventListener ||
+      !addWindowEventListener ||
+      !removeWindowEventListener ||
+      !preventDefault ||
+      !stopPropagation ||
+      !stopImmediatePropagation ||
+      !focus
+    ) {
+      return null;
+    }
+    let keyboardAuthorityHistoryIsClean = true;
+    const keyboardAuthorityIsCurrent = () => {
+      if (!keyboardAuthorityHistoryIsClean) return false;
+      keyboardAuthorityHistoryIsClean =
+        ownerDocument.defaultView === ownerWindow &&
+        trustedAuthority.isCurrent() &&
+        activeElementAuthority.isCurrent();
+      return keyboardAuthorityHistoryIsClean;
+    };
+
+    const placement = searchControlPlacement(group);
+    if (!placement) return null;
+    const dom = snapshotTemplateGridDom(group);
+    const identity = Symbol("dashboard-filter-publication");
+    const entries: FilterEntryPublication[] = [];
+    for (let index = 0; index < FILTERS.length; index++) {
+      const definition = FILTERS[index]!;
+      const element = owners.buttons.get(definition.value)?.element();
+      if (!(element instanceof ownerWindow.HTMLButtonElement)) return null;
+      const path = templateGridEventPath(ownerDocument, element);
+      if (!path) return null;
+      const entryIdentity = Symbol(`dashboard-filter-${definition.value}`);
+      entries.push(
+        Object.freeze({
+          identity: entryIdentity,
+          publicationIdentity: identity,
+          definition,
+          index,
+          element,
+          path,
+          action: Object.freeze({
+            identity: Symbol(
+              `dashboard-filter-${definition.value}-keyboard-action`,
+            ),
+            publicationIdentity: identity,
+            entryIdentity,
+            filter: definition.value,
+            index,
+          }),
+        }),
+      );
+    }
+    const publishedEntries = Object.freeze(entries);
+
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let layoutRetired = false;
+    let established = false;
+    let refs: FilterRefReplay[] = [];
+    let guard: SearchControlDomGuard | null = null;
+    let nativeProof: FilterNativeKeyProof | null = null;
+    let reactGroupProof: object | null = null;
+    let reactCaptureProof: object | null = null;
+    let reactBubbleProof: object | null = null;
+    let boundaryProof: FilterNativeKeyProof | null = null;
+    let terminal: FilterTerminalKeyProof | null = null;
+    let windowTerminal: FilterTerminalKeyProof | null = null;
+    let terminalWindow: Window | null = null;
+
+    const publication: FilterPublication = Object.freeze({
+      identity,
+      render,
+      ownerDocument,
+      group,
+      entries: publishedEntries,
+      dom,
+      placement,
+      retire: () => retire("other"),
+      isRetired: () => retired,
+    });
+
+    const releaseGuard = () => {
+      guard?.release();
+      guard = null;
+    };
+    const removeWindowListener = () => {
+      if (!terminalWindow) return;
+      TRUSTED_REFLECT_APPLY(removeWindowEventListener, terminalWindow, [
+        "keydown",
+        onNativeWindowBubble,
+      ]);
+      terminalWindow = null;
+    };
+    const clearProof = (proof?: FilterNativeKeyProof) => {
+      if (proof && nativeProof !== proof) return;
+      removeWindowListener();
+      nativeProof = null;
+      reactGroupProof = null;
+      reactCaptureProof = null;
+      reactBubbleProof = null;
+      boundaryProof = null;
+      terminal = null;
+      windowTerminal = null;
+    };
+    const retire = (reason: Retirement) => {
+      if (reason === "layout") layoutRetired = true;
+      if (retired) {
+        if (reason === "layout" && cells.pendingFocus?.source === publication) {
+          queueMicrotask(() => {
+            if (cells.pendingFocus?.source === publication) {
+              cells.pendingFocus = null;
+            }
+          });
+        }
+        return false;
+      }
+      retired = true;
+      retirement = reason;
+      clearProof();
+      releaseNativeListeners();
+      if (cells.active === publication) {
+        cells.active = null;
+        cells.successorOf = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      if (reason === "other") {
+        releaseGuard();
+      } else {
+        queueMicrotask(() => {
+          if (cells.replay?.source !== publication) releaseGuard();
+        });
+      }
+      if (reason === "layout" && cells.pendingFocus?.source === publication) {
+        queueMicrotask(() => {
+          if (cells.pendingFocus?.source === publication) {
+            cells.pendingFocus = null;
+          }
+        });
+      }
+      return true;
+    };
+    const groupMatches = () =>
+      group.isConnected &&
+      group.ownerDocument === ownerDocument &&
+      publication.dom.node === group &&
+      templateGridDomMatches(publication.dom) &&
+      searchControlPlacementMatches(ownerDocument, publication.placement);
+    const publicationOwnsCurrentDom = () => {
+      if (
+        retired ||
+        cells.active !== publication ||
+        publication.render !== render ||
+        !filterElementsAreExact(render, owners) ||
+        !groupMatches() ||
+        !guard?.unchanged()
+      ) {
+        retire("other");
+        return false;
+      }
+      return true;
+    };
+
+    const entryForEvent = (event: Event) => {
+      if (!keyboardAuthorityIsCurrent()) {
+        publication.retire();
+        requestSuccessor();
+        return null;
+      }
+      if (
+        eventType(event) !== "keydown" ||
+        !TRUSTED_IS_PROTOTYPE_OF(
+          ownerWindow.KeyboardEvent.prototype,
+          event,
+        )
+      ) {
+        return null;
+      }
+      const target = eventTarget(event);
+      return (
+        publishedEntries.find(({ element }) => element === target) ?? null
+      );
+    };
+    const nativeStillMatches = (proof: FilterNativeKeyProof) =>
+      keyboardAuthorityIsCurrent() &&
+      trustedAuthority.matches(proof.event) &&
+      trustedAuthority.read(proof.event) === proof.trusted &&
+      eventTarget(proof.event) === proof.target &&
+      eventType(proof.event) === "keydown" &&
+      eventBubbles(proof.event) &&
+      eventCancelable(proof.event) &&
+      keyboardKey(proof.event) === proof.key &&
+      keyboardCtrl(proof.event) === proof.ctrlKey &&
+      keyboardMeta(proof.event) === proof.metaKey &&
+      keyboardAlt(proof.event) === proof.altKey &&
+      keyboardShift(proof.event) === proof.shiftKey &&
+      keyboardRepeat(proof.event) === proof.repeat &&
+      keyboardComposing(proof.event) === proof.composing;
+
+    const exactNativeEvent = (
+      event: Event,
+      entry: FilterEntryPublication,
+    ): FilterNativeKeyProof | null => {
+      if (
+        !publicationOwnsCurrentDom() ||
+        !keyboardAuthorityIsCurrent() ||
+        !trustedAuthority.matches(event) ||
+        trustedAuthority.read(event) !== true ||
+        eventCurrentTarget(event) !== ownerDocument ||
+        eventPhase(event) !== ownerWindow.Event.CAPTURING_PHASE ||
+        !eventBubbles(event) ||
+        !eventCancelable(event) ||
+        eventDefaultPrevented(event) ||
+        eventCancelBubble(event) ||
+        activeElementAuthority.read(ownerDocument) !== entry.element ||
+        entry.publicationIdentity !== identity ||
+        entry.action.publicationIdentity !== identity ||
+        entry.action.entryIdentity !== entry.identity ||
+        render.filter !== entry.definition.value ||
+        render.currentFilter() !== render.filter
+      ) {
+        return null;
+      }
+      const key = keyboardKey(event);
+      const destinationIndex = filterDestination(key, entry.index);
+      const destination = destinationIndex === null
+        ? null
+        : publishedEntries[destinationIndex];
+      if (
+        !destination ||
+        keyboardCtrl(event) ||
+        keyboardMeta(event) ||
+        keyboardAlt(event) ||
+        keyboardShift(event) ||
+        keyboardRepeat(event) ||
+        keyboardComposing(event) ||
+        !searchControlPathMatches(
+          entry.path,
+          composedPath(event),
+          ownerDocument,
+        ) ||
+        TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+          event,
+          "stopPropagation",
+        ) ||
+        TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+          event,
+          "stopImmediatePropagation",
+        )
+      ) {
+        return null;
+      }
+      let propagationStopped = false;
+      if (
+        !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopPropagation", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: () => {
+            propagationStopped = true;
+            stopPropagation(event);
+          },
+        }) ||
+        !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopImmediatePropagation", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: () => {
+            propagationStopped = true;
+            stopImmediatePropagation(event);
+          },
+        })
+      ) {
+        return null;
+      }
+      return {
+        identity: Symbol("dashboard-filter-native-key"),
+        event: event as KeyboardEvent,
+        publication,
+        entry,
+        action: entry.action,
+        target: entry.element,
+        path: entry.path,
+        key,
+        ctrlKey: false,
+        metaKey: false,
+        altKey: false,
+        shiftKey: false,
+        repeat: false,
+        composing: false,
+        destination: destination.definition.value,
+        destinationButton: destination.element,
+        trusted: true,
+        propagationStopped: () => propagationStopped,
+        crossed: false,
+      };
+    };
+
+    const beginNativeEvent = (event: Event) => {
+      const entry = entryForEvent(event);
+      if (!entry) return null;
+      if (nativeProof) {
+        if (nativeProof.event === event) return nativeProof;
+        nativeProof.crossed = true;
+        cells.attemptedNativeEvents.add(event);
+        return null;
+      }
+      if (cells.attemptedNativeEvents.has(event)) return null;
+      cells.attemptedNativeEvents.add(event);
+      const proof = exactNativeEvent(event, entry);
+      if (!proof) return null;
+      nativeProof = proof;
+      queueMicrotask(() => {
+        if (nativeProof !== proof || terminal) return;
+        clearProof(proof);
+        publication.retire();
+        requestSuccessor();
+      });
+      return proof;
+    };
+
+    const reactEventMatches = (
+      event: object,
+      proof: FilterNativeKeyProof,
+      currentTarget: Element,
+    ) => {
+      const composing = searchControlOwnValue(event, "isComposing");
+      return (
+        searchControlOwnValue(event, "_reactName") === "onKeyDown" &&
+        searchControlOwnValue(event, "type") === "keydown" &&
+        searchControlOwnValue(event, "nativeEvent") === proof.event &&
+        searchControlOwnValue(event, "target") === proof.target &&
+        searchControlOwnValue(event, "currentTarget") === currentTarget &&
+        searchControlOwnValue(event, "bubbles") === true &&
+        searchControlOwnValue(event, "cancelable") === true &&
+        searchControlOwnValue(event, "defaultPrevented") === false &&
+        searchControlOwnValue(event, "isTrusted") === proof.trusted &&
+        searchControlOwnValue(event, "key") === proof.key &&
+        searchControlOwnValue(event, "ctrlKey") === false &&
+        searchControlOwnValue(event, "metaKey") === false &&
+        searchControlOwnValue(event, "altKey") === false &&
+        searchControlOwnValue(event, "shiftKey") === false &&
+        searchControlOwnValue(event, "repeat") === false &&
+        (composing === SEARCH_CONTROL_MISSING || composing === false)
+      );
+    };
+
+    const captureGroup = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (
+        !event ||
+        typeof event !== "object" ||
+        cells.claimedReactEvents.has(event) ||
+        cells.attemptedReactEvents.has(event)
+      ) {
+        return;
+      }
+      cells.attemptedReactEvents.add(event);
+      const proof = nativeProof;
+      if (
+        !proof ||
+        reactGroupProof ||
+        !reactEventMatches(event, proof, group) ||
+        !publicationOwnsCurrentDom()
+      ) {
+        return;
+      }
+      reactGroupProof = event;
+    };
+    const captureButton = (
+      filter: Filter,
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      const proof = nativeProof;
+      if (
+        !proof ||
+        !reactGroupProof ||
+        reactCaptureProof ||
+        event !== reactGroupProof ||
+        proof.entry.definition.value !== filter ||
+        !reactEventMatches(event, proof, proof.entry.element)
+      ) {
+        return;
+      }
+      reactCaptureProof = event;
+    };
+    const bubbleButton = (
+      filter: Filter,
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      const proof = nativeProof;
+      const isNewWrapper =
+        Boolean(event) &&
+        typeof event === "object" &&
+        event !== reactCaptureProof;
+      if (
+        !proof ||
+        !reactCaptureProof ||
+        reactBubbleProof ||
+        (isNewWrapper &&
+          (cells.claimedReactEvents.has(event) ||
+            cells.attemptedReactEvents.has(event))) ||
+        proof.entry.definition.value !== filter ||
+        !reactEventMatches(event, proof, proof.entry.element)
+      ) {
+        return;
+      }
+      if (isNewWrapper) cells.attemptedReactEvents.add(event);
+      reactBubbleProof = event;
+    };
+
+    const claim = (proof: FilterTerminalKeyProof) => {
+      const native = proof.native;
+      if (
+        cells.claimedPublications.has(publication) ||
+        cells.claimedEntries.has(native.entry) ||
+        cells.claimedActions.has(native.action) ||
+        cells.claimedNativeEvents.has(native.event) ||
+        cells.claimedReactEvents.has(proof.reactCaptureEvent) ||
+        cells.claimedReactEvents.has(proof.reactBubbleEvent)
+      ) {
+        return false;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedEntries.add(native.entry);
+      cells.claimedActions.add(native.action);
+      cells.claimedNativeEvents.add(native.event);
+      cells.claimedReactEvents.add(proof.reactCaptureEvent);
+      cells.claimedReactEvents.add(proof.reactBubbleEvent);
+      return true;
+    };
+
+    const authenticateTerminal = (proof: FilterNativeKeyProof) => {
+      if (
+        proof.crossed ||
+        boundaryProof !== proof ||
+        !reactGroupProof ||
+        reactCaptureProof !== reactGroupProof ||
+        !reactBubbleProof ||
+        !nativeStillMatches(proof) ||
+        !publicationOwnsCurrentDom() ||
+        activeElementAuthority.read(ownerDocument) !== proof.target
+      ) {
+        return null;
+      }
+      return Object.freeze({
+        native: proof,
+        reactCaptureEvent: reactGroupProof,
+        reactBubbleEvent: reactBubbleProof,
+      });
+    };
+
+    const settleTerminal = (proof: FilterTerminalKeyProof) => {
+      const native = proof.native;
+      if (
+        terminal !== proof ||
+        windowTerminal !== proof ||
+        nativeProof !== native ||
+        cells.delivery !== null ||
+        cells.active !== publication ||
+        eventCurrentTarget(native.event) !== null ||
+        eventPhase(native.event) !== ownerWindow.Event.NONE ||
+        eventDefaultPrevented(native.event) ||
+        eventCancelBubble(native.event) ||
+        native.propagationStopped() ||
+        native.crossed ||
+        activeElementAuthority.read(ownerDocument) !== native.target ||
+        render.currentFilter() !== render.filter ||
+        !nativeStillMatches(native) ||
+        !publicationOwnsCurrentDom() ||
+        !claim(proof)
+      ) {
+        clearProof(native);
+        publication.retire();
+        requestSuccessor();
+        return;
+      }
+      cells.delivery = publication.identity;
+      cells.pendingFocus = Object.freeze({
+        source: publication,
+        authority: render.authority,
+        changeFilter: render.changeFilter,
+        destination: native.destination,
+        button: native.destinationButton,
+        nativeEvent: native.event,
+        reactCaptureEvent: proof.reactCaptureEvent,
+        reactBubbleEvent: proof.reactBubbleEvent,
+      });
+      publication.retire();
+      try {
+        preventDefault(native.event);
+        render.changeFilter(native.destination);
+        requestSuccessor();
+      } finally {
+        if (cells.delivery === publication.identity) cells.delivery = null;
+      }
+    };
+
+    const onNativeWindowBubble = (event: Event) => {
+      if (
+        !terminal ||
+        terminal.native.event !== event ||
+        eventCurrentTarget(event) === null ||
+        eventPhase(event) !== ownerWindow.Event.BUBBLING_PHASE ||
+        eventDefaultPrevented(event) ||
+        eventCancelBubble(event) ||
+        terminal.native.propagationStopped() ||
+        !searchControlPathMatches(
+          terminal.native.path,
+          composedPath(event),
+          ownerDocument,
+        )
+      ) {
+        return;
+      };
+      windowTerminal = terminal;
+    }
+    const onNativeCapture = (event: Event) => {
+      beginNativeEvent(event);
+    };
+    const onNativeBubble = (event: Event) => {
+      const proof = nativeProof;
+      if (
+        !proof ||
+        proof.event !== event ||
+        eventCurrentTarget(event) !== ownerDocument ||
+        eventPhase(event) !== ownerWindow.Event.BUBBLING_PHASE ||
+        eventDefaultPrevented(event) ||
+        eventCancelBubble(event)
+      ) {
+        return;
+      }
+      const authenticated = authenticateTerminal(proof);
+      const windowTarget = proof.path.at(-1);
+      if (!authenticated || windowTarget !== ownerWindow) {
+        return;
+      }
+      terminal = authenticated;
+      terminalWindow = ownerWindow;
+      TRUSTED_REFLECT_APPLY(addWindowEventListener, ownerWindow, [
+        "keydown",
+        onNativeWindowBubble,
+      ]);
+      queueMicrotask(() => {
+        if (terminal === authenticated) settleTerminal(authenticated);
+      });
+    };
+    const boundaryListeners = publishedEntries.map((entry) => {
+      const listener = (event: Event) => {
+        if (
+          nativeProof?.event === event &&
+          nativeProof.entry === entry &&
+          eventCurrentTarget(event) === entry.element &&
+          (eventPhase(event) === ownerWindow.Event.CAPTURING_PHASE ||
+            eventPhase(event) === ownerWindow.Event.AT_TARGET) &&
+          publicationOwnsCurrentDom() &&
+          keyboardAuthorityIsCurrent() &&
+          activeElementAuthority.read(ownerDocument) === entry.element
+        ) {
+          boundaryProof = nativeProof;
+        }
+      };
+      return Object.freeze({ entry, listener });
+    });
+    const addNativeListeners = () => {
+      addEventListener(ownerDocument, "keydown", onNativeCapture, true);
+      addEventListener(ownerDocument, "keydown", onNativeBubble);
+      for (const { entry, listener } of boundaryListeners) {
+        addEventListener(entry.element, "keydown", listener, true);
+      }
+    };
+    const releaseNativeListeners = () => {
+      removeEventListener(ownerDocument, "keydown", onNativeCapture, true);
+      removeEventListener(ownerDocument, "keydown", onNativeBubble);
+      removeWindowListener();
+      for (const { entry, listener } of boundaryListeners) {
+        removeEventListener(entry.element, "keydown", listener, true);
+      };
+    }
+
+    const completePendingFocus = () => {
+      const pending = cells.pendingFocus;
+      const destination = publishedEntries.find(
+        ({ definition }) => definition.value === render.filter,
+      );
+      if (!pending) return;
+      if (
+        pending.authority !== render.authority ||
+        pending.changeFilter !== render.changeFilter ||
+        pending.destination !== render.filter ||
+        pending.button !== destination?.element ||
+        pending.source.ownerDocument !== ownerDocument ||
+        !pending.source.isRetired() ||
+        !cells.claimedPublications.has(pending.source) ||
+        !cells.claimedNativeEvents.has(pending.nativeEvent) ||
+        !cells.claimedReactEvents.has(pending.reactCaptureEvent) ||
+        !cells.claimedReactEvents.has(pending.reactBubbleEvent) ||
+        cells.active !== publication ||
+        cells.delivery !== null ||
+        !publicationOwnsCurrentDom()
+      ) {
+        cells.pendingFocus = null;
+        return;
+      }
+      cells.pendingFocus = null;
+      focus(destination.element, { preventScroll: true });
+    };
+
+    const runtime: FilterPublicationRuntime = Object.freeze({
+      publication,
+      publish: () => {
+        established = true;
+        refs = expectedOwners().map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish dashboard filters without every committed ref",
+            );
+          }
+          return { owner, element, state: "attached" as const };
+        });
+        guard = createFilterDomGuard(
+          ownerDocument,
+          group,
+          placement,
+          () => {
+            retire("other");
+            requestSuccessor();
+          },
+        );
+        if (
+          !guard ||
+          cells.active ||
+          !filterElementsAreExact(render, owners) ||
+          !groupMatches() ||
+          !guard.unchanged()
+        ) {
+          releaseGuard();
+          return false;
+        }
+        cells.active = publication;
+        cells.successorOf = null;
+        cells.replay = null;
+        addNativeListeners();
+        completePendingFocus();
+        return true;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        retire("layout");
+      },
+      noteRef: (
+        owner: FilterElementOwnerView,
+        element: Element | null,
+        previous: Element | null,
+      ) => {
+        if (!established) return;
+        const proof = refs.find((entry) => entry.owner === owner);
+        if (!proof) return;
+        if (
+          proof.state === "attached" &&
+          element === null &&
+          previous === proof.element
+        ) {
+          proof.state = "detached";
+        } else if (
+          proof.state === "detached" &&
+          element === proof.element &&
+          previous === null
+        ) {
+          proof.state = "reattached";
+        } else if (element !== previous) {
+          proof.state = "invalid";
+        }
+      },
+      isExactReplay: () =>
+        retired &&
+        established &&
+        ((layoutRetired &&
+          (retirement === "layout" || retirement === "element")) ||
+          (!layoutRetired && retirement === "element")) &&
+        refs.length === expectedOwners().length &&
+        refs.every(
+          (entry) =>
+            entry.state === "reattached" &&
+            entry.owner.element() === entry.element,
+        ) &&
+        filterElementsAreExact(render, owners) &&
+        groupMatches() &&
+        Boolean(guard?.unchanged()),
+      replay: () =>
+        guard
+          ? Object.freeze({
+              source: publication,
+              dom,
+              placement,
+              unchanged: guard.unchanged,
+              release: releaseGuard,
+            })
+          : null,
+      captureGroup,
+      captureButton,
+      bubbleButton,
+    });
+    return runtime;
+  };
+
+  const establish = () => {
+    if (lastRuntime) {
+      if (
+        !successorRequested &&
+        lastRuntime.isExactReplay() &&
+        cells.successorOf === lastRuntime.publication
+      ) {
+        const replay = lastRuntime.replay();
+        if (replay) {
+          cells.replay = replay;
+          successorRequested = true;
+          requestSuccessor();
+        }
+      }
+      return;
+    }
+    if (!filterElementsAreExact(render, owners)) return;
+    const replay = cells.replay;
+    if (replay) {
+      const sameFacts = filterRendersMatch(replay.source.render, render);
+      const exact =
+        sameFacts &&
+        replay.source.isRetired() &&
+        cells.successorOf === replay.source &&
+        replay.dom.node === owners.group.element() &&
+        replay.unchanged() &&
+        templateGridDomMatches(replay.dom) &&
+        searchControlPlacementMatches(
+          replay.source.ownerDocument,
+          replay.placement,
+        );
+      cells.replay = null;
+      replay.release();
+      if (cells.successorOf === replay.source) cells.successorOf = null;
+      if (sameFacts && !exact) return;
+    }
+    const runtime = createRuntime();
+    if (!runtime) return;
+    const previous = cells.active;
+    if (previous) previous.retire();
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish()) {
+      runtime.retireForElement();
+      currentRuntime = null;
+      return;
+    }
+    return runtime.retireForLayout;
+  };
+
+  return Object.freeze({
+    establish,
+    captureGroup: owners.group.capture,
+    captureButtons: new Map(
+      FILTERS.map(
+        ({ value }) => [value, owners.buttons.get(value)!.capture] as const,
+      ),
+    ),
+    captureGroupKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) =>
+      currentRuntime?.captureGroup(event),
+    captureButtonKeyDown: (
+      filter: Filter,
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) =>
+      currentRuntime?.captureButton(filter, event),
+    keyDownButton: (
+      filter: Filter,
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) =>
+      currentRuntime?.bubbleButton(filter, event),
+  });
+}
+
+type AccountDirection = "first" | "last";
+type AccountKeyRoute = "block" | "radix";
+
+interface AccountMenuState {
+  readonly identity: symbol;
+  readonly open: boolean;
+}
+
+interface AccountAuthority {
+  readonly mount: symbol;
+  readonly visit: symbol;
+  readonly user: DashboardProps["user"];
+  readonly userId: string;
+}
+
+interface AccountRenderPublication {
+  readonly identity: symbol;
+  readonly authority: AccountAuthority;
+  readonly user: DashboardProps["user"];
+  readonly userId: string;
+  readonly router: ReturnType<typeof useRouter>;
+  readonly routerPush: ReturnType<typeof useRouter>["push"];
+  readonly openSettings: () => void;
+  readonly signOut: () => void;
+  readonly state: AccountMenuState;
+  readonly open: boolean;
+  readonly setState: Dispatch<SetStateAction<AccountMenuState>>;
+  readonly changeOpen: (open: boolean) => void;
+}
+
+type AccountElementRole = "trigger" | "content" | "settings" | "sign-out";
+
+interface AccountElementOwnerView {
+  readonly role: AccountElementRole;
+  readonly element: () => HTMLElement | null;
+}
+
+interface AccountRefReplay {
+  readonly owner: AccountElementOwnerView;
+  readonly element: HTMLElement;
+  state: "attached" | "detached" | "reattached" | "invalid";
+}
+
+interface AccountDirectionPublication {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly direction: AccountDirection;
+  readonly key: "ArrowDown" | "ArrowUp";
+  readonly code: "ArrowDown" | "ArrowUp";
+  readonly destination: "settings" | "sign-out";
+}
+
+interface AccountKeyboardAuthority {
+  readonly base: SearchResultKeyboardAuthority;
+  readonly code: (event: Event) => string;
+  readonly location: (event: Event) => number;
+  readonly composed: (event: Event) => boolean;
+  readonly detail: (event: Event) => number;
+  readonly isKeyboardEvent: (event: object) => boolean;
+  readonly addEventListener: (
+    target: EventTarget,
+    type: string,
+    listener: (event: Event) => void,
+    options?: boolean | AddEventListenerOptions,
+  ) => void;
+  readonly removeEventListener: (
+    target: EventTarget,
+    type: string,
+    listener: (event: Event) => void,
+    options?: boolean | EventListenerOptions,
+  ) => void;
+  readonly addWindowEventListener: (
+    type: string,
+    listener: (event: Event) => void,
+  ) => void;
+  readonly removeWindowEventListener: (
+    type: string,
+    listener: (event: Event) => void,
+  ) => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface AccountRouteProof {
+  readonly event: KeyboardEvent;
+  readonly key: string;
+  readonly direction: AccountDirection | null;
+  readonly path: readonly EventTarget[];
+}
+
+interface AccountNativeKeyProof extends AccountRouteProof {
+  readonly publication: AccountPublication;
+  readonly action: AccountDirectionPublication;
+  readonly code: string;
+  readonly location: number;
+  readonly view: Window | null;
+  readonly reactCaptureEvent: object;
+  readonly reactPrototype: object;
+  readonly propagationStopped: () => boolean;
+  crossed: boolean;
+  boundary: boolean;
+  reactBubbleEvent: object | null;
+}
+
+interface AccountFocusRequest {
+  readonly source: AccountPublication;
+  readonly authority: AccountAuthority;
+  readonly state: AccountMenuState;
+  readonly nextState: AccountMenuState;
+  readonly direction: AccountDirectionPublication;
+  readonly trigger: HTMLButtonElement;
+  readonly triggerChild: TemplateGridDomSnapshot;
+  readonly settingsAction: () => void;
+  readonly signOutAction: () => void;
+  readonly nativeEvent: KeyboardEvent;
+  readonly reactCaptureEvent: object;
+  readonly reactBubbleEvent: object;
+}
+
+interface AccountPublication {
+  readonly identity: symbol;
+  readonly render: AccountRenderPublication;
+  readonly ownerDocument: Document;
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly trigger: HTMLButtonElement;
+  readonly content: HTMLDivElement | null;
+  readonly settings: HTMLDivElement | null;
+  readonly signOut: HTMLDivElement | null;
+  readonly triggerDom: TemplateGridDomSnapshot;
+  readonly triggerPlacement: TemplateGridPlacement;
+  readonly contentDom: TemplateGridDomSnapshot | null;
+  readonly contentPlacement: TemplateGridPlacement | null;
+  readonly actions: Readonly<Record<AccountDirection, AccountDirectionPublication>>;
+  readonly focus: (element: HTMLElement, options: FocusOptions) => void;
+  readonly intrinsicsAreCurrent: () => boolean;
+  readonly retire: () => boolean;
+  readonly isRetired: () => boolean;
+}
+
+interface AccountReplayGuard {
+  readonly unchanged: () => boolean;
+  readonly release: () => void;
+}
+
+interface AccountPublicationRuntime {
+  readonly publication: AccountPublication;
+  readonly publish: () => boolean;
+  readonly retireForElement: () => void;
+  readonly retireForLayout: () => void;
+  readonly noteRef: (
+    owner: AccountElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+  ) => void;
+  readonly isExactReplay: () => boolean;
+  readonly isExactNoRefLayoutReplay: () => boolean;
+  readonly releaseReplayGuard: () => void;
+  readonly captureKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  readonly routeKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => AccountKeyRoute;
+  readonly openAutoFocus: (event: Event) => void;
+}
+
+interface AccountPublicationCells {
+  active: AccountPublication | null;
+  successorOf: AccountPublication | null;
+  pendingFocus: AccountFocusRequest | null;
+  delivery: symbol | null;
+  readonly claimedPublications: WeakSet<AccountPublication>;
+  readonly claimedDirections: WeakSet<AccountDirectionPublication>;
+  readonly claimedReactEvents: WeakSet<object>;
+  readonly claimedNativeEvents: WeakSet<Event>;
+  readonly claimedAutoFocusEvents: WeakSet<Event>;
+  readonly attemptedReactEvents: WeakSet<object>;
+  readonly attemptedNativeEvents: WeakSet<Event>;
+  readonly attemptedAutoFocusEvents: WeakSet<Event>;
+}
+
+interface AccountPublicationSet {
+  readonly establish: () => void | (() => void);
+  readonly captureTrigger: (
+    element: HTMLButtonElement | null,
+  ) => void | (() => void);
+  readonly captureContent: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureSettings: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureSignOut: (
+    element: HTMLDivElement | null,
+  ) => void | (() => void);
+  readonly captureKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => void;
+  readonly routeKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => AccountKeyRoute;
+  readonly openAutoFocus: (event: Event) => void;
+}
+
+class AccountElementOwner<T extends HTMLElement>
+  implements AccountElementOwnerView
+{
+  private current: T | null = null;
+  private last: T | null = null;
+
+  constructor(
+    readonly role: AccountElementRole,
+    private readonly onChange: (
+      owner: AccountElementOwnerView,
+      element: T | null,
+      previous: T | null,
+      last: T | null,
+    ) => void,
+  ) {}
+
+  readonly element = () => this.current;
+
+  readonly capture = (element: T | null) => {
+    if (this.current === element) return;
+    const previous = this.current;
+    const last = this.last;
+    this.current = element;
+    if (element) this.last = element;
+    this.onChange(this, element, previous, last);
+    if (!element) return;
+    return () => {
+      if (this.current === element) this.capture(null);
+      else this.onChange(this, null, element, this.last);
+    };
+  };
+}
+
+function captureAccountKeyboardAuthority(
+  view: Window & typeof globalThis,
+): AccountKeyboardAuthority | null {
+  const base = captureSearchResultKeyboardAuthority(view);
+  const code = captureSearchOwnerGetter<string>(
+    view,
+    view.KeyboardEvent.prototype,
+    "code",
+  );
+  const location = captureSearchOwnerGetter<number>(
+    view,
+    view.KeyboardEvent.prototype,
+    "location",
+  );
+  const composed = captureSearchOwnerGetter<boolean>(
+    view,
+    view.Event.prototype,
+    "composed",
+  );
+  const detail = captureSearchOwnerGetter<number>(
+    view,
+    view.UIEvent.prototype,
+    "detail",
+  );
+  const isPrototypeOf = captureSearchOwnerMethod<[object], boolean>(
+    view,
+    view.Object.prototype,
+    "isPrototypeOf",
+  );
+  const addEventListener = captureSearchOwnerMethod<
+    [
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | AddEventListenerOptions,
+    ],
+    void
+  >(view, view.EventTarget.prototype, "addEventListener");
+  const removeEventListener = captureSearchOwnerMethod<
+    [
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | EventListenerOptions,
+    ],
+    void
+  >(view, view.EventTarget.prototype, "removeEventListener");
+  const addWindowEventListener = captureSearchOwnerGetter<
+    Window["addEventListener"]
+  >(view, view, "addEventListener");
+  const removeWindowEventListener = captureSearchOwnerGetter<
+    Window["removeEventListener"]
+  >(view, view, "removeEventListener");
+  const addWindowListener = addWindowEventListener?.read(view);
+  const removeWindowListener = removeWindowEventListener?.read(view);
+  if (
+    !base ||
+    !code ||
+    !location ||
+    !composed ||
+    !detail ||
+    !isPrototypeOf ||
+    !addEventListener ||
+    !removeEventListener ||
+    !addWindowEventListener ||
+    !removeWindowEventListener ||
+    typeof addWindowListener !== "function" ||
+    typeof removeWindowListener !== "function"
+  ) {
+    return null;
+  }
+  const authorities = [
+    code,
+    location,
+    composed,
+    detail,
+    isPrototypeOf,
+    addEventListener,
+    removeEventListener,
+    addWindowEventListener,
+    removeWindowEventListener,
+  ];
+  return Object.freeze({
+    base,
+    code: (event: Event) => code.read(event),
+    location: (event: Event) => location.read(event),
+    composed: (event: Event) => composed.read(event),
+    detail: (event: Event) => detail.read(event),
+    isKeyboardEvent: (event: object) =>
+      isPrototypeOf.call(view.KeyboardEvent.prototype, [event]),
+    addEventListener: (
+      target: EventTarget,
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | AddEventListenerOptions,
+    ) =>
+      addEventListener.call(target, [type, listener, options]),
+    removeEventListener: (
+      target: EventTarget,
+      type: string,
+      listener: (event: Event) => void,
+      options?: boolean | EventListenerOptions,
+    ) =>
+      removeEventListener.call(target, [type, listener, options]),
+    addWindowEventListener: (
+      type: string,
+      listener: (event: Event) => void,
+    ) =>
+      TRUSTED_REFLECT_APPLY(addWindowListener, view, [type, listener]),
+    removeWindowEventListener: (
+      type: string,
+      listener: (event: Event) => void,
+    ) =>
+      TRUSTED_REFLECT_APPLY(removeWindowListener, view, [type, listener]),
+    isCurrent: () =>
+      base.isCurrent() &&
+      authorities.every((authority) => authority.isCurrent()),
+  });
+}
+
+function accountRenderIsExact(render: AccountRenderPublication) {
+  return (
+    Object.isFrozen(render) &&
+    Object.isFrozen(render.authority) &&
+    Object.isFrozen(render.state) &&
+    typeof render.authority.mount === "symbol" &&
+    typeof render.authority.visit === "symbol" &&
+    render.authority.user === render.user &&
+    render.authority.userId === render.userId &&
+    render.user.id === render.userId &&
+    render.router.push === render.routerPush &&
+    typeof render.openSettings === "function" &&
+    typeof render.signOut === "function" &&
+    typeof render.setState === "function" &&
+    typeof render.changeOpen === "function" &&
+    typeof render.state.identity === "symbol" &&
+    render.open === render.state.open
+  );
+}
+
+function captureAccountPath(
+  expected: readonly EventTarget[],
+  actual: readonly EventTarget[],
+  ownerWindow: Window & typeof globalThis,
+): readonly EventTarget[] | null {
+  const actualWindow = actual.at(-1);
+  if (
+    expected.at(-1) !== ownerWindow ||
+    !(actualWindow instanceof ownerWindow.Window) ||
+    expected.length !== actual.length ||
+    !expected
+      .slice(0, -1)
+      .every((entry, index) => actual[index] === entry)
+  ) {
+    return null;
+  }
+  return Object.freeze([...actual]);
+}
+
+function accountPathMatches(
+  expected: readonly EventTarget[],
+  actual: readonly EventTarget[],
+) {
+  return (
+    expected.length === actual.length &&
+    expected.every((entry, index) => actual[index] === entry)
+  );
+}
+
+function accountAncestorsAreEnabled(
+  element: HTMLElement,
+  ownerDocument: Document,
+) {
+  for (
+    let current: HTMLElement | null = element;
+    current;
+    current = current.parentElement
+  ) {
+    if (
+      current.matches(":disabled") ||
+      current.hasAttribute("inert") ||
+      current.hasAttribute("hidden") ||
+      current.getAttribute("aria-disabled")?.toLowerCase() === "true"
+    ) {
+      return false;
+    }
+    if (current === ownerDocument.documentElement) return true;
+  }
+  return false;
+}
+
+function accountElementsAreExact(
+  render: AccountRenderPublication,
+  owners: {
+    trigger: AccountElementOwner<HTMLButtonElement>;
+    content: AccountElementOwner<HTMLDivElement>;
+    settings: AccountElementOwner<HTMLDivElement>;
+    signOut: AccountElementOwner<HTMLDivElement>;
+  },
+  requireCurrentRender = true,
+) {
+  const trigger = owners.trigger.element();
+  const ownerDocument = trigger?.ownerDocument;
+  const ownerWindow = ownerDocument?.defaultView;
+  if (
+    (requireCurrentRender && !accountRenderIsExact(render)) ||
+    !ownerDocument ||
+    !ownerWindow ||
+    !(trigger instanceof ownerWindow.HTMLButtonElement) ||
+    !trigger.isConnected ||
+    trigger.type !== "button" ||
+    trigger.className !== "rounded-full" ||
+    trigger.getAttribute("aria-label") !== "Account" ||
+    trigger.getAttribute("aria-haspopup") !== "menu" ||
+    trigger.getAttribute("aria-expanded") !== String(render.open) ||
+    trigger.getAttribute("data-state") !== (render.open ? "open" : "closed") ||
+    trigger.id.length === 0 ||
+    trigger.children.length !== 1 ||
+    !accountAncestorsAreEnabled(trigger, ownerDocument)
+  ) {
+    return false;
+  }
+  const content = owners.content.element();
+  const settings = owners.settings.element();
+  const signOut = owners.signOut.element();
+  if (!render.open) {
+    return (
+      content === null &&
+      settings === null &&
+      signOut === null &&
+      trigger.getAttribute("aria-controls") === null
+    );
+  }
+  if (
+    !(content instanceof ownerWindow.HTMLDivElement) ||
+    !(settings instanceof ownerWindow.HTMLDivElement) ||
+    !(signOut instanceof ownerWindow.HTMLDivElement) ||
+    !content.isConnected ||
+    !settings.isConnected ||
+    !signOut.isConnected ||
+    content.ownerDocument !== ownerDocument ||
+    settings.ownerDocument !== ownerDocument ||
+    signOut.ownerDocument !== ownerDocument ||
+    content.getAttribute("role") !== "menu" ||
+    content.getAttribute("data-state") !== "open" ||
+    content.getAttribute("aria-labelledby") !== trigger.id ||
+    content.id.length === 0 ||
+    trigger.getAttribute("aria-controls") !== content.id ||
+    content.className !==
+      "menu animate-fade-in max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto w-56" ||
+    content.children.length !== 3 ||
+    content.children.item(1) !== settings ||
+    content.children.item(2) !== signOut ||
+    settings.parentElement !== content ||
+    signOut.parentElement !== content ||
+    settings.getAttribute("role") !== "menuitem" ||
+    signOut.getAttribute("role") !== "menuitem" ||
+    settings.className !== "menu-item" ||
+    signOut.className !== "menu-item" ||
+    settings.textContent?.trim() !== "Agents & API tokens" ||
+    signOut.textContent?.trim() !== "Sign out" ||
+    !accountAncestorsAreEnabled(content, ownerDocument) ||
+    !accountAncestorsAreEnabled(settings, ownerDocument) ||
+    !accountAncestorsAreEnabled(signOut, ownerDocument)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function createAccountDomGuard(
+  ownerDocument: Document,
+  trigger: HTMLButtonElement,
+  content: HTMLDivElement | null,
+  triggerPlacement: TemplateGridPlacement,
+  contentPlacement: TemplateGridPlacement | null,
+  onMutation: () => void,
+): AccountReplayGuard | null {
+  const MutationObserverConstructor =
+    ownerDocument.defaultView?.MutationObserver;
+  if (!MutationObserverConstructor) return null;
+  let changed = false;
+  const roots = [trigger, content].filter(
+    (
+      element,
+    ): element is HTMLButtonElement | HTMLDivElement => element !== null,
+  );
+  const placements = contentPlacement
+    ? [...triggerPlacement, ...contentPlacement]
+    : triggerPlacement;
+  const relevant = (mutation: MutationRecord) => {
+    if (
+      roots.some(
+        (root) => mutation.target === root || root.contains(mutation.target),
+      )
+    ) {
+      return true;
+    }
+    if (mutation.type === "attributes") {
+      return (
+        (mutation.attributeName === "aria-disabled" ||
+          mutation.attributeName === "hidden" ||
+          mutation.attributeName === "inert") &&
+        placements.some(({ node }) => mutation.target === node)
+      );
+    }
+    if (mutation.type !== "childList") return false;
+    return placements.some(
+      ({ node, parent }) =>
+        mutation.target === parent &&
+        (mutation.previousSibling === node ||
+          mutation.nextSibling === node ||
+          [...mutation.addedNodes, ...mutation.removedNodes].some(
+            (changedNode) =>
+              changedNode === node ||
+              (changedNode.nodeType === 1 &&
+                (changedNode as Element).contains(node)),
+          )),
+    );
+  };
+  const record = (records: readonly MutationRecord[]) => {
+    if (!changed && records.some(relevant)) {
+      changed = true;
+      onMutation();
+    }
+    return changed;
+  };
+  const observer = new MutationObserverConstructor(record);
+  observer.observe(ownerDocument, {
+    attributeOldValue: true,
+    attributes: true,
+    characterData: true,
+    childList: true,
+    subtree: true,
+  });
+  return Object.freeze({
+    unchanged: () => {
+      record(observer.takeRecords());
+      return !changed;
+    },
+    release: () => {
+      record(observer.takeRecords());
+      observer.disconnect();
+    },
+  });
+}
+
+function createAccountPublication(
+  render: AccountRenderPublication,
+  cells: AccountPublicationCells,
+  requestSuccessor: () => void,
+): AccountPublicationSet {
+  let currentRuntime: AccountPublicationRuntime | null = null;
+  let lastRuntime: AccountPublicationRuntime | null = null;
+  let successorRequested = false;
+  let noRefLayoutReplayUsed = false;
+
+  const onElementChange = (
+    owner: AccountElementOwnerView,
+    element: HTMLElement | null,
+    previous: HTMLElement | null,
+    last: HTMLElement | null,
+  ) => {
+    const runtime = currentRuntime ?? lastRuntime;
+    runtime?.noteRef(owner, element, previous);
+    if (
+      element === null ||
+      (element !== null && last !== null && element !== last)
+    ) {
+      currentRuntime?.retireForElement();
+      currentRuntime = null;
+    }
+    if (
+      !successorRequested &&
+      runtime?.isExactReplay() &&
+      cells.successorOf === runtime.publication
+    ) {
+      successorRequested = true;
+      requestSuccessor();
+    }
+  };
+
+  const owners = {
+    trigger: new AccountElementOwner<HTMLButtonElement>(
+      "trigger",
+      onElementChange,
+    ),
+    content: new AccountElementOwner<HTMLDivElement>(
+      "content",
+      onElementChange,
+    ),
+    settings: new AccountElementOwner<HTMLDivElement>(
+      "settings",
+      onElementChange,
+    ),
+    signOut: new AccountElementOwner<HTMLDivElement>(
+      "sign-out",
+      onElementChange,
+    ),
+  };
+  const expectedOwners = () =>
+    render.open
+      ? [owners.trigger, owners.content, owners.settings, owners.signOut]
+      : [owners.trigger];
+
+  const createRuntime = (): AccountPublicationRuntime | null => {
+    type Retirement = "element" | "layout" | "other";
+    if (!accountElementsAreExact(render, owners)) return null;
+    const trigger = owners.trigger.element();
+    if (!trigger) return null;
+    const ownerDocument = trigger.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const content = owners.content.element();
+    const settings = owners.settings.element();
+    const signOut = owners.signOut.element();
+    const triggerPlacement = searchControlPlacement(trigger);
+    const contentPlacement = content ? searchControlPlacement(content) : null;
+    const keyboard = ownerWindow
+      ? captureAccountKeyboardAuthority(ownerWindow)
+      : null;
+    const triggerPath = templateGridEventPath(ownerDocument, trigger);
+    if (
+      !ownerWindow ||
+      !keyboard ||
+      !triggerPlacement ||
+      !triggerPath ||
+      (render.open && (!content || !settings || !signOut || !contentPlacement))
+    ) {
+      return null;
+    }
+
+    const identity = Symbol("dashboard-account-publication");
+    const actions = Object.freeze({
+      first: Object.freeze({
+        identity: Symbol("dashboard-account-first"),
+        publicationIdentity: identity,
+        direction: "first" as const,
+        key: "ArrowDown" as const,
+        code: "ArrowDown" as const,
+        destination: "settings" as const,
+      }),
+      last: Object.freeze({
+        identity: Symbol("dashboard-account-last"),
+        publicationIdentity: identity,
+        direction: "last" as const,
+        key: "ArrowUp" as const,
+        code: "ArrowUp" as const,
+        destination: "sign-out" as const,
+      }),
+    });
+    const triggerDom = snapshotTemplateGridDom(trigger);
+    const contentDom = content ? snapshotTemplateGridDom(content) : null;
+    let retired = false;
+    let retirement: Retirement | null = null;
+    let layoutRetired = false;
+    let established = false;
+    let refs: AccountRefReplay[] = [];
+    let guard: AccountReplayGuard | null = null;
+    let keyboardHistoryIsClean = true;
+    let routeProof: AccountRouteProof | null = null;
+    let nativeProof: AccountNativeKeyProof | null = null;
+    let nativeListening = false;
+    let terminalListening = false;
+    const reactCaptureCandidates = new WeakMap<Event, object>();
+
+    const intrinsicsAreCurrent = () => {
+      if (!keyboardHistoryIsClean) return false;
+      keyboardHistoryIsClean =
+        ownerDocument.defaultView === ownerWindow && keyboard.isCurrent();
+      return keyboardHistoryIsClean;
+    };
+    const publication: AccountPublication = Object.freeze({
+      identity,
+      render,
+      ownerDocument,
+      ownerWindow,
+      trigger,
+      content,
+      settings,
+      signOut,
+      triggerDom,
+      triggerPlacement,
+      contentDom,
+      contentPlacement,
+      actions,
+      focus: keyboard.base.focus,
+      intrinsicsAreCurrent,
+      retire: () => retire("other"),
+      isRetired: () => retired,
+    });
+
+    const exactDomMatches = () =>
+      accountElementsAreExact(render, owners) &&
+      templateGridDomMatches(triggerDom) &&
+      searchControlPlacementMatches(ownerDocument, triggerPlacement) &&
+      (render.open
+        ? Boolean(
+            contentDom &&
+              contentPlacement &&
+              templateGridDomMatches(contentDom) &&
+              searchControlPlacementMatches(ownerDocument, contentPlacement),
+          )
+        : true);
+    const replayDomMatches = () =>
+      accountElementsAreExact(render, owners, false) &&
+      templateGridDomMatches(triggerDom) &&
+      searchControlPlacementMatches(ownerDocument, triggerPlacement) &&
+      (render.open
+        ? Boolean(
+            contentDom &&
+              contentPlacement &&
+              templateGridDomMatches(contentDom) &&
+              searchControlPlacementMatches(ownerDocument, contentPlacement),
+          )
+        : true);
+    const publicationOwnsCurrentDom = () => {
+      if (
+        retired ||
+        cells.active !== publication ||
+        publication.render !== render ||
+        !accountRenderIsExact(render) ||
+        !exactDomMatches() ||
+        !guard?.unchanged()
+      ) {
+        if (retire("other")) requestSuccessor();
+        return false;
+      }
+      return true;
+    };
+    const removeTerminalListener = () => {
+      if (!terminalListening) return;
+      terminalListening = false;
+      keyboard.removeWindowEventListener("keydown", onWindowTerminal);
+    };
+    const clearProof = () => {
+      removeTerminalListener();
+      routeProof = null;
+      nativeProof = null;
+    };
+    const releaseNativeListeners = () => {
+      if (!nativeListening) {
+        removeTerminalListener();
+        return;
+      }
+      nativeListening = false;
+      keyboard.removeEventListener(
+        trigger,
+        "keydown",
+        onNativeCapture,
+        true,
+      );
+      keyboard.removeEventListener(trigger, "keydown", onNativeBoundary);
+      removeTerminalListener();
+    };
+    const releaseGuard = () => {
+      guard?.release();
+      guard = null;
+    };
+    const retire = (reason: Retirement) => {
+      if (reason === "layout") layoutRetired = true;
+      if (retired) return false;
+      retired = true;
+      retirement = reason;
+      clearProof();
+      releaseNativeListeners();
+      if (cells.active === publication) {
+        cells.active = null;
+        cells.successorOf = publication;
+      }
+      if (currentRuntime?.publication === publication) currentRuntime = null;
+      if (reason === "other") releaseGuard();
+      else {
+        queueMicrotask(() => {
+          releaseGuard();
+        });
+      }
+      if (
+        reason === "layout" &&
+        cells.pendingFocus?.source === publication
+      ) {
+        queueMicrotask(() => {
+          if (cells.pendingFocus?.source === publication) {
+            cells.pendingFocus = null;
+          }
+        });
+      }
+      return true;
+    };
+
+    const routeEvent = (event: Event): AccountRouteProof | null => {
+      try {
+        if (!intrinsicsAreCurrent()) {
+          if (retire("other")) requestSuccessor();
+          return null;
+        }
+        const path = captureAccountPath(
+          triggerPath,
+          keyboard.base.composedPath(event),
+          ownerWindow,
+        );
+        if (
+          !publicationOwnsCurrentDom() ||
+          !keyboard.isKeyboardEvent(event) ||
+          keyboard.base.type(event) !== "keydown" ||
+          keyboard.base.currentTarget(event) !== trigger ||
+          (keyboard.base.phase(event) !== ownerWindow.Event.AT_TARGET &&
+            keyboard.base.phase(event) !==
+              ownerWindow.Event.CAPTURING_PHASE) ||
+          keyboard.base.target(event) !== trigger ||
+          !keyboard.base.bubbles(event) ||
+          !path
+        ) {
+          return null;
+        }
+        const key = keyboard.base.key(event);
+        return Object.freeze({
+          event: event as KeyboardEvent,
+          key,
+          direction:
+            key === "ArrowDown" ? "first" : key === "ArrowUp" ? "last" : null,
+          path,
+        });
+      } catch {
+        return null;
+      }
+    };
+    const reactEventMatches = (
+      event: object,
+      proof: AccountRouteProof,
+      phase: number,
+      requireTrusted: boolean,
+      expectedView?: Window | null,
+      expectedCurrentTarget: EventTarget | null = trigger,
+    ) => {
+      const reactPrototype = TRUSTED_OBJECT_GET_PROTOTYPE_OF(event);
+      const isDefaultPrevented = searchControlOwnValue(
+        event,
+        "isDefaultPrevented",
+      );
+      const isPropagationStopped = searchControlOwnValue(
+        event,
+        "isPropagationStopped",
+      );
+      try {
+        return (
+          reactPrototype !== null &&
+          reactPrototype !== ownerWindow.Object.prototype &&
+          searchControlOwnValue(event, "type") === "keydown" &&
+          searchControlOwnValue(event, "nativeEvent") === proof.event &&
+          searchControlOwnValue(event, "target") === trigger &&
+          searchControlOwnValue(event, "currentTarget") ===
+            expectedCurrentTarget &&
+          searchControlOwnValue(event, "eventPhase") === phase &&
+          searchControlOwnValue(event, "bubbles") === true &&
+          searchControlOwnValue(event, "cancelable") === true &&
+          searchControlOwnValue(event, "defaultPrevented") === false &&
+          (!requireTrusted ||
+            searchControlOwnValue(event, "isTrusted") === true) &&
+          searchControlOwnValue(event, "key") === proof.key &&
+          searchControlOwnValue(event, "code") ===
+            keyboard.code(proof.event) &&
+          searchControlOwnValue(event, "location") ===
+            keyboard.location(proof.event) &&
+          searchControlOwnValue(event, "ctrlKey") ===
+            keyboard.base.ctrlKey(proof.event) &&
+          searchControlOwnValue(event, "metaKey") ===
+            keyboard.base.metaKey(proof.event) &&
+          searchControlOwnValue(event, "altKey") ===
+            keyboard.base.altKey(proof.event) &&
+          searchControlOwnValue(event, "shiftKey") ===
+            keyboard.base.shiftKey(proof.event) &&
+          searchControlOwnValue(event, "repeat") ===
+            keyboard.base.repeat(proof.event) &&
+          searchControlOwnValue(event, "view") ===
+            (expectedView === undefined
+              ? keyboard.base.view(proof.event)
+              : expectedView) &&
+          typeof isDefaultPrevented === "function" &&
+          !isDefaultPrevented() &&
+          typeof isPropagationStopped === "function" &&
+          !isPropagationStopped()
+        );
+      } catch {
+        return false;
+      }
+    };
+    const exactNativeEvent = (
+      proof: AccountRouteProof,
+    ): AccountNativeKeyProof | null => {
+      const event = proof.event;
+      const action = proof.direction ? actions[proof.direction] : null;
+      const reactCaptureEvent = reactCaptureCandidates.get(event);
+      if (!action || !reactCaptureEvent) return null;
+      try {
+        const eventView = keyboard.base.view(event);
+        if (
+          render.open ||
+          render.state.open ||
+          action.publicationIdentity !== identity ||
+          keyboard.base.defaultPrevented(event) ||
+          keyboard.base.cancelBubble(event) ||
+          !keyboard.base.cancelable(event) ||
+          !keyboard.composed(event) ||
+          keyboard.detail(event) !== 0 ||
+          keyboard.code(event) !== action.code ||
+          keyboard.location(event) !== 0 ||
+          keyboard.base.ctrlKey(event) ||
+          keyboard.base.metaKey(event) ||
+          keyboard.base.altKey(event) ||
+          keyboard.base.shiftKey(event) ||
+          keyboard.base.repeat(event) ||
+          keyboard.base.composing(event) ||
+          !keyboard.base.trusted.matches(event) ||
+          keyboard.base.trusted.read(event) !== true ||
+          (eventView !== null && eventView !== ownerWindow) ||
+          keyboard.base.activeElement.read(ownerDocument) !== trigger ||
+          TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+            event,
+            "preventDefault",
+          ) ||
+          TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+            event,
+            "stopPropagation",
+          ) ||
+          TRUSTED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(
+            event,
+            "stopImmediatePropagation",
+          ) ||
+          !reactEventMatches(
+            reactCaptureEvent,
+            proof,
+            ownerWindow.Event.CAPTURING_PHASE,
+            true,
+            eventView,
+            null,
+          )
+        ) {
+          return null;
+        }
+        let propagationStopped = false;
+        if (
+          !TRUSTED_REFLECT_DEFINE_PROPERTY(event, "stopPropagation", {
+            configurable: false,
+            enumerable: false,
+            writable: false,
+            value: () => {
+              propagationStopped = true;
+              keyboard.base.stopPropagation(event);
+            },
+          }) ||
+          !TRUSTED_REFLECT_DEFINE_PROPERTY(
+            event,
+            "stopImmediatePropagation",
+            {
+              configurable: false,
+              enumerable: false,
+              writable: false,
+              value: () => {
+                propagationStopped = true;
+                keyboard.base.stopImmediatePropagation(event);
+              },
+            },
+          )
+        ) {
+          return null;
+        }
+        return {
+          ...proof,
+          publication,
+          action,
+          code: action.code,
+          location: 0,
+          view: eventView,
+          reactCaptureEvent,
+          reactPrototype: TRUSTED_OBJECT_GET_PROTOTYPE_OF(
+            reactCaptureEvent,
+          )!,
+          propagationStopped: () => propagationStopped,
+          crossed: false,
+          boundary: false,
+          reactBubbleEvent: null,
+        };
+      } catch {
+        return null;
+      }
+    };
+    const nativeStillMatches = (proof: AccountNativeKeyProof) => {
+      try {
+        return (
+          intrinsicsAreCurrent() &&
+          keyboard.base.trusted.matches(proof.event) &&
+          keyboard.base.trusted.read(proof.event) === true &&
+          keyboard.base.type(proof.event) === "keydown" &&
+          keyboard.base.target(proof.event) === trigger &&
+          keyboard.base.bubbles(proof.event) &&
+          keyboard.base.cancelable(proof.event) &&
+          keyboard.composed(proof.event) &&
+          keyboard.detail(proof.event) === 0 &&
+          keyboard.base.key(proof.event) === proof.action.key &&
+          keyboard.code(proof.event) === proof.code &&
+          keyboard.location(proof.event) === proof.location &&
+          keyboard.base.view(proof.event) === proof.view &&
+          !keyboard.base.ctrlKey(proof.event) &&
+          !keyboard.base.metaKey(proof.event) &&
+          !keyboard.base.altKey(proof.event) &&
+          !keyboard.base.shiftKey(proof.event) &&
+          !keyboard.base.repeat(proof.event) &&
+          !keyboard.base.composing(proof.event) &&
+          accountPathMatches(
+            proof.path,
+            keyboard.base.composedPath(proof.event),
+          )
+        );
+      } catch {
+        return false;
+      }
+    };
+    const claim = (proof: AccountNativeKeyProof) => {
+      const bubble = proof.reactBubbleEvent;
+      if (
+        !bubble ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedDirections.has(proof.action) ||
+        cells.claimedNativeEvents.has(proof.event) ||
+        cells.claimedReactEvents.has(proof.reactCaptureEvent) ||
+        cells.claimedReactEvents.has(bubble)
+      ) {
+        return false;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedDirections.add(proof.action);
+      cells.claimedNativeEvents.add(proof.event);
+      cells.claimedReactEvents.add(proof.reactCaptureEvent);
+      cells.claimedReactEvents.add(bubble);
+      return true;
+    };
+    const openAutoFocus = (event: Event) => {
+      const pending = cells.pendingFocus;
+      if (
+        !pending ||
+        !(event instanceof ownerWindow.CustomEvent) ||
+        cells.attemptedAutoFocusEvents.has(event) ||
+        cells.claimedAutoFocusEvents.has(event)
+      ) {
+        return;
+      }
+      cells.attemptedAutoFocusEvents.add(event);
+      const destination =
+        pending.direction.destination === "settings" ? settings : signOut;
+      if (
+        !render.open ||
+        !content ||
+        !settings ||
+        !signOut ||
+        !destination ||
+        pending.authority !== render.authority ||
+        pending.state !== pending.source.render.state ||
+        pending.nextState !== render.state ||
+        pending.nextState.open !== true ||
+        pending.trigger !== trigger ||
+        pending.settingsAction !== render.openSettings ||
+        pending.signOutAction !== render.signOut ||
+        pending.source.trigger.children.item(0) !==
+          pending.triggerChild.node ||
+        !templateGridDomMatches(pending.triggerChild) ||
+        !pending.source.isRetired() ||
+        !pending.source.intrinsicsAreCurrent() ||
+        !cells.claimedPublications.has(pending.source) ||
+        !cells.claimedDirections.has(pending.direction) ||
+        !cells.claimedNativeEvents.has(pending.nativeEvent) ||
+        !cells.claimedReactEvents.has(pending.reactCaptureEvent) ||
+        !cells.claimedReactEvents.has(pending.reactBubbleEvent) ||
+        cells.active !== publication ||
+        cells.delivery !== null ||
+        !publicationOwnsCurrentDom() ||
+        keyboard.base.type(event) !== "focusScope.autoFocusOnMount" ||
+        keyboard.base.target(event) !== content ||
+        keyboard.base.currentTarget(event) !== content ||
+        keyboard.base.phase(event) !== ownerWindow.Event.AT_TARGET ||
+        keyboard.base.bubbles(event) ||
+        !keyboard.base.cancelable(event) ||
+        keyboard.base.defaultPrevented(event) ||
+        keyboard.base.cancelBubble(event) ||
+        keyboard.base.activeElement.read(ownerDocument) !== trigger
+      ) {
+        return;
+      }
+      cells.claimedAutoFocusEvents.add(event);
+      keyboard.base.preventDefault(event);
+      if (!keyboard.base.defaultPrevented(event)) return;
+      cells.pendingFocus = null;
+      pending.source.focus(destination, { preventScroll: true });
+    };
+    const onWindowTerminal = (event: Event) => {
+      const proof = nativeProof;
+      if (
+        !proof ||
+        proof.event !== event ||
+        !proof.boundary ||
+        !proof.reactBubbleEvent ||
+        proof.crossed ||
+        proof.propagationStopped() ||
+        cells.delivery !== null
+      ) {
+        return;
+      }
+      try {
+        if (
+          keyboard.base.currentTarget(event) !== proof.path.at(-1) ||
+          keyboard.base.phase(event) !== ownerWindow.Event.BUBBLING_PHASE ||
+          keyboard.base.defaultPrevented(event) ||
+          keyboard.base.cancelBubble(event) ||
+          searchControlOwnValue(
+            proof.reactCaptureEvent,
+            "currentTarget",
+          ) !== null ||
+          searchControlOwnValue(
+            proof.reactBubbleEvent,
+            "currentTarget",
+          ) !== null ||
+          keyboard.base.activeElement.read(ownerDocument) !== trigger ||
+          render.state.open ||
+          !nativeStillMatches(proof) ||
+          !publicationOwnsCurrentDom() ||
+          !claim(proof)
+        ) {
+          return;
+        }
+        const triggerChild = trigger.children.item(0);
+        if (!(triggerChild instanceof ownerWindow.HTMLElement)) return;
+        const nextState = Object.freeze({
+          identity: Symbol("dashboard-account-open"),
+          open: true,
+        });
+        cells.delivery = publication.identity;
+        cells.pendingFocus = Object.freeze({
+          source: publication,
+          authority: render.authority,
+          state: render.state,
+          nextState,
+          direction: proof.action,
+          trigger,
+          triggerChild: snapshotTemplateGridDom(triggerChild),
+          settingsAction: render.openSettings,
+          signOutAction: render.signOut,
+          nativeEvent: proof.event,
+          reactCaptureEvent: proof.reactCaptureEvent,
+          reactBubbleEvent: proof.reactBubbleEvent,
+        });
+        publication.retire();
+        keyboard.base.preventDefault(event);
+        if (!keyboard.base.defaultPrevented(event)) {
+          cells.pendingFocus = null;
+          return;
+        }
+        render.setState((current) =>
+          current === render.state && !current.open ? nextState : current,
+        );
+        requestSuccessor();
+      } finally {
+        if (cells.delivery === publication.identity) cells.delivery = null;
+      }
+    };
+    const onNativeCapture = (event: Event) => {
+      const proof = routeEvent(event);
+      if (!proof) return;
+      if (routeProof) {
+        if (routeProof.event !== event && nativeProof) {
+          nativeProof.crossed = true;
+        }
+        if (proof.direction) cells.attemptedNativeEvents.add(event);
+        return;
+      }
+      routeProof = proof;
+      if (!proof.direction) return;
+      if (cells.attemptedNativeEvents.has(event)) return;
+      cells.attemptedNativeEvents.add(event);
+      nativeProof = exactNativeEvent(proof);
+      if (nativeProof) {
+        terminalListening = true;
+        keyboard.addWindowEventListener("keydown", onWindowTerminal);
+      }
+      queueMicrotask(() => {
+        if (routeProof !== proof) return;
+        const directional = proof.direction !== null;
+        clearProof();
+        if (directional && !retired) {
+          publication.retire();
+          requestSuccessor();
+        }
+      });
+    };
+    const onNativeBoundary = (event: Event) => {
+      if (
+        nativeProof?.event === event &&
+        keyboard.base.currentTarget(event) === trigger &&
+        keyboard.base.phase(event) === ownerWindow.Event.AT_TARGET &&
+        publicationOwnsCurrentDom() &&
+        intrinsicsAreCurrent() &&
+        keyboard.base.activeElement.read(ownerDocument) === trigger
+      ) {
+        nativeProof.boundary = true;
+      }
+    };
+    const captureKeyDown = (
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ) => {
+      if (
+        !event ||
+        typeof event !== "object" ||
+        cells.claimedReactEvents.has(event) ||
+        cells.attemptedReactEvents.has(event)
+      ) {
+        return;
+      }
+      cells.attemptedReactEvents.add(event);
+      const nativeEvent = searchControlOwnValue(event, "nativeEvent");
+      if (
+        nativeEvent instanceof ownerWindow.Event &&
+        searchControlOwnValue(event, "currentTarget") === trigger &&
+        searchControlOwnValue(event, "eventPhase") ===
+          ownerWindow.Event.CAPTURING_PHASE
+      ) {
+        reactCaptureCandidates.set(nativeEvent, event);
+      }
+    };
+    const routeKeyDown = (
+      event: ReactKeyboardEvent<HTMLButtonElement>,
+    ): AccountKeyRoute => {
+      if (!event || typeof event !== "object") return "block";
+      const nativeEvent = searchControlOwnValue(event, "nativeEvent");
+      const route = routeProof;
+      if (
+        !route ||
+        nativeEvent !== route.event ||
+        searchControlOwnValue(event, "currentTarget") !== trigger
+      ) {
+        return "block";
+      }
+      if (!route.direction) {
+        const exact = reactEventMatches(
+          event,
+          route,
+          ownerWindow.Event.BUBBLING_PHASE,
+          false,
+        );
+        routeProof = null;
+        return exact ? "radix" : "block";
+      }
+      const proof = nativeProof;
+      const isNewWrapper = event !== proof?.reactCaptureEvent;
+      if (
+        !proof ||
+        proof.event !== nativeEvent ||
+        !proof.boundary ||
+        proof.reactBubbleEvent ||
+        (isNewWrapper &&
+          (cells.claimedReactEvents.has(event) ||
+            cells.attemptedReactEvents.has(event)))
+      ) {
+        return "block";
+      }
+      if (isNewWrapper) cells.attemptedReactEvents.add(event);
+      if (
+        TRUSTED_OBJECT_GET_PROTOTYPE_OF(event) !== proof.reactPrototype ||
+        !reactEventMatches(
+          event,
+          proof,
+          isNewWrapper
+            ? ownerWindow.Event.BUBBLING_PHASE
+            : ownerWindow.Event.CAPTURING_PHASE,
+          true,
+        ) ||
+        !nativeStillMatches(proof) ||
+        !publicationOwnsCurrentDom()
+      ) {
+        return "block";
+      }
+      proof.reactBubbleEvent = event;
+      return "block";
+    };
+
+    const runtime: AccountPublicationRuntime = Object.freeze({
+      publication,
+      publish: () => {
+        established = true;
+        refs = expectedOwners().map((owner) => {
+          const element = owner.element();
+          if (!element) {
+            throw new Error(
+              "Cannot publish the Account menu without every committed ref",
+            );
+          }
+          return { owner, element, state: "attached" as const };
+        });
+        guard = createAccountDomGuard(
+          ownerDocument,
+          trigger,
+          content,
+          triggerPlacement,
+          contentPlacement,
+          () => {
+            retire("other");
+            requestSuccessor();
+          },
+        );
+        if (
+          !guard ||
+          cells.active ||
+          !exactDomMatches() ||
+          !guard.unchanged()
+        ) {
+          releaseGuard();
+          return false;
+        }
+        cells.active = publication;
+        cells.successorOf = null;
+        if (!render.open) {
+          nativeListening = true;
+          keyboard.addEventListener(
+            trigger,
+            "keydown",
+            onNativeCapture,
+            true,
+          );
+          keyboard.addEventListener(trigger, "keydown", onNativeBoundary);
+        }
+        return true;
+      },
+      retireForElement: () => {
+        retire("element");
+      },
+      retireForLayout: () => {
+        retire("layout");
+      },
+      noteRef: (
+        owner: AccountElementOwnerView,
+        element: HTMLElement | null,
+        previous: HTMLElement | null,
+      ) => {
+        if (!established) return;
+        const proof = refs.find((entry) => entry.owner === owner);
+        if (!proof) return;
+        if (
+          proof.state === "attached" &&
+          element === null &&
+          previous === proof.element
+        ) {
+          proof.state = "detached";
+        } else if (
+          proof.state === "detached" &&
+          element === proof.element &&
+          previous === null
+        ) {
+          proof.state = "reattached";
+        } else if (element !== previous) {
+          proof.state = "invalid";
+        }
+      },
+      isExactReplay: () =>
+        retired &&
+        established &&
+        ((layoutRetired &&
+          (retirement === "layout" || retirement === "element")) ||
+          (!layoutRetired && retirement === "element")) &&
+        refs.length === expectedOwners().length &&
+        refs.every(
+          (entry) =>
+            entry.state === "reattached" &&
+            entry.owner.element() === entry.element,
+        ) &&
+        replayDomMatches() &&
+        Boolean(guard?.unchanged()),
+      isExactNoRefLayoutReplay: () =>
+        retired &&
+        established &&
+        retirement === "layout" &&
+        layoutRetired &&
+        publication.render === render &&
+        publication.render.authority === render.authority &&
+        refs.length === expectedOwners().length &&
+        refs.every(
+          (entry) =>
+            entry.state === "attached" &&
+            entry.owner.element() === entry.element,
+        ) &&
+        intrinsicsAreCurrent() &&
+        exactDomMatches() &&
+        Boolean(guard?.unchanged()),
+      releaseReplayGuard: releaseGuard,
+      captureKeyDown,
+      routeKeyDown,
+      openAutoFocus,
+    });
+    return runtime;
+  };
+
+  const establish = () => {
+    if (
+      currentRuntime &&
+      currentRuntime === lastRuntime &&
+      cells.active === currentRuntime.publication &&
+      !currentRuntime.publication.isRetired()
+    ) {
+      return currentRuntime.retireForLayout;
+    }
+    if (lastRuntime) {
+      if (
+        !noRefLayoutReplayUsed &&
+        lastRuntime.isExactNoRefLayoutReplay() &&
+        cells.successorOf === lastRuntime.publication
+      ) {
+        noRefLayoutReplayUsed = true;
+        lastRuntime.releaseReplayGuard();
+        const runtime = createRuntime();
+        if (!runtime) return;
+        currentRuntime = runtime;
+        lastRuntime = runtime;
+        if (!runtime.publish()) {
+          runtime.retireForElement();
+          currentRuntime = null;
+          return;
+        }
+        return runtime.retireForLayout;
+      }
+      if (
+        !successorRequested &&
+        lastRuntime.isExactReplay() &&
+        cells.successorOf === lastRuntime.publication
+      ) {
+        successorRequested = true;
+        requestSuccessor();
+      }
+      return;
+    }
+    if (!accountElementsAreExact(render, owners)) return;
+    const runtime = createRuntime();
+    if (!runtime) return;
+    const previous = cells.active;
+    previous?.retire();
+    currentRuntime = runtime;
+    lastRuntime = runtime;
+    if (!runtime.publish()) {
+      runtime.retireForElement();
+      currentRuntime = null;
+      return;
+    }
+    return runtime.retireForLayout;
+  };
+
+  return Object.freeze({
+    establish,
+    captureTrigger: owners.trigger.capture,
+    captureContent: owners.content.capture,
+    captureSettings: owners.settings.capture,
+    captureSignOut: owners.signOut.capture,
+    captureKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+      currentRuntime?.captureKeyDown(event),
+    routeKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
+      currentRuntime?.routeKeyDown(event) ?? "block",
+    openAutoFocus: (event: Event) => {
+      if (!currentRuntime) establish();
+      currentRuntime?.openAutoFocus(event);
+    },
+  });
+}
+
+interface AccountMenuTriggerProps
+  extends ComponentPropsWithoutRef<"button"> {
+  readonly routeAccountKeyDown: (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) => AccountKeyRoute;
+}
+
+const AccountMenuTrigger = forwardRef<
+  HTMLButtonElement,
+  AccountMenuTriggerProps
+>(function AccountMenuTrigger(
+  { onKeyDown, routeAccountKeyDown, ...props },
+  ref,
+) {
+  return (
+    <button
+      {...props}
+      ref={ref}
+      onKeyDown={(event) => {
+        if (routeAccountKeyDown(event) === "radix") onKeyDown?.(event);
+      }}
+    />
+  );
+});
 
 const TRASH_RETENTION_DAYS = 30;
 
@@ -4672,6 +10264,59 @@ function StorageBadge({ doc }: { doc: Doc }) {
 
 export function Dashboard({ user, documents: initialDocuments, githubAvailable, githubConfigured, initialSort = DEFAULT_DASHBOARD_SORT }: DashboardProps) {
   const router = useRouter();
+  const [accountMount] = useState(() => Symbol("dashboard-account"));
+  const accountAuthority = useMemo<AccountAuthority>(
+    () =>
+      Object.freeze({
+        mount: accountMount,
+        visit: Symbol("dashboard-account-user-visit"),
+        user,
+        userId: user.id,
+      }),
+    [accountMount, user],
+  );
+  const [accountState, setAccountState] = useState<AccountMenuState>(() =>
+    Object.freeze({
+      identity: Symbol("dashboard-account-closed"),
+      open: false,
+    }),
+  );
+  const [accountCells] = useState<AccountPublicationCells>(() => ({
+    active: null,
+    successorOf: null,
+    pendingFocus: null,
+    delivery: null,
+    claimedPublications: new WeakSet(),
+    claimedDirections: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+    claimedAutoFocusEvents: new WeakSet(),
+    attemptedReactEvents: new WeakSet(),
+    attemptedNativeEvents: new WeakSet(),
+    attemptedAutoFocusEvents: new WeakSet(),
+  }));
+  const [, setAccountRevision] = useState(0);
+  const requestAccountSuccessor = useCallback(() => {
+    setAccountRevision((revision) => revision + 1);
+  }, []);
+  const changeAccountOpen = useCallback((open: boolean) => {
+    setAccountState((current) =>
+      current.open === open
+        ? current
+        : Object.freeze({
+            identity: Symbol(
+              open ? "dashboard-account-open" : "dashboard-account-closed",
+            ),
+            open,
+          }),
+    );
+  }, []);
+  const openAccountSettings = useCallback(() => {
+    router.push("/settings");
+  }, [router]);
+  const signOutAccount = useCallback(() => {
+    void signOutSafely();
+  }, []);
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
   const searchRefOwner = useRef<object | null>(null);
@@ -4680,6 +10325,36 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [openPicker, setOpenPicker] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const filterRef = useRef<Filter>("all");
+  const currentFilter = useCallback(() => filterRef.current, []);
+  const [filterMount] = useState(() => Symbol("dashboard-filters"));
+  const filterAuthority = useMemo<FilterAuthority>(
+    () =>
+      Object.freeze({
+        mount: filterMount,
+        visit: Symbol("dashboard-filter-user-visit"),
+        user,
+        userId: user.id,
+      }),
+    [filterMount, user],
+  );
+  const [filterCells] = useState<FilterPublicationCells>(() => ({
+    active: null,
+    successorOf: null,
+    replay: null,
+    delivery: null,
+    pendingFocus: null,
+    claimedPublications: new WeakSet(),
+    claimedEntries: new WeakSet(),
+    claimedActions: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+    attemptedReactEvents: new WeakSet(),
+    attemptedNativeEvents: new WeakSet(),
+  }));
+  const [, setFilterRevision] = useState(0);
+  const requestFilterSuccessor = useCallback(() => {
+    setFilterRevision((revision) => revision + 1);
+  }, []);
   const [searchMount] = useState(() => Symbol("dashboard-search"));
   const searchAuthority = useMemo<SearchAuthority>(
     () =>
@@ -4695,6 +10370,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     active: null,
     successorOf: null,
     replay: null,
+    domBarrier: null,
     delivery: null,
     claimedPublications: new WeakSet(),
     claimedControls: new WeakSet(),
@@ -4708,6 +10384,13 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const requestSearchControlSuccessor = useCallback(() => {
     setSearchControlRevision((revision) => revision + 1);
   }, []);
+  useLayoutEffect(
+    () => () => {
+      searchControlCells.domBarrier?.release();
+      searchControlCells.domBarrier = null;
+    },
+    [searchControlCells],
+  );
   const searchAuthorityRef = useRef<SearchAuthority | null>(null);
   const searchShortcutOwnerRef = useRef<SearchShortcutOwner | null>(null);
   const paletteShortcutOwnerRef = useRef<PaletteShortcutOwner | null>(null);
@@ -5219,6 +10902,34 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [createBusyOperation, setCreateBusyOperation] = useState<CreateOperation | null>(null);
   const creating = createBusyOperation?.ownerId === user.id ? createBusyOperation.key : null;
   const [openTemplates, setOpenTemplates] = useState(false);
+  const [createMount] = useState(() => Symbol("dashboard-create"));
+  const createAuthority = useMemo<CreateAuthority>(
+    () =>
+      Object.freeze({
+        mount: createMount,
+        visit: Symbol("dashboard-create-visit"),
+        user,
+        userId: user.id,
+      }),
+    [createMount, user],
+  );
+  const [createControlCells] = useState<CreateControlPublicationCells>(() => ({
+    active: null,
+    successorOf: null,
+    replay: null,
+    delivery: null,
+    claimedPublications: new WeakSet(),
+    claimedControls: new WeakSet(),
+    claimedActions: new WeakSet(),
+    claimedReactEvents: new WeakSet(),
+    claimedNativeEvents: new WeakSet(),
+    attemptedReactEvents: new WeakSet(),
+    attemptedNativeEvents: new WeakSet(),
+  }));
+  const [, setCreateControlRevision] = useState(0);
+  const requestCreateControlSuccessor = useCallback(() => {
+    setCreateControlRevision((revision) => revision + 1);
+  }, []);
 
   useLayoutEffect(() => {
     const previousOwner = createOwner.current;
@@ -5351,6 +11062,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       ? results
       : null;
   const currentSearchRequest = searching ? searchingOwner : null;
+  const resultOrder = Object.freeze([...filtered]);
   // The factory stores these callbacks for committed event delivery; it never reads a ref or invokes a callback during render.
   // eslint-disable-next-line react-hooks/refs
   const searchControlRender: SearchControlRenderPublication = Object.freeze({
@@ -5369,6 +11081,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     pending,
     filter,
     filtered,
+    resultOrder,
     setQuery,
     retry: retrySearch,
   });
@@ -5389,6 +11102,8 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     captureEmptyPrimary,
     captureEmptySecondary,
     captureEmptyClear,
+    captureResultRoot,
+    captureResultLinks,
     captureRootChange,
     captureInputChange,
     changeInput,
@@ -5433,6 +11148,123 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   useLayoutEffect(
     () => establishSearchControls(),
     [establishSearchControls],
+  );
+  const showCreateEmptyState =
+    filter !== "trash" &&
+    filtered.length === 0 &&
+    !trimmed &&
+    documents.length === 0;
+  const welcomeTemplate = getTemplate(WELCOME_TEMPLATE_ID);
+  // The factory stores these callbacks for committed event delivery; it never reads a ref or invokes a callback during render.
+  // eslint-disable-next-line react-hooks/refs
+  const createControlRender: CreateControlRenderPublication = Object.freeze({
+    identity: Symbol("dashboard-create-controls-render"),
+    mount: createMount,
+    authority: createAuthority,
+    user,
+    userId: user.id,
+    create,
+    createDocument: api.documents.create,
+    router,
+    routerPush: router.push,
+    operation: createBusyOperation,
+    creating,
+    welcome: welcomeTemplate,
+    hasGuided: showCreateEmptyState,
+  });
+  const {
+    establish: establishCreateControls,
+    captureCard: captureCreateCard,
+    captureBlank: captureCreateBlank,
+    captureBlankIconFrame: captureCreateBlankIconFrame,
+    captureBlankIcon: captureCreateBlankIcon,
+    captureBlankLabel: captureCreateBlankLabel,
+    captureBlankName: captureCreateBlankName,
+    captureBlankDescription: captureCreateBlankDescription,
+    captureGuidedRoot: captureCreateGuidedRoot,
+    captureGuidedIcon: captureCreateGuidedIcon,
+    captureGuidedPrimary: captureCreateGuidedPrimary,
+    captureGuidedSecondary: captureCreateGuidedSecondary,
+    captureWelcome: captureCreateWelcome,
+    captureWelcomeIcon: captureCreateWelcomeIcon,
+    captureCardClick: captureCreateCardClick,
+    captureBlankClick: captureCreateBlankClick,
+    activateBlank: activateCreateBlank,
+    captureGuidedClick: captureCreateGuidedClick,
+    captureWelcomeClick: captureCreateWelcomeClick,
+    activateWelcome: activateCreateWelcome,
+  } = createCreateControlPublication(
+    createControlRender,
+    createControlCells,
+    requestCreateControlSuccessor,
+  );
+  useLayoutEffect(
+    () => establishCreateControls(),
+    [establishCreateControls],
+  );
+  // The factory stores these callbacks for committed event delivery; it never reads a ref or invokes a callback during render.
+  // eslint-disable-next-line react-hooks/refs
+  const filterRender: FilterRenderPublication = Object.freeze({
+    identity: Symbol("dashboard-filter-render"),
+    mount: filterMount,
+    authority: filterAuthority,
+    user,
+    userId: user.id,
+    definitions: FILTERS,
+    filter,
+    currentFilter,
+    changeFilter,
+  });
+  const {
+    establish: establishFilters,
+    captureGroup: captureFilterGroup,
+    captureButtons: captureFilterButtons,
+    captureGroupKeyDown: captureFilterGroupKeyDown,
+    captureButtonKeyDown,
+    keyDownButton,
+  } = createFilterPublication(
+    filterRender,
+    filterCells,
+    requestFilterSuccessor,
+  );
+  useLayoutEffect(
+    () => establishFilters(),
+    [establishFilters],
+  );
+  const accountRender: AccountRenderPublication = Object.freeze({
+    identity: Symbol("dashboard-account-render"),
+    authority: accountAuthority,
+    user,
+    userId: user.id,
+    router,
+    routerPush: router.push,
+    openSettings: openAccountSettings,
+    signOut: signOutAccount,
+    state: accountState,
+    open: accountState.open,
+    setState: setAccountState,
+    changeOpen: changeAccountOpen,
+  });
+  const {
+    establish: establishAccount,
+    captureTrigger: captureAccountTrigger,
+    captureContent: captureAccountContent,
+    captureSettings: captureAccountSettings,
+    captureSignOut: captureAccountSignOut,
+    captureKeyDown: captureAccountKeyDown,
+    routeKeyDown: routeAccountKeyDown,
+    openAutoFocus: openAccountAutoFocus,
+  } = createAccountPublication(
+    accountRender,
+    accountCells,
+    requestAccountSuccessor,
+  );
+  const accountOpenAutoFocusProps = {
+    onOpenAutoFocus: openAccountAutoFocus,
+  };
+  useLayoutEffect(
+    () => establishAccount(),
+    [establishAccount],
   );
 
   return (
@@ -5489,21 +11321,33 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               )}
             </div>
             <ThemeToggle className="shrink-0" />
-            <Menu>
+            <Menu open={accountState.open} onOpenChange={changeAccountOpen}>
               <MenuTrigger asChild>
-                <button type="button" className="rounded-full" aria-label="Account">
+                <AccountMenuTrigger
+                  ref={captureAccountTrigger}
+                  type="button"
+                  className="rounded-full"
+                  aria-label="Account"
+                  onKeyDownCapture={captureAccountKeyDown}
+                  routeAccountKeyDown={routeAccountKeyDown}
+                >
                   <Avatar name={user.name} src={user.image} size={36} />
-                </button>
+                </AccountMenuTrigger>
               </MenuTrigger>
-              <MenuContent align="end" className="w-56">
+              <MenuContent
+                ref={captureAccountContent}
+                align="end"
+                className="w-56"
+                {...accountOpenAutoFocusProps}
+              >
                 <div className="px-2.5 py-2">
                   <div className="truncate text-sm font-medium text-ink">{user.name}</div>
                   {user.login && <div className="truncate text-xs text-ink-3">@{user.login}</div>}
                 </div>
-                <MenuItem icon={<Bot size={15} />} onSelect={() => router.push("/settings")}>
+                <MenuItem ref={captureAccountSettings} icon={<Bot size={15} />} onSelect={openAccountSettings}>
                   Agents &amp; API tokens
                 </MenuItem>
-                <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
+                <MenuItem ref={captureAccountSignOut} icon={<LogOut size={15} />} onSelect={signOutAccount}>
                   Sign out
                 </MenuItem>
               </MenuContent>
@@ -5514,18 +11358,24 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         <section className="safe-x mx-auto max-w-6xl py-6 sm:py-8 sm:[--safe-pad:1.5rem]">
           <NotificationsStrip />
           <div className="mb-8 grid gap-3 sm:grid-cols-2">
-            <div className="group flex items-stretch rounded-2xl border border-line bg-surface shadow-sm transition hover:border-accent hover:shadow-md">
+            <div
+              ref={captureCreateCard}
+              className={CREATE_CARD_CLASS}
+              onClickCapture={captureCreateCardClick}
+            >
               <button
+                ref={captureCreateBlank}
                 type="button"
-                onClick={() => void create()}
+                onClickCapture={captureCreateBlankClick}
+                onClick={activateCreateBlank}
                 disabled={creating !== null}
-                className="flex flex-1 items-center gap-4 rounded-l-2xl p-5 text-left"
+                className={CREATE_BLANK_BUTTON_CLASS}
                 data-testid="new-document"
               >
-                <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-on-accent">{creating === "blank" ? <Loader2 className="animate-spin" /> : <FilePlus2 size={22} />}</span>
-                <span>
-                  <span className="block text-[15px] font-semibold text-ink">New document</span>
-                  <span className="block text-sm text-ink-3">Start with a blank Markdown page.</span>
+                <span ref={captureCreateBlankIconFrame} className={CREATE_BLANK_ICON_FRAME_CLASS}>{creating === CREATE_BLANK_KEY ? <Loader2 ref={captureCreateBlankIcon} className="animate-spin" /> : <FilePlus2 ref={captureCreateBlankIcon} size={22} />}</span>
+                <span ref={captureCreateBlankLabel}>
+                  <span ref={captureCreateBlankName} className={CREATE_BLANK_NAME_CLASS}>{CREATE_BLANK_NAME_TEXT}</span>
+                  <span ref={captureCreateBlankDescription} className={CREATE_BLANK_DESCRIPTION_CLASS}>{CREATE_BLANK_DESCRIPTION_TEXT}</span>
                 </span>
               </button>
               <Dialog open={openTemplates} onOpenChange={(open) => !creating && setOpenTemplates(open)}>
@@ -5590,7 +11440,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                   <button
                     type="button"
                     className="-my-2 ml-auto inline-flex min-h-11 items-center px-3 py-2 text-xs font-medium text-accent hover:underline md:-my-0.5 md:min-h-6 md:px-2 md:py-1"
-                    onClick={() => setFilter("starred")}
+                    onClick={() => changeFilter("starred")}
                     data-testid="show-all-starred"
                   >
                     Show all starred ({starred.length})
@@ -5634,13 +11484,25 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                   ))}
                 </select>
               </label>
-              <div className="flex shrink-0 rounded-lg border border-line bg-surface p-0.5 text-xs">
+              <div
+                ref={captureFilterGroup}
+                className={FILTER_GROUP_CLASS}
+                role="toolbar"
+                aria-label={FILTER_GROUP_LABEL}
+                onKeyDownCapture={captureFilterGroupKeyDown}
+              >
                 {FILTERS.map((f) => (
                   <button
                     key={f.value}
+                    ref={captureFilterButtons.get(f.value)}
                     type="button"
-                    className={cn("rounded-md px-2.5 py-1", filter === f.value ? "bg-inverse text-white" : "text-ink-3 hover:text-ink")}
+                    className={filterButtonClass(filter === f.value)}
                     onClick={() => changeFilter(f.value)}
+                    onKeyDownCapture={(event) =>
+                      captureButtonKeyDown(f.value, event)
+                    }
+                    onKeyDown={(event) => keyDownButton(f.value, event)}
+                    tabIndex={filter === f.value ? 0 : -1}
                     aria-pressed={filter === f.value}
                     data-testid={`filter-${f.value}`}
                   >
@@ -5689,21 +11551,27 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               onRestore={restore}
               onPurge={purge}
             />
-          ) : filtered.length === 0 && !trimmed && documents.length === 0 ? (
+          ) : showCreateEmptyState ? (
             <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-8" data-testid="empty-state">
-              <div className="mb-5 text-center">
-                <FileText className="mx-auto mb-3 text-ink-4" size={28} />
-                <p className="text-sm font-medium text-ink-2">No documents yet</p>
-                <p className="mt-1 text-sm text-ink-3">Start with a short guided document, pick a template, or open a Markdown file from GitHub.</p>
+              <div
+                ref={captureCreateGuidedRoot}
+                className={CREATE_GUIDED_ROOT_CLASS}
+                onClickCapture={captureCreateGuidedClick}
+              >
+                <FileText ref={captureCreateGuidedIcon} className="mx-auto mb-3 text-ink-4" size={28} />
+                <p ref={captureCreateGuidedPrimary} className={CREATE_GUIDED_PRIMARY_CLASS}>{CREATE_GUIDED_PRIMARY_TEXT}</p>
+                <p ref={captureCreateGuidedSecondary} className={CREATE_GUIDED_SECONDARY_CLASS}>{CREATE_GUIDED_SECONDARY_TEXT}</p>
                 <button
+                  ref={captureCreateWelcome}
                   type="button"
-                  className="btn btn-primary mt-4 gap-2"
-                  onClick={() => void create(getTemplate(WELCOME_TEMPLATE_ID))}
+                  className={CREATE_WELCOME_BUTTON_CLASS}
+                  onClickCapture={captureCreateWelcomeClick}
+                  onClick={activateCreateWelcome}
                   disabled={creating !== null}
                   aria-busy={creating === WELCOME_TEMPLATE_ID || undefined}
                   data-testid="start-guided-doc"
                 >
-                  {creating === WELCOME_TEMPLATE_ID ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />} Start with a guided doc
+                  {creating === WELCOME_TEMPLATE_ID ? <Loader2 ref={captureCreateWelcomeIcon} size={16} className="animate-spin" /> : <Sparkles ref={captureCreateWelcomeIcon} size={16} />} Start with a guided doc
                 </button>
               </div>
               <TemplateGrid compact onPick={(t) => void create(t)} busy={creating} />
@@ -5736,10 +11604,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               )}
             </div>
           ) : (
-            <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="document-list">
-              {filtered.map((d) => (
+            <ul
+              ref={trimmed ? captureResultRoot : undefined}
+              className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
+              data-testid="document-list"
+            >
+              {filtered.map((d, index) => (
                 <li key={d.id} className="group relative min-w-0" data-testid={trimmed ? "search-result" : undefined}>
                   <Link
+                    ref={trimmed ? captureResultLinks[index] : undefined}
                     href={`/d/${d.id}`}
                     className="flex h-full flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm transition hover:border-accent hover:shadow-md"
                     data-testid="document-card"
@@ -5849,6 +11722,7 @@ interface TrashControlPublication {
   readonly kind: TrashPublishedActionKind;
   readonly cardIndex: number | null;
   readonly element: HTMLButtonElement;
+  readonly path: readonly EventTarget[];
   readonly action: TrashActionPublication;
 }
 
@@ -5858,6 +11732,7 @@ interface TrashCardPublication {
   readonly element: HTMLLIElement;
   readonly restore: TrashControlPublication;
   readonly purge: TrashControlPublication;
+  readonly actions: readonly TrashControlPublication[];
 }
 
 interface TrashDomSnapshot {
@@ -5925,6 +11800,10 @@ interface TrashPublicationCells {
   readonly claimedActions: WeakSet<TrashActionPublication>;
   readonly claimedReactEvents: WeakSet<object>;
   readonly claimedNativeEvents: WeakSet<Event>;
+  readonly attemptedReactEvents: WeakSet<object>;
+  readonly attemptedNativeEvents: WeakSet<Event>;
+  readonly claimedMovements: WeakSet<TrashKeyboardMovement>;
+  readonly claimedWindowProofs: WeakSet<TrashKeyboardWindowProof>;
   readonly evaluatingPublications: WeakSet<TrashPublication>;
 }
 
@@ -5952,6 +11831,14 @@ interface TrashPublicationRuntime {
   readonly snapshot: () => TrashDomSnapshot | null;
   readonly placement: () => TrashPlacement | null;
   readonly partialReplayElements: () => ReadonlySet<HTMLElement>;
+  readonly captureCardKeyDown: (
+    card: TrashCardPresentation,
+    event: ReactKeyboardEvent<HTMLLIElement>,
+  ) => void;
+  readonly bubbleCardKeyDown: (
+    card: TrashCardPresentation,
+    event: ReactKeyboardEvent<HTMLLIElement>,
+  ) => void;
 }
 
 interface TrashPublicationSet {
@@ -5967,6 +11854,12 @@ interface TrashPublicationSet {
     readonly captureCard: (element: HTMLLIElement | null) => void;
     readonly captureRestore: (element: HTMLButtonElement | null) => void;
     readonly capturePurge: (element: HTMLButtonElement | null) => void;
+    readonly captureKeyDown: (
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => void;
+    readonly bubbleKeyDown: (
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => void;
   }[];
   readonly establish: () => void | (() => void);
   readonly onRetry: (event: ReactMouseEvent<HTMLButtonElement>) => void;
@@ -5974,8 +11867,865 @@ interface TrashPublicationSet {
   readonly onPurge: (card: TrashCardPresentation, event: ReactMouseEvent<HTMLButtonElement>) => void;
 }
 
+type TrashNavigationKey =
+  | "ArrowLeft"
+  | "ArrowUp"
+  | "ArrowRight"
+  | "ArrowDown"
+  | "Home"
+  | "End";
+
+interface TrashPropertyAuthority<T> {
+  readonly read: (value: object) => T;
+  readonly isCurrent: () => boolean;
+}
+
+interface TrashMethodAuthority<Args extends readonly unknown[], Result> {
+  readonly value: (...args: Args) => Result;
+  readonly call: (receiver: object, ...args: Args) => Result;
+  readonly isCurrent: () => boolean;
+}
+
+interface TrashWindowMethodAuthority<Method> {
+  readonly value: Method;
+  readonly isCurrent: () => boolean;
+}
+
+interface TrashKeyboardWindowProof {
+  readonly registration: TrashKeyboardWindowRegistration;
+  readonly nativeEvent: KeyboardEvent;
+  readonly receiver: EventTarget;
+  readonly currentTarget: EventTarget;
+  readonly terminal: EventTarget;
+  readonly path: readonly EventTarget[];
+}
+
+interface TrashKeyboardWindowRegistration {
+  readonly proofFor: (
+    event: KeyboardEvent,
+  ) => TrashKeyboardWindowProof | null;
+  readonly claim: (proof: TrashKeyboardWindowProof) => boolean;
+  readonly release: () => void;
+  readonly isCurrent: () => boolean;
+}
+
+interface TrashKeyboardAuthority {
+  readonly ownerWindow: Window & typeof globalThis;
+  readonly Event: typeof Event;
+  readonly KeyboardEvent: typeof KeyboardEvent;
+  readonly HTMLElement: typeof HTMLElement;
+  readonly keyboardPrototype: object;
+  readonly prototypeOf: typeof Object.getPrototypeOf;
+  readonly apply: typeof Reflect.apply;
+  readonly trusted: FilterTrustedAuthority;
+  readonly activeElement: FilterActiveElementAuthority;
+  readonly type: TrashPropertyAuthority<string>;
+  readonly target: TrashPropertyAuthority<EventTarget | null>;
+  readonly currentTarget: TrashPropertyAuthority<EventTarget | null>;
+  readonly phase: TrashPropertyAuthority<number>;
+  readonly bubbles: TrashPropertyAuthority<boolean>;
+  readonly cancelable: TrashPropertyAuthority<boolean>;
+  readonly composed: TrashPropertyAuthority<boolean>;
+  readonly defaultPrevented: TrashPropertyAuthority<boolean>;
+  readonly cancelBubble: TrashPropertyAuthority<boolean>;
+  readonly key: TrashPropertyAuthority<string>;
+  readonly code: TrashPropertyAuthority<string>;
+  readonly location: TrashPropertyAuthority<number>;
+  readonly ctrlKey: TrashPropertyAuthority<boolean>;
+  readonly metaKey: TrashPropertyAuthority<boolean>;
+  readonly altKey: TrashPropertyAuthority<boolean>;
+  readonly shiftKey: TrashPropertyAuthority<boolean>;
+  readonly repeat: TrashPropertyAuthority<boolean>;
+  readonly composing: TrashPropertyAuthority<boolean>;
+  readonly view: TrashPropertyAuthority<Window | null>;
+  readonly composedPath: TrashMethodAuthority<readonly [], EventTarget[]>;
+  readonly preventDefault: TrashMethodAuthority<readonly [], void>;
+  readonly focus: TrashMethodAuthority<
+    readonly [options?: FocusOptions],
+    void
+  >;
+  readonly addWindowEventListener: TrashWindowMethodAuthority<
+    Window["addEventListener"]
+  >;
+  readonly removeWindowEventListener: TrashWindowMethodAuthority<
+    Window["removeEventListener"]
+  >;
+  readonly terminal: TrashKeyboardWindowRegistration;
+  readonly isCurrent: () => boolean;
+}
+
+interface TrashReactKeyProof {
+  readonly event: object;
+  readonly nativeEvent: KeyboardEvent;
+  readonly target: HTMLButtonElement;
+  readonly currentTarget: HTMLElement;
+  readonly phase: number;
+  readonly preventDefault: () => void;
+  readonly stopPropagation: () => void;
+  readonly isDefaultPrevented: () => boolean;
+  readonly isPropagationStopped: () => boolean;
+  readonly defaultPreventedResult: false;
+  readonly propagationStoppedResult: false;
+}
+
+interface TrashKeyboardMovement {
+  readonly identity: symbol;
+  readonly publicationIdentity: symbol;
+  readonly cardIdentity: symbol;
+  readonly sourceIdentity: symbol;
+  readonly sourceActionIdentity: symbol;
+  readonly destinationIdentity: symbol;
+  readonly destinationActionIdentity: symbol;
+  readonly key: TrashNavigationKey;
+  readonly source: TrashControlPublication;
+  readonly destination: TrashControlPublication;
+}
+
+interface TrashKeyboardNativeProof {
+  readonly event: KeyboardEvent;
+  readonly publication: TrashPublication;
+  readonly card: TrashCardPublication;
+  readonly movement: TrashKeyboardMovement;
+  readonly delegatedRoot: EventTarget;
+  readonly path: readonly EventTarget[];
+  readonly terminal: EventTarget;
+  readonly window: TrashKeyboardWindowProof;
+  readonly key: TrashNavigationKey;
+  readonly code: string;
+  readonly location: number;
+  readonly capture: TrashReactKeyProof;
+  bubble: TrashReactKeyProof | null;
+  crossed: boolean;
+}
+
 const allowTrashRetry = () => true;
 const allowTrashAction = () => true;
+
+function captureTrashPropertyAuthority<T>(
+  view: Window & typeof globalThis,
+  prototype: object,
+  property: PropertyKey,
+): TrashPropertyAuthority<T> | null {
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (descriptor) {
+      if (typeof descriptor.get !== "function") return null;
+      const descriptorOwner = owner;
+      const expected = Object.freeze({ ...descriptor });
+      const getter = descriptor.get;
+      return Object.freeze({
+        read: (value: object) =>
+          apply(getter as (this: object) => T, value, []),
+        isCurrent: () =>
+          view.Object.getOwnPropertyDescriptor ===
+            getOwnPropertyDescriptor &&
+          view.Object.getPrototypeOf === getPrototypeOf &&
+          view.Reflect.apply === apply &&
+          filterDescriptorsMatch(
+            getOwnPropertyDescriptor(descriptorOwner, property),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function captureTrashMethodAuthority<
+  Args extends readonly unknown[],
+  Result,
+>(
+  view: Window & typeof globalThis,
+  prototype: object,
+  property: PropertyKey,
+): TrashMethodAuthority<Args, Result> | null {
+  const getOwnPropertyDescriptor = view.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = view.Object.getPrototypeOf;
+  const apply = view.Reflect.apply;
+  let owner: object | null = prototype;
+  while (owner) {
+    const descriptor = getOwnPropertyDescriptor(owner, property);
+    if (descriptor) {
+      if (
+        !("value" in descriptor) ||
+        typeof descriptor.value !== "function"
+      ) {
+        return null;
+      }
+      const descriptorOwner = owner;
+      const expected = Object.freeze({ ...descriptor });
+      const method = descriptor.value as (...args: Args) => Result;
+      return Object.freeze({
+        value: method,
+        call: (receiver: object, ...args: Args) =>
+          apply(method, receiver, args),
+        isCurrent: () =>
+          view.Object.getOwnPropertyDescriptor ===
+            getOwnPropertyDescriptor &&
+          view.Object.getPrototypeOf === getPrototypeOf &&
+          view.Reflect.apply === apply &&
+          filterDescriptorsMatch(
+            getOwnPropertyDescriptor(descriptorOwner, property),
+            expected,
+          ),
+      });
+    }
+    owner = getPrototypeOf(owner) as object | null;
+  }
+  return null;
+}
+
+function captureTrashWindowMethod<
+  Property extends "addEventListener" | "removeEventListener",
+>(
+  ownerWindow: Window & typeof globalThis,
+  property: Property,
+): TrashWindowMethodAuthority<Window[Property]> | null {
+  const getOwnPropertyDescriptor =
+    ownerWindow.Object.getOwnPropertyDescriptor;
+  const getPrototypeOf = ownerWindow.Object.getPrototypeOf;
+  const reflectGet = ownerWindow.Reflect.get;
+  const path: {
+    readonly target: object;
+    readonly descriptor: Readonly<PropertyDescriptor> | null;
+    readonly prototype: object | null;
+  }[] = [];
+  let target: object | null = ownerWindow;
+  let found = false;
+  while (target) {
+    const descriptor = getOwnPropertyDescriptor(target, property);
+    const prototype = getPrototypeOf(target) as object | null;
+    path.push(
+      Object.freeze({
+        target,
+        descriptor: descriptor
+          ? Object.freeze({ ...descriptor })
+          : null,
+        prototype,
+      }),
+    );
+    if (descriptor) {
+      found = true;
+      break;
+    }
+    target = prototype;
+  }
+  const value = reflectGet(
+    ownerWindow,
+    property,
+    ownerWindow,
+  ) as Window[Property];
+  if (!found || typeof value !== "function") return null;
+  const isCurrent = () =>
+    ownerWindow.Object.getOwnPropertyDescriptor ===
+      getOwnPropertyDescriptor &&
+    ownerWindow.Object.getPrototypeOf === getPrototypeOf &&
+    ownerWindow.Reflect.get === reflectGet &&
+    path.every(({ target: entry, descriptor, prototype }) => {
+      if (getPrototypeOf(entry) !== prototype) return false;
+      const current = getOwnPropertyDescriptor(entry, property);
+      return descriptor
+        ? filterDescriptorsMatch(current, descriptor)
+        : current === undefined;
+    }) &&
+    reflectGet(ownerWindow, property, ownerWindow) === value;
+  return isCurrent() ? Object.freeze({ value, isCurrent }) : null;
+}
+
+function createTrashKeyboardWindowRegistration(
+  ownerWindow: Window & typeof globalThis,
+  ownerDocument: Document,
+  KeyboardEventConstructor: typeof KeyboardEvent,
+  keyboardPrototype: object,
+  currentTarget: TrashPropertyAuthority<EventTarget | null>,
+  phase: TrashPropertyAuthority<number>,
+  composedPath: TrashMethodAuthority<readonly [], EventTarget[]>,
+  addEventListener: TrashWindowMethodAuthority<
+    Window["addEventListener"]
+  >,
+  removeEventListener: TrashWindowMethodAuthority<
+    Window["removeEventListener"]
+  >,
+  apply: typeof Reflect.apply,
+  prototypeOf: typeof Object.getPrototypeOf,
+  intrinsicsAreCurrent: () => boolean,
+): TrashKeyboardWindowRegistration | null {
+  const proofs = new WeakMap<
+    KeyboardEvent,
+    TrashKeyboardWindowProof
+  >();
+  const invalidEvents = new WeakSet<Event>();
+  let claimed: TrashKeyboardWindowProof | null = null;
+  let active = false;
+  let released = false;
+  const listener: EventListener = function (
+    this: EventTarget,
+    event: Event,
+  ) {
+    if (
+      !active ||
+      released ||
+      !(event instanceof KeyboardEventConstructor) ||
+      prototypeOf(event) !== keyboardPrototype ||
+      invalidEvents.has(event) ||
+      !intrinsicsAreCurrent()
+    ) {
+      return;
+    }
+    if (proofs.has(event)) {
+      invalidEvents.add(event);
+      return;
+    }
+    try {
+      const eventCurrentTarget = currentTarget.read(event);
+      const eventPhase = phase.read(event);
+      const path = composedPath.call(event);
+      const terminal = path.at(-1);
+      if (
+        !eventCurrentTarget ||
+        eventCurrentTarget !== this ||
+        terminal !== this ||
+        eventPhase !== ownerWindow.Event.CAPTURING_PHASE ||
+        path.at(-2) !== ownerDocument
+      ) {
+        invalidEvents.add(event);
+        return;
+      }
+      proofs.set(
+        event,
+        Object.freeze({
+          registration,
+          nativeEvent: event,
+          receiver: this,
+          currentTarget: eventCurrentTarget,
+          terminal,
+          path: Object.freeze([...path]),
+        }),
+      );
+    } catch {
+      invalidEvents.add(event);
+    }
+  };
+  const proofFor = (event: KeyboardEvent) => {
+    const proof = proofs.get(event);
+    if (
+      !proof ||
+      !active ||
+      released ||
+      claimed !== null ||
+      invalidEvents.has(event) ||
+      proof.registration !== registration ||
+      proof.nativeEvent !== event ||
+      proof.receiver !== proof.currentTarget ||
+      proof.receiver !== proof.terminal ||
+      !intrinsicsAreCurrent()
+    ) {
+      return null;
+    }
+    try {
+      const path = composedPath.call(event);
+      return path.length === proof.path.length &&
+        path.every((entry, index) => entry === proof.path[index]) &&
+        path.at(-2) === ownerDocument &&
+        path.at(-1) === proof.receiver
+        ? proof
+        : null;
+    } catch {
+      invalidEvents.add(event);
+      return null;
+    }
+  };
+  const registration: TrashKeyboardWindowRegistration =
+    Object.freeze({
+      proofFor,
+      claim: (proof: TrashKeyboardWindowProof) => {
+        if (claimed || proofFor(proof.nativeEvent) !== proof) {
+          return false;
+        }
+        claimed = proof;
+        return true;
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        active = false;
+        apply(removeEventListener.value, ownerWindow, [
+          "keydown",
+          listener,
+          true,
+        ]);
+      },
+      isCurrent: () =>
+        active &&
+        !released &&
+        intrinsicsAreCurrent() &&
+        addEventListener.isCurrent() &&
+        removeEventListener.isCurrent(),
+    });
+  active = true;
+  try {
+    apply(addEventListener.value, ownerWindow, [
+      "keydown",
+      listener,
+      true,
+    ]);
+    if (registration.isCurrent()) return registration;
+    registration.release();
+    return null;
+  } catch {
+    active = false;
+    released = true;
+    return null;
+  }
+}
+
+function captureTrashKeyboardAuthority(
+  ownerWindow: Window & typeof globalThis,
+  ownerDocument: Document,
+): TrashKeyboardAuthority | null {
+  try {
+    const EventConstructor = ownerWindow.Event;
+    const UIEventConstructor = ownerWindow.UIEvent;
+    const KeyboardEventConstructor = ownerWindow.KeyboardEvent;
+    const DocumentConstructor = ownerWindow.Document;
+    const HTMLElementConstructor = ownerWindow.HTMLElement;
+    const eventPrototype = EventConstructor.prototype;
+    const uiEventPrototype = UIEventConstructor.prototype;
+    const keyboardPrototype = KeyboardEventConstructor.prototype;
+    const documentPrototype = DocumentConstructor.prototype;
+    const htmlElementPrototype = HTMLElementConstructor.prototype;
+    const prototypeOf = ownerWindow.Object.getPrototypeOf;
+    const apply = ownerWindow.Reflect.apply;
+    const prototypeLinks = [
+      [keyboardPrototype, prototypeOf(keyboardPrototype)],
+      [uiEventPrototype, prototypeOf(uiEventPrototype)],
+      [eventPrototype, prototypeOf(eventPrototype)],
+      [documentPrototype, prototypeOf(documentPrototype)],
+      [htmlElementPrototype, prototypeOf(htmlElementPrototype)],
+    ] as const;
+    const trusted = captureFilterTrustedAuthority(ownerWindow);
+    const activeElement =
+      captureFilterActiveElementAuthority(ownerWindow);
+    const type = captureTrashPropertyAuthority<string>(
+      ownerWindow,
+      eventPrototype,
+      "type",
+    );
+    const target =
+      captureTrashPropertyAuthority<EventTarget | null>(
+        ownerWindow,
+        eventPrototype,
+        "target",
+      );
+    const currentTarget =
+      captureTrashPropertyAuthority<EventTarget | null>(
+        ownerWindow,
+        eventPrototype,
+        "currentTarget",
+      );
+    const phase = captureTrashPropertyAuthority<number>(
+      ownerWindow,
+      eventPrototype,
+      "eventPhase",
+    );
+    const bubbles = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "bubbles",
+    );
+    const cancelable = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "cancelable",
+    );
+    const composed = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "composed",
+    );
+    const defaultPrevented =
+      captureTrashPropertyAuthority<boolean>(
+        ownerWindow,
+        eventPrototype,
+        "defaultPrevented",
+      );
+    const cancelBubble = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      eventPrototype,
+      "cancelBubble",
+    );
+    const key = captureTrashPropertyAuthority<string>(
+      ownerWindow,
+      keyboardPrototype,
+      "key",
+    );
+    const code = captureTrashPropertyAuthority<string>(
+      ownerWindow,
+      keyboardPrototype,
+      "code",
+    );
+    const location = captureTrashPropertyAuthority<number>(
+      ownerWindow,
+      keyboardPrototype,
+      "location",
+    );
+    const ctrlKey = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "ctrlKey",
+    );
+    const metaKey = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "metaKey",
+    );
+    const altKey = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "altKey",
+    );
+    const shiftKey = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "shiftKey",
+    );
+    const repeat = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "repeat",
+    );
+    const composing = captureTrashPropertyAuthority<boolean>(
+      ownerWindow,
+      keyboardPrototype,
+      "isComposing",
+    );
+    const view = captureTrashPropertyAuthority<Window | null>(
+      ownerWindow,
+      uiEventPrototype,
+      "view",
+    );
+    const composedPath = captureTrashMethodAuthority<
+      readonly [],
+      EventTarget[]
+    >(ownerWindow, eventPrototype, "composedPath");
+    const preventDefault = captureTrashMethodAuthority<
+      readonly [],
+      void
+    >(ownerWindow, eventPrototype, "preventDefault");
+    const focus = captureTrashMethodAuthority<
+      readonly [options?: FocusOptions],
+      void
+    >(ownerWindow, htmlElementPrototype, "focus");
+    const addWindowEventListener = captureTrashWindowMethod(
+      ownerWindow,
+      "addEventListener",
+    );
+    const removeWindowEventListener = captureTrashWindowMethod(
+      ownerWindow,
+      "removeEventListener",
+    );
+    const authorities = [
+      type,
+      target,
+      currentTarget,
+      phase,
+      bubbles,
+      cancelable,
+      composed,
+      defaultPrevented,
+      cancelBubble,
+      key,
+      code,
+      location,
+      ctrlKey,
+      metaKey,
+      altKey,
+      shiftKey,
+      repeat,
+      composing,
+      view,
+      composedPath,
+      preventDefault,
+      focus,
+    ];
+    if (
+      !trusted ||
+      !activeElement ||
+      !addWindowEventListener ||
+      !removeWindowEventListener ||
+      authorities.some((authority) => authority === null)
+    ) {
+      return null;
+    }
+    let stale = false;
+    const intrinsicsAreCurrent = () => {
+      if (stale) return false;
+      const current =
+        ownerDocument.defaultView === ownerWindow &&
+        ownerWindow.Event === EventConstructor &&
+        ownerWindow.UIEvent === UIEventConstructor &&
+        ownerWindow.KeyboardEvent === KeyboardEventConstructor &&
+        ownerWindow.Document === DocumentConstructor &&
+        ownerWindow.HTMLElement === HTMLElementConstructor &&
+        ownerWindow.Object.getPrototypeOf === prototypeOf &&
+        ownerWindow.Reflect.apply === apply &&
+        EventConstructor.prototype === eventPrototype &&
+        UIEventConstructor.prototype === uiEventPrototype &&
+        KeyboardEventConstructor.prototype === keyboardPrototype &&
+        DocumentConstructor.prototype === documentPrototype &&
+        HTMLElementConstructor.prototype ===
+          htmlElementPrototype &&
+        prototypeLinks.every(
+          ([prototype, parent]) =>
+            prototypeOf(prototype) === parent,
+        ) &&
+        prototypeOf(keyboardPrototype) === uiEventPrototype &&
+        prototypeOf(uiEventPrototype) === eventPrototype &&
+        trusted.isCurrent() &&
+        activeElement.isCurrent() &&
+        addWindowEventListener.isCurrent() &&
+        removeWindowEventListener.isCurrent() &&
+        authorities.every((candidate) =>
+          candidate?.isCurrent(),
+        );
+      if (!current) stale = true;
+      return current;
+    };
+    const terminal = createTrashKeyboardWindowRegistration(
+      ownerWindow,
+      ownerDocument,
+      KeyboardEventConstructor,
+      keyboardPrototype,
+      currentTarget!,
+      phase!,
+      composedPath!,
+      addWindowEventListener,
+      removeWindowEventListener,
+      apply,
+      prototypeOf,
+      intrinsicsAreCurrent,
+    );
+    if (!terminal) return null;
+    const authority: TrashKeyboardAuthority = {
+      ownerWindow,
+      Event: EventConstructor,
+      KeyboardEvent: KeyboardEventConstructor,
+      HTMLElement: HTMLElementConstructor,
+      keyboardPrototype,
+      prototypeOf,
+      apply,
+      trusted,
+      activeElement,
+      type: type!,
+      target: target!,
+      currentTarget: currentTarget!,
+      phase: phase!,
+      bubbles: bubbles!,
+      cancelable: cancelable!,
+      composed: composed!,
+      defaultPrevented: defaultPrevented!,
+      cancelBubble: cancelBubble!,
+      key: key!,
+      code: code!,
+      location: location!,
+      ctrlKey: ctrlKey!,
+      metaKey: metaKey!,
+      altKey: altKey!,
+      shiftKey: shiftKey!,
+      repeat: repeat!,
+      composing: composing!,
+      view: view!,
+      composedPath: composedPath!,
+      preventDefault: preventDefault!,
+      focus: focus!,
+      addWindowEventListener,
+      removeWindowEventListener,
+      terminal,
+      isCurrent: () =>
+        intrinsicsAreCurrent() && terminal.isCurrent(),
+    };
+    return Object.freeze(authority);
+  } catch {
+    return null;
+  }
+}
+
+function trashEventPath(
+  source: Node,
+  ownerDocument: Document,
+): readonly EventTarget[] | null {
+  const path: EventTarget[] = [];
+  for (let current: Node | null = source; current; current = current.parentNode) {
+    path.push(current);
+    if (current === ownerDocument) return Object.freeze(path);
+  }
+  return null;
+}
+
+function trashNavigationKey(key: string): TrashNavigationKey | null {
+  switch (key) {
+    case "ArrowLeft":
+    case "ArrowUp":
+    case "ArrowRight":
+    case "ArrowDown":
+    case "Home":
+    case "End":
+      return key;
+    default:
+      return null;
+  }
+}
+
+function trashMovement(
+  publication: TrashPublication,
+  card: TrashCardPublication,
+  source: TrashControlPublication,
+  key: TrashNavigationKey,
+): TrashKeyboardMovement | null {
+  const sourceIndex = card.actions.indexOf(source);
+  if (sourceIndex < 0) return null;
+  let destinationIndex: number;
+  if (key === "ArrowLeft" || key === "ArrowUp") {
+    destinationIndex = sourceIndex - 1;
+  } else if (key === "ArrowRight" || key === "ArrowDown") {
+    destinationIndex = sourceIndex + 1;
+  } else if (key === "Home") {
+    destinationIndex = 0;
+  } else {
+    destinationIndex = card.actions.length - 1;
+  }
+  const destination = card.actions[destinationIndex];
+  if (!destination || destination === source) return null;
+  return Object.freeze({
+    identity: Symbol("trash-keyboard-movement"),
+    publicationIdentity: publication.identity,
+    cardIdentity: card.identity,
+    sourceIdentity: source.identity,
+    sourceActionIdentity: source.action.identity,
+    destinationIdentity: destination.identity,
+    destinationActionIdentity: destination.action.identity,
+    key,
+    source,
+    destination,
+  });
+}
+
+function captureTrashReactKeyProof(
+  event: ReactKeyboardEvent<HTMLElement>,
+  nativeEvent: KeyboardEvent,
+  target: HTMLButtonElement,
+  currentTarget: HTMLElement,
+  phase: number,
+  key: TrashNavigationKey,
+): TrashReactKeyProof | null {
+  try {
+    const preventDefault = event.preventDefault;
+    const stopPropagation = event.stopPropagation;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    const isPropagationStopped = event.isPropagationStopped;
+    if (
+      event.nativeEvent !== nativeEvent ||
+      event.type !== "keydown" ||
+      event.target !== target ||
+      event.currentTarget !== currentTarget ||
+      event.eventPhase !== phase ||
+      event.key !== key ||
+      !event.bubbles ||
+      !event.cancelable ||
+      event.defaultPrevented ||
+      !event.isTrusted ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey ||
+      event.shiftKey ||
+      event.repeat ||
+      typeof preventDefault !== "function" ||
+      typeof stopPropagation !== "function" ||
+      typeof isDefaultPrevented !== "function" ||
+      typeof isPropagationStopped !== "function" ||
+      TRUSTED_REFLECT_APPLY(isDefaultPrevented, event, []) !==
+        false ||
+      TRUSTED_REFLECT_APPLY(isPropagationStopped, event, []) !==
+        false
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      event,
+      nativeEvent,
+      target,
+      currentTarget,
+      phase,
+      preventDefault,
+      stopPropagation,
+      isDefaultPrevented,
+      isPropagationStopped,
+      defaultPreventedResult: false,
+      propagationStoppedResult: false,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function trashReactKeyProofIsCurrent(
+  proof: TrashReactKeyProof,
+): boolean {
+  try {
+    const event = proof.event as ReactKeyboardEvent<HTMLElement>;
+    return (
+      event.preventDefault === proof.preventDefault &&
+      event.stopPropagation === proof.stopPropagation &&
+      event.isDefaultPrevented === proof.isDefaultPrevented &&
+      event.isPropagationStopped === proof.isPropagationStopped &&
+      TRUSTED_REFLECT_APPLY(
+        proof.isDefaultPrevented,
+        proof.event,
+        [],
+      ) === proof.defaultPreventedResult &&
+      TRUSTED_REFLECT_APPLY(
+        proof.isPropagationStopped,
+        proof.event,
+        [],
+      ) === proof.propagationStoppedResult
+    );
+  } catch {
+    return false;
+  }
+}
+
+function trashReactKeyProofWasPrevented(
+  proof: TrashReactKeyProof,
+): boolean {
+  try {
+    const event = proof.event as ReactKeyboardEvent<HTMLElement>;
+    const isDefaultPrevented = event.isDefaultPrevented;
+    return (
+      event.preventDefault === proof.preventDefault &&
+      event.stopPropagation === proof.stopPropagation &&
+      event.isPropagationStopped === proof.isPropagationStopped &&
+      event.defaultPrevented === true &&
+      typeof isDefaultPrevented === "function" &&
+      TRUSTED_REFLECT_APPLY(
+        isDefaultPrevented,
+        proof.event,
+        [],
+      ) === true &&
+      TRUSTED_REFLECT_APPLY(
+        proof.isPropagationStopped,
+        proof.event,
+        [],
+      ) === proof.propagationStoppedResult
+    );
+  } catch {
+    return false;
+  }
+}
 
 class TrashElementOwner<T extends HTMLElement> implements TrashElementOwnerView {
   private current: T | null = null;
@@ -6257,6 +13007,12 @@ function createTrashPublication(
         captureCard: cardOwner.capture,
         captureRestore: restoreOwner.capture,
         capturePurge: purgeOwner.capture,
+        captureKeyDown: (
+          event: ReactKeyboardEvent<HTMLLIElement>,
+        ) => currentRuntime?.captureCardKeyDown(card, event),
+        bubbleKeyDown: (
+          event: ReactKeyboardEvent<HTMLLIElement>,
+        ) => currentRuntime?.bubbleCardKeyDown(card, event),
         cardOwner,
         restoreOwner,
         purgeOwner,
@@ -6558,12 +13314,19 @@ function createTrashPublication(
       element: HTMLButtonElement,
     ): TrashControlPublication => {
       const controlIdentity = Symbol(`trash-${kind}-control`);
+      const path = trashEventPath(element, root.ownerDocument);
+      if (!path) {
+        throw new Error(
+          "Cannot publish a Trash control outside its owner document",
+        );
+      }
       return Object.freeze({
         identity: controlIdentity,
         publicationIdentity: identity,
         kind,
         cardIndex,
         element,
+        path,
         action: Object.freeze({
           identity: Symbol(`trash-${kind}-action`),
           publicationIdentity: identity,
@@ -6581,12 +13344,27 @@ function createTrashPublication(
         if (!element || !restore || !purge) {
           throw new Error("Cannot publish a Trash row without every committed ref");
         }
+        const restoreControl = control(
+          "restore",
+          owned.authority.index,
+          restore,
+        );
+        const purgeControl = control(
+          "purge",
+          owned.authority.index,
+          purge,
+        );
         return Object.freeze({
           identity: Symbol("trash-card"),
           authority: owned.authority,
           element,
-          restore: control("restore", owned.authority.index, restore),
-          purge: control("purge", owned.authority.index, purge),
+          restore: restoreControl,
+          purge: purgeControl,
+          actions: Object.freeze(
+            [restoreControl, purgeControl].filter(({ element }) =>
+              trashIsEffectivelyEnabled(element),
+            ),
+          ),
         });
       }),
     );
@@ -6602,6 +13380,18 @@ function createTrashPublication(
     let replayRefs: TrashRefReplay[] = [];
     let partialReplayOwners = new Set<TrashElementOwnerView>();
     let invalidReplay = false;
+    const keyboardProofs = new WeakMap<
+      KeyboardEvent,
+      TrashKeyboardNativeProof
+    >();
+    const invalidKeyboardEvents = new WeakSet<Event>();
+    const keyboardOwnerWindow = root.ownerDocument.defaultView;
+    const keyboardAuthority = keyboardOwnerWindow
+      ? captureTrashKeyboardAuthority(
+          keyboardOwnerWindow,
+          root.ownerDocument,
+        )
+      : null;
     const publication: TrashPublication = Object.freeze({
       identity,
       render,
@@ -6617,6 +13407,496 @@ function createTrashPublication(
       retire: () => retire("other"),
       isRetired: () => retired,
     });
+
+    const publishedActionsAreCurrent = (
+      card: TrashCardPublication,
+    ) => {
+      const expected = [card.restore, card.purge].filter(
+        ({ element }) => trashIsEffectivelyEnabled(element),
+      );
+      return (
+        Object.isFrozen(card.actions) &&
+        card.actions.length <= 2 &&
+        card.actions.length === expected.length &&
+        card.actions.every(
+          (action, index) =>
+            action === expected[index] &&
+            action.publicationIdentity === publication.identity &&
+            action.cardIndex === card.authority.index &&
+            action.action.publicationIdentity ===
+              publication.identity &&
+            action.action.controlIdentity === action.identity &&
+            action.action.cardIndex === card.authority.index &&
+            action.action.kind === action.kind &&
+            trashIsEffectivelyEnabled(action.element),
+        )
+      );
+    };
+
+    const keyboardCandidateIsCurrent = (
+      card: TrashCardPublication,
+      movement: TrashKeyboardMovement,
+    ) => {
+      const source = movement.source;
+      const destination = movement.destination;
+      return (
+        currentRuntime === runtime &&
+        movement.publicationIdentity === publication.identity &&
+        movement.cardIdentity === card.identity &&
+        movement.sourceIdentity === source.identity &&
+        movement.sourceActionIdentity === source.action.identity &&
+        movement.destinationIdentity === destination.identity &&
+        movement.destinationActionIdentity ===
+          destination.action.identity &&
+        source !== destination &&
+        card.actions.includes(source) &&
+        card.actions.includes(destination) &&
+        publishedActionsAreCurrent(card) &&
+        candidateIsCurrent(
+          runtime,
+          publication,
+          card,
+          source,
+          source.action,
+        ) &&
+        candidateIsCurrent(
+          runtime,
+          publication,
+          card,
+          destination,
+          destination.action,
+        ) &&
+        keyboardAuthority?.ownerWindow ===
+          publication.ownerDocument.defaultView &&
+        keyboardAuthority.isCurrent() &&
+        keyboardAuthority.activeElement.read(
+          publication.ownerDocument,
+        ) === source.element
+      );
+    };
+
+    const pathsMatch = (
+      expected: readonly EventTarget[],
+      current: readonly EventTarget[],
+    ) =>
+      expected.length === current.length &&
+      expected.every((entry, index) => current[index] === entry);
+
+    const delegatedRootIsCurrent = (
+      card: TrashCardPublication,
+      path: readonly EventTarget[],
+      delegatedRoot: EventTarget,
+    ) => {
+      const cardIndex = path.indexOf(card.element);
+      const publicationRootIndex = path.indexOf(publication.root);
+      const delegatedRootIndex = path.indexOf(delegatedRoot);
+      return (
+        cardIndex >= 0 &&
+        publicationRootIndex > cardIndex &&
+        delegatedRootIndex > publicationRootIndex &&
+        delegatedRootIndex < path.length - 1 &&
+        path.lastIndexOf(delegatedRoot) === delegatedRootIndex
+      );
+    };
+
+    const nativeKeyboardIsCurrent = (
+      proof: TrashKeyboardNativeProof,
+      expectedPhase: number,
+    ) => {
+      const authority = keyboardAuthority;
+      if (!authority) return false;
+      try {
+        const event = proof.event;
+        const path = authority.composedPath.call(event);
+        const view = authority.view.read(event);
+        return (
+          authority.isCurrent() &&
+          event instanceof authority.KeyboardEvent &&
+          authority.prototypeOf(event) ===
+            authority.keyboardPrototype &&
+          publication.ownerDocument.defaultView ===
+            authority.ownerWindow &&
+          authority.trusted.matches(event) &&
+          authority.trusted.read(event) === true &&
+          authority.type.read(event) === "keydown" &&
+          authority.target.read(event) ===
+            proof.movement.source.element &&
+          authority.currentTarget.read(event) ===
+            proof.delegatedRoot &&
+          authority.phase.read(event) === expectedPhase &&
+          authority.bubbles.read(event) &&
+          authority.cancelable.read(event) &&
+          !authority.defaultPrevented.read(event) &&
+          !authority.cancelBubble.read(event) &&
+          authority.key.read(event) === proof.key &&
+          authority.code.read(event) === proof.code &&
+          authority.location.read(event) === proof.location &&
+          !authority.ctrlKey.read(event) &&
+          !authority.metaKey.read(event) &&
+          !authority.altKey.read(event) &&
+          !authority.shiftKey.read(event) &&
+          !authority.repeat.read(event) &&
+          !authority.composing.read(event) &&
+          (view === authority.ownerWindow ||
+            view === proof.window.receiver) &&
+          pathsMatch(proof.path, path) &&
+          pathsMatch(proof.window.path, path) &&
+          delegatedRootIsCurrent(
+            proof.card,
+            path,
+            proof.delegatedRoot,
+          ) &&
+          path.at(-2) === publication.ownerDocument &&
+          path.at(-1) === proof.terminal &&
+          proof.window.registration === authority.terminal &&
+          proof.window.nativeEvent === event &&
+          proof.window.receiver ===
+            proof.window.currentTarget &&
+          proof.window.receiver === proof.window.terminal &&
+          proof.window.receiver === proof.terminal &&
+          authority.terminal.proofFor(event) === proof.window &&
+          keyboardCandidateIsCurrent(proof.card, proof.movement)
+        );
+      } catch {
+        return false;
+      }
+    };
+
+    const releaseKeyboardClaims = (
+      proof: TrashKeyboardNativeProof,
+    ) => {
+      cells.claimedPublications.delete(publication);
+      cells.claimedCards.delete(proof.card);
+      cells.claimedControls.delete(proof.movement.source);
+      cells.claimedControls.delete(proof.movement.destination);
+      cells.claimedActions.delete(proof.movement.source.action);
+      cells.claimedActions.delete(
+        proof.movement.destination.action,
+      );
+    };
+
+    const claimKeyboard = (
+      proof: TrashKeyboardNativeProof,
+    ) => {
+      const authority = keyboardAuthority;
+      const capture = proof.capture;
+      const bubble = proof.bubble;
+      if (
+        !authority ||
+        !bubble ||
+        cells.claimedPublications.has(publication) ||
+        cells.claimedCards.has(proof.card) ||
+        cells.claimedControls.has(proof.movement.source) ||
+        cells.claimedControls.has(proof.movement.destination) ||
+        cells.claimedActions.has(proof.movement.source.action) ||
+        cells.claimedActions.has(
+          proof.movement.destination.action,
+        ) ||
+        cells.claimedNativeEvents.has(proof.event) ||
+        cells.claimedReactEvents.has(capture.event) ||
+        cells.claimedReactEvents.has(bubble.event) ||
+        cells.claimedMovements.has(proof.movement) ||
+        cells.claimedWindowProofs.has(proof.window) ||
+        !cells.evaluatingPublications.has(publication) ||
+        proof.window.registration !== authority.terminal ||
+        !authority.terminal.claim(proof.window)
+      ) {
+        return false;
+      }
+      cells.claimedPublications.add(publication);
+      cells.claimedCards.add(proof.card);
+      cells.claimedControls.add(proof.movement.source);
+      cells.claimedControls.add(proof.movement.destination);
+      cells.claimedActions.add(proof.movement.source.action);
+      cells.claimedActions.add(
+        proof.movement.destination.action,
+      );
+      cells.claimedNativeEvents.add(proof.event);
+      cells.claimedReactEvents.add(capture.event);
+      cells.claimedReactEvents.add(bubble.event);
+      cells.claimedMovements.add(proof.movement);
+      cells.claimedWindowProofs.add(proof.window);
+      return true;
+    };
+
+    const captureCardKeyDown = (
+      cardAuthority: TrashCardPresentation,
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => {
+      const authority = keyboardAuthority;
+      if (!authority || !event || typeof event !== "object") return;
+      let nativeEvent: KeyboardEvent;
+      try {
+        nativeEvent = event.nativeEvent;
+      } catch {
+        return;
+      }
+      if (!nativeEvent || typeof nativeEvent !== "object") {
+        return;
+      }
+      const existing = keyboardProofs.get(nativeEvent);
+      if (
+        existing ||
+        cells.attemptedNativeEvents.has(nativeEvent) ||
+        cells.attemptedReactEvents.has(event)
+      ) {
+        if (existing) existing.crossed = true;
+        invalidKeyboardEvents.add(nativeEvent);
+        keyboardProofs.delete(nativeEvent);
+        if (nativeEvent && typeof nativeEvent === "object")
+          cells.attemptedNativeEvents.add(nativeEvent);
+        cells.attemptedReactEvents.add(event);
+        return;
+      }
+      cells.attemptedNativeEvents.add(nativeEvent);
+      cells.attemptedReactEvents.add(event);
+      try {
+        const card =
+          publication.cards[cardAuthority.index];
+        const target = authority.target.read(nativeEvent);
+        const source =
+          card?.restore.element === target
+            ? card.restore
+            : card?.purge.element === target
+              ? card.purge
+              : null;
+        const key = trashNavigationKey(
+          authority.key.read(nativeEvent),
+        );
+        const windowProof =
+          authority.terminal.proofFor(nativeEvent);
+        const view = authority.view.read(nativeEvent);
+        const delegatedRoot =
+          authority.currentTarget.read(nativeEvent);
+        const code = authority.code.read(nativeEvent);
+        const location = authority.location.read(nativeEvent);
+        if (
+          !card ||
+          card.authority !== cardAuthority ||
+          !source ||
+          !key ||
+          !windowProof ||
+          !authority.isCurrent() ||
+          publication.ownerDocument.defaultView !==
+            authority.ownerWindow ||
+          !(nativeEvent instanceof authority.KeyboardEvent) ||
+          authority.prototypeOf(nativeEvent) !==
+            authority.keyboardPrototype ||
+          !authority.trusted.matches(nativeEvent) ||
+          authority.trusted.read(nativeEvent) !== true ||
+          authority.type.read(nativeEvent) !== "keydown" ||
+          authority.target.read(nativeEvent) !== source.element ||
+          !delegatedRoot ||
+          authority.phase.read(nativeEvent) !==
+            authority.Event.CAPTURING_PHASE ||
+          !authority.bubbles.read(nativeEvent) ||
+          !authority.cancelable.read(nativeEvent) ||
+          authority.defaultPrevented.read(nativeEvent) ||
+          authority.cancelBubble.read(nativeEvent) ||
+          authority.key.read(nativeEvent) !== key ||
+          authority.ctrlKey.read(nativeEvent) ||
+          authority.metaKey.read(nativeEvent) ||
+          authority.altKey.read(nativeEvent) ||
+          authority.shiftKey.read(nativeEvent) ||
+          authority.repeat.read(nativeEvent) ||
+          authority.composing.read(nativeEvent) ||
+          (view !== authority.ownerWindow &&
+            view !== windowProof.receiver) ||
+          authority.activeElement.read(
+            publication.ownerDocument,
+          ) !== source.element ||
+          !publishedActionsAreCurrent(card)
+        ) {
+          return;
+        }
+        const movement = trashMovement(
+          publication,
+          card,
+          source,
+          key,
+        );
+        if (
+          !movement ||
+          !keyboardCandidateIsCurrent(card, movement)
+        ) {
+          return;
+        }
+        const path = authority.composedPath.call(nativeEvent);
+        const terminal = path.at(-1);
+        if (
+          !terminal ||
+          path.length !== source.path.length + 1 ||
+          !pathsMatch(path, windowProof.path) ||
+          path.at(-2) !== publication.ownerDocument ||
+          terminal !== windowProof.receiver ||
+          windowProof.receiver !== windowProof.currentTarget ||
+          windowProof.receiver !== windowProof.terminal ||
+          !source.path.every(
+            (entry, index) => path[index] === entry,
+          ) ||
+          !delegatedRootIsCurrent(card, path, delegatedRoot)
+        ) {
+          return;
+        }
+        const capture = captureTrashReactKeyProof(
+          event,
+          nativeEvent,
+          source.element,
+          card.element,
+          authority.Event.CAPTURING_PHASE,
+          key,
+        );
+        if (!capture) return;
+        const proof: TrashKeyboardNativeProof = {
+          event: nativeEvent,
+          publication,
+          card,
+          movement,
+          delegatedRoot,
+          path: Object.freeze([...path]),
+          terminal,
+          window: windowProof,
+          key,
+          code,
+          location,
+          capture,
+          bubble: null,
+          crossed: false,
+        };
+        keyboardProofs.set(nativeEvent, proof);
+        queueMicrotask(() => {
+          if (keyboardProofs.get(nativeEvent) !== proof) return;
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+        });
+      } catch {
+        invalidKeyboardEvents.add(nativeEvent);
+        keyboardProofs.delete(nativeEvent);
+      }
+    };
+
+    const bubbleCardKeyDown = (
+      cardAuthority: TrashCardPresentation,
+      event: ReactKeyboardEvent<HTMLLIElement>,
+    ) => {
+      const authority = keyboardAuthority;
+      if (!authority) return;
+      if (!event || typeof event !== "object") {
+        return;
+      }
+      let nativeEvent: KeyboardEvent;
+      try {
+        nativeEvent = event.nativeEvent;
+      } catch {
+        return;
+      }
+      if (!nativeEvent || typeof nativeEvent !== "object") return;
+      const proof = keyboardProofs.get(nativeEvent);
+      if (!proof) return;
+      cells.attemptedReactEvents.add(event);
+      try {
+        if (
+          proof.crossed ||
+          invalidKeyboardEvents.has(nativeEvent) ||
+          proof.bubble ||
+          event === proof.capture.event ||
+          event.nativeEvent !== proof.event ||
+          proof.card.authority !== cardAuthority ||
+          authority.phase.read(proof.event) !==
+            authority.Event.BUBBLING_PHASE ||
+          !nativeKeyboardIsCurrent(
+            proof,
+            authority.Event.BUBBLING_PHASE,
+          )
+        ) {
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+          return;
+        }
+        const bubble = captureTrashReactKeyProof(
+          event,
+          proof.event,
+          proof.movement.source.element,
+          proof.card.element,
+          authority.Event.BUBBLING_PHASE,
+          proof.key,
+        );
+        if (!bubble) {
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+          return;
+        }
+        proof.bubble = bubble;
+        if (
+          !trashReactKeyProofIsCurrent(proof.capture) ||
+          !trashReactKeyProofIsCurrent(bubble) ||
+          !nativeKeyboardIsCurrent(
+            proof,
+            authority.Event.BUBBLING_PHASE,
+          ) ||
+          keyboardProofs.get(nativeEvent) !== proof
+        ) {
+          proof.crossed = true;
+          invalidKeyboardEvents.add(nativeEvent);
+          keyboardProofs.delete(nativeEvent);
+          return;
+        }
+        cells.evaluatingPublications.add(publication);
+        let claimed = false;
+        try {
+          claimed =
+            nativeKeyboardIsCurrent(
+              proof,
+              authority.Event.BUBBLING_PHASE,
+            ) &&
+            trashReactKeyProofIsCurrent(proof.capture) &&
+            trashReactKeyProofIsCurrent(bubble) &&
+            keyboardProofs.get(nativeEvent) === proof &&
+            claimKeyboard(proof);
+        } finally {
+          cells.evaluatingPublications.delete(publication);
+        }
+        keyboardProofs.delete(nativeEvent);
+        if (!claimed) return;
+        try {
+          TRUSTED_REFLECT_APPLY(
+            bubble.preventDefault,
+            bubble.event,
+            [],
+          );
+          if (
+            !authority.defaultPrevented.read(proof.event) ||
+            !trashReactKeyProofWasPrevented(bubble)
+          ) {
+            return;
+          }
+          authority.focus.call(
+            proof.movement.destination.element,
+            { preventScroll: true },
+          );
+          requestSuccessor();
+        } finally {
+          releaseKeyboardClaims(proof);
+        }
+      } catch {
+        proof.crossed = true;
+        invalidKeyboardEvents.add(nativeEvent);
+        keyboardProofs.delete(nativeEvent);
+      }
+    };
+
+    const releaseKeyboardListener = () => {
+      const authority = keyboardAuthority;
+      if (!authority) return;
+      try {
+        authority.terminal.release();
+      } catch {
+        return;
+      }
+    };
 
     const mutationIsRelevant = (record: MutationRecord) => {
       if (
@@ -6657,6 +13937,7 @@ function createTrashPublication(
       if (domObserver) recordMutations(domObserver.takeRecords());
       retired = true;
       retirement = reason;
+      releaseKeyboardListener();
       cells.retiredPublications.add(publication);
       for (const card of publication.cards) {
         cells.retiredCards.add(card);
@@ -6843,6 +14124,8 @@ function createTrashPublication(
             .filter(({ owner }) => partialReplayOwners.has(owner))
             .map(({ element }) => element),
         ),
+      captureCardKeyDown,
+        bubbleCardKeyDown,
     });
     return runtime;
   };
@@ -7188,6 +14471,10 @@ export function TrashView({
     claimedActions: new WeakSet(),
     claimedReactEvents: new WeakSet(),
     claimedNativeEvents: new WeakSet(),
+    attemptedReactEvents: new WeakSet(),
+    attemptedNativeEvents: new WeakSet(),
+    claimedMovements: new WeakSet(),
+    claimedWindowProofs: new WeakSet(),
     evaluatingPublications: new WeakSet(),
   }));
   const [, setPublicationRevision] = useState(0);
@@ -7297,6 +14584,8 @@ export function TrashView({
                 className="flex h-full min-w-0 flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm"
                 data-testid="trash-card"
                 aria-busy={card.busy || undefined}
+                onKeyDownCapture={publishedCard.captureKeyDown}
+                onKeyDown={publishedCard.bubbleKeyDown}
               >
                 <div className="mb-2 flex items-start justify-between gap-2">
                   <h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-5 text-ink">{card.title}</h3>
