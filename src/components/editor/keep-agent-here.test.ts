@@ -46,7 +46,7 @@ type TokenListResponse = Awaited<ReturnType<typeof api.tokens.list>>;
 
 const DOC = { id: "doc-1", title: "Plan" };
 type PanelProps = ComponentProps<typeof KeepAgentHerePanel>;
-type ElementRef<T extends HTMLElement> = (element: T | null) => void;
+type ElementRef<T extends HTMLElement> = (element: T | null) => void | (() => void);
 
 interface CapturedClick {
   type: string;
@@ -106,6 +106,23 @@ function reactRef<T extends HTMLElement>(element: HTMLElement): ElementRef<T> {
   const ref = reactProperty<ElementRef<T>>(element, "ref");
   if (typeof ref !== "function") throw new Error(`A callback ref was not attached to ${element.dataset.testid ?? element.tagName}`);
   return ref;
+}
+
+interface ReactHostFiber {
+  alternate?: ReactHostFiber | null;
+  memoizedProps?: Record<string, unknown>;
+  refCleanup?: unknown;
+}
+
+function reactRefCleanup(element: HTMLElement): () => void {
+  const key = Object.keys(element).find((name) => name.startsWith("__reactFiber$"));
+  if (!key) throw new Error(`React fiber was not attached to ${element.tagName}`);
+  const fiber = (element as unknown as Record<string, ReactHostFiber>)[key]!;
+  const ref = reactRef(element);
+  const current = [fiber, fiber.alternate].find((candidate) => candidate?.memoizedProps?.ref === ref);
+  const refCleanup = current?.refCleanup;
+  if (typeof refCleanup !== "function") throw new Error(`React ref cleanup was not attached to ${element.tagName}`);
+  return () => refCleanup();
 }
 
 function captureControl(element: HTMLElement): CapturedControl {
@@ -2297,9 +2314,15 @@ describe("KeepAgentHerePanel token setup error wrapping", () => {
       .mockRejectedValueOnce(new ApiError(503, unbroken))
       .mockReturnValueOnce(replacement.promise)
       .mockReturnValueOnce(recovery.promise);
-    render(panel());
+    render(createElement(StrictMode, null, panel()));
+    const mounted = capturePanel();
+    expect(listTokens).toHaveBeenCalledOnce();
     await screen.findByRole("alert");
     const failed = expectError(unbroken);
+    expect(capturePanel().panel).toBe(mounted.panel);
+    expect(capturePanel().prompt).toBe(mounted.prompt);
+    expect(capturePanel().copy.element).toBe(mounted.copy.element);
+    expect(listTokens).toHaveBeenCalledOnce();
 
     fireEvent.click(failed.retry.element);
     fireEvent.click(failed.retry.element);
@@ -2324,10 +2347,8 @@ describe("KeepAgentHerePanel token setup error wrapping", () => {
     });
     expect(listTokens).toHaveBeenCalledTimes(2);
 
-    act(() => {
-      invoke(current.retry);
-      invoke(current.retry);
-    });
+    fireEvent.click(current.retry.element);
+    fireEvent.click(current.retry.element);
     expect(listTokens).toHaveBeenCalledTimes(3);
     expectError(literal, true);
     await resolve(recovery, tokenResponse(count));
@@ -2337,6 +2358,9 @@ describe("KeepAgentHerePanel token setup error wrapping", () => {
     expect(current.retry.element.isConnected).toBe(false);
     expect(screen.queryByRole("button", { name: /Retry/ })).toBeNull();
     expect(Boolean(screen.queryByTestId("agent-connect-card"))).toBe(setup);
+    expect(capturePanel().panel).toBe(mounted.panel);
+    expect(capturePanel().prompt).toBe(mounted.prompt);
+    expect(capturePanel().copy.element).toBe(mounted.copy.element);
     act(() => {
       invoke(failed.retry);
       invoke(pending.retry);
@@ -2401,6 +2425,228 @@ describe("KeepAgentHerePanel token setup error wrapping", () => {
       expect(screen.queryByTestId("agent-connect-card")).toBeNull();
     },
   );
+});
+
+describe("KeepAgentHerePanel conditional error replay", () => {
+  async function errorPanel() {
+    const retry = deferred<TokenListResponse>();
+    const onBack = vi.fn();
+    listTokens.mockReset()
+      .mockRejectedValueOnce(new ApiError(503, "Token setup unavailable."))
+      .mockReturnValueOnce(retry.promise);
+    const props = { doc: DOC, onBack };
+    const view = renderDirect(createElement(KeepAgentHerePanel, props));
+    await waitFor(() => expect(within(view.host).getByRole("alert")).toBeInTheDocument());
+    const captured = capturePanel(view.host);
+    const error = captured.error;
+    const retryControl = captured.retry;
+    const errorRef = captured.errorRef;
+    if (!error || !retryControl || !errorRef) throw new Error("Expected the error/Retry subtree");
+    return {
+      view,
+      props,
+      captured,
+      error,
+      errorRef,
+      retryControl,
+      releaseError: reactRefCleanup(error),
+      releaseRetry: reactRefCleanup(retryControl.element),
+      retry,
+      onBack,
+    };
+  }
+
+  it("completes only the new error subtree replay while retaining the root, other owners, and exact cleanup", async () => {
+    const add = vi.spyOn(window, "addEventListener");
+    const remove = vi.spyOn(window, "removeEventListener");
+    const {
+      view, captured, error, errorRef, retryControl, releaseError, releaseRetry, retry, onBack,
+    } = await errorPanel();
+    const retained = [captured.panel, captured.heading!, captured.prompt, captured.back!.element, captured.copy.element];
+    const retainedRefs = retained.map((element) => reactRef(element));
+    const observer = observeMutations(view.host);
+    const addedAtSetup = add.mock.calls.length;
+    const removedAtSetup = remove.mock.calls.length;
+    const rejectIncomplete = () => {
+      fireEvent.click(retryControl.element);
+      invoke(captured.back!);
+      invoke(captured.copy);
+      expect(listTokens).toHaveBeenCalledOnce();
+      expect(onBack).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+    };
+
+    act(() => {
+      releaseError();
+      rejectIncomplete();
+      releaseRetry();
+      rejectIncomplete();
+      retryControl.ref(retryControl.element);
+      rejectIncomplete();
+      errorRef(error);
+    });
+
+    const current = capturePanel(view.host);
+    expect([current.panel, current.heading, current.prompt, current.back!.element, current.copy.element]).toEqual(retained);
+    expect(retained.map((element) => reactRef(element))).toEqual(retainedRefs);
+    expect(current.error).toBe(error);
+    expect(current.retry!.element).toBe(retryControl.element);
+    expect(observer.takeRecords()).toHaveLength(0);
+    expect(add.mock.calls.slice(addedAtSetup).filter(([type, , options]) => type === "keydown" && options === true)).toHaveLength(1);
+    expect(remove.mock.calls.slice(removedAtSetup).filter(([type, , options]) => type === "keydown" && options === true)).toHaveLength(1);
+
+    act(() => {
+      fireEvent.click(current.back!.element);
+      fireEvent.click(current.back!.element);
+      fireEvent.click(current.copy.element);
+      fireEvent.click(current.copy.element);
+      fireEvent.click(current.retry!.element);
+      fireEvent.click(current.retry!.element);
+    });
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(keepAgentPrompt(DOC));
+    expect(listTokens).toHaveBeenCalledTimes(2);
+    expect(selectContents).not.toHaveBeenCalled();
+    await resolve(retry, tokenResponse(1));
+
+    await act(async () => {
+      view.root.render(null);
+      await Promise.resolve();
+    });
+    const added = add.mock.calls.filter(([type, , options]) => type === "keydown" && options === true).map(([, callback]) => callback);
+    const removed = remove.mock.calls.filter(([type, , options]) => type === "keydown" && options === true).map(([, callback]) => callback);
+    expect(removed).toEqual(expect.arrayContaining(added));
+  });
+
+  it.each([
+    "incomplete cleanup",
+    "error-only rebind",
+    "Retry-only cleanup",
+    "Retry-only rebind",
+    "unrelated retained owner cleanup",
+    "unrelated retained owner rebind",
+    "duplicate cleanup",
+    "duplicate rebind",
+    "null rebind",
+    "detached rebind",
+    "replacement rebind",
+    "error mutation and restoration",
+    "retained heading mutation and restoration",
+    "placement mutation and restoration",
+  ] as const)("rejects %s without accepting an invalid partial successor", async (scenario) => {
+    const { captured, error, errorRef, retryControl, releaseError, releaseRetry, onBack } = await errorPanel();
+    const releaseHeading = reactRefCleanup(captured.heading!);
+    act(() => {
+      if (scenario === "Retry-only cleanup") {
+        releaseRetry();
+        retryControl.ref(retryControl.element);
+        return;
+      }
+      releaseError();
+      if (scenario === "incomplete cleanup") {
+        errorRef(error);
+        return;
+      }
+      if (scenario === "duplicate cleanup") releaseError();
+      if (scenario === "unrelated retained owner cleanup") releaseHeading();
+      releaseRetry();
+      if (scenario === "error-only rebind") {
+        errorRef(error);
+        return;
+      }
+      if (scenario === "unrelated retained owner rebind") captured.copy.ref(captured.copy.element);
+      if (scenario === "null rebind") retryControl.ref(null);
+      if (scenario === "detached rebind") retryControl.ref(document.createElement("button"));
+      if (scenario === "replacement rebind") retryControl.ref(captured.copy.element);
+      if (scenario === "error mutation and restoration" || scenario === "retained heading mutation and restoration") {
+        const text = scenario === "error mutation and restoration"
+          ? error.firstElementChild!.firstChild!
+          : captured.heading!.lastChild!;
+        const original = text.nodeValue;
+        text.nodeValue = "Changed during replay";
+        text.nodeValue = original;
+      }
+      if (scenario === "placement mutation and restoration") {
+        const parent = captured.panel.parentNode!;
+        const next = captured.panel.nextSibling;
+        captured.panel.remove();
+        parent.insertBefore(captured.panel, next);
+      }
+      retryControl.ref(retryControl.element);
+      if (scenario === "Retry-only rebind") return;
+      if (scenario === "duplicate rebind") retryControl.ref(retryControl.element);
+      errorRef(error);
+    });
+    const rejectActions = () => {
+      fireEvent.click(retryControl.element);
+      fireEvent.click(retryControl.element);
+      invoke(captured.back!);
+      invoke(captured.copy);
+      expect(listTokens).toHaveBeenCalledOnce();
+      expect(onBack).not.toHaveBeenCalled();
+      expect(copyText).not.toHaveBeenCalled();
+      expect(selectContents).not.toHaveBeenCalled();
+    };
+    act(rejectActions);
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      errorRef(error);
+      retryControl.ref(retryControl.element);
+      rejectActions();
+    });
+  });
+
+  it("expires incomplete error replay before a late final rebind and recovers only through a fresh publication", async () => {
+    const { view, props, captured, error, errorRef, retryControl, releaseError, releaseRetry, retry } = await errorPanel();
+    act(() => {
+      releaseError();
+      releaseRetry();
+      retryControl.ref(retryControl.element);
+    });
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      errorRef(error);
+      fireEvent.click(retryControl.element);
+      invoke(captured.copy);
+    });
+    expect(listTokens).toHaveBeenCalledOnce();
+    expect(copyText).not.toHaveBeenCalled();
+
+    act(() => view.root.render(createElement(KeepAgentHerePanel, { ...props, doc: { id: "doc-2", title: "Fresh publication" } })));
+    const current = capturePanel(view.host);
+    expect(current.panel).toBe(captured.panel);
+    expect(current.retry!.element).toBe(retryControl.element);
+    act(() => invoke(retryControl, current.retry!.element));
+    expect(listTokens).toHaveBeenCalledOnce();
+    fireEvent.click(current.retry!.element);
+    fireEvent.click(current.retry!.element);
+    expect(listTokens).toHaveBeenCalledTimes(2);
+    await resolve(retry, tokenResponse(0));
+    expect(within(view.host).queryByRole("alert")).toBeNull();
+    expect(within(view.host).getByTestId("agent-connect-card")).toBeInTheDocument();
+  });
+
+  it("does not treat an already retained error subtree as newly committed after a fresh render", async () => {
+    const { view, props, captured, onBack } = await errorPanel();
+    act(() => view.root.render(createElement(KeepAgentHerePanel, { ...props, doc: { ...DOC } })));
+    const current = capturePanel(view.host);
+    expect(current.error).toBe(captured.error);
+    expect(current.retry!.element).toBe(captured.retry!.element);
+    const releaseError = reactRefCleanup(current.error!);
+    const releaseRetry = reactRefCleanup(current.retry!.element);
+    act(() => {
+      releaseError();
+      releaseRetry();
+      current.retry!.ref(current.retry!.element);
+      current.errorRef!(current.error);
+      fireEvent.click(current.retry!.element);
+      invoke(current.back!);
+      invoke(current.copy);
+    });
+    expect(listTokens).toHaveBeenCalledOnce();
+    expect(onBack).not.toHaveBeenCalled();
+    expect(copyText).not.toHaveBeenCalled();
+  });
 });
 
 describe("KeepAgentHerePanel exact control publications", () => {
