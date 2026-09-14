@@ -1678,3 +1678,177 @@ describe("source destination entity spellings", () => {
     });
   });
 });
+
+describe("source inline code delimiter fidelity", () => {
+  function expectCodeParagraph(source: string, text: string) {
+    const { doc } = parseMarkdown(source);
+    expect(doc.childCount).toBe(1);
+    const paragraph = doc.child(0);
+    expect(paragraph.type.name).toBe("paragraph");
+    expect(paragraph.childCount).toBe(3);
+    expect(paragraph.child(0).toJSON()).toEqual({ type: "text", text: "before (" });
+    const code = paragraph.child(1);
+    expect(code.type.name).toBe("text");
+    expect(code.text).toBe(text);
+    expect(code.attrs).toEqual({});
+    expect(code.marks).toHaveLength(1);
+    expect(code.marks[0].type.name).toBe("code");
+    expect(code.marks[0].attrs).toEqual({});
+    expect(paragraph.child(2).toJSON()).toEqual({ type: "text", text: ") after" });
+  }
+
+  it.each([
+    { name: "plain text", text: "plain", offset: 1, expected: "before (`plain`) after" },
+    { name: "single interior tick", text: "left`right", offset: 3, expected: "before (`` left`right ``) after" },
+    { name: "double interior ticks", text: "left``right", offset: 4, expected: "before (``` left``right ```) after" },
+    { name: "long interior run", text: "left`````right", offset: 7, expected: "before (`````` left`````right ``````) after" },
+    { name: "mixed interior runs", text: "left`mid```end``tail", offset: 5, expected: "before (```` left`mid```end``tail ````) after" },
+    { name: "leading unmatched tick", text: "`value", offset: 3, expected: "before (`` `value ``) after" },
+    { name: "trailing unmatched tick", text: "value`", offset: 3, expected: "before (`` value` ``) after" },
+    { name: "leading unmatched double run", text: "``value", offset: 4, expected: "before (``` ``value ```) after" },
+    { name: "trailing unmatched long run", text: "value````", offset: 6, expected: "before (````` value```` `````) after" },
+    { name: "unequal edge runs", text: "`value``", offset: 4, expected: "before (``` `value`` ```) after" },
+    { name: "only a literal tick", text: "`", offset: 3, expected: "before (`` ` ``) after" },
+    { name: "only a literal run", text: "````", offset: 6, expected: "before (````` ```` `````) after" },
+    { name: "entity spellings", text: "&copy;&#65;&#x41;&amp;", offset: 1, expected: "before (`&copy;&#65;&#x41;&amp;`) after" },
+    { name: "original backslashes", text: "C:\\path\\leaf \\* \\&copy;", offset: 1, expected: "before (`C:\\path\\leaf \\* \\&copy;`) after" },
+    { name: "backslash before a literal tick", text: "\\`value", offset: 3, expected: "before (`` \\`value ``) after" },
+    { name: "strong-looking text", text: "**bold**", offset: 1, expected: "before (`**bold**`) after" },
+    { name: "Markdown punctuation", text: "*a* ~~b~~ [c](d) & + <x>", offset: 1, expected: "before (`*a* ~~b~~ [c](d) & + <x>`) after" },
+    { name: "supplementary and combining Unicode", text: "\u{10400}nai\u0308ve \u{1f642}", offset: 1, expected: "before (`\u{10400}nai\u0308ve \u{1f642}`) after" },
+    { name: "one leading ASCII space", text: " value", offset: 1, expected: "before (` value`) after" },
+    { name: "one trailing ASCII space", text: "value ", offset: 1, expected: "before (`value `) after" },
+    { name: "both edge ASCII spaces", text: " value ", offset: 2, expected: "before (`  value  `) after" },
+    { name: "multiple edge ASCII spaces", text: "  value   ", offset: 2, expected: "before (`   value    `) after" },
+    { name: "one ASCII space only", text: " ", offset: 1, expected: "before (` `) after" },
+    { name: "all ASCII spaces", text: "   ", offset: 1, expected: "before (`   `) after" },
+    { name: "edge tabs", text: "\tvalue\t", offset: 1, expected: "before (`\tvalue\t`) after" },
+    { name: "space tab space", text: " \t ", offset: 2, expected: "before (`  \t  `) after" },
+    { name: "space NBSP space", text: " \u00a0 ", offset: 2, expected: "before (`  \u00a0  `) after" },
+    { name: "edge NBSPs", text: "\u00a0value\u00a0", offset: 1, expected: "before (`\u00a0value\u00a0`) after" },
+    { name: "spaces with an unmatched tick", text: " `value ", offset: 3, expected: "before (``  `value  ``) after" },
+  ])("wraps and immediately unwraps $name literally in both directions", ({ text, offset, expected }) => {
+    const source = "before (" + text + ") after";
+    for (const reversed of [false, true]) {
+      const selection = reversed ? EditorSelection.single(8 + text.length, 8) : EditorSelection.single(8, 8 + text.length);
+      const transactions: Transaction[] = [];
+      withEditor(source, selection, (view) => {
+        expect(toggleInlineMark("`")(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(expected);
+        const range = view.state.selection.main;
+        expect([range.anchor, range.head]).toEqual([selection.main.anchor + offset, selection.main.head + offset]);
+        expect(view.state.sliceDoc(range.from, range.to)).toBe(text);
+        expectCodeParagraph(view.state.doc.toString(), text);
+        expect(transactions).toHaveLength(1);
+        expect(transactions[0].annotation(Transaction.userEvent)).toBe("input.format");
+        expect(transactions[0].scrollIntoView).toBe(true);
+        expect(transactions[0].docChanged).toBe(true);
+        expect(view.hasFocus).toBe(true);
+        expect(toggleInlineMark("`")(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(source);
+        expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+        expect(transactions).toHaveLength(2);
+        expect(transactions[1].annotation(Transaction.userEvent)).toBe("input.format");
+        expect(transactions[1].scrollIntoView).toBe(true);
+        expect(view.hasFocus).toBe(true);
+      }, [markdown(), EditorView.updateListener.of((update) => transactions.push(...update.transactions))]);
+    }
+  });
+
+  it.each([
+    { name: "whole double-tick span", source: "before (`` left`right ``) after", from: 8, to: 24, text: "left`right", expected: "before (left`right) after" },
+    { name: "complete raw double-tick content", source: "before (`` left`right ``) after", from: 10, to: 22, text: "left`right", expected: "before (left`right) after" },
+    { name: "complete double-tick payload", source: "before (`` left`right ``) after", from: 11, to: 21, text: "left`right", expected: "before (left`right) after" },
+    { name: "unpadded double-tick span", source: "before (``left`right``) after", from: 8, to: 22, text: "left`right", expected: "before (left`right) after" },
+    { name: "unpadded double-tick content", source: "before (``left`right``) after", from: 10, to: 20, text: "left`right", expected: "before (left`right) after" },
+    { name: "whole triple-tick span with edge ticks", source: "before (``` `value`` ```) after", from: 8, to: 24, text: "`value``", expected: "before (`value``) after" },
+    { name: "triple-tick payload with edge ticks", source: "before (``` `value`` ```) after", from: 12, to: 20, text: "`value``", expected: "before (`value``) after" },
+    { name: "meaningful spaces in raw content", source: "before (`  value  `) after", from: 9, to: 18, text: " value ", expected: "before ( value ) after" },
+    { name: "all-space content without trimming", source: "before (`   `) after", from: 9, to: 12, text: "   ", expected: "before (   ) after" },
+    { name: "a synthetic pair around a tab", source: "before (` \t `) after", from: 8, to: 13, text: "\t", expected: "before (\t) after" },
+  ])("removes $name and only its synthetic padding", ({ source, from, to, text, expected }) => {
+    for (const reversed of [false, true]) {
+      const selection = reversed ? EditorSelection.single(to, from) : EditorSelection.single(from, to);
+      const transactions: Transaction[] = [];
+      withEditor(source, selection, (view) => {
+        expectCodeParagraph(source, text);
+        expect(toggleInlineMark("`")(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(expected);
+        expect(view.state.selection.eq(reversed ? EditorSelection.single(8 + text.length, 8) : EditorSelection.single(8, 8 + text.length))).toBe(true);
+        expect(transactions).toHaveLength(1);
+        expect(transactions[0].annotation(Transaction.userEvent)).toBe("input.format");
+        expect(transactions[0].scrollIntoView).toBe(true);
+        expect(view.hasFocus).toBe(true);
+        expect(undo(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(source);
+        expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+      }, [markdown(), history(), EditorView.updateListener.of((update) => transactions.push(...update.transactions))]);
+    }
+  });
+
+  it.each([
+    { name: "plain word", source: "before (plain) after", caret: 10, expected: "before (`plain`) after", from: 9, to: 14 },
+    { name: "one-tick formatted word", source: "before (`plain`) after", caret: 11, expected: "before (plain) after", from: 8, to: 13 },
+  ])("retains the caret selection policy for a $name", ({ source, caret, expected, from, to }) => {
+    withEditor(source, EditorSelection.single(caret), (view) => {
+      expect(toggleInlineMark("`")(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(expected);
+      expect(view.state.selection.eq(EditorSelection.single(from, to))).toBe(true);
+      expect(view.state.sliceDoc(from, to)).toBe("plain");
+    }, [markdown()]);
+  });
+
+  it.each([
+    { name: "empty source", source: "", caret: 0, expected: "``", selected: 1 },
+    { name: "punctuation", source: "before (!) after", caret: 8, expected: "before (``!) after", selected: 9 },
+    { name: "an existing empty pair", source: "before (``) after", caret: 9, expected: "before () after", selected: 8 },
+  ])("keeps the exact empty-caret marker-pair behavior in $name", ({ source, caret, expected, selected }) => {
+    withEditor(source, EditorSelection.single(caret), (view) => {
+      expect(toggleInlineMark("`")(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(expected);
+      expect(view.state.selection.eq(EditorSelection.single(selected))).toBe(true);
+    }, [markdown()]);
+  });
+
+  it.each(["toggle off", "undo"] as const)("maps different fences and reversed ranges through one transaction and %s", (off) => {
+    const source = "before (plain / a`b / c``d /  e ) after";
+    const selection = EditorSelection.create([
+      EditorSelection.range(8, 13),
+      EditorSelection.range(19, 16),
+      EditorSelection.range(22, 26),
+      EditorSelection.range(32, 29),
+    ], 2);
+    const transactions: Transaction[] = [];
+    withEditor(source, selection, (view) => {
+      expect(toggleInlineMark("`")(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe("before (`plain` / `` a`b `` / ``` c``d ``` / `  e  `) after");
+      expect(view.state.selection.ranges.map(({ anchor, head }) => [anchor, head])).toEqual([
+        [9, 14], [24, 21], [34, 38], [50, 47],
+      ]);
+      expect(view.state.selection.mainIndex).toBe(2);
+      expect(view.state.selection.ranges.map(({ from, to }) => view.state.sliceDoc(from, to))).toEqual(["plain", "a`b", "c``d", " e "]);
+      const { doc } = parseMarkdown(view.state.doc.toString());
+      expect(doc.childCount).toBe(1);
+      expect(doc.child(0).type.name).toBe("paragraph");
+      expect(doc.child(0).content.toJSON()).toEqual([
+        { type: "text", text: "before (" },
+        { type: "text", marks: [{ type: "code" }], text: "plain" },
+        { type: "text", text: " / " },
+        { type: "text", marks: [{ type: "code" }], text: "a`b" },
+        { type: "text", text: " / " },
+        { type: "text", marks: [{ type: "code" }], text: "c``d" },
+        { type: "text", text: " / " },
+        { type: "text", marks: [{ type: "code" }], text: " e " },
+        { type: "text", text: ") after" },
+      ]);
+      expect(transactions).toHaveLength(1);
+      expect(transactions[0].annotation(Transaction.userEvent)).toBe("input.format");
+      expect(transactions[0].scrollIntoView).toBe(true);
+      expect(transactions[0].docChanged).toBe(true);
+      expect(view.hasFocus).toBe(true);
+      expect(off === "undo" ? undo(view) : toggleInlineMark("`")(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(source);
+      expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+    }, [markdown(), history(), EditorState.allowMultipleSelections.of(true), EditorView.updateListener.of((update) => transactions.push(...update.transactions))]);
+  });
+});
