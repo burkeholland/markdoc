@@ -8,11 +8,11 @@ type NodeSerializer = (state: MarkdownSerializerState, node: PMNode, parent: PMN
 type SerializerOptions = { tightLists?: boolean; escapeExtraCharacters?: RegExp; hardBreakNodeName?: string; strict?: boolean };
 
 function escapeTitle(title: string): string {
-  return title.replace(/[\\"]/g, "\\$&");
+  return title.replace(/[\\"]|&(?=[a-zA-Z][a-zA-Z0-9]*;|#\d+;|#[xX][0-9a-fA-F]+;)/g, "\\$&");
 }
 
 function escapeDestination(destination: string): string {
-  return destination.replace(/[\\()"]/g, "\\$&");
+  return destination.replace(/[\\()"]|&(?=[a-zA-Z][a-zA-Z0-9]*;|#\d+;|#[xX][0-9a-fA-F]+;)/g, "\\$&");
 }
 
 /**
