@@ -284,9 +284,17 @@ function backticksFor(node: PMNode, side: number) {
   let m: RegExpExecArray | null;
   let len = 0;
   if (node.isText) while ((m = ticks.exec(node.text!))) len = Math.max(len, m[0].length);
-  let result = len > 0 && side > 0 ? " `" : "`";
+  // CommonMark strips one edge-space pair unless the code contains only ASCII spaces.
+  const needsPadding =
+    len > 0 ||
+    (node.isText &&
+      node.text!.startsWith(" ") &&
+      node.text!.endsWith(" ") &&
+      /[^ ]/.test(node.text!) &&
+      !/[\r\n]/.test(node.text!));
+  let result = needsPadding && side > 0 ? " `" : "`";
   for (let i = 0; i < len; i++) result += "`";
-  if (len > 0 && side < 0) result += " ";
+  if (needsPadding && side < 0) result += " ";
   return result;
 }
 
