@@ -14,8 +14,19 @@ function wordRangeAt(state: EditorState, pos: number): { from: number; to: numbe
   const text = line.text;
   let from = pos - line.from;
   let to = from;
-  while (from > 0 && /[\p{L}\p{N}_'-]/u.test(text[from - 1])) from--;
-  while (to < text.length && /[\p{L}\p{N}_'-]/u.test(text[to])) to++;
+  const wordChar = /[\p{L}\p{N}\p{M}_'-]/u;
+  while (from > 0) {
+    // A supplementary code point immediately before the boundary occupies two units.
+    const previous = from > 1 ? text.codePointAt(from - 2) : undefined;
+    const width = previous !== undefined && previous > 0xffff ? 2 : 1;
+    if (!wordChar.test(text.slice(from - width, from))) break;
+    from -= width;
+  }
+  while (to < text.length) {
+    const point = text.codePointAt(to);
+    if (point === undefined || !wordChar.test(String.fromCodePoint(point))) break;
+    to += point > 0xffff ? 2 : 1;
+  }
   return { from: line.from + from, to: line.from + to };
 }
 
