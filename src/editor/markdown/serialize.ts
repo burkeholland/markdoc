@@ -11,6 +11,10 @@ function escapeTitle(title: string): string {
   return title.replace(/[\\"]/g, "\\$&");
 }
 
+function escapeDestination(destination: string): string {
+  return destination.replace(/[\\()"]/g, "\\$&");
+}
+
 /**
  * Serializer state with a gentler escaping strategy than the upstream default in `to-markdown.ts`:
  * it only escapes characters where they would otherwise change the meaning of the Markdown, which
@@ -158,7 +162,7 @@ const nodes: Record<string, NodeSerializer> = {
       "![" +
         (state as State).escImageAlt(node.attrs.alt || "") +
         "](" +
-        String(node.attrs.src).replace(/[()]/g, "\\$&") +
+        escapeDestination(String(node.attrs.src)) +
         (node.attrs.title ? ' "' + escapeTitle(String(node.attrs.title)) + '"' : "") +
         ")",
     );
@@ -214,7 +218,7 @@ const nodes: Record<string, NodeSerializer> = {
   },
   link_definition(state, node) {
     const title = node.attrs.title ? ` "${escapeTitle(String(node.attrs.title))}"` : "";
-    state.write(`[${node.attrs.label}]: ${node.attrs.url}${title}`);
+    state.write(`[${node.attrs.label}]: ${escapeDestination(String(node.attrs.url))}${title}`);
     state.closeBlock(node);
   },
   footnote_definition(state, node) {
@@ -321,7 +325,7 @@ const marks = {
       return inAutolink
         ? ">"
         : "](" +
-            String(mark.attrs.href).replace(/[()"]/g, "\\$&") +
+            escapeDestination(String(mark.attrs.href)) +
             (mark.attrs.title ? ` "${escapeTitle(String(mark.attrs.title))}"` : "") +
             ")";
     },
