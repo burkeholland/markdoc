@@ -225,12 +225,14 @@ describe("editor header star recovery", () => {
 
   it("reverts a failed toggle and lets the same action be retried", async () => {
     const failed = deferred<{ starred: true }>();
+    const retry = deferred<{ starred: true }>();
     calls.starred.mockResolvedValue({ starred: false });
-    calls.star.mockReturnValueOnce(failed.promise).mockResolvedValueOnce({ starred: true });
+    calls.star.mockReturnValueOnce(failed.promise).mockReturnValueOnce(retry.promise);
 
     render(star("toggle-document"));
     const button = await screen.findByRole("button", { name: "Star document" });
     fireEvent.click(button);
+    expect(calls.star).toHaveBeenCalledTimes(1);
     expect(button).toHaveAttribute("data-starred", "true");
     expect(button).toBeDisabled();
 
@@ -238,10 +240,27 @@ describe("editor header star recovery", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Could not save star");
     const retryButton = screen.getByRole("button", { name: "Retry star document" });
     expect(retryButton).toHaveAttribute("data-starred", "false");
+    expect(retryButton).toBeEnabled();
 
     fireEvent.click(retryButton);
-    await waitFor(() => expect(calls.star).toHaveBeenCalledTimes(2));
-    expect(screen.getByRole("button", { name: "Unstar document" })).toHaveAttribute("data-starred", "true");
+    fireEvent.click(retryButton);
+    expect(calls.star).toHaveBeenCalledTimes(2);
+    expect(calls.star.mock.calls).toEqual([["toggle-document"], ["toggle-document"]]);
+    const pendingButton = screen.getByRole("button", { name: "Starring document…" });
+    expect(pendingButton).toBeDisabled();
+    expect(pendingButton).toHaveAttribute("aria-busy", "true");
+    expect(pendingButton).toHaveAttribute("data-starred", "true");
+
+    await act(async () => retry.resolve({ starred: true }));
+    const confirmedButton = screen.getByRole("button", { name: "Unstar document" });
+    expect(confirmedButton).toHaveAttribute("data-starred", "true");
+    expect(confirmedButton).toHaveAttribute("data-state", "ready");
+    expect(confirmedButton).toBeEnabled();
+    expect(confirmedButton).not.toHaveAttribute("aria-busy");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(calls.star).toHaveBeenCalledTimes(2);
+    expect(calls.unstar).not.toHaveBeenCalled();
+    expect(unhandled).toEqual([]);
   });
 
   it("ignores a star-status response from the previously open document", async () => {
