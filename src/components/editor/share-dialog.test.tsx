@@ -3,6 +3,7 @@ import { compile } from "tailwindcss";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import {
+  Activity,
   StrictMode,
   useEffect,
   useLayoutEffect,
@@ -11,6 +12,8 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import type { DocumentDto } from "@/server/dto";
+
+declare const jsdom: { reconfigure(options: { url: string }): void };
 
 const collaborators = vi.fn();
 const addCollaborator = vi.fn();
@@ -3030,6 +3033,187 @@ describe("ShareDialog layout", () => {
     expect(field).toHaveValue(`${window.location.origin}/d/${DOC_ID}`);
     expect(field).toHaveFocus();
     expect(screen.getByTestId("editor-link")).toContainElement(field);
+  });
+});
+
+describe("ShareDialog reader link titles", () => {
+  const originalUrl = window.location.href;
+  const longOrigin = `https://${"reader".repeat(8)}.${"document".repeat(6)}.example.test`;
+  const longDocument = { ...doc, id: `doc-${"reader-link-".repeat(20)}`, linkAccess: "view" as const };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    jsdom.reconfigure({ url: originalUrl });
+  });
+
+  function expectReaderLink(url: string) {
+    const row = screen.getByTestId("reader-link");
+    const code = within(row).getByText(url, { selector: "code", exact: true });
+    expect(row.tagName).toBe("DIV");
+    expect(row.className).toBe("mt-2 flex items-center gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 text-xs");
+    expect(row.getAttributeNames().sort()).toEqual(["class", "data-testid"]);
+    expect(Array.from(row.children, (child) => child.tagName.toLowerCase())).toEqual(["svg", "span", "code", "button"]);
+    expect(row.firstElementChild).toHaveClass("lucide-book-open", "shrink-0", "text-ink-3");
+    expect(row.firstElementChild).toHaveAttribute("width", "13");
+    expect(row.firstElementChild).toHaveAttribute("height", "13");
+    expect(row.firstElementChild).toHaveAttribute("aria-hidden", "true");
+    expect(row.children[1]).toHaveTextContent(/^Reader link:$/);
+    expect(row.children[1].className).toBe("shrink-0 text-ink-3");
+    expect(code).toBe(row.children[2]);
+    expect(code.textContent).toBe(url);
+    expect(code.getAttribute("title")).toBe(url);
+    expect(code.getAttributeNames().sort()).toEqual(["class", "title"]);
+    expect(code.className).toBe("min-w-0 flex-1 truncate font-mono text-[11px] text-ink-2");
+    expect(code.childElementCount).toBe(0);
+    expect(code.tabIndex).toBe(-1);
+    expect(within(row).getAllByRole("button")).toEqual([screen.getByTestId("copy-reader-link")]);
+    expect(screen.getByTestId("copy-reader-link")).toHaveAttribute("type", "button");
+    expect(screen.getByTestId("copy-reader-link").className).toBe("btn btn-sm btn-ghost gap-1.5");
+    expect(Array.from(screen.getByRole("dialog").querySelectorAll("code[title]"))).toEqual([code]);
+    return code;
+  }
+
+  it.each([
+    { name: "ordinary", origin: "https://markdoc.test", currentDoc: { ...doc, linkAccess: "view" as const } },
+    { name: "long", origin: longOrigin, currentDoc: longDocument },
+  ])("exposes the exact $name reader URL without changing controls, copy output, or fallback target", async ({ origin, currentDoc }) => {
+    jsdom.reconfigure({ url: `${origin}/d/${currentDoc.id}` });
+    const url = `${origin}/p/${currentDoc.id}`;
+    expect(new URL(url).href).toBe(url);
+    expect(new URL(url).origin).toBe(origin);
+    if (currentDoc === longDocument) expect(url.length).toBeGreaterThanOrEqual(240);
+    render(
+      <StrictMode>
+        <ShareDialog open onOpenChange={vi.fn()} doc={currentDoc} isOwner onDocChange={vi.fn()} />
+      </StrictMode>,
+    );
+    await screen.findByText("@bob");
+    const code = expectReaderLink(url);
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getAllByRole("button")).toHaveLength(7);
+    expect(Array.from(dialog.querySelectorAll("button, input, select, a[href], [tabindex]"), (element) =>
+      element.getAttribute("data-testid") ?? element.getAttribute("aria-label") ?? element.textContent,
+    )).toEqual([
+      "Close", "share-login", "share-role", "share-add", "Role for bob", "Remove bob",
+      "copy-link", "link-access", "copy-reader-link", "share-agent-toggle", "Done",
+    ]);
+    expect(screen.getByTestId("editor-link").querySelector("code")).not.toHaveAttribute("title");
+    const readerCopy = screen.getByTestId("copy-reader-link");
+    expect(readerCopy).toHaveTextContent(/^Copy$/);
+    fireEvent.click(screen.getByTestId("copy-link"));
+    await waitFor(() => expect(screen.getByTestId("copy-link")).toHaveTextContent("Copied"));
+    fireEvent.click(readerCopy);
+    await waitFor(() => expect(readerCopy).toHaveTextContent("Copied"));
+    expect(copyText.mock.calls).toEqual([[`${origin}/d/${currentDoc.id}`], [url]]);
+    expectReaderLink(url);
+
+    copyText.mockResolvedValueOnce(false);
+    fireEvent.click(readerCopy);
+    await waitFor(() => expect(readerCopy).toHaveTextContent("Select & press Ctrl+C"));
+    expect(copyText.mock.calls).toEqual([[`${origin}/d/${currentDoc.id}`], [url], [url]]);
+    const selection = window.getSelection();
+    expect(selection?.toString()).toBe(url);
+    expect(selection?.rangeCount).toBe(1);
+    expect(selection?.getRangeAt(0).commonAncestorContainer).toBe(code);
+    expect(expectReaderLink(url)).toBe(code);
+    expect(within(dialog).getAllByRole("button")).toHaveLength(7);
+    expect(patchDocument).not.toHaveBeenCalled();
+    expect(addCollaborator).not.toHaveBeenCalled();
+    expect(removeCollaborator).not.toHaveBeenCalled();
+    expect(tokensCreate).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the title on live document and origin replacement and restores only the current nonprivate URL on reopen", async () => {
+    const onOpenChange = vi.fn();
+    const onDocChange = vi.fn();
+    const initialDoc = { ...doc, linkAccess: "view" as const };
+    const renderCurrent = (currentDoc: DocumentDto, open = true, hidden = false) => (
+      <StrictMode>
+        <Activity mode={hidden ? "hidden" : "visible"}>
+          <ShareDialog open={open} onOpenChange={onOpenChange} doc={currentDoc} isOwner onDocChange={onDocChange} />
+        </Activity>
+      </StrictMode>
+    );
+    jsdom.reconfigure({ url: "https://markdoc.test" });
+    const view = render(renderCurrent(initialDoc));
+    await screen.findByText("@bob");
+    const firstUrl = `https://markdoc.test/p/${initialDoc.id}`;
+    const code = expectReaderLink(firstUrl);
+    view.rerender(renderCurrent(longDocument));
+    await screen.findByText("@bob");
+    const secondUrl = `https://markdoc.test/p/${longDocument.id}`;
+    expect(expectReaderLink(secondUrl)).toBe(code);
+    expect(screen.queryByTitle(firstUrl)).toBeNull();
+
+    // Activity preserves state and DOM while replaying the existing origin effect.
+    view.rerender(renderCurrent(longDocument, true, true));
+    jsdom.reconfigure({ url: longOrigin });
+    view.rerender(renderCurrent(longDocument));
+    await screen.findByText("@bob");
+    const currentUrl = `${longOrigin}/p/${longDocument.id}`;
+    expect(expectReaderLink(currentUrl)).toBe(code);
+    expect(screen.queryByTitle(secondUrl)).toBeNull();
+    fireEvent.click(screen.getByTestId("copy-reader-link"));
+    await waitFor(() => expect(screen.getByTestId("copy-reader-link")).toHaveTextContent("Copied"));
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(currentUrl);
+
+    view.rerender(renderCurrent({ ...longDocument, linkAccess: "private" }));
+    expect(screen.queryAllByTestId("reader-link")).toHaveLength(0);
+    expect(screen.queryByTestId("copy-reader-link")).toBeNull();
+    expect(screen.queryByTitle(currentUrl)).toBeNull();
+    view.rerender(renderCurrent(longDocument, false));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    view.rerender(renderCurrent(longDocument));
+    await screen.findByText("@bob");
+    expectReaderLink(currentUrl);
+    expect(screen.queryByTitle(firstUrl)).toBeNull();
+    expect(screen.queryByTitle(secondUrl)).toBeNull();
+    expect(screen.getByTestId("copy-reader-link")).toHaveTextContent(/^Copy$/);
+    fireEvent.click(screen.getByTestId("copy-reader-link"));
+    await waitFor(() => expect(screen.getByTestId("copy-reader-link")).toHaveTextContent("Copied"));
+    expect(copyText.mock.calls).toEqual([[currentUrl], [currentUrl]]);
+    expect(patchDocument).not.toHaveBeenCalled();
+    expect(addCollaborator).not.toHaveBeenCalled();
+    expect(removeCollaborator).not.toHaveBeenCalled();
+    expect(onDocChange).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps hover passive after settlement without scheduling, focus, requests, or DOM mutation", async () => {
+    const dialog = await openDialog({ doc: longDocument });
+    const code = expectReaderLink(`${window.location.origin}/p/${longDocument.id}`);
+    const done = within(dialog).getByRole("button", { name: "Done" });
+    act(() => done.focus());
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const animationFrame = vi.spyOn(window, "requestAnimationFrame");
+    const microtask = vi.spyOn(globalThis, "queueMicrotask");
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected reader hover request"));
+    const observed = [focus, timeout, interval, animationFrame, microtask, fetch,
+      collaborators, addCollaborator, removeCollaborator, patchDocument, tokensList, tokensCreate, copyText];
+    const counts = observed.map((mock) => mock.mock.calls.length);
+    const html = dialog.innerHTML;
+    const observer = new MutationObserver(() => {});
+    observer.observe(dialog, { attributes: true, characterData: true, childList: true, subtree: true });
+    try {
+      fireEvent.pointerOver(code);
+      fireEvent.mouseOver(code);
+      fireEvent.mouseMove(code);
+      fireEvent.mouseOut(code);
+      fireEvent.pointerOut(code);
+      expect(observed.map((mock) => mock.mock.calls.length)).toEqual(counts);
+      expect(observer.takeRecords()).toEqual([]);
+      expect(dialog.innerHTML).toBe(html);
+      expect(done).toHaveFocus();
+      expect(screen.queryByRole("tooltip")).toBeNull();
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      observer.disconnect();
+      vi.restoreAllMocks();
+    }
   });
 });
 
