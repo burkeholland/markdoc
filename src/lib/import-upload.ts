@@ -1,3 +1,5 @@
+import { readJsonResponse } from "@/lib/json-response";
+
 export interface ImportedDocument {
   id: string;
   title: string;
@@ -26,9 +28,10 @@ export async function uploadImportBatch(documents: File[], images: File[] = []):
   for (const f of documents) form.append("files", f, f.name);
   for (const f of images) form.append("images", f, f.name);
   const res = await fetch("/api/import/file", { method: "POST", body: form, credentials: "same-origin" });
-  const text = await res.text();
-  const data = text ? (JSON.parse(text) as { documents?: ImportedDocument[]; failed?: FailedImport[]; error?: string }) : {};
-  if (!res.ok) throw new Error(data.error ?? `Import failed (${res.status})`);
+  const data = await readJsonResponse(res, {
+    fallback: `Import failed (${res.status})`,
+    emptyBody: {},
+  }) as { documents?: ImportedDocument[]; failed?: FailedImport[] };
   return { documents: data.documents ?? [], failed: data.failed ?? [] };
 }
 
