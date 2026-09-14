@@ -1,6 +1,7 @@
 import { MarkdownSerializer, MarkdownSerializerState } from "./to-markdown";
 import type { Node as PMNode } from "prosemirror-model";
 import { schema } from "./schema";
+import { fenceFor } from "./code-fence";
 
 type NodeSerializer = (state: MarkdownSerializerState, node: PMNode, parent: PMNode, index: number) => void;
 
@@ -49,13 +50,6 @@ class State extends MarkdownSerializerState {
 function taskPrefix(item: PMNode): string {
   if (item.attrs.checked === null || item.attrs.checked === undefined) return "";
   return item.attrs.checked ? "[x] " : "[ ] ";
-}
-
-function fenceFor(text: string): string {
-  const runs = text.match(/`{3,}/g);
-  if (!runs) return "```";
-  const longest = runs.reduce((a, b) => (b.length > a.length ? b : a));
-  return longest + "`";
 }
 
 function renderCell(state: State, cell: PMNode): string {

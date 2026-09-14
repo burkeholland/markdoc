@@ -273,6 +273,35 @@ describe("serializeMarkdown", () => {
     });
   });
 
+  describe("code fence length", () => {
+    it.each([
+      { name: "plain text", text: "const n = 1;", language: "ts", fenceLength: 3, expected: "```ts\nconst n = 1;\n```" },
+      { name: "single and double backticks", text: "`one` ``two``", language: null, fenceLength: 3, expected: "```\n`one` ``two``\n```" },
+      { name: "three-backtick line", text: "```", language: "md", fenceLength: 4, expected: "````md\n```\n````" },
+      { name: "longest run before the last", text: "``````\n```\n````", language: null, fenceLength: 7, expected: "```````\n``````\n```\n````\n```````" },
+      { name: "inline and indented runs", text: "left````right\n    ```", language: "text", fenceLength: 5, expected: "`````text\nleft````right\n    ```\n`````" },
+      { name: "tildes", text: "~~~~\n~value~", language: null, fenceLength: 3, expected: "```\n~~~~\n~value~\n```" },
+      { name: "one trailing newline", text: "```\n", language: "ts", fenceLength: 4, expected: "````ts\n```\n\n````" },
+      { name: "two trailing newlines", text: "````\n\n", language: null, fenceLength: 5, expected: "`````\n````\n\n\n`````" },
+      { name: "empty code", text: "", language: "js", fenceLength: 3, expected: "```js\n```" },
+    ])("preserves the existing serializer policy for $name", ({ text, language, fenceLength, expected }) => {
+      const original = schema.nodes.doc.create(null, [
+        schema.nodes.code_block.create({ language }, text ? [schema.text(text)] : []),
+      ]);
+      const source = serializeMarkdown(original);
+      expect(source).toBe(expected);
+      const lines = source.split("\n");
+      expect(lines[0].match(/^`+/)?.[0].length).toBe(fenceLength);
+      expect(lines.at(-1)?.length).toBe(fenceLength);
+      const { doc } = parseMarkdown(source);
+      expect(doc.childCount).toBe(1);
+      expect(doc.child(0).type.name).toBe("code_block");
+      expect(doc.child(0).textContent).toBe(text);
+      expect(doc.child(0).attrs.language).toBe(language);
+      expect(doc.eq(original)).toBe(true);
+    });
+  });
+
   describe("trailing newlines in a fenced code block (task #434)", () => {
     const code = (text: string) => schema.nodes.doc.create(null, [schema.nodes.code_block.create({ language: "ts" }, text ? [schema.text(text)] : [])]);
 
