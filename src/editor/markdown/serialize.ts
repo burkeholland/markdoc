@@ -16,6 +16,16 @@ class State extends MarkdownSerializerState {
   inLink = false;
   inTable = false;
 
+  escImageAlt(str: string): string {
+    const inLink = this.inLink;
+    this.inLink = true;
+    try {
+      return this.esc(str);
+    } finally {
+      this.inLink = inLink;
+    }
+  }
+
   esc(str: string, startOfLine = false): string {
     str = str.replace(/[`*\\]/g, "\\$&");
     str = str.replace(/_/g, (m, i: number, s: string) =>
@@ -142,7 +152,7 @@ const nodes: Record<string, NodeSerializer> = {
   image(state, node) {
     state.write(
       "![" +
-        state.esc(node.attrs.alt || "") +
+        (state as State).escImageAlt(node.attrs.alt || "") +
         "](" +
         String(node.attrs.src).replace(/[()]/g, "\\$&") +
         (node.attrs.title ? ' "' + String(node.attrs.title).replace(/"/g, '\\"') + '"' : "") +
