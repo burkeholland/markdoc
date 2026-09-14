@@ -6590,7 +6590,7 @@ function CommentActionFeedback({ state }: { state: CommentRowActionState }) {
   }
   if (!state.error) return null;
   return (
-    <div className="mt-1.5 rounded-md bg-red-50 px-2 py-1.5 text-xs text-danger dark:bg-red-950/40" role="alert" aria-atomic="true" data-testid="comment-action-error">
+    <div className="mt-1.5 rounded-md bg-red-50 px-2 py-1.5 text-xs text-danger dark:bg-red-950/40 wrap-anywhere" role="alert" aria-atomic="true" data-testid="comment-action-error">
       {state.error}
     </div>
   );

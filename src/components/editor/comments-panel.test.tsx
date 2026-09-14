@@ -3938,6 +3938,42 @@ describe("CommentsPanel", () => {
         await request.promise.catch(() => {});
       });
     };
+    const longActionReason = "CommentActionUnavailable".repeat(16);
+    const expectActionError = (target: HTMLElement, text: string) => {
+      const alert = within(target).getByTestId("comment-action-error");
+      expect(within(target).getAllByRole("alert")).toEqual([alert]);
+      expect(alert.tagName).toBe("DIV");
+      expect(Object.fromEntries([...alert.attributes].map(({ name, value }) => [name, value]))).toEqual({
+        class: "mt-1.5 rounded-md bg-red-50 px-2 py-1.5 text-xs text-danger dark:bg-red-950/40 wrap-anywhere",
+        role: "alert",
+        "aria-atomic": "true",
+        "data-testid": "comment-action-error",
+      });
+      expect(alert.childNodes).toHaveLength(1);
+      expect(alert.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+      expect(alert.firstChild?.nodeValue).toBe(text);
+      expect(alert.textContent).toBe(text);
+      expect(alert.querySelectorAll("*")).toHaveLength(0);
+      return alert;
+    };
+    const expectActionPending = (target: HTMLElement, action: string, text: string) => {
+      const status = within(target).getByTestId("comment-action-pending");
+      expect(status.tagName).toBe("DIV");
+      expect(Object.fromEntries([...status.attributes].map(({ name, value }) => [name, value]))).toEqual({
+        class: "mt-1.5 flex items-center gap-1.5 text-xs text-ink-3",
+        role: "status",
+        "aria-live": "polite",
+        "data-testid": "comment-action-pending",
+        "data-action": action,
+      });
+      expect(status.childNodes).toHaveLength(2);
+      expect(status.firstElementChild?.tagName).toBe("svg");
+      expect(status.firstElementChild).toHaveClass("animate-spin");
+      expect(status.firstElementChild).toHaveAttribute("aria-hidden", "true");
+      expect(status.lastChild?.nodeType).toBe(Node.TEXT_NODE);
+      expect(status.textContent).toBe(text);
+      return status;
+    };
 
     beforeEach(() => {
       vi.mocked(api.documents.comment).mockReset().mockResolvedValue(response);
@@ -4118,6 +4154,137 @@ describe("CommentsPanel", () => {
       expect(within(card(threadId)).queryByRole("alert")).toBeNull();
     });
 
+    describe.each([
+      { label: "unbroken", reason: longActionReason, formatted: `${longActionReason}. Try again.` },
+      { label: "ordinary", reason: "Service unavailable.", formatted: "Service unavailable. Try again." },
+      {
+        label: "literal HTML and quotes",
+        reason: '<strong data-reason="quoted">Can\'t update & retry</strong><img src="missing" onerror="alert(1)">',
+        formatted: '<strong data-reason="quoted">Can\'t update & retry</strong><img src="missing" onerror="alert(1)">. Try again.',
+      },
+      { label: "whitespace and trailing periods", reason: " \tFirst  line\nSecond line... \t\n", formatted: "First  line\nSecond line. Try again." },
+      { label: "blank fallback", reason: " \t\n ", formatted: null },
+    ])("wrapped comment action feedback: $label", ({ reason, formatted }) => {
+      it.each([
+        { kind: "resolve", action: "resolve", pending: "Resolving comment…", fallback: "Couldn’t resolve the comment. Try again." },
+        { kind: "reopen", action: "resolve", pending: "Re-opening comment…", fallback: "Couldn’t re-open the comment. Try again." },
+        { kind: "delete", action: "delete", pending: "Deleting comment…", fallback: "Couldn’t delete the comment. Try again." },
+        { kind: "reply-delete", action: "delete", pending: "Deleting reply…", fallback: "Couldn’t delete the reply. Try again." },
+        { kind: "reaction", action: "react", pending: "Removing 👍 reaction…", fallback: "Couldn’t update the reaction. Try again." },
+        { kind: "reply-reaction", action: "react", pending: "Removing 👍 reaction…", fallback: "Couldn’t update the reaction. Try again." },
+      ] as const)("preserves exact $kind text, replaces failures, and recovers without changing neighbors", async ({ kind, action, pending, fallback }) => {
+        const first = deferred<CommentResponse>();
+        const replacement = deferred<CommentResponse>();
+        const retry = deferred<CommentResponse>();
+        vi.mocked(api.documents.comment)
+          .mockReturnValueOnce(first.promise)
+          .mockReturnValueOnce(replacement.promise)
+          .mockReturnValueOnce(retry.promise);
+        const fixture = makeApiSession(`wrapped-${kind}`);
+        if (kind === "reopen") {
+          for (const id of fixture.threadIds) fixture.session.comments.setResolved(id, true, fixture.user);
+        }
+        render(panel(fixture.session));
+        if (kind === "reopen") fireEvent.click(screen.getByRole("tab", { name: "Resolved2" }));
+        const [threadId, neighborId] = fixture.threadIds;
+        const [replyId] = fixture.replyIds;
+        const isReply = kind === "reply-delete" || kind === "reply-reaction";
+        const target = isReply ? reply(threadId, replyId) : card(threadId);
+        const neighbor = card(neighborId);
+        const neighborHtml = neighbor.outerHTML;
+        const initialThreads = fixture.session.comments.list();
+        const initialReply = reply(threadId, replyId);
+        const initialReplyHtml = initialReply.outerHTML;
+        const rootReactions = rootReactionRow(threadId);
+        const rootReactionsHtml = rootReactions.outerHTML;
+        const payload = action === "resolve"
+          ? { action, threadId, resolved: kind !== "reopen" }
+          : action === "delete"
+            ? { action, threadId, replyId: isReply ? replyId : undefined }
+            : { action, threadId, replyId: isReply ? replyId : undefined, emoji: "👍" };
+        const invoke = async () => {
+          if (kind === "reply-delete") {
+            fireEvent.pointerDown(within(target).getByRole("button", { name: "Reply actions" }), { button: 0 });
+            fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+          } else if (kind === "reply-reaction") {
+            fireEvent.click(reactionChip(replyReactionRow(threadId, replyId)));
+          } else {
+            await invokeRoot(kind === "reopen" ? "resolve" : kind, threadId);
+          }
+        };
+        const expectUnchanged = () => {
+          expect(card(threadId)).toBe(isReply ? target.closest('[data-testid="comment-thread"]') : target);
+          expect(reply(threadId, replyId)).toBe(initialReply);
+          expect(card(neighborId)).toBe(neighbor);
+          expect(neighbor.outerHTML).toBe(neighborHtml);
+          expect(fixture.session.comments.list()).toEqual(initialThreads);
+          expect(within(neighbor).queryByRole("alert")).toBeNull();
+          expect(within(neighbor).queryByRole("status")).toBeNull();
+          expect(within(neighbor).getByTestId("comment-resolve")).toBeEnabled();
+          if (isReply) {
+            expect(within(card(threadId)).getByTestId("comment-resolve")).toBeEnabled();
+            expect(rootReactions.outerHTML).toBe(rootReactionsHtml);
+          } else if (kind !== "delete") {
+            expect(initialReply.outerHTML).toBe(initialReplyHtml);
+          }
+        };
+
+        expect(longActionReason.length).toBeGreaterThanOrEqual(240);
+        expect(longActionReason).not.toMatch(/\s/);
+        await invoke();
+        expect(api.documents.comment).toHaveBeenCalledTimes(1);
+        expect(api.documents.comment).toHaveBeenLastCalledWith(fixture.session.docId, payload);
+        const statusContent = expectActionPending(target, action, pending).innerHTML;
+        if (isReply) {
+          expect(within(target).getByRole("button", { name: "Reply actions" })).toBeDisabled();
+          expect(reactionChip(replyReactionRow(threadId, replyId))).toBeDisabled();
+        } else {
+          expectRootControlsDisabled(threadId);
+        }
+        expectUnchanged();
+        await settle(first, "reject", reason);
+        const oldAlert = expectActionError(target, formatted ?? fallback);
+        const oldText = oldAlert.firstChild!;
+        expect(within(target).queryByRole("status")).toBeNull();
+        expectUnchanged();
+
+        await invoke();
+        expect(api.documents.comment).toHaveBeenCalledTimes(2);
+        expect(oldText.isConnected).toBe(false);
+        expect(within(target).queryByRole("alert")).toBeNull();
+        expect(expectActionPending(target, action, pending).innerHTML).toBe(statusContent);
+        await settle(replacement, "reject", "  Replacement failure...  ");
+        const replacementAlert = expectActionError(target, "Replacement failure. Try again.");
+        const replacementText = replacementAlert.firstChild!;
+        expect(target.textContent).not.toContain(formatted ?? fallback);
+        expectUnchanged();
+
+        await invoke();
+        expect(api.documents.comment).toHaveBeenCalledTimes(3);
+        expect(replacementText.isConnected).toBe(false);
+        expect(within(target).queryByRole("alert")).toBeNull();
+        expect(expectActionPending(target, action, pending).innerHTML).toBe(statusContent);
+        await settle(retry, "resolve");
+        expect(within(target).queryByRole("alert")).toBeNull();
+        expect(within(target).queryByRole("status")).toBeNull();
+        expect(reactionChip(isReply ? replyReactionRow(threadId, replyId) : rootReactionRow(threadId))).toBeEnabled();
+        expect(vi.mocked(api.documents.comment).mock.calls).toEqual([
+          [fixture.session.docId, payload],
+          [fixture.session.docId, payload],
+          [fixture.session.docId, payload],
+        ]);
+        expectUnchanged();
+      });
+    });
+
+    it("compiles comment action wrap-anywhere to overflow-wrap anywhere, not break-all", async () => {
+      const { compile } = await import("tailwindcss");
+      const { build } = await compile("@tailwind utilities;");
+      const css = build(["wrap-anywhere"]);
+      expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+      expect(css).not.toMatch(/word-break:\s*break-all/);
+    });
+
     it.each(["resolve", "reject"] as const)("keeps a replacement document’s same-id owner locked through old %s and finalizer settlement", async (oldOutcome) => {
       const oldRequest = deferred<CommentResponse>();
       const currentRequest = deferred<CommentResponse>();
@@ -4156,19 +4323,25 @@ describe("CommentsPanel", () => {
       const old = makeApiSession("retired-error-document");
       const rendered = render(panel(old.session));
       const [threadId] = old.threadIds;
+      const retiredReaction = reactProperty<() => void>(reactionChip(rootReactionRow(threadId)), "onClick");
       await invokeRoot("reaction", threadId);
 
       auxiliarySessions.push(old.session);
       const current = makeApiSession("new-error-document", old.session);
       rendered.rerender(panel(current.session));
+      act(() => retiredReaction());
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
       await invokeRoot("reaction", threadId);
-      await settle(currentRequest, "reject", "current reaction failed");
-      expect(within(card(threadId)).getByRole("alert")).toHaveTextContent("current reaction failed. Try again.");
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([documentId]) => documentId)).toEqual(["retired-error-document", "new-error-document"]);
+      await settle(currentRequest, "reject", longActionReason);
+      const alert = expectActionError(card(threadId), `${longActionReason}. Try again.`);
+      const currentHtml = card(threadId).outerHTML;
 
-      await settle(oldRequest, oldOutcome, "old reaction failed");
-      expect(within(card(threadId)).getAllByRole("alert")).toHaveLength(1);
-      expect(within(card(threadId)).getByRole("alert")).toHaveTextContent("current reaction failed. Try again.");
-      expect(within(card(threadId)).getByRole("alert")).not.toHaveTextContent("old reaction failed");
+      await settle(oldRequest, oldOutcome, `old-${longActionReason}`);
+      expect(expectActionError(card(threadId), `${longActionReason}. Try again.`)).toBe(alert);
+      expect(card(threadId).outerHTML).toBe(currentHtml);
+      expect(api.documents.comment).toHaveBeenCalledTimes(2);
     });
 
     it.each([
@@ -4210,7 +4383,7 @@ describe("CommentsPanel", () => {
       try {
         await invokeRoot("delete", threadId);
         rendered.unmount();
-        await settle(pending, outcome, "late action failure");
+        await settle(pending, outcome, longActionReason);
         await act(async () => {});
         expect(unhandled).toEqual([]);
         expect(screen.queryByRole("alert")).toBeNull();
