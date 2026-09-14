@@ -13,6 +13,7 @@ import type {
 import { slashMenuPlugin } from "@/editor/prosemirror/slash-menu";
 import { editablePlugin } from "@/editor/prosemirror/editable";
 import { schema } from "@/editor/markdown/schema";
+import { SLASH_GROUPS, SLASH_ITEMS, filterSlashItems } from "@/editor/slash-items";
 
 const slashActions = vi.hoisted(() => ({
   applyCommand: vi.fn(),
@@ -441,6 +442,84 @@ function open(visit: Visit, state = slashState()) {
   expect(screen.getByTestId("slash-menu")).toBeInTheDocument();
 }
 
+function expectNativeTitles(query = "") {
+  const items = filterSlashItems(query, SLASH_ITEMS, { inTable: false, canComment: true });
+  const root = screen.getByTestId("slash-menu");
+  const groups = SLASH_GROUPS.filter((group) => items.some((item) => item.group === group));
+  expect(root).toHaveAttribute("role", "listbox");
+  expect(root).toHaveAttribute("aria-label", "Insert block");
+  expect(root).toHaveAttribute("class", "touch-target scrollbar-thin absolute z-40 overflow-y-auto rounded-lg border border-line bg-surface py-1 shadow-xl animate-fade-in");
+  expect(root.style.width).toBe("288px");
+  expect(Number.parseFloat(root.style.maxHeight)).toBeLessThanOrEqual(36 * 8 + 8);
+  expect(root.querySelectorAll("button")).toHaveLength(items.length);
+  expect(root.querySelectorAll('[role="option"]')).toHaveLength(items.length || 1);
+  expect(root.querySelectorAll("svg")).toHaveLength(items.length);
+  expect(root.querySelectorAll("[title]")).toHaveLength(
+    items.length + items.filter((item) => item.description).length,
+  );
+  expect(root.querySelectorAll("span")).toHaveLength(
+    items.length * 2 + items.filter((item) => item.description).length + items.filter((item) => item.hint).length,
+  );
+  expect(root.children).toHaveLength(groups.length || 1);
+  for (const [groupIndex, group] of groups.entries()) {
+    const element = root.children[groupIndex];
+    const heading = element.firstElementChild!;
+    expect(element.tagName).toBe("DIV");
+    expect(element.getAttributeNames()).toEqual([]);
+    expect(element.children).toHaveLength(items.filter((item) => item.group === group).length + 1);
+    expect(heading.tagName).toBe("DIV");
+    expect(heading.getAttributeNames()).toEqual(["class"]);
+    expect(heading).toHaveAttribute("class", "px-3 pb-0.5 pt-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-3");
+    expect(heading.textContent).toBe(group);
+  }
+  for (const [index, item] of items.entries()) {
+    const row = screen.getByTestId(`slash-item-${item.id}`);
+    const [icon, body, hint] = Array.from(row.children);
+    const [title, description] = Array.from(body.children);
+    expect(row).toHaveAttribute("type", "button");
+    expect(row).toHaveAttribute("role", "option");
+    expect(row).toHaveAttribute("data-index", String(index));
+    expect(row).toHaveAttribute("aria-selected", String(index === 0));
+    expect(row.style.height).toBe(item.description ? "52px" : "36px");
+    expect(row).toHaveAttribute("class", `flex w-full items-center gap-3 px-3 text-left text-sm text-ink-2${index === 0 ? " bg-accent-soft text-ink" : ""}`);
+    expect(row.parentElement?.firstElementChild?.textContent).toBe(item.group);
+    expect(row.children).toHaveLength(item.hint ? 3 : 2);
+    expect(icon.tagName).toBe("svg");
+    expect(icon).toHaveAttribute("width", "16");
+    expect(icon).toHaveAttribute("height", "16");
+    expect(icon).toHaveClass("shrink-0", "text-ink-3");
+    expect(body.tagName).toBe("SPAN");
+    expect(body.getAttributeNames()).toEqual(["class"]);
+    expect(body).toHaveAttribute("class", "flex min-w-0 flex-1 flex-col");
+    expect(body.children).toHaveLength(item.description ? 2 : 1);
+    expect(title.tagName).toBe("SPAN");
+    expect(title.getAttributeNames().sort()).toEqual(["class", "title"]);
+    expect(title).toHaveAttribute("class", "truncate");
+    expect(title.textContent).toBe(item.title);
+    expect(title.getAttribute("title")).toBe(title.textContent);
+    expect(title.childNodes).toHaveLength(1);
+    if (item.description) {
+      expect(description.tagName).toBe("SPAN");
+      expect(description.getAttributeNames().sort()).toEqual(["class", "title"]);
+      expect(description).toHaveAttribute("class", "truncate text-xs text-ink-3");
+      expect(description.textContent).toBe(item.description);
+      expect(description.getAttribute("title")).toBe(description.textContent);
+      expect(description.childNodes).toHaveLength(1);
+    } else {
+      expect(description).toBeUndefined();
+    }
+    if (item.hint) {
+      expect(hint.tagName).toBe("SPAN");
+      expect(hint.getAttributeNames()).toEqual(["class"]);
+      expect(hint).toHaveAttribute("class", "text-xs text-ink-3");
+      expect(hint.textContent).toBe(item.hint);
+    } else {
+      expect(hint).toBeUndefined();
+    }
+  }
+  return root;
+}
+
 type DirectMouseEvent<T extends HTMLElement> = Pick<
   ReactMouseEvent<T>,
   "type" | "currentTarget" | "target" | "nativeEvent" | "preventDefault"
@@ -739,6 +818,117 @@ describe("slash-menu visit authority", () => {
 
 });
 
+describe("slash-menu native title metadata", () => {
+  it("exposes every actual catalog label without adding nodes or changing controls", () => {
+    const visit = makeVisit();
+    render(
+      <StrictMode>
+        <BoundaryHarness visit={visit} />
+      </StrictMode>,
+    );
+    open(visit);
+    expectNativeTitles();
+    expect(screen.getAllByRole("option")).toHaveLength(SLASH_ITEMS.length);
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    expect(slashActions.applyItem).not.toHaveBeenCalled();
+    expect(visit.view.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("removes old titles through filtering, group changes, close-reopen, and session replacement", () => {
+    const a = makeVisit();
+    const b = makeVisit(a.controller);
+    const mounted = render(
+      <StrictMode>
+        <BoundaryHarness visit={a} />
+      </StrictMode>,
+    );
+    open(a, slashState("agent"));
+    expectNativeTitles("agent");
+    const oldAgent = captureRow("agent");
+    const oldDescription = screen.getByText(SLASH_ITEMS.find((item) => item.id === "agent")!.description!);
+
+    open(a, slashState("code ts"));
+    expectNativeTitles("code ts");
+    expect(oldAgent.element).not.toBeInTheDocument();
+    expect(oldDescription).not.toBeInTheDocument();
+    const oldCode = captureRow("code");
+    open(a, slashState("no-such-item"));
+    expectNativeTitles("no-such-item");
+    expect(screen.getByTestId("slash-empty").textContent).toBe("No matches");
+    expect(oldCode.element).not.toBeInTheDocument();
+
+    act(() => a.controller.emit(null));
+    expect(screen.queryByTestId("slash-menu")).toBeNull();
+    open(a, slashState("image"));
+    expectNativeTitles("image");
+    const oldImage = captureRow("image");
+    mounted.rerender(
+      <StrictMode>
+        <BoundaryHarness visit={b} />
+      </StrictMode>,
+    );
+    expect(screen.queryByTestId("slash-menu")).toBeNull();
+    expect(oldImage.element).not.toBeInTheDocument();
+    open(b, slashState("keep"));
+    expectNativeTitles("keep");
+    const current = captureRow("agent");
+    for (const retired of [oldAgent, oldCode, oldImage]) {
+      clickRow(retired);
+      clickRow({ ...retired, element: current.element });
+    }
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    expect(slashActions.applyItem).not.toHaveBeenCalled();
+    expect(a.view.focus).not.toHaveBeenCalled();
+    expect(b.view.focus).not.toHaveBeenCalled();
+    const accepted = clickRow(current, current.element.querySelector("[title]")!);
+    current.click(accepted.event);
+    expect(slashActions.applyItem).toHaveBeenCalledOnce();
+    expect(slashActions.applyItem.mock.calls[0][0]).toBe(b.view);
+    expect(slashActions.applyItem.mock.calls[0][2]).toBe(b.session.undoManager);
+    expect(b.onKeepAgent).toHaveBeenCalledOnce();
+    expect(a.onKeepAgent).not.toHaveBeenCalled();
+  });
+
+  it.each(["title", "description"] as const)("allows native hover on the agent %s without applying an editor command", (field) => {
+    const visit = makeVisit();
+    render(
+      <StrictMode>
+        <BoundaryHarness visit={visit} />
+      </StrictMode>,
+    );
+    open(visit);
+    const agent = SLASH_ITEMS.find((item) => item.id === "agent")!;
+    const target = screen.getByText(agent[field]!);
+    const before = captureRow("agent");
+    const bodyMarkup = before.element.children[1].outerHTML;
+    const iconMarkup = before.element.children[0].outerHTML;
+    const controls = screen.getAllByRole("option");
+    const activeElement = document.activeElement;
+    fireEvent.mouseOver(target);
+    expect(screen.getByTestId("slash-item-agent")).toHaveAttribute("aria-selected", "true");
+    expect(target.getAttribute("title")).toBe(target.textContent);
+    expect(screen.getAllByRole("option")).toEqual(controls);
+    expect(before.element.children[1].outerHTML).toBe(bodyMarkup);
+    expect(before.element.children[0].outerHTML).toBe(iconMarkup);
+    expect(document.activeElement).toBe(activeElement);
+    expect(slashActions.applyCommand).not.toHaveBeenCalled();
+    expect(slashActions.applyItem).not.toHaveBeenCalled();
+    expect(slashActions.close).not.toHaveBeenCalled();
+    expect(visit.view.dispatch).not.toHaveBeenCalled();
+    expect(visit.view.focus).not.toHaveBeenCalled();
+    expect(visit.session.undoManager.stopCapturing).not.toHaveBeenCalled();
+    expect(visit.onKeepAgent).not.toHaveBeenCalled();
+
+    clickRow(before, target);
+    expect(slashActions.applyItem).not.toHaveBeenCalled();
+    const current = captureRow("agent");
+    const accepted = clickRow(current, target);
+    current.click(accepted.event);
+    expect(slashActions.applyItem).toHaveBeenCalledOnce();
+    expect(visit.onKeepAgent).toHaveBeenCalledOnce();
+  });
+});
+
 describe("slash-menu native keyboard publication", () => {
   it("moves Home and End to exact filtered boundaries without moving editor focus or selection", async () => {
     const visit = makeIntegratedVisit();
@@ -946,7 +1136,7 @@ describe("slash-menu native keyboard publication", () => {
     }
   });
 
-  it("rejects mutate-restored menu DOM and lets a complete query successor recover", async () => {
+  it.each(["root", "title", "description"] as const)("rejects mutate-restored menu DOM and lets a complete query successor recover (%s)", async (field) => {
     const visit = makeIntegratedVisit();
     try {
       render(
@@ -956,16 +1146,23 @@ describe("slash-menu native keyboard publication", () => {
       );
       await openIntegrated(visit);
       const root = screen.getByTestId("slash-menu");
-      root.setAttribute("data-history-probe", "changed");
-      root.removeAttribute("data-history-probe");
+      const agent = SLASH_ITEMS.find((item) => item.id === "agent")!;
+      const target = field === "root" ? root : screen.getByText(agent[field]!);
+      const attribute = field === "root" ? "data-history-probe" : "title";
+      const original = target.getAttribute(attribute);
+      target.setAttribute(attribute, "changed");
+      if (original === null) target.removeAttribute(attribute);
+      else target.setAttribute(attribute, original);
 
       const rejected = await dispatchIntegratedKey(visit.view, "End");
       expect(rejected.defaultPrevented).toBe(false);
+      expect((await dispatchIntegratedKey(visit.view, "Enter")).defaultPrevented).toBe(false);
       expect(screen.getByTestId("slash-item-text")).toHaveAttribute(
         "aria-selected",
         "true",
       );
       expect(slashActions.applyCommand).not.toHaveBeenCalled();
+      expect(slashActions.applyItem).not.toHaveBeenCalled();
       expect(visit.view.focus).not.toHaveBeenCalled();
 
       await act(async () => {
@@ -978,6 +1175,10 @@ describe("slash-menu native keyboard publication", () => {
         "aria-selected",
         "true",
       );
+      expect((await dispatchIntegratedKey(visit.view, "Enter")).defaultPrevented).toBe(true);
+      expect(slashActions.applyCommand).toHaveBeenCalledOnce();
+      expect(slashActions.applyCommand.mock.calls[0][0]).toBe(visit.view);
+      expect(slashActions.applyCommand.mock.calls[0][2]).toBe(visit.session.undoManager);
     } finally {
       visit.view.destroy();
       visit.host.remove();
@@ -987,6 +1188,51 @@ describe("slash-menu native keyboard publication", () => {
 });
 
 describe("slash-menu pointer presentation", () => {
+  it.each([
+    ["title", false],
+    ["title", true],
+    ["description", false],
+    ["description", true],
+  ] as const)("guards the exact %s attribute, including restoration=%s", (field, restoreBeforeClick) => {
+    const visit = makeVisit();
+    render(
+      <StrictMode>
+        <BoundaryHarness visit={visit} />
+      </StrictMode>,
+    );
+    open(visit, slashState("keep"));
+    const row = captureRow("agent");
+    const root = captureRoot();
+    const agent = SLASH_ITEMS.find((item) => item.id === "agent")!;
+    const target = screen.getByText(agent[field]!);
+    const original = target.getAttribute("title")!;
+    target.setAttribute("title", "changed");
+    if (restoreBeforeClick) target.setAttribute("title", original);
+    const rejectedDown = invokeMouse(root.down, root.element, "mousedown", { target });
+    clickRow(row, target);
+    expect(rejectedDown.preventDefault).not.toHaveBeenCalled();
+    expect(slashActions.applyItem).not.toHaveBeenCalled();
+    expect(visit.onKeepAgent).not.toHaveBeenCalled();
+    expect(visit.view.focus).not.toHaveBeenCalled();
+    if (!restoreBeforeClick) target.setAttribute("title", original);
+    clickRow(row, target);
+    expect(slashActions.applyItem).not.toHaveBeenCalled();
+
+    open(visit, slashState("keep"));
+    expectNativeTitles("keep");
+    const current = captureRow("agent");
+    const currentTarget = screen.getByText(agent[field]!);
+    clickRow(current, target);
+    clickRow({ ...row, element: current.element }, currentTarget);
+    expect(slashActions.applyItem).not.toHaveBeenCalled();
+    const accepted = clickRow(current, currentTarget);
+    current.click(accepted.event);
+    expect(slashActions.applyItem).toHaveBeenCalledOnce();
+    expect(slashActions.applyItem.mock.calls[0][0]).toBe(visit.view);
+    expect(slashActions.applyItem.mock.calls[0][2]).toBe(visit.session.undoManager);
+    expect(visit.onKeepAgent).toHaveBeenCalledOnce();
+  });
+
   it("keeps the exact current controls usable after Strict Mode replays layout effects", () => {
     const a = makeVisit();
     const b = makeVisit();
