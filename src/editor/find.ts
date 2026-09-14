@@ -50,8 +50,9 @@ export function findMatches(text: string, query: string, options: FindOptions): 
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) && out.length < MAX_MATCHES) {
     if (m[0].length === 0) {
-      // Zero-width matches (e.g. /a*/) would loop forever; step past them.
-      re.lastIndex++;
+      // Skip zero-width matches by a Unicode code point, including past the end.
+      const codePoint = text.codePointAt(m.index);
+      re.lastIndex = m.index + (codePoint !== undefined && codePoint > 0xffff ? 2 : 1);
       continue;
     }
     out.push({ from: m.index, to: m.index + m[0].length });
