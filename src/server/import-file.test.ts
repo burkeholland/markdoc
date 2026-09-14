@@ -103,6 +103,18 @@ describe("titles", () => {
     expect(titleForImport(content, "examples.md")).toBe(heading ?? "examples");
   });
 
+  describe.each(["```", "~~~"])("CRLF fence with %s", (marker) => {
+    it.each<[string, string, string | null]>([
+      ["matching closer", `${marker}\r\n# Code\r\n${marker}\r\n# Real title\r\n`, "Real title"],
+      ["longer opener and shorter inner run", `${marker}${marker[0]}markdown\r\n${marker}\r\n# Code\r\n${marker}${marker[0]} \t\r\n# Real title\r\n`, "Real title"],
+      ["unclosed fence", `${marker}${marker[0]}\r\n${marker}\r\n# Code\r\n`, null],
+      ["lone CR in closer suffix", `${marker}\r\n${marker}\r \r\n# Code\r\n${marker}\r\n# Real title\r\n`, "Real title"],
+    ])("handles %s without normalizing the input", (_name, content, heading) => {
+      expect(firstHeading(content)).toBe(heading);
+      expect(titleForImport(content, "examples.md")).toBe(heading ?? "examples");
+    });
+  });
+
   describe.each(["```", "~~~"])("%s fence whitespace", (marker) => {
     it.each([0, 1, 2, 3])("accepts %i leading spaces and trailing spaces/tabs", (spaces) => {
       const indent = " ".repeat(spaces);

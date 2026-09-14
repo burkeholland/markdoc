@@ -61,7 +61,7 @@ export function firstHeading(content: string): string | null {
   const fm = frontMatterSpan(content);
   const body = fm ? content.slice(fm.to) : content;
   let fence: { marker: string; length: number } | null = null;
-  for (const line of body.split("\n")) {
+  for (const line of body.split(/\r?\n/)) {
     // A leading tab reaches column four, so only literal spaces may indent a fence.
     const delimiter = /^ {0,3}(`{3,}|~{3,})/.exec(line);
     if (fence) {
