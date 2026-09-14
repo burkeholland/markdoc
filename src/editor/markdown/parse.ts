@@ -488,7 +488,7 @@ class Converter {
       }
       case "image": {
         const img = node as Md.Image;
-        b.leaf(schema.nodes.image.create({ src: img.url, alt: img.alt ?? null, title: img.title ?? null }), range);
+        b.leaf(schema.nodes.image.create({ src: img.url, alt: img.alt ?? null, title: img.title ?? null }, null, marks), range);
         return;
       }
       case "linkReference": {
@@ -510,7 +510,7 @@ class Converter {
         const ref = node as Md.ImageReference;
         const def = this.definitions.get(ref.identifier);
         if (def) {
-          b.leaf(schema.nodes.image.create({ src: def.url, alt: ref.alt ?? null, title: def.title ?? null }), range);
+          b.leaf(schema.nodes.image.create({ src: def.url, alt: ref.alt ?? null, title: def.title ?? null }, null, marks), range);
         } else {
           b.text(this.src.slice(range.from, range.to), marks, range);
         }
