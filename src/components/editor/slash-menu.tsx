@@ -1698,6 +1698,7 @@ export function SlashMenu({
                   <span
                     ref={(element) => bindPointerRow(pointerPresentation, item, "title", element)}
                     className="truncate"
+                    title={item.title}
                   >
                     {item.title}
                   </span>
@@ -1705,6 +1706,7 @@ export function SlashMenu({
                     <span
                       ref={(element) => bindPointerRow(pointerPresentation, item, "description", element)}
                       className="truncate text-xs text-ink-3"
+                      title={item.description}
                     >
                       {item.description}
                     </span>
