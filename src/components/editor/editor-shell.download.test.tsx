@@ -202,6 +202,157 @@ describe("EditorShell PDF download filename", () => {
   });
 });
 
+describe("EditorShell PDF download errors", () => {
+  function expectNoDownloadResources(download: Awaited<ReturnType<typeof setupDownload>>) {
+    expect(download.downloads).toEqual([]);
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(download.anchorCreations()).toHaveLength(0);
+    expect(download.append).not.toHaveBeenCalled();
+    expect(download.click).not.toHaveBeenCalled();
+    expect(download.remove).not.toHaveBeenCalled();
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    expect(download.releaseTimers()).toHaveLength(0);
+    expect(document.querySelectorAll("a[download]")).toHaveLength(0);
+  }
+
+  function expectErrorToast(message: string) {
+    const error = screen.getByText(message, { normalizer: (text) => text });
+    expect(error).toBeVisible();
+    expect(error.textContent).toBe(message);
+    expect(error.closest('[role="status"]')).toHaveClass("bg-red-600");
+    expect(screen.getByText("Preparing PDF\u2026")).toBeVisible();
+    expect(screen.getAllByTestId("toast")).toHaveLength(2);
+  }
+
+  const cases: { label: string; status: number; body: string; contentType?: string; message?: string }[] = [
+    { label: "server message with original whitespace", status: 422, body: '{"error":"  PDF export unavailable \\t"}', message: "  PDF export unavailable \t" },
+    { label: "empty error", status: 400, body: '{"error":""}' },
+    { label: "whitespace error", status: 500, body: '{"error":" \\t\\r\\n "}' },
+    { label: "numeric error", status: 429, body: '{"error":42}' },
+    { label: "object error", status: 500, body: '{"error":{"message":"Not a string"}}' },
+    { label: "array error", status: 503, body: '{"error":["Not a string"]}' },
+    { label: "missing error", status: 404, body: '{}' },
+    { label: "null error", status: 500, body: '{"error":null}' },
+    { label: "null JSON", status: 403, body: 'null' },
+    { label: "array JSON", status: 500, body: '[{"error":"Not a top-level message"}]' },
+    { label: "primitive JSON", status: 400, body: '"Not an error object"' },
+    { label: "empty body", status: 502, body: '' },
+    { label: "malformed JSON", status: 500, body: '{"error":"Incomplete message"' },
+    { label: "HTML response", status: 502, body: '<html><body>Export gateway unavailable</body></html>', contentType: "text/html" },
+    { label: "plain-text response", status: 503, body: 'Export service unavailable', contentType: "text/plain" },
+  ];
+
+  it.each(cases)("reports $label without downloading the failed response", async ({ status, body, contentType, message }) => {
+    const response = new Response(body, {
+      status,
+      headers: new Headers({ "Content-Type": contentType ?? "application/json" }),
+    });
+    const text = vi.spyOn(response, "text");
+    const blob = vi.spyOn(Response.prototype, "blob");
+    const download = await setupDownload(response);
+
+    await act(async () => { await headerProps.onDownload("pdf", true); });
+
+    expectErrorToast(message ?? `PDF export failed (${status})`);
+    for (const elapsed of [0, 20_000]) {
+      await act(async () => { vi.advanceTimersByTime(elapsed); });
+      expect(download.fetch).toHaveBeenCalledExactlyOnceWith(`/api/documents/${DOC.id}/export?format=pdf&download=1&suggestions=1`);
+      expect(text).toHaveBeenCalledOnce();
+      expect(blob).not.toHaveBeenCalled();
+      expectNoDownloadResources(download);
+    }
+  });
+
+  it.each(["fetch", "response body read"] as const)("preserves the original %s rejection without retrying", async (stage) => {
+    const response = new Response('{"error":"Unread server message"}', { status: 502 });
+    const text = vi.spyOn(response, "text");
+    const blob = vi.spyOn(Response.prototype, "blob");
+    const download = await setupDownload(response);
+    const error = new Error(stage === "fetch" ? "Export connection interrupted" : "Export response stream interrupted");
+    if (stage === "fetch") {
+      download.fetch.mockReset().mockRejectedValueOnce(error);
+    } else {
+      text.mockRejectedValueOnce(error);
+    }
+
+    await act(async () => { await headerProps.onDownload("pdf", true); });
+
+    expectErrorToast(error.message);
+    for (const elapsed of [0, 20_000]) {
+      await act(async () => { vi.advanceTimersByTime(elapsed); });
+      expect(download.fetch).toHaveBeenCalledExactlyOnceWith(`/api/documents/${DOC.id}/export?format=pdf&download=1&suggestions=1`);
+      expect(text).toHaveBeenCalledTimes(stage === "fetch" ? 0 : 1);
+      expect(blob).not.toHaveBeenCalled();
+      expectNoDownloadResources(download);
+    }
+  });
+
+  it("allows a fresh intentional download after an HTTP failure with its own bytes, filename and grace", async () => {
+    const failed = new Response('{"error":{}}', { status: 503 });
+    const failedText = vi.spyOn(failed, "text");
+    const failedBlob = vi.spyOn(failed, "blob");
+    const success = pdfResponse(exportContentDisposition("Retry caf\u00e9", "pdf"));
+    const successBlob = vi.spyOn(success, "blob");
+    const successText = vi.spyOn(success, "text");
+    const successJson = vi.spyOn(success, "json");
+    const download = await setupDownload(failed);
+    download.fetch.mockResolvedValueOnce(success);
+
+    await act(async () => { await headerProps.onDownload("pdf", true); });
+    expectErrorToast("PDF export failed (503)");
+    expectNoDownloadResources(download);
+    await act(async () => { vi.advanceTimersByTime(20_000); });
+    expectNoDownloadResources(download);
+    expect(download.fetch).toHaveBeenCalledOnce();
+    expect(failedText).toHaveBeenCalledOnce();
+    expect(failedBlob).not.toHaveBeenCalled();
+    expect(successBlob).not.toHaveBeenCalled();
+
+    await act(async () => { await headerProps.onDownload("pdf", false); });
+    expect(download.fetch.mock.calls).toEqual([
+      [`/api/documents/${DOC.id}/export?format=pdf&download=1&suggestions=1`],
+      [`/api/documents/${DOC.id}/export?format=pdf&download=1`],
+    ]);
+    expect(successBlob).toHaveBeenCalledOnce();
+    expect(successText).not.toHaveBeenCalled();
+    expect(successJson).not.toHaveBeenCalled();
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(createObjectURL.mock.calls[0][0]).toBe(await successBlob.mock.results[0].value);
+    const blob = createObjectURL.mock.calls[0][0];
+    if (!("arrayBuffer" in blob)) throw new Error("Expected the response blob");
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(PDF_BYTES);
+    expect(blob.type).toBe("application/pdf");
+    expect(download.downloads).toEqual([{ filename: "Retry caf\u00e9.pdf", href: OBJECT_URL, connected: true }]);
+    expect(download.click).toHaveBeenCalledOnce();
+    expect(download.anchorCreations()).toHaveLength(1);
+    expect(download.append).toHaveBeenCalledOnce();
+    expect(download.remove.mock.contexts).toEqual([download.append.mock.calls[0][0]]);
+    expect(download.append.mock.calls[0][0].isConnected).toBe(false);
+    expect(document.querySelectorAll("a[download]")).toHaveLength(0);
+    expect(download.releaseTimers()).toHaveLength(1);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    expect(screen.getByText("Preparing PDF\u2026")).toBeVisible();
+    expect(screen.getAllByTestId("toast")).toHaveLength(1);
+    await act(async () => { vi.advanceTimersByTime(9_999); });
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    await act(async () => { vi.advanceTimersByTime(1); });
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(OBJECT_URL);
+    await act(async () => { vi.advanceTimersByTime(10_000); });
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(OBJECT_URL);
+    expect(download.fetch).toHaveBeenCalledTimes(2);
+    expect(failedText).toHaveBeenCalledOnce();
+    expect(failedBlob).not.toHaveBeenCalled();
+    expect(successBlob).toHaveBeenCalledOnce();
+    expect(successText).not.toHaveBeenCalled();
+    expect(successJson).not.toHaveBeenCalled();
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(download.click).toHaveBeenCalledOnce();
+    expect(download.anchorCreations()).toHaveLength(1);
+    expect(download.remove).toHaveBeenCalledOnce();
+    expect(download.releaseTimers()).toHaveLength(1);
+  });
+});
+
 describe("EditorShell PDF download cleanup", () => {
   it.each(["append", "click", "anchor creation", "blob read", "object URL creation"] as const)(
     "cleans up after failed %s without replacing the error or retrying",

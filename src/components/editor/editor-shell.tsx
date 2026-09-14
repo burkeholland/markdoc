@@ -19,6 +19,7 @@ import { api, ApiError, apiErrorText, type SyncStatusDto, type VersionSummary } 
 import { uploadAsset } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { readDownloadFilename } from "@/lib/download-filename";
+import { readJsonResponse } from "@/lib/json-response";
 import { setPendingNotice, takePendingNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
 import { TooltipProvider, Tip, Dialog, DialogPortal, DialogOverlay, DialogPrimitiveContent, DialogTitle } from "@/components/ui/primitives";
@@ -2498,8 +2499,7 @@ export function EditorShell({
       try {
         const res = await fetch(href);
         if (!res.ok) {
-          const data = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(data?.error ?? `PDF export failed (${res.status})`);
+          await readJsonResponse(res, { fallback: `PDF export failed (${res.status})` });
         }
         const blob = await res.blob();
         const filename = readDownloadFilename(res.headers.get("Content-Disposition"));
