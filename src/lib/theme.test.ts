@@ -214,40 +214,110 @@ describe("theme", () => {
   });
 
   describe("boot script", () => {
-    function run(stored: string | null, prefersDark: boolean) {
-      const root = { attrs: {} as Record<string, string>, setAttribute(k: string, v: string) { this.attrs[k] = v; } };
-      const fn = new Function(
-        "localStorage",
-        "window",
-        "document",
-        THEME_BOOT_SCRIPT,
-      );
-      fn(
-        { getItem: (k: string) => (k === THEME_STORAGE_KEY ? stored : null) },
-        { matchMedia: (q: string) => ({ matches: q.includes("dark") && prefersDark }) },
-        { documentElement: root },
-      );
-      return root.attrs["data-theme"];
+    type StorageMode = "available" | "denied getter" | "throwing getItem";
+    type MediaMode = "available" | "missing" | "throwing call" | "denied getter";
+
+    function run(
+      stored: string | null,
+      prefersDark: boolean,
+      storageMode: StorageMode = "available",
+      mediaMode: MediaMode = "available",
+    ) {
+      const attrs: Record<string, string> = {};
+      const root = { setAttribute: vi.fn((k: string, v: string) => { attrs[k] = v; }) };
+      const sideEffect = vi.fn();
+      const getItem = vi.fn((k: string) => {
+        if (storageMode === "throwing getItem") throw new Error("Storage read denied");
+        return k === THEME_STORAGE_KEY ? stored : null;
+      });
+      const storageAccess = vi.fn(() => {
+        if (storageMode === "denied getter") throw new DOMException("Storage access denied", "SecurityError");
+        return { getItem, setItem: sideEffect, removeItem: sideEffect, clear: sideEffect };
+      });
+      const matchMedia = vi.fn(() => {
+        if (mediaMode === "throwing call") throw new Error("Media query unavailable");
+        return { matches: prefersDark, addEventListener: sideEffect, addListener: sideEffect };
+      });
+      const mediaAccess = vi.fn(() => {
+        if (mediaMode === "denied getter") throw new Error("Media access denied");
+        return mediaMode === "missing" ? undefined : matchMedia;
+      });
+      const scope = {
+        get localStorage() { return storageAccess(); },
+        get matchMedia() { return mediaAccess(); },
+        document: { documentElement: root },
+        addEventListener: sideEffect,
+        setTimeout: sideEffect,
+        setInterval: sideEffect,
+        requestAnimationFrame: sideEffect,
+        fetch: sideEffect,
+        XMLHttpRequest: sideEffect,
+      };
+      // Resolve unqualified localStorage through the isolated window getter, without changing shared globals.
+      const fn = new Function("window", `with (window) { ${THEME_BOOT_SCRIPT} }`);
+      fn(scope);
+
+      expect(root.setAttribute).toHaveBeenCalledExactlyOnceWith("data-theme", attrs["data-theme"]);
+      expect(storageAccess).toHaveBeenCalledTimes(1);
+      if (storageMode === "denied getter") expect(getItem).not.toHaveBeenCalled();
+      else expect(getItem).toHaveBeenCalledExactlyOnceWith(THEME_STORAGE_KEY);
+      const explicit = storageMode === "available" && (stored === "light" || stored === "dark");
+      expect(mediaAccess).toHaveBeenCalledTimes(explicit ? 0 : 1);
+      if (!explicit && (mediaMode === "available" || mediaMode === "throwing call")) {
+        expect(matchMedia).toHaveBeenCalledExactlyOnceWith("(prefers-color-scheme: dark)");
+      } else {
+        expect(matchMedia).not.toHaveBeenCalled();
+      }
+      expect(sideEffect).not.toHaveBeenCalled();
+      return attrs["data-theme"];
     }
 
-    it("applies the stored preference or the OS default before hydration", () => {
-      expect(run(null, true)).toBe("dark");
-      expect(run(null, false)).toBe("light");
-      expect(run("dark", false)).toBe("dark");
-      expect(run("light", true)).toBe("light");
-      expect(run("system", true)).toBe("dark");
-      expect(run("garbage", false)).toBe("light");
+    it.each([
+      ["light", "light", "light"],
+      ["dark", "dark", "dark"],
+      ["system", "light", "dark"],
+      ["garbage", "light", "dark"],
+      [null, "light", "dark"],
+    ] as const)("applies stored %s or the OS default", (stored, lightOS, darkOS) => {
+      expect(run(stored, false)).toBe(lightOS);
+      expect(run(stored, true)).toBe(darkOS);
     });
 
-    it("falls back to light when storage throws", () => {
-      const root = { attrs: {} as Record<string, string>, setAttribute(k: string, v: string) { this.attrs[k] = v; } };
-      const fn = new Function("localStorage", "window", "document", THEME_BOOT_SCRIPT);
-      fn(
-        { getItem: () => { throw new Error("denied"); } },
-        { matchMedia: () => ({ matches: true }) },
-        { documentElement: root },
-      );
-      expect(root.attrs["data-theme"]).toBe("light");
+    it.each(["denied getter", "throwing getItem"] as const)(
+      "follows the OS preference with %s",
+      (storageMode) => {
+        expect(run(null, true, storageMode)).toBe("dark");
+        expect(run(null, false, storageMode)).toBe("light");
+      },
+    );
+
+    it.each(["missing", "throwing call", "denied getter"] as const)(
+      "falls back to light in System mode with %s matchMedia",
+      (mediaMode) => {
+        for (const storageMode of ["available", "denied getter", "throwing getItem"] as const) {
+          expect(run("system", true, storageMode, mediaMode)).toBe("light");
+        }
+      },
+    );
+
+    it.each(["available", "missing", "throwing call", "denied getter"] as const)(
+      "preserves explicit preferences without accessing %s matchMedia",
+      (mediaMode) => {
+        expect(run("light", true, "available", mediaMode)).toBe("light");
+        expect(run("dark", false, "available", mediaMode)).toBe("dark");
+      },
+    );
+
+    it("does not hide or retry unrelated root write failures", () => {
+      const error = new Error("Root write failed");
+      const setAttribute = vi.fn(() => { throw error; });
+      const fn = new Function("localStorage", "document", THEME_BOOT_SCRIPT);
+
+      expect(() => fn(
+        { getItem: () => "dark" },
+        { documentElement: { setAttribute } },
+      )).toThrow(error);
+      expect(setAttribute).toHaveBeenCalledExactlyOnceWith("data-theme", "dark");
     });
   });
 });
