@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EditorSelection, EditorState, Transaction, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history, undo } from "@codemirror/commands";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { languages } from "@codemirror/language-data";
+import { ensureSyntaxTree } from "@codemirror/language";
 import type { Node as PMNode } from "prosemirror-model";
 import { parseMarkdown } from "../markdown/parse";
 import { insertCodeBlock, insertImage, insertLink, setHeading, toggleInlineMark, toggleLinePrefix, type InlineMarker, type LinePrefixKind } from "./commands";
@@ -905,6 +908,372 @@ describe("source destination delimiters", () => {
         expect(view.state.doc.toString()).toBe(fixture[name]);
         expect(view.state.selection.eq(EditorSelection.single(fixture[name].length))).toBe(true);
       });
+    });
+  });
+});
+
+describe("clear source Setext headings", () => {
+  const language = markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false });
+  type Heading = { level: number; from: number; to: number; parents: string[] };
+  const heading = (level: number, from: number, to: number, parents = ["Document"]): Heading =>
+    ({ level, from, to, parents });
+
+  function parsed(view: EditorView) {
+    const tree = ensureSyntaxTree(view.state, view.state.doc.length, 1000);
+    expect(tree).not.toBeNull();
+    const headings: Heading[] = [];
+    const containers: string[] = [];
+    tree!.iterate({
+      enter(node) {
+        if (["Blockquote", "BulletList", "OrderedList", "ListItem"].includes(node.name)) {
+          containers.push(node.name);
+        }
+        if (node.name !== "SetextHeading1" && node.name !== "SetextHeading2") return;
+        const mark = node.node.getChild("HeaderMark");
+        expect(mark).not.toBeNull();
+        expect(mark!.parent?.from).toBe(node.from);
+        expect(mark!.parent?.name).toBe(node.name);
+        const parents: string[] = [];
+        for (let parent = node.node.parent; parent; parent = parent.parent) parents.push(parent.name);
+        headings.push(heading(node.name === "SetextHeading1" ? 1 : 2, mark!.from, mark!.to, parents));
+        return false;
+      },
+    });
+    return { tree: tree!, headings, containers };
+  }
+
+  function expectChanges(transaction: Transaction, deleted: [number, number][]) {
+    const actual: { from: number; to: number; mappedFrom: number; mappedTo: number; text: string }[] = [];
+    transaction.changes.iterChanges((from, to, mappedFrom, mappedTo, inserted) => {
+      actual.push({ from, to, mappedFrom, mappedTo, text: inserted.toString() });
+    });
+    let removed = 0;
+    const expected = deleted.map(([from, to]) => {
+      const mappedFrom = from - removed;
+      removed += to - from;
+      return { from, to, mappedFrom, mappedTo: mappedFrom, text: "" };
+    });
+    expect(actual).toEqual(expected);
+  }
+
+  function clears({
+    source, selection, expected, headings, deleted = headings.map(({ from, to }) => [from, to]),
+    remaining = [], after,
+  }: {
+    source: string;
+    selection: EditorSelection;
+    expected: string;
+    headings: Heading[];
+    deleted?: [number, number][];
+    remaining?: Heading[];
+    after?: (view: EditorView) => void;
+  }) {
+    const transactions: Transaction[] = [];
+    withEditor(source, selection, (view) => {
+      const before = parsed(view);
+      expect(before.headings).toEqual(headings);
+      const focus = vi.spyOn(view, "focus");
+      expect(setHeading(0)(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(expected);
+      expect(transactions).toHaveLength(1);
+      const transaction = transactions[0];
+      expect(transaction.docChanged).toBe(true);
+      expect(transaction.annotation(Transaction.userEvent)).toBe("input.format");
+      expect(transaction.scrollIntoView).toBe(true);
+      expectChanges(transaction, deleted);
+      expect(view.state.selection.toJSON()).toEqual(selection.map(transaction.changes).toJSON());
+      expect(view.state.selection.mainIndex).toBe(selection.mainIndex);
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(view.hasFocus).toBe(true);
+      const reparsed = parsed(view);
+      expect(reparsed.headings).toEqual(remaining);
+      expect(reparsed.containers).toEqual(before.containers);
+      after?.(view);
+
+      view.contentDOM.blur();
+      const state = view.state;
+      expect(setHeading(0)(view)).toBe(false);
+      expect(view.state).toBe(state);
+      expect(transactions).toHaveLength(1);
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(view.hasFocus).toBe(false);
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(source);
+      expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+      expect(parsed(view).headings).toEqual(headings);
+      focus.mockRestore();
+    }, [
+      language,
+      history(),
+      EditorState.allowMultipleSelections.of(true),
+      EditorView.updateListener.of((update) => transactions.push(...update.transactions)),
+    ]);
+  }
+
+  describe.each([
+    { level: 1, mark: "===" },
+    { level: 2, mark: "---" },
+  ])("level $level", ({ level, mark }) => {
+    it.each([
+      { name: "text start", head: 0 },
+      { name: "text middle", head: 2 },
+      { name: "text end", head: 5 },
+      { name: "underline start", head: 6 },
+      { name: "underline middle", head: 7 },
+      { name: "underline end at EOF", head: 9 },
+    ])("clears from $name without deleting the line separator", ({ head }) => {
+      clears({
+        source: `Title\n${mark}`, selection: EditorSelection.single(head),
+        expected: "Title\n", headings: [heading(level, 6, 9)],
+        after(view) {
+          const { doc } = parseMarkdown(view.state.doc.toString());
+          expect(doc.childCount).toBe(1);
+          expect([doc.child(0).type.name, doc.child(0).textContent]).toEqual(["paragraph", "Title"]);
+        },
+      });
+    });
+
+    it("keeps a final newline when the caret is at the underline end", () => {
+      clears({
+        source: `Title\n${mark}\n`, selection: EditorSelection.single(9),
+        expected: "Title\n\n", headings: [heading(level, 6, 9)],
+      });
+    });
+
+    it("leaves a blank line before the following paragraph", () => {
+      clears({
+        source: `Title\n${mark}\nAfter`, selection: EditorSelection.single(2),
+        expected: "Title\n\nAfter", headings: [heading(level, 6, 9)],
+        after(view) {
+          const { doc } = parseMarkdown(view.state.doc.toString());
+          expect(doc.childCount).toBe(2);
+          expect([doc.child(0).type.name, doc.child(0).textContent]).toEqual(["paragraph", "Title"]);
+          expect([doc.child(1).type.name, doc.child(1).textContent]).toEqual(["paragraph", "After"]);
+        },
+      });
+    });
+
+    it.each([
+      { name: "text indentation", head: 0 },
+      { name: "underline indentation", head: 8 },
+      { name: "underline trailing whitespace", head: 15 },
+    ])("preserves whitespace and the following paragraph from $name", ({ head }) => {
+      clears({
+        source: `  Title\n   ${mark}  \nAfter`, selection: EditorSelection.single(head),
+        expected: "  Title\n     \nAfter", headings: [heading(level, 11, 14)],
+        after(view) {
+          const { doc } = parseMarkdown(view.state.doc.toString());
+          expect(doc.childCount).toBe(2);
+          expect([doc.child(0).type.name, doc.child(0).textContent]).toEqual(["paragraph", "  Title"]);
+          expect([doc.child(1).type.name, doc.child(1).textContent]).toEqual(["paragraph", "After"]);
+        },
+      });
+    });
+
+    it("clears a multiline heading once when all its lines are selected", () => {
+      clears({
+        source: `First\nsecond\n${mark}\nAfter`, selection: EditorSelection.single(0, 16),
+        expected: "First\nsecond\n\nAfter", headings: [heading(level, 13, 16)],
+      });
+    });
+
+    it("keeps supplementary, combining and inline-mark content unchanged", () => {
+      const text = "**\u{10400}Cafe\u0301** and *soft* and `code`";
+      clears({
+        source: `${text}\n${mark}`, selection: EditorSelection.single(text.length - 2, 3),
+        expected: `${text}\n`, headings: [heading(level, text.length + 1, text.length + 4)],
+        after(view) {
+          const { doc } = parseMarkdown(view.state.doc.toString());
+          const paragraph = doc.child(0);
+          expect(paragraph.type.name).toBe("paragraph");
+          expect(paragraph.textContent).toBe("\u{10400}Cafe\u0301 and soft and code");
+          expect(paragraph.child(0).marks.map((mark) => mark.type.name)).toEqual(["strong"]);
+          expect(paragraph.child(2).marks.map((mark) => mark.type.name)).toEqual(["em"]);
+          expect(paragraph.child(4).marks.map((mark) => mark.type.name)).toEqual(["code"]);
+        },
+      });
+    });
+
+    it.each([
+      {
+        name: "quote", textPrefix: "> ", underlinePrefix: ">   ",
+        parents: ["Blockquote", "Document"], richContainer: "blockquote",
+      },
+      {
+        name: "bullet", textPrefix: "- ", underlinePrefix: "    ",
+        parents: ["ListItem", "BulletList", "Document"], richContainer: "bullet_list",
+      },
+      {
+        name: "ordered item", textPrefix: "1. ", underlinePrefix: "     ",
+        parents: ["ListItem", "OrderedList", "Document"], richContainer: "ordered_list",
+      },
+    ])("clears from either $name prefix while retaining the marker-only line", ({ textPrefix, underlinePrefix, parents, richContainer }) => {
+      const text = `${textPrefix}Title`;
+      const markFrom = text.length + 1 + underlinePrefix.length;
+      for (const head of [0, text.length + 1]) {
+        clears({
+          source: `${text}\n${underlinePrefix}${mark}  \n\nAfter`,
+          selection: EditorSelection.single(head),
+          expected: `${text}\n${underlinePrefix}  \n\nAfter`,
+          headings: [heading(level, markFrom, markFrom + mark.length, parents)],
+          after(view) {
+            const { doc } = parseMarkdown(view.state.doc.toString());
+            expect(doc.childCount).toBe(2);
+            expect([doc.child(0).type.name, doc.child(0).textContent]).toEqual([richContainer, "Title"]);
+            expect([doc.child(1).type.name, doc.child(1).textContent]).toEqual(["paragraph", "After"]);
+          },
+        });
+      }
+    });
+  });
+
+  it.each(["forward", "reversed"])("clears the heading when a %s selection excludes its underline line", (direction) => {
+    clears({
+      source: "First\nsecond\n===\nAfter",
+      selection: direction === "forward" ? EditorSelection.single(6, 13) : EditorSelection.single(13, 6),
+      expected: "First\nsecond\n\nAfter", headings: [heading(1, 13, 16)],
+    });
+  });
+
+  it.each(["forward", "reversed"])("leaves the next heading untouched at a %s exclusive endpoint", (direction) => {
+    clears({
+      source: "First\n===\n\nSecond\n---",
+      selection: direction === "forward" ? EditorSelection.single(0, 11) : EditorSelection.single(11, 0),
+      expected: "First\n\n\nSecond\n---",
+      headings: [heading(1, 6, 9), heading(2, 18, 21)], deleted: [[6, 9]],
+      remaining: [heading(2, 15, 18)],
+    });
+  });
+
+  it("includes the next heading when a caret is at its first-line start", () => {
+    clears({
+      source: "First\n===\n\nSecond\n---", selection: EditorSelection.single(11),
+      expected: "First\n===\n\nSecond\n",
+      headings: [heading(1, 6, 9), heading(2, 18, 21)], deleted: [[18, 21]],
+      remaining: [heading(1, 6, 9)],
+    });
+  });
+
+  it("clears multiple headings and ATX lines in source order without changing prose", () => {
+    const source = "# Before\n\nFirst\n===\n\nordinary\n\nSecond\n---\n\n## After";
+    const first = source.indexOf("===");
+    const second = source.indexOf("---");
+    const atx = source.indexOf("##");
+    clears({
+      source, selection: EditorSelection.single(source.length, 0),
+      expected: "Before\n\nFirst\n\n\nordinary\n\nSecond\n\n\nAfter",
+      headings: [heading(1, first, first + 3), heading(2, second, second + 3)],
+      deleted: [[0, 2], [first, first + 3], [second, second + 3], [atx, atx + 3]],
+    });
+  });
+
+  it("deduplicates shared headings across distinct ranges and keeps a nonzero main index", () => {
+    const source = "First\nsecond\n===\n\nNext\n---";
+    const selection = EditorSelection.create([
+      EditorSelection.range(3, 0),
+      EditorSelection.range(9, 11),
+      EditorSelection.cursor(14),
+      EditorSelection.range(24, 20),
+    ], 1);
+    clears({
+      source, selection, expected: "First\nsecond\n\n\nNext\n",
+      headings: [heading(1, 13, 16), heading(2, 23, 26)],
+      after(view) {
+        expect(view.state.selection.toJSON()).toEqual(EditorSelection.create([
+          EditorSelection.range(3, 0),
+          EditorSelection.range(9, 11),
+          EditorSelection.cursor(13),
+          EditorSelection.range(20, 17),
+        ], 1).toJSON());
+      },
+    });
+  });
+
+  it("preserves nested quote/list prefixes and a minimally sized underline", () => {
+    clears({
+      source: "> - Title\n>   =\n>   \n>   After", selection: EditorSelection.single(10),
+      expected: "> - Title\n>   \n>   \n>   After",
+      headings: [heading(1, 14, 15, ["ListItem", "BulletList", "Blockquote", "Document"])],
+      after(view) {
+        const { doc } = parseMarkdown(view.state.doc.toString());
+        expect(doc.child(0).type.name).toBe("blockquote");
+        const list = doc.child(0).child(0);
+        expect(list.type.name).toBe("bullet_list");
+        const item = list.child(0);
+        expect(item.childCount).toBe(2);
+        expect([item.child(0).type.name, item.child(0).textContent]).toEqual(["paragraph", "Title"]);
+        expect([item.child(1).type.name, item.child(1).textContent]).toEqual(["paragraph", "After"]);
+      },
+    });
+  });
+
+  it("does not scan a genuine heading's tab-indented continuation for ATX-like text", () => {
+    const source = "Title\n\t# literal\n===";
+    const selection = EditorSelection.single(6, 17);
+    const transactions: Transaction[] = [];
+    withEditor(source, selection, (view) => {
+      expect(parsed(view).headings).toEqual([heading(1, 17, 20)]);
+      expect(setHeading(0)(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe("Title\n\t# literal\n");
+      expect(transactions).toHaveLength(1);
+      expectChanges(transactions[0], [[17, 20]]);
+      expect(parsed(view).headings).toEqual([]);
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(source);
+      expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+    }, [language, history(), EditorView.updateListener.of((update) => transactions.push(...update.transactions))]);
+  });
+
+  it.each([
+    { name: "standalone thematic break", source: "---", kind: "HorizontalRule" },
+    { name: "separated thematic break", source: "Title\n\n---", kind: "HorizontalRule" },
+    { name: "plain prose", source: "Title\nordinary", kind: "Paragraph" },
+    { name: "escaped dashes", source: "Title\n\\---", kind: "Paragraph" },
+    { name: "escaped equals", source: "Title\n\\===", kind: "Paragraph" },
+    { name: "fenced code", source: "```\nTitle\n===\n```", kind: "FencedCode" },
+    { name: "indented code", source: "    Title\n    ---", kind: "CodeBlock" },
+    { name: "final empty line", source: "Title\n===\n", kind: "SetextHeading1", selection: EditorSelection.single(10) },
+    { name: "exclusive forward endpoint", source: "Before\n\nTitle\n===", kind: "SetextHeading1", selection: EditorSelection.single(0, 8) },
+    { name: "exclusive reversed endpoint", source: "Before\n\nTitle\n===", kind: "SetextHeading1", selection: EditorSelection.single(8, 0) },
+  ])("does not dispatch or focus for $name", ({ source, kind, selection = EditorSelection.single(0, source.length) }) => {
+    const transactions: Transaction[] = [];
+    withEditor(source, selection, (view) => {
+      const before = parsed(view);
+      const names: string[] = [];
+      before.tree.iterate({ enter(node) { names.push(node.name); } });
+      expect(names).toContain(kind);
+      expect(before.headings).toHaveLength(kind === "SetextHeading1" ? 1 : 0);
+      const state = view.state;
+      const focus = vi.spyOn(view, "focus");
+      expect(setHeading(0)(view)).toBe(false);
+      expect(view.state).toBe(state);
+      expect(view.state.doc.toString()).toBe(source);
+      expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+      expect(transactions).toHaveLength(0);
+      expect(focus).not.toHaveBeenCalled();
+      expect(view.hasFocus).toBe(false);
+      focus.mockRestore();
+    }, [language, EditorView.updateListener.of((update) => transactions.push(...update.transactions))]);
+  });
+
+  it.each([1, 2, 3, 4, 5, 6])("keeps the existing positive level %i ATX-line operation", (level) => {
+    const source = "Title\n===\n\n## Existing";
+    withEditor(source, EditorSelection.single(0, source.length), (view) => {
+      expect(parsed(view).headings).toEqual([heading(1, 6, 9)]);
+      expect(setHeading(level)(view)).toBe(true);
+      const prefix = "#".repeat(level) + " ";
+      expect(view.state.doc.toString()).toBe(`${prefix}Title\n${prefix}===\n${prefix}\n${prefix}Existing`);
+    }, [language]);
+  });
+
+  it.each([
+    { name: "ATX heading with closing marks", source: "  ## Title ##", expected: "Title ##", deleted: [0, 5] },
+    { name: "ATX-like fenced content", source: "```\n# literal\n```", expected: "```\nliteral\n```", deleted: [4, 6] },
+    { name: "tab-indented ATX-like paragraph continuation", source: "Title\n\t# literal", expected: "Title\nliteral", deleted: [6, 9] },
+  ])("retains existing clearing for $name on non-Setext lines", ({ source, expected, deleted: [from, to] }) => {
+    clears({
+      source, selection: EditorSelection.single(0, source.length), expected,
+      headings: [], deleted: [[from, to]],
     });
   });
 });

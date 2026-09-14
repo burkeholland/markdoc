@@ -86,12 +86,14 @@ function lastSelectedLine(state: EditorState, range: SelectionRange): number {
 
 const HEADING_RE = /^(\s{0,3})(#{1,6})\s+/;
 
-/** Set (level 1-6) or clear (level 0) the ATX heading marker on the selected lines. */
+/** Set ATX headings (level 1-6), or clear ATX and parsed Setext headings (level 0). */
 export function setHeading(level: number) {
   return (view: EditorView): boolean => {
     const { state } = view;
     const changes: ChangeSpec[] = [];
     const seen = new Set<number>();
+    const tree = level === 0 ? syntaxTree(state) : null;
+    const clearedSetext = new Set<number>();
     for (const range of state.selection.ranges) {
       const fromLine = state.doc.lineAt(range.from).number;
       const toLine = lastSelectedLine(state, range);
@@ -99,6 +101,23 @@ export function setHeading(level: number) {
         if (seen.has(n)) continue;
         seen.add(n);
         const line = state.doc.line(n);
+        let setext = false;
+        // Include the whole logical line, even when the caret precedes a container's heading.
+        tree?.iterate({
+          from: line.from,
+          to: line.to,
+          enter(node) {
+            if (node.name !== "SetextHeading1" && node.name !== "SetextHeading2") return;
+            setext = true;
+            if (!clearedSetext.has(node.from)) {
+              clearedSetext.add(node.from);
+              const mark = node.node.getChild("HeaderMark");
+              if (mark) changes.push({ from: mark.from, to: mark.to, insert: "" });
+            }
+            return false;
+          },
+        });
+        if (setext) continue;
         const m = HEADING_RE.exec(line.text);
         const prefix = level > 0 ? "#".repeat(level) + " " : "";
         if (m) changes.push({ from: line.from, to: line.from + m[0].length, insert: prefix });
