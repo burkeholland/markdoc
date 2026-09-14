@@ -75,6 +75,12 @@ export function toggleInlineMark(marker: InlineMarker) {
   };
 }
 
+function lastSelectedLine(state: EditorState, range: SelectionRange): number {
+  const line = state.doc.lineAt(range.to);
+  // A nonempty selection's end is exclusive; a caret still includes its line.
+  return !range.empty && line.from === range.to ? line.number - 1 : line.number;
+}
+
 const HEADING_RE = /^(\s{0,3})(#{1,6})\s+/;
 
 /** Set (level 1-6) or clear (level 0) the ATX heading marker on the selected lines. */
@@ -85,7 +91,7 @@ export function setHeading(level: number) {
     const seen = new Set<number>();
     for (const range of state.selection.ranges) {
       const fromLine = state.doc.lineAt(range.from).number;
-      const toLine = state.doc.lineAt(range.to).number;
+      const toLine = lastSelectedLine(state, range);
       for (let n = fromLine; n <= toLine; n++) {
         if (seen.has(n)) continue;
         seen.add(n);
@@ -117,7 +123,7 @@ export function toggleLinePrefix(kind: LinePrefixKind) {
     const seen = new Set<number>();
     for (const range of state.selection.ranges) {
       const a = state.doc.lineAt(range.from).number;
-      const b = state.doc.lineAt(range.to).number;
+      const b = lastSelectedLine(state, range);
       for (let n = a; n <= b; n++) {
         if (seen.has(n)) continue;
         seen.add(n);
