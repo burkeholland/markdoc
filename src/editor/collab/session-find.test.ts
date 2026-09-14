@@ -151,4 +151,75 @@ describe("CollabSession find & replace", () => {
       viewer.destroy();
     }
   });
+
+  function withBoundedRegexExec(query: string, texts: string[], action: () => void) {
+    const nativeExec = RegExp.prototype.exec;
+    const calls = new Map(texts.map((text) => [text, 0]));
+    const exec = vi.spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, input: string) {
+      const result = nativeExec.call(this, input);
+      const count = calls.get(input);
+      if (this.source === query && this.flags === "giu" && count !== undefined) {
+        calls.set(input, count + 1);
+        // Cover repeated searches, replacement expansion and undo without risking a synchronous hang.
+        if (count + 1 > 16 * (input.length + 1)) {
+          throw new Error("Session Find exceeded its native RegExp.exec call budget");
+        }
+      }
+      return result;
+    });
+    try {
+      action();
+      for (const count of calls.values()) expect(count).toBeGreaterThan(0);
+    } finally {
+      exec.mockRestore();
+    }
+  }
+
+  it("refreshes, replaces and undoes regex matches across emoji without changing the emoji", () => {
+    const source = "\uD83D\uDE00aa\uD801\uDC00a\uD83D\uDE03";
+    const edited = "\uD83D\uDE04a" + source;
+    const replaced = "\uD83D\uDE04x\uD83D\uDE00x\uD801\uDC00x\uD83D\uDE03";
+    const editedMatches = [{ from: 2, to: 3 }, { from: 5, to: 7 }, { from: 9, to: 10 }];
+    session.ydoc.transact(() => {
+      session.ytext.delete(0, session.ytext.length);
+      session.ytext.insert(0, source);
+    });
+
+    withBoundedRegexExec("a*", [source, edited, replaced], () => {
+      session.setFind("a*", { ...DEFAULT_FIND_OPTIONS, regex: true });
+      expect(session.find!.matches).toEqual([{ from: 2, to: 4 }, { from: 6, to: 7 }]);
+      expect(session.ytext.toString()).toBe(source);
+
+      session.ytext.insert(0, "\uD83D\uDE04a");
+      expect(session.ytext.toString()).toBe(edited);
+      expect(session.find!.matches).toEqual(editedMatches);
+
+      expect(session.replaceAll("x")).toBe(3);
+      expect(session.ytext.toString()).toBe(replaced);
+      expect(session.find!.matches).toEqual([]);
+      expect(session.find!.active).toBe(-1);
+
+      session.undo();
+      expect(session.ytext.toString()).toBe(edited);
+      expect(session.find!.matches).toEqual(editedMatches);
+    });
+  });
+
+  it("does not replace or change emoji source for an all-empty regex query", () => {
+    const source = "\uD83D\uDE00\uD801\uDC00\uD83D\uDE03";
+    session.ydoc.transact(() => {
+      session.ytext.delete(0, session.ytext.length);
+      session.ytext.insert(0, source);
+    });
+    const canUndoBefore = session.canUndo;
+
+    withBoundedRegexExec("()", [source], () => {
+      session.setFind("()", { ...DEFAULT_FIND_OPTIONS, regex: true });
+      expect(session.find!.matches).toEqual([]);
+      expect(session.find!.active).toBe(-1);
+      expect(session.replaceAll("x")).toBe(0);
+      expect(session.ytext.toString()).toBe(source);
+      expect(session.canUndo).toBe(canUndoBefore);
+    });
+  });
 });
