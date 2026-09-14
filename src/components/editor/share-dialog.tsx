@@ -7003,7 +7003,7 @@ export const ShareDialog = memo(function ShareDialog({
                 <div className="mt-2 flex items-center gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5 text-xs" data-testid="reader-link">
                   <BookOpen size={13} className="shrink-0 text-ink-3" />
                   <span className="shrink-0 text-ink-3">Reader link:</span>
-                  <code ref={readerLinkEl} className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-2">
+                  <code ref={readerLinkEl} className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-2" title={readerLink}>
                     {readerLink}
                   </code>
                   <CopyButton text={readerLink} label="Copy" testId="copy-reader-link" target={readerLinkEl} />
