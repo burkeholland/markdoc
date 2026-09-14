@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -81,6 +81,7 @@ const DOC: DocumentDto = {
 };
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37, 0x0a]);
 const OBJECT_URL = "blob:http://localhost/download-test";
+const SECOND_OBJECT_URL = "blob:http://localhost/download-test-2";
 let session: CollabSession;
 let headerProps: ComponentProps<typeof import("./header").Header>;
 const createObjectURL = vi.fn<typeof URL.createObjectURL>();
@@ -115,6 +116,34 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function pdfResponse(header: string | null = exportContentDisposition(DOC.title, "pdf")) {
+  return new Response(PDF_BYTES, {
+    headers: {
+      "Content-Type": "application/pdf",
+      ...(header === null ? {} : { "Content-Disposition": header }),
+    },
+  });
+}
+
+async function setupDownload(response = pdfResponse()) {
+  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(response);
+  vi.stubGlobal("fetch", fetch);
+  await act(async () => {
+    render(<EditorShell doc={DOC} role="owner" user={USER} githubAvailable={false} githubConfigured={false} />);
+  });
+  const downloads: { filename: string; href: string; connected: boolean }[] = [];
+  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+    downloads.push({ filename: this.download, href: this.href, connected: this.isConnected });
+  });
+  const createElement = vi.spyOn(document, "createElement");
+  const append = vi.spyOn(document.body, "appendChild");
+  const remove = vi.spyOn(HTMLAnchorElement.prototype, "remove");
+  const timers = vi.spyOn(globalThis, "setTimeout");
+  const anchorCreations = () => createElement.mock.calls.filter(([tag]) => tag === "a");
+  const releaseTimers = () => timers.mock.calls.filter(([, delay]) => delay === 10_000);
+  return { fetch, downloads, click, createElement, append, remove, anchorCreations, releaseTimers };
+}
+
 describe("EditorShell PDF download filename", () => {
   const cases = [
     ...[
@@ -137,21 +166,7 @@ describe("EditorShell PDF download filename", () => {
   ];
 
   it.each(cases)("downloads the same bytes exactly once as $filename from $header", async ({ header, filename }) => {
-    const response = new Response(PDF_BYTES, {
-      headers: {
-        "Content-Type": "application/pdf",
-        ...(header === null ? {} : { "Content-Disposition": header }),
-      },
-    });
-    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(response);
-    vi.stubGlobal("fetch", fetch);
-    const downloads: { filename: string; href: string; connected: boolean }[] = [];
-    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
-      downloads.push({ filename: this.download, href: this.href, connected: this.isConnected });
-    });
-    await act(async () => {
-      render(<EditorShell doc={DOC} role="owner" user={USER} githubAvailable={false} githubConfigured={false} />);
-    });
+    const { fetch, downloads, click, append, remove, anchorCreations, releaseTimers } = await setupDownload(pdfResponse(header));
     await act(async () => { await headerProps.onDownload("pdf", true); });
 
     expect(fetch).toHaveBeenCalledExactlyOnceWith(`/api/documents/${DOC.id}/export?format=pdf&download=1&suggestions=1`);
@@ -162,11 +177,185 @@ describe("EditorShell PDF download filename", () => {
     expect(blob.type).toBe("application/pdf");
     expect(click).toHaveBeenCalledOnce();
     expect(downloads).toEqual([{ filename, href: OBJECT_URL, connected: true }]);
+    expect(anchorCreations()).toHaveLength(1);
+    expect(append).toHaveBeenCalledOnce();
+    const anchor = append.mock.calls[0][0];
+    expect(remove).toHaveBeenCalledOnce();
+    expect(remove.mock.contexts).toEqual([anchor]);
+    expect(anchor.isConnected).toBe(false);
     expect(document.querySelectorAll("a[download]")).toHaveLength(0);
+    expect(screen.getByText("Preparing PDF\u2026")).toBeVisible();
+    expect(screen.getAllByTestId("toast")).toHaveLength(1);
+    expect(releaseTimers()).toHaveLength(1);
     expect(revokeObjectURL).not.toHaveBeenCalled();
+    await act(async () => { vi.advanceTimersByTime(9_999); });
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    await act(async () => { vi.advanceTimersByTime(1); });
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(OBJECT_URL);
     await act(async () => { vi.advanceTimersByTime(10_000); });
     expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(OBJECT_URL);
     expect(fetch).toHaveBeenCalledOnce();
     expect(click).toHaveBeenCalledOnce();
+    expect(anchorCreations()).toHaveLength(1);
+    expect(remove).toHaveBeenCalledOnce();
+    expect(releaseTimers()).toHaveLength(1);
+  });
+});
+
+describe("EditorShell PDF download cleanup", () => {
+  it.each(["append", "click", "anchor creation", "blob read", "object URL creation"] as const)(
+    "cleans up after failed %s without replacing the error or retrying",
+    async (stage) => {
+      const response = pdfResponse();
+      const nativeCreateElement = document.createElement.bind(document);
+      const { fetch, click, createElement, append, remove, anchorCreations, releaseTimers } = await setupDownload(response);
+      const error = new Error(`PDF ${stage} failed`);
+      switch (stage) {
+        case "append":
+          append.mockImplementationOnce(() => { throw error; });
+          break;
+        case "click":
+          click.mockImplementationOnce(function (this: HTMLAnchorElement) {
+            expect(this.isConnected).toBe(true);
+            expect(this.href).toBe(OBJECT_URL);
+            throw error;
+          });
+          break;
+        case "anchor creation":
+          createElement.mockImplementation((tag, options) => {
+            if (tag === "a") throw error;
+            return nativeCreateElement(tag, options);
+          });
+          break;
+        case "blob read":
+          vi.spyOn(response, "blob").mockRejectedValueOnce(error);
+          break;
+        case "object URL creation":
+          createObjectURL.mockImplementationOnce(() => { throw error; });
+          break;
+      }
+      await act(async () => { await headerProps.onDownload("pdf", true); });
+
+      const allocated = stage !== "blob read" && stage !== "object URL creation";
+      const createdAnchor = stage === "append" || stage === "click";
+      expect(fetch).toHaveBeenCalledExactlyOnceWith(`/api/documents/${DOC.id}/export?format=pdf&download=1&suggestions=1`);
+      expect(createObjectURL).toHaveBeenCalledTimes(stage === "blob read" ? 0 : 1);
+      expect(anchorCreations()).toHaveLength(allocated ? 1 : 0);
+      expect(append).toHaveBeenCalledTimes(createdAnchor ? 1 : 0);
+      expect(click).toHaveBeenCalledTimes(stage === "click" ? 1 : 0);
+      expect(remove).toHaveBeenCalledTimes(createdAnchor ? 1 : 0);
+      if (createdAnchor) {
+        const anchor = append.mock.calls[0][0];
+        expect(remove.mock.contexts).toEqual([anchor]);
+        expect(anchor.isConnected).toBe(false);
+      }
+      expect(document.querySelectorAll("a[download]")).toHaveLength(0);
+      expect(revokeObjectURL.mock.calls).toEqual(allocated ? [[OBJECT_URL]] : []);
+      expect(releaseTimers()).toHaveLength(0);
+      expect(screen.getByText(error.message)).toBeVisible();
+      expect(screen.getByText(error.message).closest('[role="status"]')).toHaveClass("bg-red-600");
+      expect(screen.getByText("Preparing PDF\u2026")).toBeVisible();
+      expect(screen.getAllByTestId("toast")).toHaveLength(2);
+
+      await act(async () => { vi.advanceTimersByTime(20_000); });
+      expect(revokeObjectURL.mock.calls).toEqual(allocated ? [[OBJECT_URL]] : []);
+      expect(releaseTimers()).toHaveLength(0);
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(anchorCreations()).toHaveLength(allocated ? 1 : 0);
+      expect(append).toHaveBeenCalledTimes(createdAnchor ? 1 : 0);
+      expect(remove).toHaveBeenCalledTimes(createdAnchor ? 1 : 0);
+      expect(click).toHaveBeenCalledTimes(stage === "click" ? 1 : 0);
+    },
+  );
+
+  it("keeps a failed handoff's cleanup independent of a successful retry", async () => {
+    const { fetch, downloads, click, append, remove, anchorCreations, releaseTimers } = await setupDownload();
+    fetch.mockResolvedValueOnce(pdfResponse(exportContentDisposition("Retry caf\u00e9", "pdf")));
+    createObjectURL.mockReturnValueOnce(OBJECT_URL).mockReturnValueOnce(SECOND_OBJECT_URL);
+    click.mockImplementationOnce(() => { throw new Error("Save action failed"); });
+
+    await act(async () => { await headerProps.onDownload("pdf", true); });
+    expect(screen.getByText("Save action failed")).toBeVisible();
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(OBJECT_URL);
+    expect(remove).toHaveBeenCalledOnce();
+    expect(document.querySelectorAll("a[download]")).toHaveLength(0);
+    expect(releaseTimers()).toHaveLength(0);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      await headerProps.onDownload("pdf", false);
+    });
+    expect(fetch.mock.calls).toEqual([
+      [`/api/documents/${DOC.id}/export?format=pdf&download=1&suggestions=1`],
+      [`/api/documents/${DOC.id}/export?format=pdf&download=1`],
+    ]);
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    expect(click).toHaveBeenCalledTimes(2);
+    expect(downloads).toEqual([{ filename: "Retry caf\u00e9.pdf", href: SECOND_OBJECT_URL, connected: true }]);
+    expect(anchorCreations()).toHaveLength(2);
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(remove.mock.contexts).toEqual(append.mock.calls.map(([anchor]) => anchor));
+    expect(append.mock.calls.every(([anchor]) => !anchor.isConnected)).toBe(true);
+    expect(document.querySelectorAll("a[download]")).toHaveLength(0);
+    expect(releaseTimers()).toHaveLength(1);
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(OBJECT_URL);
+    await act(async () => { vi.advanceTimersByTime(8_000); });
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(OBJECT_URL);
+    await act(async () => { vi.advanceTimersByTime(1_999); });
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(OBJECT_URL);
+    await act(async () => { vi.advanceTimersByTime(1); });
+    expect(revokeObjectURL.mock.calls).toEqual([[OBJECT_URL], [SECOND_OBJECT_URL]]);
+    await act(async () => { vi.advanceTimersByTime(10_000); });
+    expect(revokeObjectURL.mock.calls).toEqual([[OBJECT_URL], [SECOND_OBJECT_URL]]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(click).toHaveBeenCalledTimes(2);
+    expect(anchorCreations()).toHaveLength(2);
+    expect(remove).toHaveBeenCalledTimes(2);
+    expect(releaseTimers()).toHaveLength(1);
+  });
+
+  it("gives two intentional successful downloads separate URLs and grace periods", async () => {
+    const { fetch, downloads, click, append, remove, anchorCreations, releaseTimers } = await setupDownload();
+    fetch.mockResolvedValueOnce(pdfResponse());
+    createObjectURL.mockReturnValueOnce(OBJECT_URL).mockReturnValueOnce(SECOND_OBJECT_URL);
+
+    await act(async () => { await headerProps.onDownload("pdf", true); });
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      await headerProps.onDownload("pdf", true);
+    });
+    expect(fetch.mock.calls).toEqual([
+      [`/api/documents/${DOC.id}/export?format=pdf&download=1&suggestions=1`],
+      [`/api/documents/${DOC.id}/export?format=pdf&download=1&suggestions=1`],
+    ]);
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    expect(click).toHaveBeenCalledTimes(2);
+    expect(downloads).toEqual([
+      { filename: "Previous title.pdf", href: OBJECT_URL, connected: true },
+      { filename: "Previous title.pdf", href: SECOND_OBJECT_URL, connected: true },
+    ]);
+    expect(anchorCreations()).toHaveLength(2);
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(append.mock.calls[0][0]).not.toBe(append.mock.calls[1][0]);
+    expect(remove.mock.contexts).toEqual(append.mock.calls.map(([anchor]) => anchor));
+    expect(append.mock.calls.every(([anchor]) => !anchor.isConnected)).toBe(true);
+    expect(document.querySelectorAll("a[download]")).toHaveLength(0);
+    expect(releaseTimers()).toHaveLength(2);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    await act(async () => { vi.advanceTimersByTime(7_999); });
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    await act(async () => { vi.advanceTimersByTime(1); });
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(OBJECT_URL);
+    await act(async () => { vi.advanceTimersByTime(1_999); });
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith(OBJECT_URL);
+    await act(async () => { vi.advanceTimersByTime(1); });
+    expect(revokeObjectURL.mock.calls).toEqual([[OBJECT_URL], [SECOND_OBJECT_URL]]);
+    await act(async () => { vi.advanceTimersByTime(10_000); });
+    expect(revokeObjectURL.mock.calls).toEqual([[OBJECT_URL], [SECOND_OBJECT_URL]]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(click).toHaveBeenCalledTimes(2);
+    expect(anchorCreations()).toHaveLength(2);
+    expect(remove).toHaveBeenCalledTimes(2);
+    expect(releaseTimers()).toHaveLength(2);
   });
 });
