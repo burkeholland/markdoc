@@ -232,6 +232,146 @@ describe("serializeMarkdown", () => {
     expect(roundTrip(src)).toBe(src);
   });
 
+  describe("image alt brackets", () => {
+    it.each([
+      { name: "one closing bracket", alt: "plan] end", expected: String.raw`![plan\] end](image.png "Preview")` },
+      { name: "repeated closing brackets", alt: "plan]]] end", expected: String.raw`![plan\]\]\] end](image.png "Preview")` },
+      { name: "balanced nested brackets", alt: "[plan [detail]]", expected: String.raw`![\[plan \[detail\]\]](image.png "Preview")` },
+      { name: "leading and trailing brackets", alt: "]plan[", expected: String.raw`![\]plan\[](image.png "Preview")` },
+      { name: "a backslash before a closing bracket", alt: "plan\\] end", expected: String.raw`![plan\\\] end](image.png "Preview")` },
+      { name: "multiple literal backslashes", alt: "plan\\\\] end", expected: String.raw`![plan\\\\\] end](image.png "Preview")` },
+      { name: "Unicode and brackets", alt: "café] [日本語]", expected: String.raw`![café\] \[日本語\]](image.png "Preview")` },
+    ])("preserves $name as literal image alt text", ({ alt, expected }) => {
+      const original = schema.nodes.doc.create(null, [
+        schema.nodes.paragraph.create(null, [schema.nodes.image.create({ src: "image.png", alt, title: "Preview" })]),
+      ]);
+      const source = serializeMarkdown(original);
+      expect(source).toBe(expected);
+      const { doc } = parseMarkdown(source);
+      expect(doc.childCount).toBe(1);
+      const paragraph = doc.child(0);
+      expect(paragraph.type.name).toBe("paragraph");
+      expect(paragraph.childCount).toBe(1);
+      expect(paragraph.child(0).type.name).toBe("image");
+      expect(paragraph.child(0).attrs).toEqual({ src: "image.png", alt, title: "Preview" });
+      expect(doc.eq(original)).toBe(true);
+      expect(serializeMarkdown(doc)).toBe(expected);
+      const reparsed = parseMarkdown(serializeMarkdown(doc)).doc;
+      expect(reparsed.eq(doc)).toBe(true);
+      expect(serializeMarkdown(reparsed)).toBe(expected);
+    });
+
+    it.each([
+      { name: "ordinary alt", alt: "A plan", expected: "![A plan](image.png)" },
+      { name: "gentle escaping", alt: "snake_case and a | b", expected: "![snake_case and a | b](image.png)" },
+      { name: "other metacharacters", alt: "*plan* _view_ ~end~", expected: String.raw`![\*plan\* \_view\_ \~end\~](image.png)` },
+      { name: "entities and HTML", alt: "&copy; <tag>", expected: String.raw`![\&copy; \<tag>](image.png)` },
+      { name: "empty alt", alt: "", expected: "![](image.png)" },
+      { name: "null alt", alt: null, expected: "![](image.png)" },
+    ])("keeps the existing source bytes for $name", ({ alt, expected }) => {
+      const original = schema.nodes.doc.create(null, [
+        schema.nodes.paragraph.create(null, [schema.nodes.image.create({ src: "image.png", alt })]),
+      ]);
+      expect(serializeMarkdown(original)).toBe(expected);
+      const { doc } = parseMarkdown(expected);
+      expect(doc.childCount).toBe(1);
+      expect(doc.child(0).type.name).toBe("paragraph");
+      expect(doc.child(0).childCount).toBe(1);
+      expect(doc.child(0).child(0).type.name).toBe("image");
+      expect(doc.child(0).child(0).attrs).toEqual({ src: "image.png", alt: alt ?? "", title: null });
+      expect(serializeMarkdown(doc)).toBe(expected);
+    });
+
+    it("keeps src and title escaping unchanged", () => {
+      const original = schema.nodes.doc.create(null, [
+        schema.nodes.paragraph.create(null, [
+          schema.nodes.image.create({ src: "image(1).png", alt: "plan]", title: 'A "plan"' }),
+        ]),
+      ]);
+      const source = serializeMarkdown(original);
+      expect(source).toBe(String.raw`![plan\]](image\(1\).png "A \"plan\"")`);
+      expect(parseMarkdown(source).doc.eq(original)).toBe(true);
+    });
+
+    it("does not escape closing brackets in surrounding plain text", () => {
+      const original = schema.nodes.doc.create(null, [
+        schema.nodes.paragraph.create(null, [
+          schema.text("before] "),
+          schema.nodes.image.create({ src: "image.png", alt: "plan] end" }),
+          schema.text(" after]"),
+        ]),
+      ]);
+      const source = serializeMarkdown(original);
+      expect(source).toBe(String.raw`before] ![plan\] end](image.png) after]`);
+      const { doc } = parseMarkdown(source);
+      expect(doc.childCount).toBe(1);
+      const paragraph = doc.child(0);
+      expect(paragraph.type.name).toBe("paragraph");
+      expect(paragraph.childCount).toBe(3);
+      expect(paragraph.child(0).text).toBe("before] ");
+      expect(paragraph.child(1).type.name).toBe("image");
+      expect(paragraph.child(1).attrs).toEqual({ src: "image.png", alt: "plan] end", title: null });
+      expect(paragraph.child(2).text).toBe(" after]");
+      expect(doc.eq(original)).toBe(true);
+    });
+
+    it("restores enclosing link escaping without double-escaping the image alt", () => {
+      const link = schema.marks.link.create({ href: "page.html", title: "Page" });
+      const original = schema.nodes.doc.create(null, [
+        schema.nodes.paragraph.create(null, [
+          schema.nodes.image.create({ src: "image.png", alt: "plan\\] [end]", title: "Preview" }, null, [link]),
+          schema.text(" linked]", [link]),
+          schema.text(" outside]"),
+        ]),
+      ]);
+      const source = serializeMarkdown(original);
+      expect(source).toBe(String.raw`[![plan\\\] \[end\]](image.png "Preview") linked\]](page.html "Page") outside]`);
+      expect(parseMarkdown(source).tree.children).toMatchObject([
+        {
+          type: "paragraph",
+          children: [
+            {
+              type: "link",
+              url: "page.html",
+              title: "Page",
+              children: [
+                { type: "image", url: "image.png", alt: "plan\\] [end]", title: "Preview" },
+                { type: "text", value: " linked]" },
+              ],
+            },
+            { type: "text", value: " outside]" },
+          ],
+        },
+      ]);
+    });
+
+    it("preserves pipe escaping in a table image alt", () => {
+      const original = schema.nodes.doc.create(null, [
+        schema.nodes.table.create(null, [
+          schema.nodes.table_row.create(null, [
+            schema.nodes.table_header.create(null, [schema.nodes.image.create({ src: "image.png", alt: "a|]" })]),
+          ]),
+        ]),
+      ]);
+      const source = serializeMarkdown(original);
+      expect(source).toBe(String.raw`| ![a\|\]](image.png) |
+| ------------------- |`);
+      const { doc } = parseMarkdown(source);
+      expect(doc.childCount).toBe(1);
+      const table = doc.child(0);
+      expect(table.type.name).toBe("table");
+      expect(table.childCount).toBe(1);
+      expect(table.child(0).childCount).toBe(1);
+      const cell = table.child(0).child(0);
+      expect(cell.type.name).toBe("table_header");
+      expect(cell.childCount).toBe(1);
+      expect(cell.child(0).type.name).toBe("image");
+      expect(cell.child(0).attrs).toEqual({ src: "image.png", alt: "a|]", title: null });
+      expect(doc.eq(original)).toBe(true);
+      expect(serializeMarkdown(doc)).toBe(source);
+    });
+  });
+
   describe("hard break at the end of a quote line, list item or table cell (task #434)", () => {
     const p = (...content: ReturnType<typeof schema.text>[]) => schema.nodes.paragraph.create(null, content);
     const br = () => schema.nodes.hard_break.create();
