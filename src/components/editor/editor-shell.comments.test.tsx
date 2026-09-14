@@ -66,7 +66,7 @@ vi.mock("./rich-pane", async (importOriginal) => {
   const { RichPane } = await importOriginal<typeof import("./rich-pane")>();
   return {
     RichPane: (props: ComponentProps<typeof RichPane>) => (
-      <RichPane {...props} onReady={(view) => { rich = view; props.onReady(view); }} />
+      <RichPane {...props} onReady={(view) => { rich = view; richOwner = view ? props.session : null; props.onReady(view); }} />
     ),
   };
 });
@@ -75,7 +75,13 @@ vi.mock("./code-pane", async (importOriginal) => {
   return {
     CodePane: (props: ComponentProps<typeof CodePane>) => {
       codeHighlight = props.onHighlightClick;
-      return <CodePane {...props} onReady={(view, api) => { code = view; props.onReady(view, api); }} />;
+      return <CodePane {...props} onReady={(view, api) => {
+        code = view;
+        codeOwner = view ? props.session : null;
+        codeHighlight = view ? props.onHighlightClick : null;
+        if (view) codeVisits.push(view);
+        props.onReady(view, api);
+      }} />;
     },
   };
 });
@@ -88,13 +94,18 @@ import type { DocumentDto } from "@/server/dto";
 import type { AgentRequestMirror } from "./agent-requests";
 import { EditorShell } from "./editor-shell";
 
-// Compile the real lazy module once; each open still publishes it through EditorShell's lazyOnFirstUse boundary.
+// These are warm semantic scenarios, not cold chunk-load timing tests. Compile the real modules
+// before mounting; EditorShell still installs them through its actual lazy/dynamic boundaries.
 const commentsPanelReady = import("./comments-panel");
+const codePaneReady = import("./code-pane");
 
 let session: CollabSession;
 let rich: PMView | null = null;
 let code: CMView | null = null;
-let codeHighlight: HighlightClickHandler;
+let richOwner: CollabSession | null = null;
+let codeOwner: CollabSession | null = null;
+let codeHighlight: HighlightClickHandler | null = null;
+const codeVisits: CMView[] = [];
 let threadId: string;
 const TEXT = "A commented paragraph for editing.\n\nOrdinary plain text.\n";
 const TYPED = "abcdefghijklmnopqrst";
@@ -106,6 +117,13 @@ const doc: DocumentDto = {
   createdAt: "2026-09-05T00:00:00Z", updatedAt: "2026-09-05T00:00:00Z",
 };
 const media = new Map<string, { matches: boolean; listeners: Set<() => void> }>();
+const originalGeometry = [
+  { target: window, key: "innerWidth" },
+  { target: Range.prototype, key: "getClientRects" },
+  { target: Range.prototype, key: "getBoundingClientRect" },
+  { target: HTMLElement.prototype, key: "scrollIntoView" },
+].map(({ target, key }) => ({ target, key, descriptor: Object.getOwnPropertyDescriptor(target, key) }));
+const originalUrl = window.location.href;
 function matches(query: string, width: number) {
   const min = /min-width: ([\d.]+)px/.exec(query);
   const max = /max-width: ([\d.]+)px/.exec(query);
@@ -123,12 +141,30 @@ function viewport(width: number) {
     window.dispatchEvent(new Event("resize"));
   });
 }
-function mount(width: number, layout?: Layout) {
+function mount(width: number, layout?: Layout, strict = false) {
   viewport(width);
   if (layout) localStorage.setItem("markdoc:layout", layout);
-  return render(<EditorShell doc={doc} role="owner" user={{ id: user.id, name: user.name, login: null, image: null }} githubAvailable={false} githubConfigured={false} />);
+  return render(<EditorShell doc={doc} role="owner" user={{ id: user.id, name: user.name, login: null, image: null }} githubAvailable={false} githubConfigured={false} />, { reactStrictMode: strict });
+}
+function currentCodeView(container: HTMLElement, view = code): CMView {
+  if (!view || codeOwner !== session || !view.dom.isConnected ||
+    container.querySelector('[data-testid="code-pane"] .cm-editor') !== view.dom) {
+    throw new Error("Current source editor is not mounted");
+  }
+  return view;
+}
+async function sourceEditorReady(container: HTMLElement) {
+  const view = await waitFor(() => currentCodeView(container));
+  expect(container.querySelector('[data-testid="code-pane-loading"]')).toBeNull();
+  expect(container.querySelectorAll('[data-testid="code-pane"] .cm-editor')).toHaveLength(1);
+  expect(codeHighlight).not.toBeNull();
+  expect(view.state.doc.toString()).toBe(TEXT);
+  return view;
 }
 function selectRich(anchor = 5, head = anchor) {
+  expect(richOwner).toBe(session);
+  expect(rich!.dom.isConnected).toBe(true);
+  expect(screen.getByTestId("rich-pane")).toContainElement(rich!.dom);
   act(() => {
     rich!.dispatch(rich!.state.tr.setSelection(TextSelection.create(rich!.state.doc, anchor, head)));
     rich!.focus();
@@ -182,7 +218,13 @@ async function expectPanel(width: number) {
 }
 
 beforeEach(async () => {
-  await commentsPanelReady;
+  rich = null;
+  code = null;
+  richOwner = null;
+  codeOwner = null;
+  codeHighlight = null;
+  codeVisits.length = 0;
+  await Promise.all([commentsPanelReady, codePaneReady]);
   localStorage.clear();
   window.history.replaceState(null, "", "/");
   media.clear();
@@ -215,11 +257,34 @@ beforeEach(async () => {
   threadId = session.comments.add({ from: 2, to: 21, body: "Synthetic thread", author: user });
 });
 afterEach(() => {
-  cleanup();
-  session.destroy();
-  expect(fetch).not.toHaveBeenCalled();
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
+  try {
+    cleanup();
+    session.destroy();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(rich).toBeNull();
+    expect(code).toBeNull();
+    expect(richOwner).toBeNull();
+    expect(codeOwner).toBeNull();
+    expect(codeHighlight).toBeNull();
+    for (const view of codeVisits) expect(view.dom.isConnected).toBe(false);
+  } finally {
+    rich = null;
+    code = null;
+    richOwner = null;
+    codeOwner = null;
+    codeHighlight = null;
+    codeVisits.length = 0;
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    for (const { target, key, descriptor } of originalGeometry) {
+      if (descriptor) Object.defineProperty(target, key, descriptor);
+      else Reflect.deleteProperty(target, key);
+    }
+    media.clear();
+    localStorage.clear();
+    window.history.replaceState(null, "", originalUrl);
+  }
 });
 
 describe("responsive comment opening at the real shell boundary", () => {
@@ -290,25 +355,46 @@ describe("responsive comment opening at the real shell boundary", () => {
     expect(session.ytext.toString()).toBe(before.slice(0, offset) + TYPED + before.slice(offset));
   });
 
-  it.each([390, 768])("keeps source clicks closed and restores the source selection at %i px", async (width) => {
-    mount(width, "code");
-    await waitFor(() => expect(code).not.toBeNull());
-    act(() => {
-      code!.dispatch({ selection: { anchor: 4, head: 10 } });
-      code!.focus();
-      codeHighlight("comment", threadId, code!.state.selection.main.head);
+  describe.each([false, true])("source editor ownership (Strict Mode: %s)", (strict) => {
+    it.each([390, 768])("keeps source clicks closed and restores the source selection at %i px", async (width) => {
+      expect(code).toBeNull();
+      expect(codeOwner).toBeNull();
+      expect(codeHighlight).toBeNull();
+      const { container } = mount(width, "code", strict);
+      const view = await sourceEditorReady(container);
+      expect(codeVisits).toHaveLength(strict ? 2 : 1);
+      expect(codeVisits.at(-1)).toBe(view);
+      // Strict Mode really retires the first view before publishing its successor.
+      for (const retired of codeVisits.slice(0, -1)) {
+        expect(retired.dom.isConnected).toBe(false);
+        expect(() => currentCodeView(container, retired)).toThrow("Current source editor is not mounted");
+      }
+      act(() => {
+        view.dispatch({ selection: { anchor: 4, head: 10 } });
+        view.focus();
+        codeHighlight!("comment", threadId, view.state.selection.main.head);
+      });
+      expectClosed();
+      expect(session.activeCommentId).toBe(threadId);
+      expect(view.hasFocus).toBe(true);
+      expect(view.state.selection.main.anchor).toBe(4);
+      expect(view.state.selection.main.head).toBe(10);
+      const selection = view.state.selection.toJSON();
+      view.scrollDOM.scrollTop = 120;
+      await userEvent.click(screen.getByTestId("comments-toggle"));
+      await expectPanel(width);
+      expect(currentCodeView(container)).toBe(view);
+      expect(view.state.selection.toJSON()).toEqual(selection);
+      expect(view.scrollDOM.scrollTop).toBe(120);
+      await userEvent.click(screen.getByRole("button", { name: "Close comments" }));
+      await waitFor(() => expect(view.hasFocus).toBe(true));
+      expectClosed();
+      expect(currentCodeView(container)).toBe(view);
+      expect(view.state.selection.toJSON()).toEqual(selection);
+      expect(view.scrollDOM.scrollTop).toBe(120);
+      expect(view.state.doc.toString()).toBe(TEXT);
+      expect(session.ytext.toString()).toBe(TEXT);
     });
-    expectClosed();
-    expect(session.activeCommentId).toBe(threadId);
-    const selection = code!.state.selection.toJSON();
-    code!.scrollDOM.scrollTop = 120;
-    await userEvent.click(screen.getByTestId("comments-toggle"));
-    await expectPanel(width);
-    await userEvent.click(screen.getByRole("button", { name: "Close comments" }));
-    await waitFor(() => expect(code!.hasFocus).toBe(true));
-    expect(code!.state.selection.toJSON()).toEqual(selection);
-    expect(code!.scrollDOM.scrollTop).toBe(120);
-    expect(session.ytext.toString()).toBe(TEXT);
   });
 
   it.each([390, 520, 768])("never mounts an automatic-wide panel as an overlay when narrowing to %i px", async (width) => {
@@ -388,17 +474,17 @@ describe("responsive comment opening at the real shell boundary", () => {
   });
 
   it("keeps suggestion clicks non-obstructing but explicitly reveals the intended suggestion", async () => {
-    mount(768, "code");
-    await waitFor(() => expect(code).not.toBeNull());
+    const { container } = mount(768, "code");
+    const view = await sourceEditorReady(container);
     act(() => session.suggestions.applyEdit({ from: 4, to: 4, insert: "proposed" }, user));
     const suggestion = session.suggestions.list()[0];
     const suggestionId = suggestion.id;
     act(() => {
-      code!.focus();
-      codeHighlight("suggest-insert", suggestionId, suggestion.from);
+      view.focus();
+      codeHighlight!("suggest-insert", suggestionId, suggestion.from);
     });
     expectClosed();
-    expect(code!.hasFocus).toBe(true);
+    expect(view.hasFocus).toBe(true);
     expect(session.activeSuggestionId).toBe(suggestionId);
     await userEvent.click(screen.getByTestId("comments-toggle"));
     await screen.findByTestId("comments-panel");
@@ -423,12 +509,12 @@ describe("responsive comment opening at the real shell boundary", () => {
   });
 
   it("returns a hidden source selection to the same passage in preview after narrowing", async () => {
-    mount(1280);
-    await waitFor(() => expect(code).not.toBeNull());
+    const { container } = mount(1280);
+    const view = await sourceEditorReady(container);
     act(() => {
-      code!.dispatch({ selection: { anchor: 12, head: 5 } });
-      code!.focus();
-      codeHighlight("comment", threadId, code!.state.selection.main.head);
+      view.dispatch({ selection: { anchor: 12, head: 5 } });
+      view.focus();
+      codeHighlight!("comment", threadId, view.state.selection.main.head);
     });
     await expectPanel(1280);
     fireEvent.pointerDown(screen.getByTestId("comments-panel"));
