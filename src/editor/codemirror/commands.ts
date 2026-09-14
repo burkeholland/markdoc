@@ -36,6 +36,8 @@ export function toggleInlineMark(marker: InlineMarker) {
     const { state } = view;
     const len = marker.length;
     const changes = state.changeByRange((range) => {
+      const orientedRange = (start: number, end: number) =>
+        range.anchor > range.head ? EditorSelection.range(end, start) : EditorSelection.range(start, end);
       let { from, to } = range;
       if (from === to) {
         const word = wordRangeAt(state, from);
@@ -52,13 +54,13 @@ export function toggleInlineMark(marker: InlineMarker) {
             { from: from - len, to: from, insert: "" },
             { from: to, to: to + len, insert: "" },
           ],
-          range: EditorSelection.range(from - len, to - len),
+          range: orientedRange(from - len, to - len),
         };
       }
       if (inner.length >= len * 2 && inner.startsWith(marker) && inner.endsWith(marker)) {
         return {
           changes: { from, to, insert: inner.slice(len, inner.length - len) },
-          range: EditorSelection.range(from, to - len * 2),
+          range: orientedRange(from, to - len * 2),
         };
       }
       return {
@@ -66,7 +68,7 @@ export function toggleInlineMark(marker: InlineMarker) {
           { from, insert: marker },
           { from: to, insert: marker },
         ],
-        range: from === to ? EditorSelection.cursor(from + len) : EditorSelection.range(from + len, to + len),
+        range: from === to ? EditorSelection.cursor(from + len) : orientedRange(from + len, to + len),
       };
     });
     view.dispatch(changes, { scrollIntoView: true, userEvent: "input.format" });
