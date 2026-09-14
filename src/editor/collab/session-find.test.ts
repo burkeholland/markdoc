@@ -114,6 +114,59 @@ describe("CollabSession find & replace", () => {
     expect(session.ytext.toString()).toBe("The atc sat. The atc ran. A dog barked at the atc.");
   });
 
+  it("replaces only standalone words and refreshes marked boundaries in editing mode", () => {
+    const source = "nai\u0308ve nai \u0308nai";
+    const matches = [{ from: 7, to: 10 }];
+    session.ydoc.transact(() => {
+      session.ytext.delete(0, session.ytext.length);
+      session.ytext.insert(0, source);
+    });
+    session.setMode("editing");
+    session.setFind("nai", { ...DEFAULT_FIND_OPTIONS, wholeWord: true });
+    expect(session.find!.matches).toEqual(matches);
+    expect(session.find!.matches.map(({ from, to }) => source.slice(from, to))).toEqual(["nai"]);
+    expect(session.ytext.toString()).toBe(source);
+
+    session.ytext.insert(10, "\u0308");
+    expect(session.ytext.toString()).toBe("nai\u0308ve nai\u0308 \u0308nai");
+    expect(session.find!.matches).toEqual([]);
+    expect(session.find!.active).toBe(-1);
+    session.ytext.delete(10, 1);
+    expect(session.ytext.toString()).toBe(source);
+    expect(session.find!.matches).toEqual(matches);
+
+    expect(session.replaceAll("word")).toBe(1);
+    expect(session.ytext.toString()).toBe("nai\u0308ve word \u0308nai");
+    expect(session.find!.matches).toEqual([]);
+    expect(session.find!.active).toBe(-1);
+    expect(session.canUndo).toBe(true);
+    session.undo();
+    expect(session.ytext.toString()).toBe(source);
+    expect(session.find!.matches).toEqual(matches);
+  });
+
+  it("replaces a complete marked word with regex captures and undoes the exact edit", () => {
+    const source = "\uD83D\uDE00 nai\u0308ve, nai\u0308ve\u0301; nai\u0308ve!";
+    const matches = [{ from: 3, to: 9 }, { from: 20, to: 26 }];
+    session.ydoc.transact(() => {
+      session.ytext.delete(0, session.ytext.length);
+      session.ytext.insert(0, source);
+    });
+    session.setMode("editing");
+    session.setFind("(nai)(\u0308)(ve)", { ...DEFAULT_FIND_OPTIONS, regex: true, wholeWord: true });
+    expect(session.find!.matches).toEqual(matches);
+    expect(session.find!.matches.map(({ from, to }) => source.slice(from, to))).toEqual(["nai\u0308ve", "nai\u0308ve"]);
+    expect(session.ytext.toString()).toBe(source);
+
+    expect(session.replaceActive("$3$2$1")).toEqual({ from: 20, to: 26 });
+    expect(session.ytext.toString()).toBe("\uD83D\uDE00 ve\u0308nai, nai\u0308ve\u0301; nai\u0308ve!");
+    expect(session.find!.matches).toEqual([{ from: 20, to: 26 }]);
+    expect(session.canUndo).toBe(true);
+    session.undo();
+    expect(session.ytext.toString()).toBe(source);
+    expect(session.find!.matches).toEqual(matches);
+  });
+
   it("replaceAll in suggesting mode produces tracked changes instead of edits", () => {
     session.setMode("suggesting");
     session.setFind("cat");

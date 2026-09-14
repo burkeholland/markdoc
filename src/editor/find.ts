@@ -28,7 +28,7 @@ export interface CompiledFindRegex {
 export function compileFindRegex(query: string, options: FindOptions): CompiledFindRegex {
   if (!query) return { regex: null, invalid: false };
   let source = options.regex ? query : escapeRegex(query);
-  if (options.wholeWord) source = `(?<![\\p{L}\\p{N}_])(?:${source})(?![\\p{L}\\p{N}_])`;
+  if (options.wholeWord) source = `(?<![\\p{L}\\p{M}\\p{N}_])(?:${source})(?![\\p{L}\\p{M}\\p{N}_])`;
   try {
     return { regex: new RegExp(source, "gu" + (options.matchCase ? "" : "i")), invalid: false };
   } catch (error) {
