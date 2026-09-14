@@ -73,6 +73,80 @@ describe("titles", () => {
     expect(frontMatterTitle("# H\n")).toBeNull();
   });
 
+  it.each<[string, string, string | null]>([
+    ["four-backtick opener with a shorter inner fence", "````markdown\n```\n# Not the document title\n````\n# Real title\n", "Real title"],
+    ["four-tilde opener with a shorter inner fence", "~~~~markdown\n~~~\n# Not the document title\n~~~~\n# Real title\n", "Real title"],
+    ["shorter backticks without a real H1", "````\n```\n# Not the document title\n````\n", null],
+    ["shorter tildes without a real H1", "~~~~\n~~~\n# Not the document title\n~~~~\n", null],
+    ["tildes inside backticks", "```\n~~~~\n# Not the document title\n```\n# Real title\n", "Real title"],
+    ["backticks inside tildes", "~~~\n````\n# Not the document title\n~~~\n# Real title\n", "Real title"],
+    ["tildes cannot close unclosed backticks", "```\n~~~\n# Not the document title\n", null],
+    ["backticks cannot close unclosed tildes", "~~~\n```\n# Not the document title\n", null],
+    ["content after backticks is not a close", "```\n```markdown\n# Not the document title\n```\n# Real title\n", "Real title"],
+    ["content after tildes is not a close", "~~~\n~~~ markdown\n# Not the document title\n~~~\n# Real title\n", "Real title"],
+    ["content after longer backticks is not a close", "```\n```` \ttext\n# Not the document title\n", null],
+    ["content after longer tildes is not a close", "~~~\n~~~~ \ttext\n# Not the document title\n", null],
+    ["longer backtick close", "```\n# Not the document title\n````` \t\n# Real title\n", "Real title"],
+    ["longer tilde close", "~~~\n# Not the document title\n~~~~~\t \n# Real title\n", "Real title"],
+    ["unclosed backticks", "```markdown\n# Not the document title\n", null],
+    ["unclosed tildes", "~~~ markdown\n# Not the document title\n", null],
+    ["backtick info string", "``` \tmarkdown example ~~~\n# Not the document title\n```\n# Real title\n", "Real title"],
+    ["tilde info string with backticks", "~~~ \tmarkdown `example`\n# Not the document title\n~~~\n# Real title\n", "Real title"],
+    ["backticks invalidate an adjacent backtick info string", "```markdown`example\n# Real title\n", "Real title"],
+    ["backticks invalidate a spaced backtick info string", "``` markdown ```\n# Real title\n", "Real title"],
+    ["opening and closing indentation can differ", "   ```\n# Not the document title\n```\n# Real title\n", "Real title"],
+    ["consecutive fences reset marker and length", "````markdown\n~~~\n# Not the document title\n````\n~~~\n```\n# Also not the title\n~~~~\n# Real title\n", "Real title"],
+    ["front matter does not open a fence", "---\n````\n# Not the document title\n---\n# Real title\n", "Real title"],
+    ["an empty stripped H1 still stops title search", "~~~\n# Not the document title\n~~~\n# **\n# Later heading\n", null],
+  ])("chooses an H1 outside fenced code: %s", (_name, content, heading) => {
+    expect(firstHeading(content)).toBe(heading);
+    expect(titleForImport(content, "examples.md")).toBe(heading ?? "examples");
+  });
+
+  describe.each(["```", "~~~"])("CRLF fence with %s", (marker) => {
+    it.each<[string, string, string | null]>([
+      ["matching closer", `${marker}\r\n# Code\r\n${marker}\r\n# Real title\r\n`, "Real title"],
+      ["longer opener and shorter inner run", `${marker}${marker[0]}markdown\r\n${marker}\r\n# Code\r\n${marker}${marker[0]} \t\r\n# Real title\r\n`, "Real title"],
+      ["unclosed fence", `${marker}${marker[0]}\r\n${marker}\r\n# Code\r\n`, null],
+      ["lone CR in closer suffix", `${marker}\r\n${marker}\r \r\n# Code\r\n${marker}\r\n# Real title\r\n`, "Real title"],
+    ])("handles %s without normalizing the input", (_name, content, heading) => {
+      expect(firstHeading(content)).toBe(heading);
+      expect(titleForImport(content, "examples.md")).toBe(heading ?? "examples");
+    });
+  });
+
+  describe.each(["```", "~~~"])("%s fence whitespace", (marker) => {
+    it.each([0, 1, 2, 3])("accepts %i leading spaces and trailing spaces/tabs", (spaces) => {
+      const indent = " ".repeat(spaces);
+      const content = `${indent}${marker}markdown\n# Not the document title\n${indent}${marker} \t\n# Real title\n`;
+      expect(firstHeading(content)).toBe("Real title");
+      expect(titleForImport(content, "examples.md")).toBe("Real title");
+    });
+
+    it.each([
+      ["four spaces", "    "],
+      ["tab", "\t"],
+      ["space and tab", " \t"],
+      ["two spaces and tab", "  \t"],
+      ["three spaces and tab", "   \t"],
+      ["non-breaking space", "\u00a0"],
+      ["em space", "\u2003"],
+    ])("does not open or close with %s indentation", (_name, indent) => {
+      const invalidOpen = `${indent}${marker}\n# Real title\n`;
+      expect(firstHeading(invalidOpen)).toBe("Real title");
+      expect(titleForImport(invalidOpen, "examples.md")).toBe("Real title");
+      const invalidClose = `${marker}\n${indent}${marker}\n# Not the document title\n`;
+      expect(firstHeading(invalidClose)).toBeNull();
+      expect(titleForImport(invalidClose, "examples.md")).toBe("examples");
+    });
+
+    it.each(["\u00a0", "\u2003", "\v"])("does not close with non-space/tab suffix %j", (suffix) => {
+      const content = `${marker}\n${marker}${suffix}\n# Not the document title\n${marker}\n# Real title\n`;
+      expect(firstHeading(content)).toBe("Real title");
+      expect(titleForImport(content, "examples.md")).toBe("Real title");
+    });
+  });
+
   it("maps extensions to formats", () => {
     expect(importFormatFor("a.md")).toBe("markdown");
     expect(importFormatFor("a.MARKDOWN")).toBe("markdown");
@@ -132,6 +206,29 @@ describe("convertImport", () => {
     const out = await convertImport({ name: "x.md", text: "---\r\ntitle: T\r\n---\r\n# H\r\n\r\nbody", format: "markdown" });
     expect(out.title).toBe("T");
     expect(out.content).toBe("---\ntitle: T\n---\n# H\n\nbody\n");
+  });
+
+  it.each([
+    ["shorter inner backticks", "````markdown\n```\n# Not the document title\n````\n# Real *title*\n", "Real title"],
+    ["opposite marker and content-bearing close", "~~~markdown\n```\n~~~~ example\n# Not the document title\n~~~\n# Real title\n", "Real title"],
+    ["unclosed code", "````markdown\n```\n# Not the document title\n", "examples"],
+  ])("preserves the body with %s across LF and BOM/CRLF input", async (_name, content, title) => {
+    for (const text of [content, "\uFEFF" + content.replace(/\n/g, "\r\n").trimEnd()]) {
+      const out = await convertImport({ name: "examples.md", text, format: "markdown" });
+      expect(out.title).toBe(title);
+      expect(out.content).toBe(content);
+      expect(out.warnings).toEqual([]);
+    }
+  });
+
+  it("keeps explicit and front-matter title precedence over the unfenced H1", async () => {
+    const content = "---\ntitle: Front matter title\n---\n````markdown\n```\n# Not the document title\n````\n# Real title\n";
+    expect(titleForImport(content, "examples.md")).toBe("Front matter title");
+    for (const [title, expected] of [["Explicit title", "Explicit title"], [" \t", "Front matter title"]]) {
+      const out = await convertImport({ name: "examples.md", text: content, format: "markdown", title });
+      expect(out.title).toBe(expected);
+      expect(out.content).toBe(content);
+    }
   });
 
   it("wraps plain text as-is with paragraphs preserved", async () => {
