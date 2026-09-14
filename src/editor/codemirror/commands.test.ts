@@ -8,6 +8,7 @@ import { languages } from "@codemirror/language-data";
 import { ensureSyntaxTree } from "@codemirror/language";
 import type { Node as PMNode } from "prosemirror-model";
 import { parseMarkdown } from "../markdown/parse";
+import { serializeMarkdown } from "../markdown/serialize";
 import { insertCodeBlock, insertImage, insertLink, setHeading, toggleInlineMark, toggleLinePrefix, type InlineMarker, type LinePrefixKind } from "./commands";
 
 function withEditor(
@@ -1274,6 +1275,406 @@ describe("clear source Setext headings", () => {
     clears({
       source, selection: EditorSelection.single(0, source.length), expected,
       headings: [], deleted: [[from, to]],
+    });
+  });
+});
+
+describe("source destination entity spellings", () => {
+  const commands = [
+    { name: "link", command: insertLink, scrollIntoView: true },
+    { name: "image", command: insertImage, scrollIntoView: false },
+  ] as const;
+
+  function expectDestination(node: PMNode, kind: "link" | "image", url: string, label: string) {
+    expect(node.childCount).toBe(0);
+    if (kind === "link") {
+      expect(node.type.name).toBe("text");
+      expect(node.text).toBe(label);
+      expect(node.marks).toHaveLength(1);
+      expect(node.marks[0].type.name).toBe("link");
+      expect(node.marks[0].attrs).toEqual({ href: url, title: null });
+    } else {
+      expect(node.type.name).toBe("image");
+      expect(node.attrs).toEqual({ src: url, alt: label, title: null });
+      expect(node.marks).toHaveLength(0);
+    }
+  }
+
+  describe.each(commands)("$name", ({ name, command, scrollIntoView }) => {
+    it.each([
+      {
+        name: "named ampersand", url: "/&amp;",
+        link: String.raw`[Guide](/\&amp;)`, image: String.raw`![Guide](/\&amp;)`,
+      },
+      {
+        name: "named copyright", url: "/&copy;",
+        link: String.raw`[Guide](/\&copy;)`, image: String.raw`![Guide](/\&copy;)`,
+      },
+      {
+        name: "uppercase named reference", url: "/&AMP;",
+        link: String.raw`[Guide](/\&AMP;)`, image: String.raw`![Guide](/\&AMP;)`,
+      },
+      {
+        name: "decimal reference", url: "/&#65;",
+        link: String.raw`[Guide](/\&#65;)`, image: String.raw`![Guide](/\&#65;)`,
+      },
+      {
+        name: "decimal leading zeroes", url: "/&#0065;",
+        link: String.raw`[Guide](/\&#0065;)`, image: String.raw`![Guide](/\&#0065;)`,
+      },
+      {
+        name: "lowercase hexadecimal", url: "/&#x41;",
+        link: String.raw`[Guide](/\&#x41;)`, image: String.raw`![Guide](/\&#x41;)`,
+      },
+      {
+        name: "uppercase hexadecimal", url: "/&#X4A;",
+        link: String.raw`[Guide](/\&#X4A;)`, image: String.raw`![Guide](/\&#X4A;)`,
+      },
+      {
+        name: "mixed-case hexadecimal digits", url: "/&#x1f4Af;",
+        link: String.raw`[Guide](/\&#x1f4Af;)`, image: String.raw`![Guide](/\&#x1f4Af;)`,
+      },
+      {
+        name: "adjacent references", url: "/&amp;&copy;&#65;&#x41;&#X4A;",
+        link: String.raw`[Guide](/\&amp;\&copy;\&#65;\&#x41;\&#X4A;)`,
+        image: String.raw`![Guide](/\&amp;\&copy;\&#65;\&#x41;\&#X4A;)`,
+      },
+      {
+        name: "query-embedded references", url: "/find?q=&copy;&page=2&value=&#65;",
+        link: String.raw`[Guide](/find?q=\&copy;&page=2&value=\&#65;)`,
+        image: String.raw`![Guide](/find?q=\&copy;&page=2&value=\&#65;)`,
+      },
+      {
+        name: "path-embedded reference", url: "https://example.com/pre&copy;post/guide",
+        link: String.raw`[Guide](https://example.com/pre\&copy;post/guide)`,
+        image: String.raw`![Guide](https://example.com/pre\&copy;post/guide)`,
+      },
+      {
+        name: "unknown alphanumeric name", url: "/&notARealEntity42;",
+        link: String.raw`[Guide](/\&notARealEntity42;)`,
+        image: String.raw`![Guide](/\&notARealEntity42;)`,
+      },
+      {
+        name: "single-letter unknown name", url: "/&a;",
+        link: String.raw`[Guide](/\&a;)`, image: String.raw`![Guide](/\&a;)`,
+      },
+      {
+        name: "Unicode and percent mix", url: "../caf\u00e9/\u{10400}a\u0308%26copy;&copy;%5C",
+        link: "[Guide](../caf\u00e9/\u{10400}a\u0308%26copy;\\&copy;%5C)",
+        image: "![Guide](../caf\u00e9/\u{10400}a\u0308%26copy;\\&copy;%5C)",
+      },
+      {
+        name: "one original backslash", url: String.raw`/\&copy;`,
+        link: String.raw`[Guide](/\\\&copy;)`, image: String.raw`![Guide](/\\\&copy;)`,
+      },
+      {
+        name: "two original backslashes", url: String.raw`/\\&#65;`,
+        link: String.raw`[Guide](/\\\\\&#65;)`, image: String.raw`![Guide](/\\\\\&#65;)`,
+      },
+      {
+        name: "three original backslashes", url: String.raw`/\\\&#X41;`,
+        link: String.raw`[Guide](/\\\\\\\&#X41;)`, image: String.raw`![Guide](/\\\\\\\&#X41;)`,
+      },
+      {
+        name: "balanced parentheses nearby", url: "/(&copy;)(part)",
+        link: String.raw`[Guide](/\(\&copy;\)\(part\))`,
+        image: String.raw`![Guide](/\(\&copy;\)\(part\))`,
+      },
+      {
+        name: "unmatched opening parenthesis nearby", url: "/(&amp;",
+        link: String.raw`[Guide](/\(\&amp;)`, image: String.raw`![Guide](/\(\&amp;)`,
+      },
+      {
+        name: "unmatched closing parenthesis nearby", url: "/&#x41;)",
+        link: String.raw`[Guide](/\&#x41;\))`, image: String.raw`![Guide](/\&#x41;\))`,
+      },
+      {
+        name: "combined backslashes and parentheses", url: String.raw`/\&copy;(\&#65;)\)`,
+        link: String.raw`[Guide](/\\\&copy;\(\\\&#65;\)\\\))`,
+        image: String.raw`![Guide](/\\\&copy;\(\\\&#65;\)\\\))`,
+      },
+      {
+        name: "bare ampersand", url: "/&",
+        link: "[Guide](/&)", image: "![Guide](/&)",
+      },
+      {
+        name: "ordinary query separators", url: "/find?a=1&b=2&c=3",
+        link: "[Guide](/find?a=1&b=2&c=3)", image: "![Guide](/find?a=1&b=2&c=3)",
+      },
+      {
+        name: "named reference missing semicolon", url: "/&copy",
+        link: "[Guide](/&copy)", image: "![Guide](/&copy)",
+      },
+      {
+        name: "decimal reference missing semicolon", url: "/&#65",
+        link: "[Guide](/&#65)", image: "![Guide](/&#65)",
+      },
+      {
+        name: "hexadecimal reference missing semicolon", url: "/&#x41",
+        link: "[Guide](/&#x41)", image: "![Guide](/&#x41)",
+      },
+      {
+        name: "empty name", url: "/&;",
+        link: "[Guide](/&;)", image: "![Guide](/&;)",
+      },
+      {
+        name: "name starting with a digit", url: "/&1copy;",
+        link: "[Guide](/&1copy;)", image: "![Guide](/&1copy;)",
+      },
+      {
+        name: "name starting with an underscore", url: "/&_copy;",
+        link: "[Guide](/&_copy;)", image: "![Guide](/&_copy;)",
+      },
+      {
+        name: "name containing punctuation", url: "/&co-py;",
+        link: "[Guide](/&co-py;)", image: "![Guide](/&co-py;)",
+      },
+      {
+        name: "non-ASCII name", url: "/&cop\u00e9;",
+        link: "[Guide](/&cop\u00e9;)", image: "![Guide](/&cop\u00e9;)",
+      },
+      {
+        name: "decimal reference without digits", url: "/&#;",
+        link: "[Guide](/&#;)", image: "![Guide](/&#;)",
+      },
+      {
+        name: "signed decimal reference", url: "/&#-65;",
+        link: "[Guide](/&#-65;)", image: "![Guide](/&#-65;)",
+      },
+      {
+        name: "decimal reference with a letter", url: "/&#6A;",
+        link: "[Guide](/&#6A;)", image: "![Guide](/&#6A;)",
+      },
+      {
+        name: "lowercase hexadecimal without digits", url: "/&#x;",
+        link: "[Guide](/&#x;)", image: "![Guide](/&#x;)",
+      },
+      {
+        name: "uppercase hexadecimal without digits", url: "/&#X;",
+        link: "[Guide](/&#X;)", image: "![Guide](/&#X;)",
+      },
+      {
+        name: "invalid hexadecimal digit", url: "/&#x4G;",
+        link: "[Guide](/&#x4G;)", image: "![Guide](/&#x4G;)",
+      },
+      {
+        name: "plain address", url: "/guide",
+        link: "[Guide](/guide)", image: "![Guide](/guide)",
+      },
+      {
+        name: "percent-only escapes", url: "/%26copy;%26%2365;%26%23x41;%28%29%5C",
+        link: "[Guide](/%26copy;%26%2365;%26%23x41;%28%29%5C)",
+        image: "![Guide](/%26copy;%26%2365;%26%23x41;%28%29%5C)",
+      },
+      {
+        name: "backslash before an ordinary ampersand", url: String.raw`/\&query=1`,
+        link: String.raw`[Guide](/\\&query=1)`, image: String.raw`![Guide](/\\&query=1)`,
+      },
+    ])("preserves $name in source and repeated rich address round trips", (fixture) => {
+      withEditor("", EditorSelection.single(0), (view) => {
+        expect(command(view, fixture.url, "Guide")).toBe(true);
+        expect(view.state.doc.toString()).toBe(fixture[name]);
+        expect(view.state.doc.length).toBe(fixture[name].length);
+        expect(view.state.selection.eq(EditorSelection.single(fixture[name].length))).toBe(true);
+        let { doc } = parseMarkdown(view.state.doc.toString());
+        expect(doc.childCount).toBe(1);
+        expect(doc.child(0).type.name).toBe("paragraph");
+        expect(doc.child(0).childCount).toBe(1);
+        expectDestination(doc.child(0).child(0), name, fixture.url, "Guide");
+        const initial = doc.toJSON();
+        for (let cycle = 0; cycle < 3; cycle++) {
+          doc = parseMarkdown(serializeMarkdown(doc)).doc;
+          expect(doc.toJSON()).toEqual(initial);
+          expectDestination(doc.child(0).child(0), name, fixture.url, "Guide");
+        }
+      });
+    });
+
+    it.each(["forward", "reversed", "collapsed"])(
+      "preserves UTF-16 positions, paragraphs, formatting transaction, focus and undo for a %s selection",
+      (direction) => {
+        const prefix = "Before \u{10400}\n\nlead a\u0308 ";
+        const suffix = " tail\n\nAfter";
+        const selected = direction === "collapsed" ? "" : "old \u{10400}";
+        const source = prefix + selected + suffix;
+        const from = prefix.length;
+        const to = from + selected.length;
+        const selection = direction === "reversed"
+          ? EditorSelection.single(to, from)
+          : EditorSelection.single(from, to);
+        const url = "../\u{10400}a\u0308/\\&copy;(part)&#65;)";
+        const emitted = name === "link"
+          ? "[Guide](../\u{10400}a\u0308/\\\\\\&copy;\\(part\\)\\&#65;\\))"
+          : "![Guide](../\u{10400}a\u0308/\\\\\\&copy;\\(part\\)\\&#65;\\))";
+        const transactions: Transaction[] = [];
+        withEditor(source, selection, (view) => {
+          expect(command(view, url, "Guide")).toBe(true);
+          expect(view.state.doc.toString()).toBe(prefix + emitted + suffix);
+          expect(view.state.doc.length).toBe(source.length - selected.length + emitted.length);
+          expect(view.state.selection.eq(EditorSelection.single(from + emitted.length))).toBe(true);
+          expect(transactions).toHaveLength(1);
+          expect(transactions[0].annotation(Transaction.userEvent)).toBe("input.format");
+          expect(transactions[0].scrollIntoView).toBe(scrollIntoView);
+          expect(transactions[0].docChanged).toBe(true);
+          const changes: { fromA: number; toA: number; fromB: number; toB: number; text: string }[] = [];
+          transactions[0].changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
+            changes.push({ fromA, toA, fromB, toB, text: inserted.toString() });
+          });
+          expect(changes).toEqual([{ fromA: from, toA: to, fromB: from, toB: from + emitted.length, text: emitted }]);
+          expect(view.hasFocus).toBe(true);
+          const { doc } = parseMarkdown(view.state.doc.toString());
+          expect(doc.childCount).toBe(3);
+          expect([doc.child(0).type.name, doc.child(0).textContent]).toEqual(["paragraph", "Before \u{10400}"]);
+          expect([doc.child(2).type.name, doc.child(2).textContent]).toEqual(["paragraph", "After"]);
+          const paragraph = doc.child(1);
+          expect(paragraph.type.name).toBe("paragraph");
+          expect(paragraph.childCount).toBe(3);
+          expect(paragraph.child(0).text).toBe("lead a\u0308 ");
+          expect(paragraph.child(0).marks).toHaveLength(0);
+          expectDestination(paragraph.child(1), name, url, "Guide");
+          expect(paragraph.child(2).text).toBe(" tail");
+          expect(paragraph.child(2).marks).toHaveLength(0);
+          expect(undo(view)).toBe(true);
+          expect(view.state.doc.toString()).toBe(source);
+          expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+          expect(undo(view)).toBe(false);
+        }, [history(), EditorView.updateListener.of((update) => transactions.push(...update.transactions))]);
+      },
+    );
+
+    it("replaces only a nonzero main selection and undoes the single-cursor result", () => {
+      const source = "left / old / right";
+      const selection = EditorSelection.create([
+        EditorSelection.range(0, 4),
+        EditorSelection.range(10, 7),
+        EditorSelection.cursor(source.length),
+      ], 1);
+      const emitted = name === "link"
+        ? String.raw`[Guide](/\\\&copy;\))`
+        : String.raw`![Guide](/\\\&copy;\))`;
+      const transactions: Transaction[] = [];
+      withEditor(source, selection, (view) => {
+        expect(view.state.selection.mainIndex).toBe(1);
+        expect(command(view, String.raw`/\&copy;)`, "Guide")).toBe(true);
+        expect(view.state.doc.toString()).toBe("left / " + emitted + " / right");
+        expect(view.state.selection.eq(EditorSelection.single(7 + emitted.length))).toBe(true);
+        expect(transactions).toHaveLength(1);
+        expect(transactions[0].annotation(Transaction.userEvent)).toBe("input.format");
+        expect(transactions[0].scrollIntoView).toBe(scrollIntoView);
+        const changes: { from: number; to: number; text: string }[] = [];
+        transactions[0].changes.iterChanges((from, to, _fromB, _toB, inserted) => {
+          changes.push({ from, to, text: inserted.toString() });
+        });
+        expect(changes).toEqual([{ from: 7, to: 10, text: emitted }]);
+        expect(view.hasFocus).toBe(true);
+        const { doc } = parseMarkdown(view.state.doc.toString());
+        expect(doc.childCount).toBe(1);
+        expect(doc.child(0).type.name).toBe("paragraph");
+        expect(doc.child(0).childCount).toBe(3);
+        expectDestination(doc.child(0).child(1), name, String.raw`/\&copy;)`, "Guide");
+        expect(undo(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(source);
+        expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+        expect(undo(view)).toBe(false);
+      }, [
+        EditorState.allowMultipleSelections.of(true),
+        history(),
+        EditorView.updateListener.of((update) => transactions.push(...update.transactions)),
+      ]);
+    });
+
+    it.each([
+      {
+        name: "explicit benign text", selected: "Selected", text: "Guide",
+        link: String.raw`[Guide](/\&copy;\&#65;)`, image: String.raw`![Guide](/\&copy;\&#65;)`,
+        linkLabel: "Guide", imageAlt: "Guide",
+      },
+      {
+        name: "selected default text", selected: "Selected", text: undefined,
+        link: String.raw`[Selected](/\&copy;\&#65;)`, image: String.raw`![](/\&copy;\&#65;)`,
+        linkLabel: "Selected", imageAlt: "",
+      },
+      {
+        name: "raw URL fallback and default empty image alt", selected: "", text: undefined,
+        link: String.raw`[/&copy;&#65;](/\&copy;\&#65;)`, image: String.raw`![](/\&copy;\&#65;)`,
+        linkLabel: "/\u00a9A", imageAlt: "",
+      },
+      {
+        name: "explicit empty text overriding a selection", selected: "Selected", text: "",
+        link: String.raw`[](/\&copy;\&#65;)`, image: String.raw`![](/\&copy;\&#65;)`,
+        linkLabel: "", imageAlt: "",
+      },
+      {
+        name: "explicit empty text overriding URL fallback", selected: "", text: "",
+        link: String.raw`[](/\&copy;\&#65;)`, image: String.raw`![](/\&copy;\&#65;)`,
+        linkLabel: "", imageAlt: "",
+      },
+      {
+        name: "entity-looking explicit text decoded only in the label", selected: "Selected", text: "&copy;&#65;&#x41;",
+        link: String.raw`[&copy;&#65;&#x41;](/\&copy;\&#65;)`,
+        image: String.raw`![&copy;&#65;&#x41;](/\&copy;\&#65;)`,
+        linkLabel: "\u00a9AA", imageAlt: "\u00a9AA",
+      },
+      {
+        name: "entity-looking selected source", selected: "&copy;&#65;&#x41;", text: undefined,
+        link: String.raw`[&copy;&#65;&#x41;](/\&copy;\&#65;)`, image: String.raw`![](/\&copy;\&#65;)`,
+        linkLabel: "\u00a9AA", imageAlt: "",
+      },
+      {
+        name: "backslash-escaped entity-looking explicit text", selected: "Selected", text: String.raw`\&copy;`,
+        link: String.raw`[\&copy;](/\&copy;\&#65;)`, image: String.raw`![\&copy;](/\&copy;\&#65;)`,
+        linkLabel: "&copy;", imageAlt: "&copy;",
+      },
+    ])("keeps the raw source policy for $name", (fixture) => {
+      const url = "/&copy;&#65;";
+      withEditor(fixture.selected, EditorSelection.single(0, fixture.selected.length), (view) => {
+        expect(command(view, url, fixture.text)).toBe(true);
+        expect(view.state.doc.toString()).toBe(fixture[name]);
+        expect(view.state.selection.eq(EditorSelection.single(fixture[name].length))).toBe(true);
+        const { doc, tree } = parseMarkdown(view.state.doc.toString());
+        expect(doc.childCount).toBe(1);
+        expect(doc.child(0).type.name).toBe("paragraph");
+        if (name === "link" && fixture.linkLabel === "") {
+          // An empty link has no text node to carry a ProseMirror link mark.
+          expect(doc.child(0).childCount).toBe(0);
+          expect(tree).toMatchObject({
+            children: [{ type: "paragraph", children: [{ type: "link", url, children: [] }] }],
+          });
+        } else {
+          expect(doc.child(0).childCount).toBe(1);
+          expectDestination(doc.child(0).child(0), name, url, name === "link" ? fixture.linkLabel : fixture.imageAlt);
+        }
+      });
+    });
+
+    it.each([
+      {
+        name: "explicit Markdown", selected: "Selected", text: "**Guide**",
+        link: String.raw`[**Guide**](/\&copy;)`, image: String.raw`![**Guide**](/\&copy;)`,
+      },
+      {
+        name: "selected Markdown", selected: "**Guide**", text: undefined,
+        link: String.raw`[**Guide**](/\&copy;)`, image: String.raw`![](/\&copy;)`,
+      },
+    ])("does not add escaping to $name labels or alt text", (fixture) => {
+      withEditor(fixture.selected, EditorSelection.single(0, fixture.selected.length), (view) => {
+        expect(command(view, "/&copy;", fixture.text)).toBe(true);
+        expect(view.state.doc.toString()).toBe(fixture[name]);
+        const { doc } = parseMarkdown(view.state.doc.toString());
+        expect(doc.childCount).toBe(1);
+        expect(doc.child(0).type.name).toBe("paragraph");
+        expect(doc.child(0).childCount).toBe(1);
+        const node = doc.child(0).child(0);
+        if (name === "link") {
+          expect(node.type.name).toBe("text");
+          expect(node.text).toBe("Guide");
+          expect(node.marks).toHaveLength(2);
+          expect(node.marks.map((mark) => mark.type.name).sort()).toEqual(["link", "strong"]);
+          expect(node.marks.find((mark) => mark.type.name === "link")?.attrs.href).toBe("/&copy;");
+        } else {
+          expectDestination(node, name, "/&copy;", fixture.text === undefined ? "" : "Guide");
+        }
+      });
     });
   });
 });

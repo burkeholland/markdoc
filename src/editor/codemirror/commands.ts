@@ -181,7 +181,7 @@ export function toggleLinePrefix(kind: LinePrefixKind) {
 }
 
 function escapeDestination(url: string): string {
-  return url.replace(/[\\()]/g, "\\$&");
+  return url.replace(/[\\()]|&(?=[a-zA-Z][a-zA-Z0-9]*;|#\d+;|#[xX][0-9a-fA-F]+;)/g, "\\$&");
 }
 
 export function insertLink(view: EditorView, url: string, text?: string): boolean {
