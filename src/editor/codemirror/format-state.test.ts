@@ -325,3 +325,104 @@ describe("source Setext heading state", () => {
     }
   });
 });
+
+describe("bare source ATX headings", () => {
+  function expectATX(state: EditorState, level: number, head = state.selection.main.head) {
+    const tree = ensureSyntaxTree(state, state.doc.length, 1000);
+    expect(tree).not.toBeNull();
+    const names: string[] = [];
+    for (let node = tree!.resolveInner(head, -1); ; ) {
+      names.push(node.name);
+      if (!node.parent) break;
+      node = node.parent;
+    }
+    expect(names.filter((name) => name.startsWith("ATXHeading")))
+      .toEqual(level > 0 ? [`ATXHeading${level}`] : []);
+  }
+
+  it.each([
+    { heading: 1, doc: "#", indented: " #" },
+    { heading: 2, doc: "##", indented: "  ##" },
+    { heading: 3, doc: "###", indented: "   ###" },
+    { heading: 4, doc: "####", indented: " ####" },
+    { heading: 5, doc: "#####", indented: "  #####" },
+    { heading: 6, doc: "######", indented: "   ######" },
+    { heading: 1, doc: "#\n", indented: " #\n" },
+    { heading: 2, doc: "##\n", indented: "  ##\n" },
+    { heading: 3, doc: "###\n", indented: "   ###\n" },
+    { heading: 4, doc: "####\n", indented: " ####\n" },
+    { heading: 5, doc: "#####\n", indented: "  #####\n" },
+    { heading: 6, doc: "######\n", indented: "   ######\n" },
+  ])("reports complete state for bare level $heading in $doc", ({ heading, doc, indented }) => {
+    for (const source of [doc, indented]) {
+      const end = source.endsWith("\n") ? source.length - 1 : source.length;
+      for (const head of [0, end]) {
+        const state = parsedState(source, EditorSelection.single(head));
+        // Indentation lies outside Lezer's ATX node; the line policy still applies there.
+        expectATX(state, head === 0 ? 0 : heading);
+        expectFormat(state, { ...plain, heading });
+        expectATX(state, heading, end);
+      }
+      if (source.endsWith("\n")) {
+        const state = parsedState(source, EditorSelection.single(source.length));
+        expectATX(state, 0);
+        expectFormat(state, plain);
+      }
+    }
+  });
+
+  it.each([
+    { name: "forward between levels", anchor: 9, head: 12, heading: 2 },
+    { name: "reversed between levels", anchor: 12, head: 9, heading: 1 },
+    { name: "forward into the neighboring paragraph", anchor: 9, head: 17, heading: 0 },
+    { name: "reversed from the neighboring paragraph", anchor: 17, head: 12, heading: 2 },
+    { name: "exclusive endpoint on the next heading line", anchor: 8, head: 10, heading: 2 },
+  ])("uses the selection head for $name", ({ anchor, head, heading }) => {
+    const state = parsedState("Before\n\n#\n##\n\nAfter", EditorSelection.single(anchor, head));
+    expectFormat(state, { ...plain, heading });
+    if (head !== 10) expectATX(state, heading);
+  });
+
+  it("honors default mainIndex and explicit ranges without changing selections", () => {
+    const selection = EditorSelection.create([EditorSelection.cursor(9), EditorSelection.cursor(12)], 1);
+    const state = parsedState("Before\n\n#\n##\n\nAfter", selection);
+    expectATX(state, 2);
+    expectFormat(state, { ...plain, heading: 2 });
+    expectATX(state, 1, state.selection.ranges[0].head);
+    expectFormat(state, { ...plain, heading: 1 }, state.selection.ranges[0]);
+    const explicit = EditorSelection.range(17, 9);
+    expectFormat(state, { ...plain, heading: 1 }, explicit);
+    expect([explicit.anchor, explicit.head]).toEqual([17, 9]);
+    expect(state.selection.toJSON()).toEqual(selection.toJSON());
+    expect(state.selection.mainIndex).toBe(1);
+  });
+
+  it.each([
+    { doc: "```\n#\n######\n```", heads: [5, 12], kind: "FencedCode" as const },
+    { doc: "~~~\n ##\n   #####\n~~~", heads: [7, 16], kind: "FencedCode" as const },
+    { doc: "    #\n    ######", heads: [5, 16], kind: "CodeBlock" as const },
+  ])("suppresses bare heading markers in actual $kind", ({ doc, heads, kind }) => {
+    for (const head of heads) {
+      const state = parsedState(doc, EditorSelection.single(head));
+      expectCodeContext(state, kind);
+      expectATX(state, 0);
+      expectFormat(state, codeBlock);
+    }
+  });
+
+  it.each([
+    { name: "empty line", doc: "", heading: 0, atx: 0 },
+    { name: "seven hashes", doc: "#######", heading: 0, atx: 0 },
+    { name: "long hash run", doc: " ########", heading: 0, atx: 0 },
+    { name: "overlong run with a delimiter", doc: "####### text", heading: 0, atx: 0 },
+    { name: "attached word", doc: "###word", heading: 0, atx: 0 },
+    { name: "escaped hash", doc: "\\#", heading: 0, atx: 0 },
+    { name: "nonempty heading with spaces", doc: "  ## text", heading: 2, atx: 2 },
+    // The inherited lexical policy accepts tabs; the installed Lezer ATX parser requires a space.
+    { name: "nonempty heading with tabs", doc: " ###\t\ttext", heading: 3, atx: 0 },
+  ])("keeps the existing lexical result for $name", ({ doc, heading, atx }) => {
+    const state = parsedState(doc, EditorSelection.single(doc.length));
+    expectATX(state, atx);
+    expectFormat(state, { ...plain, heading });
+  });
+});
