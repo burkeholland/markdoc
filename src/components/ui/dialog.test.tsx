@@ -287,8 +287,12 @@ describe("DialogContent focus lifecycle", () => {
     expect(first.getClientRects().length).toBeGreaterThan(0);
     expect(second).toHaveFocus();
 
-    act(() => opener.focus());
-    expect(opener).toHaveFocus();
+    act(() => {
+      opener.focus();
+      // The modal trap returns focus immediately; leave it on body for the pending recovery.
+      second.blur();
+    });
+    expect(document.activeElement).toBe(document.body);
     await flushTasks();
     expect(second).toHaveFocus();
 
