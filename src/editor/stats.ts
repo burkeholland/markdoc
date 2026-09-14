@@ -4,9 +4,11 @@
  *
  * Counting is prose-only: fenced code blocks and YAML front matter are excluded,
  * inline code text is included, link text counts but URLs do not, images are dropped.
- * Words are runs of Unicode letters/digits (with inner apostrophes/hyphens), which
- * under-counts CJK text where words are not space-separated; that is accepted for now.
+ * Words are runs of Unicode letters/digits and attached marks (with inner apostrophes/hyphens).
+ * This under-counts CJK text where words are not space-separated; that is accepted for now.
  */
+
+import { countWords } from "../lib/word-count";
 
 export interface DocStats {
   words: number;
@@ -25,7 +27,6 @@ export interface DocStats {
 export const READING_WPM = 200;
 export const SPEAKING_WPM = 130;
 
-const WORD_RE = /[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu;
 const SENTENCE_RE = /[.!?…]+(?=\s|$)/gu;
 const FENCE_RE = /^(\s{0,3})(`{3,}|~{3,})/;
 
@@ -137,11 +138,6 @@ function proseOfLine(line: string, imageAlt = false): { text: string; heading: b
   s = s.replace(/(\*\*|__|~~|\*|_)/g, "");
   s = s.replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, "$1");
   return { text: s, heading };
-}
-
-function countWords(text: string): number {
-  const m = text.match(WORD_RE);
-  return m ? m.length : 0;
 }
 
 /**
