@@ -47,6 +47,7 @@ body {
 }
 main {
   max-width: 820px; margin: 0 auto; padding: 48px 32px 96px;
+  overflow-wrap: anywhere;
   --md-space: 0.9em; --md-space-heading-after: 0.45em;
   --md-space-heading-before-h2: 1.6em; --md-space-heading-before-h3: 1.25em; --md-space-heading-before-h4: 1em;
 }
