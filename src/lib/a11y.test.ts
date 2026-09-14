@@ -114,6 +114,67 @@ describe("firstTabbable", () => {
     expect(firstTabbable(root)?.id).toBe("link");
   });
 
+  it.each([
+    ["hidden control", '<input id="unavailable" style="visibility:hidden" />'],
+    ["inherited hidden visibility", '<div style="visibility:hidden"><input id="unavailable" /></div>'],
+    ["collapsed visibility", '<input id="unavailable" style="visibility:collapse" />'],
+    ["inert control", '<input id="unavailable" inert />'],
+    ["inert subtree", '<div inert><input id="unavailable" /></div>'],
+    ["disabled fieldset", '<fieldset disabled><input id="unavailable" /></fieldset>'],
+    ["later legend", '<fieldset disabled><legend>First</legend><legend><input id="unavailable" /></legend></fieldset>'],
+    ["nested first legend outside the outer first legend", '<fieldset disabled><legend>Outer</legend><fieldset><legend><input id="unavailable" /></legend></fieldset></fieldset>'],
+    ["disabled nested fieldset inside the outer first legend", '<fieldset disabled><legend><fieldset disabled><legend>Inner</legend><input id="unavailable" /></fieldset></legend></fieldset>'],
+  ])("skips a rendered %s without trying to focus it", (_, unavailable) => {
+    const root = mount(`<div>${unavailable}<input id="available" /></div>`);
+    const first = root.querySelector<HTMLInputElement>("#unavailable")!;
+    const second = root.querySelector<HTMLInputElement>("#available")!;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    const html = root.innerHTML;
+    const active = document.activeElement;
+    expect(first.disabled).toBe(false);
+    expect(first.getClientRects().length).toBeGreaterThan(0);
+    expect(firstTabbable(root)).toBe(second);
+    expect(focus).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(active);
+    expect(root.innerHTML).toBe(html);
+  });
+
+  it.each([
+    ["first legend", '<fieldset disabled><legend><input id="eligible" /></legend><input /></fieldset>'],
+    ["nested first legends", '<fieldset disabled><legend><fieldset disabled><legend><input id="eligible" /></legend></fieldset></legend></fieldset>'],
+    ["visible override", '<div style="visibility:hidden"><input id="eligible" style="visibility:visible" /></div>'],
+    ["aria-disabled", '<input id="eligible" aria-disabled="true" />'],
+    ["aria-hidden", '<input id="eligible" aria-hidden="true" />'],
+    ["zero opacity", '<input id="eligible" style="opacity:0" />'],
+    ["DOM order rather than positive tabindex order", '<input id="eligible" tabindex="3" /><input tabindex="1" />'],
+  ])("keeps the first eligible control with %s", (_, eligible) => {
+    const root = mount(`<div>${eligible}<input /></div>`);
+    const first = root.querySelector<HTMLInputElement>("#eligible")!;
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    expect(first.matches(":disabled")).toBe(false);
+    expect(firstTabbable(root)).toBe(first);
+    expect(focus).not.toHaveBeenCalled();
+  });
+
+  it("skips an inert ancestor outside the search root", () => {
+    const ancestor = mount('<div inert><section><input /></section></div>');
+    const root = ancestor.querySelector("section")!;
+    expect(root.querySelector("input")!.getClientRects().length).toBeGreaterThan(0);
+    expect(firstTabbable(root)).toBeNull();
+  });
+
+  it("returns null when every rendered candidate is unavailable", () => {
+    const root = mount(`<div>
+      <input style="visibility:hidden" />
+      <input style="visibility:collapse" />
+      <div inert><input /></div>
+      <fieldset disabled><input /></fieldset>
+    </div>`);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    expect(firstTabbable(root)).toBeNull();
+    expect(focus).not.toHaveBeenCalled();
+  });
+
   it("returns null when nothing in the body is tabbable, so the caller keeps the default", () => {
     const root = mount(`<div><div data-focus-skip><button>Close</button></div><ul><li>Ctrl+B</li></ul></div>`);
     expect(firstTabbable(root)).toBeNull();

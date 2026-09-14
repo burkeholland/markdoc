@@ -259,6 +259,46 @@ describe("DialogContent focus lifecycle", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    { unavailable: "hidden", strict: false },
+    { unavailable: "fieldset-disabled", strict: false },
+    { unavailable: "hidden", strict: true },
+    { unavailable: "fieldset-disabled", strict: true },
+  ])("skips the $unavailable first control on opening and recovery (StrictMode=$strict)", async ({ unavailable, strict }) => {
+    const onClosed = vi.fn();
+    const content = (
+      <>
+        {unavailable === "hidden"
+          ? <div style={{ visibility: "hidden" }}><input data-testid="unavailable" /></div>
+          : <fieldset disabled><input data-testid="unavailable" /></fieldset>}
+        <input data-testid="available" />
+      </>
+    );
+    const tree = (open: boolean) => {
+      const harness = <Harness open={open} onClosed={onClosed}>{content}</Harness>;
+      return strict ? <StrictMode>{harness}</StrictMode> : harness;
+    };
+    const { rerender } = render(tree(false));
+    const opener = screen.getByTestId("more-menu");
+    act(() => opener.focus());
+    rerender(tree(true));
+    const first = screen.getByTestId("unavailable");
+    const second = screen.getByTestId("available");
+    expect(first.getClientRects().length).toBeGreaterThan(0);
+    expect(second).toHaveFocus();
+
+    act(() => opener.focus());
+    expect(opener).toHaveFocus();
+    await flushTasks();
+    expect(second).toHaveFocus();
+
+    rerender(tree(false));
+    await flushTasks();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
   it("keeps a body without a tabbable control focused inside and restores its opener", async () => {
     const content = <p>Command palette - Mod-Shift-P</p>;
     const { rerender } = render(<Harness open title="Keyboard shortcuts">{content}</Harness>);
