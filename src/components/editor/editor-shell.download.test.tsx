@@ -109,9 +109,9 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   session.destroy();
+  vi.restoreAllMocks();
   vi.clearAllTimers();
   vi.useRealTimers();
-  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
