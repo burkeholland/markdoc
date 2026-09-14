@@ -534,6 +534,63 @@ afterEach(() => {
 });
 
 describe("mounted theme controls", () => {
+  it.each([
+    ["normal", false, "light", true, "dark"],
+    ["normal", false, "dark", false, "light"],
+    ["StrictMode", true, "light", true, "dark"],
+    ["StrictMode", true, "dark", false, "light"],
+  ] as const)(
+    "cross-tab storage reset updates %s controls (strict=%s) from pinned %s",
+    (_mode, strict, initial, prefersDark, resolved) => {
+      vi.spyOn(window, "matchMedia").mockReturnValue({
+        ...window.matchMedia("(prefers-color-scheme: dark)"),
+        matches: prefersDark,
+      });
+      setThemePreference(initial);
+      const subscribe = vi.spyOn(themeStore, "subscribe");
+      const controls = <><ThemeToggle /><ThemePicker /></>;
+      const { host } = renderDirect(strict ? <StrictMode>{controls}</StrictMode> : controls);
+      expect(toggle(host)).toHaveAttribute("data-theme-preference", initial);
+      expect(option(picker(host), initial)).toHaveAttribute("aria-checked", "true");
+      expect(document.documentElement).toHaveAttribute("data-theme", initial);
+      const subscriber = vi.fn(() => themeStore.getSnapshot());
+      const unsubscribe = themeStore.subscribe(subscriber);
+      try {
+        localStorage.clear();
+        const writes = [
+          vi.spyOn(Storage.prototype, "setItem"),
+          vi.spyOn(Storage.prototype, "removeItem"),
+          vi.spyOn(Storage.prototype, "clear"),
+        ];
+        subscribe.mockClear();
+        act(() => {
+          window.dispatchEvent(new StorageEvent("storage", {
+            key: null,
+            storageArea: localStorage,
+          }));
+        });
+
+        expect(subscriber).toHaveBeenCalledExactlyOnceWith();
+        expect(subscriber).toHaveReturnedWith("system");
+        expect(themeStore.getSnapshot()).toBe("system");
+        expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+        expect(document.documentElement).toHaveAttribute("data-theme", resolved);
+        expect(toggle(host)).toHaveAttribute("aria-label", "Theme: System");
+        expect(toggle(host)).toHaveAttribute("title", "Theme: System (click to switch)");
+        expect(toggle(host)).toHaveAttribute("data-theme-preference", "system");
+        for (const preference of ["system", "light", "dark"] as const) {
+          const row = option(picker(host), preference);
+          expect(row).toHaveAttribute("aria-checked", String(preference === "system"));
+          expect(row.tabIndex).toBe(preference === "system" ? 0 : -1);
+        }
+        for (const write of writes) expect(write).not.toHaveBeenCalled();
+        expect(subscribe).not.toHaveBeenCalled();
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
+
   it("preserves the compact and picker labels, title, icons, classes, order, and selected state", () => {
     const { host } = renderDirect(
       <>

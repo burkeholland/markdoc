@@ -9,6 +9,8 @@ import {
   resolveTheme,
   setThemePreference,
   themeStore,
+  type ResolvedTheme,
+  type ThemePreference,
 } from "./theme";
 
 function fakeMatchMedia(matches: boolean) {
@@ -42,6 +44,7 @@ describe("theme", () => {
     setMatchMedia(false);
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     restoreMatchMedia();
     localStorage.clear();
   });
@@ -87,6 +90,127 @@ describe("theme", () => {
     unsubscribe();
     setThemePreference("light");
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  describe("cross-tab storage reset", () => {
+    function dispatchAndExpect(
+      event: StorageEvent,
+      preference: ThemePreference,
+      resolved: ResolvedTheme,
+      notifications: number,
+    ) {
+      const subscriber = vi.fn(() => themeStore.getSnapshot());
+      const unsubscribe = themeStore.subscribe(subscriber);
+      try {
+        const attribute = vi.spyOn(document.documentElement, "setAttribute");
+        const sideEffects = [
+          vi.spyOn(Storage.prototype, "setItem"),
+          vi.spyOn(Storage.prototype, "removeItem"),
+          vi.spyOn(Storage.prototype, "clear"),
+          vi.spyOn(themeStore, "subscribe"),
+          vi.spyOn(EventTarget.prototype, "addEventListener"),
+          vi.spyOn(window, "setTimeout"),
+          vi.spyOn(window, "setInterval"),
+          vi.spyOn(window, "requestAnimationFrame"),
+          vi.spyOn(globalThis, "fetch"),
+          vi.spyOn(XMLHttpRequest.prototype, "open"),
+          vi.spyOn(XMLHttpRequest.prototype, "send"),
+        ];
+        vi.mocked(window.matchMedia).mockClear();
+
+        window.dispatchEvent(event);
+
+        expect(subscriber).toHaveBeenCalledTimes(notifications);
+        expect(subscriber.mock.results.map((result) => result.value))
+          .toEqual(Array.from({ length: notifications }, () => preference));
+        expect(themeStore.getSnapshot()).toBe(preference);
+        expect(document.documentElement).toHaveAttribute("data-theme", resolved);
+        expect(attribute).toHaveBeenCalledTimes(notifications);
+        for (const effect of sideEffects) expect(effect).not.toHaveBeenCalled();
+        for (const result of vi.mocked(window.matchMedia).mock.results) {
+          expect(result.value.addEventListener).not.toHaveBeenCalled();
+          expect(result.value.addListener).not.toHaveBeenCalled();
+        }
+      } finally {
+        unsubscribe();
+      }
+    }
+
+    it.each([
+      ["light", true, "dark"],
+      ["dark", false, "light"],
+    ] as const)("returns pinned %s to system with OS dark=%s after localStorage clear", (initial, prefersDark, resolved) => {
+      setMatchMedia(prefersDark);
+      setThemePreference(initial);
+      localStorage.clear();
+
+      dispatchAndExpect(
+        new StorageEvent("storage", { key: null, storageArea: localStorage }),
+        "system",
+        resolved,
+        1,
+      );
+      expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+    });
+
+    it.each(["local", "synthetic"] as const)(
+      "preserves %s keyed theme changes and removals",
+      (source) => {
+        setMatchMedia(true);
+        setThemePreference("light");
+        const event = () => new StorageEvent("storage", {
+          key: THEME_STORAGE_KEY,
+          storageArea: source === "local" ? localStorage : null,
+        });
+        localStorage.setItem(THEME_STORAGE_KEY, "dark");
+        dispatchAndExpect(event(), "dark", "dark", 1);
+        vi.restoreAllMocks();
+
+        localStorage.removeItem(THEME_STORAGE_KEY);
+        dispatchAndExpect(event(), "system", "dark", 1);
+        expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+      },
+    );
+
+    it.each(["unrelated key", "session clear", "null area"] as const)(
+      "ignores %s",
+      (source) => {
+        setMatchMedia(true);
+        setThemePreference("light");
+        if (source === "unrelated key") localStorage.setItem("unrelated", "changed");
+        else if (source === "session clear") sessionStorage.clear();
+        else localStorage.clear();
+
+        dispatchAndExpect(
+          new StorageEvent("storage", {
+            key: source === "unrelated key" ? "unrelated" : null,
+            storageArea: source === "unrelated key" ? localStorage
+              : source === "session clear" ? sessionStorage : null,
+          }),
+          source === "null area" ? "system" : "light",
+          "light",
+          0,
+        );
+      },
+    );
+
+    it.each(["local", "null"] as const)(
+      "ignores %s clear events when localStorage access is denied",
+      (source) => {
+        setMatchMedia(true);
+        setThemePreference("light");
+        localStorage.clear();
+        const event = new StorageEvent("storage", {
+          key: null,
+          storageArea: source === "local" ? localStorage : null,
+        });
+        vi.spyOn(window, "localStorage", "get").mockImplementation(() => {
+          throw new DOMException("Storage access denied", "SecurityError");
+        });
+
+        dispatchAndExpect(event, "system", "light", 0);
+      },
+    );
   });
 
   describe("boot script", () => {
