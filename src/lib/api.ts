@@ -3,6 +3,7 @@ import type { DocumentSummary, SearchResult } from "@/server/documents";
 import type { ActivityAction, NotificationKind, Role, TokenScope } from "@/server/db/schema";
 import type { ReviewDto } from "@/server/reviews";
 import type { GistAutoUpdatePreview, GistAutoUpdateSettings, GistAutoUpdateStatus } from "@/lib/gist-auto-update";
+import { readJsonResponse } from "@/lib/json-response";
 
 export class ApiError extends Error {
   constructor(
@@ -45,19 +46,20 @@ export interface SyncStatusDto {
   remoteContent?: string;
 }
 
+async function readApiResponse<T>(res: Response): Promise<T> {
+  return await readJsonResponse(res, {
+    fallback: `Request failed (${res.status})`,
+    createError: (message, body) => new ApiError(res.status, message, body?.issues, body),
+  }) as T;
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     credentials: "same-origin",
   });
-  const text = await res.text();
-  const data = text ? (JSON.parse(text) as unknown) : null;
-  if (!res.ok) {
-    const err = (data ?? {}) as { error?: string; issues?: unknown };
-    throw new ApiError(res.status, err.error ?? res.statusText, err.issues, (data ?? undefined) as Record<string, unknown> | undefined);
-  }
-  return data as T;
+  return readApiResponse<T>(res);
 }
 
 export interface VersionSummary {
@@ -342,11 +344,5 @@ export async function uploadAsset(documentId: string, file: File): Promise<Uploa
   const form = new FormData();
   form.append("file", file, file.name);
   const res = await fetch(`/api/documents/${documentId}/assets`, { method: "POST", body: form, credentials: "same-origin" });
-  const text = await res.text();
-  const data = text ? (JSON.parse(text) as unknown) : null;
-  if (!res.ok) {
-    const err = (data ?? {}) as { error?: string; issues?: unknown };
-    throw new ApiError(res.status, err.error ?? res.statusText, err.issues);
-  }
-  return data as UploadedAsset;
+  return readApiResponse<UploadedAsset>(res);
 }
