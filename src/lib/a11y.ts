@@ -78,7 +78,7 @@ export function restoreFocus(el: HTMLElement | null): boolean {
 const TABBABLE = 'input:not([type="hidden"]), select, textarea, button, a[href], [tabindex], [contenteditable="true"]';
 
 /**
- * First element inside `root` a Tab press could land on: enabled, not `tabindex="-1"`, and rendered
+ * First element inside `root` a Tab press could land on: enabled, non-inert, visible, not `tabindex="-1"`, and rendered
  * (display:none controls such as a hidden file input have no client rects). Elements inside a
  * `[data-focus-skip]` ancestor are passed over — the dialog header uses it so its Close button never
  * takes the opening focus ahead of the form, and a dialog body can opt out the same way when its first
@@ -87,9 +87,11 @@ const TABBABLE = 'input:not([type="hidden"]), select, textarea, button, a[href],
 export function firstTabbable(root: HTMLElement | null): HTMLElement | null {
   if (!root) return null;
   for (const el of root.querySelectorAll<HTMLElement>(TABBABLE)) {
-    if (el.closest("[data-focus-skip]")) continue;
-    if ((el as HTMLButtonElement).disabled || el.tabIndex < 0) continue;
+    if (el.closest("[data-focus-skip], [inert]")) continue;
+    if (el.matches(":disabled") || el.tabIndex < 0) continue;
     if (el.getClientRects().length === 0) continue;
+    const visibility = el.ownerDocument.defaultView?.getComputedStyle(el).visibility;
+    if (visibility === "hidden" || visibility === "collapse") continue;
     return el;
   }
   return null;
