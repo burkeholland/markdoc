@@ -2646,6 +2646,9 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
             const idle = !u.isLocal && isIdle(u.idleSince, now);
             const following = followUserId === u.id;
             const working = u.isAgent && busy.has(u.name);
+            const humanLocation = u.isAgent
+              ? undefined
+              : `${idle ? "Idle · " : ""}${u.cursor === null ? "no cursor" : u.section ? `in ‘${u.section}’` : "at the top"}`;
             return (
               <li key={u.id} className={cn("flex items-center gap-2.5 rounded-lg px-2 py-1.5", idle && !working && "opacity-60")} data-testid="presence-row" data-user-id={u.id} data-agent={u.isAgent ? "" : undefined}>
                 <span className="relative inline-flex shrink-0">
@@ -2658,7 +2661,7 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
                     {u.isAgent && <span className="rounded-md bg-violet-100 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:bg-violet-950 dark:text-violet-300">Agent</span>}
                     {u.role && <span className="rounded-md bg-surface-2 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-ink-3">{roleLabel[u.role] ?? u.role}</span>}
                   </div>
-                  <div className="truncate text-xs text-ink-3" data-testid="presence-section">
+                  <div className="truncate text-xs text-ink-3" data-testid="presence-section" title={humanLocation}>
                     {u.isAgent ? (
                       <>
                         <span data-testid="presence-status">{idle && !working ? "Idle" : u.status ?? "working"}</span>
@@ -2670,10 +2673,7 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
                         )}
                       </>
                     ) : (
-                      <>
-                        {idle ? "Idle · " : ""}
-                        {u.cursor === null ? "no cursor" : u.section ? `in ‘${u.section}’` : "at the top"}
-                      </>
+                      humanLocation
                     )}
                   </div>
                 </div>

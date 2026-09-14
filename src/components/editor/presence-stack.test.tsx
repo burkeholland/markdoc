@@ -459,13 +459,42 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.clearAllTimers();
   vi.useRealTimers();
-  vi.restoreAllMocks();
   document.body.replaceChildren();
 });
 
 describe("PresenceStack", () => {
+  const unbrokenSection = "Location".repeat(40);
+  const ordinarySection = "Editorial planning and collaborative document review ".repeat(6);
+  const literalSection = '  <img src="section" onerror="alert(1)"> & "quoted" \'section\' ‘literal’  '.repeat(4);
+  const whitespaceSection = " \t\n ".repeat(60);
+
+  function expectLocations(popover: HTMLElement, expected: (string | undefined)[]) {
+    const sections = within(popover).getAllByTestId("presence-section");
+    expect(sections).toHaveLength(expected.length);
+    return sections.map((section, index) => {
+      expect(section.tagName).toBe("DIV");
+      expect(section.className).toBe("truncate text-xs text-ink-3");
+      expect(section.getAttribute("title")).toBe(expected[index] ?? null);
+      expect(section.getAttributeNames().sort()).toEqual(
+        expected[index] === undefined ? ["class", "data-testid"] : ["class", "data-testid", "title"],
+      );
+      expect(section.parentElement?.className).toBe("min-w-0 flex-1");
+      expect(section.parentElement?.children).toHaveLength(2);
+      expect(section.closest("[data-testid='presence-row']")?.tagName).toBe("LI");
+      if (expected[index] !== undefined) {
+        expect(section.textContent).toBe(expected[index]);
+        expect(section.getAttribute("title")).toBe(section.textContent);
+        expect(section.children).toHaveLength(0);
+        expect(section.childNodes).toHaveLength(1);
+        expect(section.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+      }
+      return section;
+    });
+  }
+
   describe("display-name titles", () => {
     const localName = "  Alexandra Local Collaborator with a complete display identity for the collaborative document review across editorial planning accessibility research technical writing release coordination customer education and documentation maintenance teams  ";
     const remoteName = "  Benjamin Remote Collaborator with a different complete display identity for the shared document review across product engineering content strategy international support quality assurance implementation planning and long term knowledge management teams  ";
@@ -499,13 +528,18 @@ describe("PresenceStack", () => {
     it.each(["Jump", "Follow"] as const)(
       "keeps long displayed identities and hover passive before one explicit %s",
       (action) => {
+        vi.useFakeTimers();
+        const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+        const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+        const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+        const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
         for (const name of [localName, remoteName, agentName]) expect(name.length).toBeGreaterThanOrEqual(200);
         expect(new Set([localName, remoteName, agentName]).size).toBe(3);
         const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected presence fetch"));
         const xhrSpy = vi.spyOn(XMLHttpRequest.prototype, "send").mockImplementation(() => { throw new Error("Unexpected presence XHR"); });
         const socketSpy = vi.spyOn(globalThis, "WebSocket").mockImplementation(function () { throw new Error("Unexpected presence WebSocket"); });
-        const local = person("local", localName, { isLocal: true, role: "owner", idleSince: Date.now() - 120_000 });
-        const remote = person("remote", remoteName, { idleSince: Date.now() - 120_000, section: "Review plan" });
+        const local = person("local", localName, { isLocal: true, role: "owner", idleSince: Date.now() - 120_000, section: ordinarySection });
+        const remote = person("remote", remoteName, { idleSince: Date.now() - 120_000, section: unbrokenSection });
         const working = person("working-agent", agentName, {
           isAgent: true, role: null, cursor: null, section: null, status: "drafting",
           ownerLogin: "owner", ownerName: "Morgan", idleSince: Date.now() - 120_000,
@@ -520,6 +554,9 @@ describe("PresenceStack", () => {
           localId: local.id, localName: local.name, users,
           requests: [request("current-request", local.id, { status: "claimed", claimedBy: working.name })],
         });
+        const presenceSpy = vi.spyOn(session, "presence");
+        const subscribeSpy = vi.spyOn(session, "subscribe");
+        const metaSpy = vi.spyOn(session.meta, "get");
         const handlers = callbacks();
         render(<PresenceBoundary session={session} callbacks={handlers} />);
         const trigger = screen.getByTestId("presence");
@@ -550,16 +587,28 @@ describe("PresenceStack", () => {
         expect(rows[0].querySelector(".avatar")?.getAttribute("title")).toBe(localName);
         expect(rows[1].querySelector(".avatar")?.getAttribute("title")).toBe(remoteName);
         expect(within(popover).getByText("5 people here")).toBeInTheDocument();
-        expect(within(popover).getAllByTestId("presence-section").map((section) => section.textContent)).toEqual([
-          "in ‘Overview’", "Idle · in ‘Review plan’", "drafting", "Idle", "no cursor",
+        const locations = expectLocations(popover, [
+          `in ‘${ordinarySection}’`, `Idle · in ‘${unbrokenSection}’`, undefined, undefined, "no cursor",
+        ]);
+        expect(locations.map((section) => section.textContent)).toEqual([
+          `in ‘${ordinarySection}’`, `Idle · in ‘${unbrokenSection}’`, "drafting", "Idle", "no cursor",
         ]);
         expect(within(rows[4]).getByTestId("presence-jump")).toBeDisabled();
         expect(within(rows[1]).getByTestId("presence-follow")).toHaveAttribute("aria-pressed", "false");
         expect(within(popover).getByTestId("presence-request-cancel")).toBeInTheDocument();
         expect(within(popover).queryByTestId("keep-agent-here")).toBeNull();
+        act(() => vi.advanceTimersByTime(0));
+        const passiveCounts = () => [
+          setTimeoutSpy.mock.calls.length, setIntervalSpy.mock.calls.length,
+          clearTimeoutSpy.mock.calls.length, clearIntervalSpy.mock.calls.length,
+          presenceSpy.mock.calls.length, subscribeSpy.mock.calls.length, metaSpy.mock.calls.length,
+          vi.getTimerCount(),
+        ];
+        const sessionUsers = session.presence();
+        const countsBeforeHover = passiveCounts();
         const markup = popover.innerHTML;
         const focusOwner = document.activeElement;
-        for (const name of names) {
+        for (const name of [...names, ...locations]) {
           fireEvent.pointerEnter(name);
           fireEvent.mouseEnter(name);
           fireEvent.pointerMove(name);
@@ -569,6 +618,9 @@ describe("PresenceStack", () => {
         }
         expect(popover.innerHTML).toBe(markup);
         expect(document.activeElement).toBe(focusOwner);
+        expect(passiveCounts()).toEqual(countsBeforeHover);
+        expect(session.presence()).toBe(sessionUsers);
+        expect(session.followUserId).toBeNull();
         expect(trigger.getAttribute("aria-label")).toBe(triggerLabel);
         expect(handlers.onJump).not.toHaveBeenCalled();
         expect(session.follow).not.toHaveBeenCalled();
@@ -624,8 +676,8 @@ describe("PresenceStack", () => {
       expect(remainingTitles).not.toContain(`Morgan's ${agentName}`);
       expect(remainingTitles).not.toContain(`Taylor's ${agentName}`);
 
-      const replacementLocal = { ...local, name: "Current local" };
-      const replacementRemote = { ...remote, name: "Current remote" };
+      const replacementLocal = { ...local, name: "Current local", section: "Current local section" };
+      const replacementRemote = { ...remote, name: "Current remote", section: "Current remote section" };
       const replacementAgent = { ...agent, name: "Current assistant", ownerName: "Current owner" };
       const replacement = new PresenceSession({
         docId: "document-b", localId: replacementLocal.id, localName: replacementLocal.name,
@@ -657,6 +709,178 @@ describe("PresenceStack", () => {
       const session = new PresenceSession({ localId: local.id, localName: local.name, users: [local, remote, agent] });
       render(<PresenceBoundary session={session} callbacks={callbacks()} />);
       expectNames(openPresence(), [" (you)", "  ", ""]);
+    });
+  });
+
+  describe("human-location titles", () => {
+    describe.each([
+      { label: "local active", isLocal: true, idle: false },
+      { label: "local with an old activity timestamp", isLocal: true, idle: true },
+      { label: "remote active", isLocal: false, idle: false },
+      { label: "remote idle", isLocal: false, idle: true },
+    ])("$label", ({ isLocal, idle }) => {
+      describe.each([10, null])("cursor %s", (cursor) => {
+        it.each([
+          { label: "unbroken", section: unbrokenSection, location: `in ‘${unbrokenSection}’` },
+          { label: "ordinary", section: ordinarySection, location: `in ‘${ordinarySection}’` },
+          { label: "literal markup and quotes", section: literalSection, location: `in ‘${literalSection}’` },
+          { label: "whitespace-only", section: whitespaceSection, location: `in ‘${whitespaceSection}’` },
+          { label: "empty", section: "", location: "at the top" },
+          { label: "null", section: null, location: "at the top" },
+        ])("preserves the exact $label section copy", ({ section, location }) => {
+          if (section) expect(section.length).toBeGreaterThanOrEqual(240);
+          const user = person("human", "Human collaborator", {
+            isLocal, cursor, section, idleSince: idle ? Date.now() - 120_000 : null,
+          });
+          const local = person("local", "Local collaborator", { isLocal: true, section: null });
+          const session = new PresenceSession({
+            localId: isLocal ? user.id : local.id,
+            localName: isLocal ? user.name : local.name,
+            users: isLocal ? [user] : [local, user],
+          });
+          render(<PresenceBoundary session={session} callbacks={callbacks()} />);
+          const popover = openPresence();
+          const expected = `${!isLocal && idle ? "Idle · " : ""}${cursor === null ? "no cursor" : location}`;
+          expectLocations(popover, isLocal ? [expected] : ["at the top", expected]);
+          const row = within(popover).getAllByTestId("presence-row").at(-1)!;
+          expect(row.classList.contains("opacity-60")).toBe(!isLocal && idle);
+          expect(within(row).getByText("Editor")).toBeInTheDocument();
+          expect(within(row).queryAllByRole("button")).toHaveLength(isLocal ? 0 : 2);
+          if (!isLocal) expect(within(row).getByTestId("presence-jump").hasAttribute("disabled")).toBe(cursor === null);
+        });
+      });
+    });
+
+    it.each(["Jump", "Follow"] as const)(
+      "updates same-ID locations and idle state, retires departed/session labels, and keeps current %s",
+      (action) => {
+        const local = person("local", "Local", { isLocal: true, section: ordinarySection });
+        const remote = person("remote", "Remote", { section: unbrokenSection });
+        const departing = person("departing", "Departing", { section: literalSection });
+        const session = new PresenceSession({ docId: "locations-a", localId: local.id, localName: local.name, users: [local, remote, departing] });
+        const handlers = callbacks();
+        const view = render(<StrictMode><PresenceBoundary session={session} callbacks={handlers} /></StrictMode>);
+        let popover = openPresence();
+        const original = expectLocations(popover, [`in ‘${ordinarySection}’`, `in ‘${unbrokenSection}’`, `in ‘${literalSection}’`]);
+        const updatedLocal = { ...local, section: whitespaceSection, idleSince: Date.now() - 120_000 };
+        const updatedRemote = { ...remote, section: literalSection, cursor: 84, idleSince: Date.now() - 120_000 };
+        act(() => session.setUsers([updatedLocal, updatedRemote, departing]));
+        const updated = expectLocations(popover, [`in ‘${whitespaceSection}’`, `Idle · in ‘${literalSection}’`, `in ‘${literalSection}’`]);
+        updated.forEach((section, index) => expect(section).toBe(original[index]));
+        act(() => session.setUsers([updatedLocal, { ...updatedRemote, cursor: null }]));
+        expectLocations(popover, [`in ‘${whitespaceSection}’`, "Idle · no cursor"]);
+        expect(original[2]).not.toBeInTheDocument();
+        expect(within(popover).getByTestId("presence-jump")).toBeDisabled();
+        act(() => session.setUsers([updatedLocal, { ...updatedRemote, section: "", idleSince: null }]));
+        expectLocations(popover, [`in ‘${whitespaceSection}’`, "at the top"]);
+        act(() => session.setUsers([updatedLocal, updatedRemote]));
+        expectLocations(popover, [`in ‘${whitespaceSection}’`, `Idle · in ‘${literalSection}’`]);
+        fireEvent.click(within(popover).getByRole("button", { name: action }));
+        if (action === "Jump") {
+          expect(handlers.onJump).toHaveBeenCalledExactlyOnceWith(updatedRemote);
+          expect(session.follow).not.toHaveBeenCalled();
+        } else {
+          expect(session.follow).toHaveBeenCalledExactlyOnceWith(updatedRemote.id);
+          expect(session.followUserId).toBe(updatedRemote.id);
+          expect(handlers.onJump).not.toHaveBeenCalled();
+        }
+        expect(screen.queryByTestId("presence-popover")).toBeNull();
+        popover = openPresence();
+        if (action === "Follow") expect(within(popover).getByRole("button", { name: "Following" })).toHaveAttribute("aria-pressed", "true");
+        const retired = expectLocations(popover, [`in ‘${whitespaceSection}’`, `Idle · in ‘${literalSection}’`]);
+        const replacementLocal = { ...local, name: "Current local", section: null };
+        const replacementRemote = { ...remote, name: "Current remote", section: "Current section", cursor: 123 };
+        const replacement = new PresenceSession({
+          docId: "locations-b", localId: local.id, localName: replacementLocal.name,
+          users: [replacementLocal, replacementRemote],
+        });
+        view.rerender(<StrictMode><PresenceBoundary session={replacement} callbacks={handlers} /></StrictMode>);
+        expect(screen.queryByTestId("presence-popover")).toBeNull();
+        retired.forEach((section) => expect(section).not.toBeInTheDocument());
+        popover = openPresence();
+        expectLocations(popover, ["at the top", "in ‘Current section’"]);
+        act(() => session.setUsers([local, remote, departing]));
+        expectLocations(popover, ["at the top", "in ‘Current section’"]);
+        const currentTitles = Array.from(document.querySelectorAll("[title]"), (element) => element.getAttribute("title"));
+        for (const section of [ordinarySection, unbrokenSection, literalSection, whitespaceSection]) {
+          expect(currentTitles).not.toContain(`in ‘${section}’`);
+          expect(currentTitles).not.toContain(`Idle · in ‘${section}’`);
+        }
+        fireEvent.click(within(popover).getByRole("button", { name: action }));
+        if (action === "Jump") {
+          expect(handlers.onJump).toHaveBeenCalledTimes(2);
+          expect(handlers.onJump).toHaveBeenLastCalledWith(replacementRemote);
+          expect(replacement.follow).not.toHaveBeenCalled();
+        } else {
+          expect(replacement.follow).toHaveBeenCalledExactlyOnceWith(replacementRemote.id);
+          expect(replacement.followUserId).toBe(replacementRemote.id);
+          expect(handlers.onJump).not.toHaveBeenCalled();
+        }
+        expect(screen.queryByTestId("presence-popover")).toBeNull();
+        expect(handlers.onCancelRequest).not.toHaveBeenCalled();
+        expect(handlers.onKeepAgent).not.toHaveBeenCalled();
+      },
+    );
+
+    it("updates titles on the existing idle tick without adding a timer", () => {
+      vi.useFakeTimers();
+      const intervalSpy = vi.spyOn(globalThis, "setInterval");
+      const local = person("local", "Local", { isLocal: true, section: ordinarySection, idleSince: Date.now() - 50_000 });
+      const remote = person("remote", "Remote", { section: unbrokenSection, idleSince: Date.now() - 50_000 });
+      const session = new PresenceSession({ localId: local.id, localName: local.name, users: [local, remote] });
+      render(<PresenceBoundary session={session} callbacks={callbacks()} />);
+      const popover = openPresence();
+      const sections = expectLocations(popover, [`in ‘${ordinarySection}’`, `in ‘${unbrokenSection}’`]);
+      act(() => vi.advanceTimersByTime(0));
+      expect(intervalSpy).toHaveBeenCalledTimes(1);
+      expect(intervalSpy.mock.calls[0][1]).toBe(15_000);
+      expect(vi.getTimerCount()).toBe(1);
+      act(() => vi.advanceTimersByTime(15_000));
+      const updated = expectLocations(popover, [`in ‘${ordinarySection}’`, `Idle · in ‘${unbrokenSection}’`]);
+      updated.forEach((section, index) => expect(section).toBe(sections[index]));
+      expect(intervalSpy).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(1);
+    });
+
+    it("never titles agent locations from long raw metadata while activity ages and idle status hides it", () => {
+      vi.useFakeTimers();
+      const local = person("local", "Local", { isLocal: true });
+      const agent = person("agent", unbrokenSection, {
+        isAgent: true, role: null, ownerLogin: "owner", ownerName: "Morgan",
+        section: literalSection, status: ordinarySection, idleSince: Date.now() - 120_000,
+      });
+      const ownAgent = person("own-agent", literalSection, {
+        isAgent: true, isLocal: true, role: null, ownerLogin: local.id,
+        section: ordinarySection, cursor: null, status: null,
+      });
+      const session = new PresenceSession({
+        localId: local.id, localName: local.name, users: [local, agent, ownAgent],
+        activity: { name: agent.name, action: literalSection, at: Date.now() - 10_000 },
+      });
+      render(<PresenceBoundary session={session} callbacks={callbacks()} />);
+      const popover = openPresence();
+      const sections = expectLocations(popover, ["in ‘Overview’", undefined, undefined]);
+      expect(sections[1].textContent).toBe(`${ordinarySection} · edited · 10 s ago`);
+      expect(sections[1].children).toHaveLength(2);
+      expect(within(sections[1]).getByTestId("presence-activity").textContent).toBe("edited · 10 s ago");
+      expect(sections[2].textContent).toBe("working");
+      const rows = within(popover).getAllByTestId("presence-row");
+      expect(rows[1].querySelector("span.truncate")?.getAttribute("title")).toBe(`Morgan's ${agent.name}`);
+      expect(rows[2].querySelector("span.truncate")?.getAttribute("title")).toBe(`${ownAgent.name} (you)`);
+      expect(within(rows[1]).getByTestId("presence-avatar-busy")).toHaveAccessibleName(`Morgan's ${agent.name} is working`);
+      expect(within(rows[1]).getByText("Agent")).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(5_000));
+      expectLocations(popover, ["in ‘Overview’", undefined, undefined]);
+      expect(within(sections[1]).getByTestId("presence-activity").textContent).toBe("edited · 15 s ago");
+      act(() => vi.advanceTimersByTime(35_000));
+      expectLocations(popover, ["in ‘Overview’", undefined, undefined]);
+      expect(sections[1].textContent).toBe("Idle");
+      expect(sections[1].children).toHaveLength(1);
+      expect(within(sections[1]).queryByTestId("presence-activity")).toBeNull();
+      expect(within(rows[1]).queryByTestId("presence-avatar-busy")).toBeNull();
+      expect(rows[1]).toHaveClass("opacity-60");
+      expect(sections[1].querySelector("[title]")).toBeNull();
+      expect(sections[2].querySelector("[title]")).toBeNull();
     });
   });
 
@@ -735,6 +959,7 @@ describe("PresenceStack", () => {
     expect(within(popover).getByText("Burke's Copilot CLI")).toBeInTheDocument();
     expect(within(popover).getByTestId("presence-status")).toHaveTextContent("drafting");
     expect(within(popover).getByTestId("presence-activity")).toHaveTextContent("proposed changes · 10 s ago");
+    expectLocations(popover, ["in ‘Overview’", "in ‘Plan’", undefined, "no cursor", "Idle · in ‘Overview’"]);
     expect(within(popover).getByTestId("presence-requests")).toBeInTheDocument();
     expect(within(popover).getByText("Tighten the introduction")).toBeInTheDocument();
     expect(within(popover).getByText("Check the facts")).toBeInTheDocument();
