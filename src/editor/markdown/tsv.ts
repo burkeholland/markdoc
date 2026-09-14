@@ -10,23 +10,60 @@ export interface NoticeAction {
 }
 
 /**
- * Split tab-separated plain text (what spreadsheets, `psql`, `jq -r @tsv` and most terminals
- * put on the clipboard) into rows of trimmed cells. Returns null unless there are at least
- * two rows and every row has the same number (≥ 1) of tabs — the shape a table range has and
- * ordinary prose never does.
+ * Decode tab-separated clipboard text, including double-quoted spreadsheet fields, into
+ * rows of trimmed cells. Returns null for malformed quoting or unless there are at least
+ * two logical rows with the same number of cells (at least two).
  */
 export function parseTsv(text: string): string[][] | null {
-  const lines = text.replace(/\r\n?/g, "\n").replace(/^\n+|\n+$/g, "").split("\n");
-  if (lines.length < 2) return null;
-  const tabs = lines[0].split("\t").length - 1;
-  if (tabs < 1) return null;
+  const normalized = text.replace(/\r\n?/g, "\n");
+  let position = 0;
+  let end = normalized.length;
+  while (position < end && normalized[position] === "\n") position++;
+  while (end > position && normalized[end - 1] === "\n") end--;
+
   const rows: string[][] = [];
-  for (const line of lines) {
-    const cells = line.split("\t");
-    if (cells.length - 1 !== tabs) return null;
-    rows.push(cells.map((c) => c.trim()));
+  let cells: string[] = [];
+  while (position <= end) {
+    let cell: string;
+    if (normalized[position] === '"') {
+      let start = ++position;
+      const parts: string[] = [];
+      let closed = false;
+      while (position < end) {
+        if (normalized[position] !== '"') {
+          position++;
+          continue;
+        }
+        parts.push(normalized.slice(start, position++));
+        if (normalized[position] === '"') {
+          parts.push('"');
+          start = ++position;
+        } else {
+          closed = true;
+          break;
+        }
+      }
+      if (!closed) return null;
+      if (position < end && normalized[position] !== "\t" && normalized[position] !== "\n") return null;
+      cell = parts.join("");
+    } else {
+      const start = position;
+      while (position < end && normalized[position] !== "\t" && normalized[position] !== "\n") position++;
+      cell = normalized.slice(start, position);
+    }
+    cells.push(cell.trim());
+
+    if (position < end && normalized[position] === "\t") {
+      position++;
+      continue;
+    }
+    if (cells.length < 2 || (rows.length > 0 && cells.length !== rows[0].length)) return null;
+    rows.push(cells);
+    if (position === end) break;
+    cells = [];
+    position++;
   }
-  return rows;
+  return rows.length >= 2 ? rows : null;
 }
 
 /**
