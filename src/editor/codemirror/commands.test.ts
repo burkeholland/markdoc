@@ -5,7 +5,7 @@ import { EditorView } from "@codemirror/view";
 import { history, undo } from "@codemirror/commands";
 import type { Node as PMNode } from "prosemirror-model";
 import { parseMarkdown } from "../markdown/parse";
-import { insertImage, insertLink, setHeading, toggleInlineMark, toggleLinePrefix, type InlineMarker, type LinePrefixKind } from "./commands";
+import { insertCodeBlock, insertImage, insertLink, setHeading, toggleInlineMark, toggleLinePrefix, type InlineMarker, type LinePrefixKind } from "./commands";
 
 function withEditor(
   doc: string,
@@ -43,6 +43,111 @@ const representativeWords = [
   { name: "decomposed Latin", word: markedWord, caret: 3 },
   { name: "supplementary letters", word: supplementaryWord, caret: 2 },
 ];
+
+describe("code fence length", () => {
+  it.each([
+    { name: "plain text", text: "const n = 1;", lang: "TypeScript", fenceLength: 3, expected: "```TypeScript\nconst n = 1;\n```\n" },
+    { name: "single backticks", text: "`value`", lang: "", fenceLength: 3, expected: "```\n`value`\n```\n" },
+    { name: "double backticks", text: "``value``", lang: "", fenceLength: 3, expected: "```\n``value``\n```\n" },
+    { name: "three-backtick line", text: "before\n```\nafter", lang: "md", fenceLength: 4, expected: "````md\nbefore\n```\nafter\n````\n" },
+    { name: "four-backtick line", text: "before\n````\nafter", lang: "", fenceLength: 5, expected: "`````\nbefore\n````\nafter\n`````\n" },
+    { name: "longer backtick line", text: "```````", lang: "text", fenceLength: 8, expected: "````````text\n```````\n````````\n" },
+    { name: "longest run before the last", text: "``````\n```\n````", lang: "", fenceLength: 7, expected: "```````\n``````\n```\n````\n```````\n" },
+    { name: "inline run", text: "left````right", lang: "", fenceLength: 5, expected: "`````\nleft````right\n`````\n" },
+    { name: "indented run", text: "    `````", lang: "", fenceLength: 6, expected: "``````\n    `````\n``````\n" },
+    { name: "nonclosing run", text: "```tail", lang: "", fenceLength: 4, expected: "````\n```tail\n````\n" },
+    { name: "tildes", text: "~~~\n~value~\n~~~~", lang: "", fenceLength: 3, expected: "```\n~~~\n~value~\n~~~~\n```\n" },
+    {
+      name: "literal Unicode, backslashes and spaces", text: "  \u{10400}nai\u0308ve\\path ~~~~ ```  \n  end  ", lang: "text", fenceLength: 4,
+      expected: "````text\n  \u{10400}nai\u0308ve\\path ~~~~ ```  \n  end  \n````\n",
+    },
+    { name: "one trailing newline", text: "```\n", lang: "md", fenceLength: 4, expected: "````md\n```\n\n````\n" },
+    { name: "two trailing newlines", text: "````\n\n", lang: "", fenceLength: 5, expected: "`````\n````\n\n\n`````\n" },
+    { name: "empty source", text: "", lang: "", fenceLength: 3, expected: "```\n\n```\n" },
+    { name: "empty source with a language", text: "", lang: "js", fenceLength: 3, expected: "```js\n\n```\n" },
+  ])("wraps $name without changing the body", ({ text, lang, fenceLength, expected }) => {
+    const transactions: Transaction[] = [];
+    withEditor(text, EditorSelection.single(0, text.length), (view) => {
+      expect(insertCodeBlock(view, lang)).toBe(true);
+      const source = view.state.doc.toString();
+      expect(source).toBe(expected);
+      const lines = source.split("\n");
+      expect(lines[0].match(/^`+/)?.[0].length).toBe(fenceLength);
+      expect(lines.at(-2)?.length).toBe(fenceLength);
+      expect(view.state.selection.eq(EditorSelection.single(fenceLength + 1 + lang.length + text.length))).toBe(true);
+      const { doc } = parseMarkdown(source);
+      expect(doc.childCount).toBe(1);
+      expect(doc.child(0).type.name).toBe("code_block");
+      expect(doc.child(0).textContent).toBe(text);
+      expect(doc.child(0).attrs.language).toBe(lang || null);
+      expect(transactions).toHaveLength(1);
+      expect(transactions[0].annotation(Transaction.userEvent)).toBe("input.format");
+      expect(transactions[0].scrollIntoView).toBe(true);
+      expect(transactions[0].docChanged).toBe(true);
+      expect(view.hasFocus).toBe(true);
+    }, [EditorView.updateListener.of((update) => transactions.push(...update.transactions))]);
+  });
+
+  it.each([
+    { name: "forward with a language", anchor: 6, head: 19, lang: "ts", cursor: 29, expected: "Before\n\n`````ts\n```\nbody\n````\n`````\n\nAfter" },
+    { name: "reversed without a language", anchor: 19, head: 6, lang: "", cursor: 27, expected: "Before\n\n`````\n```\nbody\n````\n`````\n\nAfter" },
+  ])("keeps surrounding paragraphs for a $name selection", ({ anchor, head, lang, cursor, expected }) => {
+    withEditor("Before```\nbody\n````After", EditorSelection.single(anchor, head), (view) => {
+      expect(insertCodeBlock(view, lang)).toBe(true);
+      expect(view.state.doc.toString()).toBe(expected);
+      expect(view.state.selection.eq(EditorSelection.single(cursor))).toBe(true);
+      const { doc } = parseMarkdown(view.state.doc.toString());
+      expect(doc.childCount).toBe(3);
+      expect([doc.child(0).type.name, doc.child(0).textContent]).toEqual(["paragraph", "Before"]);
+      expect([doc.child(1).type.name, doc.child(1).textContent, doc.child(1).attrs.language]).toEqual(["code_block", "```\nbody\n````", lang || null]);
+      expect([doc.child(2).type.name, doc.child(2).textContent]).toEqual(["paragraph", "After"]);
+    });
+  });
+
+  it("only wraps the main selection and ignores longer unselected runs", () => {
+    const selection = EditorSelection.create([EditorSelection.range(11, 19), EditorSelection.range(24, 21)], 1);
+    withEditor("unselected ````````\n\n```", selection, (view) => {
+      expect(insertCodeBlock(view, "text")).toBe(true);
+      expect(view.state.doc.toString()).toBe("unselected ````````\n\n````text\n```\n````\n");
+      expect(view.state.selection.eq(EditorSelection.single(33))).toBe(true);
+      const { doc } = parseMarkdown(view.state.doc.toString());
+      expect(doc.childCount).toBe(2);
+      expect([doc.child(0).type.name, doc.child(0).textContent]).toEqual(["paragraph", "unselected ````````"]);
+      expect([doc.child(1).type.name, doc.child(1).textContent, doc.child(1).attrs.language]).toEqual(["code_block", "```", "text"]);
+    }, [EditorState.allowMultipleSelections.of(true)]);
+  });
+
+  it("keeps an empty caret inside the blank body with the default language", () => {
+    withEditor("BeforeAfter", EditorSelection.single(6), (view) => {
+      expect(insertCodeBlock(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe("Before\n\n```\n\n```\n\nAfter");
+      expect(view.state.selection.eq(EditorSelection.single(12))).toBe(true);
+      const { doc } = parseMarkdown(view.state.doc.toString());
+      expect(doc.childCount).toBe(3);
+      expect([doc.child(0).type.name, doc.child(0).textContent]).toEqual(["paragraph", "Before"]);
+      expect([doc.child(1).type.name, doc.child(1).textContent, doc.child(1).attrs.language]).toEqual(["code_block", "", null]);
+      expect([doc.child(2).type.name, doc.child(2).textContent]).toEqual(["paragraph", "After"]);
+    });
+  });
+
+  it("undoes a longer fence and restores the exact reversed selection", () => {
+    const source = "Before```\nbody\n````After";
+    const selection = EditorSelection.single(19, 6);
+    const transactions: Transaction[] = [];
+    withEditor(source, selection, (view) => {
+      expect(insertCodeBlock(view, "ts")).toBe(true);
+      expect(view.state.doc.toString()).toBe("Before\n\n`````ts\n```\nbody\n````\n`````\n\nAfter");
+      expect(view.state.selection.eq(EditorSelection.single(29))).toBe(true);
+      expect(transactions).toHaveLength(1);
+      expect(transactions[0].annotation(Transaction.userEvent)).toBe("input.format");
+      expect(transactions[0].scrollIntoView).toBe(true);
+      expect(view.hasFocus).toBe(true);
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(source);
+      expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+    }, [history(), EditorView.updateListener.of((update) => transactions.push(...update.transactions))]);
+  });
+});
 
 describe("inline selection direction", () => {
   const plain = "pre\n(\u{10400}a\u0308) tail";

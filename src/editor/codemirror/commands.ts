@@ -1,6 +1,7 @@
 import { EditorSelection, type ChangeSpec, type EditorState, type SelectionRange } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
+import { fenceFor } from "../markdown/code-fence";
 
 /**
  * Markdown-aware editing commands for the source pane. They mirror the rich
@@ -227,8 +228,9 @@ export function insertCodeBlock(view: EditorView, lang = ""): boolean {
   const { state } = view;
   const range = state.selection.main;
   const selected = state.sliceDoc(range.from, range.to);
-  const block = "```" + lang + "\n" + (selected || "") + "\n```";
-  return insertBlock(view, block, 4 + lang.length + (selected ? selected.length : 0));
+  const fence = fenceFor(selected);
+  const block = fence + lang + "\n" + selected + "\n" + fence;
+  return insertBlock(view, block, fence.length + 1 + lang.length + selected.length);
 }
 
 /** Names of syntax nodes enclosing the cursor, used to reflect formatting state in the toolbar. */
