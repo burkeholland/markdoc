@@ -1,4 +1,5 @@
 import { clsx, type ClassValue } from "clsx";
+import { splitGraphemes } from "unicode-segmenter/grapheme";
 
 export function cn(...inputs: ClassValue[]) {
   return clsx(inputs);
@@ -48,8 +49,18 @@ export function formatDayHeading(input: string | number | Date): string {
 export function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  const words = parts.length === 1 ? parts : [parts[0], parts[parts.length - 1]];
+  const limit = parts.length === 1 ? 2 : 1;
+  let result = "";
+  // Use pinned Unicode 17.0 / UAX #29 rev. 47 boundaries on both server and client.
+  for (const word of words) {
+    let selected = 0;
+    for (const grapheme of splitGraphemes(word)) {
+      result += grapheme;
+      if (++selected === limit) break;
+    }
+  }
+  return result.toUpperCase();
 }
 
 export function countWords(text: string): number {

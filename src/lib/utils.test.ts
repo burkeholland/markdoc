@@ -1,5 +1,50 @@
-import { describe, expect, it } from "vitest";
-import { findReplaceShortcut, findShortcutAction, type FindShortcutKey } from "./utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { findReplaceShortcut, findShortcutAction, initials, type FindShortcutKey } from "./utils";
+
+describe.each([false, true])("initials (native Segmenter absent=%s)", (nativeAbsent) => {
+  beforeEach(() => {
+    if (nativeAbsent) {
+      vi.stubGlobal("Intl", Object.create(Intl, { Segmenter: { value: undefined } }));
+      expect(Intl.Segmenter).toBeUndefined();
+    }
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ["single letter", "a", "A"],
+    ["single word", "ada", "AD"],
+    ["two words", "Ada Lovelace", "AL"],
+    ["many words", "Grace Brewster Hopper", "GH"],
+    ["whitespace", "  grace\tbrewster\nhopper  ", "GH"],
+    ["ASCII login", "octo-cat", "OC"],
+    ["empty name", "", "?"],
+    ["blank name", " \t\n ", "?"],
+    ["decomposed first", "e\u0301lan Poe", "E\u0301P"],
+    ["decomposed last", "Ada o\u0308rn", "AO\u0308"],
+    ["supplementary first", "\u{10428}da Poe", "\u{10400}P"],
+    ["supplementary last", "Ada \u{10428}oe", "A\u{10400}"],
+    ["emoji first", "\u{1f469}\u200d\u{1f4bb} Ada", "\u{1f469}\u200d\u{1f4bb}A"],
+    ["emoji last", "Ada \u{1f469}\u200d\u{1f4bb}", "A\u{1f469}\u200d\u{1f4bb}"],
+    ["skin tone", "\u{1f44d}\u{1f3fd}", "\u{1f44d}\u{1f3fd}"],
+    ["ZWJ family", "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}\u200d\u{1f466}", "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}\u200d\u{1f466}"],
+    ["flag", "\u{1f1fa}\u{1f1f8}", "\u{1f1fa}\u{1f1f8}"],
+    ["variation selector", "\u2764\ufe0f", "\u2764\ufe0f"],
+    ["two complete clusters", "\u{1f44d}\u{1f3fd}e\u0301x", "\u{1f44d}\u{1f3fd}E\u0301"],
+    ["single-word uppercase expansion", "\u00dfeta", "SSE"],
+    ["multi-word uppercase expansion", "\u00df \u00df", "SSSS"],
+    ["Hangul Jamo", "\u1100\u1161\u11a8 Min", "\u1100\u1161\u11a8M"],
+    ["SpacingMark", "\u0915\u093e Min", "\u0915\u093eM"],
+    ["Prepend", "\u0600A Min", "\u0600AM"],
+    ["Indic conjunct", "\u0915\u094d\u0937 Min", "\u0915\u094d\u0937M"],
+    ["non-emoji ZWJ boundary", "a\u200dbcd", "A\u200dB"],
+  ])("selects %s", (_description, name, expected) => {
+    expect(initials(name)).toBe(expected);
+  });
+});
 
 const press = (overrides: Partial<FindShortcutKey> & Pick<FindShortcutKey, "key">): FindShortcutKey => ({
   code: `Key${overrides.key.toUpperCase()}`,
