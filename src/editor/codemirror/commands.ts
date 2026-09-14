@@ -264,18 +264,26 @@ export function formatStateAt(state: EditorState, range: SelectionRange = state.
   const line = state.doc.lineAt(range.head).text;
   const heading = HEADING_RE.exec(line)?.[2].length ?? 0;
   const bullet = BULLET_RE.exec(line);
+  const codeBlock = names.has("FencedCode") || names.has("CodeBlock");
+  let codeTask = false;
+  if (codeBlock && names.has("ListItem")) {
+    // Lezer's Task is a sibling of the code block, not one of its ancestors.
+    let item = syntaxTree(state).resolveInner(range.head, -1);
+    while (item.parent && item.name !== "ListItem") item = item.parent;
+    codeTask = item.getChild("Task") !== null;
+  }
   return {
     strong: names.has("StrongEmphasis"),
     em: names.has("Emphasis"),
     code: names.has("InlineCode"),
     strike: names.has("Strikethrough"),
     link: names.has("Link") || names.has("URL"),
-    heading,
-    bullet: !!bullet && !bullet[3],
-    task: !!bullet && !!bullet[3],
-    ordered: ORDERED_RE.test(line),
-    quote: QUOTE_RE.test(line),
-    codeBlock: names.has("FencedCode") || names.has("CodeBlock"),
+    heading: codeBlock ? 0 : heading,
+    bullet: codeBlock ? names.has("BulletList") && !codeTask : !!bullet && !bullet[3],
+    task: codeBlock ? codeTask : !!bullet && !!bullet[3],
+    ordered: codeBlock ? names.has("OrderedList") : ORDERED_RE.test(line),
+    quote: codeBlock ? names.has("Blockquote") : QUOTE_RE.test(line),
+    codeBlock,
   };
 }
 
