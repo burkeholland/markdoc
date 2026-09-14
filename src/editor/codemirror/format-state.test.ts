@@ -426,3 +426,156 @@ describe("bare source ATX headings", () => {
     expectFormat(state, { ...plain, heading });
   });
 });
+
+import { parseMarkdown } from "../markdown/parse";
+
+describe("bare source list markers", () => {
+  function ancestry(state: EditorState, head: number) {
+    const tree = ensureSyntaxTree(state, state.doc.length, 1000);
+    expect(tree).not.toBeNull();
+    const names: string[] = [];
+    let node = tree!.resolveInner(head, -1);
+    for (;;) {
+      names.push(node.name);
+      if (!node.parent) break;
+      node = node.parent;
+    }
+    return names;
+  }
+
+  it.each([
+    { marker: "-", ordered: false, attrs: { bullet: "-", tight: true } },
+    { marker: "*", ordered: false, attrs: { bullet: "*", tight: true } },
+    { marker: "+", ordered: false, attrs: { bullet: "+", tight: true } },
+    { marker: "1.", ordered: true, attrs: { start: 1, delimiter: ".", tight: true } },
+    { marker: "2)", ordered: true, attrs: { start: 2, delimiter: ")", tight: true } },
+    { marker: "0.", ordered: true, attrs: { start: 0, delimiter: ".", tight: true } },
+    { marker: "7)", ordered: true, attrs: { start: 7, delimiter: ")", tight: true } },
+    { marker: "1234567.", ordered: true, attrs: { start: 1234567, delimiter: ".", tight: true } },
+    { marker: "123456789)", ordered: true, attrs: { start: 123456789, delimiter: ")", tight: true } },
+  ])("recognizes $marker at line start and end without borrowing the next blank line", ({ marker, ordered, attrs }) => {
+    for (const indent of ["", " ", "  ", "   "]) {
+      for (const newline of ["", "\n"]) {
+        const doc = indent + marker + newline;
+        const end = indent.length + marker.length;
+        const state = parsedState(doc, EditorSelection.single(end));
+        const names = ancestry(state, end);
+        expect(names).toContain("ListItem");
+        expect(names).toContain(ordered ? "OrderedList" : "BulletList");
+        const list = parseMarkdown(doc).doc.child(0);
+        expect(list.type.name).toBe(ordered ? "ordered_list" : "bullet_list");
+        expect(list.attrs).toEqual(attrs);
+        expect(list.childCount).toBe(1);
+        expect(list.child(0).type.name).toBe("list_item");
+        expect(list.child(0).attrs).toEqual({ checked: null });
+        expect(list.child(0).child(0).type.name).toBe("paragraph");
+        expect(list.child(0).child(0).content.size).toBe(0);
+        expectFormat(state, { ...plain, ordered, bullet: !ordered });
+        expectFormat(state, { ...plain, ordered, bullet: !ordered }, EditorSelection.cursor(0));
+        if (newline) expectFormat(state, plain, EditorSelection.cursor(doc.length));
+      }
+    }
+  });
+
+  it.each([
+    { category: "attached words", sources: ["-word", "*word", "+word", "1.word", "2)word"], kind: "paragraph" },
+    { category: "wrong punctuation", sources: ["1:", "2]", "1..", "2))"], kind: "paragraph" },
+    { category: "plain numbers", sources: ["0", "7", "123456789"], kind: "paragraph" },
+    { category: "repeated markers", sources: ["--", "**", "++"], kind: "paragraph" },
+    { category: "escaped markers", sources: ["\\-", "\\*", "\\+", "1\\.", "2\\)"], kind: "paragraph" },
+    { category: "unspaced thematic breaks", sources: ["---", "***", "___"], kind: "horizontal_rule" },
+  ])("does not recognize only part of $category", ({ sources, kind }) => {
+    for (const doc of sources) {
+      const state = parsedState(doc, EditorSelection.single(doc.length));
+      expect(parseMarkdown(doc).doc.child(0).type.name).toBe(kind);
+      expect(ancestry(state, doc.length)).not.toContain("ListItem");
+      expectFormat(state, plain);
+      expectFormat(state, plain, EditorSelection.cursor(0));
+    }
+  });
+
+  it("keeps spaced thematic-break and repeated-marker parser results distinct from lexical state", () => {
+    for (const { doc, parsed, context } of [
+      { doc: "- - -", parsed: "horizontal_rule", context: "HorizontalRule" },
+      { doc: "* * *", parsed: "horizontal_rule", context: "HorizontalRule" },
+      { doc: "+ +", parsed: "bullet_list", context: "ListItem" },
+    ]) {
+      const state = parsedState(doc, EditorSelection.single(doc.length));
+      expect(parseMarkdown(doc).doc.child(0).type.name).toBe(parsed);
+      expect(ancestry(state, doc.length)).toContain(context);
+      expectFormat(state, { ...plain, bullet: true });
+    }
+  });
+
+  it("preserves nonempty space, tab and checked-task controls", () => {
+    for (const { doc, expected, checked } of [
+      { doc: "- text", expected: { ...plain, bullet: true }, checked: null },
+      { doc: "*\ttext", expected: { ...plain, bullet: true }, checked: null },
+      { doc: "2)\ttext", expected: { ...plain, ordered: true }, checked: null },
+      { doc: "- [ ] text", expected: { ...plain, task: true }, checked: false },
+      { doc: "+ [x]\ttext", expected: { ...plain, task: true }, checked: true },
+      { doc: "* [X] text", expected: { ...plain, task: true }, checked: true },
+    ]) {
+      const state = parsedState(doc, EditorSelection.single(doc.length));
+      expect(ancestry(state, doc.length)).toContain("ListItem");
+      expect(parseMarkdown(doc).doc.child(0).child(0).attrs).toEqual({ checked });
+      expectFormat(state, expected);
+      expectFormat(state, expected, EditorSelection.cursor(0));
+    }
+  });
+
+  it("does not expand the checkbox suffix's separate whitespace requirement", () => {
+    for (const doc of ["- [ ]", "* [x]", "+ [X]"]) {
+      const state = parsedState(doc, EditorSelection.single(doc.length));
+      expect(ancestry(state, doc.length)).toContain("ListItem");
+      expectFormat(state, { ...plain, bullet: true, link: !doc.includes("[ ]") });
+      expect(parseMarkdown(doc).doc.child(0).child(0).attrs).toEqual({ checked: !doc.includes("[ ]") });
+    }
+    const state = parsedState("- [ ] ", EditorSelection.single(6));
+    expectFormat(state, { ...plain, task: true });
+    expect(parseMarkdown("- [ ] ").doc.child(0).child(0).attrs).toEqual({ checked: false });
+  });
+
+  it("preserves arbitrary lexical number lengths and leading zeros without claiming parser parity", () => {
+    for (const { doc, kind } of [
+      { doc: "0007)", kind: "ordered_list" },
+      { doc: "1234567890.", kind: "paragraph" },
+    ]) {
+      const state = parsedState(doc, EditorSelection.single(doc.length));
+      expectFormat(state, { ...plain, ordered: true });
+      expect(parseMarkdown(doc).doc.child(0).type.name).toBe(kind);
+    }
+  });
+
+  it.each(["forward", "reverse"] as const)("uses the %s selection head rather than aggregating list lines", (direction) => {
+    const doc = "-\n\n7)\n\nplain";
+    const selection = direction === "forward" ? EditorSelection.single(1, 5) : EditorSelection.single(5, 1);
+    const state = parsedState(doc, selection);
+    expectFormat(state, { ...plain, bullet: direction === "reverse", ordered: direction === "forward" });
+    expectFormat(state, plain, EditorSelection.cursor(doc.length));
+  });
+
+  it("uses the nonzero main range by default and honors an explicit alternate range", () => {
+    const doc = "-\n\n7)\n\nplain";
+    const selection = EditorSelection.create([
+      EditorSelection.cursor(1), EditorSelection.cursor(5), EditorSelection.cursor(doc.length),
+    ], 1);
+    const state = parsedState(doc, selection);
+    expect(state.selection.mainIndex).toBe(1);
+    expectFormat(state, { ...plain, ordered: true });
+    expectFormat(state, { ...plain, bullet: true }, state.selection.ranges[0]);
+    expectFormat(state, plain, state.selection.ranges[2]);
+  });
+
+  it.each(["FencedCode", "CodeBlock"] as const)("keeps actual top-level %s marker-shaped contents as code", (kind) => {
+    for (const marker of ["-", "*", "+", "1.", "2)", "123456789)"]) {
+      const doc = kind === "FencedCode" ? "```\n" + marker + "\n```" : "    " + marker;
+      const head = 4 + marker.length;
+      const state = parsedState(doc, EditorSelection.single(head));
+      expectCodeContext(state, kind);
+      expect(ancestry(state, head)).not.toContain("ListItem");
+      expect(parseMarkdown(doc).doc.child(0).type.name).toBe("code_block");
+      expectFormat(state, codeBlock);
+    }
+  });
+});

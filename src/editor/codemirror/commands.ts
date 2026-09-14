@@ -181,8 +181,8 @@ export function setHeading(level: number) {
   };
 }
 
-const BULLET_RE = /^(\s*)([-*+])\s+(\[[ xX]\]\s+)?/;
-const ORDERED_RE = /^(\s*)(\d+)[.)]\s+(\[[ xX]\]\s+)?/;
+const BULLET_RE = /^(\s*)([-*+])(?:\s+|$)(\[[ xX]\]\s+)?/;
+const ORDERED_RE = /^(\s*)(\d+)[.)](?:\s+|$)(\[[ xX]\]\s+)?/;
 const QUOTE_RE = /^(\s*)>\s?/;
 
 export type LinePrefixKind = "bullet" | "ordered" | "task" | "quote";

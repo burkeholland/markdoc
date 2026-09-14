@@ -2170,3 +2170,224 @@ describe("bare source ATX headings", () => {
     });
   });
 });
+
+describe("bare source list markers", () => {
+      const language = markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false });
+
+      function expectList(source: string, kind: "bullet" | "ordered", attrs: Record<string, unknown>, text = "", checked: boolean | null = null) {
+        const { doc } = parseMarkdown(source);
+        expect(doc.childCount).toBe(1);
+        const list = doc.child(0);
+        expect(list.type.name).toBe(kind === "bullet" ? "bullet_list" : "ordered_list");
+        expect(list.attrs).toEqual(attrs);
+        expect(list.childCount).toBe(1);
+        const item = list.child(0);
+        expect(item.type.name).toBe("list_item");
+        expect(item.attrs).toEqual({ checked });
+        expect(item.childCount).toBe(1);
+        expect(item.child(0).type.name).toBe("paragraph");
+        expect(item.textContent).toBe(text);
+        if (!text) expect(item.child(0).content.size).toBe(0);
+      }
+
+      function edits({
+        source, selection, kind, expected, mapped, before, after,
+      }: {
+        source: string;
+        selection: EditorSelection;
+        kind: LinePrefixKind;
+        expected: string;
+        mapped?: EditorSelection;
+        before?: (view: EditorView) => void;
+        after?: (view: EditorView) => void;
+      }) {
+        const transactions: Transaction[] = [];
+        withEditor(source, selection, (view) => {
+          expect(ensureSyntaxTree(view.state, view.state.doc.length, 1000)).not.toBeNull();
+          before?.(view);
+          const focus = vi.spyOn(view, "focus");
+          try {
+            expect(toggleLinePrefix(kind)(view)).toBe(true);
+            expect(view.state.doc.toString()).toBe(expected);
+            expect(transactions).toHaveLength(1);
+            const transaction = transactions[0];
+            expect(transaction.docChanged).toBe(true);
+            expect(transaction.annotation(Transaction.userEvent)).toBe("input.format");
+            expect(transaction.scrollIntoView).toBe(true);
+            expect(view.state.selection.toJSON()).toEqual(selection.map(transaction.changes).toJSON());
+            if (mapped) expect(view.state.selection.toJSON()).toEqual(mapped.toJSON());
+            expect(view.state.selection.mainIndex).toBe(selection.mainIndex);
+            expect(focus).toHaveBeenCalledTimes(1);
+            expect(view.hasFocus).toBe(true);
+            expect(ensureSyntaxTree(view.state, view.state.doc.length, 1000)).not.toBeNull();
+            expect(parseMarkdown(view.state.doc.toString()).doc.toJSON()).toEqual(parseMarkdown(expected).doc.toJSON());
+            after?.(view);
+            expect(undo(view)).toBe(true);
+            expect(view.state.doc.toString()).toBe(source);
+            expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+            expect(undo(view)).toBe(false);
+          } finally {
+            focus.mockRestore();
+          }
+        }, [
+          language, history(), EditorState.allowMultipleSelections.of(true),
+          EditorView.updateListener.of((update) => transactions.push(...update.transactions)),
+        ]);
+      }
+
+      it.each([
+        { marker: "-", kind: "bullet" as const, attrs: { bullet: "-", tight: true } },
+        { marker: "*", kind: "bullet" as const, attrs: { bullet: "*", tight: true } },
+        { marker: "+", kind: "bullet" as const, attrs: { bullet: "+", tight: true } },
+        { marker: "1.", kind: "ordered" as const, attrs: { start: 1, delimiter: ".", tight: true } },
+        { marker: "2)", kind: "ordered" as const, attrs: { start: 2, delimiter: ")", tight: true } },
+        { marker: "0.", kind: "ordered" as const, attrs: { start: 0, delimiter: ".", tight: true } },
+        { marker: "7)", kind: "ordered" as const, attrs: { start: 7, delimiter: ")", tight: true } },
+        { marker: "1234567.", kind: "ordered" as const, attrs: { start: 1234567, delimiter: ".", tight: true } },
+        { marker: "123456789)", kind: "ordered" as const, attrs: { start: 123456789, delimiter: ")", tight: true } },
+      ])("clears an empty $kind marker $marker without clearing indentation", ({ marker, kind, attrs }) => {
+        for (const indent of ["", " ", "  ", "   "]) {
+          for (const newline of ["", "\n"]) {
+            const source = indent + marker + newline;
+            const end = indent.length + marker.length;
+            edits({
+              source, selection: EditorSelection.single(end), kind, expected: indent + newline,
+              mapped: EditorSelection.single(indent.length),
+              before: (view) => {
+                expectList(source, kind, attrs);
+                const names: string[] = [];
+                let node = ensureSyntaxTree(view.state, source.length, 1000)!.resolveInner(end, -1);
+                for (;;) {
+                  names.push(node.name);
+                  if (!node.parent) break;
+                  node = node.parent;
+                }
+                expect(names).toContain("ListItem");
+                expect(names).toContain(kind === "bullet" ? "BulletList" : "OrderedList");
+              },
+              after: (view) => {
+                expect(parseMarkdown(view.state.doc.toString()).doc.toJSON()).toEqual(parseMarkdown("").doc.toJSON());
+              },
+            });
+          }
+        }
+      });
+
+      it.each([
+        { source: " *", kind: "ordered" as const, expected: " 1. ", beforeKind: "bullet_list", afterKind: "ordered_list" },
+        { source: " 2)", kind: "bullet" as const, expected: " - ", beforeKind: "ordered_list", afterKind: "bullet_list" },
+        { source: "+", kind: "task" as const, expected: "- [ ] ", beforeKind: "bullet_list", afterKind: "bullet_list" },
+        { source: "7.", kind: "task" as const, expected: "- [ ] ", beforeKind: "ordered_list", afterKind: "bullet_list" },
+        { source: "  -", kind: "quote" as const, expected: "  > ", beforeKind: "bullet_list", afterKind: "blockquote" },
+        { source: "0)", kind: "quote" as const, expected: "> ", beforeKind: "ordered_list", afterKind: "blockquote" },
+        { source: "- [x] done", kind: "bullet" as const, expected: "- done", beforeKind: "bullet_list", afterKind: "bullet_list" },
+        { source: "+ [ ] work", kind: "ordered" as const, expected: "1. work", beforeKind: "bullet_list", afterKind: "ordered_list" },
+        { source: "* [X] done", kind: "quote" as const, expected: "> done", beforeKind: "bullet_list", afterKind: "blockquote" },
+        { source: "> ", kind: "bullet" as const, expected: "- ", beforeKind: "blockquote", afterKind: "bullet_list" },
+        { source: "> text", kind: "ordered" as const, expected: "1. text", beforeKind: "blockquote", afterKind: "ordered_list" },
+        { source: "- [ ] work", kind: "task" as const, expected: "work", beforeKind: "bullet_list", afterKind: "paragraph" },
+      ])("replaces one complete prefix for $kind from $source", ({ source, kind, expected, beforeKind, afterKind }) => {
+        edits({
+          source, selection: EditorSelection.single(source.length), kind, expected,
+          mapped: EditorSelection.single(expected.length),
+          before: () => {
+            const block = parseMarkdown(source).doc.child(0);
+            expect(block.type.name).toBe(beforeKind);
+            if (source.includes("[x]") || source.includes("[X]")) expect(block.child(0).attrs.checked).toBe(true);
+            if (source.includes("[ ]")) expect(block.child(0).attrs.checked).toBe(false);
+          },
+          after: () => {
+            const block = parseMarkdown(expected).doc.child(0);
+            expect(block.type.name).toBe(afterKind);
+            if (afterKind === "ordered_list") {
+              expectList(expected, "ordered", { start: 1, delimiter: ".", tight: true }, block.textContent);
+            } else if (afterKind === "bullet_list") {
+              expectList(expected, "bullet", { bullet: "-", tight: true }, kind === "task" ? "" : block.textContent, kind === "task" ? false : null);
+            }
+          },
+        });
+      });
+
+      it.each(["forward", "reverse"] as const)("numbers mixed selected lines once with a %s exclusive endpoint", (direction) => {
+        const source = "before\n\n-\n+ text\n2)\nuntouched\n\nafter";
+        const expected = "before\n\n1. \n2. text\n3. \nuntouched\n\nafter";
+        const start = source.indexOf("-");
+        const end = source.indexOf("untouched");
+        const selection = direction === "forward" ? EditorSelection.single(start, end) : EditorSelection.single(end, start);
+        const mappedEnd = expected.indexOf("untouched");
+        edits({
+          source, selection, kind: "ordered", expected,
+          mapped: direction === "forward" ? EditorSelection.single(start, mappedEnd) : EditorSelection.single(mappedEnd, start),
+          after: (view) => {
+            const { doc } = parseMarkdown(view.state.doc.toString());
+            expect(doc.child(0).textContent).toBe("before");
+            expect(doc.lastChild?.textContent).toBe("after");
+            expect(doc.child(1).type.name).toBe("ordered_list");
+            expect(doc.child(1).attrs).toEqual({ start: 1, delimiter: ".", tight: true });
+            expect(doc.child(1).childCount).toBe(3);
+          },
+        });
+      });
+
+      it("deduplicates overlapping selected lines with a nonzero main range", () => {
+        const source = "- text\n\n+\n\n2)\n\nkeep";
+        const expected = "> text\n\n> \n\n> \n\nkeep";
+        const selection = EditorSelection.create([
+          EditorSelection.range(2, 3), EditorSelection.range(5, 6),
+          EditorSelection.cursor(9), EditorSelection.range(13, 11),
+        ], 2);
+        edits({
+          source, selection, kind: "quote", expected,
+          mapped: EditorSelection.create([
+            EditorSelection.range(2, 3), EditorSelection.range(5, 6),
+            EditorSelection.cursor(10), EditorSelection.range(14, 12),
+          ], 2),
+        });
+      });
+
+      it.each([
+        { category: "attached text", sources: ["-word", "*word", "+word", "1.word", "2)word"], kind: "paragraph" },
+        { category: "wrong punctuation", sources: ["1:", "2]", "1..", "2))"], kind: "paragraph" },
+        { category: "plain numbers", sources: ["0", "7", "123456789"], kind: "paragraph" },
+        { category: "repeated markers", sources: ["--", "**", "++"], kind: "paragraph" },
+        { category: "escaped markers", sources: ["\\-", "\\*", "\\+", "1\\.", "2\\)"], kind: "paragraph" },
+        { category: "unspaced thematic breaks", sources: ["---", "***", "___"], kind: "horizontal_rule" },
+      ])("preserves the inherited lexical treatment of $category", ({ sources, kind }) => {
+        for (const source of sources) {
+          edits({
+            source, selection: EditorSelection.single(source.length), kind: "bullet", expected: "- " + source,
+            before: () => expect(parseMarkdown(source).doc.child(0).type.name).toBe(kind),
+          });
+        }
+      });
+
+      it("keeps lexical stripping distinct from parser thematic-break and nested-list recognition", () => {
+        for (const { source, expected, block } of [
+          { source: "- - -", expected: "- -", block: "horizontal_rule" },
+          { source: "* * *", expected: "* *", block: "horizontal_rule" },
+          { source: "+ +", expected: "+", block: "bullet_list" },
+        ]) {
+          edits({
+            source, selection: EditorSelection.single(source.length), kind: "bullet", expected,
+            before: () => expect(parseMarkdown(source).doc.child(0).type.name).toBe(block),
+          });
+        }
+      });
+
+      it("retains whitespace, bare-checkbox, leading-zero and broad numeric/indent policies", () => {
+        for (const { source, kind, expected } of [
+          { source: "- text", kind: "bullet" as const, expected: "text" },
+          { source: "+\ttext", kind: "bullet" as const, expected: "text" },
+          { source: "2)\ttext", kind: "ordered" as const, expected: "text" },
+          { source: "- [x]\ttext", kind: "task" as const, expected: "text" },
+          { source: "- [ ]", kind: "bullet" as const, expected: "[ ]" },
+          { source: "- [x]", kind: "task" as const, expected: "- [ ] [x]" },
+          { source: "0007)", kind: "ordered" as const, expected: "" },
+          { source: "1234567890.", kind: "ordered" as const, expected: "" },
+          { source: "\t-", kind: "bullet" as const, expected: "\t" },
+          { source: "    7)", kind: "ordered" as const, expected: "    " },
+        ]) {
+          edits({ source, selection: EditorSelection.single(source.length), kind, expected });
+        }
+      });
+    });
