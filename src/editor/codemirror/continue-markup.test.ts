@@ -1,49 +1,52 @@
-import { describe, expect, it, vi } from "vitest";
-import { EditorSelection, EditorState, type StateCommand } from "@codemirror/state";
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { EditorSelection, EditorState } from "@codemirror/state";
+import { EditorView, keymap, runScopeHandlers } from "@codemirror/view";
+import { defaultKeymap } from "@codemirror/commands";
+import { closeBracketsKeymap } from "@codemirror/autocomplete";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { languages } from "@codemirror/language-data";
-import { exitOrContinueMarkup, isolatedMarkdownBackspace, markdownEditingKeymap } from "./continue-markup";
+import { createMarkdownEditingKeymap, exitOrContinueMarkup } from "./continue-markup";
 
-// Same markdown configuration as setup.ts, minus the view/collab pieces that need a DOM.
-const extensions = [markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false }), markdownEditingKeymap];
+const extensions = [markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false })];
+const views: EditorView[] = [];
+
+afterEach(() => {
+  for (const view of views) view.destroy();
+  views.length = 0;
+});
 
 function editor(
   doc: string,
-  selection: number | { anchor: number; head: number } = doc.length,
+  selection: number | { anchor: number; head: number } | EditorSelection = doc.length,
   beforeBackspace: () => void = () => {},
 ) {
-  let state = EditorState.create({
-    doc,
-    selection: typeof selection === "number" ? { anchor: selection } : selection,
-    extensions,
+  const view = new EditorView({
+    state: EditorState.create({
+      doc,
+      selection: typeof selection === "number" ? { anchor: selection } : selection,
+      extensions: [
+        extensions,
+        createMarkdownEditingKeymap(beforeBackspace),
+        keymap.of([...closeBracketsKeymap, ...defaultKeymap]),
+        EditorState.allowMultipleSelections.of(true),
+      ],
+    }),
+    parent: document.body,
   });
-  const markdownBackspace = isolatedMarkdownBackspace(beforeBackspace);
-  const run = (command: StateCommand) =>
-    command({
-      state,
-      dispatch: (tr) => {
-        state = tr.state;
-      },
-    });
+  views.push(view);
   return {
-    enter: () => run(exitOrContinueMarkup),
-    backspace: () => {
-      if (run(markdownBackspace)) return true;
-      const range = state.selection.main;
-      if (range.empty && range.head === 0) return false;
-      const from = range.empty ? range.head - 1 : range.from;
-      state = state.update({
-        changes: { from, to: range.to },
-        selection: EditorSelection.cursor(from),
-        userEvent: "delete.backward",
-      }).state;
-      return true;
-    },
+    enter: () => exitOrContinueMarkup(view),
+    // Use setup.ts's Backspace chain, including default indentation and selection handling.
+    backspace: () => runScopeHandlers(view, new KeyboardEvent("keydown", { key: "Backspace" }), "editor"),
     get doc() {
-      return state.doc.toString();
+      return view.state.doc.toString();
     },
     get cursor() {
-      return state.selection.main.head;
+      return view.state.selection.main.head;
+    },
+    get selection() {
+      return view.state.selection;
     },
   };
 }
@@ -59,6 +62,72 @@ describe("exitOrContinueMarkup", () => {
   });
 
   describe("list Backspace", () => {
+    it("deletes a whole fallback indentation unit without losing text", () => {
+      const beforeBackspace = vi.fn();
+      const doc = "Paragraph above.\n\n  second bullet text";
+      const ed = editor(doc, doc.indexOf("second bullet text"), beforeBackspace);
+
+      expect(ed.backspace()).toBe(true);
+      expect(ed.doc).toBe("Paragraph above.\n\nsecond bullet text");
+      expect(ed.cursor).toBe(ed.doc.indexOf("second bullet text"));
+      expect(beforeBackspace).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the real fallback steps from an odd indentation column through joining", () => {
+      const beforeBackspace = vi.fn();
+      const doc = "first bullet text\n   second bullet text";
+      const ed = editor(doc, doc.indexOf("second bullet text"), beforeBackspace);
+
+      expect(ed.backspace()).toBe(true);
+      expect(ed.doc).toBe("first bullet text\n  second bullet text");
+      expect(ed.cursor).toBe(ed.doc.indexOf("second bullet text"));
+      expect(beforeBackspace).toHaveBeenCalledTimes(1);
+      expect(ed.backspace()).toBe(true);
+      expect(ed.doc).toBe("first bullet text\nsecond bullet text");
+      expect(ed.cursor).toBe(ed.doc.indexOf("second bullet text"));
+      expect(beforeBackspace).toHaveBeenCalledTimes(2);
+      expect(ed.backspace()).toBe(true);
+      expect(ed.doc).toBe("first bullet textsecond bullet text");
+      expect(ed.cursor).toBe("first bullet text".length);
+      expect(beforeBackspace).toHaveBeenCalledTimes(3);
+    });
+
+    it("applies fallback deletion at every cursor with one undo boundary", () => {
+      const beforeBackspace = vi.fn();
+      const ed = editor(
+        "abc\nxyz",
+        EditorSelection.create([EditorSelection.cursor(3), EditorSelection.cursor(7)], 1),
+        beforeBackspace,
+      );
+
+      expect(ed.backspace()).toBe(true);
+      expect(ed.doc).toBe("ab\nxy");
+      expect(ed.selection.ranges.map(({ anchor, head }) => ({ anchor, head }))).toEqual([
+        { anchor: 2, head: 2 },
+        { anchor: 5, head: 5 },
+      ]);
+      expect(ed.selection.mainIndex).toBe(1);
+      expect(beforeBackspace).toHaveBeenCalledTimes(1);
+    });
+
+    it("deletes a reversed selection and a character at another cursor in the same keypress", () => {
+      const beforeBackspace = vi.fn();
+      const ed = editor(
+        "abc\nxyz",
+        EditorSelection.create([EditorSelection.range(3, 1), EditorSelection.cursor(7)], 1),
+        beforeBackspace,
+      );
+
+      expect(ed.backspace()).toBe(true);
+      expect(ed.doc).toBe("a\nxy");
+      expect(ed.selection.ranges.map(({ anchor, head }) => ({ anchor, head }))).toEqual([
+        { anchor: 1, head: 1 },
+        { anchor: 4, head: 4 },
+      ]);
+      expect(ed.selection.mainIndex).toBe(1);
+      expect(beforeBackspace).toHaveBeenCalledTimes(1);
+    });
+
     for (const [name, firstMarker, secondMarker, markerPattern] of [
       ["bullet", "- ", "- ", /^- /gm],
       ["ordered", "1. ", "2. ", /^\d+\. /gm],
@@ -98,17 +167,23 @@ describe("exitOrContinueMarkup", () => {
       });
 
       it(`${name}: a later item joins the preceding item without losing either text`, () => {
-        const ed = editor(initial, initial.indexOf("second bullet text"));
+        const beforeBackspace = vi.fn();
+        const ed = editor(initial, initial.indexOf("second bullet text"), beforeBackspace);
         ed.backspace();
+        expect(beforeBackspace).toHaveBeenCalledTimes(1);
         expect((ed.doc.match(markerPattern) ?? []).length).toBe(1);
         expect(ed.doc.match(/first bullet text/g)).toHaveLength(1);
         expect(ed.doc.match(/second bullet text/g)).toHaveLength(1);
         ed.backspace();
+        expect(beforeBackspace).toHaveBeenCalledTimes(2);
         expect((ed.doc.match(markerPattern) ?? []).length).toBe(1);
         expect(ed.doc).toContain("\nsecond bullet text");
         ed.backspace();
+        expect(beforeBackspace).toHaveBeenCalledTimes(3);
         expect(ed.doc).toContain(`${firstMarker}first bullet textsecond bullet text`);
         expect((ed.doc.match(markerPattern) ?? []).length).toBe(1);
+        expect(ed.doc.match(/first bullet text/g)).toHaveLength(1);
+        expect(ed.doc.match(/second bullet text/g)).toHaveLength(1);
       });
 
       it(`${name}: an empty first or second item loses its marker once`, () => {
