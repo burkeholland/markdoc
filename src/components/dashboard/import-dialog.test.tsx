@@ -446,6 +446,23 @@ function resultItems(retry: () => void): ImportItem[] {
   ];
 }
 
+function expectImportError(row: HTMLElement, error: string) {
+  const messages = row.querySelectorAll("div.text-red-600");
+  expect(messages).toHaveLength(1);
+  const message = messages[0];
+  expect(message.tagName).toBe("DIV");
+  expect(Array.from(message.attributes, ({ name, value }) => [name, value])).toEqual([
+    ["class", "mt-0.5 text-xs text-red-600 wrap-anywhere"],
+  ]);
+  expect(message.textContent).toBe(error);
+  expect(message.childNodes).toHaveLength(1);
+  expect(message.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+  expect(message.childElementCount).toBe(0);
+  expect(message.parentElement).toBe(row.children[1]);
+  expect(message.previousElementSibling).toBe(row.children[1].firstElementChild);
+  return message;
+}
+
 function StatefulResultDialog({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
   const [open, setOpen] = useState(true);
   return (
@@ -878,7 +895,7 @@ describe("ImportDialog result hover labels", () => {
       initial.resolve({
         documents: [{ id: "first", title: "First imported", warnings: ["First warning"] }],
         failed: [
-          { index: 1, name: second.name, error: "Second failed" },
+          { index: 1, name: second.name, error: "s".repeat(300) },
           { index: 2, name: third.name, error: "Third failed" },
         ],
       });
@@ -889,7 +906,11 @@ describe("ImportDialog result hover labels", () => {
     expectLabels(rows[2], third.name);
     expect(within(rows[0]).getByTestId("import-warning").textContent).toBe(" First warning");
     expect(within(rows[1]).getByLabelText("Failed")).toHaveClass("text-red-600");
-    expect(within(rows[1]).getByText("Second failed").className).toBe("mt-0.5 text-xs text-red-600");
+    const secondError = expectImportError(rows[1], "s".repeat(300));
+    expectImportError(rows[2], "Third failed");
+    const firstHtml = rows[0].outerHTML;
+    const thirdDetails = rows[2].children[1].outerHTML;
+    const retiredRetry = captureResultRowRetry();
     expect(onDone).toHaveBeenCalledOnce();
     const retry = within(rows[1]).getByRole("button", { name: "Retry second.md" });
     expect(retry.className).toBe("btn btn-sm btn-outline shrink-0");
@@ -899,6 +920,12 @@ describe("ImportDialog result hover labels", () => {
     expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [second], []);
     expectLabels(screen.getAllByTestId("import-item")[1], second.name);
     expect(screen.getAllByTestId("import-item")[1]).toHaveAttribute("data-status", "uploading");
+    expect(secondError).not.toBeInTheDocument();
+    expect(rows[1].querySelector("div.text-red-600")).toBeNull();
+    expect(rows[0].outerHTML).toBe(firstHtml);
+    expect(rows[2].children[1].outerHTML).toBe(thirdDetails);
+    expect(screen.getByTestId("import-retry")).toBeDisabled();
+    expect(within(rows[2]).getByTestId("import-row-retry")).toBeDisabled();
     await act(async () => {
       rowRetry.resolve({
         documents: [{ id: "second", title: "Second recovered", warnings: [] }],
@@ -909,6 +936,12 @@ describe("ImportDialog result hover labels", () => {
     expectLabels(afterRowRetry[0], "First imported", first.name);
     expectLabels(afterRowRetry[1], "Second recovered", second.name);
     expectLabels(afterRowRetry[2], third.name);
+    expect(afterRowRetry[1]).toBe(rows[1]);
+    expect(afterRowRetry[1].querySelector("div.text-red-600")).toBeNull();
+    expect(afterRowRetry[0].outerHTML).toBe(firstHtml);
+    expect(afterRowRetry[2].children[1].outerHTML).toBe(thirdDetails);
+    invokeResultControl(retiredRetry);
+    expect(uploadImportBatch).toHaveBeenCalledTimes(2);
     expect(onDone).toHaveBeenCalledTimes(2);
     const retryAll = screen.getByRole("button", { name: "Retry failed" });
     expect(retryAll.className).toBe("btn btn-sm btn-outline mt-4");
@@ -937,6 +970,231 @@ describe("ImportDialog result hover labels", () => {
     expect(onDone).toHaveBeenCalledTimes(3);
     expect(onError).not.toHaveBeenCalled();
     expect(uploadImportBatch).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("ImportDialog failed-import reason wrapping", () => {
+  it.each([
+    { kind: "unbroken", error: "e".repeat(300) },
+    { kind: "ordinary", error: "The document could not be imported. Please try again." },
+    { kind: "literal HTML, quotes, and whitespace", error: ' \t<img src="x"><b>failed</b> & "quoted" \'reason\'\n  ' },
+  ])("keeps $kind reasons in the existing rows without changing surrounding content", ({ kind, error }) => {
+    if (kind === "unbroken") {
+      expect(error.length).toBeGreaterThanOrEqual(240);
+      expect(error).not.toMatch(/\s/);
+    }
+    const retry = vi.fn();
+    const otherRetry = vi.fn();
+    const retryAll = vi.fn();
+    const onOpenChange = vi.fn();
+    const [success, failed] = resultItems(retry);
+    const items: ImportItem[] = [
+      success,
+      { ...failed, title: "Failed document", error, warnings: ["Kept warning"], retryAll },
+      { name: "third.md", status: "error", error: "Another failure", warnings: [], retry: otherRetry, retryAll },
+    ];
+    const footer = <p data-testid="reason-footer">Unchanged footer</p>;
+    render(<ImportDialog open onOpenChange={onOpenChange} items={items} ignored={["skipped.pdf"]} footer={footer} />);
+    const rows = screen.getAllByTestId("import-item");
+    expect(rows.map((row) => row.dataset.status)).toEqual(["done", "error", "error"]);
+    expect(screen.getByTestId("import-list").children).toHaveLength(3);
+    expect(rows[1].tagName).toBe("LI");
+    expect(Array.from(rows[1].attributes, ({ name, value }) => [name, value])).toEqual([
+      ["class", "import-item"], ["data-testid", "import-item"], ["data-status", "error"],
+    ]);
+    expect(Array.from(rows[1].children, (child) => child.tagName.toLowerCase())).toEqual(["svg", "div", "button"]);
+    expect(within(rows[1]).getByLabelText("Failed")).toHaveClass("text-red-600");
+    const details = rows[1].children[1];
+    expect(details.className).toBe("min-w-0 flex-1");
+    expect(details.children).toHaveLength(3);
+    const labels = details.firstElementChild;
+    expect(labels?.className).toBe("flex items-center gap-2");
+    expect(labels?.children).toHaveLength(3);
+    expect(within(rows[1]).getByTitle("Failed document").outerHTML).toBe(
+      '<span class="truncate text-sm text-ink" title="Failed document">Failed document</span>',
+    );
+    expect(within(rows[1]).getByTitle(failed.name).outerHTML).toBe(
+      '<span class="truncate text-xs text-ink-4" title="second.md">second.md</span>',
+    );
+    const message = expectImportError(rows[1], error);
+    expectImportError(rows[2], "Another failure");
+    expect(rows[0].querySelector("div.text-red-600")).toBeNull();
+    const warning = within(rows[1]).getByTestId("import-warning");
+    expect(warning).toBe(message.nextElementSibling);
+    expect(warning.className).toBe("import-warning");
+    expect(warning.textContent).toBe(" Kept warning");
+    expect(warning.children).toHaveLength(1);
+    expect(warning.firstElementChild?.tagName.toLowerCase()).toBe("svg");
+    expect(screen.getAllByTestId("import-warning")).toHaveLength(2);
+    expect(screen.getAllByTestId("import-row-retry")).toHaveLength(2);
+    const rowRetry = within(rows[1]).getByRole("button", { name: "Retry second.md" });
+    expect(rowRetry.className).toBe("btn btn-sm btn-outline shrink-0");
+    expect(rowRetry).toHaveAttribute("type", "button");
+    expect(rowRetry).toBeEnabled();
+    expect(screen.getByTestId("import-retry").className).toBe("btn btn-sm btn-outline mt-4");
+    expect(screen.getByTestId("import-retry")).toBeEnabled();
+    expect(screen.getByTestId("import-dialog").querySelectorAll("button, a, input, textarea, select")).toHaveLength(4);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.getByTestId("import-dialog").querySelectorAll("img, b")).toHaveLength(0);
+    expect(screen.getByTestId("import-ignored").textContent).toBe(
+      "Skipped 1 file that is not Markdown, text, HTML or an image: skipped.pdf",
+    );
+    expect(screen.getByTestId("import-dialog").lastElementChild).toBe(screen.getByTestId("reason-footer"));
+    const open = captureResultOpen();
+    expect(open.element.outerHTML).toBe('<a class="import-open" data-testid="import-open" href="/d/doc-first">Open</a>');
+    expect(invokeResultControl(open).preventDefault).not.toHaveBeenCalled();
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(retry).not.toHaveBeenCalled();
+    expect(otherRetry).not.toHaveBeenCalled();
+    expect(retryAll).not.toHaveBeenCalled();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+  });
+
+  it("updates a same-key reason in place and omits null, undefined, or empty messages", () => {
+    const retry = vi.fn();
+    const onOpenChange = vi.fn();
+    const [success, failed] = resultItems(retry);
+    const renderItems = (item: ImportItem) => (
+      <ImportDialog open onOpenChange={onOpenChange} items={[success, item]} ignored={[]} />
+    );
+    const view = render(renderItems(failed));
+    const [neighbor, row] = screen.getAllByTestId("import-item");
+    const neighborHtml = neighbor.outerHTML;
+    const message = expectImportError(row, "Second failed");
+    const originalShape = row.cloneNode(true);
+    const originalRetry = captureResultRowRetry();
+    for (const error of ["r".repeat(300), ' \n<em title="literal">Different</em> & "quotes"\t ']) {
+      view.rerender(renderItems({ ...failed, error }));
+      expect(screen.getAllByTestId("import-item")[1]).toBe(row);
+      expect(expectImportError(row, error)).toBe(message);
+      if (!(originalShape instanceof HTMLElement)) throw new Error("Expected a cloned import row");
+      const clonedMessage = originalShape.querySelector("div.text-red-600");
+      if (!clonedMessage) throw new Error("Expected a cloned import reason");
+      clonedMessage.textContent = error;
+      expect(row.outerHTML).toBe(originalShape.outerHTML);
+      expect(neighbor.outerHTML).toBe(neighborHtml);
+      invokeResultControl(originalRetry, captureResultRowRetry().element);
+      expect(retry).not.toHaveBeenCalled();
+    }
+    for (const error of [undefined, "", null]) {
+      const item = { ...failed };
+      // Null is a runtime omission case, not an expansion of the typed import contract.
+      Object.defineProperty(item, "error", { value: error });
+      view.rerender(renderItems(item));
+      expect(screen.getAllByTestId("import-item")[1]).toBe(row);
+      expect(row.querySelector("div.text-red-600")).toBeNull();
+      expect(row.children[1].children).toHaveLength(1);
+      expect(row.children).toHaveLength(3);
+      expect(neighbor.outerHTML).toBe(neighborHtml);
+    }
+    view.rerender(renderItems({ ...failed, error: "Current failure" }));
+    expectImportError(row, "Current failure");
+    invokeResultControl(originalRetry, captureResultRowRetry().element);
+    expect(retry).not.toHaveBeenCalled();
+    const current = captureResultRowRetry();
+    invokeResultControl(current);
+    invokeResultControl(current);
+    expect(retry).toHaveBeenCalledOnce();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { mode: "Strict", change: "close" },
+    { mode: "Strict", change: "replacement" },
+    { mode: "ordinary", change: "close" },
+    { mode: "ordinary", change: "replacement" },
+  ])("retires wrapped-row actions across $change in $mode mode without affecting the next row", ({ mode, change }) => {
+    const oldRetry = vi.fn();
+    const nextRetry = vi.fn();
+    const onOpenChange = vi.fn();
+    const [success, failed] = resultItems(oldRetry);
+    const oldItem = { ...failed, error: "o".repeat(300) };
+    const dialog = (open: boolean, item: ImportItem) => {
+      const content = <ImportDialog open={open} onOpenChange={onOpenChange} items={[success, item]} ignored={[]} />;
+      return mode === "Strict" ? <StrictMode>{content}</StrictMode> : content;
+    };
+    const view = render(dialog(true, oldItem));
+    const resultRoot = screen.getByTestId("import-dialog");
+    const dialogElement = screen.getByRole("dialog");
+    const rows = screen.getAllByTestId("import-item");
+    const neighborHtml = rows[0].outerHTML;
+    expectImportError(rows[1], oldItem.error);
+    const retired = captureResultRowRetry();
+    const retiredOpen = captureResultOpen();
+    const nextItem = { ...failed, name: change === "replacement" ? "replacement.md" : failed.name, error: "n".repeat(300), retry: nextRetry };
+    if (change === "close") {
+      view.rerender(dialog(false, oldItem));
+      expect(screen.queryByTestId("import-dialog")).toBeNull();
+      invokeResultControl(retired);
+      expect(oldRetry).not.toHaveBeenCalled();
+    }
+    view.rerender(dialog(true, nextItem));
+    const currentRows = screen.getAllByTestId("import-item");
+    expect(rows[1]).not.toBeInTheDocument();
+    expect(currentRows[0].outerHTML).toBe(neighborHtml);
+    if (change === "replacement") {
+      expect(screen.getByTestId("import-dialog")).toBe(resultRoot);
+      expect(screen.getByRole("dialog")).toBe(dialogElement);
+      expect(currentRows[0]).toBe(rows[0]);
+      expect(captureResultOpen().element).toBe(retiredOpen.element);
+    }
+    expectImportError(currentRows[1], nextItem.error);
+    const current = captureResultRowRetry();
+    invokeResultControl(retiredOpen, captureResultOpen().element);
+    invokeResultControl(retired);
+    invokeResultControl(retired, current.element);
+    expect(oldRetry).not.toHaveBeenCalled();
+    expect(nextRetry).not.toHaveBeenCalled();
+    invokeResultControl(current);
+    invokeResultControl(current);
+    expect(nextRetry).toHaveBeenCalledOnce();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps wrapped-reason pointer activity passive after settled setup", async () => {
+    const retry = vi.fn();
+    const onOpenChange = vi.fn();
+    const items = resultItems(retry);
+    items[1] = { ...items[1], error: "p".repeat(300) };
+    render(<ImportDialog open onOpenChange={onOpenChange} items={items} ignored={[]} />);
+    await act(async () => {});
+    const message = expectImportError(screen.getAllByTestId("import-item")[1], "p".repeat(300));
+    const domBefore = document.body.innerHTML;
+    const activeBefore = document.activeElement;
+    const spies = [
+      vi.spyOn(globalThis, "fetch"),
+      vi.spyOn(HTMLElement.prototype, "focus"),
+      vi.spyOn(globalThis, "setTimeout"),
+      vi.spyOn(globalThis, "setInterval"),
+      vi.spyOn(globalThis, "queueMicrotask"),
+      vi.spyOn(window, "requestAnimationFrame"),
+    ];
+    try {
+      fireEvent.pointerOver(message);
+      fireEvent.pointerMove(message);
+      fireEvent.mouseOver(message);
+      fireEvent.mouseMove(message);
+      fireEvent.mouseOut(message);
+      fireEvent.pointerOut(message);
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+      expect(document.body.innerHTML).toBe(domBefore);
+      expect(document.activeElement).toBe(activeBefore);
+      expect(retry).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(uploadImportBatch).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  it("compiles the installed wrapping utility to overflow-wrap anywhere, not word-break all", async () => {
+    const { compile } = await import("tailwindcss");
+    const { build } = await compile("@tailwind utilities;");
+    const css = build(["wrap-anywhere"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).not.toMatch(/word-break:\s*break-all/);
   });
 });
 
@@ -2602,6 +2860,129 @@ describe("ImportDialog result action keyboard navigation", () => {
 });
 
 describe("ImportDialog result publications", () => {
+  it.each([
+    "complete",
+    "row only",
+    "retry only",
+    "row left detached",
+    "retry left detached",
+    "retained successful row",
+    "retained Open",
+    "retained failed row",
+    "retained Retry",
+    "restored message mutation",
+  ] as const)("requires exact newly placed row replay: %s", (change) => {
+    const onOpenChange = vi.fn();
+    const retainedRetry = vi.fn();
+    const oldRetry = vi.fn();
+    const nextRetry = vi.fn();
+    const retryAll = vi.fn();
+    const [success, failed] = resultItems(retainedRetry);
+    const items: ImportItem[] = [
+      success,
+      { ...failed, retryAll },
+      { ...failed, name: "old.md", error: "o".repeat(300), retry: oldRetry, retryAll },
+    ];
+    const dialog = (results: ImportItem[]) => (
+      <ImportDialog open onOpenChange={onOpenChange} items={results} ignored={[]} />
+    );
+    const view = render(dialog(items));
+    const originalRows = screen.getAllByTestId("import-item");
+    const root = screen.getByTestId("import-dialog");
+    const neighborHtml = originalRows[0].outerHTML;
+    const oldOpen = captureResultOpen();
+    const oldRetainedRetry = captureResultRowRetry(0);
+    const oldReplacedRetry = captureResultRowRetry(1);
+    const oldBatchRetry = captureResultRetry();
+    const retainedReason = "Changed data on the retained row";
+    const replacementReason = "n".repeat(300);
+    const replacement: ImportItem[] = [
+      success,
+      { ...items[1], error: retainedReason },
+      { ...items[2], name: "replacement.md", error: replacementReason, retry: nextRetry },
+    ];
+    view.rerender(dialog(replacement));
+    const rows = screen.getAllByTestId("import-item");
+    const replayOpen = captureResultOpen();
+    const replayRetainedRetry = captureResultRowRetry(0);
+    const replayRetry = captureResultRowRetry(1);
+    const replayBatchRetry = captureResultRetry();
+    expect(screen.getByTestId("import-dialog")).toBe(root);
+    expect(rows[0]).toBe(originalRows[0]);
+    expect(rows[0].outerHTML).toBe(neighborHtml);
+    expect(rows[1]).toBe(originalRows[1]);
+    expect(replayOpen.element).toBe(oldOpen.element);
+    expect(replayRetainedRetry.element).toBe(oldRetainedRetry.element);
+    expect(replayBatchRetry.element).toBe(oldBatchRetry.element);
+    expect(rows[2]).not.toBe(originalRows[2]);
+    expect(originalRows[2]).not.toBeInTheDocument();
+    expect(replayRetry.element).not.toBe(oldReplacedRetry.element);
+    expectImportError(rows[1], retainedReason);
+    const message = expectImportError(rows[2], replacementReason);
+    const rowRef = reactRef(rows[2]);
+    const retryRef = reactRef(replayRetry.element);
+    const markup = root.outerHTML;
+
+    // Ordinary mode lets the captured refs exercise incomplete histories before any successor.
+    act(() => {
+      const unrelated =
+        change === "retained successful row" ? rows[0] :
+        change === "retained Open" ? replayOpen.element :
+        change === "retained failed row" ? rows[1] :
+        change === "retained Retry" ? replayRetainedRetry.element : null;
+      if (unrelated) {
+        // Retained DOM can still point at the previous fiber; its committed props carry the current ref.
+        const unrelatedRef = reactProp<RefCallback<HTMLElement>>(unrelated, "ref");
+        unrelatedRef(null);
+        unrelatedRef(unrelated);
+      }
+      if (change !== "retry only") rowRef(null);
+      if (change !== "row only") retryRef(null);
+      if (change === "restored message mutation") {
+        message.textContent = "Changed";
+        message.textContent = replacementReason;
+      }
+      if (change !== "retry only" && change !== "row left detached") rowRef(rows[2]);
+      if (change !== "row only" && change !== "retry left detached") retryRef(replayRetry.element);
+    });
+    expect(root.outerHTML).toBe(markup);
+    expect(rows[0].outerHTML).toBe(neighborHtml);
+
+    invokeResultControl(oldOpen, replayOpen.element);
+    invokeResultControl(oldRetainedRetry, replayRetainedRetry.element);
+    invokeResultControl(oldReplacedRetry, replayRetry.element);
+    invokeResultControl(oldBatchRetry, replayBatchRetry.element);
+    invokeResultControl(replayOpen);
+    invokeResultControl(replayRetainedRetry);
+    invokeResultControl(replayRetry);
+    invokeResultControl(replayBatchRetry);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(retainedRetry).not.toHaveBeenCalled();
+    expect(oldRetry).not.toHaveBeenCalled();
+    expect(nextRetry).not.toHaveBeenCalled();
+    expect(retryAll).not.toHaveBeenCalled();
+
+    if (change === "complete") {
+      expect(captureResultRowRetry(1).onClick).not.toBe(replayRetry.onClick);
+    } else {
+      expect(captureResultRowRetry(1).onClick).toBe(replayRetry.onClick);
+      // A separate ordinary publication recovers; incomplete replay cannot publish itself.
+      view.rerender(dialog(replacement));
+    }
+    const current = captureResultRowRetry(1);
+    invokeResultControl(replayRetry, current.element);
+    expect(nextRetry).not.toHaveBeenCalled();
+    invokeResultControl(current);
+    invokeResultControl(current);
+    expect(nextRetry).toHaveBeenCalledOnce();
+    expect(retainedRetry).not.toHaveBeenCalled();
+    expect(oldRetry).not.toHaveBeenCalled();
+    expect(retryAll).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+    expect(root.outerHTML).toBe(markup);
+  });
+
   it("binds repeated and crossed row retries to one exact current failed row", () => {
     const firstRetry = vi.fn();
     const secondRetry = vi.fn();
@@ -4050,15 +4431,17 @@ describe("useFileImport - retry ownership", () => {
     const image = new File(["image"], "diagram.png", { type: "image/png" });
     const onDone = vi.fn();
     const onError = vi.fn();
+    const initialReason = "f".repeat(300);
+    const repeatedReason = `Retry unavailable: ${"r".repeat(300)}`;
     uploadImportBatch
       .mockResolvedValueOnce({
         documents: [],
         failed: [
-          { index: 0, name: first.name, error: "First failed" },
+          { index: 0, name: first.name, error: initialReason },
           { index: 1, name: second.name, error: "Second failed" },
         ],
       })
-      .mockRejectedValueOnce(new Error("Retry unavailable"))
+      .mockRejectedValueOnce(new Error(repeatedReason))
       .mockResolvedValueOnce({
         documents: [{ id: "doc-first", title: "First", warnings: [] }],
         failed: [],
@@ -4076,15 +4459,37 @@ describe("useFileImport - retry ownership", () => {
     fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
     await screen.findByRole("button", { name: "Retry first.md" });
     await act(async () => {});
+    const [firstRow, neighbor] = screen.getAllByTestId("import-item");
+    expectImportError(firstRow, initialReason);
+    const neighborDetails = neighbor.children[1].outerHTML;
+    const initialRetry = captureResultRowRetry();
     fireEvent.click(screen.getByRole("button", { name: "Retry first.md" }));
+    expect(firstRow).toHaveAttribute("data-status", "uploading");
+    expect(firstRow.querySelector("div.text-red-600")).toBeNull();
+    expect(neighbor.children[1].outerHTML).toBe(neighborDetails);
+    expect(uploadImportBatch).toHaveBeenCalledTimes(2);
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [first], [image]);
 
-    expect(await screen.findByText("Retry unavailable")).toBeInTheDocument();
+    expect(await screen.findByText(repeatedReason)).toBeInTheDocument();
+    expect(screen.getAllByTestId("import-item")[0]).toBe(firstRow);
+    expectImportError(firstRow, repeatedReason);
+    expect(neighbor.children[1].outerHTML).toBe(neighborDetails);
     expect(screen.getByRole("button", { name: "Retry first.md" })).toBeEnabled();
-    expect(onError).toHaveBeenCalledExactlyOnceWith("Retry unavailable");
+    expect(onError).toHaveBeenCalledExactlyOnceWith(repeatedReason);
     expect(onDone).toHaveBeenCalledTimes(2);
+    const repeatedRetry = captureResultRowRetry();
+    invokeResultControl(initialRetry, repeatedRetry.element);
+    expect(uploadImportBatch).toHaveBeenCalledTimes(2);
 
     fireEvent.click(screen.getByRole("button", { name: "Retry first.md" }));
+    expect(firstRow).toHaveAttribute("data-status", "uploading");
+    expect(firstRow.querySelector("div.text-red-600")).toBeNull();
     await waitFor(() => expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/d/doc-first"));
+    expect(firstRow).toHaveAttribute("data-status", "done");
+    expect(firstRow.querySelector("div.text-red-600")).toBeNull();
+    expect(neighbor.children[1].outerHTML).toBe(neighborDetails);
+    invokeResultControl(repeatedRetry);
+    expect(uploadImportBatch).toHaveBeenCalledTimes(3);
     expect(uploadImportBatch).toHaveBeenNthCalledWith(3, [first], [image]);
     expect(screen.queryByRole("button", { name: "Retry first.md" })).toBeNull();
     expect(screen.getByRole("button", { name: "Retry second.md" })).toBeEnabled();
@@ -4095,6 +4500,7 @@ describe("useFileImport - retry ownership", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry failed" }));
     await waitFor(() => expect(screen.getAllByTestId("import-open")).toHaveLength(2));
     expect(uploadImportBatch).toHaveBeenNthCalledWith(4, [second], [image]);
+    expect(uploadImportBatch).toHaveBeenCalledTimes(4);
     expect(screen.queryByTestId("import-row-retry")).toBeNull();
     expect(screen.queryByRole("button", { name: "Retry failed" })).toBeNull();
     expect(onDone).toHaveBeenCalledTimes(4);

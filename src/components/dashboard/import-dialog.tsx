@@ -2797,6 +2797,9 @@ function createImportResultPublication(
     const publication = runtime.publication;
     const previous = cells.active.current;
     const predecessor = previous ?? cells.successorOf.current;
+    const predecessorRows = new Set<HTMLElement>(
+      predecessor?.rows.map((row) => row.item),
+    );
     const predecessorControls = new Set<HTMLElement>(
       predecessor
         ? [
@@ -2815,6 +2818,7 @@ function createImportResultPublication(
         ? [
             ...publication.rows.flatMap((row) =>
               [
+                ...(!predecessorRows.has(row.item) ? [row.item] : []),
                 ...(row.open && !predecessorControls.has(row.open.element)
                   ? [row.open.element]
                   : []),
@@ -3681,7 +3685,7 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
                       </span>
                       {item.title && item.title !== item.name && <span className="truncate text-xs text-ink-4" title={item.name}>{item.name}</span>}
                     </div>
-                    {item.error && <div className="mt-0.5 text-xs text-red-600">{item.error}</div>}
+                    {item.error && <div className="mt-0.5 text-xs text-red-600 wrap-anywhere">{item.error}</div>}
                     {item.warnings.map((w, j) => (
                       <div key={j} className="import-warning" data-testid="import-warning">
                         <AlertTriangle size={12} /> {w}
