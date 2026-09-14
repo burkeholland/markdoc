@@ -77,7 +77,7 @@ function bindMedia() {
   if (typeof mq.addEventListener === "function") mq.addEventListener("change", onChange);
   else mq.addListener(onChange);
   window.addEventListener("storage", (e) => {
-    if (e.key === THEME_STORAGE_KEY) {
+    if (e.key === THEME_STORAGE_KEY || (e.key === null && e.storageArea !== null && e.storageArea === storage())) {
       applyTheme(readThemePreference());
       emit();
     }
