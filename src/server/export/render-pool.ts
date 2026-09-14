@@ -84,10 +84,20 @@ class RenderPool {
     }
     const job = this.queue.shift()!;
     this.current = job;
-    const worker = this.ensureWorker();
-    this.timer = setTimeout(() => this.fail(job, new RenderTimeoutError(job.timeoutMs), true), job.timeoutMs);
-    const req: WorkerRequest = { id: job.id, markdown: job.markdown, assetBaseUrl: job.assetBaseUrl };
-    worker.postMessage(req);
+    try {
+      const worker = this.ensureWorker();
+      this.timer = setTimeout(() => {
+        if (this.worker !== worker || this.current !== job) return;
+        this.fail(job, new RenderTimeoutError(job.timeoutMs), true);
+        this.pump();
+      }, job.timeoutMs);
+      const req: WorkerRequest = { id: job.id, markdown: job.markdown, assetBaseUrl: job.assetBaseUrl };
+      worker.postMessage(req);
+    } catch (err) {
+      this.fail(job, err instanceof Error ? err : new Error(String(err)), true);
+      // A backlog of setup failures must not recurse or monopolize this event-loop turn.
+      if (this.queue.length) setImmediate(() => this.pump());
+    }
   }
 
   private ensureWorker(): Worker {
@@ -96,6 +106,7 @@ class RenderPool {
     // Never keep the server (or a test runner) alive just because a render thread exists.
     worker.unref();
     worker.on("message", (msg: WorkerResponse) => {
+      if (this.worker !== worker) return;
       const job = this.current;
       if (!job || msg.id !== job.id) return;
       this.finish();
@@ -104,23 +115,28 @@ class RenderPool {
       this.pump();
     });
     worker.on("error", (err) => {
+      if (this.worker !== worker) return;
       const job = this.current;
       this.discardWorker(worker);
       if (job) this.fail(job, err instanceof Error ? err : new Error(String(err)), false);
-      else this.pump();
+      this.pump();
     });
     worker.on("exit", () => {
       if (this.worker !== worker) return;
       const job = this.current;
       this.discardWorker(worker);
       if (job) this.fail(job, new Error("Markdown render worker exited unexpectedly"), false);
+      this.pump();
     });
     this.worker = worker;
     return worker;
   }
 
   private discardWorker(worker: Worker) {
-    if (this.worker === worker) this.worker = null;
+    if (this.worker !== worker) return;
+    this.worker = null;
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
   }
 
   private finish() {
@@ -131,7 +147,7 @@ class RenderPool {
       const worker = this.worker;
       this.idleTimer = setTimeout(() => {
         if (this.worker === worker && !this.current) {
-          this.worker = null;
+          this.discardWorker(worker);
           void worker.terminate();
         }
       }, IDLE_EXIT_MS);
@@ -142,13 +158,10 @@ class RenderPool {
   private fail(job: Job, err: Error, terminate: boolean) {
     if (this.current !== job) return;
     const worker = this.worker;
+    if (terminate && worker) this.discardWorker(worker);
     this.finish();
-    if (terminate && worker) {
-      this.worker = null;
-      void worker.terminate();
-    }
+    if (terminate && worker) void worker.terminate();
     job.reject(err);
-    this.pump();
   }
 }
 
