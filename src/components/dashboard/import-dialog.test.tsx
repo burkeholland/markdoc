@@ -758,7 +758,7 @@ describe("ImportDialog result hover labels", () => {
     expect(row.children[1].className).toBe("min-w-0 flex-1");
     expect(row.children[1].firstElementChild?.className).toBe("flex items-center gap-2");
     const warning = within(row).getByTestId("import-warning");
-    expect(warning.className).toBe("import-warning");
+    expect(warning.className).toBe("import-warning wrap-anywhere");
     expect(warning.textContent).toBe(" Kept warning");
     const open = captureResultOpen();
     expect(open.element.tagName).toBe("A");
@@ -1021,7 +1021,7 @@ describe("ImportDialog failed-import reason wrapping", () => {
     expect(rows[0].querySelector("div.text-red-600")).toBeNull();
     const warning = within(rows[1]).getByTestId("import-warning");
     expect(warning).toBe(message.nextElementSibling);
-    expect(warning.className).toBe("import-warning");
+    expect(warning.className).toBe("import-warning wrap-anywhere");
     expect(warning.textContent).toBe(" Kept warning");
     expect(warning.children).toHaveLength(1);
     expect(warning.firstElementChild?.tagName.toLowerCase()).toBe("svg");
@@ -1194,6 +1194,321 @@ describe("ImportDialog failed-import reason wrapping", () => {
     const { build } = await compile("@tailwind utilities;");
     const css = build(["wrap-anywhere"]);
     expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).not.toMatch(/word-break:\s*break-all/);
+  });
+});
+
+describe("ImportDialog asset warning wrapping", () => {
+  const assetName = `${"asset".repeat(52)}.png`;
+  const longWarning = `Could not import image "${assetName}": Unsupported image type.`;
+  const ordinaryWarning = 'Could not import image "diagram.png": The image is too large.';
+  const literalWarning = 'Could not import image "<img src=\'x\'><b>diagram</b>.png": Keep  "quotes"\tand\ninternal whitespace.';
+
+  function expectWarnings(row: HTMLElement, expected: readonly string[]) {
+    const warnings = within(row).queryAllByTestId("import-warning");
+    expect(warnings).toHaveLength(expected.length);
+    expect(warnings.map((warning) => warning.textContent)).toEqual(expected.map((text) => ` ${text}`));
+    for (const [index, warning] of warnings.entries()) {
+      expect(warning.tagName).toBe("DIV");
+      expect(Array.from(warning.attributes, ({ name, value }) => [name, value])).toEqual([
+        ["class", "import-warning wrap-anywhere"],
+        ["data-testid", "import-warning"],
+      ]);
+      expect(warning.parentElement).toBe(row.children[1]);
+      expect(warning.children).toHaveLength(1);
+      expect(Array.from(warning.childNodes, (node) => node.nodeType)).toEqual([
+        Node.ELEMENT_NODE, Node.TEXT_NODE, Node.TEXT_NODE,
+      ]);
+      expect(warning.childNodes[1].nodeValue).toBe(" ");
+      expect(warning.childNodes[2].nodeValue).toBe(expected[index]);
+      const icon = warning.firstElementChild;
+      expect(icon?.tagName.toLowerCase()).toBe("svg");
+      expect(icon).toHaveAttribute("width", "12");
+      expect(icon).toHaveAttribute("height", "12");
+      expect(icon).toHaveClass("shrink-0");
+      expect(warning.querySelectorAll("svg")).toHaveLength(1);
+      expect(warning.querySelectorAll("span, img, b, a, button, input, [tabindex], [role], [title]")).toHaveLength(0);
+    }
+    return warnings;
+  }
+
+  it.each([
+    { kind: "long unbroken asset name", warning: longWarning },
+    { kind: "ordinary asset failure", warning: ordinaryWarning },
+    { kind: "literal HTML, quotes, and internal whitespace", warning: literalWarning },
+  ])("preserves $kind warnings and their existing success and error row structure", ({ warning }) => {
+    expect(assetName.length).toBeGreaterThanOrEqual(240);
+    expect(assetName).not.toMatch(/\s/);
+    expect(longWarning).toContain(assetName);
+    const onOpenChange = vi.fn();
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    const otherRetry = vi.fn();
+    const [success, failed] = resultItems(retry);
+    const warnings = [warning, ordinaryWarning];
+    render(
+      <ImportDialog
+        open
+        onOpenChange={onOpenChange}
+        items={[
+          { ...success, warnings },
+          { ...failed, warnings: [warning], retryAll },
+          { ...failed, name: "third.md", retry: otherRetry, retryAll },
+        ]}
+        ignored={["skipped.pdf"]}
+        footer={<p data-testid="warning-footer">Unchanged footer</p>}
+      />,
+    );
+    const rows = screen.getAllByTestId("import-item");
+    expect(screen.getByTestId("import-list").children).toHaveLength(3);
+    expect(rows.map((row) => row.dataset.status)).toEqual(["done", "error", "error"]);
+    for (const [index, row] of rows.entries()) {
+      expect(row.tagName).toBe("LI");
+      expect(row.className).toBe("import-item");
+      expect(Array.from(row.children, (child) => child.tagName.toLowerCase())).toEqual([
+        "svg", "div", index === 0 ? "a" : "button",
+      ]);
+      expect(row.children[1].className).toBe("min-w-0 flex-1");
+      expect(row.children[1].firstElementChild?.className).toBe("flex items-center gap-2");
+      expect(row.children[1].children).toHaveLength(index === 2 ? 2 : 3);
+    }
+    expect(within(rows[0]).getByLabelText("Imported")).toHaveClass("text-emerald-600");
+    expect(within(rows[1]).getByLabelText("Failed")).toHaveClass("text-red-600");
+    const successWarnings = expectWarnings(rows[0], warnings);
+    expect(successWarnings[0].previousElementSibling).toBe(rows[0].children[1].firstElementChild);
+    expect(successWarnings[1].previousElementSibling).toBe(successWarnings[0]);
+    expect(expectWarnings(rows[1], [warning])[0].previousElementSibling).toBe(expectImportError(rows[1], "Second failed"));
+    expectWarnings(rows[2], []);
+    expect(screen.getAllByTestId("import-warning")).toHaveLength(3);
+    expect(screen.getByTestId("import-dialog").querySelectorAll("button, a, input, textarea, select")).toHaveLength(4);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(screen.getByTestId("import-dialog").querySelectorAll("img, b")).toHaveLength(0);
+    expect(screen.getByTestId("import-ignored").textContent).toBe(
+      "Skipped 1 file that is not Markdown, text, HTML or an image: skipped.pdf",
+    );
+    expect(screen.getByTestId("import-dialog").lastElementChild).toBe(screen.getByTestId("warning-footer"));
+    const open = captureResultOpen();
+    const rowRetry = captureResultRowRetry();
+    expect(open.element.outerHTML).toBe('<a class="import-open" data-testid="import-open" href="/d/doc-first">Open</a>');
+    expect(rowRetry.element.className).toBe("btn btn-sm btn-outline shrink-0");
+    expect(rowRetry.element).toHaveAttribute("type", "button");
+    expect(rowRetry.element).toBeEnabled();
+    expect(screen.getByTestId("import-retry").className).toBe("btn btn-sm btn-outline mt-4");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      for (const event of [invokeResultControl(open), invokeResultControl(rowRetry)]) {
+        expect(event.preventDefault).not.toHaveBeenCalled();
+        expect(event.stopPropagation).not.toHaveBeenCalled();
+        expect(event.defaultPrevented).toBe(false);
+      }
+    }
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(retry).toHaveBeenCalledOnce();
+    expect(otherRetry).not.toHaveBeenCalled();
+    expect(retryAll).not.toHaveBeenCalled();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+  });
+
+  it.each(["Strict", "ordinary"])("replaces and removes same-key warnings with repeated action recovery in %s mode", (mode) => {
+    const onOpenChange = vi.fn();
+    const retry = vi.fn();
+    const [success, failed] = resultItems(retry);
+    const neighbor = { ...success, name: "neighbor.md", id: "neighbor", warnings: [ordinaryWarning] };
+    const dialog = (warnings: string[]) => {
+      const content = (
+        <ImportDialog
+          open
+          onOpenChange={onOpenChange}
+          items={[{ ...success, warnings }, { ...failed, warnings }, neighbor]}
+          ignored={[]}
+        />
+      );
+      return mode === "Strict" ? <StrictMode>{content}</StrictMode> : content;
+    };
+    const view = render(dialog([longWarning, ordinaryWarning]));
+    const root = screen.getByTestId("import-dialog");
+    const rows = screen.getAllByTestId("import-item");
+    const neighborHtml = rows[2].outerHTML;
+    const neighborNodes = Array.from(rows[2].querySelectorAll("*"));
+    const originalWarnings = rows.slice(0, 2).map((row) => expectWarnings(row, [longWarning, ordinaryWarning]));
+    const retiredOpens = [captureResultOpen()];
+    const retiredRetries = [captureResultRowRetry()];
+    for (const [index, warnings] of [[literalWarning], [], [longWarning, ordinaryWarning]].entries()) {
+      view.rerender(dialog(warnings));
+      expect(screen.getByTestId("import-dialog")).toBe(root);
+      const currentRows = screen.getAllByTestId("import-item");
+      currentRows.forEach((row, rowIndex) => expect(row).toBe(rows[rowIndex]));
+      expect(rows[2].outerHTML).toBe(neighborHtml);
+      Array.from(rows[2].querySelectorAll("*")).forEach((node, nodeIndex) => expect(node).toBe(neighborNodes[nodeIndex]));
+      for (const [rowIndex, row] of rows.slice(0, 2).entries()) {
+        const currentWarnings = expectWarnings(row, warnings);
+        expect(row.children[1].children).toHaveLength(1 + rowIndex + warnings.length);
+        if (index === 0) {
+          expect(currentWarnings[0]).toBe(originalWarnings[rowIndex][0]);
+          expect(originalWarnings[rowIndex][1]).not.toBeInTheDocument();
+        } else {
+          for (const original of originalWarnings[rowIndex]) expect(original).not.toBeInTheDocument();
+        }
+      }
+      const currentOpen = captureResultOpen();
+      const currentRetry = captureResultRowRetry();
+      expect(currentOpen.element).toBe(retiredOpens[0].element);
+      expect(currentRetry.element).toBe(retiredRetries[0].element);
+      for (const retired of retiredOpens) invokeResultControl(retired, currentOpen.element);
+      for (const retired of retiredRetries) invokeResultControl(retired, currentRetry.element);
+      expect(onOpenChange).toHaveBeenCalledTimes(index);
+      expect(retry).toHaveBeenCalledTimes(index);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        expect(invokeResultControl(currentOpen).preventDefault).not.toHaveBeenCalled();
+        invokeResultControl(currentRetry);
+      }
+      expect(onOpenChange).toHaveBeenCalledTimes(index + 1);
+      expect(onOpenChange).toHaveBeenLastCalledWith(false);
+      expect(retry).toHaveBeenCalledTimes(index + 1);
+      retiredOpens.push(currentOpen);
+      retiredRetries.push(currentRetry);
+    }
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+  });
+
+  it.each(["Strict", "ordinary"])("keeps replacement warning actions usable through actual close and reopen in %s mode", (mode) => {
+    const onOpenChange = vi.fn();
+    const oldRetry = vi.fn();
+    const nextRetry = vi.fn();
+    const [success, failed] = resultItems(oldRetry);
+    const neighbor = { ...success, name: "neighbor.md", id: "neighbor", warnings: [ordinaryWarning] };
+    function ReopenableDialog({ items }: { items: ImportItem[] }) {
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>Reopen results</button>
+          <ImportDialog
+            open={open}
+            onOpenChange={(next) => {
+              onOpenChange(next);
+              setOpen(next);
+            }}
+            items={items}
+            ignored={[]}
+          />
+        </>
+      );
+    }
+    const dialog = (items: ImportItem[]) => {
+      const content = <ReopenableDialog items={items} />;
+      return mode === "Strict" ? <StrictMode>{content}</StrictMode> : content;
+    };
+    const view = render(dialog([
+      { ...success, warnings: [longWarning] },
+      { ...failed, warnings: [longWarning] },
+      neighbor,
+    ]));
+    const oldRows = screen.getAllByTestId("import-item");
+    const root = screen.getByTestId("import-dialog");
+    const dialogElement = screen.getByRole("dialog");
+    const neighborHtml = oldRows[2].outerHTML;
+    const neighborNodes = Array.from(oldRows[2].querySelectorAll("*"));
+    const oldOpen = captureResultOpen();
+    const oldControl = captureResultRowRetry();
+    view.rerender(dialog([
+      { ...success, name: "replacement.md", id: "replacement", warnings: [literalWarning, longWarning] },
+      { ...failed, name: "replacement-error.md", retry: nextRetry, warnings: [longWarning, ordinaryWarning] },
+      neighbor,
+    ]));
+    const rows = screen.getAllByTestId("import-item");
+    expect(screen.getByTestId("import-dialog")).toBe(root);
+    expect(screen.getByRole("dialog")).toBe(dialogElement);
+    expect(oldRows[0]).not.toBeInTheDocument();
+    expect(oldRows[1]).not.toBeInTheDocument();
+    expect(rows[2]).toBe(oldRows[2]);
+    expect(rows[2].outerHTML).toBe(neighborHtml);
+    Array.from(rows[2].querySelectorAll("*")).forEach((node, index) => expect(node).toBe(neighborNodes[index]));
+    expectWarnings(rows[0], [literalWarning, longWarning]);
+    expectWarnings(rows[1], [longWarning, ordinaryWarning]);
+    const retiredOpens = [oldOpen];
+    const retiredRetries = [oldControl];
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const currentOpen = captureResultOpen();
+      const currentRetry = captureResultRowRetry();
+      expect(currentOpen.element).toHaveAttribute("href", "/d/replacement");
+      for (const retired of retiredOpens) invokeResultControl(retired, currentOpen.element);
+      for (const retired of retiredRetries) invokeResultControl(retired, currentRetry.element);
+      expect(oldRetry).not.toHaveBeenCalled();
+      expect(nextRetry).toHaveBeenCalledTimes(cycle);
+      expect(onOpenChange).toHaveBeenCalledTimes(cycle);
+      invokeResultControl(currentRetry);
+      invokeResultControl(currentRetry);
+      expect(nextRetry).toHaveBeenCalledTimes(cycle + 1);
+      act(() => {
+        const event = invokeResultControl(currentOpen);
+        expect(event.preventDefault).not.toHaveBeenCalled();
+        expect(event.stopPropagation).not.toHaveBeenCalled();
+        invokeResultControl(currentOpen);
+      });
+      expect(onOpenChange).toHaveBeenCalledTimes(cycle + 1);
+      expect(onOpenChange).toHaveBeenLastCalledWith(false);
+      expect(screen.queryByTestId("import-dialog")).toBeNull();
+      invokeResultControl(currentOpen);
+      invokeResultControl(currentRetry);
+      expect(nextRetry).toHaveBeenCalledTimes(cycle + 1);
+      expect(onOpenChange).toHaveBeenCalledTimes(cycle + 1);
+      retiredOpens.push(currentOpen);
+      retiredRetries.push(currentRetry);
+      fireEvent.click(screen.getByRole("button", { name: "Reopen results" }));
+      const reopenedRows = screen.getAllByTestId("import-item");
+      expectWarnings(reopenedRows[0], [literalWarning, longWarning]);
+      expectWarnings(reopenedRows[1], [longWarning, ordinaryWarning]);
+      expectWarnings(reopenedRows[2], [ordinaryWarning]);
+      expect(reopenedRows[2].outerHTML).toBe(neighborHtml);
+    }
+    expect(oldRetry).not.toHaveBeenCalled();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps wrapped-warning pointer activity passive after settled setup", async () => {
+    const retry = vi.fn();
+    const onOpenChange = vi.fn();
+    const items = resultItems(retry).map((item) => ({ ...item, warnings: [longWarning, literalWarning] }));
+    render(<ImportDialog open onOpenChange={onOpenChange} items={items} ignored={[]} />);
+    await act(async () => {});
+    const warnings = screen.getAllByTestId("import-warning");
+    const domBefore = document.body.innerHTML;
+    const activeBefore = document.activeElement;
+    const spies = [
+      vi.spyOn(globalThis, "fetch"),
+      vi.spyOn(HTMLElement.prototype, "focus"),
+      vi.spyOn(globalThis, "setTimeout"),
+      vi.spyOn(globalThis, "setInterval"),
+      vi.spyOn(globalThis, "queueMicrotask"),
+      vi.spyOn(window, "requestAnimationFrame"),
+    ];
+    try {
+      for (const warning of warnings) {
+        for (const target of [warning, warning.firstElementChild!]) {
+          fireEvent.pointerOver(target);
+          fireEvent.pointerMove(target);
+          fireEvent.mouseOver(target);
+          fireEvent.mouseMove(target);
+          fireEvent.mouseOut(target);
+          fireEvent.pointerOut(target);
+        }
+      }
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+      expect(document.body.innerHTML).toBe(domBefore);
+      expect(document.activeElement).toBe(activeBefore);
+      expect(retry).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(uploadImportBatch).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("compiles installed warning wrapping and icon shrink utilities", async () => {
+    const { compile } = await import("tailwindcss");
+    const { build } = await compile("@tailwind utilities;");
+    const css = build(["wrap-anywhere", "shrink-0"]);
+    expect(css).toMatch(/\.wrap-anywhere\s*\{\s*overflow-wrap:\s*anywhere;\s*\}/);
+    expect(css).toMatch(/\.shrink-0\s*\{\s*flex-shrink:\s*0;\s*\}/);
     expect(css).not.toMatch(/word-break:\s*break-all/);
   });
 });
