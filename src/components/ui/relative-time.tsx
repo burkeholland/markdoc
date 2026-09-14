@@ -91,10 +91,9 @@ function getServerNow(): number {
   return 0;
 }
 
-/** Absolute short date, in UTC so the server and the hydrating client always agree ("Aug 22"). */
-export function shortDate(date: Date, now = Date.now()): string {
-  const sameYear = date.getUTCFullYear() === new Date(now).getUTCFullYear();
-  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: sameYear ? undefined : "numeric", timeZone: "UTC" });
+/** Absolute short date with its year, in UTC so the server and the hydrating client always agree ("Aug 22, 2026"). */
+export function shortDate(date: Date): string {
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 }
 
 export interface RelativeTimeProps {
@@ -106,7 +105,7 @@ export interface RelativeTimeProps {
 
 /**
  * "Edited 3 minutes ago" that stays in sync with the clock and never causes a hydration
- * mismatch: the server renders the absolute date ("Aug 22"), the client switches to relative
+ * mismatch: the server renders the absolute date ("Aug 22, 2026"), the client switches to relative
  * text right after mount and refreshes it every minute and when the tab becomes visible.
  */
 export function RelativeTime({ date, prefix = "", className }: RelativeTimeProps) {
