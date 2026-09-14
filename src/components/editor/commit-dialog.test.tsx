@@ -15,6 +15,7 @@ import { flushSync } from "react-dom";
 import { act, cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import type { DocumentDto } from "@/server/dto";
+import { ApiError } from "@/lib/api";
 
 vi.mock("./gist-auto-update", () => ({
   GistAutoUpdateControl: ({ doc, isOwner }: { doc: DocumentDto; isOwner: boolean }) =>
@@ -576,6 +577,32 @@ function commitTimerCall(spy: MockInstance<typeof setTimeout>, index = 0) {
   };
 }
 
+const unbrokenCommitError = "commit-failure-".repeat(20);
+
+function expectCommitError(value: string | null) {
+  const form = commitForm();
+  const error = form.children.item(4);
+  if (!(error instanceof HTMLDivElement)) throw new Error("The commit error slot must remain a div");
+  expect(form.childNodes).toHaveLength(6);
+  expect([...form.children].map((child) => child.tagName)).toEqual(["DIV", "LABEL", "INPUT", "P", "DIV", "DIV"]);
+  expect(error.textContent).toBe(value ?? "");
+  expect(error.hidden).toBe(value === null);
+  expect(Object.fromEntries([...error.attributes].map(({ name, value }) => [name, value]))).toEqual({
+    class: "rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40 wrap-anywhere",
+    ...(value === null ? { hidden: "" } : {}),
+  });
+  expect(error.children).toHaveLength(0);
+  expect(error.childNodes).toHaveLength(value ? 1 : 0);
+  if (value) expect(error.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+  expect(error.tabIndex).toBe(-1);
+  expect(error.previousElementSibling).toHaveTextContent("Pending suggestions are not included until they are accepted.");
+  expect(error.nextElementSibling?.children).toHaveLength(2);
+  expect(error.nextElementSibling?.firstElementChild).toBe(screen.getByRole("button", { name: "Cancel" }));
+  expect(error.nextElementSibling?.lastElementChild).toBe(screen.getByTestId("commit-submit"));
+  expect(screen.queryByRole("alert")).toBeNull();
+  return error;
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
 });
@@ -583,9 +610,149 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllTimers();
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
-  vi.restoreAllMocks();
+});
+
+describe("CommitDialog wrapped failures", () => {
+  const messages = [
+    { kind: "unbroken", text: unbrokenCommitError },
+    { kind: "ordinary", text: "GitHub could not publish this document. Please try again." },
+    { kind: "literal markup", text: `<a href="literal">Not a link</a><img src="literal">${unbrokenCommitError}` },
+    { kind: "whitespace", text: ` \t First reason\n\n${unbrokenCommitError}\t last reason \n ` },
+    { kind: "whitespace only", text: " \t \n  " },
+    { kind: "empty", text: "" },
+  ];
+
+  it.each(messages)("keeps $kind errors literal in the existing slot through replacement, retry and success", async ({ text }) => {
+    expect(unbrokenCommitError.length).toBeGreaterThanOrEqual(240);
+    expect(unbrokenCommitError).not.toMatch(/\s/);
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const recovered = deferred<void>();
+    const current = actions(first.promise, second.promise, recovered.promise);
+    const doc = repoDocument("doc-wrapped", "docs/wrapped.md");
+    const { host, root } = createHost();
+
+    try {
+      await render(root, { visit: "current", doc, actions: current });
+      await advance(0);
+      const input = message();
+      const error = expectCommitError(null);
+      expect(error).not.toBeVisible();
+      expect(input).toHaveValue("Update docs/wrapped.md");
+      expect(input).toBeEnabled();
+      expect(screen.getByText("Commit message")).toBeInTheDocument();
+      fireEvent.change(input, { target: { value: "  Preserve this draft  " } });
+      await submit();
+      await submit();
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Preserve this draft");
+      expect(expectCommitError(null)).toBe(error);
+      expect(screen.getByTestId("commit-submit")).toBeDisabled();
+
+      await reject(first, text);
+      await flushPublication();
+      expect(expectCommitError(text)).toBe(error);
+      expect(error).toBeVisible();
+      expect(message()).toBe(input);
+      expect(input).toHaveValue("  Preserve this draft  ");
+      expect(input).toBeEnabled();
+      expect(screen.getByTestId("commit-submit")).toBeEnabled();
+      const dialog = screen.getByRole("dialog");
+      const controls = [...dialog.querySelectorAll<HTMLElement>("*")].filter((element) => element.tabIndex >= 0);
+      const focus = document.activeElement;
+      const observer = new MutationObserver(() => {});
+      observer.observe(dialog, { subtree: true, childList: true, attributes: true, characterData: true });
+      const spies = [
+        vi.spyOn(HTMLElement.prototype, "focus"),
+        vi.spyOn(globalThis, "setTimeout"),
+        vi.spyOn(globalThis, "setInterval"),
+        vi.spyOn(window, "requestAnimationFrame"),
+        vi.spyOn(globalThis, "queueMicrotask"),
+        vi.spyOn(globalThis, "fetch"),
+      ];
+      try {
+        expectCommitError(text);
+        fireEvent.mouseOver(error);
+        fireEvent.mouseMove(error);
+        fireEvent.mouseOut(error);
+        expect(observer.takeRecords()).toHaveLength(0);
+        for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+        expect(document.activeElement).toBe(focus);
+        expect([...dialog.querySelectorAll<HTMLElement>("*")].filter((element) => element.tabIndex >= 0)).toEqual(controls);
+        expect(screen.queryByRole("tooltip")).toBeNull();
+        expect(current.onCommit).toHaveBeenCalledTimes(1);
+        expect(current.onOpenChange).not.toHaveBeenCalled();
+      } finally {
+        observer.disconnect();
+        vi.restoreAllMocks();
+      }
+
+      await submit();
+      await submit();
+      expect(current.onCommit.mock.calls).toEqual([["Preserve this draft"], ["Preserve this draft"]]);
+      expect(expectCommitError(null)).toBe(error);
+      const replacement = ` \t Replacement <b>reason</b>\n${unbrokenCommitError} `;
+      await act(async () => {
+        second.reject(new ApiError(400, "Invalid request", [{ message: replacement }]));
+        await Promise.allSettled([second.promise]);
+      });
+      expect(expectCommitError(replacement)).toBe(error);
+      expect(error.textContent).not.toBe("Invalid request");
+      expect(message()).toBe(input);
+      expect(input).toHaveValue("  Preserve this draft  ");
+      await submit();
+      await submit();
+      expect(current.onCommit.mock.calls).toEqual(Array.from({ length: 3 }, () => ["Preserve this draft"]));
+      expect(expectCommitError(null)).toBe(error);
+      await resolve(recovered);
+      expect(expectCommitError(null)).toBe(error);
+      expect(error).not.toBeVisible();
+      expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
+      await advance(899);
+      expect(current.onOpenChange).not.toHaveBeenCalled();
+      await advance(1);
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("clears a visible failure on close and reopen before the current visit publishes once", async () => {
+    const failed = deferred<void>();
+    const recovered = deferred<void>();
+    const old = actions(failed.promise);
+    const current = actions(recovered.promise);
+    const doc = repoDocument("doc-error-reopen", "docs/reopen.md");
+    const { host, root } = createHost();
+    try {
+      await render(root, { visit: "old", doc, actions: old });
+      await submit();
+      await reject(failed, unbrokenCommitError);
+      expectCommitError(unbrokenCommitError);
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(old.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      await render(root, { visit: "closed", doc, actions: old, open: false });
+      expect(screen.queryByRole("dialog")).toBeNull();
+      await render(root, { visit: "current", doc, actions: current });
+      expectCommitError(null);
+      expect(message()).toHaveValue("Update docs/reopen.md");
+      await submit();
+      await submit();
+      expect(current.onCommit).toHaveBeenCalledExactlyOnceWith("Update docs/reopen.md");
+      expect(old.onCommit).toHaveBeenCalledTimes(1);
+      await resolve(recovered);
+      expectCommitError(null);
+      await advance(900);
+      expect(current.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+      expect(old.onOpenChange).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });
 
 describe("CommitDialog action keyboard navigation", () => {
@@ -1514,6 +1681,7 @@ describe("CommitDialog visit authority", () => {
 
         await render(root, { visit: "closed", doc, actions: current, open: false });
         await render(root, { visit: "current", doc, actions: current });
+        expectCommitError(null);
         expect(message()).toHaveValue("Update docs/reopen.md");
         expect(screen.getByTestId("commit-submit")).toBeEnabled();
         fireEvent.change(message(), { target: { value: "  Current pending  " } });
@@ -1522,20 +1690,23 @@ describe("CommitDialog visit authority", () => {
         expect(screen.getByTestId("commit-submit")).toBeDisabled();
 
         if (stale === "success") await resolve(oldPending);
-        else await reject(oldPending, "Old publish failed");
+        else await reject(oldPending, unbrokenCommitError);
         expect(message()).toHaveValue("  Current pending  ");
         expect(screen.getByTestId("commit-submit")).toBeDisabled();
-        expect(screen.queryByText("Old publish failed")).toBeNull();
+        expectCommitError(null);
         expect(screen.queryByRole("button", { name: "Published" })).toBeNull();
         expect(current.onOpenChange).toHaveBeenCalledTimes(1);
 
         fireEvent.change(message(), { target: { value: "  Current retry  " } });
         await reject(currentPending, "Current publish failed");
         expect(screen.getByText("Current publish failed")).toBeInTheDocument();
+        expectCommitError("Current publish failed");
         expect(screen.getByTestId("commit-submit")).toBeEnabled();
         await submit();
+        expectCommitError(null);
         expect(current.onCommit).toHaveBeenNthCalledWith(3, "Current retry");
         await resolve(retryPending);
+        expectCommitError(null);
         expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
         await advance(900);
         expect(current.onOpenChange).toHaveBeenCalledTimes(2);
@@ -1654,19 +1825,19 @@ describe("CommitDialog visit authority", () => {
         expect(screen.getByTestId("commit-submit")).toBeDisabled();
 
         if (order === "stale-before-current") {
-          await reject(oldPending, "Retired failure");
+          await reject(oldPending, unbrokenCommitError);
           expect(screen.getByTestId("commit-submit")).toBeDisabled();
-          expect(screen.queryByText("Retired failure")).toBeNull();
+          expectCommitError(null);
           await resolve(currentPending);
         } else {
           await resolve(currentPending);
           expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
-          await reject(oldPending, "Retired failure");
+          await reject(oldPending, unbrokenCommitError);
         }
 
         expect(message()).toHaveValue("Current pending");
         expect(screen.getByRole("button", { name: "Published" })).toBeDisabled();
-        expect(screen.queryByText("Retired failure")).toBeNull();
+        expectCommitError(null);
         expect(oldActions.onOpenChange).not.toHaveBeenCalled();
         await advance(900);
         expect(currentActions.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
