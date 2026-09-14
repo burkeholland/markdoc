@@ -1,7 +1,10 @@
 import { EditorSelection, type ChangeSpec, type EditorState, type SelectionRange } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
-import { syntaxTree } from "@codemirror/language";
+import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import type { SyntaxNode, Tree } from "@lezer/common";
 import { fenceFor } from "../markdown/code-fence";
+import { pathologicalParagraphs } from "./pathological";
 
 /**
  * Markdown-aware editing commands for the source pane. They mirror the rich
@@ -31,11 +34,14 @@ function wordRangeAt(state: EditorState, pos: number): { from: number; to: numbe
   return { from: line.from + from, to: line.from + to };
 }
 
+const inlineCodeParser = markdown({ base: markdownLanguage, addKeymap: false, extensions: [pathologicalParagraphs] }).language.parser;
+
 /** Wrap or unwrap the selection (or the word at the cursor) with an inline marker. */
 export function toggleInlineMark(marker: InlineMarker) {
   return (view: EditorView): boolean => {
     const { state } = view;
     const len = marker.length;
+    let codeTree: Tree | undefined;
     const changes = state.changeByRange((range) => {
       const orientedRange = (start: number, end: number) =>
         range.anchor > range.head ? EditorSelection.range(end, start) : EditorSelection.range(start, end);
@@ -48,6 +54,50 @@ export function toggleInlineMark(marker: InlineMarker) {
       const before = state.sliceDoc(Math.max(0, from - len), from);
       const after = state.sliceDoc(to, to + len);
       const inner = state.sliceDoc(from, to);
+      if (marker === "`" && from < to && state.doc.lineAt(from).number === state.doc.lineAt(to).number) {
+        codeTree ??= ensureSyntaxTree(state, state.doc.length) ?? inlineCodeParser.parse(state.doc.toString());
+        let span: SyntaxNode | null = null;
+        let legacy = false;
+        for (let node: SyntaxNode | null = codeTree.resolveInner(from, 1); node; node = node.parent) {
+          if (node.name === "FencedCode" || node.name === "CodeBlock" || node.name === "Table" || node.name === "UnrenderableParagraph") legacy = true;
+          if (node.name === "InlineCode") span = node;
+        }
+        if (span && !legacy) {
+          const opening = span.firstChild;
+          const closing = span.lastChild;
+          if (opening?.name === "CodeMark" && closing?.name === "CodeMark" && opening !== closing) {
+            const raw = state.sliceDoc(opening.to, closing.from);
+            const padding = raw.startsWith(" ") && raw.endsWith(" ") && /[^ ]/.test(raw) ? 1 : 0;
+            const fullSpan = from === span.from && to === span.to;
+            const fullContent = from === opening.to && to === closing.from;
+            const payload = from === opening.to + padding && to === closing.from - padding;
+            if (!/[\r\n]/.test(raw) && (fullSpan || fullContent || payload)) {
+              const text = raw.slice(padding, raw.length - padding);
+              return {
+                changes: { from: span.from, to: span.to, insert: text },
+                range: orientedRange(span.from, span.from + text.length),
+              };
+            }
+          }
+          // Partial or multiline spans retain the existing selection policy.
+          legacy = true;
+        }
+        if (!legacy) {
+          let longest = 0;
+          for (const run of inner.matchAll(/`+/g)) longest = Math.max(longest, run[0].length);
+          const delimiter = "`".repeat(longest + 1);
+          // A synthetic pair prevents merged ticks and protects meaningful edge spaces.
+          const padding = longest > 0 || (inner.startsWith(" ") && inner.endsWith(" ") && /[^ ]/.test(inner)) ? " " : "";
+          const prefix = delimiter + padding;
+          return {
+            changes: [
+              { from, insert: prefix },
+              { from: to, insert: padding + delimiter },
+            ],
+            range: orientedRange(from + prefix.length, to + prefix.length),
+          };
+        }
+      }
       // Unwrap when the selection is wrapped or contains the marker at both ends.
       if (before === marker && after === marker) {
         return {
