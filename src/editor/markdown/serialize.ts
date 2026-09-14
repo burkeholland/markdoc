@@ -56,7 +56,7 @@ class State extends MarkdownSerializerState {
     if (this.inTable) str = str.replace(/\|/g, "\\|");
     if (startOfLine) {
       str = str
-        .replace(/^(\+(?=[ \t]|$)|[-*>])/, "\\$&")
+        .replace(/^( {0,3})(\+(?=[ \t]|$)|[-*>])/, "$1\\$2")
         .replace(/^(\s*)(#{1,6})(\s|$)/, "$1\\$2$3")
         .replace(/^(\s*\d+)([.)])(\s|$)/, "$1\\$2$3")
         .replace(/^(\s*)(---+|___+)\s*$/, "$1\\$2");
