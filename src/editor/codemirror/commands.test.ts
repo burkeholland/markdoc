@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { EditorSelection, EditorState, Transaction, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { history, undo } from "@codemirror/commands";
-import { setHeading, toggleInlineMark, toggleLinePrefix, type InlineMarker, type LinePrefixKind } from "./commands";
+import type { Node as PMNode } from "prosemirror-model";
+import { parseMarkdown } from "../markdown/parse";
+import { insertImage, insertLink, setHeading, toggleInlineMark, toggleLinePrefix, type InlineMarker, type LinePrefixKind } from "./commands";
 
 function withEditor(
   doc: string,
@@ -359,5 +361,260 @@ describe("selected line boundaries", () => {
     }, [
       EditorView.updateListener.of((update) => transactions.push(...update.transactions)),
     ]);
+  });
+});
+
+describe("source destination delimiters", () => {
+  const commands = [
+    { name: "link", command: insertLink, scrollIntoView: true },
+    { name: "image", command: insertImage, scrollIntoView: false },
+  ] as const;
+
+  function expectDestination(node: PMNode, kind: "link" | "image", url: string) {
+    expect(node.childCount).toBe(0);
+    if (kind === "link") {
+      expect(node.type.name).toBe("text");
+      expect(node.text).toBe("Guide");
+      expect(node.marks).toHaveLength(1);
+      expect(node.marks[0].type.name).toBe("link");
+      expect(node.marks[0].attrs.href).toBe(url);
+    } else {
+      expect(node.type.name).toBe("image");
+      expect(node.attrs.src).toBe(url);
+      expect(node.attrs.alt).toBe("Guide");
+      expect(node.marks).toHaveLength(0);
+    }
+  }
+
+  describe.each(commands)("$name", ({ name, command, scrollIntoView }) => {
+    it.each([
+      {
+        name: "simple HTTPS",
+        url: "https://example.com/guide",
+        link: "[Guide](https://example.com/guide)",
+        image: "![Guide](https://example.com/guide)",
+      },
+      {
+        name: "relative Unicode",
+        url: "../caf\u00e9#intro",
+        link: "[Guide](../caf\u00e9#intro)",
+        image: "![Guide](../caf\u00e9#intro)",
+      },
+      {
+        name: "Unicode fragment",
+        url: "#r\u00e9sum\u00e9",
+        link: "[Guide](#r\u00e9sum\u00e9)",
+        image: "![Guide](#r\u00e9sum\u00e9)",
+      },
+      {
+        name: "percent-encoded delimiters and controls",
+        url: "/guide%28chapter%29%5C%20%0A%00",
+        link: "[Guide](/guide%28chapter%29%5C%20%0A%00)",
+        image: "![Guide](/guide%28chapter%29%5C%20%0A%00)",
+      },
+      {
+        name: "balanced parentheses",
+        url: "/guide(chapter)",
+        link: String.raw`[Guide](/guide\(chapter\))`,
+        image: String.raw`![Guide](/guide\(chapter\))`,
+      },
+      {
+        name: "unmatched opening parenthesis",
+        url: "/guide(chapter",
+        link: String.raw`[Guide](/guide\(chapter)`,
+        image: String.raw`![Guide](/guide\(chapter)`,
+      },
+      {
+        name: "unmatched closing parenthesis",
+        url: "/guide)chapter",
+        link: String.raw`[Guide](/guide\)chapter)`,
+        image: String.raw`![Guide](/guide\)chapter)`,
+      },
+      {
+        name: "repeated parentheses",
+        url: "/guide))chapter((",
+        link: String.raw`[Guide](/guide\)\)chapter\(\()`,
+        image: String.raw`![Guide](/guide\)\)chapter\(\()`,
+      },
+      {
+        name: "nested parentheses",
+        url: "/guide((chapter)part)",
+        link: String.raw`[Guide](/guide\(\(chapter\)part\))`,
+        image: String.raw`![Guide](/guide\(\(chapter\)part\))`,
+      },
+      {
+        name: "backslash before opening parenthesis",
+        url: String.raw`/guide\(chapter`,
+        link: String.raw`[Guide](/guide\\\(chapter)`,
+        image: String.raw`![Guide](/guide\\\(chapter)`,
+      },
+      {
+        name: "backslash before closing parenthesis",
+        url: String.raw`/guide\)chapter`,
+        link: String.raw`[Guide](/guide\\\)chapter)`,
+        image: String.raw`![Guide](/guide\\\)chapter)`,
+      },
+      {
+        name: "backslash before ordinary punctuation",
+        url: String.raw`/guide\!chapter`,
+        link: String.raw`[Guide](/guide\\!chapter)`,
+        image: String.raw`![Guide](/guide\\!chapter)`,
+      },
+      {
+        name: "doubled backslash",
+        url: String.raw`/guide\\chapter`,
+        link: String.raw`[Guide](/guide\\\\chapter)`,
+        image: String.raw`![Guide](/guide\\\\chapter)`,
+      },
+      {
+        name: "combined backslashes and parentheses",
+        url: String.raw`/guide\(one\\two\))`,
+        link: String.raw`[Guide](/guide\\\(one\\\\two\\\)\))`,
+        image: String.raw`![Guide](/guide\\\(one\\\\two\\\)\))`,
+      },
+      {
+        name: "trailing backslash",
+        url: "/guide\\",
+        link: String.raw`[Guide](/guide\\)`,
+        image: String.raw`![Guide](/guide\\)`,
+      },
+      {
+        name: "absolute URL with parentheses",
+        url: "https://example.com/guide(chapter)",
+        link: String.raw`[Guide](https://example.com/guide\(chapter\))`,
+        image: String.raw`![Guide](https://example.com/guide\(chapter\))`,
+      },
+    ])("preserves $name as exactly one parsed destination", (fixture) => {
+      withEditor("", EditorSelection.single(0), (view) => {
+        expect(command(view, fixture.url, "Guide")).toBe(true);
+        expect(view.state.doc.toString()).toBe(fixture[name]);
+        expect(view.state.doc.length).toBe(fixture[name].length);
+        expect(view.state.selection.eq(EditorSelection.single(fixture[name].length))).toBe(true);
+        const { doc } = parseMarkdown(view.state.doc.toString());
+        expect(doc.childCount).toBe(1);
+        expect(doc.child(0).type.name).toBe("paragraph");
+        expect(doc.child(0).childCount).toBe(1);
+        expectDestination(doc.child(0).child(0), name, fixture.url);
+      });
+    });
+
+    it.each(["forward", "reversed", "collapsed"])(
+      "preserves surrounding paragraphs, transaction, cursor, focus, and undo for a %s selection",
+      (direction) => {
+        const prefix = "Before\n\nlead ";
+        const suffix = " tail\n\nAfter";
+        const selected = direction === "collapsed" ? "" : "old";
+        const source = prefix + selected + suffix;
+        const from = prefix.length;
+        const to = from + selected.length;
+        const selection = direction === "reversed"
+          ? EditorSelection.single(to, from)
+          : EditorSelection.single(from, to);
+        const url = String.raw`/guide\(part\))`;
+        const emitted = name === "link"
+          ? String.raw`[Guide](/guide\\\(part\\\)\))`
+          : String.raw`![Guide](/guide\\\(part\\\)\))`;
+        const transactions: Transaction[] = [];
+        withEditor(source, selection, (view) => {
+          expect(command(view, url, "Guide")).toBe(true);
+          expect(view.state.doc.toString()).toBe(prefix + emitted + suffix);
+          expect(view.state.doc.length).toBe(source.length - selected.length + emitted.length);
+          expect(view.state.selection.eq(EditorSelection.single(from + emitted.length))).toBe(true);
+          expect(transactions).toHaveLength(1);
+          expect(transactions[0].annotation(Transaction.userEvent)).toBe("input.format");
+          expect(transactions[0].scrollIntoView).toBe(scrollIntoView);
+          const changes: { fromA: number; toA: number; fromB: number; toB: number; text: string }[] = [];
+          transactions[0].changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
+            changes.push({ fromA, toA, fromB, toB, text: inserted.toString() });
+          });
+          expect(changes).toEqual([{ fromA: from, toA: to, fromB: from, toB: from + emitted.length, text: emitted }]);
+          expect(view.hasFocus).toBe(true);
+          const { doc } = parseMarkdown(view.state.doc.toString());
+          expect(doc.childCount).toBe(3);
+          expect(doc.child(0).textContent).toBe("Before");
+          expect(doc.child(2).textContent).toBe("After");
+          const paragraph = doc.child(1);
+          expect(paragraph.type.name).toBe("paragraph");
+          expect(paragraph.childCount).toBe(3);
+          expect(paragraph.child(0).text).toBe("lead ");
+          expect(paragraph.child(0).marks).toHaveLength(0);
+          expectDestination(paragraph.child(1), name, url);
+          expect(paragraph.child(2).text).toBe(" tail");
+          expect(paragraph.child(2).marks).toHaveLength(0);
+          expect(undo(view)).toBe(true);
+          expect(view.state.doc.toString()).toBe(source);
+          expect(view.state.selection.eq(selection)).toBe(true);
+        }, [
+          history(),
+          EditorView.updateListener.of((update) => transactions.push(...update.transactions)),
+        ]);
+      },
+    );
+
+    it("replaces only the main selection and retains the existing single-cursor result", () => {
+      const selection = EditorSelection.create([
+        EditorSelection.range(0, 4),
+        EditorSelection.range(10, 7),
+      ], 1);
+      withEditor("left / old / right", selection, (view) => {
+        expect(command(view, "/guide)chapter", "Guide")).toBe(true);
+        const expected = name === "link"
+          ? String.raw`left / [Guide](/guide\)chapter) / right`
+          : String.raw`left / ![Guide](/guide\)chapter) / right`;
+        expect(view.state.doc.toString()).toBe(expected);
+        expect(view.state.selection.eq(EditorSelection.single(expected.length - " / right".length))).toBe(true);
+      }, [EditorState.allowMultipleSelections.of(true)]);
+    });
+
+    it.each([
+      {
+        name: "selected source",
+        selected: "Selected",
+        text: undefined,
+        link: String.raw`[Selected](/guide\\\(part\))`,
+        image: String.raw`![](/guide\\\(part\))`,
+      },
+      {
+        name: "selected Markdown without new label escaping",
+        selected: "[part] **bold** <i>text</i>",
+        text: undefined,
+        link: String.raw`[[part] **bold** <i>text</i>](/guide\\\(part\))`,
+        image: String.raw`![](/guide\\\(part\))`,
+      },
+      {
+        name: "explicit text overriding the selection",
+        selected: "Selected",
+        text: "Guide",
+        link: String.raw`[Guide](/guide\\\(part\))`,
+        image: String.raw`![Guide](/guide\\\(part\))`,
+      },
+      {
+        name: "explicit empty text overriding the selection",
+        selected: "Selected",
+        text: "",
+        link: String.raw`[](/guide\\\(part\))`,
+        image: String.raw`![](/guide\\\(part\))`,
+      },
+      {
+        name: "unescaped URL fallback for links and empty default image alt",
+        selected: "",
+        text: undefined,
+        link: String.raw`[/guide\(part)](/guide\\\(part\))`,
+        image: String.raw`![](/guide\\\(part\))`,
+      },
+      {
+        name: "explicit Markdown without new label or alt escaping",
+        selected: "Selected",
+        text: "[part] **bold** <i>text</i>",
+        link: String.raw`[[part] **bold** <i>text</i>](/guide\\\(part\))`,
+        image: String.raw`![[part] **bold** <i>text</i>](/guide\\\(part\))`,
+      },
+    ])("preserves the source policy for $name", (fixture) => {
+      withEditor(fixture.selected, EditorSelection.single(0, fixture.selected.length), (view) => {
+        expect(command(view, String.raw`/guide\(part)`, fixture.text)).toBe(true);
+        expect(view.state.doc.toString()).toBe(fixture[name]);
+        expect(view.state.selection.eq(EditorSelection.single(fixture[name].length))).toBe(true);
+      });
+    });
   });
 });

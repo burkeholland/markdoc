@@ -158,12 +158,16 @@ export function toggleLinePrefix(kind: LinePrefixKind) {
   };
 }
 
+function escapeDestination(url: string): string {
+  return url.replace(/[\\()]/g, "\\$&");
+}
+
 export function insertLink(view: EditorView, url: string, text?: string): boolean {
   const { state } = view;
   const range = state.selection.main;
   const selected = state.sliceDoc(range.from, range.to);
   const label = text ?? (selected || url);
-  const insert = `[${label}](${url})`;
+  const insert = `[${label}](${escapeDestination(url)})`;
   view.dispatch({
     changes: { from: range.from, to: range.to, insert },
     selection: EditorSelection.cursor(range.from + insert.length),
@@ -176,7 +180,7 @@ export function insertLink(view: EditorView, url: string, text?: string): boolea
 
 export function insertImage(view: EditorView, url: string, alt = ""): boolean {
   const range = view.state.selection.main;
-  const insert = `![${alt}](${url})`;
+  const insert = `![${alt}](${escapeDestination(url)})`;
   view.dispatch({
     changes: { from: range.from, to: range.to, insert },
     selection: EditorSelection.cursor(range.from + insert.length),
