@@ -10,6 +10,9 @@ import type { Node as PMNode } from "prosemirror-model";
 import { parseMarkdown } from "../markdown/parse";
 import { serializeMarkdown } from "../markdown/serialize";
 import { insertCodeBlock, insertImage, insertLink, setHeading, toggleInlineMark, toggleLinePrefix, type InlineMarker, type LinePrefixKind } from "./commands";
+import * as codeMirrorLanguage from "@codemirror/language";
+import { Parser, Tree } from "@lezer/common";
+import { pathologicalParagraphs } from "./pathological";
 
 function withEditor(
   doc: string,
@@ -1850,5 +1853,123 @@ describe("source inline code delimiter fidelity", () => {
       expect(view.state.doc.toString()).toBe(source);
       expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
     }, [markdown(), history(), EditorState.allowMultipleSelections.of(true), EditorView.updateListener.of((update) => transactions.push(...update.transactions))]);
+  });
+
+  it.for(["no language", "configured Markdown"] as const)("reuses guarded syntax within the command budget with %s", (mode, { task }) => {
+    const soup = "[".repeat(40_000) + "a" + "]".repeat(40_000);
+    const prefix = soup + "\n\n";
+    const paragraph = "before (a`b / c``d) after";
+    const selection = EditorSelection.create([
+      EditorSelection.range(prefix.length + 8, prefix.length + 11),
+      EditorSelection.range(prefix.length + 18, prefix.length + 14),
+    ], 1);
+    const transactions: Transaction[] = [];
+    const measurements: { milliseconds: number; syntaxTrees: number; rangeLookups: number; fallbackParses: number }[] = [];
+    withEditor(prefix + paragraph, selection, (view) => {
+      const parse = vi.spyOn(Parser.prototype, "parse");
+      const resolve = vi.spyOn(Tree.prototype, "resolveInner");
+      let fallbackParser: Parser | undefined;
+      try {
+        for (const invocation of [1, 2]) {
+          const original = view.state;
+          const start = performance.now();
+          const changed = toggleInlineMark("`")(view);
+          const milliseconds = performance.now() - start;
+          const rangeTrees = resolve.mock.contexts.filter((tree, index): tree is Tree =>
+            tree instanceof Tree && tree.length === original.doc.length && resolve.mock.calls[index][1] === 1 &&
+            original.selection.ranges.some((range) => range.from === resolve.mock.calls[index][0]));
+          measurements.push({ milliseconds, syntaxTrees: new Set(rangeTrees).size, rangeLookups: rangeTrees.length, fallbackParses: parse.mock.calls.length });
+          expect(changed).toBe(true);
+          expect(milliseconds).toBeLessThan(500);
+          expect(rangeTrees).toHaveLength(2);
+          expect(rangeTrees[0]).toBe(rangeTrees[1]);
+          expect(parse).toHaveBeenCalledTimes(mode === "no language" ? 1 : 0);
+          expect(rangeTrees[0].length).toBe(original.doc.length);
+          expect(rangeTrees[0].topNode.firstChild?.name).toBe("UnrenderableParagraph");
+          if (mode === "no language") {
+            const parser = parse.mock.contexts[0];
+            if (!(parser instanceof Parser)) throw new Error("Expected the real fallback parser");
+            expect(parse.mock.results[0].type).toBe("return");
+            expect(parse.mock.results[0].value).toBe(rangeTrees[0]);
+            expect(parser).not.toBe(markdownLanguage.parser);
+            if (fallbackParser) expect(parser).toBe(fallbackParser);
+            fallbackParser = parser;
+            expect(parse).toHaveBeenCalledWith(original.doc.toString());
+          } else {
+            // Completing the configured parse may extend the state's partial tree.
+            expect(rangeTrees[0].type).toBe(codeMirrorLanguage.syntaxTree(original).type);
+          }
+          expect(transactions).toHaveLength(invocation);
+          expect(transactions[invocation - 1].annotation(Transaction.userEvent)).toBe("input.format");
+          expect(transactions[invocation - 1].scrollIntoView).toBe(true);
+          expect(view.hasFocus).toBe(true);
+          expect(view.state.doc.sliceString(0, prefix.length)).toBe(prefix);
+          if (invocation === 1) {
+            expect(view.state.doc.sliceString(prefix.length)).toBe("before (`` a`b `` / ``` c``d ```) after");
+            expect(view.state.selection.ranges.map(({ anchor, head }) => [anchor - prefix.length, head - prefix.length]))
+              .toEqual([[11, 14], [28, 24]]);
+            expect(view.state.selection.mainIndex).toBe(1);
+            const { doc } = parseMarkdown(view.state.doc.sliceString(prefix.length));
+            expect(doc.childCount).toBe(1);
+            expect(doc.child(0).type.name).toBe("paragraph");
+            expect(doc.child(0).content.toJSON()).toEqual([
+              { type: "text", text: "before (" },
+              { type: "text", marks: [{ type: "code" }], text: "a`b" },
+              { type: "text", text: " / " },
+              { type: "text", marks: [{ type: "code" }], text: "c``d" },
+              { type: "text", text: ") after" },
+            ]);
+            expect(view.state.selection.ranges.map(({ from, to }) => view.state.sliceDoc(from, to))).toEqual(["a`b", "c``d"]);
+          } else {
+            expect(view.state.doc.sliceString(prefix.length)).toBe(paragraph);
+            expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+          }
+          resolve.mockClear();
+          parse.mockClear();
+        }
+      } finally {
+        resolve.mockRestore();
+        parse.mockRestore();
+      }
+    }, [
+      ...(mode === "configured Markdown" ? [markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false, extensions: [pathologicalParagraphs] })] : []),
+      EditorState.allowMultipleSelections.of(true),
+      EditorView.updateListener.of((update) => transactions.push(...update.transactions)),
+    ]);
+    Object.assign(task.meta, { inlineCodeCommands: measurements });
+  });
+
+  it.each(["no language", "configured Markdown"] as const)("retains opaque-paragraph legacy behavior with %s", (mode) => {
+    const prefix = "[".repeat(40_000) + "a" + "]".repeat(40_000) + " ";
+    const source = prefix + "a`b";
+    const selection = EditorSelection.single(source.length, prefix.length);
+    withEditor(source, selection, (view) => {
+      expect(toggleInlineMark("`")(view)).toBe(true);
+      expect(view.state.doc.sliceString(0, prefix.length)).toBe(prefix);
+      expect(view.state.doc.sliceString(prefix.length)).toBe("`a`b`");
+      expect(view.state.selection.eq(EditorSelection.single(source.length + 1, prefix.length + 1))).toBe(true);
+      expect(toggleInlineMark("`")(view)).toBe(true);
+      expect(view.state.doc.sliceString(prefix.length)).toBe("a`b");
+      expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+    }, mode === "configured Markdown" ? [markdown({ base: markdownLanguage, extensions: [pathologicalParagraphs] })] : []);
+  });
+
+  it.each([
+    { name: "GFM table", source: "| a`b | tail |\n| --- | --- |", from: 2, to: 5, expected: "| `a`b` | tail |\n| --- | --- |" },
+    { name: "fenced code", source: "```\na`b\n```", from: 4, to: 7, expected: "```\n`a`b`\n```" },
+    { name: "container fenced code", source: "> ```\n> a`b\n> ```", from: 8, to: 11, expected: "> ```\n> `a`b`\n> ```" },
+    { name: "indented code", source: "    a`b", from: 4, to: 7, expected: "    `a`b`" },
+  ])("preserves enclosing $name legacy context with or without a language", ({ source, from, to, expected }) => {
+    for (const configured of [false, true]) {
+      const selection = EditorSelection.single(to, from);
+      withEditor(source, selection, (view) => {
+        expect(toggleInlineMark("`")(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(expected);
+        expect(view.state.selection.eq(EditorSelection.single(to + 1, from + 1))).toBe(true);
+        expect(toggleInlineMark("`")(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(source);
+        expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+      }, configured ? [markdown({ base: markdownLanguage, extensions: [pathologicalParagraphs] })] : []);
+    }
   });
 });

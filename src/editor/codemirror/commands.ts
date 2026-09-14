@@ -1,9 +1,10 @@
 import { EditorSelection, type ChangeSpec, type EditorState, type SelectionRange } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
-import { markdownLanguage } from "@codemirror/lang-markdown";
-import type { SyntaxNode } from "@lezer/common";
+import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import type { SyntaxNode, Tree } from "@lezer/common";
 import { fenceFor } from "../markdown/code-fence";
+import { pathologicalParagraphs } from "./pathological";
 
 /**
  * Markdown-aware editing commands for the source pane. They mirror the rich
@@ -33,11 +34,14 @@ function wordRangeAt(state: EditorState, pos: number): { from: number; to: numbe
   return { from: line.from + from, to: line.from + to };
 }
 
+const inlineCodeParser = markdown({ base: markdownLanguage, addKeymap: false, extensions: [pathologicalParagraphs] }).language.parser;
+
 /** Wrap or unwrap the selection (or the word at the cursor) with an inline marker. */
 export function toggleInlineMark(marker: InlineMarker) {
   return (view: EditorView): boolean => {
     const { state } = view;
     const len = marker.length;
+    let codeTree: Tree | undefined;
     const changes = state.changeByRange((range) => {
       const orientedRange = (start: number, end: number) =>
         range.anchor > range.head ? EditorSelection.range(end, start) : EditorSelection.range(start, end);
@@ -51,11 +55,11 @@ export function toggleInlineMark(marker: InlineMarker) {
       const after = state.sliceDoc(to, to + len);
       const inner = state.sliceDoc(from, to);
       if (marker === "`" && from < to && state.doc.lineAt(from).number === state.doc.lineAt(to).number) {
-        const tree = ensureSyntaxTree(state, to) ?? markdownLanguage.parser.parse(state.doc.toString());
+        codeTree ??= ensureSyntaxTree(state, state.doc.length) ?? inlineCodeParser.parse(state.doc.toString());
         let span: SyntaxNode | null = null;
         let legacy = false;
-        for (let node: SyntaxNode | null = tree.resolveInner(from, 1); node; node = node.parent) {
-          if (node.name === "FencedCode" || node.name === "CodeBlock" || node.name === "Table") legacy = true;
+        for (let node: SyntaxNode | null = codeTree.resolveInner(from, 1); node; node = node.parent) {
+          if (node.name === "FencedCode" || node.name === "CodeBlock" || node.name === "Table" || node.name === "UnrenderableParagraph") legacy = true;
           if (node.name === "InlineCode") span = node;
         }
         if (span && !legacy) {
