@@ -167,3 +167,161 @@ describe("source code block format state", () => {
     expect(state.selection.mainIndex).toBe(1);
   });
 });
+
+describe("source Setext heading state", () => {
+  function expectContext(state: EditorState, kind: string, head = state.selection.main.head) {
+    const tree = ensureSyntaxTree(state, state.doc.length, 1000);
+    expect(tree).not.toBeNull();
+    const names: string[] = [];
+    let node = tree!.resolveInner(head, -1);
+    while (node) {
+      names.push(node.name);
+      if (!node.parent) break;
+      node = node.parent;
+    }
+    expect(names).toContain(kind);
+    expect(names.filter((name) => name === "SetextHeading1" || name === "SetextHeading2"))
+      .toEqual(kind.startsWith("SetextHeading") ? [kind] : []);
+    return names;
+  }
+
+  it.each([
+    { doc: "Title\n=====", heading: 1, kind: "SetextHeading1" },
+    { doc: "Title\n-----", heading: 2, kind: "SetextHeading2" },
+  ])("recognizes $kind in text and underline", ({ doc, heading, kind }) => {
+    for (const head of [2, 8]) {
+      const state = parsedState(doc, EditorSelection.single(head));
+      expectContext(state, kind);
+      expectFormat(state, { ...plain, heading });
+    }
+  });
+
+  it.each([
+    { doc: "First\nsecond\n======", heading: 1, kind: "SetextHeading1" },
+    { doc: "First\nsecond\n------", heading: 2, kind: "SetextHeading2" },
+  ])("recognizes every line of multiline $kind", ({ doc, heading, kind }) => {
+    for (const head of [2, 8, 15]) {
+      const state = parsedState(doc, EditorSelection.single(head));
+      expectContext(state, kind);
+      expectFormat(state, { ...plain, heading });
+    }
+  });
+
+  it.each([
+    { doc: "**bold**\n=====", head: 4, underline: 11, heading: 1, kind: "SetextHeading1", mark: "strong" },
+    { doc: "**bold**\n-----", head: 4, underline: 11, heading: 2, kind: "SetextHeading2", mark: "strong" },
+    { doc: "*soft*\n===", head: 3, underline: 8, heading: 1, kind: "SetextHeading1", mark: "em" },
+    { doc: "*soft*\n---", head: 3, underline: 8, heading: 2, kind: "SetextHeading2", mark: "em" },
+    { doc: "`code`\n===", head: 3, underline: 8, heading: 1, kind: "SetextHeading1", mark: "code" },
+    { doc: "`code`\n---", head: 3, underline: 8, heading: 2, kind: "SetextHeading2", mark: "code" },
+  ])("preserves $mark in $kind without extending it to the underline", ({ doc, head, underline, heading, kind, mark }) => {
+    const state = parsedState(doc, EditorSelection.single(head));
+    expectContext(state, kind);
+    expectFormat(state, { ...plain, heading, [mark]: true });
+    const range = EditorSelection.cursor(underline);
+    expectContext(state, kind, range.head);
+    expectFormat(state, { ...plain, heading }, range);
+  });
+
+  it.each([
+    { doc: "> Title\n> =====", head: 4, underline: 12, heading: 1, kind: "SetextHeading1", container: "Blockquote", textFlags: { quote: true }, underlineFlags: { quote: true } },
+    { doc: "- Title\n  =====", head: 4, underline: 12, heading: 1, kind: "SetextHeading1", container: "BulletList", textFlags: { bullet: true }, underlineFlags: {} },
+    { doc: "1. Title\n   -----", head: 5, underline: 14, heading: 2, kind: "SetextHeading2", container: "OrderedList", textFlags: { ordered: true }, underlineFlags: {} },
+  ])("recognizes $kind inside a real $container with unchanged line flags", ({ doc, head, underline, heading, kind, container, textFlags, underlineFlags }) => {
+    const state = parsedState(doc, EditorSelection.single(head));
+    expect(expectContext(state, kind)).toContain(container);
+    expectFormat(state, { ...plain, heading, ...textFlags });
+    const range = EditorSelection.cursor(underline);
+    expect(expectContext(state, kind, range.head)).toContain(container);
+    expectFormat(state, { ...plain, heading, ...underlineFlags }, range);
+  });
+
+  it.each([
+    { doc: "\u{10400} Cafe\u0301\n===", heading: 1, kind: "SetextHeading1" },
+    { doc: "\u{10400} Cafe\u0301\n---", heading: 2, kind: "SetextHeading2" },
+  ])("recognizes $kind with supplementary and combining text", ({ doc, heading, kind }) => {
+    for (const head of [2, 8, 10]) {
+      const state = parsedState(doc, EditorSelection.single(head));
+      expectContext(state, kind);
+      expectFormat(state, { ...plain, heading });
+    }
+  });
+
+  it.each([
+    { name: "single equals", doc: "Title\n=", heads: [2, 7], heading: 1, kind: "SetextHeading1" },
+    { name: "two dashes", doc: "Title\n--", heads: [2, 7], heading: 2, kind: "SetextHeading2" },
+    { name: "indented equals with trailing spaces", doc: "  Title\n   ===  ", heads: [4, 12], heading: 1, kind: "SetextHeading1" },
+    { name: "indented long dashes", doc: " Title\n  --------", heads: [3, 13], heading: 2, kind: "SetextHeading2" },
+  ])("uses parsed ancestry for $name", ({ doc, heads, heading, kind }) => {
+    for (const head of heads) {
+      const state = parsedState(doc, EditorSelection.single(head));
+      expectContext(state, kind);
+      expectFormat(state, { ...plain, heading });
+    }
+  });
+
+  it.each([
+    { name: "forward between heading levels", anchor: 2, head: 15, heading: 2, kind: "SetextHeading2" },
+    { name: "reversed between heading levels", anchor: 15, head: 2, heading: 1, kind: "SetextHeading1" },
+    { name: "forward out of a heading", anchor: 15, head: 28, heading: 0, kind: "Paragraph" },
+    { name: "reversed into an underline", anchor: 28, head: 22, heading: 2, kind: "SetextHeading2" },
+  ])("uses the head for a selection $name", ({ anchor, head, heading, kind }) => {
+    const state = parsedState("First\n=====\n\nSecond\n-----\n\nAfter", EditorSelection.single(anchor, head));
+    expectContext(state, kind);
+    expectFormat(state, { ...plain, heading });
+  });
+
+  it("honors an explicit crossing range instead of the main selection without mutation", () => {
+    const state = parsedState("First\n=====\n\nSecond\n------", EditorSelection.single(2));
+    const range = EditorSelection.range(2, 15);
+    expectContext(state, "SetextHeading2", range.head);
+    expectFormat(state, { ...plain, heading: 2 }, range);
+    expectContext(state, "SetextHeading1");
+    expectFormat(state, { ...plain, heading: 1 });
+    expect(range.anchor).toBe(2);
+    expect(range.head).toBe(15);
+  });
+
+  it("honors the main index and an explicit non-main range", () => {
+    const selection = EditorSelection.create([EditorSelection.cursor(2), EditorSelection.cursor(15)], 1);
+    const state = parsedState("First\n=====\n\nSecond\n------", selection);
+    expectContext(state, "SetextHeading2");
+    expectFormat(state, { ...plain, heading: 2 });
+    expectContext(state, "SetextHeading1", state.selection.ranges[0].head);
+    expectFormat(state, { ...plain, heading: 1 }, state.selection.ranges[0]);
+    expect(state.selection.mainIndex).toBe(1);
+  });
+
+  it.each([1, 2, 3, 4, 5, 6])("keeps ATX level %i unchanged", (heading) => {
+    const state = parsedState(`${"#".repeat(heading)} Title`, EditorSelection.single(heading + 3));
+    expectContext(state, `ATXHeading${heading}`);
+    expectFormat(state, { ...plain, heading });
+  });
+
+  it.each([
+    { name: "paragraph", doc: "Ordinary prose", heads: [3], kind: "Paragraph" },
+    { name: "standalone thematic break", doc: "-----", heads: [2], kind: "HorizontalRule" },
+    { name: "thematic break separated from prose", doc: "Title\n\n-----", heads: [9], kind: "HorizontalRule" },
+    { name: "escaped equals underline", doc: "Title\n\\=====", heads: [2, 9], kind: "Paragraph" },
+    { name: "escaped dash underline", doc: "Title\n\\-----", heads: [2, 9], kind: "Paragraph" },
+  ])("does not infer a heading from $name", ({ doc, heads, kind }) => {
+    for (const head of heads) {
+      const state = parsedState(doc, EditorSelection.single(head));
+      expectContext(state, kind);
+      expectFormat(state, plain);
+    }
+  });
+
+  it.each([
+    { doc: "```\nTitle\n=====\n```", heads: [6, 12], kind: "FencedCode" },
+    { doc: "~~~\nTitle\n-----\n~~~", heads: [6, 12], kind: "FencedCode" },
+    { doc: "    Title\n    =====", heads: [6, 16], kind: "CodeBlock" },
+    { doc: "    Title\n    -----", heads: [6, 16], kind: "CodeBlock" },
+  ])("keeps underlined-looking text literal in $kind", ({ doc, heads, kind }) => {
+    for (const head of heads) {
+      const state = parsedState(doc, EditorSelection.single(head));
+      expectContext(state, kind);
+      expectFormat(state, codeBlock);
+    }
+  });
+});
