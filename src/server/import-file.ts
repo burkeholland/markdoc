@@ -60,13 +60,20 @@ export function frontMatterTitle(content: string): string | null {
 export function firstHeading(content: string): string | null {
   const fm = frontMatterSpan(content);
   const body = fm ? content.slice(fm.to) : content;
-  let inFence = false;
+  let fence: { marker: string; length: number } | null = null;
   for (const line of body.split("\n")) {
-    if (/^\s{0,3}(```|~~~)/.test(line)) {
-      inFence = !inFence;
+    // A leading tab reaches column four, so only literal spaces may indent a fence.
+    const delimiter = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (delimiter && delimiter[1][0] === fence.marker && delimiter[1].length >= fence.length && /^[ \t]*$/.test(line.slice(delimiter[0].length))) {
+        fence = null;
+      }
       continue;
     }
-    if (inFence) continue;
+    if (delimiter && (delimiter[1][0] === "~" || !line.slice(delimiter[0].length).includes("`"))) {
+      fence = { marker: delimiter[1][0], length: delimiter[1].length };
+      continue;
+    }
     const m = /^\s{0,3}#\s+(.+?)\s*#*\s*$/.exec(line);
     if (m) return m[1].replace(/[*_`]/g, "").trim() || null;
   }
