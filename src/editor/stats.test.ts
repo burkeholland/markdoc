@@ -53,6 +53,59 @@ describe("computeStats", () => {
     expect(computeStats("Use `npm ci` now.").words).toBe(4);
   });
 
+  it("counts marked heading, prose, link and inline-code words without counting excluded regions", () => {
+    const heading = "nai\u0308ve";
+    const prose = "\u0915\u093F\u0924\u093E\u092C cafe\u0301 re\u0301sume\u0301.";
+    const markdown = [
+      "---",
+      "title: nai\u0308ve",
+      "---",
+      "",
+      `# ${heading}`,
+      "",
+      "\u0915\u093F\u0924\u093E\u092C [cafe\u0301](https://example.com/nai\u0308ve) `re\u0301sume\u0301`.",
+      "",
+      "![nai\u0308ve](image.png)",
+      "",
+      "```text",
+      "nai\u0308ve re\u0301sume\u0301",
+      "```",
+      "",
+      "~~~",
+      "\u0915\u093F\u0924\u093E\u092C",
+      "~~~",
+    ].join("\n");
+
+    expect(computeStats(markdown)).toEqual({
+      words: 4,
+      characters: heading.length + prose.length,
+      charactersNoSpaces: heading.length + prose.replace(/ /g, "").length,
+      sentences: 1,
+      paragraphs: 1,
+      headings: 1,
+      readingMinutes: 1,
+      speakingMinutes: 1,
+    });
+  });
+
+  it("keeps source character lengths and distinct cache entries for equivalent accented spellings", () => {
+    const composed = "na\u00EFve caf\u00E9";
+    const decomposed = "nai\u0308ve cafe\u0301";
+    const nfc = computeStats(composed);
+    expect(computeStats(composed)).toBe(nfc);
+    const nfd = computeStats(decomposed);
+    expect(computeStats(decomposed)).toBe(nfd);
+    expect(nfd).not.toBe(nfc);
+    expect(nfc).toMatchObject({ words: 2, characters: 10, charactersNoSpaces: 9 });
+    expect(nfd).toEqual({ ...nfc, characters: 12, charactersNoSpaces: 11 });
+    expect(nfc.characters).toBe(composed.length);
+    expect(nfd.characters).toBe(decomposed.length);
+  });
+
+  it("does not count isolated marks as prose words", () => {
+    expect(computeStats("\u0301 \u093E \u20DD").words).toBe(0);
+  });
+
   it("handles a tilde fence and text after it", () => {
     const s = computeStats("~~~\nignored words here\n~~~\n\nReal words.\n");
     expect(s.words).toBe(2);
@@ -135,6 +188,19 @@ describe("computeSelectionStats", () => {
     expect(computeSelectionStats(text, -10, 1000).words).toBe(6);
   });
 
+  it("uses source offsets and lengths for a marked range in either direction", () => {
+    const selected = "nai\u0308ve cafe\u0301";
+    const text = `Before \u{1F600} ${selected} after.`;
+    const from = text.indexOf(selected);
+    const to = from + selected.length;
+    const forward = computeSelectionStats(text, from, to);
+    expect(forward).toMatchObject({ words: 2, characters: 12, charactersNoSpaces: 11 });
+    expect(computeSelectionStats(text, to, from)).toEqual(forward);
+    expect(computeSelectionStats(text, -10, text.length + 10)).toEqual(computeStats(text));
+    const mark = text.indexOf("\u0308");
+    expect(computeSelectionStats(text, mark, mark + 1).words).toBe(0);
+  });
+
   it("memoises the last range", () => {
     const a = computeSelectionStats(FIXTURE, 10, 60);
     expect(computeSelectionStats(FIXTURE, 10, 60)).toBe(a);
@@ -143,6 +209,16 @@ describe("computeSelectionStats", () => {
 
 describe("goalProgress", () => {
   const stats = { ...EMPTY_STATS, words: 120, readingMinutes: 1 };
+
+  it("derives times and word-goal states from 200 decomposed words", () => {
+    const marked = computeStats(Array.from({ length: 200 }, () => "nai\u0308ve").join(" "));
+    expect(marked).toMatchObject({ words: 200, readingMinutes: 1, speakingMinutes: 2 });
+    for (const mode of ["min", "max"] as const) {
+      expect(goalProgress(marked, { kind: "words", mode, value: 200, setBy: null, setAt: 0 }))
+        .toEqual({ current: 200, target: 200, fraction: 1, state: "reached" });
+    }
+  });
+
   it("tracks a minimum word goal", () => {
     const p = goalProgress(stats, { kind: "words", mode: "min", value: 200, setBy: null, setAt: 0 });
     expect(p).toMatchObject({ current: 120, target: 200, state: "progress" });

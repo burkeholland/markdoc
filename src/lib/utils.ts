@@ -63,10 +63,7 @@ export function initials(name: string): string {
   return result.toUpperCase();
 }
 
-export function countWords(text: string): number {
-  const words = text.match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu);
-  return words ? words.length : 0;
-}
+export { countWords } from "./word-count";
 
 export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
