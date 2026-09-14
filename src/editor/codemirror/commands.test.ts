@@ -44,6 +44,191 @@ const representativeWords = [
   { name: "supplementary letters", word: supplementaryWord, caret: 2 },
 ];
 
+describe("inline selection direction", () => {
+  const plain = "pre\n(\u{10400}a\u0308) tail";
+  const content = "\u{10400}a\u0308";
+  type SelectionCase = {
+    branch: "wrap" | "outside" | "contained";
+    anchor: number;
+    head: number;
+    expected: [number, number, number, number];
+  };
+  const formats: { marker: InlineMarker; formatted: string; selections: SelectionCase[] }[] = [
+    {
+      marker: "**",
+      formatted: "pre\n(**\u{10400}a\u0308**) tail",
+      selections: [
+        { branch: "wrap", anchor: 5, head: 9, expected: [7, 11, 7, 11] },
+        { branch: "wrap", anchor: 9, head: 5, expected: [11, 7, 7, 11] },
+        { branch: "outside", anchor: 7, head: 11, expected: [5, 9, 5, 9] },
+        { branch: "outside", anchor: 11, head: 7, expected: [9, 5, 5, 9] },
+        { branch: "contained", anchor: 5, head: 13, expected: [5, 9, 5, 9] },
+        { branch: "contained", anchor: 13, head: 5, expected: [9, 5, 5, 9] },
+      ],
+    },
+    {
+      marker: "*",
+      formatted: "pre\n(*\u{10400}a\u0308*) tail",
+      selections: [
+        { branch: "wrap", anchor: 5, head: 9, expected: [6, 10, 6, 10] },
+        { branch: "wrap", anchor: 9, head: 5, expected: [10, 6, 6, 10] },
+        { branch: "outside", anchor: 6, head: 10, expected: [5, 9, 5, 9] },
+        { branch: "outside", anchor: 10, head: 6, expected: [9, 5, 5, 9] },
+        { branch: "contained", anchor: 5, head: 11, expected: [5, 9, 5, 9] },
+        { branch: "contained", anchor: 11, head: 5, expected: [9, 5, 5, 9] },
+      ],
+    },
+    {
+      marker: "`",
+      formatted: "pre\n(`\u{10400}a\u0308`) tail",
+      selections: [
+        { branch: "wrap", anchor: 5, head: 9, expected: [6, 10, 6, 10] },
+        { branch: "wrap", anchor: 9, head: 5, expected: [10, 6, 6, 10] },
+        { branch: "outside", anchor: 6, head: 10, expected: [5, 9, 5, 9] },
+        { branch: "outside", anchor: 10, head: 6, expected: [9, 5, 5, 9] },
+        { branch: "contained", anchor: 5, head: 11, expected: [5, 9, 5, 9] },
+        { branch: "contained", anchor: 11, head: 5, expected: [9, 5, 5, 9] },
+      ],
+    },
+    {
+      marker: "~~",
+      formatted: "pre\n(~~\u{10400}a\u0308~~) tail",
+      selections: [
+        { branch: "wrap", anchor: 5, head: 9, expected: [7, 11, 7, 11] },
+        { branch: "wrap", anchor: 9, head: 5, expected: [11, 7, 7, 11] },
+        { branch: "outside", anchor: 7, head: 11, expected: [5, 9, 5, 9] },
+        { branch: "outside", anchor: 11, head: 7, expected: [9, 5, 5, 9] },
+        { branch: "contained", anchor: 5, head: 13, expected: [5, 9, 5, 9] },
+        { branch: "contained", anchor: 13, head: 5, expected: [9, 5, 5, 9] },
+      ],
+    },
+  ];
+
+  describe.each(formats)("$marker", ({ marker, formatted, selections }) => {
+    it.each(selections)("$branch from $anchor to $head", ({ branch, anchor, head, expected }) => {
+      withEditor(branch === "wrap" ? plain : formatted, EditorSelection.single(anchor, head), (view) => {
+        expect(toggleInlineMark(marker)(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(branch === "wrap" ? formatted : plain);
+        const range = view.state.selection.main;
+        expect([range.anchor, range.head, range.from, range.to]).toEqual(expected);
+        expect(view.state.sliceDoc(range.from, range.to)).toBe(content);
+        if (branch === "wrap") {
+          expect(toggleInlineMark(marker)(view)).toBe(true);
+          expect(view.state.doc.toString()).toBe(plain);
+          const restored = view.state.selection.main;
+          expect([restored.anchor, restored.head, restored.from, restored.to]).toEqual([anchor, head, 5, 9]);
+          expect(view.state.sliceDoc(restored.from, restored.to)).toBe(content);
+        }
+      });
+    });
+  });
+
+  it.each([
+    {
+      name: "partial word", doc: "pre\n(hello) tail", anchor: 9, head: 6,
+      formatted: "pre\n(h**ell**o) tail", expected: [11, 8, 8, 11], text: "ell",
+    },
+    {
+      name: "combining mark", doc: plain, anchor: 9, head: 8,
+      formatted: "pre\n(\u{10400}a**\u0308**) tail", expected: [11, 10, 10, 11], text: "\u0308",
+    },
+    {
+      name: "single surrogate unit", doc: plain, anchor: 6, head: 5,
+      formatted: "pre\n(**\ud801**\udc00a\u0308) tail", expected: [8, 7, 7, 8], text: "\ud801",
+    },
+  ])("keeps a reversed explicit $name selection exact", ({ doc, anchor, head, formatted, expected, text }) => {
+    withEditor(doc, EditorSelection.single(anchor, head), (view) => {
+      toggleInlineMark("**")(view);
+      expect(view.state.doc.toString()).toBe(formatted);
+      const range = view.state.selection.main;
+      expect([range.anchor, range.head, range.from, range.to]).toEqual(expected);
+      expect(view.state.sliceDoc(range.from, range.to)).toBe(text);
+      toggleInlineMark("**")(view);
+      expect(view.state.doc.toString()).toBe(doc);
+      expect(view.state.selection.eq(EditorSelection.single(anchor, head))).toBe(true);
+    });
+  });
+
+  it("maps mixed directions and an empty caret across all branches with a non-first main range", () => {
+    const doc = "one **two** **six** !";
+    const selection = EditorSelection.create([
+      EditorSelection.range(0, 3),
+      EditorSelection.range(9, 6),
+      EditorSelection.range(19, 12),
+      EditorSelection.cursor(20),
+    ], 2);
+    withEditor(doc, selection, (view) => {
+      expect(toggleInlineMark("**")(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe("**one** two six ****!");
+      expect(view.state.selection.ranges.map(({ anchor, head }) => [anchor, head]))
+        .toEqual([[2, 5], [11, 8], [15, 12], [18, 18]]);
+      expect(view.state.selection.mainIndex).toBe(2);
+      expect(view.state.selection.ranges.map(({ from, to }) => view.state.sliceDoc(from, to)))
+        .toEqual(["one", "two", "six", ""]);
+      expect(toggleInlineMark("**")(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(doc);
+      expect(view.state.selection.ranges.map(({ anchor, head }) => [anchor, head]))
+        .toEqual([[0, 3], [9, 6], [17, 14], [20, 20]]);
+      expect(view.state.selection.mainIndex).toBe(2);
+      expect(view.state.selection.ranges.map(({ from, to }) => view.state.sliceDoc(from, to)))
+        .toEqual(["one", "two", "six", ""]);
+    }, [EditorState.allowMultipleSelections.of(true)]);
+  });
+
+  it.each([
+    { name: "empty source", doc: "", anchor: 0, head: 0, formatted: "****", expected: [2, 2, 2, 2], text: "" },
+    {
+      name: "punctuation caret", doc: "pre\n(!) tail", anchor: 5, head: 5,
+      formatted: "pre\n(****!) tail", expected: [7, 7, 7, 7], text: "",
+    },
+    {
+      name: "whole word caret", doc: plain, anchor: 8, head: 8,
+      formatted: "pre\n(**\u{10400}a\u0308**) tail", expected: [7, 11, 7, 11], text: content,
+    },
+    {
+      name: "forward markers only", doc: "pre\n(****) tail", anchor: 5, head: 9,
+      formatted: "pre\n() tail", expected: [5, 5, 5, 5], text: "",
+    },
+    {
+      name: "reverse markers only", doc: "pre\n(****) tail", anchor: 9, head: 5,
+      formatted: "pre\n() tail", expected: [5, 5, 5, 5], text: "",
+    },
+  ])("preserves the existing $name behavior", ({ doc, anchor, head, formatted, expected, text }) => {
+    withEditor(doc, EditorSelection.single(anchor, head), (view) => {
+      expect(toggleInlineMark("**")(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(formatted);
+      const range = view.state.selection.main;
+      expect([range.anchor, range.head, range.from, range.to]).toEqual(expected);
+      expect(view.state.sliceDoc(range.from, range.to)).toBe(text);
+    });
+  });
+
+  it.each([
+    { name: "wrap", doc: plain, anchor: 9, head: 5, formatted: "pre\n(**\u{10400}a\u0308**) tail", expected: [11, 7] },
+    { name: "outside unwrap", doc: "pre\n(**\u{10400}a\u0308**) tail", anchor: 11, head: 7, formatted: plain, expected: [9, 5] },
+    { name: "contained unwrap", doc: "pre\n(**\u{10400}a\u0308**) tail", anchor: 13, head: 5, formatted: plain, expected: [9, 5] },
+  ])("undoes a reversed $name including its original selection", ({ doc, anchor, head, formatted, expected }) => {
+    const selection = EditorSelection.single(anchor, head);
+    const transactions: Transaction[] = [];
+    withEditor(doc, selection, (view) => {
+      expect(toggleInlineMark("**")(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(formatted);
+      expect([view.state.selection.main.anchor, view.state.selection.main.head]).toEqual(expected);
+      expect(transactions).toHaveLength(1);
+      expect(transactions[0].annotation(Transaction.userEvent)).toBe("input.format");
+      expect(transactions[0].scrollIntoView).toBe(true);
+      expect(transactions[0].docChanged).toBe(true);
+      expect(view.hasFocus).toBe(true);
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(doc);
+      expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+    }, [
+      history(),
+      EditorView.updateListener.of((update) => transactions.push(...update.transactions)),
+    ]);
+  });
+});
+
 describe("toggleInlineMark: word at an empty caret", () => {
   it.each([
     { name: "decomposed Latin", word: markedWord, carets: [0, 2, 3, 4, 6] },
