@@ -2504,13 +2504,25 @@ export function EditorShell({
         const blob = await res.blob();
         const filename = readDownloadFilename(res.headers.get("Content-Disposition"));
         const objectUrl = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = objectUrl;
-        a.download = filename ?? `${doc.title || "document"}.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+        let downloadStarted = false;
+        try {
+          const a = document.createElement("a");
+          try {
+            a.href = objectUrl;
+            a.download = filename ?? `${doc.title || "document"}.pdf`;
+            document.body.appendChild(a);
+            a.click();
+            downloadStarted = true;
+          } finally {
+            a.remove();
+          }
+        } finally {
+          if (downloadStarted) {
+            setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
+          } else {
+            URL.revokeObjectURL(objectUrl);
+          }
+        }
       } catch (e) {
         toast(apiErrorText(e, "PDF export failed"), "error");
       }
