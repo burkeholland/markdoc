@@ -130,7 +130,12 @@ const nodes: Record<string, NodeSerializer> = {
   },
   heading(state, node) {
     state.write(state.repeat("#", node.attrs.level) + " ");
+    const contentStart = state.out.length;
     state.renderInline(node, false);
+    // Only an ASCII-space/tab-separated terminal hash run can close an ATX heading.
+    state.out =
+      state.out.slice(0, contentStart) +
+      state.out.slice(contentStart).replace(/(^|[ \t])(#+[ \t]*)$/, "$1\\$2");
     state.closeBlock(node);
   },
   horizontal_rule(state, node) {
