@@ -21,6 +21,7 @@ const {
   firstHeading,
   frontMatterTitle,
   htmlToMarkdown,
+  htmlTitle,
   importFiles,
   importFormatFor,
   importText,
@@ -271,6 +272,85 @@ describe("convertImport", () => {
     expect(out.title).toBe("Hello World");
     const untitled = await convertImport({ name: "page.html", text: "<html><head><title>Only Title</title></head><body><p>x</p></body></html>", format: "html" });
     expect(untitled.title).toBe("Only Title");
+  });
+});
+
+describe("HTML document titles", () => {
+  it.each([
+    ["named ampersands", "Research &amp; Notes", "Research & Notes"],
+    ["quotes", "&quot;Quoted&quot; &apos;notes&apos;", "\"Quoted\" 'notes'"],
+    ["decimal and hex Unicode", "Caf&#233; &#x1F4DD; &#128221;", "Caf\u00e9 \u{1f4dd} \u{1f4dd}"],
+    ["one decoding pass", "&amp;amp; &amp;lt;b&amp;gt;", "&amp; &lt;b&gt;"],
+    ["encoded angle text", "&lt;b&gt;Research&lt;/b&gt; &lt;/title&gt;", "<b>Research</b> </title>"],
+    ["literal angle text", "<b>Research</b> < 2", "<b>Research</b> < 2"],
+    ["parser-defined malformed references", "&madeup; &#xZZ; &#0;", "&madeup; &#xZZ; \ufffd"],
+    ["encoded whitespace", " \t&nbsp;Research&#x20;&#9; &NewLine; Notes&#160; \n", "Research Notes"],
+  ])("reads %s as parsed title text", async (_name, source, title) => {
+    const html = `<html><head><title>${source}</title></head><body><p>Body &amp; <strong>notes</strong>.</p></body></html>`;
+    expect(htmlTitle(html)).toBe(title);
+    const out = await convertImport({ name: "page.html", text: html, format: "html" });
+    expect(out).toEqual({ title, content: "Body & **notes**.\n", warnings: [] });
+    expect(await htmlToMarkdown(html)).toBe(out.content);
+  });
+
+  it.each([
+    ["a comment before the head", '<!-- <title>Comment title</title> --><html><head><title>Real &amp; Title</title></head><body><p>Body</p></body></html>'],
+    ["script rawtext before the title", '<html><head><script>const example = "<title>Script title</title>";</script><title>Real &amp; Title</title></head><body><p>Body</p></body></html>'],
+    ["attributes and mixed case", '<HTML><HEAD><TiTlE data-label="a > b">Real &amp; Title</tItLe></HEAD><BODY><p>Body</p></BODY></HTML>'],
+  ])("selects the head title with %s", async (_name, html) => {
+    expect(htmlTitle(html)).toBe("Real & Title");
+    expect(await convertImport({ name: "page.html", text: html, format: "html" })).toEqual({
+      title: "Real & Title", content: "Body\n", warnings: [],
+    });
+  });
+
+  it.each([
+    ["no title", "<html><head></head><body><p>Body</p></body></html>"],
+    ["an empty title", "<html><head><title></title></head><body><p>Body</p></body></html>"],
+    ["a whitespace-only title", "<html><head><title> \t\n </title></head><body><p>Body</p></body></html>"],
+    ["an encoded blank title", "<html><head><title>&nbsp;&#32;&#x9;&NewLine;&#160;</title></head><body><p>Body</p></body></html>"],
+    ["only a foreign SVG title", "<html><head></head><body><svg><title>Diagram title</title></svg><p>Body</p></body></html>"],
+    ["only a body title", "<html><head></head><body><title>Body title</title><p>Body</p></body></html>"],
+  ])("falls back to the filename with %s", async (_name, html) => {
+    expect(htmlTitle(html)).toBeNull();
+    expect(await convertImport({ name: "meeting-notes.html", text: html, format: "html" })).toEqual({
+      title: "meeting-notes", content: "Body\n", warnings: [],
+    });
+  });
+
+  it.each([
+    ["explicit title", " Explicit title ", true, true, "Explicit title"],
+    ["front matter", undefined, true, true, "Front matter"],
+    ["front matter with blank explicit title", " \t", true, true, "Front matter"],
+    ["actual H1", undefined, false, true, "Heading"],
+    ["head title with blank explicit title", " \t", false, false, "Head & Title"],
+  ] as const)("preserves precedence for %s", async (_name, explicit, frontMatter, h1, title) => {
+    const body = `${frontMatter ? "<hr><p>title: Front matter</p><hr>" : ""}${h1 ? "<h1>Heading</h1>" : ""}<p>Body</p>`;
+    const html = `<html><head><title>Head &amp; Title</title></head><body>${body}</body></html>`;
+    const content = `${frontMatter ? "---\n\ntitle: Front matter\n\n---\n\n" : ""}${h1 ? "# Heading\n\n" : ""}Body\n`;
+    expect(await convertImport({ name: "page.html", text: html, format: "html", title: explicit })).toEqual({
+      title, content, warnings: [],
+    });
+  });
+
+  it.each([
+    ["decoded characters", "&amp;".repeat(DOCUMENT_TITLE_MAX + 1), "&".repeat(DOCUMENT_TITLE_MAX + 1), "&".repeat(DOCUMENT_TITLE_MAX)],
+    ["an emoji at the boundary", "&#65;".repeat(DOCUMENT_TITLE_MAX - 1) + "&#x1F4DD;Z", "A".repeat(DOCUMENT_TITLE_MAX - 1) + "\u{1f4dd}Z", "A".repeat(DOCUMENT_TITLE_MAX - 1)],
+  ])("clips %s after decoding", async (_name, source, decoded, title) => {
+    const html = `<html><head><title>${source}</title></head><body><p>Body</p></body></html>`;
+    expect(htmlTitle(html)).toBe(decoded);
+    expect(await convertImport({ name: "page.html", text: html, format: "html" })).toEqual({
+      title, content: "Body\n", warnings: [],
+    });
+  });
+
+  it("keeps empty-body warnings when the head title is readable or blank", async () => {
+    for (const [source, title] of [["Notes &amp; Ideas", "Notes & Ideas"], ["&nbsp;&#32;", "page"]]) {
+      const html = `<html><head><title>${source}</title></head><body></body></html>`;
+      expect(await convertImport({ name: "page.html", text: html, format: "html" })).toEqual({
+        title, content: "\n", warnings: ["The HTML had no readable content"],
+      });
+    }
   });
 });
 

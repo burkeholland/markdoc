@@ -1,4 +1,5 @@
 import { unified } from "unified";
+import type { Element, Root } from "hast";
 import rehypeParse from "rehype-parse";
 import rehypeSanitize, { defaultSchema, type Options as SanitizeSchema } from "rehype-sanitize";
 import rehypeRemark from "rehype-remark";
@@ -107,13 +108,24 @@ const htmlProcessor = unified()
 
 /** Best-effort HTML → GFM Markdown. Scripts, styles and event handlers are dropped before conversion. */
 export async function htmlToMarkdown(html: string): Promise<string> {
-  const file = await htmlProcessor.process(html);
-  return String(file).replace(/\n{3,}/g, "\n\n").trim() + "\n";
+  return htmlTreeToMarkdown(htmlProcessor.parse(html));
+}
+
+async function htmlTreeToMarkdown(tree: Root): Promise<string> {
+  const markdown = await htmlProcessor.run(tree);
+  return htmlProcessor.stringify(markdown).replace(/\n{3,}/g, "\n\n").trim() + "\n";
 }
 
 export function htmlTitle(html: string): string | null {
-  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-  const text = m?.[1].replace(/\s+/g, " ").trim();
+  return htmlTreeTitle(htmlProcessor.parse(html));
+}
+
+function htmlTreeTitle(tree: Root): string | null {
+  const html = tree.children.find((node): node is Element => node.type === "element" && node.tagName === "html");
+  const head = html?.children.find((node): node is Element => node.type === "element" && node.tagName === "head");
+  const title = head?.children.find((node): node is Element => node.type === "element" && node.tagName === "title");
+  // HTML title/RCDATA parsing already decodes references and preserves literal angle brackets.
+  const text = title?.children.filter((node) => node.type === "text").map((node) => node.value).join("").replace(/\s+/g, " ").trim();
   return text || null;
 }
 
@@ -134,8 +146,9 @@ export async function convertImport(input: { name: string; text: string; format:
   let content: string;
   let fallback: string | null = null;
   if (input.format === "html") {
-    content = await htmlToMarkdown(text);
-    fallback = htmlTitle(text);
+    const tree = htmlProcessor.parse(text);
+    fallback = htmlTreeTitle(tree);
+    content = await htmlTreeToMarkdown(tree);
     if (!content.trim()) warnings.push("The HTML had no readable content");
   } else {
     content = text.endsWith("\n") ? text : text + "\n";
