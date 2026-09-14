@@ -262,7 +262,7 @@ export interface SourceFormatState {
 export function formatStateAt(state: EditorState, range: SelectionRange = state.selection.main): SourceFormatState {
   const names = enclosingMarkdownNodes(state, range.head);
   const line = state.doc.lineAt(range.head).text;
-  const heading = HEADING_RE.exec(line)?.[2].length ?? 0;
+  const heading = names.has("SetextHeading1") ? 1 : names.has("SetextHeading2") ? 2 : HEADING_RE.exec(line)?.[2].length ?? 0;
   const bullet = BULLET_RE.exec(line);
   const codeBlock = names.has("FencedCode") || names.has("CodeBlock");
   let codeTask = false;
