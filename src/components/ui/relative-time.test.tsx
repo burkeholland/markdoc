@@ -4,6 +4,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { Profiler } from "react";
 import { renderToString } from "react-dom/server";
 import { hydrateRoot } from "react-dom/client";
+import { formatDateTime } from "@/lib/utils";
 import { RelativeTime, shortDate } from "./relative-time";
 
 const NOW = new Date("2026-08-22T18:30:00Z").getTime();
@@ -104,39 +105,71 @@ describe("RelativeTime", () => {
       );
       expect(html).toContain('<time dateTime="2026-08-22T18:29:00.000Z"');
       expect(html).toContain('class="timestamp"');
-      expect(html).toContain(">Edited Aug 22</time>");
+      expect(html).toContain(">Edited Aug 22, 2026</time>");
       expect(html).not.toContain("ago");
       expect(html).not.toContain("title=");
       expect(html).not.toContain("data-relative");
       expect(intervalSpy).not.toHaveBeenCalled();
     } finally {
+      vi.restoreAllMocks();
       vi.unstubAllGlobals();
     }
   });
 
-  it("includes the year for dates outside the current year", () => {
-    expect(shortDate(new Date("2025-12-31T23:59:00Z"), NOW)).toBe("Dec 31, 2025");
-    expect(shortDate(new Date("2026-01-01T00:00:00Z"), NOW)).toBe("Jan 1");
+  it("includes the date's year regardless of the current clock", () => {
+    for (const now of ["2026-12-31T23:59:59Z", "2027-01-01T00:00:01Z", "2025-01-01T00:00:00Z"]) {
+      vi.setSystemTime(new Date(now));
+      expect(shortDate(new Date("2025-12-31T23:59:00Z"))).toBe("Dec 31, 2025");
+      expect(shortDate(new Date("2026-01-01T00:00:00Z"))).toBe("Jan 1, 2026");
+    }
   });
 
-  it("hydrates without mismatch and then switches to relative text", async () => {
-    const date = new Date(NOW - 60_000);
-    const element = <RelativeTime date={date} prefix="Edited " />;
+  it.each([
+    ["same clock", "2026-08-22T18:30:00Z", "2026-08-22T18:30:00Z", "2026-08-22T18:29:00Z", "Aug 22, 2026", "1 minute ago"],
+    ["UTC New Year", "2026-12-31T23:59:59Z", "2027-01-01T00:00:01Z", "2026-12-31T23:59:01Z", "Dec 31, 2026", "1 minute ago"],
+    ["inverse clock years", "2027-01-01T00:00:01Z", "2026-12-31T23:59:59Z", "2026-12-31T23:58:59Z", "Dec 31, 2026", "1 minute ago"],
+    [
+      "another year's date", "2026-12-31T23:59:59Z", "2027-01-01T00:00:01Z", "2025-12-31T23:59:00Z", "Dec 31, 2025",
+      new Date("2025-12-31T23:59:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+    ],
+  ])("hydrates without mismatch and then switches to relative text: %s", async (_case, serverClock, clientClock, dateString, absolute, relative) => {
+    const date = new Date(dateString);
+    const element = <RelativeTime date={date} prefix="Edited " className="timestamp" />;
     const container = document.createElement("div");
-    container.innerHTML = renderToString(element);
-    document.body.appendChild(container);
-    expect(container.textContent).toBe("Edited Aug 22");
-
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-    const root = await act(async () => hydrateRoot(container, element));
-    expect(errors).not.toHaveBeenCalled();
+    const recoverableErrors = vi.fn();
+    let root: ReturnType<typeof hydrateRoot> | undefined;
+    try {
+      vi.setSystemTime(new Date(serverClock));
+      const html = renderToString(element);
+      expect(html).toBe(`<time dateTime="${date.toISOString()}" class="timestamp">Edited ${absolute}</time>`);
+      container.innerHTML = html;
+      document.body.appendChild(container);
+      expect(container.textContent).toBe(`Edited ${absolute}`);
+      const initialTime = container.querySelector("time");
 
-    const time = container.querySelector("time")!;
-    expect(time.textContent).toBe("Edited 1 minute ago");
-    expect(time.getAttribute("title")).toBeTruthy();
-    expect(time.dataset.relative).toBe("true");
-    act(() => root.unmount());
-    container.remove();
+      vi.setSystemTime(new Date(clientClock));
+      await act(async () => {
+        root = hydrateRoot(container, element, { onRecoverableError: recoverableErrors });
+      });
+      expect(errors).not.toHaveBeenCalled();
+      expect(recoverableErrors).not.toHaveBeenCalled();
+
+      const time = container.querySelector("time")!;
+      expect(time).toBe(initialTime);
+      expect(time.textContent).toBe(`Edited ${relative}`);
+      expect(time.getAttribute("title")).toBe(formatDateTime(date));
+      expect(time.getAttribute("dateTime")).toBe(date.toISOString());
+      expect(time.className).toBe("timestamp");
+      expect(time.dataset.relative).toBe("true");
+    } finally {
+      try {
+        act(() => root?.unmount());
+      } finally {
+        container.remove();
+        vi.restoreAllMocks();
+      }
+    }
   });
 
   it("publishes one current tick to every concurrent subscriber and clears only after the last unmount", () => {
