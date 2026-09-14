@@ -86,6 +86,47 @@ async function sqlOf(fn: () => Promise<unknown>): Promise<string[]> {
 }
 
 describe("excerptOfPrefix agrees with excerptOf wherever it answers", () => {
+  it.each([
+    { name: "surrogate pair", cluster: "\u{1F600}" },
+    { name: "combining sequence", cluster: "e\u0301\u0308" },
+    { name: "ZWJ sequence", cluster: "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}" },
+    { name: "flag", cluster: "\u{1F1FA}\u{1F1F8}" },
+    { name: "emoji modifier", cluster: "\u{1F44D}\u{1F3FD}" },
+  ])("grapheme excerpt prefix parity around a $name", ({ cluster }) => {
+    const before = "a".repeat(159);
+    const preamble = ["---", `title: ${cluster}`, "---", "# Heading", "```text", cluster, "```", ""].join("\n");
+    const line = before + cluster;
+    const text = `${preamble}${line}\n~~~\n${cluster}\n~~~\nLater prose.\n`;
+    const expected = excerptOf(text);
+    expect(expected).toBe(before);
+    expect(expected.length).toBeLessThanOrEqual(160);
+
+    const cuts = new Set<number>([0, text.length - 1, text.length, text.length + 1]);
+    for (let start = text.indexOf(cluster); start !== -1; start = text.indexOf(cluster, start + cluster.length)) {
+      for (let offset = 0; offset <= cluster.length; offset++) cuts.add(start + offset);
+    }
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === "\n") {
+        cuts.add(i);
+        cuts.add(i + 1);
+      }
+    }
+    let answered = 0;
+    for (const cut of cuts) {
+      const got = excerptOfPrefix(text.slice(0, cut), cut < text.length);
+      if (got === null) continue;
+      answered++;
+      expect(got, `cut at ${cut}`).toBe(expected);
+    }
+    expect(answered).toBeGreaterThan(0);
+    expect(excerptOfPrefix(preamble + line, true)).toBeNull();
+    expect(excerptOfPrefix(`${preamble}${line}\n`, true)).toBe(before);
+    expect(excerptOfPrefix(`---\ntitle: ${cluster}\n`, true)).toBeNull();
+    expect(excerptOfPrefix(`\`\`\`\n${cluster}\n`, true)).toBeNull();
+    expect(excerptOfPrefix(`# ${line}\n`, true)).toBeNull();
+    expect(excerptOfPrefix(`# ${line}`, false)).toBe(before);
+  });
+
   const cutsFor = (text: string, r: () => number) => {
     const cuts = new Set<number>([0, 1, 2, 10, 100, 500, 999, 1000, 1001, 1500, text.length - 1, text.length, text.length + 5]);
     for (let i = 0; i < 25; i++) cuts.add(Math.floor(r() * (text.length + 2)));
