@@ -1,15 +1,20 @@
 // @vitest-environment jsdom
 import { Fragment, StrictMode, type ComponentProps } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Avatar } from "./display";
 
 const SOURCE_A = "https://example.test/avatar-a.png";
 const SOURCE_B = "https://example.test/avatar-b.png?version=2";
+const UNICODE_NAMES = [
+  ["  e\u0301lan \u{1f469}\u200d\u{1f4bb}  ", "E\u0301\u{1f469}\u200d\u{1f4bb}"],
+  ["\u{10428}da o\u0308rn", "\u{10400}O\u0308"],
+] as const;
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe.each([false, true])("Avatar (StrictMode=%s)", (strict) => {
@@ -149,14 +154,50 @@ describe.each([false, true])("Avatar (StrictMode=%s)", (strict) => {
     expect(screen.getByText("AL")).toBeInTheDocument();
   });
 
-  it("uses current initials and default title while the same source remains failed", () => {
-    const view = renderAvatar({ name: "Ada Lovelace", src: SOURCE_A });
-    fireEvent.error(screen.getByRole("img"));
-    for (const [name, expected] of [["  Grace Brewster Hopper  ", "GH"], ["ada", "AD"], [" ", "?"]]) {
-      view.rerender(<Avatar name={name} src={SOURCE_A} />);
+  describe.each([false, true])("Unicode initials (native Segmenter absent=%s)", (nativeAbsent) => {
+    beforeEach(() => {
+      if (nativeAbsent) {
+        vi.stubGlobal("Intl", Object.create(Intl, { Segmenter: { value: undefined } }));
+        expect(Intl.Segmenter).toBeUndefined();
+      }
+    });
+
+    it.each([undefined, null, ""])("keeps complete Unicode initials for absent src %s", (src) => {
+      const view = renderAvatar({ name: UNICODE_NAMES[0][0], src });
+      for (const [name, expected] of UNICODE_NAMES) {
+        view.rerender(<Avatar name={name} src={src} />);
+        expect(screen.queryAllByRole("img")).toHaveLength(0);
+        expect(screen.getByText(expected).textContent).toBe(expected);
+        expect(screen.getByText(expected).parentElement).toHaveAttribute("title", name);
+      }
+    });
+
+    it("uses current initials and default title while the same source remains failed, then recovers", () => {
+      const view = renderAvatar({ name: "Ada Lovelace", src: SOURCE_A });
+      const failedImage = screen.getByRole("img");
+      fireEvent.error(failedImage);
+      for (const [name, expected] of [["  Grace Brewster Hopper  ", "GH"], ["ada", "AD"], [" ", "?"], ...UNICODE_NAMES]) {
+        view.rerender(<Avatar name={name} src={SOURCE_A} />);
+        expect(screen.queryAllByRole("img")).toHaveLength(0);
+        expect(screen.getByText(expected).textContent).toBe(expected);
+        expect(screen.getByText(expected).parentElement).toHaveAttribute("title", name);
+      }
+
+      const [name, expected] = UNICODE_NAMES[1];
+      view.rerender(<Avatar name={name} src={SOURCE_B} />);
+      const image = screen.getByRole("img");
+      expect(image).toHaveAttribute("alt", name);
+      expect(image).toHaveAttribute("src", SOURCE_B);
+      expect(image.parentElement).toHaveAttribute("title", name);
+      expect(image).not.toBe(failedImage);
+      expect(failedImage).not.toBeInTheDocument();
+      fireEvent.error(failedImage);
+      expect(screen.getAllByRole("img")).toEqual([image]);
+      fireEvent.error(image);
       expect(screen.queryAllByRole("img")).toHaveLength(0);
+      expect(screen.getByText(expected).textContent).toBe(expected);
       expect(screen.getByText(expected).parentElement).toHaveAttribute("title", name);
-    }
+    });
   });
 
   it("does not add requests, timers, animation callbacks, or focus work", () => {
@@ -171,6 +212,7 @@ describe.each([false, true])("Avatar (StrictMode=%s)", (strict) => {
     const view = renderAvatar({ name: "Ada Lovelace", src: SOURCE_A });
     fireEvent.error(screen.getByRole("img"));
     view.rerender(<Avatar name="Grace Hopper" src={SOURCE_A} />);
+    view.rerender(<Avatar name={UNICODE_NAMES[0][0]} src={SOURCE_A} />);
     view.rerender(<Avatar name="Grace Hopper" src={SOURCE_B} />);
     fireEvent.error(screen.getByRole("img"));
     view.unmount();
