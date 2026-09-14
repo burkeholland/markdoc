@@ -8,6 +8,7 @@
  * This under-counts CJK text where words are not space-separated; that is accepted for now.
  */
 
+import { splitGraphemes } from "unicode-segmenter/grapheme";
 import { countWords } from "../lib/word-count";
 
 export interface DocStats {
@@ -160,11 +161,11 @@ function closesFence(line: string, fence: string): boolean {
 }
 
 /**
- * The first `max` characters of a document's prose, for the dashboard card under the title:
+ * A complete-grapheme prefix within `max` UTF-16 code units, for the dashboard card under the title:
  * front matter and fenced code are skipped, headings are passed over (the title is already on
  * the card), images become their alt text, links their text, table cells are joined by spaces
  * and the remaining Markdown punctuation is removed. A document with no prose at all falls back
- * to its heading text. Linear in the input and stops once `max` characters are collected.
+ * to its heading text. Linear in the input and stops once `max` code units are collected.
  */
 export function excerptOf(markdown: string, max = 160): string {
   return collectExcerpt(markdown, max).text;
@@ -217,8 +218,15 @@ function collectExcerpt(markdown: string, max: number): { text: string; saturate
     }
     out += (out ? " " : "") + t;
   }
-  // Once `out` holds `max` characters the remaining lines cannot change the result.
-  return { text: (out || headingsOnly).slice(0, max).trim(), saturated: out.length >= max };
+  const prose = out || headingsOnly;
+  let end = 0;
+  // Segment the collected prose before clipping so a partial cluster cannot look complete.
+  for (const grapheme of splitGraphemes(prose)) {
+    if (end + grapheme.length > max) break;
+    end += grapheme.length;
+  }
+  // Raw prose fills the budget even when omitting its last cluster leaves a shorter excerpt.
+  return { text: prose.slice(0, end).trim(), saturated: out.length >= max };
 }
 
 function countSentences(text: string): number {

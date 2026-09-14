@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeStats, computeSelectionStats, EMPTY_STATS, goalProgress, minutesFor } from "./stats";
+import { computeStats, computeSelectionStats, EMPTY_STATS, excerptOf, excerptOfPrefix, goalProgress, minutesFor } from "./stats";
 
 const FIXTURE = [
   "---",
@@ -174,6 +174,81 @@ describe("computeStats", () => {
     expect(fastest(cold), `cold runs (ms): ${cold.map((r) => r.toFixed(2)).join(", ")}`).toBeLessThan(budgetMs);
     // The status bar re-reads stats on every render; the memo hit is the guarantee it relies on.
     expect(fastest(memoised), `memoised runs (ms): ${memoised.map((r) => r.toFixed(3)).join(", ")}`).toBeLessThan(0.5);
+  });
+});
+
+describe("grapheme excerpt", () => {
+  it.each([
+    { name: "ASCII", text: "Hello world", max: 8, expected: "Hello wo" },
+    { name: "final whitespace trim", text: "Hello world", max: 6, expected: "Hello" },
+    { name: "emoji crossing the boundary", text: "a\u{1F600}z", max: 2, expected: "a" },
+    { name: "exact-fit emoji", text: "a\u{1F600}z", max: 3, expected: "a\u{1F600}" },
+    { name: "supplementary letter", text: "a\u{10400}z", max: 2, expected: "a" },
+    { name: "nonspacing marks (Mn)", text: "ae\u0301\u0308z", max: 3, expected: "a" },
+    { name: "spacing mark (Mc)", text: "a\u0915\u093Fz", max: 2, expected: "a" },
+    { name: "enclosing mark (Me)", text: "ab\u20DDz", max: 2, expected: "a" },
+    { name: "emoji modifier", text: "a\u{1F44D}\u{1F3FD}z", max: 4, expected: "a" },
+    { name: "joined family", text: "a\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}z", max: 10, expected: "a" },
+    { name: "regional indicator flag", text: "a\u{1F1FA}\u{1F1F8}z", max: 4, expected: "a" },
+    { name: "exact-fit flag", text: "a\u{1F1FA}\u{1F1F8}z", max: 5, expected: "a\u{1F1FA}\u{1F1F8}" },
+    { name: "first cluster too large", text: "\u{1F44D}\u{1F3FD}z", max: 3, expected: "" },
+    { name: "only cluster too large", text: "e\u0301\u0308", max: 2, expected: "" },
+    { name: "zero budget", text: "\u{1F600}abc", max: 0, expected: "" },
+    { name: "empty source", text: "", max: 2, expected: "" },
+  ])("respects a small code-unit budget: $name", ({ text, max, expected }) => {
+    for (const markdown of [text, `# ${text}`]) {
+      const got = excerptOf(markdown, max);
+      expect(got).toBe(expected);
+      expect(got.length).toBeLessThanOrEqual(max);
+      expect(excerptOfPrefix(markdown, false, max)).toBe(expected);
+    }
+  });
+
+  it.each([
+    { name: "emoji", cluster: "\u{1F600}", units: 2 },
+    { name: "supplementary letter", cluster: "\u{10400}", units: 2 },
+    { name: "nonspacing marks", cluster: "e\u0301\u0308", units: 3 },
+    { name: "spacing mark", cluster: "\u0915\u093F", units: 2 },
+    { name: "enclosing mark", cluster: "b\u20DD", units: 2 },
+    { name: "emoji modifier", cluster: "\u{1F44D}\u{1F3FD}", units: 4 },
+    { name: "joined family", cluster: "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}", units: 11 },
+    { name: "regional indicator flag", cluster: "\u{1F1FA}\u{1F1F8}", units: 4 },
+  ])("uses the default 160-unit budget for $name", ({ cluster, units }) => {
+    const before = "a".repeat(159);
+    const exact = "a".repeat(160 - units) + cluster;
+    for (const heading of ["", "# "]) {
+      const clipped = excerptOf(`${heading}${before}${cluster}z`);
+      expect(clipped).toBe(before);
+      expect(clipped.length).toBeLessThanOrEqual(160);
+      const fitted = excerptOf(`${heading}${exact}z`);
+      expect(fitted).toBe(exact);
+      expect(fitted.length).toBe(160);
+    }
+  });
+
+  it("preserves ASCII, Markdown extraction and source spelling", () => {
+    expect(excerptOf("a".repeat(161))).toBe("a".repeat(160));
+    const markdown = [
+      "---", "title: ignored", "---",
+      "# Heading ignored",
+      "```text", "fenced text ignored", "```",
+      "~~~", "also ignored", "~~~",
+      "> - **cafe\u0301**   [link](destination) ![alt](image.png) `code`",
+      "| one | two |", "| --- | --- |",
+    ].join("\n");
+    expect(excerptOf(markdown)).toBe("cafe\u0301 link alt code one two");
+    expect(excerptOf(markdown, 4)).toBe("caf");
+    expect(excerptOf("# cafe\u0301\n## Other", 4)).toBe("caf");
+  });
+
+  it("keeps a saturated prefix conclusive when its last cluster is omitted", () => {
+    const before = "a".repeat(159);
+    const prefix = `# Heading\n${before}\u{1F600}\n`;
+    const full = `${prefix}Later prose.\n`;
+    expect(excerptOf(full)).toBe(before);
+    expect(excerptOfPrefix(prefix, true)).toBe(before);
+    expect(excerptOfPrefix("\u{1F44D}\u{1F3FD}\n", true, 3)).toBe("");
+    expect(excerptOfPrefix("# Heading\n", true, 0)).toBe("");
   });
 });
 
