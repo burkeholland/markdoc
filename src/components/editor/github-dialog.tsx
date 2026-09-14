@@ -5517,6 +5517,9 @@ export const GitHubDialog = memo(function GitHubDialog({
   const [unlinking, setUnlinking] = useState(false);
   const [unlinkError, setUnlinkError] = useState<string | null>(null);
   const linked = doc.storage !== "local";
+  const linkedDestination = linked
+    ? doc.storage === "gist" ? `Gist · ${doc.gistFile}` : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch} · ${doc.repoPath}`
+    : "";
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -5528,8 +5531,8 @@ export const GitHubDialog = memo(function GitHubDialog({
           <div className="mb-4 flex items-center gap-3 rounded-xl border border-line bg-surface-2 p-3">
             <GitHubIcon size={18} className="text-ink-2" />
             <div className="min-w-0 flex-1 text-sm">
-              <div className="truncate font-medium text-ink">
-                {doc.storage === "gist" ? `Gist · ${doc.gistFile}` : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch} · ${doc.repoPath}`}
+              <div className="truncate font-medium text-ink" title={linkedDestination}>
+                {linkedDestination}
               </div>
               <div className="text-xs text-ink-3">
                 {doc.publishedAt ? `Last published ${relativeTime(doc.publishedAt)}` : "Not published yet"}
@@ -5562,7 +5565,7 @@ export const GitHubDialog = memo(function GitHubDialog({
             </button>
           </div>
         )}
-        {linked && unlinkError && <p role="alert" className="mb-3 text-sm text-danger">{unlinkError}</p>}
+        {linked && unlinkError && <p role="alert" className="mb-3 text-sm text-danger wrap-anywhere">{unlinkError}</p>}
         {open && <GistAutoUpdateControl doc={doc} isOwner={isOwner} />}
         <GitHubPicker
           mode="link"
@@ -5594,7 +5597,7 @@ type CommitActionNavigationKey =
 const COMMIT_FORM_CLASS = "flex flex-col gap-3";
 const COMMIT_LABEL_CLASS = "text-sm font-medium text-ink-2";
 const COMMIT_STATIC_CLASS = "text-xs text-ink-3";
-const COMMIT_ERROR_CLASS = "rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40";
+const COMMIT_ERROR_CLASS = "rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40 wrap-anywhere";
 const COMMIT_ACTIONS_CLASS = "flex justify-end gap-2";
 const COMMIT_CANCEL_CLASS = "btn btn-ghost";
 const COMMIT_SUBMIT_CLASS = "btn btn-primary gap-2";

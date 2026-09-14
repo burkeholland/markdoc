@@ -15,6 +15,7 @@ import {
 } from "react";
 import { createRoot } from "react-dom/client";
 import type { DocumentDto } from "@/server/dto";
+import { ApiError } from "@/lib/api";
 
 const signIn = vi.fn(() => new Promise<void>(() => {}));
 vi.mock("next-auth/react", () => ({ signIn: (...args: unknown[]) => signIn(...(args as [])) }));
@@ -73,7 +74,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
-import { GitHubPicker, GitHubSignInPrompt } from "./github-dialog";
+import { GitHubDialog, GitHubPicker, GitHubSignInPrompt } from "./github-dialog";
 import { GITHUB_NOT_CONFIGURED } from "./labels";
 
 function deferred<T>() {
@@ -1098,6 +1099,260 @@ describe("GitHubSignInPrompt ownership", () => {
     expect(disconnect).toHaveBeenCalled();
     expect(screen.queryByTestId("github-signin-prompt")).toBeNull();
     expect(unhandledRejections).toEqual([]);
+  });
+});
+
+describe("GitHubDialog connection presentation", () => {
+  const unbroken = "destination-detail-".repeat(16);
+  const filename = ` \t${unbroken}<b title="literal">file</b>.md\n `;
+  const branch = ` \trelease-${unbroken}<i>branch</i>\n `;
+  const path = `docs/${unbroken}<a href="literal">path</a>.md\n `;
+  const effects = [gists, repos, branches, files, importDocument, linkDocument, signIn];
+  const callCounts = () => effects.map((effect) => effect.mock.calls.length);
+
+  function linkedDocument(storage: "gist" | "repo"): DocumentDto {
+    const doc = documentDto();
+    return storage === "gist"
+      ? { ...doc, storage, gistId: "linked-gist", gistFile: filename, githubUrl: "https://gist.github.com/linked-gist" }
+      : {
+          ...doc, storage, repoOwner: "octo", repoName: "notes", repoBranch: branch, repoPath: path,
+          githubUrl: "https://github.com/octo/notes",
+        };
+  }
+
+  function connection(doc: DocumentDto, onDocChange = vi.fn(), onOpenChange = vi.fn()) {
+    return <GitHubDialog open doc={doc} onDocChange={onDocChange} onOpenChange={onOpenChange} githubAvailable githubConfigured isOwner />;
+  }
+
+  function expectDestination(text: string) {
+    const destination = screen.getByTitle(text, { normalizer: (value) => value });
+    expect(destination.tagName).toBe("DIV");
+    expect(destination.textContent).toBe(text);
+    expect(destination.title).toBe(text);
+    expect(Object.fromEntries([...destination.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      class: "truncate font-medium text-ink",
+      title: text,
+    });
+    expect(destination.children).toHaveLength(0);
+    expect(destination.childNodes).toHaveLength(1);
+    expect(destination.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(destination.tabIndex).toBe(-1);
+    const metadata = destination.parentElement!;
+    const card = metadata.parentElement!;
+    expect(metadata.className).toBe("min-w-0 flex-1 text-sm");
+    expect([...metadata.children]).toEqual([destination, destination.nextElementSibling]);
+    expect(destination.nextElementSibling?.className).toBe("text-xs text-ink-3");
+    expect([...card.children].map((child) => child.tagName.toLowerCase())).toEqual(["svg", "div", "a", "button"]);
+    expect(card.querySelectorAll("svg")).toHaveLength(3);
+    expect(card.querySelector("svg")).toHaveAttribute("width", "18");
+    expect(card.querySelectorAll("input, select, textarea, [tabindex]")).toHaveLength(0);
+    expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("target", "_blank");
+    expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("rel", "noopener noreferrer");
+    return destination;
+  }
+
+  function expectPassive(element: HTMLElement, onDocChange: ReturnType<typeof vi.fn>, onOpenChange: ReturnType<typeof vi.fn>) {
+    const dialog = screen.getByRole("dialog");
+    const controls = [...dialog.querySelectorAll<HTMLElement>("*")].filter((node) => node.tabIndex >= 0);
+    const focus = document.activeElement;
+    const before = callCounts();
+    const observer = new MutationObserver(() => {});
+    observer.observe(dialog, { subtree: true, childList: true, attributes: true, characterData: true });
+    const spies = [
+      vi.spyOn(HTMLElement.prototype, "focus"),
+      vi.spyOn(globalThis, "setTimeout"),
+      vi.spyOn(globalThis, "setInterval"),
+      vi.spyOn(window, "requestAnimationFrame"),
+      vi.spyOn(globalThis, "queueMicrotask"),
+      vi.spyOn(globalThis, "fetch"),
+    ];
+    try {
+      fireEvent.mouseOver(element);
+      fireEvent.mouseMove(element);
+      fireEvent.mouseOut(element);
+      expect(observer.takeRecords()).toHaveLength(0);
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+      expect(callCounts()).toEqual(before);
+      expect(onDocChange).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(focus);
+      expect([...dialog.querySelectorAll<HTMLElement>("*")].filter((node) => node.tabIndex >= 0)).toEqual(controls);
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    } finally {
+      observer.disconnect();
+      vi.restoreAllMocks();
+    }
+  }
+
+  it.each(["gist", "repo"] as const)("exposes exact long %s destination text and replaces metadata without adding controls", async (storage) => {
+    expect(unbroken.length).toBeGreaterThanOrEqual(240);
+    expect(unbroken).not.toMatch(/\s/);
+    const doc = { ...linkedDocument(storage), hasUnpublishedChanges: true };
+    const onDocChange = vi.fn();
+    const onOpenChange = vi.fn();
+    const view = render(connection(doc, onDocChange, onOpenChange));
+    await screen.findByTestId("gist-filename");
+    await act(async () => {});
+    const text = storage === "gist" ? `Gist · ${filename}` : `octo/notes · ${branch} · ${path}`;
+    const destination = expectDestination(text);
+    expect(destination.nextElementSibling?.textContent).toBe("Not published yet · unpublished changes");
+    expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", doc.githubUrl);
+    expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled();
+    const input = screen.getByTestId("gist-filename");
+    fireEvent.change(input, { target: { value: "keep-draft.md" } });
+    await act(async () => {});
+    expectPassive(destination, onDocChange, onOpenChange);
+    expect(input).toHaveValue("keep-draft.md");
+
+    const updated = {
+      ...doc, gistFile: " \tUpdated <img src='literal'>.md\n ",
+      repoOwner: "new-owner", repoName: "new-repo", repoBranch: "next-branch", repoPath: " \tnew/<b>path</b>.md\n ",
+      hasUnpublishedChanges: false,
+    };
+    view.rerender(connection(updated, onDocChange, onOpenChange));
+    const nextText = storage === "gist" ? `Gist · ${updated.gistFile}` : `new-owner/new-repo · next-branch · ${updated.repoPath}`;
+    expect(expectDestination(nextText)).toBe(destination);
+    expect(screen.queryByTitle(text, { normalizer: (value) => value })).toBeNull();
+    expect(destination.nextElementSibling?.textContent).toBe("Not published yet");
+    expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", doc.githubUrl);
+    expect(linkDocument).not.toHaveBeenCalled();
+    expect(onDocChange).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    view.rerender(connection(documentDto(doc.id), onDocChange, onOpenChange));
+    expect(screen.getByRole("dialog", { name: "Connect to GitHub" })).toBeInTheDocument();
+    expect(screen.queryByTitle(nextText, { normalizer: (value) => value })).toBeNull();
+    expect(destination).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Open" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
+    expect(screen.getByTestId("github-picker")).toBeInTheDocument();
+  });
+
+  it.each([null, "", " \t \n "])("preserves destination interpolation without a fallback for %j", async (value) => {
+    const doc = { ...linkedDocument("gist"), gistFile: value };
+    const view = render(connection(doc));
+    await screen.findByTestId("gist-filename");
+    expectDestination(`Gist · ${value}`);
+    view.rerender(connection({
+      ...linkedDocument("repo"), repoOwner: value, repoName: value, repoBranch: value, repoPath: value,
+    }));
+    expectDestination(`${value}/${value} · ${value} · ${value}`);
+  });
+
+  const failures = [
+    { kind: "unbroken", error: new Error(unbroken), text: unbroken },
+    { kind: "ordinary", error: new Error("GitHub could not disconnect this document."), text: "GitHub could not disconnect this document." },
+    { kind: "literal markup", error: new Error(`<a href="literal">Reason</a>${unbroken}`), text: `<a href="literal">Reason</a>${unbroken}` },
+    { kind: "whitespace", error: new Error(` \tFirst reason\n\n${unbroken}\t last reason \n `), text: ` \tFirst reason\n\n${unbroken}\t last reason \n ` },
+    { kind: "whitespace only", error: new Error(" \t \n "), text: " \t \n " },
+    { kind: "validation issue", error: new ApiError(400, "Invalid request", [{ message: unbroken }]), text: unbroken },
+    { kind: "fallback", error: undefined, text: "Could not disconnect the gist." },
+  ];
+
+  function expectUnlinkError(text: string) {
+    const error = screen.getByRole("alert");
+    expect(error.tagName).toBe("P");
+    expect(error.textContent).toBe(text);
+    expect(Object.fromEntries([...error.attributes].map(({ name, value }) => [name, value]))).toEqual({
+      role: "alert",
+      class: "mb-3 text-sm text-danger wrap-anywhere",
+    });
+    expect(error.childNodes).toHaveLength(1);
+    expect(error.firstChild?.nodeType).toBe(Node.TEXT_NODE);
+    expect(error.children).toHaveLength(0);
+    expect(error.tabIndex).toBe(-1);
+    expect(error).toBeVisible();
+    expect(error.parentElement).toBe(screen.getByRole("dialog"));
+    expect(error.previousElementSibling).toBe(screen.getByRole("button", { name: "Disconnect" }).parentElement);
+    expect(error.nextElementSibling).toBe(screen.getByTestId("github-picker"));
+    expect(screen.getAllByRole("alert")).toEqual([error]);
+    return error;
+  }
+
+  it.each(failures)("wraps $kind unlink failures with normal disabled recovery and unchanged fields", async ({ error: reason, text }) => {
+    expect(unbroken.length).toBeGreaterThanOrEqual(240);
+    expect(unbroken).not.toMatch(/\s/);
+    const first = deferred<{ document: DocumentDto }>();
+    const second = deferred<{ document: DocumentDto }>();
+    const recovered = deferred<{ document: DocumentDto }>();
+    linkDocument.mockReset().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise).mockReturnValueOnce(recovered.promise);
+    const doc = linkedDocument("repo");
+    const onDocChange = vi.fn();
+    const onOpenChange = vi.fn();
+    const view = render(connection(doc, onDocChange, onOpenChange));
+    await screen.findByTestId("gist-filename");
+    const destinationText = `octo/notes · ${branch} · ${path}`;
+    const destination = expectDestination(destinationText);
+    const input = screen.getByTestId("gist-filename");
+    const visibility = screen.getByRole("checkbox", { name: "Public" });
+    fireEvent.change(input, { target: { value: "keep-draft.md" } });
+    const disconnect = screen.getByRole("button", { name: "Disconnect" });
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(disconnect);
+    expect(disconnect).toBeDisabled();
+    expect(linkDocument).toHaveBeenCalledExactlyOnceWith(doc.id, { storage: "local" });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(input).toBeEnabled();
+    expect(visibility).toBeEnabled();
+    await act(async () => {
+      first.reject(reason);
+      await Promise.allSettled([first.promise]);
+    });
+    const error = expectUnlinkError(text);
+    expect(disconnect).toBeEnabled();
+    expect(input).toHaveValue("keep-draft.md");
+    expect(visibility).not.toBeChecked();
+    expect(expectDestination(destinationText)).toBe(destination);
+    await act(async () => {});
+    expectPassive(error, onDocChange, onOpenChange);
+
+    fireEvent.click(disconnect);
+    expect(disconnect).toBeDisabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(error).not.toBeInTheDocument();
+    expect(linkDocument.mock.calls).toEqual(Array.from({ length: 2 }, () => [doc.id, { storage: "local" }]));
+    const replacement = ` \tReplacement <b>reason</b>\n${unbroken} `;
+    await act(async () => {
+      second.reject(new ApiError(400, "Invalid request", [{ message: replacement }]));
+      await Promise.allSettled([second.promise]);
+    });
+    expectUnlinkError(replacement);
+    expect(disconnect).toBeEnabled();
+    expect(input).toHaveValue("keep-draft.md");
+    expect(onDocChange).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    fireEvent.click(disconnect);
+    expect(disconnect).toBeDisabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(linkDocument.mock.calls).toEqual(Array.from({ length: 3 }, () => [doc.id, { storage: "local" }]));
+    const local = documentDto(doc.id);
+    await act(async () => {
+      recovered.resolve({ document: local });
+      await recovered.promise;
+    });
+    expect(disconnect).toBeEnabled();
+    expect(onDocChange).toHaveBeenCalledExactlyOnceWith(local);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(input).toHaveValue("keep-draft.md");
+    expect(screen.queryByRole("alert")).toBeNull();
+    view.rerender(connection(local, onDocChange, onOpenChange));
+    expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
+    expect(destination).not.toBeInTheDocument();
+    expect(importDocument).not.toHaveBeenCalled();
+    expect(signIn).not.toHaveBeenCalled();
+    expect(unhandledRejections).toEqual([]);
+  });
+
+  it("keeps an empty normalized unlink error absent and releases the Disconnect button", async () => {
+    linkDocument.mockRejectedValueOnce(new Error(""));
+    render(connection(linkedDocument("repo")));
+    await screen.findByTestId("gist-filename");
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+    await act(async () => {});
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: "Disconnect" })).toBeEnabled();
+    expect(linkDocument).toHaveBeenCalledExactlyOnceWith("doc-current", { storage: "local" });
   });
 });
 
