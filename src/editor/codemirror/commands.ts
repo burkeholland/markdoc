@@ -134,7 +134,7 @@ function lastSelectedLine(state: EditorState, range: SelectionRange): number {
   return !range.empty && line.from === range.to ? line.number - 1 : line.number;
 }
 
-const HEADING_RE = /^(\s{0,3})(#{1,6})\s+/;
+const HEADING_RE = /^(\s{0,3})(#{1,6})(?:\s+|$)/;
 
 /** Set ATX headings (level 1-6), or clear ATX and parsed Setext headings (level 0). */
 export function setHeading(level: number) {

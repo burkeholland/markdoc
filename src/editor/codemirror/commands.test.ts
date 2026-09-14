@@ -13,6 +13,7 @@ import { insertCodeBlock, insertImage, insertLink, setHeading, toggleInlineMark,
 import * as codeMirrorLanguage from "@codemirror/language";
 import { Parser, Tree } from "@lezer/common";
 import { pathologicalParagraphs } from "./pathological";
+import { formatStateAt, type SourceFormatState } from "./commands";
 
 function withEditor(
   doc: string,
@@ -1971,5 +1972,201 @@ describe("source inline code delimiter fidelity", () => {
         expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
       }, configured ? [markdown({ base: markdownLanguage, extensions: [pathologicalParagraphs] })] : []);
     }
+  });
+});
+
+describe("bare source ATX headings", () => {
+  const language = markdown({ base: markdownLanguage, codeLanguages: languages, addKeymap: false });
+  const plain: SourceFormatState = {
+    strong: false, em: false, code: false, strike: false, link: false, heading: 0,
+    bullet: false, ordered: false, task: false, quote: false, codeBlock: false,
+  };
+
+  function expectEmptyHeading(source: string, level: number) {
+    const { doc } = parseMarkdown(source);
+    expect(doc.childCount).toBe(1);
+    expect(doc.child(0).type.name).toBe("heading");
+    expect(doc.child(0).attrs.level).toBe(level);
+    expect(doc.child(0).textContent).toBe("");
+    expect(doc.child(0).childCount).toBe(0);
+    expect(doc.child(0).content.size).toBe(0);
+  }
+
+  function edits({
+    source, selection, level, expected, changes, mapped, before, after,
+  }: {
+    source: string;
+    selection: EditorSelection;
+    level: number;
+    expected: string;
+    changes: [number, number, string][];
+    mapped?: EditorSelection;
+    before?: (view: EditorView) => void;
+    after?: (view: EditorView) => void;
+  }) {
+    const transactions: Transaction[] = [];
+    withEditor(source, selection, (view) => {
+      expect(ensureSyntaxTree(view.state, view.state.doc.length, 1000)).not.toBeNull();
+      before?.(view);
+      const focus = vi.spyOn(view, "focus");
+      try {
+        expect(setHeading(level)(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(expected);
+        expect(transactions).toHaveLength(1);
+        const transaction = transactions[0];
+        expect(transaction.annotation(Transaction.userEvent)).toBe("input.format");
+        expect(transaction.scrollIntoView).toBe(true);
+        expect(transaction.docChanged).toBe(true);
+        const actual: [number, number, string][] = [];
+        transaction.changes.iterChanges((from, to, _mappedFrom, _mappedTo, inserted) => {
+          actual.push([from, to, inserted.toString()]);
+        });
+        expect(actual).toEqual(changes);
+        expect(view.state.selection.toJSON()).toEqual(selection.map(transaction.changes).toJSON());
+        if (mapped) expect(view.state.selection.toJSON()).toEqual(mapped.toJSON());
+        expect(view.state.selection.mainIndex).toBe(selection.mainIndex);
+        expect(focus).toHaveBeenCalledTimes(1);
+        expect(view.hasFocus).toBe(true);
+        expect(ensureSyntaxTree(view.state, view.state.doc.length, 1000)).not.toBeNull();
+        after?.(view);
+        expect(undo(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(source);
+        expect(view.state.selection.toJSON()).toEqual(selection.toJSON());
+      } finally {
+        focus.mockRestore();
+      }
+    }, [
+      language, history(), EditorState.allowMultipleSelections.of(true),
+      EditorView.updateListener.of((update) => transactions.push(...update.transactions)),
+    ]);
+  }
+
+  it.each([
+    { level: 1, source: "#", indented: " #", normalized: "# ", target: 2, changed: "## ", cleared: "" },
+    { level: 2, source: "##", indented: "  ##", normalized: "## ", target: 3, changed: "### ", cleared: "" },
+    { level: 3, source: "###", indented: "   ###", normalized: "### ", target: 4, changed: "#### ", cleared: "" },
+    { level: 4, source: "####", indented: " ####", normalized: "#### ", target: 5, changed: "##### ", cleared: "" },
+    { level: 5, source: "#####", indented: "  #####", normalized: "##### ", target: 6, changed: "###### ", cleared: "" },
+    { level: 6, source: "######", indented: "   ######", normalized: "###### ", target: 1, changed: "# ", cleared: "" },
+    { level: 1, source: "#\n", indented: " #\n", normalized: "# \n", target: 2, changed: "## \n", cleared: "\n" },
+    { level: 2, source: "##\n", indented: "  ##\n", normalized: "## \n", target: 3, changed: "### \n", cleared: "\n" },
+    { level: 3, source: "###\n", indented: "   ###\n", normalized: "### \n", target: 4, changed: "#### \n", cleared: "\n" },
+    { level: 4, source: "####\n", indented: " ####\n", normalized: "#### \n", target: 5, changed: "##### \n", cleared: "\n" },
+    { level: 5, source: "#####\n", indented: "  #####\n", normalized: "##### \n", target: 6, changed: "###### \n", cleared: "\n" },
+    { level: 6, source: "######\n", indented: "   ######\n", normalized: "###### \n", target: 1, changed: "# \n", cleared: "\n" },
+  ])("clears, replaces and normalizes level $level in $source with or without indentation", (fixture) => {
+    for (const source of [fixture.source, fixture.indented]) {
+      const end = source.endsWith("\n") ? source.length - 1 : source.length;
+      for (const { level, expected } of [
+        { level: 0, expected: fixture.cleared },
+        { level: fixture.target, expected: fixture.changed },
+        { level: fixture.level, expected: fixture.normalized },
+      ]) {
+        edits({
+          source, selection: EditorSelection.single(end), level, expected,
+          changes: [[0, end, expected.endsWith("\n") ? expected.slice(0, -1) : expected]],
+          before: (view) => {
+            expectEmptyHeading(source, fixture.level);
+            expect(formatStateAt(view.state)).toEqual({ ...plain, heading: fixture.level });
+          },
+          after: (view) => {
+            if (level === 0) {
+              const { doc } = parseMarkdown(view.state.doc.toString());
+              expect(doc.toJSON()).toEqual(parseMarkdown("").doc.toJSON());
+              expect(doc.childCount).toBe(1);
+              expect(doc.child(0).type.name).toBe("paragraph");
+              expect(doc.child(0).content.size).toBe(0);
+              expect(formatStateAt(view.state)).toEqual(plain);
+            } else {
+              expectEmptyHeading(view.state.doc.toString(), level);
+              expect(formatStateAt(view.state)).toEqual({ ...plain, heading: level });
+            }
+          },
+        });
+      }
+    }
+  });
+
+  it.each([
+    { name: "forward replacement", selection: EditorSelection.single(8, 13), level: 3, expected: "Before\n\n### \n### \n\nAfter", mapped: EditorSelection.single(8, 18), changes: [[8, 9, "### "], [10, 12, "### "]] },
+    { name: "reversed replacement", selection: EditorSelection.single(13, 8), level: 3, expected: "Before\n\n### \n### \n\nAfter", mapped: EditorSelection.single(18, 8), changes: [[8, 9, "### "], [10, 12, "### "]] },
+    { name: "forward clear with selected unaffected lines", selection: EditorSelection.single(0, 14), level: 0, expected: "Before\n\n\n\n\nAfter", mapped: EditorSelection.single(0, 11), changes: [[8, 9, ""], [10, 12, ""]] },
+    { name: "reversed clear with selected unaffected lines", selection: EditorSelection.single(14, 0), level: 0, expected: "Before\n\n\n\n\nAfter", mapped: EditorSelection.single(11, 0), changes: [[8, 9, ""], [10, 12, ""]] },
+    { name: "caret at line start", selection: EditorSelection.single(8), level: 3, expected: "Before\n\n### \n##\n\nAfter", mapped: EditorSelection.single(8), changes: [[8, 9, "### "]] },
+    { name: "caret at marker end", selection: EditorSelection.single(9), level: 0, expected: "Before\n\n\n##\n\nAfter", mapped: EditorSelection.single(8), changes: [[8, 9, ""]] },
+    { name: "exclusive next-heading endpoint", selection: EditorSelection.single(8, 10), level: 3, expected: "Before\n\n### \n##\n\nAfter", mapped: EditorSelection.single(8, 13), changes: [[8, 9, "### "]] },
+    { name: "reversed exclusive next-heading endpoint", selection: EditorSelection.single(10, 8), level: 0, expected: "Before\n\n\n##\n\nAfter", mapped: EditorSelection.single(9, 8), changes: [[8, 9, ""]] },
+  ] satisfies { name: string; selection: EditorSelection; level: number; expected: string; mapped: EditorSelection; changes: [number, number, string][] }[])(
+    "preserves neighboring paragraphs, mapped selection and undo for $name",
+    (fixture) => edits({
+      source: "Before\n\n#\n##\n\nAfter", ...fixture,
+      after: (view) => {
+        const { doc } = parseMarkdown(view.state.doc.toString());
+        expect([doc.firstChild?.type.name, doc.firstChild?.textContent]).toEqual(["paragraph", "Before"]);
+        expect([doc.lastChild?.type.name, doc.lastChild?.textContent]).toEqual(["paragraph", "After"]);
+      },
+    }),
+  );
+
+  it.each([
+    { level: 0, expected: "Before\n\n\nkeep\n\n\nAfter", mapped: [8, 14], changes: [[8, 9, ""], [15, 19, ""]] },
+    { level: 3, expected: "Before\n\n### \nkeep\n### \n\nAfter", mapped: [12, 22], changes: [[8, 9, "### "], [15, 19, "### "]] },
+  ] satisfies { level: number; expected: string; mapped: number[]; changes: [number, number, string][] }[])(
+    "formats disjoint bare headings at level $level with nonzero mainIndex",
+    ({ mapped, ...fixture }) => edits({
+      source: "Before\n\n#\nkeep\n  ##\n\nAfter",
+      selection: EditorSelection.create([EditorSelection.cursor(9), EditorSelection.cursor(19)], 1),
+      mapped: EditorSelection.create(mapped.map((pos) => EditorSelection.cursor(pos)), 1),
+      ...fixture,
+      after: (view) => {
+        expect(formatStateAt(view.state)).toEqual({ ...plain, heading: fixture.level });
+      },
+    }),
+  );
+
+  it.each([
+    { name: "empty line", source: "", expected: "## " },
+    { name: "seven hashes", source: "#######", expected: "## #######" },
+    { name: "long hash run", source: " ########", expected: "##  ########" },
+    { name: "overlong run with a delimiter", source: "####### text", expected: "## ####### text" },
+    { name: "attached word", source: "###word", expected: "## ###word" },
+    { name: "escaped hash", source: "\\#", expected: "## \\#" },
+  ])("does not strip a false heading prefix from $name", ({ source, expected }) => {
+    const transactions: Transaction[] = [];
+    withEditor(source, EditorSelection.single(source.length), (view) => {
+      expect(ensureSyntaxTree(view.state, view.state.doc.length, 1000)).not.toBeNull();
+      const focus = vi.spyOn(view, "focus");
+      try {
+        const state = view.state;
+        expect(formatStateAt(state)).toEqual(plain);
+        expect(setHeading(0)(view)).toBe(false);
+        expect(view.state).toBe(state);
+        expect(view.state.doc.toString()).toBe(source);
+        expect(transactions).toHaveLength(0);
+        expect(focus).not.toHaveBeenCalled();
+      } finally {
+        focus.mockRestore();
+      }
+    }, [language, EditorView.updateListener.of((update) => transactions.push(...update.transactions))]);
+    edits({
+      source, selection: EditorSelection.single(source.length), level: 2, expected,
+      changes: [[0, 0, "## "]],
+    });
+  });
+
+  it.each([
+    { source: "  ## text", expected: "#### text", end: 5 },
+    { source: " ###\t\ttext", expected: "#### text", end: 6 },
+  ])("retains whitespace consumption for nonempty $source", ({ source, expected, end }) => {
+    edits({
+      source, selection: EditorSelection.single(source.length), level: 4, expected,
+      changes: [[0, end, "#### "]],
+      after: (view) => expect(formatStateAt(view.state)).toEqual({ ...plain, heading: 4 }),
+    });
+    edits({
+      source, selection: EditorSelection.single(source.length), level: 0, expected: "text",
+      changes: [[0, end, ""]],
+      after: (view) => expect(formatStateAt(view.state)).toEqual(plain),
+    });
   });
 });
