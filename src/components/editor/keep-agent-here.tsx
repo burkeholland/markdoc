@@ -341,6 +341,7 @@ interface KeepAgentPanelPublication {
   readonly elements: Readonly<KeepAgentPanelElements>;
   readonly bindings: Readonly<Record<PanelElementRole, KeepAgentPanelBinding | null>>;
   readonly roles: readonly PanelElementRole[];
+  readonly canReplayNewError: boolean;
   readonly setup: Element | null;
   readonly topLevelChildren: readonly Element[];
   readonly placement: readonly KeepAgentPanelPlacement[];
@@ -369,6 +370,7 @@ interface PromptOwner {
 }
 
 interface KeepAgentPanelReplay {
+  readonly kind: "full" | "new-error";
   readonly publication: KeepAgentPanelPublication;
   readonly generation: KeepAgentPanelGeneration;
   readonly expected: Readonly<Record<PanelElementRole, KeepAgentPanelBinding | null>>;
@@ -1225,6 +1227,8 @@ class KeepAgentPanelCoordinator {
   #promptOwner: PromptOwner | null = null;
   #publishedGenerations = new WeakSet<KeepAgentPanelGeneration>();
   #replayedGenerations = new WeakSet<KeepAgentPanelGeneration>();
+  #committedElementRoles = new WeakMap<HTMLElement, PanelElementRole>();
+  #errorReplaySuccessors = new WeakMap<KeepAgentPanelPublication, KeepAgentPanelPublication>();
   #claimedActions = new WeakSet<KeepAgentPanelAction>();
   #claimedNavPublications = new WeakSet<KeepAgentPanelPublication>();
   #claimedReactEvents = new WeakSet<object>();
@@ -1628,6 +1632,19 @@ class KeepAgentPanelCoordinator {
     target?: RefObject<HTMLPreElement | null>,
   ): (() => void) | undefined {
     const previous = generation.bindings[role];
+    const errorReplay = this.#replay;
+    if (errorReplay?.generation === generation && errorReplay.kind === "new-error") {
+      if (
+        errorReplay.layoutRetired ||
+        errorReplay.released.size !== 2 ||
+        role !== (errorReplay.rebound.size === 0 ? "retry" : "error") ||
+        errorReplay.rebound.size >= 2 ||
+        element !== errorReplay.expected[role]?.element
+      ) {
+        this.#invalidateReplay(errorReplay);
+        return;
+      }
+    }
     if (element === null) {
       if (previous) this.#release(previous, "null");
       return;
@@ -1688,7 +1705,12 @@ class KeepAgentPanelCoordinator {
       this.#promptOwner = { binding, target };
       target.current = element as HTMLPreElement;
     }
-    if (replay?.generation === generation) replay.rebound.set(role, binding);
+    if (replay?.generation === generation) {
+      replay.rebound.set(role, binding);
+      if (replay.kind === "new-error" && replay.rebound.size === 2) {
+        this.#completeErrorReplay(replay);
+      }
+    }
     return () => this.#release(binding, "cleanup");
   }
 
@@ -1696,12 +1718,21 @@ class KeepAgentPanelCoordinator {
     binding: KeepAgentPanelBinding,
     source: "cleanup" | "null" | "replace",
   ) {
-    if (!binding.active) return;
+    if (!binding.active) {
+      const replay = this.#replay;
+      if (replay?.kind === "new-error" && replay.expected[binding.role] === binding) {
+        this.#invalidateReplay(replay);
+      }
+      return;
+    }
     const publication = this.#current;
     const startsReplay =
       publication?.generation === binding.generation &&
       publication.bindings[binding.role] === binding
-        ? this.#beginReplay(publication)
+        ? this.#beginReplay(
+            publication,
+            source === "cleanup" && binding.role === "error" && publication.canReplayNewError,
+          )
         : null;
     const replay = this.#replay;
 
@@ -1725,7 +1756,12 @@ class KeepAgentPanelCoordinator {
         source !== "cleanup" ||
         replay.expected[role] !== binding ||
         replay.released.has(role) ||
-        replay.rebound.has(role)
+        replay.rebound.has(role) ||
+        (replay.kind === "new-error" && (
+          replay.rebound.size !== 0 ||
+          replay.released.size >= 2 ||
+          role !== (replay.released.size === 0 ? "error" : "retry")
+        ))
       ) {
         replay.invalid = true;
       } else {
@@ -1753,7 +1789,10 @@ class KeepAgentPanelCoordinator {
     );
   }
 
-  #beginReplay(publication: KeepAgentPanelPublication): KeepAgentPanelReplay | null {
+  #beginReplay(
+    publication: KeepAgentPanelPublication,
+    newError = false,
+  ): KeepAgentPanelReplay | null {
     if (this.#replay?.publication === publication) return this.#replay;
     if (
       this.#replay ||
@@ -1764,11 +1803,13 @@ class KeepAgentPanelCoordinator {
       Boolean(publication.back && this.#claimedActions.has(publication.back)) ||
       Boolean(publication.retry && this.#claimedActions.has(publication.retry)) ||
       this.#claimedNavPublications.has(publication) ||
-      !this.#publicationIsCurrent(publication)
+      !this.#publicationIsCurrent(publication) ||
+      (newError && !publication.observer)
     ) {
       return null;
     }
     const replay: KeepAgentPanelReplay = {
+      kind: newError ? "new-error" : "full",
       publication,
       generation: publication.generation,
       expected: publication.bindings,
@@ -1777,6 +1818,16 @@ class KeepAgentPanelCoordinator {
       layoutRetired: false,
       invalid: false,
     };
+    if (newError) {
+      // React replays a newly placed error subtree without replaying its retained
+      // ancestor's layout effect. Preserve all DOM history until both refs return.
+      publication.observer!.observe(publication.elements.panel!, {
+        attributes: true,
+        characterData: true,
+        childList: true,
+        subtree: true,
+      });
+    }
     this.#replay = replay;
     queueMicrotask(() => {
       if (this.#replay === replay) this.#invalidateReplay(replay);
@@ -1811,9 +1862,16 @@ class KeepAgentPanelCoordinator {
   }
 
   retire(publication: KeepAgentPanelPublication) {
+    const successor = this.#errorReplaySuccessors.get(publication);
+    if (successor) {
+      // The retained layout cleanup still closes over the original publication.
+      this.retire(successor);
+      return;
+    }
     const existingReplay = this.#replay;
     if (existingReplay?.publication === publication) {
       existingReplay.layoutRetired = true;
+      if (existingReplay.kind === "new-error") this.#invalidateReplay(existingReplay);
       return;
     }
     if (publication.retired) return;
@@ -1830,6 +1888,7 @@ class KeepAgentPanelCoordinator {
     const { generation } = initialDraft;
     if (
       !replay ||
+      replay.kind !== "full" ||
       replay.publication.draft !== initialDraft ||
       replay.generation !== generation ||
       generation.authority !== initialDraft ||
@@ -1861,9 +1920,54 @@ class KeepAgentPanelCoordinator {
       return null;
     }
 
+    return this.#publishReplaySuccessor(replay);
+  }
+
+  #completeErrorReplay(replay: KeepAgentPanelReplay) {
+    const { publication, generation } = replay;
+    const { draft, target } = publication;
+    if (
+      this.#replay !== replay ||
+      replay.kind !== "new-error" ||
+      !publication.canReplayNewError ||
+      replay.layoutRetired ||
+      replay.invalid ||
+      this.#current ||
+      generation.authority !== draft ||
+      generation.target !== target ||
+      !draft.committed ||
+      !draft.retired ||
+      !publication.retired ||
+      this.#replayedGenerations.has(generation) ||
+      replay.released.size !== 2 ||
+      replay.rebound.size !== 2 ||
+      !replay.released.has("error") ||
+      !replay.released.has("retry") ||
+      publication.roles.some((role) => {
+        const expected = replay.expected[role];
+        const binding = role === "error" || role === "retry"
+          ? replay.rebound.get(role)
+          : expected;
+        return !expected || !binding ||
+          binding.element !== expected.element ||
+          generation.bindings[role] !== binding ||
+          !this.#ownsBinding(binding);
+      }) ||
+      !this.#renderIsCurrent(draft.render) ||
+      !this.#mutationFree(publication)
+    ) {
+      this.#invalidateReplay(replay);
+      return;
+    }
+    const successor = this.#publishReplaySuccessor(replay);
+    if (successor) this.#errorReplaySuccessors.set(publication, successor);
+  }
+
+  #publishReplaySuccessor(replay: KeepAgentPanelReplay): KeepAgentPanelPublication | null {
+    const { generation } = replay;
     const successor: KeepAgentPanelDraft = {
       identity: Symbol("keep-agent-panel-successor-draft"),
-      render: initialDraft.render,
+      render: replay.publication.render,
       generation,
       committed: false,
       retired: false,
@@ -1872,7 +1976,7 @@ class KeepAgentPanelCoordinator {
     generation.authority = successor;
     const publication = this.#createPublication(
       successor,
-      target,
+      replay.publication.target,
       replay.publication.dom,
       replay.publication.placement,
       replay.publication.navIntrinsics,
@@ -2007,6 +2111,7 @@ class KeepAgentPanelCoordinator {
       callback: navWindowCallback,
       active: false,
     };
+    const roles = Object.freeze(PANEL_ELEMENT_ROLES.filter((role) => Boolean(elements[role])));
     const publication: KeepAgentPanelPublication = {
       identity: Symbol("keep-agent-panel-publication"),
       render,
@@ -2015,9 +2120,11 @@ class KeepAgentPanelCoordinator {
       target,
       elements: Object.freeze({ ...elements }),
       bindings,
-      roles: Object.freeze(
-        PANEL_ELEMENT_ROLES.filter((role) => Boolean(elements[role])),
-      ),
+      roles,
+      canReplayNewError: Boolean(error && retry && roles.every((role) =>
+        role === "error" || role === "retry"
+          ? !this.#committedElementRoles.has(elements[role]!)
+          : this.#committedElementRoles.get(elements[role]!) === role)),
       setup,
       topLevelChildren: Object.freeze(Array.from(panel.children)),
       placement,
@@ -2107,6 +2214,9 @@ class KeepAgentPanelCoordinator {
     publication.navWindowListener.active = true;
     publication.draft.committed = true;
     this.#current = publication;
+    for (const role of publication.roles) {
+      this.#committedElementRoles.set(publication.elements[role]!, role);
+    }
     return true;
   }
 
@@ -3021,7 +3131,7 @@ function KeepAgentHerePanelContent({
           className={ERROR_CLASS}
           data-testid="keep-agent-token-error"
         >
-          <span className="min-w-0 flex-1" role="alert" aria-atomic="true">{render.tokenCheckError}</span>
+          <span className="min-w-0 flex-1 wrap-anywhere" role="alert" aria-atomic="true">{render.tokenCheckError}</span>
           <button
             ref={(element) => coordinator.bindElement(draft, "retry", element)}
             type="button"
