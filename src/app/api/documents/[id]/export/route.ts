@@ -2,6 +2,7 @@ import { handler, requireAccess, json, HttpError } from "@/server/http";
 import { readLiveText } from "@/server/livedoc";
 import { renderDocumentHtml } from "@/server/export/html";
 import { renderPdf, PdfUnavailableError } from "@/server/export/pdf";
+import { exportContentDisposition } from "@/lib/download-filename";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -32,10 +33,10 @@ export const GET = handler(async (req: Request, { params }: Params) => {
   const url = new URL(req.url);
   const live = await readLiveText(id);
   const markdown = url.searchParams.get("suggestions") === "1" ? live.text : live.clean;
-  const filename = (doc.title || "document").replace(/[^\w\- ]+/g, "").trim() || "document";
+  const currentTitle = live.title || doc.title;
   const download = url.searchParams.get("download") === "1";
   const format = parseFormat(url.searchParams.get("format"));
-  const title = live.title || doc.title || "Document";
+  const title = currentTitle || "Document";
 
   let body: BodyInit;
   if (format === "md") {
@@ -63,7 +64,7 @@ export const GET = handler(async (req: Request, { params }: Params) => {
   return new Response(body, {
     headers: {
       "Content-Type": CONTENT_TYPES[format],
-      ...(download ? { "Content-Disposition": `attachment; filename="${filename}.${format}"` } : {}),
+      ...(download ? { "Content-Disposition": exportContentDisposition(currentTitle || "", format) } : {}),
       "Cache-Control": "no-store",
     },
   });

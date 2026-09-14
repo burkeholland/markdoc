@@ -32,6 +32,8 @@ const { createDocument, setDocumentText } = await import("@/server/documents");
 const { putAsset } = await import("@/server/assets");
 const { PdfUnavailableError } = await import("@/server/export/pdf");
 const { renderDocumentHtml } = await import("@/server/export/html");
+const livedoc = await import("@/server/livedoc");
+const { readDownloadFilename } = await import("@/lib/download-filename");
 const { GET } = await import("./[id]/export/route");
 const { GET: assetGET } = await import("../assets/[id]/route");
 const { GET: healthGET } = await import("../health/route");
@@ -89,6 +91,90 @@ describe("GET /api/documents/[id]/export", () => {
 
     const dl = await call("?format=html&download=1");
     expect(dl.headers.get("Content-Disposition")).toBe('attachment; filename="Export Me.html"');
+  });
+
+  describe("download filenames", () => {
+    const formats = ["md", "html", "pdf"] as const;
+    const titles = [
+      { title: "Renamed document", basename: "Renamed document", ascii: "Renamed document" },
+      { title: "Caf\u00e9 r\u00e9sum\u00e9", basename: "Caf\u00e9 r\u00e9sum\u00e9", ascii: "Caf rsum" },
+      { title: "\u8a08\u753b \u6587\u66f8", basename: "\u8a08\u753b \u6587\u66f8", ascii: "document" },
+      { title: "\ud83d\ude80 \ud83d\udc69\ud83c\udffd\u200d\ud83d\udcbb", basename: "\ud83d\ude80 \ud83d\udc69\ud83c\udffd\u200d\ud83d\udcbb", ascii: "document" },
+      { title: "  Current / title  ", basename: "Current  title", ascii: "Current  title" },
+      { title: "", basename: "Export Me", ascii: "Export Me" },
+    ];
+
+    it.each(formats.flatMap((format) => titles.map((title) => ({ format, ...title }))))(
+      "uses one current-title snapshot for $format: $title",
+      async ({ format, title, basename, ascii }) => {
+        const snapshot = { title, clean: "# Current body\n", text: "# Current body with suggestions\n", pendingSuggestions: 1, openComments: 0 };
+        const live = vi.spyOn(livedoc, "readLiveText").mockResolvedValueOnce(snapshot);
+        renderPdf.mockResolvedValueOnce(PDF_BYTES);
+        try {
+          const res = await call(`?format=${format}&download=1`);
+          const disposition = `attachment; filename="${ascii}.${format}"` +
+            (basename === ascii ? "" : `; filename*=UTF-8''${encodeURIComponent(`${basename}.${format}`)}`);
+          expect(res.status).toBe(200);
+          expect(res.headers.get("Content-Disposition")).toBe(disposition);
+          expect(readDownloadFilename(res.headers.get("Content-Disposition"))).toBe(`${basename}.${format}`);
+          expect(res.headers.get("Cache-Control")).toBe("no-store");
+          expect(live).toHaveBeenCalledExactlyOnceWith(docId);
+          if (format === "md") {
+            expect(await res.text()).toBe(snapshot.clean);
+            expect(renderPdf).not.toHaveBeenCalled();
+          } else {
+            const html = format === "html" ? await res.text() : renderPdf.mock.calls[0][0];
+            expect(html).toContain(`<title>${title || "Export Me"}</title>`);
+            expect(html).toContain('<h1 id="current-body">Current body</h1>');
+            expect(html).not.toContain("with suggestions");
+            if (format === "pdf") {
+              expect(renderPdf).toHaveBeenCalledOnce();
+              expect(new Uint8Array(await res.arrayBuffer())).toEqual(PDF_BYTES);
+            } else {
+              expect(renderPdf).not.toHaveBeenCalled();
+            }
+          }
+        } finally {
+          live.mockRestore();
+        }
+      },
+    );
+
+    it.each([
+      { title: '  \u8a08\u753b "50%"; Bob\'s (v2)* /\\.\r\n ', basename: "\u8a08\u753b 50 Bobs v2" },
+      { title: "\ud800Caf\u00e9\udfff\u0000\u0085", basename: "Caf\u00e9" },
+      { title: "../\\;\r\n\u0000\u007f\ud800", basename: "document" },
+      { title: " \t\r\n ", basename: "document" },
+    ])("emits a safe native header for malformed/unsafe titles: $basename", async ({ title, basename }) => {
+      const snapshot = { title, clean: "Clean", text: "With suggestions", pendingSuggestions: 1, openComments: 0 };
+      const live = vi.spyOn(livedoc, "readLiveText").mockResolvedValueOnce(snapshot);
+      try {
+        const res = await call("?format=md&download=1&suggestions=1");
+        expect(res.status).toBe(200);
+        expect(readDownloadFilename(res.headers.get("Content-Disposition"))).toBe(`${basename}.md`);
+        expect([...res.headers.keys()].sort()).toEqual([
+          "cache-control", "content-disposition", "content-type", "x-ratelimit-limit", "x-ratelimit-remaining",
+        ]);
+        expect(await res.text()).toBe(snapshot.text);
+        expect(live).toHaveBeenCalledExactlyOnceWith(docId);
+      } finally {
+        live.mockRestore();
+      }
+    });
+
+    it.each(formats)("does not add an attachment to direct Unicode %s responses", async (format) => {
+      const snapshot = { title: "Caf\u00e9", clean: "Clean", text: "With suggestions", pendingSuggestions: 1, openComments: 0 };
+      const live = vi.spyOn(livedoc, "readLiveText").mockResolvedValueOnce(snapshot);
+      renderPdf.mockResolvedValueOnce(PDF_BYTES);
+      try {
+        const res = await call(`?format=${format}`);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("Content-Disposition")).toBeNull();
+        expect(live).toHaveBeenCalledExactlyOnceWith(docId);
+      } finally {
+        live.mockRestore();
+      }
+    });
   });
 
   describe("pathological documents (#115)", () => {

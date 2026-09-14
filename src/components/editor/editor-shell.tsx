@@ -18,6 +18,7 @@ import { activateHighlight } from "@/editor/highlight-activation";
 import { api, ApiError, apiErrorText, type SyncStatusDto, type VersionSummary } from "@/lib/api";
 import { uploadAsset } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
+import { readDownloadFilename } from "@/lib/download-filename";
 import { setPendingNotice, takePendingNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
 import { TooltipProvider, Tip, Dialog, DialogPortal, DialogOverlay, DialogPrimitiveContent, DialogTitle } from "@/components/ui/primitives";
@@ -2501,11 +2502,11 @@ export function EditorShell({
           throw new Error(data?.error ?? `PDF export failed (${res.status})`);
         }
         const blob = await res.blob();
-        const match = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "");
+        const filename = readDownloadFilename(res.headers.get("Content-Disposition"));
         const objectUrl = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = objectUrl;
-        a.download = match?.[1] ?? `${doc.title || "document"}.pdf`;
+        a.download = filename ?? `${doc.title || "document"}.pdf`;
         document.body.appendChild(a);
         a.click();
         a.remove();
