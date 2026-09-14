@@ -7,6 +7,10 @@ type NodeSerializer = (state: MarkdownSerializerState, node: PMNode, parent: PMN
 
 type SerializerOptions = { tightLists?: boolean; escapeExtraCharacters?: RegExp; hardBreakNodeName?: string; strict?: boolean };
 
+function escapeTitle(title: string): string {
+  return title.replace(/[\\"]/g, "\\$&");
+}
+
 /**
  * Serializer state with a gentler escaping strategy than the upstream default in `to-markdown.ts`:
  * it only escapes characters where they would otherwise change the meaning of the Markdown, which
@@ -155,7 +159,7 @@ const nodes: Record<string, NodeSerializer> = {
         (state as State).escImageAlt(node.attrs.alt || "") +
         "](" +
         String(node.attrs.src).replace(/[()]/g, "\\$&") +
-        (node.attrs.title ? ' "' + String(node.attrs.title).replace(/"/g, '\\"') + '"' : "") +
+        (node.attrs.title ? ' "' + escapeTitle(String(node.attrs.title)) + '"' : "") +
         ")",
     );
   },
@@ -209,7 +213,7 @@ const nodes: Record<string, NodeSerializer> = {
     state.closeBlock(node);
   },
   link_definition(state, node) {
-    const title = node.attrs.title ? ` "${String(node.attrs.title).replace(/"/g, '\\"')}"` : "";
+    const title = node.attrs.title ? ` "${escapeTitle(String(node.attrs.title))}"` : "";
     state.write(`[${node.attrs.label}]: ${node.attrs.url}${title}`);
     state.closeBlock(node);
   },
@@ -318,7 +322,7 @@ const marks = {
         ? ">"
         : "](" +
             String(mark.attrs.href).replace(/[()"]/g, "\\$&") +
-            (mark.attrs.title ? ` "${String(mark.attrs.title).replace(/"/g, '\\"')}"` : "") +
+            (mark.attrs.title ? ` "${escapeTitle(String(mark.attrs.title))}"` : "") +
             ")";
     },
     mixable: true,
