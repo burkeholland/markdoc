@@ -34,7 +34,7 @@ export function themeLabel(preference: ThemePreference): string {
  * Runs before hydration from a `<script>` in the root layout. Kept as a string (not a function
  * reference) so Next inlines it verbatim; the unit test evaluates it against fake globals.
  */
-export const THEME_BOOT_SCRIPT = `(function(){try{var k=${JSON.stringify(THEME_STORAGE_KEY)};var p=localStorage.getItem(k);if(p!=="light"&&p!=="dark")p="system";var d=p==="system"?window.matchMedia(${JSON.stringify(DARK_QUERY)}).matches:p==="dark";document.documentElement.setAttribute("data-theme",d?"dark":"light");}catch(e){document.documentElement.setAttribute("data-theme","light");}})();`;
+export const THEME_BOOT_SCRIPT = `(function(){var k=${JSON.stringify(THEME_STORAGE_KEY)};var p;try{p=localStorage.getItem(k);}catch(e){p="system";}var d=p==="dark";if(p!=="light"&&p!=="dark"){try{d=window.matchMedia(${JSON.stringify(DARK_QUERY)}).matches===true;}catch(e){d=false;}}document.documentElement.setAttribute("data-theme",d?"dark":"light");})();`;
 
 function storage(): Storage | null {
   try {
