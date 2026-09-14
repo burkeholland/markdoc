@@ -49,10 +49,7 @@ vi.mock("./use-session", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./use-session")>();
   return {
     ...actual,
-    useDebouncedSessionValue: (...args: unknown[]) => {
-      controlled.sessionHook(...args);
-      return controlled.sessionValue;
-    },
+    useDebouncedSessionValue: controlled.sessionHook,
   };
 });
 vi.mock("@/components/ui/theme-toggle", () => ({
@@ -179,7 +176,7 @@ function fakeSession(name: string) {
   ydoc.on("update", notify);
   const session = {
     name,
-    binding: { getTree: () => controlled.sessionValue.tree },
+    binding: { getTree: () => controlled.sessionValue },
     ydoc,
     ytext,
     meta,
@@ -724,7 +721,7 @@ beforeEach(() => {
   controlled.hydrated = true;
   controlled.issues = [ISSUE_A];
   controlled.lint.mockReset();
-  controlled.sessionHook.mockReset();
+  controlled.sessionHook.mockReset().mockImplementation(() => controlled.sessionValue);
   controlled.sessionValue = { text: "# Status bar", tree: {} };
   controlled.themePreference = "system";
   controlled.themeSetter.mockReset();
@@ -3359,6 +3356,11 @@ describe("status bar long issue descriptions", () => {
     ["literal", '<button tabindex="0">Not a control</button> & **literal** <img src="missing"> '.repeat(4)],
   ] as const;
 
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import("./use-session")>("./use-session");
+    controlled.sessionHook.mockImplementation(actual.useDebouncedSessionValue);
+  });
+
   function expectWrappedIssues(issues: readonly LintIssue[]) {
     const content = screen.getByTestId("status-issues-content");
     expect(content).toHaveClass("w-80", "p-0");
@@ -3473,7 +3475,7 @@ describe("status bar long issue descriptions", () => {
   });
 
   it.each(["replacement", "reorder", "removal", "document switch"] as const)(
-    "retires long issue handlers and renders the current ordered messages after %s",
+    "keeps the same open portal and retires long issue handlers after %s",
     async (transition) => {
       const first: LintIssue = { ...ISSUE_A, message: messages[0][1] };
       const second: LintIssue = { ...ISSUE_OTHER, message: messages[1][1] };
@@ -3483,17 +3485,20 @@ describe("status bar long issue descriptions", () => {
       const current = callbacks();
       const props = statusProps(retired);
       const view = await renderStatus(props);
-      openIssues();
+      const trigger = openIssues();
       await nextTask();
-      const stale = expectWrappedIssues([first, second]).map(captureClick);
-      const source = props.session.ytext.toString();
-      const version = props.session.version;
+      const root = screen.getByTestId("status-bar");
+      const content = screen.getByTestId("status-issues-content");
+      const portal = content.parentElement;
+      const rows = expectWrappedIssues([first, second]);
+      const stale = rows.map(captureClick);
       const nextIssues = transition === "reorder"
         ? [second, first]
         : transition === "removal"
           ? [second]
           : [replacement];
       controlled.issues = nextIssues;
+      controlled.sessionValue = { text: `# Current ${transition}`, tree: {} };
       const nextProps: StatusBarProps = {
         ...props,
         onIssueSelect: current.issue,
@@ -3502,36 +3507,204 @@ describe("status bar long issue descriptions", () => {
           session: fakeSession("session-b"),
         } : {}),
       };
-      await rerenderStatus(view, nextProps, transition);
-      openIssues();
-      await nextTask();
-
-      inspectWithoutEffects(nextProps, [retired, current], () => {
-        expectWrappedIssues(nextIssues);
-        for (const issue of [first, second]) {
-          if (!nextIssues.includes(issue))
-            expect(screen.queryByText(issue.message, { exact: true })).toBeNull();
+      vi.useFakeTimers();
+      try {
+        if (transition !== "document switch") {
+          act(() => {
+            props.session.ydoc.transact(() => {
+              props.session.ytext.delete(0, props.session.ytext.length);
+              props.session.ytext.insert(0, controlled.sessionValue.text);
+            });
+          });
         }
-      });
-      for (const old of stale) {
-        const probe = invokeFabricatedClick(old);
-        expect(probe.preventDefault).not.toHaveBeenCalled();
-        expect(probe.stopPropagation).not.toHaveBeenCalled();
-        if (!old.element.isConnected) fireEvent.click(old.element);
-      }
-      expect(allCallbackCounts([retired, current])).toEqual(new Array(12).fill(0));
+        await rerenderStatus(view, nextProps);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(500);
+        });
 
-      const selected = nextIssues[0];
-      const row = elementWithText("button", selected.message);
-      fireEvent.click(row);
-      fireEvent.click(row);
-      expect(retired.issue).not.toHaveBeenCalled();
-      expect(current.issue).toHaveBeenCalledOnce();
-      expect(current.issue.mock.calls[0][0]).toBe(selected);
-      expect(props.session.ytext.toString()).toBe(source);
-      expect(props.session.version).toBe(version);
+        inspectWithoutEffects(nextProps, [retired, current], () => {
+          expect(screen.getByTestId("status-bar")).toBe(root);
+          expect(screen.getAllByTestId("status-issues-content")).toHaveLength(1);
+          expect(screen.getByTestId("status-issues-content")).toBe(content);
+          expect(content.parentElement).toBe(portal);
+          expect(screen.getByTestId("issues-button")).toBe(trigger);
+          expect(trigger).toHaveAttribute("aria-expanded", "true");
+          expect(trigger).toHaveAttribute("aria-controls", content.id);
+          expectWrappedIssues(nextIssues).forEach((row, index) => {
+            expect(row).toBe(rows[index]);
+          });
+          expect(controlled.lint).toHaveBeenLastCalledWith(
+            controlled.sessionValue.text,
+            controlled.sessionValue.tree,
+          );
+          expect(nextProps.session.ytext.toString()).toBe(controlled.sessionValue.text);
+          for (const issue of [first, second]) {
+            if (!nextIssues.includes(issue))
+              expect(screen.queryByText(issue.message, { exact: true })).toBeNull();
+          }
+        });
+        for (const old of stale) {
+          const probe = invokeFabricatedClick(old);
+          expect(probe.preventDefault).not.toHaveBeenCalled();
+          expect(probe.stopPropagation).not.toHaveBeenCalled();
+          if (!old.element.isConnected) fireEvent.click(old.element);
+        }
+        expect(allCallbackCounts([retired, current])).toEqual(new Array(12).fill(0));
+
+        const source = nextProps.session.ytext.toString();
+        const version = nextProps.session.version;
+        const selected = nextIssues[0];
+        const row = elementWithText("button", selected.message);
+        fireEvent.click(row);
+        fireEvent.click(row);
+        expect(retired.issue).not.toHaveBeenCalled();
+        expect(current.issue).toHaveBeenCalledOnce();
+        expect(current.issue.mock.calls[0][0]).toBe(selected);
+        expect(nextProps.session.ytext.toString()).toBe(source);
+        expect(nextProps.session.version).toBe(version);
+      } finally {
+        vi.restoreAllMocks();
+        vi.useRealTimers();
+      }
     },
   );
+
+  it("republishes the same open portal for a callback-only change without relinting", async () => {
+    useExactWindowListenerRealm();
+    const issue: LintIssue = { ...ISSUE_A, message: messages[0][1] };
+    controlled.issues = [issue];
+    const retired = callbacks();
+    const current = callbacks();
+    const props = statusProps(retired);
+    const view = await renderStatus(props);
+    const trigger = openIssues();
+    await nextTask();
+    const root = screen.getByTestId("status-bar");
+    const content = screen.getByTestId("status-issues-content");
+    const portal = content.parentElement;
+    const [row] = expectWrappedIssues([issue]);
+    const stale = captureClick(row);
+    const staleClose = nearestHandler<(open: boolean) => void>(content, "onOpenChange");
+    const lintCalls = controlled.lint.mock.calls.length;
+    const snapshot = controlled.sessionValue;
+    const source = props.session.ytext.toString();
+    const version = props.session.version;
+    const nextProps = { ...props, onIssueSelect: current.issue };
+    await rerenderStatus(view, nextProps);
+
+    inspectWithoutEffects(nextProps, [retired, current], () => {
+      expect(screen.getByTestId("status-bar")).toBe(root);
+      expect(screen.getAllByTestId("status-issues-content")).toHaveLength(1);
+      expect(screen.getByTestId("status-issues-content")).toBe(content);
+      expect(content.parentElement).toBe(portal);
+      expect(screen.getByTestId("issues-button")).toBe(trigger);
+      expect(trigger).toHaveAttribute("aria-expanded", "true");
+      expect(trigger).toHaveAttribute("aria-controls", content.id);
+      expect(expectWrappedIssues([issue])[0]).toBe(row);
+      expect(controlled.sessionValue).toBe(snapshot);
+      expect(controlled.lint).toHaveBeenCalledTimes(lintCalls);
+    });
+    const probe = invokeFabricatedClick(stale);
+    expect(probe.preventDefault).not.toHaveBeenCalled();
+    expect(probe.stopPropagation).not.toHaveBeenCalled();
+    act(() => staleClose(false));
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(allCallbackCounts([retired, current])).toEqual(new Array(12).fill(0));
+    fireEvent.click(row);
+    fireEvent.click(row);
+    invokeFabricatedClick(stale);
+    expect(retired.issue).not.toHaveBeenCalled();
+    expect(current.issue).toHaveBeenCalledOnce();
+    expect(current.issue.mock.calls[0][0]).toBe(issue);
+    expect(props.session.ytext.toString()).toBe(source);
+    expect(props.session.version).toBe(version);
+
+    fireEvent.keyDown(content, { key: "Escape" });
+    await nextTask();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(trigger).toHaveFocus();
+    openIssues();
+    closeIssues();
+  });
+
+  it.each(["wrapper attribute", "wrapper replacement", "content replacement", "duplicate content"] as const)(
+    "does not republish an inexact retained boundary after %s",
+    async (mutation) => {
+      const issue: LintIssue = { ...ISSUE_A, message: messages[0][1] };
+      controlled.issues = [issue];
+      const retired = callbacks();
+      const current = callbacks();
+      const props = statusProps(retired);
+      const view = await renderStatus(props);
+      openIssues();
+      await nextTask();
+      const content = screen.getByTestId("status-issues-content");
+      const portal = content.parentElement;
+      if (!portal) throw new Error("Issues portal wrapper missing");
+      const [row] = expectWrappedIssues([issue]);
+      const stale = captureClick(row);
+      const clone = mutation === "wrapper replacement"
+        ? portal.cloneNode(false)
+        : content.cloneNode(true);
+      try {
+        if (mutation === "wrapper attribute") {
+          portal.removeAttribute("data-radix-popper-content-wrapper");
+        } else if (mutation === "wrapper replacement") {
+          portal.replaceWith(clone);
+          clone.appendChild(content);
+        } else if (mutation === "content replacement") {
+          content.replaceWith(clone);
+        } else {
+          portal.append(clone);
+        }
+        await rerenderStatus(view, { ...props, onIssueSelect: current.issue });
+        invokeFabricatedClick(stale);
+        fireEvent.click(row);
+        fireEvent.click(row);
+        if (clone instanceof HTMLElement) {
+          const foreignRow = clone.querySelector("button");
+          if (foreignRow) fireEvent.click(foreignRow);
+        }
+        expect(allCallbackCounts([retired, current])).toEqual(new Array(12).fill(0));
+      } finally {
+        if (mutation === "wrapper attribute") {
+          portal.setAttribute("data-radix-popper-content-wrapper", "");
+        } else if (mutation === "wrapper replacement") {
+          portal.append(content);
+          clone.parentNode?.replaceChild(portal, clone);
+        } else if (mutation === "content replacement") {
+          clone.parentNode?.replaceChild(content, clone);
+        } else {
+          clone.parentNode?.removeChild(clone);
+        }
+      }
+    },
+  );
+
+  it("rejects restored retained-boundary mutation history before a successor can act", async () => {
+    const issue: LintIssue = { ...ISSUE_A, message: messages[0][1] };
+    controlled.issues = [issue];
+    const retired = callbacks();
+    const current = callbacks();
+    const props = statusProps(retired);
+    const view = await renderStatus(props);
+    openIssues();
+    await nextTask();
+    const content = screen.getByTestId("status-issues-content");
+    const [row] = expectWrappedIssues([issue]);
+    const stale = captureClick(row);
+    await rerenderStatus(view, { ...props, onIssueSelect: current.issue });
+    expect(screen.getByTestId("status-issues-content")).toBe(content);
+    const className = content.className;
+    content.className = `${className} altered`;
+    content.className = className;
+    act(() => {
+      fireEvent.click(row);
+      fireEvent.click(row);
+      invokeFabricatedClick(stale);
+    });
+    expect(allCallbackCounts([retired, current])).toEqual(new Array(12).fill(0));
+  });
 
   it("emits min-width zero and overflow-wrap anywhere from installed Tailwind", async () => {
     const theme = readFileSync(createRequire(import.meta.url).resolve("tailwindcss/theme.css"), "utf8");

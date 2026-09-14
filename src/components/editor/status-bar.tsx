@@ -3392,6 +3392,21 @@ function useStatusBarControl<T extends HTMLElement>(
         layoutAttemptedRef.current = false;
       };
     }
+    if (isStatusBarPortalSlot(slot)) {
+      // Presence can retain its DOM ref while the committed authority changes.
+      const boundary = manager.portalBoundaries.get(slot);
+      if (
+        !boundary
+        || boundary.root !== root
+        || boundary.content !== control
+        || !statusBarPortalBoundaryIsExact(boundary, true)
+        || !publishStatusBarPortalBoundary(manager, authority, slot, root, control)
+      ) {
+        return () => {
+          layoutAttemptedRef.current = false;
+        };
+      }
+    }
     const publication = registerControl(manager, authority, slot, root, control);
     if (!publication) {
       return () => {
