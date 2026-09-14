@@ -46,6 +46,148 @@ describe("findMatches", () => {
     ]);
   });
 
+  describe.each([
+    { mode: "literal", regex: false },
+    { mode: "regex", regex: true },
+  ])("whole word boundaries in $mode mode", ({ regex }) => {
+    const wholeWord = { ...opts, regex, wholeWord: true };
+
+    it.each([
+      {
+        name: "decomposed Latin prefix",
+        text: "nai\u0308ve nai",
+        query: "nai",
+        whole: [{ from: 7, to: 10 }],
+        substrings: [{ from: 0, to: 3 }, { from: 7, to: 10 }],
+      },
+      {
+        name: "decomposed Latin suffix",
+        text: "nai\u0308ve ve",
+        query: "ve",
+        whole: [{ from: 7, to: 9 }],
+        substrings: [{ from: 4, to: 6 }, { from: 7, to: 9 }],
+      },
+      {
+        name: "combining spacing vowel mark on either side",
+        text: "\u0915\u093e \u0915 \u093e\u0915",
+        query: "\u0915",
+        whole: [{ from: 3, to: 4 }],
+        substrings: [{ from: 0, to: 1 }, { from: 3, to: 4 }, { from: 6, to: 7 }],
+      },
+      {
+        name: "enclosing mark on either side",
+        text: "a\u20dd a \u20dda",
+        query: "a",
+        whole: [{ from: 3, to: 4 }],
+        substrings: [{ from: 0, to: 1 }, { from: 3, to: 4 }, { from: 6, to: 7 }],
+      },
+      {
+        name: "supplementary spacing mark on either side",
+        text: "a\u{1D165} a \u{1D165}a",
+        query: "a",
+        whole: [{ from: 4, to: 5 }],
+        substrings: [{ from: 0, to: 1 }, { from: 4, to: 5 }, { from: 8, to: 9 }],
+      },
+      {
+        name: "supplementary nonspacing mark on either side",
+        text: "a\u{1E000} a \u{1E000}a",
+        query: "a",
+        whole: [{ from: 4, to: 5 }],
+        substrings: [{ from: 0, to: 1 }, { from: 4, to: 5 }, { from: 8, to: 9 }],
+      },
+      {
+        name: "multiple marks on either side",
+        text: "\u0308\u0301a a a\u0308\u0301",
+        query: "a",
+        whole: [{ from: 4, to: 5 }],
+        substrings: [{ from: 2, to: 3 }, { from: 4, to: 5 }, { from: 6, to: 7 }],
+      },
+      {
+        name: "adjacent marked and unmarked words",
+        text: "a\u0308,a;\u0308a!a",
+        query: "a",
+        whole: [{ from: 3, to: 4 }, { from: 8, to: 9 }],
+        substrings: [{ from: 0, to: 1 }, { from: 3, to: 4 }, { from: 6, to: 7 }, { from: 8, to: 9 }],
+      },
+    ])("excludes parts touching $name only with whole word selected", ({ text, query, whole, substrings }) => {
+      const matches = findMatches(text, query, wholeWord);
+      expect(matches).toEqual(whole);
+      expect(matches.map(({ from, to }) => text.slice(from, to))).toEqual(whole.map(() => query));
+
+      const partials = findMatches(text, query, { ...wholeWord, wholeWord: false });
+      expect(partials).toEqual(substrings);
+      expect(partials.map(({ from, to }) => text.slice(from, to))).toEqual(substrings.map(() => query));
+    });
+
+    it.each([
+      { name: "decomposed Latin", word: "nai\u0308ve", units: 6 },
+      { name: "spacing vowel mark", word: "\u0915\u093e", units: 2 },
+      { name: "enclosing mark", word: "a\u20dd", units: 2 },
+      { name: "supplementary spacing mark", word: "a\u{1D165}", units: 3 },
+      { name: "supplementary nonspacing mark", word: "a\u{1E000}", units: 3 },
+      { name: "multiple marks", word: "a\u0308\u0301", units: 3 },
+    ])("matches complete $name words at ordinary boundaries", ({ word, units }) => {
+      const text = `${word}, ${word} ${word}`;
+      const matches = findMatches(text, word, wholeWord);
+      expect(matches).toEqual([
+        { from: 0, to: units },
+        { from: units + 2, to: 2 * units + 2 },
+        { from: 2 * units + 3, to: 3 * units + 3 },
+      ]);
+      expect(matches.map(({ from, to }) => text.slice(from, to))).toEqual([word, word, word]);
+    });
+
+    it("keeps case matching independent of marked-word boundaries", () => {
+      const text = "NAI\u0308VE nai\u0308ve NAI nai Nai";
+      const insensitive = findMatches(text, "nai", wholeWord);
+      expect(insensitive).toEqual([{ from: 14, to: 17 }, { from: 18, to: 21 }, { from: 22, to: 25 }]);
+      expect(insensitive.map(({ from, to }) => text.slice(from, to))).toEqual(["NAI", "nai", "Nai"]);
+      expect(findMatches(text, "nai", { ...wholeWord, matchCase: true })).toEqual([{ from: 18, to: 21 }]);
+      expect(findMatches(text, "nai\u0308ve", wholeWord)).toEqual([{ from: 0, to: 6 }, { from: 7, to: 13 }]);
+      expect(findMatches(text, "nai\u0308ve", { ...wholeWord, matchCase: true })).toEqual([{ from: 7, to: 13 }]);
+    });
+
+    it.each([
+      { name: "Latin letter", boundary: "a", blocked: true },
+      { name: "Greek letter", boundary: "\u03b1", blocked: true },
+      { name: "supplementary letter", boundary: "\u{10400}", blocked: true },
+      { name: "digit", boundary: "2", blocked: true },
+      { name: "underscore", boundary: "_", blocked: true },
+      { name: "punctuation", boundary: ".", blocked: false },
+      { name: "apostrophe", boundary: "'", blocked: false },
+      { name: "hyphen", boundary: "-", blocked: false },
+      { name: "zero-width non-joiner", boundary: "\u200c", blocked: false },
+      { name: "zero-width joiner", boundary: "\u200d", blocked: false },
+    ])("preserves existing $name boundaries", ({ boundary, blocked }) => {
+      const text = `${boundary}cat cat${boundary} cat`;
+      const units = boundary.length;
+      const standalone = { from: 2 * units + 8, to: 2 * units + 11 };
+      const matches = findMatches(text, "cat", wholeWord);
+      expect(matches).toEqual(blocked ? [standalone] : [
+        { from: units, to: units + 3 },
+        { from: units + 4, to: units + 7 },
+        standalone,
+      ]);
+      expect(matches.map(({ from, to }) => text.slice(from, to))).toEqual(blocked ? ["cat"] : ["cat", "cat", "cat"]);
+    });
+
+    it.each([
+      { name: "NFC query against NFD source", text: "cafe\u0301", query: "caf\u00e9" },
+      { name: "NFD query against NFC source", text: "caf\u00e9", query: "cafe\u0301" },
+    ])("does not normalize $name", ({ text, query }) => {
+      expect(findMatches(text, query, wholeWord)).toEqual([]);
+      expect(findMatches(text, query, { ...wholeWord, wholeWord: false })).toEqual([]);
+      expect(findMatches(text, text, wholeWord)).toEqual([{ from: 0, to: text.length }]);
+    });
+  });
+
+  it("applies whole word boundaries to every regex alternative", () => {
+    const text = "nai\u0308ve nai ve";
+    const matches = findMatches(text, "nai|ve", { ...opts, regex: true, wholeWord: true });
+    expect(matches).toEqual([{ from: 7, to: 10 }, { from: 11, to: 13 }]);
+    expect(matches.map(({ from, to }) => text.slice(from, to))).toEqual(["nai", "ve"]);
+  });
+
   it("treats the query literally unless regex mode is on", () => {
     expect(findMatches("a.c abc", "a.c", opts)).toEqual([{ from: 0, to: 3 }]);
     expect(findMatches("a.c abc", "a.c", { ...opts, regex: true })).toEqual([
@@ -239,5 +381,15 @@ describe("expandReplacement", () => {
     expect(expandReplacement(text, { from: 7, to: 9 }, "42", opts, "$1-$&")).toBe("$1-$&");
     const rx = { ...opts, regex: true };
     expect(expandReplacement(text, { from: 7, to: 9 }, "(\\d+)", rx, "[$1] was $&, $$")).toBe("[42] was 42, $");
+  });
+
+  it("preserves numbered groups and full matches for whole marked words", () => {
+    const text = "\uD83D\uDE00 nai\u0308ve!";
+    const query = "(nai)(\u0308)(ve)";
+    const options = { ...opts, regex: true, wholeWord: true };
+    const match = { from: 3, to: 9 };
+    expect(findMatches(text, query, options)).toEqual([match]);
+    expect(text.slice(match.from, match.to)).toBe("nai\u0308ve");
+    expect(expandReplacement(text, match, query, options, "$3|$2|$1|$&|$$")).toBe("ve|\u0308|nai|nai\u0308ve|$");
   });
 });
