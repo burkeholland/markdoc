@@ -357,14 +357,27 @@ application still occurs only after the release's operation-bound WAL archive
 and restore gate succeeds. This documentation does not grant release permission
 or report a successful release.
 
+On September 24, 2026, an isolated pre-cutover rehearsal identified and fixed
+two release-gate defects without changing the application service. pgBackRest
+2.59.1 rejected the restore-only `--lock-timeout` option with error `031`; the
+gate already has a hard ten-minute restore process timeout, so the unsupported
+option was removed. After restore, PostgreSQL temporarily rejected SQL
+connections while replay was still finishing, so the one-shot readiness check
+became a bounded ten-minute poll. Operation
+`55466ca5-ca20-4b6f-a92a-ec78c3932359` then archived the exact segment, restored
+the scratch cluster, reached SQL readiness, replayed from `F/7F000148` through
+`F/80000000`, and removed its owned scratch resources. This recovery proof is
+not by itself an application deployment.
+
 The entrypoint performs one bounded attempt:
 
 1. It rechecks the clean exact `main` source, the configured Azure
    subscription/tenant, ACR, Linux VM/NIC/public-IP association and stable
    public origin. It builds an immutable archive of that commit and makes
    one ACR submission with full-SHA, 12-character and unique submission tags.
-   A lost or failed submission is reconciled by its identifiers; it is not
-   submitted again.
+   It resolves the run by polling a bounded ACR QuickRun window for that unique
+   tag, even when the Azure CLI returns no run ID. An absent or ambiguous match
+   fails unverified; the build is not submitted again.
 2. After ACR reports success, it requires one unambiguous digest for the
    full-SHA tag and verifies that digest against that build's output. It then
    sends [`infra/release-wal-gate.sh`](infra/release-wal-gate.sh) and
@@ -375,9 +388,10 @@ The entrypoint performs one bounded attempt:
    waits for its exact local archive completion and checksum-suffixed remote
    pgBackRest object, then restores that repository into a fresh private
    invocation-owned cluster. It requires SQL readiness with archiving and
-   network listening disabled, replay at or beyond the captured endpoint, and
-   exact cleanup of the scratch process and directory. Archive, restore,
-   readiness, replay or cleanup failure stops the cutover.
+   network listening disabled, polling while PostgreSQL finishes recovery,
+   replay at or beyond the captured endpoint, and exact cleanup of the scratch
+   process and directory. Archive, restore, readiness, replay or cleanup
+   failure stops the cutover.
 4. Only after that ordered proof does the guest pull the immutable digest,
    preserve the existing environment, update `APP_VERSION`, replace the
    application unit and restart `markdoc-app`. Guest success requires the

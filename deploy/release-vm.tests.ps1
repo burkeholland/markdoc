@@ -1,12 +1,14 @@
 #requires -Version 7.2
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'release-vm-evidence.ps1')
+
 function Assert-True([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw $Message }
 }
 
 function Assert-Equal($Expected, $Actual, [string]$Message) {
-  if ($Expected -cne $Actual) { throw $Message }
+  if ($Expected -cne $Actual) { throw "$Message Expected '$Expected', received '$Actual'." }
 }
 
 $path = Join-Path $PSScriptRoot 'release-vm.ps1'
@@ -67,9 +69,9 @@ Assert-True $cleanup.Success 'Guest cleanup function must remain identifiable.'
 Assert-Equal 1 ([regex]::Matches($guestSource, '(?m)^\s*echo markdoc-vm-image-ready$').Count) 'Guest ready marker must have one emission point.'
 Assert-True ($cleanup.Value -match 'rm -rf "\$rollback_dir"[\s\S]+echo markdoc-vm-image-ready') 'Guest readiness must follow cleanup.'
 Assert-Equal 2 ([regex]::Matches($guestSource, 'all\(health\.get\(key\) is True for key in \("ok", "db", "collab"\)\)').Count) 'Both local health decisions must require boolean true.'
-Assert-True ($guestSource -match 'if \[ "\$#" -ne 4 \] && \[ "\$#" -ne 5 \]') 'Existing four-argument workflow must remain supported.'
+Assert-True ($guestSource -match 'if \[ "\$#" -ne 5 \]') 'Guest deployment must require the operation-scoped five-argument workflow.'
 
-$bash = Join-Path (Split-Path -Parent (Split-Path -Parent (Get-Command git -CommandType Application).Source)) 'bin\bash.exe'
+$bash = (Get-Command bash -CommandType Application | Select-Object -First 1).Source
 Assert-True (Test-Path -LiteralPath $bash) 'Guest cleanup checks require the existing Git for Windows Bash.'
 [void](& $native $bash @('-n', (Join-Path $PSScriptRoot '..\infra\deploy-vm-image.sh')) $PSScriptRoot 10)
 foreach ($cleanupExit in @(0, 23)) {
@@ -100,6 +102,7 @@ cleanup
 
 $script:sha = '0123456789abcdef0123456789abcdef01234567'
 $script:digest = 'sha256:' + ('a' * 64)
+$script:ReleaseDeadlineSeconds = 2100
 $script:subscription = '332d0c98-694c-48a0-91f3-465de6ac30a5'
 $script:tenant = 'f1fde69f-c8d3-4b94-adeb-02d045b37f6a'
 $script:registry = 'markdocacrmnd542unepl56.azurecr.io'
@@ -109,7 +112,9 @@ $script:messages = [Collections.Generic.List[string]]::new()
 $script:scenario = ''
 $script:publicCount = 0
 $script:pollCount = 0
+$script:reconcileCount = 0
 $script:sourceChecks = 0
+$script:submissionTag = ''
 
 function New-Item { param($ItemType, $Path) }
 function Remove-Item { param($LiteralPath, [switch]$Recurse, [switch]$Force) }
@@ -117,13 +122,17 @@ function Test-Path { param($LiteralPath) return $true }
 function Start-Sleep { param($Seconds) }
 function Write-Host { param([string]$Object) $script:messages.Add($Object) }
 
+function Assert-ReleaseDependencyPreflight([string]$Commit) {
+  Assert-Equal $script:sha $Commit 'Release orchestration must preflight the selected commit.'
+}
+
 function Get-TestHealth {
   return @{ ok = $true; db = $true; collab = $true; version = $script:sha }
 }
 
 function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds) {
   $script:calls.Add(@{ Command = $Command; Arguments = $Arguments; Directory = $Directory; Timeout = $TimeoutSeconds })
-  Assert-True ($TimeoutSeconds -gt 0 -and $TimeoutSeconds -le 540) 'Every native call must be bounded.'
+  Assert-True ($TimeoutSeconds -gt 0 -and $TimeoutSeconds -le $script:ReleaseDeadlineSeconds) 'Every native call must be bounded.'
   if ($Command -ceq 'git') {
     switch ($Arguments[0]) {
       'rev-parse' {
@@ -164,7 +173,11 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     return ConvertTo-Json -InputObject $account -Compress
   }
   Assert-True ($Arguments -contains '--subscription' -and $Arguments -contains $script:subscription) 'Every resource operation must pin the subscription.'
-  Assert-True ($Arguments -contains '--resource-group' -and $Arguments -contains 'markdoc-rg') 'Every resource operation must pin the hyphenated group.'
+  if ($commandKey -ceq 'acr manifest list-metadata') {
+    Assert-True ($Arguments -notcontains '--resource-group') 'Manifest lookup must not pass the unsupported resource-group option.'
+  } else {
+    Assert-True ($Arguments -contains '--resource-group' -and $Arguments -contains 'markdoc-rg') 'Every resource operation must pin the hyphenated group.'
+  }
   if ($commandKey.StartsWith('acr show ')) {
     $info = @{ id = "$script:resourceRoot/Microsoft.ContainerRegistry/registries/markdocacrmnd542unepl56"; loginServer = $script:registry }
     if ($script:scenario -eq 'wrong-registry') { $info.loginServer = 'different.azurecr.io' }
@@ -188,14 +201,30 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
   if ($commandKey.StartsWith('acr build ')) {
     Assert-True ($Arguments -contains "APP_VERSION=$script:sha") 'Build must embed the exact commit.'
     Assert-True ($Arguments -contains "markdoc:$script:sha" -and $Arguments -contains "markdoc:$($script:sha.Substring(0, 12))") 'Existing full and short tags must be retained.'
-    Assert-True ($Arguments -contains '--no-wait' -and $Arguments -contains '--no-logs') 'Submission must return the run identity without streaming build logs.'
+    Assert-True ($Arguments -contains '--no-wait' -and $Arguments -contains '--no-logs') 'Submission must be asynchronous without streaming build logs.'
     Assert-True (@($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' }).Count -eq 1) 'A lost submission response must have one unique tag for reconciliation.'
+    $script:submissionTag = @($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' })[0].Substring(8)
     $dockerfile = $Arguments[[array]::IndexOf($Arguments, '--file') + 1]
     Assert-True ($dockerfile -match 'markdoc-release-[0-9a-f]+\\Dockerfile$') 'Build must use only the isolated exact archive.'
     if ($script:scenario -eq 'build-submit-failed') { Stop-VmRelease 'Build submission failed.' 32 }
     if ($script:scenario -eq 'build-submit-timeout') { Stop-VmRelease 'Submission acceptance unknown.' 124 }
     if ($script:scenario -eq 'missing-run') { return '{}' }
     return '{"runId":"build123"}'
+  }
+  if ($commandKey -ceq 'acr task list-runs') {
+    $script:reconcileCount++
+    Assert-True ($Arguments -notcontains '--run-type' -and $Arguments -contains '50') 'Reconciliation must inspect a bounded CLI-compatible run window.'
+    if ($script:scenario -eq 'reconcile-missing') { return '[]' }
+    if ($script:scenario -eq 'reconcile-delayed' -and $script:reconcileCount -eq 1) { return '[]' }
+    $run = @{
+      runId = 'build123'; runType = 'QuickRun'; status = 'Queued'
+      outputImages = @(@{ registry = $script:registry; repository = 'markdoc'; tag = $script:submissionTag; digest = $null })
+    }
+    if ($script:scenario -eq 'reconcile-malformed-run') { $run.runId = 'not valid!' }
+    if ($script:scenario -eq 'reconcile-ambiguous') {
+      return ConvertTo-Json -InputObject @($run, $run) -Depth 5 -Compress
+    }
+    return ConvertTo-Json -InputObject @($run) -Depth 5 -Compress
   }
   if ($commandKey -ceq 'acr task show-run') {
     $script:pollCount++
@@ -240,7 +269,22 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     if ($script:scenario -eq 'local-health-string') { $health.ok = 'true' }
     $healthText = ConvertTo-Json -InputObject $health -Compress
     if ($script:scenario -eq 'malformed-local-json') { $healthText = '{bad json}' }
-    $stdout = "$healthText`nmarkdoc-vm-image-ready`nmarkdoc-vm-image-operation-ready:$operation"
+    $endpoint = '3/25002220'
+    $wal = '000000010000000300000025'
+    $archive = "$wal-0123456789abcdef0123456789abcdef01234567.gz"
+    $replay = '3/25003333'
+    $walEvidence = @(
+      "markdoc-release-wal-operation:$operation",
+      "markdoc-release-wal-capture:$operation`:$endpoint`:$wal",
+      "markdoc-release-wal-switch:$operation`:true",
+      "markdoc-release-wal-archive:$operation`:$wal`:$archive",
+      "markdoc-release-wal-restore:$operation`:true",
+      "markdoc-release-wal-sql-ready:$operation`:true",
+      "markdoc-release-wal-replay:$operation`:$endpoint`:$replay",
+      "markdoc-release-wal-cleanup:$operation`:true",
+      "markdoc-release-wal-ready:$operation`:$endpoint`:$wal`:$archive`:$replay"
+    ) -join "`n"
+    $stdout = "$walEvidence`n$healthText`nmarkdoc-vm-image-ready`nmarkdoc-vm-image-operation-ready:$operation"
     if ($script:scenario -eq 'transport-only') { $stdout = '' }
     if ($script:scenario -eq 'missing-ready-marker') { $stdout = $healthText }
     if ($script:scenario -eq 'missing-local-health') { $stdout = "markdoc-vm-image-ready`nmarkdoc-vm-image-operation-ready:$operation" }
@@ -277,12 +321,13 @@ $cases = @(
   'missing-sha', 'malformed-sha', 'short-sha', 'conflicting-sha', 'wrong-branch', 'detached', 'wrong-head', 'dirty', 'untracked',
   'account-failed', 'wrong-subscription', 'wrong-tenant', 'wrong-cloud', 'disabled-subscription',
   'wrong-registry', 'wrong-vm', 'old-origin', 'wrong-ip-association', 'archive-failed',
-  'build-submit-failed', 'build-submit-timeout', 'missing-run', 'build-failed', 'build-timeout', 'build-unknown-status', 'wrong-run',
+  'build-submit-failed', 'build-submit-timeout', 'reconcile-missing', 'reconcile-ambiguous', 'reconcile-malformed-run',
+  'build-failed', 'build-timeout', 'build-unknown-status', 'wrong-run',
   'ambiguous-digest', 'missing-digest', 'null-digest', 'malformed-digest', 'scalar-digest', 'tag-raced', 'changed-after-build',
   'vm-timeout', 'vm-native-failed', 'transport-failed', 'transport-only', 'missing-ready-marker', 'missing-local-health',
   'wrong-operation', 'nonterminal-marker', 'stderr-marker', 'wrong-local-version', 'local-health-false', 'local-health-string', 'malformed-local-json',
   'wrong-public-version', 'public-ok-false', 'public-db-false', 'public-collab-false', 'public-health-string', 'public-array',
-  'public-request-failed', 'malformed-public-json', 'success', 'pending-then-success', 'uppercase-sha'
+  'public-request-failed', 'malformed-public-json', 'success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha'
 )
 $priorReleaseSha = $env:RELEASE_SHA
 try {
@@ -292,7 +337,9 @@ try {
     $script:messages.Clear()
     $script:publicCount = 0
     $script:pollCount = 0
+    $script:reconcileCount = 0
     $script:sourceChecks = 0
+    $script:submissionTag = ''
     $env:RELEASE_SHA = $null
     $commit = $script:sha
     if ($case -eq 'missing-sha') { $commit = '' }
@@ -307,8 +354,8 @@ try {
       if (-not $_.Exception.Data.Contains('ReleaseExitCode')) { throw }
       $code = $_.Exception.Data['ReleaseExitCode']
     }
-    $success = $case -in @('success', 'pending-then-success', 'uppercase-sha')
-    Assert-Equal $success ($code -eq 0) "Unexpected exit outcome for $case."
+    $success = $case -in @('success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha')
+    Assert-Equal $success ($code -eq 0) "Unexpected exit outcome for $case. Log: $log"
     $log = $script:messages -join "`n"
     Assert-Equal $success ($log -match 'Release complete:') "Completion reporting mismatch for $case."
     Assert-True ($log -notmatch 'withheld response body|failed after marker|bad json') "Raw diagnostics escaped for $case."
@@ -330,7 +377,9 @@ try {
       Assert-Equal 0 $script:publicCount "Guest failure must not reach public health: $case."
     }
     $expectedNativeCodes = @{ 'account-failed' = 19; 'archive-failed' = 31; 'build-submit-failed' = 32; 'vm-native-failed' = 33; 'build-submit-timeout' = 124; 'vm-timeout' = 124 }
-    if ($expectedNativeCodes.ContainsKey($case)) { Assert-Equal $expectedNativeCodes[$case] $code "Exact native error code must survive for $case." }
+    if ($expectedNativeCodes.ContainsKey($case)) {
+      Assert-Equal $expectedNativeCodes[$case] $code "Exact native error code must survive for $case. Log: $log"
+    }
   }
 } finally {
   $env:RELEASE_SHA = $priorReleaseSha

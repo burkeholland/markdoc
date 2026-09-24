@@ -20,6 +20,7 @@ run_markdoc_release_wal_gate() {
   archive_timeout=300
   restore_timeout=600
   start_timeout=240
+  recovery_timeout=600
   query_timeout=30
   stop_timeout=45
   if [ -n "$test_root" ]; then
@@ -32,6 +33,7 @@ run_markdoc_release_wal_gate() {
     archive_timeout="${MARKDOC_RELEASE_WAL_GATE_ARCHIVE_TIMEOUT:-2}"
     restore_timeout="${MARKDOC_RELEASE_WAL_GATE_RESTORE_TIMEOUT:-10}"
     start_timeout="${MARKDOC_RELEASE_WAL_GATE_START_TIMEOUT:-10}"
+    recovery_timeout="${MARKDOC_RELEASE_WAL_GATE_RECOVERY_TIMEOUT:-10}"
     query_timeout="${MARKDOC_RELEASE_WAL_GATE_QUERY_TIMEOUT:-5}"
     stop_timeout="${MARKDOC_RELEASE_WAL_GATE_STOP_TIMEOUT:-5}"
   elif [ "$(id -u)" -ne 0 ]; then
@@ -39,7 +41,7 @@ run_markdoc_release_wal_gate() {
     return 1
   fi
   local timeout_value
-  for timeout_value in "$archive_timeout" "$restore_timeout" "$start_timeout" "$query_timeout" "$stop_timeout"; do
+  for timeout_value in "$archive_timeout" "$restore_timeout" "$start_timeout" "$recovery_timeout" "$query_timeout" "$stop_timeout"; do
     if ! [[ "$timeout_value" =~ ^[1-9][0-9]{0,3}$ ]]; then
       echo 'release WAL gate timeout is invalid' >&2
       return 2
@@ -339,7 +341,6 @@ if matches:
   run_silent "$restore_timeout" sudo -u postgres pgbackrest \
     --stanza=markdoc \
     --repo=1 \
-    --lock-timeout=0 \
     --pg1-path="$data_dir" \
     --archive-mode=off \
     --type=lsn \
@@ -387,13 +388,25 @@ CONF
   fi
 
   stage='sql-ready'
-  run_capture "$query_timeout" sudo -u postgres psql -X \
-    -h "$socket_dir" -p "$scratch_port" -d postgres \
-    -v ON_ERROR_STOP=1 -Atq -c \
-    "select case when not pg_is_in_recovery() and current_setting('archive_mode') = 'off' and current_setting('listen_addresses') = '' then 'ready' else 'not-ready' end"
-  if [ "$(read_control)" != ready ]; then
-    return 1
-  fi
+  local recovery_deadline=$((SECONDS + recovery_timeout))
+  while true; do
+    local recovery_remaining=$((recovery_deadline - SECONDS))
+    if [ "$recovery_remaining" -le 0 ]; then
+      return 1
+    fi
+    if [ "$recovery_remaining" -gt "$query_timeout" ]; then
+      recovery_remaining="$query_timeout"
+    fi
+    if run_capture "$recovery_remaining" sudo -u postgres psql -X \
+      -h "$socket_dir" -p "$scratch_port" -d postgres \
+      -v ON_ERROR_STOP=1 -Atq -c \
+      "select case when not pg_is_in_recovery() and current_setting('archive_mode') = 'off' and current_setting('listen_addresses') = '' then 'ready' else 'not-ready' end"; then
+      if [ "$(read_control)" = ready ]; then
+        break
+      fi
+    fi
+    sleep 1
+  done
   printf 'markdoc-release-wal-sql-ready:%s:true\n' "$operation_id"
 
   stage='replay'

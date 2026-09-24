@@ -70,10 +70,10 @@ Assert-Equal 'node --no-warnings --experimental-strip-types scripts/dependency-p
 Assert-True ($preflightCommand -notmatch '\btsx\b') 'The package preflight must not require the tsx development dependency.'
 $currentLock = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package-lock.json') -Raw |
   ConvertFrom-Json -AsHashtable
-Assert-Equal '3.1.5' $currentLock['packages']['node_modules/fast-uri']['version'] `
-  'The current lock must remain blocked on fast-uri 3.1.5.'
-Assert-Equal '6.15.3' $currentLock['packages']['node_modules/qs']['version'] `
-  'The current lock must remain blocked on qs 6.15.3.'
+Assert-Equal '3.1.8' $currentLock['packages']['node_modules/fast-uri']['version'] `
+  'The current lock must retain the remediated fast-uri version.'
+Assert-Equal '6.16.0' $currentLock['packages']['node_modules/qs']['version'] `
+  'The current lock must retain the remediated qs version.'
 
 $workflowSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\deploy.yml') -Raw
 $checkout = $workflowSource.IndexOf('actions/checkout@v4')

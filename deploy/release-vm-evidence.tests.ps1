@@ -141,7 +141,9 @@ Assert-True ($gateSource -match "pg_current_wal_flush_lsn\(\)" -and
 Assert-True ($gateSource -match '--type=lsn' -and $gateSource -match '--target="\$endpoint"' -and
   $gateSource -match '--repo=1' -and $gateSource -match "archive_mode = off" -and
   $gateSource -match "listen_addresses = ''") 'Restore must target the endpoint in the proven repository with archive off and no listener.'
-Assert-True ($gateSource -match '--lock-timeout=0' -and $gateSource -match 'flock -n 9') 'Release and pgBackRest contention must fail without unbounded waiting.'
+Assert-True ($gateSource -notmatch '--lock-timeout' -and
+  $gateSource -match 'run_silent "\$restore_timeout" sudo -u postgres pgbackrest' -and
+  $gateSource -match 'flock -n 9') 'Release and restore contention must remain bounded without unsupported pgBackRest options.'
 Assert-True ($gateSource -notmatch '(?i)pg_basebackup|checkpoint|systemctl\s+(restart|stop)\s+postgres|archive_command|cp\s+.*pg_wal') 'Gate must not copy WAL or alter/restart the primary.'
 Assert-True ($gateSource -notmatch 'markdoc-restore-check\.lock|markdoc-restore-check\.XXXXXX') 'Release cleanup must not claim the long-term restore-check instance.'
 

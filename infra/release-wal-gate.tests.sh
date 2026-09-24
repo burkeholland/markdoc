@@ -97,6 +97,16 @@ case "$query" in
     printf '16\n'
     ;;
   *'not pg_is_in_recovery()'*)
+    ready_count_file="$TEST_EVENTS.sql-ready-count"
+    ready_count=0
+    if [ -f "$ready_count_file" ]; then
+      ready_count="$(cat "$ready_count_file")"
+    fi
+    ready_count=$((ready_count + 1))
+    printf '%s\n' "$ready_count" >"$ready_count_file"
+    if [ "$ready_count" -lt "${TEST_SQL_READY_AFTER:-1}" ]; then
+      exit 2
+    fi
     printf '%s\n' "${TEST_SQL_READY:-ready}"
     printf 'sql-ready\n' >>"$TEST_EVENTS"
     ;;
@@ -114,9 +124,11 @@ STUB
 #!/usr/bin/env bash
 set -euo pipefail
 command=''
+lock_timeout=''
 for argument in "$@"; do
   case "$argument" in
     info|repo-ls|restore) command="$argument" ;;
+    --lock-timeout=*) lock_timeout="${argument#--lock-timeout=}" ;;
     --pg1-path=*) data_dir="${argument#--pg1-path=}" ;;
   esac
 done
@@ -140,6 +152,7 @@ case "$command" in
     ;;
   restore)
     printf 'restore\n' >>"$TEST_EVENTS"
+    test -z "$lock_timeout"
     if [ "${TEST_RESTORE_SLEEP:-0}" = 1 ]; then
       sleep 30
     fi
@@ -191,6 +204,7 @@ run_gate() {
     PATH="$case_dir/bin:$PATH" \
     MARKDOC_RELEASE_WAL_GATE_TEST_ROOT="$case_dir/root" \
     MARKDOC_RELEASE_WAL_GATE_ARCHIVE_TIMEOUT=3 \
+    MARKDOC_RELEASE_WAL_GATE_RECOVERY_TIMEOUT=2 \
     TEST_PRIMARY_DATA="$case_dir/primary" \
     TEST_EVENTS="$case_dir/events" \
     "$@" \
@@ -288,6 +302,16 @@ assert_contains "$start_dir/output" \
   'startup failure did not report owned cleanup'
 assert_no_scratch "$start_dir"
 
+sql_retry_dir="$(make_case)"
+run_gate "$sql_retry_dir" TEST_SQL_READY_AFTER=2
+assert_contains "$sql_retry_dir/output" \
+  "markdoc-release-wal-sql-ready:$operation:true" \
+  'temporary SQL rejection was not retried'
+test "$(cat "$sql_retry_dir/events.sql-ready-count")" = 2 ||
+  fail 'SQL readiness did not retry exactly once'
+passed=$((passed + 1))
+assert_no_scratch "$sql_retry_dir"
+
 sql_dir="$(make_case)"
 if run_gate "$sql_dir" TEST_SQL_READY=not-ready; then
   fail 'non-ready scratch SQL was accepted'
@@ -352,7 +376,7 @@ passed=$((passed + 1))
 
 rm -rf \
   "$success_dir" "$archive_dir" "$repo_archive_dir" "$wrong_repo_object_dir" \
-  "$archive_info_dir" "$malformed_dir" "$restore_dir" "$start_dir" "$sql_dir" \
+  "$archive_info_dir" "$malformed_dir" "$restore_dir" "$start_dir" "$sql_retry_dir" "$sql_dir" \
   "$replay_dir" "$lock_dir" "$signal_dir"
 
 printf 'release WAL gate tests passed: %s assertions\n' "$passed"
