@@ -30,5 +30,5 @@ export type PersistenceRequest =
   | { type: "document-persistence-status" | "document-persistence-flush"; docId: string; requestId: string }
   | { type: "document-composition"; docId: string; active: boolean };
 
-export const CONTENT_AUTOSAVE_IDLE_MS = 1_000;
+export const CONTENT_AUTOSAVE_IDLE_MS = 2_000;
 export const PERSISTENCE_REQUEST_TIMEOUT_MS = 15_000;

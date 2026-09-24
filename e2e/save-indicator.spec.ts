@@ -1,8 +1,8 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { budgetMs, codeText, createDocument, focusRichEnd, openDocument, richText, shareWith, signIn } from "./helpers";
+import { CONTENT_AUTOSAVE_IDLE_MS } from "../src/lib/document-persistence";
 
-const CONTENT_IDLE_MS = 1000;
 /** 40 letters at 120 ms each: about five seconds of typing at a normal pace. */
 const TYPED = Array.from({ length: 40 }, (_, i) => String.fromCharCode(97 + (i % 26))).join("");
 const CONTENT = "# Save indicator\n\nA paragraph.\n";
@@ -80,7 +80,7 @@ test("continuous typing stays dirty until actual trailing-idle persistence", asy
     expect(shown.filter((change) => change.value === "saved")).toHaveLength(1);
     expect(shown.some((change) => change.value === "pending")).toBe(true);
     expect(live.map((change) => change.value)).toEqual(shown.map((change) => change.value));
-    expect(settle.t - typedEnd).toBeGreaterThanOrEqual(CONTENT_IDLE_MS - 200);
+    expect(settle.t - typedEnd).toBeGreaterThanOrEqual(CONTENT_AUTOSAVE_IDLE_MS - 200);
     expect(settle.t - typedEnd).toBeLessThanOrEqual(budgetMs(3_000));
     expect(await storedAt(alice.page, docId)).not.toBe(before);
     await openDocument(alice.page, docId);
@@ -145,7 +145,7 @@ test("manual Save flushes the current edit and synthetic composition holds autos
     const rich = alice.page.locator(".md-rich");
     await rich.dispatchEvent("compositionstart", { data: "" });
     await alice.page.keyboard.insertText("\u3042");
-    await alice.page.waitForTimeout(CONTENT_IDLE_MS + 500);
+    await alice.page.waitForTimeout(CONTENT_AUTOSAVE_IDLE_MS + 500);
     expect(await storedAt(alice.page, docId)).toBe(manualSaved);
     await rich.dispatchEvent("compositionend", { data: "\u3042" });
     await expect(alice.page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
