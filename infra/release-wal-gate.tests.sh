@@ -82,7 +82,8 @@ case "$query" in
   'show data_directory')
     printf '%s\n' "$TEST_PRIMARY_DATA"
     ;;
-  *pg_current_wal_flush_lsn*)
+  *pg_create_restore_point*)
+    [[ "$query" == *"markdoc_release_1234567812344abc8def1234567890ab"* ]]
     printf '%s|%s\n' "${TEST_CAPTURE:-3/25002220}" "${TEST_WAL:-000000010000000300000025}"
     printf 'capture\n' >>"$TEST_EVENTS"
     ;;
@@ -125,11 +126,15 @@ STUB
 set -euo pipefail
 command=''
 lock_timeout=''
+restore_type=''
+restore_target=''
 for argument in "$@"; do
   case "$argument" in
     info|repo-ls|restore) command="$argument" ;;
     --lock-timeout=*) lock_timeout="${argument#--lock-timeout=}" ;;
     --pg1-path=*) data_dir="${argument#--pg1-path=}" ;;
+    --type=*) restore_type="${argument#--type=}" ;;
+    --target=*) restore_target="${argument#--target=}" ;;
   esac
 done
 case "$command" in
@@ -153,6 +158,8 @@ case "$command" in
   restore)
     printf 'restore\n' >>"$TEST_EVENTS"
     test -z "$lock_timeout"
+    test "$restore_type" = name
+    test "$restore_target" = markdoc_release_1234567812344abc8def1234567890ab
     if [ "${TEST_RESTORE_SLEEP:-0}" = 1 ]; then
       sleep 30
     fi

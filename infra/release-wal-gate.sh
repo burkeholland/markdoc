@@ -68,6 +68,7 @@ run_markdoc_release_wal_gate() {
   replay_lsn=''
   gate_saved_stderr=''
   unset MARKDOC_RELEASE_WAL_GATE_OPERATION
+  local restore_point="markdoc_release_${operation_id//-/}"
 
   cleanup_owned() {
     local failed=0
@@ -207,7 +208,7 @@ run_markdoc_release_wal_gate() {
 
   run_capture "$query_timeout" sudo -u postgres psql -X -d postgres \
     -v ON_ERROR_STOP=1 -Atq -c \
-    "with endpoint as materialized (select pg_current_wal_flush_lsn() as lsn) select upper(lsn::text) || '|' || pg_walfile_name(lsn) from endpoint"
+    "with endpoint as materialized (select pg_create_restore_point('${restore_point}') as lsn) select upper(lsn::text) || '|' || pg_walfile_name(lsn) from endpoint"
   local capture
   capture="$(read_control)"
   IFS='|' read -r endpoint wal_object <<<"$capture"
@@ -343,8 +344,8 @@ if matches:
     --repo=1 \
     --pg1-path="$data_dir" \
     --archive-mode=off \
-    --type=lsn \
-    --target="$endpoint" \
+    --type=name \
+    --target="$restore_point" \
     --target-action=promote \
     restore
   printf 'markdoc-release-wal-restore:%s:true\n' "$operation_id"
@@ -404,6 +405,11 @@ CONF
       if [ "$(read_control)" = ready ]; then
         break
       fi
+    fi
+    if [ -z "$test_root" ] &&
+      [[ "$owned_postgres_pid" =~ ^[1-9][0-9]*$ ]] &&
+      ! kill -0 "$owned_postgres_pid" 2>/dev/null; then
+      return 1
     fi
     sleep 1
   done

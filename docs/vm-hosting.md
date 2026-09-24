@@ -227,8 +227,9 @@ depend on returning a run ID. It then waits for ACR success, requires a single
 well-formed digest for the full-SHA tag matching that build's output, and makes
 one VM invocation containing the WAL gate and existing deployment script.
 Before image pull, environment
-change, unit rewrite or service start, the gate captures the primary's current
-flush LSN, performs an explicit `pg_switch_wal()`, and waits for PostgreSQL's
+change, unit rewrite or service start, the gate creates an operation-named
+restore point, captures its exact WAL record LSN, performs an explicit
+`pg_switch_wal()`, and waits for PostgreSQL's
 exact `.done` archive-status object for the containing segment. pgBackRest's
 documented asynchronous archive push returns success only after safely storing
 that segment in the archive. The gate additionally reads repository metadata to
@@ -289,11 +290,18 @@ The next rehearsal restored successfully but reached the SQL check while
 PostgreSQL was still replaying and temporarily reported that it was not
 accepting connections. `pg_ctl -w` did not establish the stronger condition
 the gate needed. The gate now polls that exact SQL readiness condition for at
-most ten minutes. Operation `55466ca5-ca20-4b6f-a92a-ec78c3932359` then proved
-the complete release gate: captured endpoint `F/7F000148`, exact segment and
-checksum-suffixed repository object archived, scratch restore and SQL readiness
-succeeded, replay reached `F/80000000`, and owned cleanup succeeded. The
-application image was not pulled or restarted during this rehearsal.
+most ten minutes.
+
+A later release target landed exactly on a WAL segment boundary. That byte
+position is not itself a WAL record, so PostgreSQL exhausted the archived
+segment and exited because the configured LSN target was never encountered.
+The gate now creates an operation-named PostgreSQL restore point and uses its
+returned record LSN as both the archive proof and replay threshold. Operation
+`af9d6b09-43e3-4000-b2f0-e35f4797e6c7` proved the corrected complete gate:
+captured restore-point LSN `F/81000090`, exact segment and checksum-suffixed
+repository object archived, scratch restore and SQL readiness succeeded, replay
+reached exactly `F/81000090`, and owned cleanup succeeded. The application
+image was not pulled or restarted during this rehearsal.
 
 ## Health and safe diagnostics
 

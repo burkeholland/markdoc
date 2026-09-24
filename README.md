@@ -357,17 +357,19 @@ application still occurs only after the release's operation-bound WAL archive
 and restore gate succeeds. This documentation does not grant release permission
 or report a successful release.
 
-On September 24, 2026, an isolated pre-cutover rehearsal identified and fixed
-two release-gate defects without changing the application service. pgBackRest
+On September 24, 2026, isolated pre-cutover rehearsals identified and fixed
+three release-gate defects without changing the application service. pgBackRest
 2.59.1 rejected the restore-only `--lock-timeout` option with error `031`; the
 gate already has a hard ten-minute restore process timeout, so the unsupported
 option was removed. After restore, PostgreSQL temporarily rejected SQL
 connections while replay was still finishing, so the one-shot readiness check
-became a bounded ten-minute poll. Operation
-`55466ca5-ca20-4b6f-a92a-ec78c3932359` then archived the exact segment, restored
-the scratch cluster, reached SQL readiness, replayed from `F/7F000148` through
-`F/80000000`, and removed its owned scratch resources. This recovery proof is
-not by itself an application deployment.
+became a bounded recovery poll. A later target landed exactly on a WAL segment
+boundary, which is not itself a WAL record and could never satisfy an LSN
+recovery target. The gate now creates an operation-named restore point and uses
+its exact record LSN. Operation `af9d6b09-43e3-4000-b2f0-e35f4797e6c7` then
+archived the exact segment, restored the scratch cluster, reached SQL readiness,
+replayed exactly to `F/81000090`, and removed its owned scratch resources. This
+recovery proof is not by itself an application deployment.
 
 The entrypoint performs one bounded attempt:
 
@@ -384,7 +386,8 @@ The entrypoint performs one bounded attempt:
    [`infra/deploy-vm-image.sh`](infra/deploy-vm-image.sh), in that order, in
    one VM invocation through Run Command on `markdoc-pg`.
 3. Before image pull, environment change, migration or service cutover, the
-   operation-bound WAL gate captures the primary flush endpoint, switches WAL,
+   operation-bound WAL gate creates an operation-named restore point, captures
+   its exact WAL record LSN, switches WAL,
    waits for its exact local archive completion and checksum-suffixed remote
    pgBackRest object, then restores that repository into a fresh private
    invocation-owned cluster. It requires SQL readiness with archiving and

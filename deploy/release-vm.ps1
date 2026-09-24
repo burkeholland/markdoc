@@ -287,7 +287,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     ) + $nativeScope) 90)
 
     $releaseStage = 'ACR build reconciliation'
-    for ($attempt = 1; $attempt -le 12; $attempt++) {
+    for ($attempt = 1; $attempt -le 72; $attempt++) {
       $runs = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@(
         'acr', 'task', 'list-runs', '--registry', $acr, '--top', '50',
         '--query', '[].{runId:runId,runType:runType,status:status,outputImages:outputImages}'
@@ -314,7 +314,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
         }
         break
       }
-      if ($attempt -lt 12) { Start-Sleep -Seconds 5 }
+      if ($attempt -lt 72) { Start-Sleep -Seconds 5 }
     }
     if (-not $buildRun) {
       Stop-VmRelease 'ACR submission acceptance is unknown after unique-tag reconciliation. Do not retry.'
