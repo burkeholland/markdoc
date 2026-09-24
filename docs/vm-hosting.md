@@ -189,10 +189,12 @@ package audit with no retry, rechecks the lock and withholds raw output. It
 accepts only the bounded pass report with an empty package list and all blocked,
 severity, vulnerability, reported and omitted counts equal to zero.
 
-The current lock is intentionally blocked because it contains
-`fast-uri@3.1.5` and `qs@6.15.3`. **Do not run the release command until trusted
-replacement integrity is admitted.** Workflow setup, a merge, audit evidence
-or this documentation update neither invokes nor approves a release.
+The current lock resolves the audited transitive packages to
+`fast-uri@3.1.8`, `qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and
+`sharp@0.35.4`. The bounded dependency preflight reports zero blocked,
+severity, vulnerability, reported and omitted counts. Workflow setup, a merge,
+audit evidence or this documentation update neither invokes nor approves a
+release.
 
 The Board release command (run from the composed project's root) is:
 
@@ -219,9 +221,12 @@ association or public origin. It neither signs in interactively nor changes
 the active account. The guest still uses its managed identity and existing
 root-owned `0600` `/etc/markdoc/markdoc.env` for `markdoc-app`.
 
-The command waits for ACR success, requires a single well-formed digest for the
-full-SHA tag matching that build's output, then makes one VM invocation containing
-the WAL gate and existing deployment script. Before image pull, environment
+The command reconciles the accepted ACR QuickRun by polling a bounded recent-run
+window for the unique submission tag, so a successful Azure CLI call does not
+depend on returning a run ID. It then waits for ACR success, requires a single
+well-formed digest for the full-SHA tag matching that build's output, and makes
+one VM invocation containing the WAL gate and existing deployment script.
+Before image pull, environment
 change, unit rewrite or service start, the gate captures the primary's current
 flush LSN, performs an explicit `pg_switch_wal()`, and waits for PostgreSQL's
 exact `.done` archive-status object for the containing segment. pgBackRest's
@@ -232,8 +237,9 @@ the exact checksum-suffixed WAL object in that archive. It binds that basename
 to the release receipt without printing the repository path. It restores from
 the same repository to a fresh invocation-owned directory with that LSN as the
 recovery target, starts PostgreSQL with no network listener on a private socket
-and unused port, requires `archive_mode=off`, SQL readiness and a replay LSN at
-or beyond the captured endpoint, then stops and removes that scratch cluster.
+and unused port, polls for SQL readiness while recovery finishes, requires
+`archive_mode=off` and a replay LSN at or beyond the captured endpoint, then
+stops and removes that scratch cluster.
 It does not fetch or copy WAL outside recovery, alter archive state, checkpoint
 or restart the primary, change recovery configuration, use the weekly
 restore-check directory, or connect to an application database.
@@ -254,21 +260,40 @@ it does not undo schema changes.
 The local deadline is 35 minutes. Build polling still stops by roughly 6.5
 minutes and the ACR build itself has a five-minute service timeout. The guest
 gate is phase-bounded: lock acquisition is nonblocking, archive wait is five
-minutes, restore ten minutes, scratch start four minutes, each control query 30
-seconds, and cleanup gets a separate 45-second stop. The total leaves about five
-minutes beyond the gate and build ceilings for the existing image pull,
-application start/health loop and reserved public check. Cleanup targets only
-the invocation's directory/process. Cloud queue/upload/pull and startup
-durations are not guaranteed to fit. On failure or timeout, do not press Release
-again before reconciling the prior attempt: no write is resubmitted, but killing
-the CLI does **not** cancel remote work. Output records the ACR run ID and a
-unique additional submission tag, then the VM resource, guest invocation UUID
-and start time. The high-level VM CLI does not expose its ARM operation ID; the
-guest UUID is instead retained in Run Command parameters/output for targeted
-owner reconciliation. A lost submission response can leave Azure acceptance
-unknown (including no returned ACR run ID); these identifiers do not claim that
-the provider accepted or canceled anything. Raw build/VM/HTTP output is withheld.
-The protected rollback bundle and diagnostics are not terminal scratch space.
+minutes, restore ten minutes, scratch start four minutes, SQL recovery readiness
+ten minutes, each control query 30 seconds, and cleanup gets a separate
+45-second stop. Cleanup targets only the invocation's directory/process. Cloud
+queue/upload/pull and startup durations are not guaranteed to fit. On failure
+or timeout, do not press Release again before reconciling the prior attempt: no
+write is resubmitted, but killing the CLI does **not** cancel remote work.
+Output records the unique submission tag and the reconciled ACR run ID, then
+the VM resource, guest invocation UUID and start time. The high-level VM CLI
+does not expose its ARM operation ID; the guest UUID is instead retained in Run
+Command parameters/output for targeted owner reconciliation. Failure to find
+one unique tagged run leaves Azure acceptance unknown. Raw build/VM/HTTP output
+is withheld. The protected rollback bundle and diagnostics are not terminal
+scratch space.
+
+### September 24 release-gate verification
+
+Bounded production-safe diagnostics found that the backup system was healthy:
+pgBackRest 2.59.1, PostgreSQL 16, seven recorded backups, no archive failures,
+about 20 GB free on the PostgreSQL volume, and a successful weekly isolated
+restore marker about 4.6 days old. The release-specific restore failed because
+pgBackRest 2.59.1 rejects `--lock-timeout` for the `restore` command with error
+`031`; both `0` and `30` were invalid. The gate already wraps restore in a hard
+ten-minute process timeout, so removing the unsupported option preserves a
+bounded failure path.
+
+The next rehearsal restored successfully but reached the SQL check while
+PostgreSQL was still replaying and temporarily reported that it was not
+accepting connections. `pg_ctl -w` did not establish the stronger condition
+the gate needed. The gate now polls that exact SQL readiness condition for at
+most ten minutes. Operation `55466ca5-ca20-4b6f-a92a-ec78c3932359` then proved
+the complete release gate: captured endpoint `F/7F000148`, exact segment and
+checksum-suffixed repository object archived, scratch restore and SQL readiness
+succeeded, replay reached `F/80000000`, and owned cleanup succeeded. The
+application image was not pulled or restarted during this rehearsal.
 
 ## Health and safe diagnostics
 

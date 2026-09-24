@@ -227,6 +227,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
   $resourceRoot = "/subscriptions/$subscription/resourceGroups/$group/providers"
   $vmId = "$resourceRoot/Microsoft.Compute/virtualMachines/$vm"
   $nativeScope = @('--subscription', $subscription, '--resource-group', $group)
+  $subscriptionScope = @('--subscription', $subscription)
   $context = $null
   $releaseStage = 'source validation'
   $buildRun = $null
@@ -278,16 +279,46 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     $submissionTag = "release-$([guid]::NewGuid().ToString('N'))"
     Write-Host "Release: ACR submission $acr/markdoc:$submissionTag (run ID not yet returned)."
     Write-Host 'Stopping the CLI does not cancel cloud work. Reconcile this submission before any retry.'
-    $queued = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@(
+    [void](Invoke-ReleaseAz (@(
       'acr', 'build', '--registry', $acr, '--image', "markdoc:$Commit", '--image', "markdoc:$($Commit.Substring(0, 12))",
       '--image', "markdoc:$submissionTag", '--build-arg', "APP_VERSION=$Commit",
       '--file', (Join-Path $context 'Dockerfile'), $context, '--timeout', '300',
-      '--no-wait', '--no-logs', '--query', '{runId:runId}'
+      '--no-wait', '--no-logs'
     ) + $nativeScope) 90)
-    if ($queued.runId -isnot [string] -or $queued.runId -cnotmatch '^[a-zA-Z0-9]{1,80}$') {
-      Stop-VmRelease 'ACR submission did not return a valid run ID; acceptance is unknown. Reconcile the submission tag; do not retry.'
+
+    $releaseStage = 'ACR build reconciliation'
+    for ($attempt = 1; $attempt -le 12; $attempt++) {
+      $runs = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@(
+        'acr', 'task', 'list-runs', '--registry', $acr, '--top', '50',
+        '--query', '[].{runId:runId,runType:runType,status:status,outputImages:outputImages}'
+      ) + $nativeScope))
+      if ($runs -isnot [array]) {
+        Stop-VmRelease 'ACR build reconciliation did not return a run list.'
+      }
+      $matches = @(
+        $runs | Where-Object {
+          $_ -is [System.Collections.IDictionary] -and
+          $_['runType'] -ceq 'QuickRun' -and
+          @($_['outputImages'] | Where-Object {
+            $_ -is [System.Collections.IDictionary] -and $_['tag'] -ceq $submissionTag
+          }).Count -eq 1
+        }
+      )
+      if ($matches.Count -gt 1) {
+        Stop-VmRelease 'The unique ACR submission tag matched more than one build run.'
+      }
+      if ($matches.Count -eq 1) {
+        $buildRun = $matches[0]['runId']
+        if ($buildRun -isnot [string] -or $buildRun -cnotmatch '^[a-zA-Z0-9]{1,80}$') {
+          Stop-VmRelease 'The reconciled ACR build run has an invalid identity.'
+        }
+        break
+      }
+      if ($attempt -lt 12) { Start-Sleep -Seconds 5 }
     }
-    $buildRun = $queued.runId
+    if (-not $buildRun) {
+      Stop-VmRelease 'ACR submission acceptance is unknown after unique-tag reconciliation. Do not retry.'
+    }
     Write-Host "Release: ACR run $buildRun; registry $acr."
     $releaseStage = 'ACR build completion'
     do {
@@ -301,7 +332,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
 
     $releaseStage = 'immutable image identity'
     $digests = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@('acr', 'manifest', 'list-metadata', '--registry', $acr, '--name', 'markdoc',
-      '--query', "[?tags != null && contains(tags, '$Commit')].digest") + $nativeScope))
+      '--query', "[?tags != null && contains(tags, '$Commit')].digest") + $subscriptionScope))
     if ($digests -isnot [array] -or $digests.Count -ne 1 -or $digests[0] -isnot [string] -or $digests[0] -cnotmatch '^sha256:[0-9a-f]{64}$') {
       Stop-VmRelease 'The exact commit tag has an absent, ambiguous or malformed digest.'
     }
