@@ -258,8 +258,8 @@ A public failure after guest readiness is a failed/unverified release, **not** a
 automatic rollback. Existing local rollback restores configuration/image only;
 it does not undo schema changes.
 
-The local deadline is 35 minutes. Build polling still stops by roughly 6.5
-minutes and the ACR build itself has a five-minute service timeout. The guest
+The local deadline is 35 minutes. Build polling stops by roughly 12.5 minutes
+and the ACR build itself has a ten-minute service timeout. The guest
 gate is phase-bounded: lock acquisition is nonblocking, archive wait is five
 minutes, restore ten minutes, scratch start four minutes, SQL recovery readiness
 ten minutes, each control query 30 seconds, and cleanup gets a separate
