@@ -378,9 +378,9 @@ Select any text and press **Comment** in the toolbar. The thread follows the wor
 
 ## 3. Collaborate with an agent
 
-Markdoc is built so people *and* agents can work on the same document. GitHub Copilot CLI joins through a personal token: it reads, comments and proposes suggestions you accept or reject.
+Markdoc is built so people *and* agents can work on the same document. An AI agent such as GitHub Copilot CLI joins with a key you create: it reads, comments and proposes suggestions you accept or reject.
 
-**Try it:** Open **Share → Collaborate with an agent** to let Copilot CLI join.
+**Try it:** Type \`/agent\` here and follow the three steps to connect your agent.
 
 Once it is connected, select a sentence, press **Comment** and @-mention Copilot in the comment: that is the request, and the answer lands in the thread.
 
@@ -388,7 +388,7 @@ Once it is connected, select a sentence, press **Comment** and @-mention Copilot
 
 - [ ] Type \`/\` and insert a block from the menu
 - [ ] Select a sentence and press Comment
-- [ ] Open Share → Collaborate with an agent
+- [ ] Type /agent and connect an AI agent
 
 Delete this doc when you're done — it's just a doc.
 `,

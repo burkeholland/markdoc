@@ -20,8 +20,9 @@ test.use({ trace: "off", screenshot: "off", video: "off" });
 /**
  * Agent addressing, the UI half (task #1330 on top of #1296): someone else's agent is named with its owner
  * ("alice's Scribe") wherever it shows, the `@` picker greys out an agent whose owner keeps it to themself and the
- * composer refuses to send before the server would answer 403, and the owner opens it from Settings → Agents with
- * the "Collaborators may ask this agent" switch. Two users: alice owns the document and the agent, bob edits.
+ * composer refuses to send before the server would answer 403, and the owner opens it from the key's Manage panel in
+ * Settings with the "People I share documents with can ask this agent" switch. Two users: alice owns the document
+ * and the agent, bob edits.
  * Dev-login users have their login as display name, so the owner reads as "alice" here.
  */
 
@@ -152,18 +153,18 @@ test.describe("agent addressing (UI): owner-labelled names, locked agents, colla
     await expect(page.getByTestId("pending-comment")).toHaveCount(0);
   });
 
-  test("2) the owner turns 'Collaborators may ask this agent' on in Settings → Agents: exactly one PATCH, the API agrees, and the collaborator's ask then goes through to that agent", async () => {
+  test("2) the owner turns on 'People I share documents with can ask this agent' from the key's Manage panel: exactly one PATCH, the API agrees, and the collaborator's ask then goes through to that agent", async () => {
     const page = alice.page;
     await page.goto("/settings");
     // The switch is a client handler: a click before hydration is dropped (e2e rule since #1263).
     await waitForHydration(page);
-    const tokenRow = page.getByTestId("token-row").filter({ hasText: agentName }).first();
-    await tokenRow.getByText("Details & agent requests", { exact: true }).click();
-    const toggle = tokenRow.getByTestId("token-collaborators-may-ask");
+    const keyRow = () => page.getByTestId("key-row").filter({ hasText: agentName }).first();
+    await keyRow().getByTestId("key-manage").click();
+    const toggle = keyRow().getByTestId("key-may-ask");
     await expect(toggle).toHaveAttribute("role", "switch");
     await expect(toggle).toHaveAttribute("aria-checked", "false");
-    await expect(toggle).toHaveAccessibleName("Collaborators may ask this agent");
-    await expect(tokenRow).toContainText("Off: only you can send requests to it. On: people you share documents with can too.");
+    await expect(toggle).toHaveAccessibleName("People I share documents with can ask this agent");
+    await expect(keyRow()).toContainText("Off: only you can send it requests. On: your collaborators can @mention it too.");
     const patches: string[] = [];
     page.on("request", (req) => {
       if (req.method() === "PATCH" && new URL(req.url()).pathname === `/api/tokens/${minted.id}`) patches.push(req.postData() ?? "");
@@ -171,17 +172,18 @@ test.describe("agent addressing (UI): owner-labelled names, locked agents, colla
     const [response] = await Promise.all([page.waitForResponse((res) => res.request().method() === "PATCH" && new URL(res.url()).pathname === `/api/tokens/${minted.id}`), toggle.click()]);
     expect(response.status()).toBe(200);
     await expect(toggle).toHaveAttribute("aria-checked", "true");
+    await expect(toggle).toBeEnabled();
     await page.waitForTimeout(300);
     expect(patches).toEqual([JSON.stringify({ collaboratorsMayAsk: true })]);
-    await expect(tokenRow.getByRole("alert")).toHaveCount(0);
+    await expect(keyRow().getByRole("alert")).toHaveCount(0);
     // The API agrees, and the switch survives a reload.
     const listed = await page.request.get("/api/tokens");
     expect(listed.ok()).toBeTruthy();
     const { tokens } = (await listed.json()) as { tokens: { id: string; collaboratorsMayAsk: boolean }[] };
     expect(tokens.find((t) => t.id === minted.id)?.collaboratorsMayAsk).toBe(true);
     await reloadHydrated(page);
-    await tokenRow.getByText("Details & agent requests", { exact: true }).click();
-    await expect(page.getByTestId("token-row").filter({ hasText: agentName }).first().getByTestId("token-collaborators-may-ask")).toHaveAttribute("aria-checked", "true");
+    await keyRow().getByTestId("key-manage").click();
+    await expect(keyRow().getByTestId("key-may-ask")).toHaveAttribute("aria-checked", "true");
     await shot(page, "settings-switch-on");
 
     // Bob's picker learns of it with the document (the collaborators route is read when the panel opens).

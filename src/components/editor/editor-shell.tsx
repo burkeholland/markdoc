@@ -2747,12 +2747,9 @@ export function EditorShell({
       setCommentsFocus({ tab: r.result?.suggestions ? "suggestions" : "open", nonce: Date.now() });
     }
   });
-  const goCreateToken = useCallback(() => {
-    navigateTo(`/settings?next=${encodeURIComponent(`/d/${doc.id}`)}#tokens`);
-  }, [doc.id]);
-  // "Keep an agent here" from the command palette or the `/agent` slash item: the header opens its dialog.
-  const [keepAgentNonce, setKeepAgentNonce] = useState(0);
-  const openKeepAgent = useCallback(() => setKeepAgentNonce((n) => n + 1), []);
+  // "Connect an AI agent" from Share, the command palette or the `/agent` slash item: the header opens its dialog.
+  const [connectAgentNonce, setConnectAgentNonce] = useState(0);
+  const openConnectAgent = useCallback(() => setConnectAgentNonce((n) => n + 1), []);
   // Hint (b) and the empty state: a comment on the whole document with `@` already typed, so the
   // agent picker is up before the user types anything (#1025).
   const startMentionComment = useCallback(() => startDocumentComment({ mention: true }), [startDocumentComment]);
@@ -2933,7 +2930,7 @@ export function EditorShell({
     openImage,
     startComment,
     commentDocument: startDocumentComment,
-    keepAgent: openKeepAgent,
+    connectAgent: openConnectAgent,
     toggleComments,
     toggleHistory,
     toggleActivity,
@@ -3147,7 +3144,7 @@ export function EditorShell({
         onReveal={reveal}
         onPendingDone={() => actions.focusCollapsed()}
         onCancelRequest={cancelAgentRequest}
-        onCreateToken={goCreateToken}
+        onConnectAgent={openConnectAgent}
         focusTab={commentsFocus}
         documentComposer={documentComposer}
         focusOnMount={focusCommentsOnOpen}
@@ -3207,12 +3204,11 @@ export function EditorShell({
           compact={isPhone}
           onJumpToUser={jumpToUser}
           onCancelRequest={cancelAgentRequest}
-          onCreateToken={goCreateToken}
-          keepAgentNonce={keepAgentNonce}
+          connectAgentNonce={connectAgentNonce}
           embed={embed}
         />
         <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onTable={openTable} />
-        {!isPhone && <HintBar session={session} actions={actions} onShare={openShare} onComment={startMentionComment} />}
+        {!isPhone && <HintBar session={session} actions={actions} onConnectAgent={openConnectAgent} onComment={startMentionComment} />}
         {findOpen && (
           <FindBar
             session={session}
@@ -3330,7 +3326,7 @@ export function EditorShell({
                     )}
                     <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onLink={openLink} />
                     <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />
-                    <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onLink={openLink} onComment={startComment} onKeepAgent={openKeepAgent} />
+                    <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onLink={openLink} onComment={startComment} onConnectAgent={openConnectAgent} />
                     <RichPane
                       session={session}
                       hidden={showRichPlaceholder}
@@ -3404,7 +3400,7 @@ export function EditorShell({
 
         {!embed && (
           <>
-            {everOpened.share && <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} />}
+            {everOpened.share && <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} onConnectAgent={openConnectAgent} />}
             {everOpened.publish && (
               <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} isOwner={isOwner} />
             )}

@@ -125,7 +125,7 @@ function fakeSession(
 }
 
 const actions = { focus: vi.fn() } as unknown as EditorActions;
-const onShare = vi.fn();
+const onConnectAgent = vi.fn();
 const onComment = vi.fn();
 
 function mount(session = fakeSession("doc-1")) {
@@ -133,7 +133,7 @@ function mount(session = fakeSession("doc-1")) {
     <HintBar
       session={session}
       actions={actions}
-      onShare={onShare}
+      onConnectAgent={onConnectAgent}
       onComment={onComment}
     />,
   );
@@ -147,7 +147,7 @@ function HintBoundary({
   onPassiveCleanup,
   instance = "hint",
   editorActions = actions,
-  share = onShare,
+  share = onConnectAgent,
   comment = onComment,
 }: {
   session: CollabSession;
@@ -169,7 +169,7 @@ function HintBoundary({
       key={instance}
       session={session}
       actions={editorActions}
-      onShare={share}
+      onConnectAgent={share}
       onComment={comment}
     />
   ) : null;
@@ -617,7 +617,7 @@ function strictNavigationTree(
       <HintBar
         session={session}
         actions={actions}
-        onShare={onShare}
+        onConnectAgent={onConnectAgent}
         onComment={comment}
       />
     </StrictMode>
@@ -697,7 +697,7 @@ async function buildHintBarBrowserHarness() {
             <HintBar
               session={session}
               actions={actions}
-              onShare={() => events.push("share")}
+              onConnectAgent={() => events.push("share")}
               onComment={() => events.push("comment")}
             />
           </StrictMode>,
@@ -757,7 +757,7 @@ describe("HintBar collaborator discovery", () => {
     collaborators.mockResolvedValue(collaboratorResult());
     tokens.mockResolvedValue(tokenResult());
     actions.focus = vi.fn();
-    onShare.mockReset();
+    onConnectAgent.mockReset();
     onComment.mockReset();
   });
 
@@ -910,7 +910,7 @@ describe("HintBar collaborator discovery", () => {
     pointerActivate(hint.dismissElement);
     expect(storageWrites).toHaveBeenCalledOnce();
     expect(actions.focus).not.toHaveBeenCalled();
-    expect(onShare).not.toHaveBeenCalled();
+    expect(onConnectAgent).not.toHaveBeenCalled();
     expect(onComment).not.toHaveBeenCalled();
     expect(screen.queryByTestId("hint-bar")).not.toBeInTheDocument();
     expect(readHintsRecord(window.localStorage).dismissed).toEqual([
@@ -1066,7 +1066,7 @@ describe("HintBar collaborator discovery", () => {
       <HintBar
         session={newSession}
         actions={actions}
-        onShare={onShare}
+        onConnectAgent={onConnectAgent}
         onComment={onComment}
       />,
     );
@@ -1169,7 +1169,7 @@ describe("HintBar collaborator discovery", () => {
         "mention-copilot",
       ]);
     expect(actions.focus).not.toHaveBeenCalled();
-    expect(onShare).toHaveBeenCalledTimes(destination === "share" ? 1 : 0);
+    expect(onConnectAgent).toHaveBeenCalledTimes(destination === "share" ? 1 : 0);
       expect(onComment).toHaveBeenCalledTimes(
         destination === "comment" ? 1 : 0,
       );
@@ -1215,7 +1215,7 @@ describe("HintBar collaborator discovery", () => {
 
       expect(storageWrites).toHaveBeenCalledOnce();
       expect(actions.focus).toHaveBeenCalledTimes(focusInside ? 1 : 0);
-      expect(onShare).not.toHaveBeenCalled();
+      expect(onConnectAgent).not.toHaveBeenCalled();
       expect(onComment).not.toHaveBeenCalled();
       expect(collaborators).not.toHaveBeenCalled();
       expect(tokens).not.toHaveBeenCalled();
@@ -1509,7 +1509,7 @@ describe("HintBar collaborator discovery", () => {
         expect(commentA).not.toHaveBeenCalled();
         expect(commentB).toHaveBeenCalledOnce();
         expect(actions.focus).not.toHaveBeenCalled();
-        expect(onShare).not.toHaveBeenCalled();
+        expect(onConnectAgent).not.toHaveBeenCalled();
         expect(screen.queryByTestId("hint-bar")).toBeNull();
       } finally {
         foreign.remove();
@@ -1566,7 +1566,7 @@ describe("HintBar collaborator discovery", () => {
             stale.action();
             stale.dismiss();
             expect(storageWrites).not.toHaveBeenCalled();
-            expect(onShare).not.toHaveBeenCalled();
+            expect(onConnectAgent).not.toHaveBeenCalled();
             expect(onComment).not.toHaveBeenCalled();
           }}
         />,
@@ -1591,7 +1591,7 @@ describe("HintBar collaborator discovery", () => {
       });
 
       expect(storageWrites).toHaveBeenCalledOnce();
-      expect(onShare).toHaveBeenCalledTimes(replaceShownHint ? 1 : 0);
+      expect(onConnectAgent).toHaveBeenCalledTimes(replaceShownHint ? 1 : 0);
       expect(onComment).toHaveBeenCalledTimes(replaceShownHint ? 0 : 1);
       expect(actions.focus).not.toHaveBeenCalled();
     },
@@ -1619,7 +1619,7 @@ describe("HintBar collaborator discovery", () => {
       stale.dismissElement.focus();
       act(() => stale[activation]());
       expect(storageWrites).not.toHaveBeenCalled();
-      expect(onShare).not.toHaveBeenCalled();
+      expect(onConnectAgent).not.toHaveBeenCalled();
       expect(onComment).not.toHaveBeenCalled();
       expect(actions.focus).not.toHaveBeenCalled();
 
@@ -1629,7 +1629,7 @@ describe("HintBar collaborator discovery", () => {
         stale.dismiss();
       });
       expect(storageWrites).not.toHaveBeenCalled();
-      expect(onShare).not.toHaveBeenCalled();
+      expect(onConnectAgent).not.toHaveBeenCalled();
       expect(onComment).not.toHaveBeenCalled();
       expect(actions.focus).not.toHaveBeenCalled();
 
@@ -1643,7 +1643,7 @@ describe("HintBar collaborator discovery", () => {
         stale.actionHandler(fabricatedClick(stale.actionElement));
         stale.dismissHandler(fabricatedClick(stale.dismissElement));
         expect(storageWrites).not.toHaveBeenCalled();
-        expect(onShare).not.toHaveBeenCalled();
+        expect(onConnectAgent).not.toHaveBeenCalled();
         expect(onComment).not.toHaveBeenCalled();
         expect(actions.focus).not.toHaveBeenCalled();
         expect(timeouts).not.toHaveBeenCalled();
@@ -1673,7 +1673,7 @@ describe("HintBar collaborator discovery", () => {
         "collab-agent",
         "mention-copilot",
       ]);
-      expect(onShare).not.toHaveBeenCalled();
+      expect(onConnectAgent).not.toHaveBeenCalled();
       expect(onComment).toHaveBeenCalledTimes(activation === "action" ? 1 : 0);
       expect(actions.focus).toHaveBeenCalledTimes(activation === "dismiss" ? 1 : 0);
       expect(collaborators).not.toHaveBeenCalled();
@@ -1730,7 +1730,7 @@ describe("HintBar collaborator discovery", () => {
     expect(storageWrites).not.toHaveBeenCalled();
     expect(preventDefault).not.toHaveBeenCalled();
     expect(actions.focus).not.toHaveBeenCalled();
-    expect(onShare).not.toHaveBeenCalled();
+    expect(onConnectAgent).not.toHaveBeenCalled();
     expect(onComment).not.toHaveBeenCalled();
     expect(screen.queryByTestId("hint-bar")).toBeNull();
   });
@@ -1766,7 +1766,7 @@ describe("HintBar collaborator discovery", () => {
           stale.action();
           stale.dismiss();
           expect(storageWrites).not.toHaveBeenCalled();
-          expect(onShare).not.toHaveBeenCalled();
+          expect(onConnectAgent).not.toHaveBeenCalled();
         }}
       />,
     );
@@ -1799,7 +1799,7 @@ describe("HintBar collaborator discovery", () => {
       stale.action();
     });
     expect(storageWrites).toHaveBeenCalledOnce();
-    expect(onShare).toHaveBeenCalledOnce();
+    expect(onConnectAgent).toHaveBeenCalledOnce();
     expect(onComment).not.toHaveBeenCalled();
 
     setVisibility("hidden");
@@ -1842,7 +1842,7 @@ describe("HintBar collaborator discovery", () => {
           <HintBar
             session={session}
             actions={actions}
-            onShare={id === "collab-agent" ? destination : onShare}
+            onConnectAgent={id === "collab-agent" ? destination : onConnectAgent}
             onComment={id === "mention-copilot" ? destination : onComment}
           />
         </StrictMode>,
@@ -1912,7 +1912,7 @@ describe("HintBar collaborator discovery", () => {
                 threads: 1,
               })}
               actions={editorActions}
-              onShare={onShare}
+              onConnectAgent={onConnectAgent}
               onComment={onComment}
             />
           </StrictMode>,
@@ -1934,7 +1934,7 @@ describe("HintBar collaborator discovery", () => {
 
         expect(storageWrites).toHaveBeenCalledOnce();
         expect(editorActions.focus).toHaveBeenCalledTimes(focusInside ? 1 : 0);
-        expect(onShare).not.toHaveBeenCalled();
+        expect(onConnectAgent).not.toHaveBeenCalled();
         expect(onComment).not.toHaveBeenCalled();
         pointerActivate(current.dismissElement);
         expect(storageWrites).toHaveBeenCalledOnce();
@@ -2072,7 +2072,7 @@ describe("HintBar collaborator discovery", () => {
                 threads: 1,
               })}
               actions={actions}
-              onShare={onShare}
+              onConnectAgent={onConnectAgent}
               onComment={comment}
             />
           </StrictMode>,
@@ -2389,7 +2389,7 @@ describe("HintBar collaborator discovery", () => {
         <HintBar
           session={fakeSession("strict-event-provenance", { threads: 1 })}
           actions={actions}
-          onShare={onShare}
+          onConnectAgent={onConnectAgent}
           onComment={onComment}
         />
       </StrictMode>,
@@ -2554,7 +2554,7 @@ describe("HintBar collaborator discovery", () => {
             <HintBar
               session={session}
               actions={actions}
-              onShare={onShare}
+              onConnectAgent={onConnectAgent}
               onComment={comment}
             />
           </section>
@@ -2642,7 +2642,7 @@ describe("HintBar collaborator discovery", () => {
             key={key}
             session={session}
             actions={actions}
-            onShare={onShare}
+            onConnectAgent={onConnectAgent}
             onComment={comment}
           />
         </StrictMode>
@@ -2695,7 +2695,7 @@ describe("HintBar collaborator discovery", () => {
         <HintBar
           session={session}
           actions={actions}
-          onShare={onShare}
+          onConnectAgent={onConnectAgent}
           onComment={comment}
         />
       </StrictMode>
@@ -2764,7 +2764,7 @@ describe("HintBar collaborator discovery", () => {
       expect(preventDefault).toHaveBeenCalledOnce();
       expect(storageWrites).not.toHaveBeenCalled();
       expect(comment).not.toHaveBeenCalled();
-      expect(onShare).not.toHaveBeenCalled();
+      expect(onConnectAgent).not.toHaveBeenCalled();
       expect(actions.focus).not.toHaveBeenCalled();
       expect([
         window.scrollX,
@@ -2823,7 +2823,7 @@ describe("HintBar collaborator discovery", () => {
     expect(order).toEqual(["capture-checkpoint", "movement"]);
     expect(storageWrites).not.toHaveBeenCalled();
     expect(comment).not.toHaveBeenCalled();
-    expect(onShare).not.toHaveBeenCalled();
+    expect(onConnectAgent).not.toHaveBeenCalled();
     expect(actions.focus).not.toHaveBeenCalled();
   });
 
@@ -3223,7 +3223,7 @@ describe("HintBar collaborator discovery", () => {
 
       expect(storageWrites).toHaveBeenCalledOnce();
       expect(comment).toHaveBeenCalledOnce();
-      expect(onShare).not.toHaveBeenCalled();
+      expect(onConnectAgent).not.toHaveBeenCalled();
       expect(actions.focus).not.toHaveBeenCalled();
     },
   );

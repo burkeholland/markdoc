@@ -1,11 +1,15 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
-import { signIn, createDocument, openDocument, selectTextInRich, shareWith, mintToken, type User } from "./helpers";
+import { signIn, createDocument, openDocument, selectTextInRich, shareWith, mintToken, reloadHydrated, waitForHydration, type User } from "./helpers";
+
+// The Settings test makes and mints keys; capture must not retain their credentials. Worker-scoped options
+// (trace, screenshot, video) cannot be set inside a describe group, so this covers the whole file.
+test.use({ trace: "off", screenshot: "off", video: "off" });
 
 /**
- * Task #385 — first-run path: the guided Welcome doc from the empty dashboard, the once-only hint
- * bar under the toolbar (localStorage `markdoc:hints`), and token/client setup in Settings.
+ * Task #385 - first-run path: the guided Welcome doc from the empty dashboard, the once-only hint
+ * bar under the toolbar (localStorage `markdoc:hints`), and agent setup in Settings.
  */
 
 const fresh = (prefix: string) => `${prefix}-${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
@@ -39,6 +43,7 @@ test.describe("onboarding: guided Welcome doc", () => {
     await expect(rich.getByRole("checkbox")).toHaveCount(3);
     await expect(rich).toContainText("Type / here for a block menu");
     await expect(rich).toContainText("Select this sentence and press Comment");
+    await expect(rich).toContainText("Type /agent here and follow the three steps");
     await expect(rich).toContainText("Delete this doc when you're done — it's just a doc.");
     await page.screenshot({ path: "shots/onboarding-welcome-doc.png", fullPage: false });
 
@@ -114,17 +119,19 @@ test.describe("onboarding: hint bar", () => {
     const bar = page.getByTestId("hint-bar");
     await expect(bar).toBeVisible();
     await expect(bar).toHaveAttribute("data-hint", "collab-agent");
-    await expect(bar).toContainText("Collaborate with an agent");
-    // The action opens Share.
+    await expect(bar).toContainText("An AI agent can work in this doc with you");
+    await expect(page.getByTestId("hint-action")).toHaveText("Connect an agent");
+    // The action opens the connect dialog, not Share.
     await page.getByTestId("hint-action").focus();
     await expect(page.getByTestId("hint-action")).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(page.getByTestId("hint-dismiss")).toBeFocused();
     await page.keyboard.press("Shift+Tab");
     await page.keyboard.press("Enter");
-    await expect(page.getByTestId("share-login")).toBeVisible();
-    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "Connect an AI agent" })).toBeVisible();
     await expect(page.getByTestId("share-login")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("agent-dialog")).toHaveCount(0);
     await expect(page.getByTestId("hint-bar")).toHaveCount(0);
     expect((await readHints(page))?.dismissed).toEqual(["collab-agent"]);
 
@@ -217,25 +224,30 @@ test.describe("onboarding: hint bar", () => {
   });
 });
 
-test.describe("onboarding: Settings token and client setup", () => {
-  test.use({ trace: "off", screenshot: "off", video: "off" });
-
-  test("token metadata records MCP discovery and tool use without a top-level checklist or recovering the secret", async ({ browser }) => {
+test.describe("onboarding: Settings agent setup", () => {
+  test("a new account sees only the setup steps; keys then show when an agent last connected and called a tool, and never reveal the secret", async ({ browser }) => {
     process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";
     const user = await signIn(browser, fresh("checklist"));
     const page = user.page;
     await page.goto("/settings");
-    await expect(page.getByRole("button", { name: "Tokens", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("copilot-checklist")).toHaveCount(0);
-    await expect(page.getByTestId("token-manager")).toContainText("No tokens yet.");
-    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
+    await waitForHydration(page);
+
+    // No keys yet: the page is the setup steps and nothing else (no empty table, no folded "Set up" button).
+    await expect(page.getByRole("heading", { name: "AI agents", level: 1 })).toBeVisible();
+    const setup = page.getByTestId("agent-setup");
+    await expect(setup).toHaveAttribute("data-state", "new");
+    await expect(page.getByTestId("agent-setup-toggle")).toHaveCount(0);
+    await expect(page.getByTestId("keys-card")).toHaveCount(0);
+    await expect(setup.getByRole("radiogroup", { name: "Agent" })).toBeVisible();
+    await expect(setup.getByTestId("agent-setup-snippet")).toHaveCount(0);
     const docsLink = page.getByTestId("agent-docs-link");
     await expect(docsLink).toBeVisible();
     await expect(docsLink).toHaveAttribute("href", AGENT_DOCS_URL);
     await expect(docsLink).toHaveAttribute("target", "_blank");
     await expect(docsLink).toHaveAttribute("rel", "noreferrer");
-    await expect(page.getByTestId("agent-connect-card")).toBeVisible();
-    await expect(page.getByTestId("token-manager")).toContainText("No tokens yet.");
+    // Webhooks are folded away under Advanced, below the setup.
+    await expect(page.getByTestId("advanced-toggle")).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("webhooks-card")).toHaveCount(0);
 
     const minted = await mintToken(page, "Copilot CLI", { expiresInDays: 30 });
     const readUsage = async () => (await (await page.request.get("/api/tokens")).json()) as {
@@ -246,35 +258,47 @@ test.describe("onboarding: Settings token and client setup", () => {
     expect(listed.ok()).toBeTruthy();
     await expect.poll(async () => Boolean((await readUsage()).tokens[0]?.lastMcpSeenAt)).toBe(true);
 
-    // The manager intentionally loads on entry rather than polling a checklist.
-    await page.reload();
-    const row = page.getByTestId("token-row").filter({ hasText: "Copilot CLI" });
+    // The list loads with the page rather than polling: with a key, the setup folds behind "Set up" and the key row leads.
+    await reloadHydrated(page);
+    await expect(page.getByTestId("agent-setup")).toHaveCount(0);
+    const row = page.getByTestId("key-row").filter({ hasText: "Copilot CLI" });
     await expect(row).toHaveCount(1);
-    await expect(row).toContainText("Active");
-    await row.getByText("Details & agent requests", { exact: true }).click();
+    await expect(row.getByTestId("key-status")).toContainText("Connected");
+    await expect(row.getByTestId("key-status")).toContainText("all documents");
+    await row.getByTestId("key-manage").click();
     const discovered = await readUsage();
     expect(discovered.tokens[0].lastMcpSeenAt).toMatch(/^\d{4}-/);
     expect(discovered.tokens[0].lastMcpCallAt).toBeNull();
-    await expect(row).toContainText(`Last MCP discovery: ${discovered.tokens[0].lastMcpSeenAt}`);
-    await expect(row).toContainText("Last MCP tool call: not recorded");
-    await expect(page.getByTestId("copy-token")).toHaveCount(0);
+    await expect(row.getByTestId("key-last-request").locator("time")).toHaveAttribute("datetime", discovered.tokens[0].lastMcpSeenAt!);
+    await expect(row.getByTestId("key-last-tool-call")).toHaveText("Never");
+    // The secret is not recoverable from the page: only a short prefix is shown.
+    expect(await page.locator("body").innerText()).not.toContain(minted.token);
 
     const called = await page.request.post("/api/mcp", { headers, data: { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "markdoc_whoami", arguments: {} } } });
     expect(called.ok()).toBeTruthy();
     await expect.poll(async () => Boolean((await readUsage()).tokens[0]?.lastMcpCallAt)).toBe(true);
-    // Persisted on the token row, not just this tab's state.
+    // Persisted on the key, not just this tab's state.
     const tokens = await readUsage();
     expect(tokens.tokens[0].lastMcpSeenAt).toMatch(/^\d{4}-/);
     expect(tokens.tokens[0].lastMcpCallAt).toMatch(/^\d{4}-/);
-    await page.reload();
-    await row.getByText("Details & agent requests", { exact: true }).click();
-    await expect(row).toContainText(`Last MCP discovery: ${tokens.tokens[0].lastMcpSeenAt}`);
-    await expect(row).toContainText(`Last MCP tool call: ${tokens.tokens[0].lastMcpCallAt}`);
-    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
-    await expect.poll(async () => (await page.getByTestId("agent-connect-config").innerText()).includes(["Bearer", "MARKDOC_TOKEN"].join(" "))).toBe(true);
-    expect((await page.getByTestId("agent-connect-config").innerText()).includes(minted.token)).toBe(false);
-    await expect(page.getByTestId("agent-connect-card")).toContainText("Check Markdoc for requests");
-    await expect(page.getByTestId("copy-token")).toHaveCount(0);
+    await reloadHydrated(page);
+    await row.getByTestId("key-manage").click();
+    await expect(row.getByTestId("key-last-request").locator("time")).toHaveAttribute("datetime", tokens.tokens[0].lastMcpSeenAt!);
+    await expect(row.getByTestId("key-last-tool-call").locator("time")).toHaveAttribute("datetime", tokens.tokens[0].lastMcpCallAt!);
+
+    // "Set up" brings the steps back for another agent; it shows no snippet until a new key is made, and never this key.
+    await page.getByTestId("agent-setup-toggle").click();
+    await expect(page.getByTestId("agent-setup")).toHaveAttribute("data-state", "new");
+    await expect(page.getByTestId("agent-setup-snippet")).toHaveCount(0);
+    await expect(page.getByTestId("agent-setup")).toContainText("Ask your agent to check in");
+    expect(await page.locator("body").innerText()).not.toContain(minted.token);
+
+    // A link to /settings#webhooks lands with Advanced already open.
+    await page.goto("/settings#webhooks");
+    await reloadHydrated(page);
+    await expect(page.getByTestId("advanced-toggle")).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByTestId("webhooks-card")).toBeVisible();
+
     await minted.revoke();
     await user.context.close();
   });

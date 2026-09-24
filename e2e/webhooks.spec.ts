@@ -6,7 +6,7 @@ import { createDocument, devLogin, reloadHydrated, uniqueLogin, waitForHydration
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
 /**
- * Settings → Webhooks: add a webhook pointing at a receiver started in this process, read the secret once,
+ * Settings → Advanced → Webhooks: add a webhook pointing at a receiver started in this process, read the secret once,
  * press Send test and see `200` in the list; delete it. Delivery and retries are covered by
  * src/server/webhooks.test.ts.
  */
@@ -46,6 +46,13 @@ test.describe("settings · webhooks", () => {
     await devLogin(page, uniqueLogin("webhooks-owner"));
     await page.goto("/settings");
     await waitForHydration(page);
+
+    // Webhooks sit behind "Advanced" and are not even loaded until it is opened.
+    await expect(page.getByTestId("webhooks-card")).toHaveCount(0);
+    const advanced = page.getByTestId("advanced-toggle");
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await advanced.click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "true");
 
     const card = page.getByTestId("webhooks-card");
     await expect(card).toBeVisible();
@@ -105,6 +112,7 @@ test.describe("settings · webhooks", () => {
     expect(typeof payload.cursor).toBe("string");
     expect(pushed.signature).toMatch(/^sha256=[0-9a-f]{64}$/);
     await reloadHydrated(page);
+    await advanced.click();
     await expect(page.getByTestId("webhook-status")).toContainText("200");
 
     page.once("dialog", (d) => void d.accept());

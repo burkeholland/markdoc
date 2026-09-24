@@ -55,16 +55,16 @@ import { jsonEqual, useOpenSettled, useSessionValue } from "./use-session";
 import { NotificationsBell } from "@/components/notifications/notifications-bell";
 import type { NotificationDto } from "@/lib/api";
 import { pendingRequests, useAgentRequests } from "./agent-requests";
-import { AgentBusyBadge, KeepAgentHereButton, PresenceActivity, PresenceRequests, WaitingPlaceholder, busyAgentNames, isRecentActivity, pendingWorker, presenceAgentName, presenceNameOf, useAgentActivity, waitingLabel } from "./presence-agents";
+import { AgentBusyBadge, ConnectAgentButton, PresenceActivity, PresenceRequests, WaitingPlaceholder, busyAgentNames, isRecentActivity, pendingWorker, presenceAgentName, presenceNameOf, useAgentActivity, waitingLabel } from "./presence-agents";
 import { signOutSafely } from "@/lib/sign-out";
 import { Logo } from "@/components/ui/logo";
 import { useEverTrue, useHydrated } from "@/lib/hooks";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
 import { HEADER_BOX } from "./chrome-classes";
 
-// On demand (#1150): the dialog, with the agent-connect card and copy blocks behind it, is fetched on its first
+// On demand (#1150): the dialog, with its setup steps and copy blocks behind it, is fetched on its first
 // open and then stays mounted (mount-once gate below), so Radix's close handling and focus return are unchanged.
-const KeepAgentHereDialog = lazyOnFirstUse(() => import("./keep-agent-here"), (m) => m.KeepAgentHereDialog);
+const AgentDialog = lazyOnFirstUse(() => import("@/components/agents/agent-dialog"), (m) => m.AgentDialog);
 
 interface ManualSaveOperation {
   readonly mount: symbol;
@@ -2399,15 +2399,15 @@ export interface PresenceStackProps {
   onJump?: (user: PresenceUser) => void;
   /** Cancel an open request from the popover's Requests section; without it the rows show but not Cancel (embed / read-only). */
   onCancelRequest?: (requestId: string) => void;
-  /** Opens the "Keep an agent here" dialog; the popover offers it while no agent is present. */
-  onKeepAgent?: () => void;
+  /** Opens the "Connect an AI agent" dialog; the popover offers it while no agent is present. */
+  onConnectAgent?: () => void;
 }
 
 interface PresenceVisit {
   session: CollabSession;
   onJump: PresenceStackProps["onJump"];
   onCancelRequest: PresenceStackProps["onCancelRequest"];
-  onKeepAgent: PresenceStackProps["onKeepAgent"];
+  onConnectAgent: PresenceStackProps["onConnectAgent"];
 }
 
 interface PresenceVisitState {
@@ -2437,10 +2437,10 @@ interface PendingRequestsOwner {
  * Everyone in the document, agents included: agents are bot avatars with a spinner badge while they work,
  * and the popover carries their status, the open requests and the way to put an agent here (task #981).
  */
-export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }: PresenceStackProps) {
+export function PresenceStack({ session, onJump, onCancelRequest, onConnectAgent }: PresenceStackProps) {
   const visit = useMemo<PresenceVisit>(
-    () => ({ session, onJump, onCancelRequest, onKeepAgent }),
-    [session, onJump, onCancelRequest, onKeepAgent],
+    () => ({ session, onJump, onCancelRequest, onConnectAgent }),
+    [session, onJump, onCancelRequest, onConnectAgent],
   );
   const users = useSessionValue(session, (s) => s.presence(), jsonEqual);
   const followUserId = useSessionValue(session, (s) => s.followUserId);
@@ -2589,10 +2589,10 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
     visit.session.follow(followUserId === u.id ? null : u.id);
     updateState((current) => (current.open ? { ...current, open: false } : current));
   };
-  const keepAgent = () => {
+  const connectAgent = () => {
     if (!ownsVisit(visit)) return;
     updateState((current) => (current.open ? { ...current, open: false } : current));
-    visit.onKeepAgent?.();
+    visit.onConnectAgent?.();
   };
   const changeOpen = (open: boolean) => {
     updateState((current) => (current.open === open ? current : { ...current, open }));
@@ -2703,9 +2703,9 @@ export function PresenceStack({ session, onJump, onCancelRequest, onKeepAgent }:
             {waitingLabel(pending.length)} — none is sitting in this document.
           </p>
         )}
-        {agents.length === 0 && onKeepAgent && (
+        {agents.length === 0 && onConnectAgent && (
           <div className={cn("px-1 pb-1", waiting ? "pt-1" : "pt-1.5")}>
-            <KeepAgentHereButton onClick={keepAgent} primary={waiting} />
+            <ConnectAgentButton onClick={connectAgent} primary={waiting} />
           </div>
         )}
         {others.length === 0 && pending.length === 0 && <div className="px-2 pb-1 pt-1.5 text-xs text-ink-3">Share the document to work on it together.</div>}
@@ -7107,10 +7107,8 @@ export interface HeaderProps {
   onJumpToUser?: (user: PresenceUser) => void;
   /** Cancel an open request from the presence popover's Requests section; the Cancel buttons are hidden when omitted. */
   onCancelRequest?: (requestId: string) => void;
-  /** Where "Keep an agent here" sends people without a token (defaults to /settings#tokens). */
-  onCreateToken?: () => void;
-  /** Bumped by the command palette's "Keep an agent here" (and the `/agent` slash item): opens the Keep-an-agent dialog. */
-  keepAgentNonce?: number;
+  /** Bumped by Share's agent row, the command palette and the `/agent` slash item: opens the "Connect an AI agent" dialog. */
+  connectAgentNonce?: number;
   /** Canvas mode: hide navigation, sharing, publishing, and account menus. */
   embed?: boolean;
 }
@@ -16704,7 +16702,7 @@ function MoreMenuOpenCommit({ presentation }: { presentation: MoreMenuPresentati
 }
 
 export const Header = memo(function Header(props: HeaderProps) {
-  const { session, doc, compact, githubConfigured, embed = false, keepAgentNonce = 0 } = props;
+  const { session, doc, compact, githubConfigured, embed = false, connectAgentNonce = 0 } = props;
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
   const linked = doc.storage !== "local";
   const canEdit = session.role === "owner" || session.role === "editor";
@@ -16822,14 +16820,14 @@ export const Header = memo(function Header(props: HeaderProps) {
   // Star state and the notifications poll wait for the first sync: the socket handshake and the
   // collab-token call get the server to themselves on open (#118).
   const settled = useOpenSettled(session);
-  // "Keep an agent here": one dialog, opened from the presence popover, the command palette and the slash menu.
-  const [keepAgentOpen, setKeepAgentOpen] = useState(false);
+  // "Connect an AI agent": one dialog, opened from Share, the presence popover, the command palette and the slash menu.
+  const [agentDialogOpen, setAgentDialogOpen] = useState(false);
   useEffect(() => {
-    if (keepAgentNonce > 0) setKeepAgentOpen(true);
-  }, [keepAgentNonce]);
-  const keepAgentEverOpened = useEverTrue(keepAgentOpen);
+    if (connectAgentNonce > 0) setAgentDialogOpen(true);
+  }, [connectAgentNonce]);
+  const agentDialogEverOpened = useEverTrue(agentDialogOpen);
   const liveTitle = useSessionValue(session, (s) => s.title || doc.title);
-  const openKeepAgent = useCallback(() => setKeepAgentOpen(true), []);
+  const openAgentDialog = useCallback(() => setAgentDialogOpen(true), []);
   // Phones can paint the header while the HTML is still being parsed (a 4× slower CPU: `readyState` was "loading" at the
   // first frame in 2 of 3 runs), and then the right group is laid out with only its first children — 70 px, or 110 px
   // with the bell — and grows to 190 px once the comments toggle and ⋮ have arrived, pushing the title and the save chip
@@ -16868,9 +16866,9 @@ export const Header = memo(function Header(props: HeaderProps) {
         <LayoutSegment layout={props.layout} onLayout={props.onLayout} />
         <div className="hidden items-center gap-3 md:flex">
           <ModeSwitcher session={session} />
-          <PresenceStack session={session} onJump={props.onJumpToUser} onCancelRequest={props.onCancelRequest} onKeepAgent={openKeepAgent} />
+          <PresenceStack session={session} onJump={props.onJumpToUser} onCancelRequest={props.onCancelRequest} onConnectAgent={openAgentDialog} />
         </div>
-        {keepAgentEverOpened && <KeepAgentHereDialog doc={{ id: doc.id, title: liveTitle }} open={keepAgentOpen} onOpenChange={setKeepAgentOpen} onCreateToken={props.onCreateToken} />}
+        {agentDialogEverOpened && <AgentDialog doc={{ id: doc.id, title: liveTitle }} open={agentDialogOpen} onOpenChange={setAgentDialogOpen} />}
         {!embed && session.user.login && <NotificationsBell currentDocId={doc.id} onOpen={props.onOpenNotification} ready={settled} />}
         {!embed && !compact && (
           <button type="button" className="btn btn-outline max-md:hidden" onClick={props.onShare} data-testid="share-button">

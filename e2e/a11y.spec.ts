@@ -1,11 +1,12 @@
 import { test, expect } from "./fixtures";
 import { devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, devLogin, waitForHydration, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme, cssPx, uniqueLogin } from "./helpers";
+import { signIn, devLogin, waitForHydration, reloadHydrated, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme, cssPx, uniqueLogin } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
 
-// Some scans use minted fixture tokens; capture must not retain their API credentials.
+// Some scans use minted fixture tokens or show a one-time key; capture must not retain their API credentials.
 test.use({ trace: "off", screenshot: "off", video: "off" });
+process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";
 
 /**
  * Accessibility sweep: axe-core (WCAG 2.1 A/AA) on every screen and floating UI, then a
@@ -303,24 +304,6 @@ test.describe("axe: pages", () => {
     await expect(page.getByTestId("empty-state-clear-search")).toBeVisible();
     await expect(page.getByTestId("search-clear")).toBeVisible();
     await scan(page, "dashboard no-match search (dark)", { contrast: true });
-    await context.close();
-  });
-
-  test("settings", async ({ browser }) => {
-    const { page, context } = await signIn(browser, "a11y-settings");
-    await page.goto("/settings");
-    await expect(page.getByTestId("theme-row")).toBeVisible();
-    await expect(page.getByTestId("token-manager")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Tokens", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("copilot-checklist")).toHaveCount(0);
-    await scan(page, "settings (token list)");
-    await page.getByTestId("token-add").click();
-    await expect(page.getByTestId("token-name")).toBeVisible();
-    await scan(page, "settings (expanded token form)");
-    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Connect an MCP client", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("agent-connect-card")).toBeVisible();
-    await scan(page, "settings (MCP client setup)");
     await context.close();
   });
 
@@ -735,7 +718,7 @@ test.describe("axe: editor", () => {
 
     // A request is a comment that mentions an agent (#1075). This user has no token, so the `@` picker ends in the
     // connect row instead of an agent; then a request (posted the way the composer does) shows in the presence
-    // popover (waiting placeholder in the stack, Requests section with Cancel) and the Keep-an-agent dialog.
+    // popover (waiting placeholder in the stack, Requests section with Cancel) and the connect dialog.
     await page.evaluate(() => window.localStorage.removeItem("markdoc:agent-connect-dismissed"));
     await page.getByTestId("comments-panel").getByTestId("comment-document").click();
     const composer = page.getByTestId("pending-comment").getByTestId("comment-composer");
@@ -758,12 +741,12 @@ test.describe("axe: editor", () => {
     await page.getByTestId("presence-request-cancel").first().click();
     await expect(page.getByTestId("presence-requests")).toHaveCount(0);
     await expect(page.getByTestId("presence").getByTestId("presence-waiting")).toHaveCount(0);
-    await page.getByTestId("presence-popover").getByTestId("keep-agent-here").click();
+    await page.getByTestId("presence-popover").getByTestId("connect-agent").click();
     await expect(page.getByTestId("presence-popover")).toHaveCount(0);
-    await expect(page.getByTestId("keep-agent-dialog")).toBeVisible();
-    await scan(page, "editor + keep-agent dialog");
+    await expect(page.getByTestId("agent-dialog")).toBeVisible();
+    await scan(page, "editor + connect dialog");
     await page.keyboard.press("Escape");
-    await expect(page.getByTestId("keep-agent-dialog")).toHaveCount(0);
+    await expect(page.getByTestId("agent-dialog")).toHaveCount(0);
 
     // Image dialog.
     await page.getByTestId("tb-image").click();
@@ -1015,6 +998,87 @@ test.describe("axe: contrast", () => {
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await expect(page.getByTestId("reader-body")).toBeVisible();
       await scan(page, `reader (${theme})`, { contrast: true });
+    }
+    await context.close();
+  });
+});
+
+/**
+ * The agent setup on Settings and in the editor's dialogs. These tests make keys and leave the one-time key on screen;
+ * the file records no trace, screenshot or video, and PLAYWRIGHT_NO_COPY_PROMPT keeps failure snapshots (which print
+ * the page) out too.
+ */
+test.describe("axe: agent setup and keys", () => {
+  test("settings: setup, options, key created, keys list, advanced", async ({ browser }) => {
+    // Per run: the test makes a key, and a fixed login would carry it into the next run.
+    const { page, context } = await signIn(browser, uniqueLogin("a11y-settings"));
+    await page.goto("/settings");
+    await waitForHydration(page);
+    await expect(page.getByTestId("theme-row")).toBeVisible();
+    await expect(page.getByTestId("agent-setup")).toBeVisible();
+    await expect(page.getByTestId("keys-card")).toHaveCount(0);
+    await scan(page, "settings (agent setup, no keys)");
+    await page.getByTestId("agent-options-toggle").click();
+    await expect(page.getByTestId("agent-options")).toBeVisible();
+    await scan(page, "settings (agent setup, options open)");
+    await page.getByTestId("agent-create-key").click();
+    await expect(page.getByTestId("agent-setup-snippet")).toBeVisible();
+    await scan(page, "settings (key created, waiting for the agent)");
+    await reloadHydrated(page);
+    await expect(page.getByTestId("keys-card")).toBeVisible();
+    await page.getByTestId("key-manage").click();
+    await expect(page.getByTestId("key-details")).toBeVisible();
+    await scan(page, "settings (keys list, one key managed)");
+    await page.getByTestId("advanced-toggle").click();
+    await expect(page.getByTestId("webhooks-card")).toBeVisible();
+    await scan(page, "settings (advanced: webhooks)");
+    await context.close();
+  });
+
+  test("agent setup, keys, and the Share and connect dialogs, light + dark (color-contrast enabled)", async ({ browser }) => {
+    // Per run: the test makes a key.
+    const { page, context } = await signIn(browser, uniqueLogin("a11y-contrast-agents"));
+    const id = await createDocument(page, DOC, "Contrast agents fixture");
+    // The theme is the html[data-theme] attribute; flipping it keeps the on-screen state (a reload would drop the key's command).
+    // Colours ease over 150 ms and dialogs fade in, and axe would read the in-between values, so both are switched off first.
+    const flip = (theme: "light" | "dark") =>
+      page.evaluate((value) => {
+        if (!document.getElementById("settled-styles")) {
+          const style = document.createElement("style");
+          style.id = "settled-styles";
+          style.textContent = '*, *::before, *::after { transition: none !important; } [role="dialog"], [role="dialog"] * { animation: none !important; }';
+          document.head.append(style);
+        }
+        document.documentElement.setAttribute("data-theme", value);
+      }, theme);
+
+    await page.goto("/settings");
+    await waitForHydration(page);
+    await page.getByTestId("agent-create-key").click();
+    await expect(page.getByTestId("agent-setup-snippet")).toBeVisible();
+    for (const theme of ["light", "dark"] as const) {
+      await flip(theme);
+      await scan(page, `settings: key created, waiting for the agent (${theme})`, { contrast: true });
+    }
+    await reloadHydrated(page);
+    await page.getByTestId("key-manage").click();
+    await expect(page.getByTestId("key-details")).toBeVisible();
+    for (const theme of ["light", "dark"] as const) {
+      await flip(theme);
+      await scan(page, `settings: keys list, one key managed (${theme})`, { contrast: true });
+    }
+
+    await openDocument(page, id);
+    for (const theme of ["light", "dark"] as const) {
+      await flip(theme);
+      await page.getByTestId("share-button").click();
+      await expect(page.getByTestId("share-connect-agent")).toBeVisible();
+      await scan(page, `share dialog (${theme})`, { contrast: true });
+      await page.getByTestId("share-connect-agent").click();
+      await expect(page.getByTestId("agent-dialog")).toBeVisible();
+      await scan(page, `connect dialog (${theme})`, { contrast: true });
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("agent-dialog")).toHaveCount(0);
     }
     await context.close();
   });

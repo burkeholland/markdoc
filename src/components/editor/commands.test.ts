@@ -155,17 +155,17 @@ describe("buildCommands", () => {
     expect((ctx as unknown as { calls: string[] }).calls).toEqual(["reader", "find:true", "sync:false", "layout:code", "dialog:shortcuts"]);
   });
 
-  it("offers 'Keep an agent here' for 'agent' only when the shell wires it", () => {
+  it("offers 'Connect an AI agent' for 'agent' only when the shell wires it", () => {
     const without = buildCommands(stubCtx());
-    expect(ids(visible(without))).not.toContain("doc:keep-agent");
+    expect(ids(visible(without))).not.toContain("doc:connect-agent");
     const calls: string[] = [];
-    const cmds = buildCommands(stubCtx({ keepAgent: () => calls.push("keep-agent") }));
+    const cmds = buildCommands(stubCtx({ connectAgent: () => calls.push("connect-agent") }));
     const hits = ids(filterCommands("agent", cmds));
-    expect(hits).toContain("doc:keep-agent");
+    expect(hits).toContain("doc:connect-agent");
     // The `/agent` slash item is the same action; the palette lists it once.
     expect(ids(cmds)).not.toContain("block:agent");
-    cmds.find((c) => c.id === "doc:keep-agent")!.run();
-    expect(calls).toEqual(["keep-agent"]);
+    cmds.find((c) => c.id === "doc:connect-agent")!.run();
+    expect(calls).toEqual(["connect-agent"]);
   });
 
   it("offers 'Comment on the document' when the shell wires it and the user can comment (#1025)", () => {

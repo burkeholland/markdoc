@@ -35,7 +35,7 @@ import type { EditorActions } from "./actions";
 export interface HintBarProps {
   session: CollabSession;
   actions: EditorActions;
-  onShare: () => void;
+  onConnectAgent: () => void;
   /** Hint (b): opens a comment on the whole document with `@` already typed, so the agent picker is up. */
   onComment: () => void;
 }
@@ -144,7 +144,7 @@ interface HintRender {
   readonly pin: PinnedHint;
   readonly actions: EditorActions;
   readonly focus: EditorActions["focus"];
-  readonly onShare: () => void;
+  readonly onConnectAgent: () => void;
   readonly onComment: () => void;
   readonly primaryCallback: () => void;
   readonly storage: Storage;
@@ -766,7 +766,7 @@ function hintRenderMatches(previous: HintRender, current: HintRender) {
     previous.pin === current.pin &&
     previous.actions === current.actions &&
     previous.focus === current.focus &&
-    previous.onShare === current.onShare &&
+    previous.onConnectAgent === current.onConnectAgent &&
     previous.onComment === current.onComment &&
     previous.primaryCallback === current.primaryCallback &&
     previous.storage === current.storage &&
@@ -806,7 +806,7 @@ function hintFactsAreCurrent(render: HintRender) {
     copy.action === render.actionLabel &&
     render.actions.focus === render.focus &&
     render.primaryCallback ===
-      (render.id === "collab-agent" ? render.onShare : render.onComment) &&
+      (render.id === "collab-agent" ? render.onConnectAgent : render.onComment) &&
     hintRecordMatches(render.dismissedRecord, expectedDismissed) &&
     (!render.discovery ||
       (!render.discovery.retired && render.discovery.key === render.key))
@@ -3052,7 +3052,7 @@ function PublishedHintBar({
   record,
   pinned,
   actions,
-  onShare,
+  onConnectAgent,
   onComment,
   discovery,
   retireDiscovery,
@@ -3068,7 +3068,7 @@ function PublishedHintBar({
   record: HintsRecord;
   pinned: PinnedHint;
   actions: EditorActions;
-  onShare: () => void;
+  onConnectAgent: () => void;
   onComment: () => void;
   discovery: DiscoveryAuthority | null;
   retireDiscovery: (authority: DiscoveryAuthority) => void;
@@ -3126,9 +3126,9 @@ function PublishedHintBar({
     pin: pinned,
     actions,
     focus: actions.focus,
-    onShare,
+    onConnectAgent,
     onComment,
-    primaryCallback: shown === "collab-agent" ? onShare : onComment,
+    primaryCallback: shown === "collab-agent" ? onConnectAgent : onComment,
     storage: window.localStorage,
     discovery,
   });
@@ -3243,7 +3243,7 @@ function PublishedHintBar({
 export function HintBar({
   session,
   actions,
-  onShare,
+  onConnectAgent,
   onComment,
 }: HintBarProps) {
   // Storage is read after hydration so the server markup (no bar) matches the first client render.
@@ -3597,7 +3597,7 @@ export function HintBar({
       record={record}
       pinned={pinned}
       actions={actions}
-      onShare={onShare}
+      onConnectAgent={onConnectAgent}
       onComment={onComment}
       discovery={
         shown === "collab-agent" && currentDiscovery

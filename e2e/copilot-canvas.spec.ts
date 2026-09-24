@@ -87,7 +87,7 @@ test("the loopback canvas spends a token handoff and frames the editor without d
     await expect(editor.getByTestId("comments-panel")).toBeVisible();
     // The Copilot app sits in presence as an agent, so the `@` picker offers it as one that is here; the request made
     // from the embed shows up as a chip on the thread and in the popover's Requests section (Cancel included) — no
-    // waiting placeholder and no "Keep an agent here" while it is here.
+    // waiting placeholder and no "Connect an AI agent" while it is here.
     const stack = editor.getByTestId("presence");
     await expect(stack.locator('[data-testid="presence-avatar"][data-agent]')).toHaveCount(1);
     await editor.getByTestId("comment-document").click();
@@ -109,7 +109,7 @@ test("the loopback canvas spends a token handoff and frames the editor without d
     await expect(popover.getByTestId("presence-request")).toContainText("Tighten this");
     await expect(popover.getByTestId("presence-request-cancel")).toBeVisible();
     await expect(stack.getByTestId("presence-waiting")).toHaveCount(0);
-    await expect(popover.getByTestId("keep-agent-here")).toHaveCount(0);
+    await expect(popover.getByTestId("connect-agent")).toHaveCount(0);
   } finally {
     await canvas?.onClose({ instanceId: "e2e-canvas" });
     // After the extension has let go of the document: revoking disconnects the token's collab sessions.

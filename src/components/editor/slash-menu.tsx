@@ -221,7 +221,7 @@ type PointerCallbacks = Readonly<{
   onImage: () => void;
   onLink: () => void;
   onComment: () => void;
-  onKeepAgent: () => void;
+  onConnectAgent: () => void;
 }>;
 
 type PointerPresentation = Readonly<{
@@ -537,7 +537,7 @@ export function SlashMenu({
   onImage,
   onLink,
   onComment,
-  onKeepAgent,
+  onConnectAgent,
 }: {
   view: EditorView | null;
   session: CollabSession;
@@ -546,8 +546,8 @@ export function SlashMenu({
   onImage: () => void;
   onLink: () => void;
   onComment: () => void;
-  /** `/agent`: opens the "Keep an agent here" dialog. */
-  onKeepAgent: () => void;
+  /** `/agent`: opens the "Connect an AI agent" dialog. */
+  onConnectAgent: () => void;
 }) {
   const [mount] = useState(() => Symbol("slash-menu"));
   const authority = useMemo<SlashMenuAuthority | null>(
@@ -740,7 +740,7 @@ export function SlashMenu({
       groups: pointerGroups,
       highlightedIndex: index,
       argument: splitSlashQuery(state.query).arg,
-      callbacks: Object.freeze({ onImage, onLink, onComment, onKeepAgent }),
+      callbacks: Object.freeze({ onImage, onLink, onComment, onConnectAgent }),
       position: pos,
     } satisfies PointerPresentation);
   })();
@@ -1374,7 +1374,7 @@ export function SlashMenu({
         selectCurrentBlock(owner.view);
         callbacks.onComment();
       },
-      keepAgent: callbacks.onKeepAgent,
+      connectAgent: callbacks.onConnectAgent,
     });
     const run = item.run;
     if (!run) return;

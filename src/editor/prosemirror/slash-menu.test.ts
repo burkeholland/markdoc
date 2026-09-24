@@ -492,7 +492,7 @@ describe("slash menu undo", () => {
       view,
       () => {
         docWhenOpened = ytext.toString();
-        agent.run!({ view, where: { inTable: false, canComment: true }, openImage: () => {}, openLink: () => {}, startComment: () => {}, keepAgent: () => opened++ }, "");
+        agent.run!({ view, where: { inTable: false, canComment: true }, openImage: () => {}, openLink: () => {}, startComment: () => {}, connectAgent: () => opened++ }, "");
       },
       undoManager,
     );

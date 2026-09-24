@@ -16,12 +16,12 @@ export const HINT_ORDER: readonly HintId[] = ["collab-agent", "mention-copilot"]
 
 export interface HintCopy {
   message: string;
-  /** Label of the action button (opens Share / a document comment with `@` typed). */
+  /** Label of the action button (opens the agent dialog / a document comment with `@` typed). */
   action: string;
 }
 
 export const HINTS: Record<HintId, HintCopy> = {
-  "collab-agent": { message: "Copilot can work in this doc with you — Share → Collaborate with an agent", action: "Open Share" },
+  "collab-agent": { message: "An AI agent can work in this doc with you", action: "Connect an agent" },
   "mention-copilot": { message: "Mention an agent in a comment and it answers in the thread", action: "Write a comment" },
 };
 
