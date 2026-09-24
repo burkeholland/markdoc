@@ -202,6 +202,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     Assert-True ($Arguments -contains "APP_VERSION=$script:sha") 'Build must embed the exact commit.'
     Assert-True ($Arguments -contains "markdoc:$script:sha" -and $Arguments -contains "markdoc:$($script:sha.Substring(0, 12))") 'Existing full and short tags must be retained.'
     Assert-True ($Arguments -contains '--no-wait' -and $Arguments -contains '--no-logs') 'Submission must be asynchronous without streaming build logs.'
+    Assert-Equal '600' $Arguments[[array]::IndexOf($Arguments, '--timeout') + 1] 'ACR must have enough time for the measured production build.'
     Assert-True (@($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' }).Count -eq 1) 'A lost submission response must have one unique tag for reconciliation.'
     $script:submissionTag = @($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' })[0].Substring(8)
     $dockerfile = $Arguments[[array]::IndexOf($Arguments, '--file') + 1]

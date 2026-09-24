@@ -282,12 +282,12 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     [void](Invoke-ReleaseAz (@(
       'acr', 'build', '--registry', $acr, '--image', "markdoc:$Commit", '--image', "markdoc:$($Commit.Substring(0, 12))",
       '--image', "markdoc:$submissionTag", '--build-arg', "APP_VERSION=$Commit",
-      '--file', (Join-Path $context 'Dockerfile'), $context, '--timeout', '300',
+      '--file', (Join-Path $context 'Dockerfile'), $context, '--timeout', '600',
       '--no-wait', '--no-logs'
     ) + $nativeScope) 90)
 
     $releaseStage = 'ACR build reconciliation'
-    for ($attempt = 1; $attempt -le 72; $attempt++) {
+    for ($attempt = 1; $attempt -le 132; $attempt++) {
       $runs = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@(
         'acr', 'task', 'list-runs', '--registry', $acr, '--top', '50',
         '--query', '[].{runId:runId,runType:runType,status:status,outputImages:outputImages}'
@@ -314,7 +314,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
         }
         break
       }
-      if ($attempt -lt 72) { Start-Sleep -Seconds 5 }
+      if ($attempt -lt 132) { Start-Sleep -Seconds 5 }
     }
     if (-not $buildRun) {
       Stop-VmRelease 'ACR submission acceptance is unknown after unique-tag reconciliation. Do not retry.'
@@ -322,7 +322,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     Write-Host "Release: ACR run $buildRun; registry $acr."
     $releaseStage = 'ACR build completion'
     do {
-      if ($releaseClock.Elapsed.TotalSeconds -ge 390) { Stop-VmRelease 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' 124 }
+      if ($releaseClock.Elapsed.TotalSeconds -ge 750) { Stop-VmRelease 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' 124 }
       $run = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@('acr', 'task', 'show-run', '--registry', $acr, '--run-id', $buildRun, '--query', '{runId:runId,status:status,outputImages:outputImages}') + $nativeScope))
       if ($run.runId -cne $buildRun) { Stop-VmRelease 'ACR returned a different run identity.' }
       if ($run.status -ceq 'Succeeded') { break }
