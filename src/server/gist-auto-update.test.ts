@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { SessionUser } from "@/server/documents";
 import type { GistFile } from "@/server/github";
 import type { GistAutoUpdateDestination, GistAutoUpdatePreview, GistAutoUpdateStatus } from "@/lib/gist-auto-update";
+import { CONTENT_AUTOSAVE_IDLE_MS } from "@/lib/document-persistence";
 import { SuggestionsModel } from "@/editor/collab/suggestions";
 import { createCollabServer } from "@/server/collab/hocuspocus";
 import { documentStoreSnapshot, type DocumentStoreSnapshot } from "@/server/collab/autosave";
@@ -517,7 +518,7 @@ describe("durable debounced saved-version publishing", () => {
     let releaseMutex: (() => void) | undefined = await document.saveMutex.acquire();
     try {
       text.insert(0, "First saved edit.\n\n");
-      await vi.advanceTimersByTimeAsync(999);
+      await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS - 1);
       expect(server.debouncer.isCurrentlyExecuting(`onStoreDocument-${doc.id}`)).toBe(false);
       expect((await receipt(doc.id)).queuedVersion).toBe(initialReceipt.queuedVersion);
       await vi.advanceTimersByTimeAsync(1);

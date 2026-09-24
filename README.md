@@ -337,19 +337,25 @@ and withholds raw output. It accepts only the bounded pass report with an
 empty package list and all blocked, severity, vulnerability, reported and
 omitted counts equal to zero.
 
-The current lock is intentionally blocked because it contains
-`fast-uri@3.1.5` and `qs@6.15.3`. **Do not run the release command until trusted
-replacement integrity is admitted.** Workflow setup, a merge, audit evidence
-or this documentation update neither invokes nor approves a release.
+The current lock resolves the audited transitive packages to
+`fast-uri@3.1.8`, `qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and
+`sharp@0.35.4`. The bounded dependency preflight reports zero blocked,
+severity, vulnerability, reported and omitted counts. Workflow setup, a merge,
+audit evidence or this documentation update neither invokes nor approves a
+release.
 
 Prerequisites also include a clean exact `main` checkout at that commit,
 including no untracked files, and completed schema and recovery decisions. The
 latest production ledger observation has 19 applied migrations, `0000` through
 `0018`; **`0019_agent_request_addressee` and `0020_gist_auto_update` remain
-pending**. Starting the candidate can apply both. Their SQL, locks, trigger
-behavior, previous-image compatibility and recovery requirements have not been
-accepted or exercised here. This documentation does not grant release
-permission or report a successful release.
+pending**. Starting the candidate can apply both. The pending-migration suite
+exercises the exact `0018` starting ledger, applies both migrations twice,
+checks data preservation and current-schema objects, verifies the serving
+schema remains compatible with the previously deployed application, and proves
+a failed pending batch does not advance its ledger entry. Production
+application still occurs only after the release's operation-bound WAL archive
+and restore gate succeeds. This documentation does not grant release permission
+or report a successful release.
 
 The entrypoint performs one bounded attempt:
 

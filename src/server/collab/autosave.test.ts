@@ -8,7 +8,7 @@ import { installOriginAwareBroadcast } from "./broadcast";
 import { CommentsModel } from "@/editor/collab/comments";
 import { ClientDocumentPersistence, snapshotContains } from "@/editor/collab/persistence";
 import { makeCollabUser } from "@/editor/collab/shared";
-import type { PersistenceMessage } from "@/lib/document-persistence";
+import { CONTENT_AUTOSAVE_IDLE_MS, type PersistenceMessage } from "@/lib/document-persistence";
 import { contentHash } from "@/server/export/html";
 
 vi.mock("./authorization", () => ({ collabAccessChangeBlocks: (connection: { blocked?: boolean }) => !!connection.blocked }));
@@ -28,7 +28,7 @@ async function fixture(content = "original") {
   const store = vi.fn(async () => {});
   const server = new Hocuspocus({
     quiet: true,
-    debounce: 1000,
+    debounce: CONTENT_AUTOSAVE_IDLE_MS,
     flushDelay: false,
     unloadImmediately: false,
     async onLoadDocument({ document }) {
@@ -126,7 +126,7 @@ describe("server-owned content persistence integration (no sockets/database)", (
     const undo = new Y.UndoManager(f.text);
     f.text.insert(f.text.length, " pasted");
     undo.undo();
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS - 1);
     expect(f.writes).toHaveLength(0);
     await vi.advanceTimersByTimeAsync(1);
     expect(f.writes).toHaveLength(1);
@@ -144,16 +144,16 @@ describe("server-owned content persistence integration (no sockets/database)", (
     const saving = deferred();
     f.store.mockImplementationOnce(() => saving.promise);
     f.text.insert(0, "first ");
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS);
     expect(f.document.saveMutex.isLocked()).toBe(true);
     f.text.insert(0, "second ");
-    await vi.advanceTimersByTimeAsync(1100);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS + 100);
     expect(f.writes).toHaveLength(1);
     expect(f.writes[0].content).toBe("first original");
     f.text.insert(0, "third ");
     saving.resolve();
     await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS - 1);
     expect(f.writes).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(f.writes.map((write) => write.content)).toEqual(["first original", "third second first original"]);
@@ -207,7 +207,7 @@ describe("server-owned content persistence integration (no sockets/database)", (
     expect(f.server.documents.has("document")).toBe(true);
     expect(f.server.shouldUnloadDocument(f.document)).toBe(false);
     expect(f.text.toString()).toBe("REST original");
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS);
     expect(f.writes).toHaveLength(2);
     expect(f.writes[1].content).toBe("REST original");
   });
@@ -248,7 +248,7 @@ describe("server-owned content persistence integration (no sockets/database)", (
     request({ type: "document-composition", docId: "document", active: true });
     request({ type: "document-persistence-flush", docId: "other-document", requestId: "wrong" });
     expect(f.writes).toHaveLength(0);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS);
     expect(f.writes).toHaveLength(1);
   });
 
@@ -263,7 +263,7 @@ describe("server-owned content persistence integration (no sockets/database)", (
     await vi.advanceTimersByTimeAsync(10_000);
     expect(f.writes).toHaveLength(0);
     socket.close();
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS);
     expect(f.writes[0].content).toBe("あoriginal");
   });
 
@@ -282,7 +282,7 @@ describe("server-owned content persistence integration (no sockets/database)", (
     await f.server.debouncer.executeNow("onStoreDocument-document");
     socket.blocked = false;
     f.text.insert(0, "Other editor ");
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS - 1);
     expect(f.writes).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(f.writes).toHaveLength(2);
@@ -360,7 +360,7 @@ describe("server-owned content persistence integration (no sockets/database)", (
       }
       Y.applyUpdate(f.document, update);
       f.document.transact(() => {});
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS);
       expect(f.writes).toHaveLength(3);
       expect(f.server.debouncer.isDebounced("onStoreDocument-document")).toBe(false);
     } finally {

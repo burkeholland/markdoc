@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CONTENT_AUTOSAVE_IDLE_MS } from "@/lib/document-persistence";
 import { DocumentSaveQueue } from "./save-queue";
 
 function deferred<T>() {
@@ -12,7 +13,7 @@ describe("document content autosave scheduling", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
 
-  it("saves a typing/paste/undo burst exactly 1000ms after its last edit", async () => {
+  it("saves a typing/paste/undo burst after the configured idle window", async () => {
     const write = vi.fn(async (revision: number) => revision);
     const queue = new DocumentSaveQueue(write, vi.fn());
     for (let index = 0; index < 10; index++) {
@@ -21,7 +22,7 @@ describe("document content autosave scheduling", () => {
     }
     expect(write).not.toHaveBeenCalled();
     expect(queue.state).toBe("pending");
-    await vi.advanceTimersByTimeAsync(899);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS - 101);
     expect(write).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(write).toHaveBeenCalledExactlyOnceWith(10);
@@ -36,7 +37,7 @@ describe("document content autosave scheduling", () => {
       await vi.advanceTimersByTimeAsync(900);
     }
     expect(write).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS - 900);
     expect(write).toHaveBeenCalledExactlyOnceWith(100);
   });
 
@@ -67,9 +68,9 @@ describe("document content autosave scheduling", () => {
     const write = vi.fn().mockImplementationOnce(() => first.promise).mockImplementation(async (revision: number) => revision);
     const queue = new DocumentSaveQueue<number>(write, vi.fn());
     queue.edit(true);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS);
     queue.edit(true);
-    await vi.advanceTimersByTimeAsync(1100); // second edit's first deadline passes while saving
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS + 100); // second edit's first deadline passes while saving
     queue.edit(true); // fresh deadline must supersede the expired one
     first.resolve(1);
     await vi.advanceTimersByTimeAsync(0);
@@ -77,7 +78,7 @@ describe("document content autosave scheduling", () => {
     expect(queue.savedRevision).toBe(1);
     expect(queue.dirty).toBe(true);
     expect(queue.state).toBe("pending");
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS - 1);
     expect(write).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(write).toHaveBeenNthCalledWith(2, 3);
@@ -90,7 +91,7 @@ describe("document content autosave scheduling", () => {
     const write = vi.fn().mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
     const queue = new DocumentSaveQueue<number>(write, vi.fn());
     queue.edit(true);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS);
     queue.edit(true);
     const flush = queue.flush();
     const done = vi.fn();
@@ -132,7 +133,7 @@ describe("document content autosave scheduling", () => {
     const write = vi.fn().mockImplementationOnce(() => first.promise).mockImplementation(async (revision: number) => revision);
     const queue = new DocumentSaveQueue<number>(write, vi.fn());
     queue.edit(true);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS);
     queue.edit(false);
     queue.composition("typing-client", true);
     queue.edit(true);
@@ -159,7 +160,7 @@ describe("document content autosave scheduling", () => {
     await vi.advanceTimersByTimeAsync(20_000);
     expect(write).not.toHaveBeenCalled();
     queue.composition("client-a", false);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS - 1);
     expect(write).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(write).toHaveBeenCalledOnce();
@@ -177,7 +178,7 @@ describe("document content autosave scheduling", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(writeA).toHaveBeenCalledExactlyOnceWith(2);
     expect(writeB).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS);
     expect(writeB).toHaveBeenCalledExactlyOnceWith(1);
   });
 
@@ -187,7 +188,7 @@ describe("document content autosave scheduling", () => {
     queue.composition("closing-tab", true);
     queue.edit(true);
     queue.composition("closing-tab", false);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(CONTENT_AUTOSAVE_IDLE_MS);
     expect(write).toHaveBeenCalledOnce();
   });
 });
