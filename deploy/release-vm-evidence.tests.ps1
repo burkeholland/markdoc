@@ -134,11 +134,11 @@ Assert-True ($releaseSource -match '\$origin = ''https://markdoc-burkeholland\.e
   $releaseSource -match 'Assert-ReleaseHealth \$health \$Commit ''Public''') 'The configured release must retain exact public health verification.'
 Assert-True ($deploySource.IndexOf('MARKDOC_RELEASE_WAL_GATE_OPERATION') -lt $deploySource.IndexOf('rollback_dir=') -and
   $deploySource.IndexOf('MARKDOC_RELEASE_WAL_GATE_OPERATION') -lt $deploySource.IndexOf('aad_token=')) 'Guest deployment must check the exact receipt before mutable work.'
-Assert-True ($gateSource -match "pg_current_wal_flush_lsn\(\)" -and
+Assert-True ($gateSource -match "pg_create_restore_point\(" -and
   $gateSource -match "pg_switch_wal\(\)" -and
   $gateSource -match 'archive_status/\$\{wal_object\}\.done' -and
   $gateSource -match 'repo-ls "\$archive_path"') 'Gate must await local acknowledgement and the exact remote repository object.'
-Assert-True ($gateSource -match '--type=lsn' -and $gateSource -match '--target="\$endpoint"' -and
+Assert-True ($gateSource -match '--type=name' -and $gateSource -match '--target="\$restore_point"' -and
   $gateSource -match '--repo=1' -and $gateSource -match "archive_mode = off" -and
   $gateSource -match "listen_addresses = ''") 'Restore must target the endpoint in the proven repository with archive off and no listener.'
 Assert-True ($gateSource -notmatch '--lock-timeout' -and
