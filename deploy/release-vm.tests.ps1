@@ -53,14 +53,14 @@ try {
 
 function Invoke-RestMethod {
   param($Uri, $Method, $TimeoutSec, $MaximumRedirection, $Headers, $ErrorAction)
-  Assert-Equal 'https://markdoc-burkeholland.eastus2.cloudapp.azure.com/api/health' $Uri 'Health must not use a liveness-only probe.'
+  Assert-Equal 'https://markdoc.app/api/health' $Uri 'Health must not use a liveness-only probe.'
   Assert-Equal 'Get' $Method 'Public health must not write.'
   Assert-Equal 0 $MaximumRedirection 'Public health must reject redirects to another target.'
   Assert-Equal 7 $TimeoutSec 'Public health must pass the caller deadline to HTTP.'
   Assert-Equal 'no-cache' $Headers['Cache-Control'] 'Public health must request fresh evidence.'
   return [pscustomobject]@{ ok = $true; db = $true; collab = $true; version = '0123456789abcdef0123456789abcdef01234567' }
 }
-$public = ConvertFrom-ReleaseJson (Get-ReleasePublicHealth 'https://markdoc-burkeholland.eastus2.cloudapp.azure.com' 7)
+$public = ConvertFrom-ReleaseJson (Get-ReleasePublicHealth 'https://markdoc.app' 7)
 Assert-ReleaseHealth $public '0123456789abcdef0123456789abcdef01234567' 'Public'
 
 $guestSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\infra\deploy-vm-image.sh') -Raw
@@ -302,7 +302,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
 
 function Get-ReleasePublicHealth([string]$Origin, [int]$TimeoutSeconds) {
   $script:publicCount++
-  Assert-Equal 'https://markdoc-burkeholland.eastus2.cloudapp.azure.com' $Origin 'Public health must use the exact stable origin.'
+  Assert-Equal 'https://markdoc.app' $Origin 'Public health must use the exact stable origin.'
   Assert-True ($TimeoutSeconds -gt 0 -and $TimeoutSeconds -le 20) 'Public health must have a bounded timeout.'
   Assert-True (($script:messages -join "`n") -match 'guest ready; waiting') 'Public health must follow guest readiness.'
   Assert-True (($script:messages -join "`n") -notmatch 'Release complete:') 'Completion must not precede public health.'

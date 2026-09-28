@@ -6,7 +6,8 @@
 > retained only as history for the former Container Apps custom-domain design.
 > Its old endpoint, certificate binding and revision rollback are not current
 > fallbacks. Use the [VM hosting runbook](vm-hosting.md) for the current origin,
-> release mechanism and rollback limits.
+> release mechanism and rollback limits. The VM later moved to
+> `https://markdoc.app`; see [Public domain](vm-hosting.md#public-domain-markdocapp).
 
 How to move production Markdoc from its Container App default name to a bought domain without breaking sign-in. Steps marked **human** need Burke (DNS console, GitHub OAuth app); steps marked **agent** are Azure CLI work anyone with `Contributor` on `markdoc-rg` can run. Everything below was prepared before the domain existed: replace `<host>` with the real name (for example `markdoc.example.com`, or an apex such as `example.com`) and run the steps in order. Nothing here is executed by the repo automatically.
 

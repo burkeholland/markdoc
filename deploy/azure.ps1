@@ -25,7 +25,7 @@
 
 .NOTES
   GitHub OAuth callback URL:
-  https://markdoc-burkeholland.eastus2.cloudapp.azure.com/api/auth/callback/github
+  https://markdoc.app/api/auth/callback/github
   This script no longer deploys the application or performs database password rotation. Use the
   manual GitHub workflow for application releases. Database rotation needs a VM-native replacement
   for the retired Container App revision compensation flow before it can be re-enabled here.

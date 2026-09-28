@@ -24,8 +24,9 @@ async function expectCardContentVisible(page: Page) {
   const card = page.getByTestId("login-card");
   const githubAuth = page.locator('[data-testid="github-signin"], [data-testid="github-not-configured"]');
   const visibleContent = [
-    page.getByRole("heading", { name: "Markdoc" }),
-    page.getByText("Collaborative Markdown editing."),
+    page.getByRole("heading", { name: "Sign in to Markdoc" }),
+    page.getByText("Markdown, together."),
+    page.getByTestId("login-about"),
     page.getByText("Development login"),
     page.getByTestId("dev-login"),
     page.getByTestId("dev-login-submit"),
