@@ -78,7 +78,7 @@ describe("templates", () => {
     expect(content.match(/^- \[ \] /gm)).toHaveLength(3);
     expect(content).toContain("Type `/` here for a block menu");
     expect(content).toContain("Select this sentence and press Comment");
-    expect(content).toContain("Share → Collaborate with an agent");
+    expect(content).toContain("Type `/agent` here and follow the three steps");
     expect(content.trim().endsWith("Delete this doc when you're done — it's just a doc.")).toBe(true);
     expect(content).toContain("@octocat");
   });

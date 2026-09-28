@@ -63,8 +63,8 @@ export interface EditorCommandContext {
   startComment: () => void;
   /** Opens a comment on the whole document (no selection needed, #1025). */
   commentDocument?: () => void;
-  /** Opens "Keep an agent here": the sentence that puts an agent into this document's watch loop. */
-  keepAgent?: () => void;
+  /** Opens "Connect an AI agent": setup for a first-time user, or the sentence that puts an agent into this document. */
+  connectAgent?: () => void;
   toggleComments: () => void;
   toggleHistory: () => void;
   toggleActivity: () => void;
@@ -111,7 +111,7 @@ const SLASH_SHORTCUTS: Record<string, string> = {
 
 const SLASH_GROUP_SET = new Set<string>(SLASH_GROUPS);
 
-/** Block items reused from the slash menu (template items, other extensions and `/agent` — the palette has `doc:keep-agent` — are skipped). */
+/** Block items reused from the slash menu (template items, other extensions and `/agent` - the palette has `doc:connect-agent` - are skipped). */
 function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = SLASH_ITEMS): Command[] {
   return items
     .filter((item) => item.id !== "agent" && SLASH_GROUP_SET.has(item.group) && (!item.available || item.available(ctx.slashWhere)))
@@ -131,7 +131,7 @@ function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = 
           view.focus();
           return;
         }
-        item.run({ view, openImage: ctx.openImage, openLink: ctx.openLink, startComment: ctx.startComment, keepAgent: () => ctx.keepAgent?.(), where: ctx.slashWhere }, "");
+        item.run({ view, openImage: ctx.openImage, openLink: ctx.openLink, startComment: ctx.startComment, connectAgent: () => ctx.connectAgent?.(), where: ctx.slashWhere }, "");
       },
     }));
 }
@@ -261,13 +261,13 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
       run: () => ctx.commentDocument?.(),
     },
     {
-      id: "doc:keep-agent",
-      title: "Keep an agent here",
-      keywords: ["agent", "ai", "copilot", "watch", "presence", "sit", "loop", "mcp", "here"],
+      id: "doc:connect-agent",
+      title: "Connect an AI agent",
+      keywords: ["agent", "ai", "copilot", "claude", "cursor", "mcp", "connect", "setup", "add", "key", "token", "invite", "watch", "presence", "keep", "here"],
       group: "Document",
-      icon: "Radio",
-      when: () => !!ctx.keepAgent,
-      run: () => ctx.keepAgent?.(),
+      icon: "Bot",
+      when: () => !!ctx.connectAgent,
+      run: () => ctx.connectAgent?.(),
     },
     { id: "doc:find", title: "Find", keywords: ["search", "locate"], group: "Document", icon: "Search", shortcut: "Mod-F", run: () => ctx.openFind(false) },
     { id: "doc:find-replace", title: "Find and replace", keywords: ["search", "substitute", "rename"], group: "Document", icon: "Replace", shortcut: findReplaceShortcut(), when: canEdit, run: () => ctx.openFind(true) },

@@ -11964,7 +11964,7 @@ describe("CommentsPanel", () => {
 
     const panel = (current: CollabSession) => (
       <TooltipProvider>
-        <CommentsPanel session={current} onClose={() => {}} onReveal={() => {}} onCreateToken={() => {}} />
+        <CommentsPanel session={current} onClose={() => {}} onReveal={() => {}} onConnectAgent={() => {}} />
       </TooltipProvider>
     );
 
@@ -12449,7 +12449,7 @@ describe("CommentsPanel", () => {
     const TEXT = "Intro text. The quick brown fox jumps.";
     const DISMISSED_KEY = "markdoc:agent-connect-dismissed";
 
-    const mount = (opts: { role?: "owner" | "editor" | "commenter"; documentComposer?: CommentsPanelProps["documentComposer"]; onCreateToken?: () => void; collaborators?: boolean } = {}) => {
+    const mount = (opts: { role?: "owner" | "editor" | "commenter"; documentComposer?: CommentsPanelProps["documentComposer"]; onConnectAgent?: () => void; collaborators?: boolean } = {}) => {
       Element.prototype.scrollIntoView ??= () => {};
       const user = makeCollabUser("alice", "Alice", null, "alice");
       session = new CollabSession({ docId: "doc", user, role: opts.role ?? "owner", getToken: async () => "token", autoConnect: false });
@@ -12467,7 +12467,7 @@ describe("CommentsPanel", () => {
       const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
       const props = (documentComposer: CommentsPanelProps["documentComposer"]) => (
         <TooltipProvider>
-          <CommentsPanel session={session!} onClose={() => {}} onReveal={onReveal} onToast={onToast} onCreateToken={opts.onCreateToken} documentComposer={documentComposer} />
+          <CommentsPanel session={session!} onClose={() => {}} onReveal={onReveal} onToast={onToast} onConnectAgent={opts.onConnectAgent} documentComposer={documentComposer} />
         </TooltipProvider>
       );
       const view = render(props(opts.documentComposer ?? null));
@@ -12605,8 +12605,8 @@ describe("CommentsPanel", () => {
     });
 
     it("the `@` picker shows 'Connect an agent' for a user with no token, once, until dismissed — and never with a token", async () => {
-      const onCreateToken = vi.fn();
-      mount({ onCreateToken });
+      const onConnectAgent = vi.fn();
+      mount({ onConnectAgent });
       act(() => session!.setPendingComment({ from: 16, to: 27 }));
       let box = await composer();
       await paste(box, "@");
@@ -12618,7 +12618,7 @@ describe("CommentsPanel", () => {
       expect(screen.getByTestId("mention-connect-docs")).toHaveAttribute("href", "https://github.com/burkeholland/markdoc/blob/main/docs/agents.md");
       expect(screen.getByTestId("mention-connect-docs")).toHaveAttribute("target", "_blank");
       fireEvent.click(screen.getByTestId("mention-connect-agent"));
-      expect(onCreateToken).toHaveBeenCalledTimes(1);
+      expect(onConnectAgent).toHaveBeenCalledTimes(1);
       fireEvent.click(screen.getByTestId("mention-connect-dismiss"));
       await waitFor(() => expect(screen.queryByTestId("mention-connect-row")).toBeNull());
       expect(window.localStorage.getItem(DISMISSED_KEY)).toBe("1");
@@ -12628,7 +12628,7 @@ describe("CommentsPanel", () => {
       // A fresh panel remembers the dismissal.
       cleanup();
       session!.destroy();
-      mount({ onCreateToken });
+      mount({ onConnectAgent });
       act(() => session!.setPendingComment({ from: 16, to: 27 }));
       box = await composer();
       await paste(box, "@");
@@ -12641,7 +12641,7 @@ describe("CommentsPanel", () => {
       session!.destroy();
       window.localStorage.removeItem(DISMISSED_KEY);
       vi.mocked(api.tokens.list).mockClear().mockResolvedValue({ tokens: [{ id: "t1", name: "Copilot CLI" }] } as never);
-      mount({ onCreateToken });
+      mount({ onConnectAgent });
       act(() => session!.setPendingComment({ from: 16, to: 27 }));
       box = await composer();
       await paste(box, "@");
@@ -12651,7 +12651,7 @@ describe("CommentsPanel", () => {
       expect(screen.queryByTestId("mention-connect-row")).toBeNull();
     });
 
-    it("with nobody to mention, `@` still opens the picker for the connect row alone; without onCreateToken only the docs link is offered", async () => {
+    it("with nobody to mention, `@` still opens the picker for the connect row alone; without onConnectAgent only the docs link is offered", async () => {
       mount({ collaborators: false });
       act(() => session!.setPendingComment({ from: 16, to: 27 }));
       const box = await composer();

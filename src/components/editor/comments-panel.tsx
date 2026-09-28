@@ -6272,8 +6272,8 @@ const MAX_SUGGESTIONS = 6;
 interface MentionConnectValue {
   /** Show the row: the user has no API token and has not dismissed the row on this browser. */
   due: boolean;
-  /** Settings → tokens (the row's button is hidden without it). */
-  onCreateToken?: () => void;
+  /** Opens the agent dialog (the row's button is hidden without it). */
+  onConnectAgent?: () => void;
   onDismiss: () => void;
 }
 
@@ -6356,8 +6356,8 @@ export interface CommentsPanelProps {
    * With `mention` the composer starts with `@` typed, so the agent picker is up at once.
    */
   documentComposer?: { mention: boolean; nonce: number } | null;
-  /** Settings → API tokens, for the picker's "Connect an agent" row (a user with no token); the button is hidden without it. */
-  onCreateToken?: () => void;
+  /** Opens the agent dialog, for the picker's "Connect an agent" row (a user with no token); the button is hidden without it. */
+  onConnectAgent?: () => void;
   /** Move focus to the selected tab when this panel mounts. */
   focusOnMount?: boolean;
   /** Shell toast (Accept suggestion offers Undo). */
@@ -11752,19 +11752,19 @@ function Composer<Result>({
               })}
             </ul>
           )}
-          {/* No agent to mention yet: a footer that leads to Settings → API tokens, once per browser (#1025). Pointer
+          {/* No agent to mention yet: a footer that opens the agent dialog, once per browser (#1025). Pointer
               actions keep the caret in the box (mousedown is swallowed) so the picker does not close under the click. */}
           {connectDue && (
             <div className={cn("mention-connect-row", matches.length > 0 && "mention-connect-row-under")} data-testid="mention-connect-row">
               <Bot size={14} className="shrink-0 text-ink-4" aria-hidden />
               <span className="min-w-0 flex-1 text-xs text-ink-3">
                 No agent connected yet —{" "}
-                {connect.onCreateToken && (
-                  <button type="button" className="font-medium text-accent hover:underline" onMouseDown={(e) => e.preventDefault()} onClick={connect.onCreateToken} data-testid="mention-connect-agent">
+                {connect.onConnectAgent && (
+                  <button type="button" className="font-medium text-accent hover:underline" onMouseDown={(e) => e.preventDefault()} onClick={connect.onConnectAgent} data-testid="mention-connect-agent">
                     Connect an agent
                   </button>
                 )}
-                {connect.onCreateToken && " · "}
+                {connect.onConnectAgent && " · "}
                 <a href={AGENT_DOCS_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 font-medium text-accent hover:underline" onMouseDown={(e) => e.preventDefault()} data-testid="mention-connect-docs">
                   Agent docs
                   <ExternalLink size={11} aria-hidden />
@@ -17755,7 +17755,7 @@ export function CommentsPanel({
   onReveal,
   onPendingDone,
   onCancelRequest,
-  onCreateToken,
+  onConnectAgent,
   focusTab,
   documentComposer,
   focusOnMount = false,
@@ -17814,9 +17814,9 @@ export function CommentsPanel({
       candidates,
       viewerLogin: session.user.login ?? null,
       onPickerOpen: requestOwnTokens,
-      connect: { due: tokenCount === 0 && !connectDismissed, onCreateToken, onDismiss: dismissConnect },
+      connect: { due: tokenCount === 0 && !connectDismissed, onConnectAgent, onDismiss: dismissConnect },
     }),
-    [candidates, session.user.login, requestOwnTokens, tokenCount, connectDismissed, onCreateToken, dismissConnect],
+    [candidates, session.user.login, requestOwnTokens, tokenCount, connectDismissed, onConnectAgent, dismissConnect],
   );
   // The agent entries only, and the same reference while they read the same: the cards' request chips read this
   // and stay out of every other candidate change (#1382).

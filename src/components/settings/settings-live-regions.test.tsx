@@ -2,11 +2,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
-vi.mock("@/components/settings/copilot-checklist", () => ({
-  CopilotChecklist: () => null,
-}));
-
-import { TokensPanel } from "./tokens-panel";
 import { WebhooksPanel } from "./webhooks-panel";
 
 const fetchMock = vi.fn<typeof fetch>();
@@ -29,10 +24,6 @@ function response(body: unknown, status = 200) {
   });
 }
 
-function renderTokens() {
-  return render(<TokensPanel origin="https://markdoc.test" userLogin="alice" />);
-}
-
 beforeEach(() => {
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
@@ -44,70 +35,6 @@ afterEach(() => {
 });
 
 describe("settings result live regions", () => {
-  it("announces a token load failure as one atomic alert", async () => {
-    fetchMock.mockResolvedValueOnce(response({ error: "Token service temporarily unavailable" }, 503));
-
-    renderTokens();
-
-    const alert = await screen.findByRole("alert");
-    expect(screen.getAllByRole("alert")).toHaveLength(1);
-    expect(alert).toHaveTextContent(/^Token service temporarily unavailable$/);
-    expect(alert).toHaveAttribute("aria-atomic", "true");
-  });
-
-  it("announces creation conflicts with an actionable list refresh and allows another attempt", async () => {
-    fetchMock
-      .mockResolvedValueOnce(response({ tokens: [] }))
-      .mockResolvedValueOnce(response({ error: "Token name is already in use" }, 409))
-      .mockResolvedValueOnce(response({ tokens: [] }))
-      .mockResolvedValueOnce(response({ error: "Token service temporarily unavailable" }, 503));
-    renderTokens();
-    await screen.findByText("No tokens yet.");
-    fireEvent.click(screen.getByTestId("token-add"));
-    const create = screen.getByTestId("token-create");
-    create.focus();
-
-    fireEvent.click(create);
-    expect(await screen.findByRole("alert")).toHaveTextContent(/^Token name is already in use$/);
-    expect(screen.getAllByRole("alert")).toHaveLength(1);
-    expect(create).toHaveFocus();
-    expect(screen.getByTestId("token-conflict")).toHaveTextContent("Retry the list or open all your tokens");
-
-    fireEvent.click(create);
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/^Token service temporarily unavailable$/));
-    expect(screen.getAllByRole("alert")).toHaveLength(1);
-    expect(create).toHaveFocus();
-  });
-
-  it("announces a created token as a polite atomic status without duplicating its secret", async () => {
-    fetchMock
-      .mockResolvedValueOnce(response({ tokens: [] }))
-      .mockResolvedValueOnce(
-        response({
-          token: {
-            token: "mdk_one_time_secret",
-            name: "GitHub Copilot CLI",
-            scope: "comment",
-            documentIds: null,
-          },
-        }),
-      )
-      .mockResolvedValueOnce(response({ tokens: [] }));
-    renderTokens();
-    await screen.findByText("No tokens yet.");
-
-    fireEvent.click(screen.getByTestId("token-add"));
-    fireEvent.click(screen.getByTestId("token-create"));
-
-    const status = await screen.findByRole("status");
-    expect(status).toBe(screen.getByTestId("token-created"));
-    expect(status).toHaveAttribute("aria-live", "polite");
-    expect(status).toHaveAttribute("aria-atomic", "true");
-    expect(status).toHaveTextContent("Token “GitHub Copilot CLI” created. Copy it now; it will not be shown again.");
-    expect(within(status).getAllByText("mdk_one_time_secret", { selector: "code" })).toHaveLength(1);
-    expect(status).not.toHaveFocus();
-  });
-
   it("announces a webhook load failure as one atomic alert", async () => {
     fetchMock.mockResolvedValueOnce(response({ error: "Webhook service temporarily unavailable" }, 503));
 

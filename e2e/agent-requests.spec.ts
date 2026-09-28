@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { budgetMs, signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, waitForHydration, type MintedToken, type User } from "./helpers";
+import { budgetMs, signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, mintToken, type MintedToken, type User } from "./helpers";
 
 // This suite mints local fixture tokens; never retain their network payloads in traces.
 test.use({ trace: "off", screenshot: "off", video: "off" });
@@ -520,7 +520,7 @@ test.describe("document comments, the empty state and the connect row (#1025)", 
     await expect(picker.getByTestId("mention-connect-row")).toHaveCount(0);
   });
 
-  test("h) Connect an agent in that row goes to /settings#tokens, where the connect card carries this origin's MCP config", async () => {
+  test("h) Connect an agent in that row opens the connect dialog in place: three steps, and no secret until a key is made", async () => {
     const page = bob.page;
     await page.evaluate((k) => localStorage.removeItem(k), CONNECT_DISMISSED_KEY);
     await openDocument(page, docId);
@@ -532,36 +532,17 @@ test.describe("document comments, the empty state and the connect row (#1025)", 
     const row = page.getByTestId("mention-suggestions").getByTestId("mention-connect-row");
     await expect(row).toBeVisible();
     await row.getByTestId("mention-connect-agent").click();
-    await page.waitForURL((u) => u.pathname === "/settings");
-    // The stdio toggle below is clicked into a freshly navigated /settings: wait for React to hydrate (the `<details open>` hydration warning).
-    await waitForHydration(page);
-    expect(new URL(page.url()).hash).toBe("#tokens");
-    await expect(page.getByRole("button", { name: "Tokens", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await expect(page.getByTestId("token-name")).toHaveCount(0);
-    await page.getByTestId("token-add").click();
-    await expect(page.getByTestId("token-name")).toBeVisible();
-    await page.getByRole("button", { name: "Connect an MCP client", exact: true }).click();
-    const card = page.getByTestId("agent-connect-card");
-    await expect(card).toBeVisible();
-    const origin = await page.evaluate(() => window.location.origin);
-    await expect(page.getByTestId("agent-connect-config")).toContainText(`"url": "${origin}/api/mcp"`);
-    await expect(page.getByTestId("agent-connect-config")).toContainText('"type": "http"');
-    await expect(page.getByTestId("agent-connect-config")).toContainText(["Bearer", "MARKDOC_TOKEN"].join(" "));
-    // The stdio config is still there, one click away.
-    await page.getByTestId("agent-connect-stdio-toggle").click();
-    await expect(page.getByTestId("agent-connect-config-stdio")).toContainText(`"MARKDOC_URL": "${origin}"`);
-    await expect(card).toContainText("Check Markdoc for requests");
-    // The same "Stop the permission prompts" block as the Share card, with the allow line for the `markdoc` server key.
-    await card.getByText("Optional Copilot CLI permissions", { exact: true }).click();
-    await expect(card).toContainText("Stop the permission prompts");
-    await expect(page.getByTestId("agent-connect-allow-line")).toContainText("copilot --allow-tool 'markdoc(markdoc_suggest)");
-    await expect(page.getByRole("tab", { name: "Copilot CLI" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByRole("tab", { name: "VS Code", exact: true })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Other MCP clients", exact: true })).toBeVisible();
-    await page.getByRole("tab", { name: "Copilot app" }).click();
-    await expect(page.getByTestId("agent-connect-app-install")).toContainText("~/.copilot/extensions/markdoc");
-    await expect(page.getByRole("link", { name: "Inside the Copilot app setup and limits" })).toHaveAttribute("href", /agents\.md#inside-the-copilot-app$/);
-    await page.getByTestId("settings-back-to-document").click();
-    await page.waitForURL((u) => u.pathname === `/d/${docId}`);
+
+    // No navigation: the dialog opens over the document. Bob has no key, so it starts at step 1.
+    const dialog = page.getByRole("dialog", { name: "Connect an AI agent" });
+    await expect(dialog).toBeVisible();
+    expect(new URL(page.url()).pathname).toBe(`/d/${docId}`);
+    await expect(dialog.getByTestId("agent-setup")).toHaveAttribute("data-state", "new");
+    await expect(dialog.getByRole("radiogroup", { name: "Agent" })).toBeVisible();
+    await expect(dialog.getByTestId("agent-create-key")).toBeVisible();
+    await expect(dialog.getByTestId("agent-setup-snippet")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    expect(new URL(page.url()).pathname).toBe(`/d/${docId}`);
   });
 });

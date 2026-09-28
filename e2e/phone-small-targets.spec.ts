@@ -10,6 +10,8 @@ const VIEWPORTS = [
 const COPILOT_APP_DOCS = "https://github.com/burkeholland/markdoc/blob/main/docs/agents.md#inside-the-copilot-app";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
+// The Copilot app step shows a one-time key; keep failure snapshots (which print the page) out of the artifacts too.
+process.env.PLAYWRIGHT_NO_COPY_PROMPT = "1";
 
 function deferred() {
   let resolve!: () => void;
@@ -97,10 +99,14 @@ const switchGeometry = (toggle: Locator): Promise<SwitchGeometry> =>
     const trackStyle = getComputedStyle(element);
     const thumbStyle = getComputedStyle(element, "::after");
     const transform = thumbStyle.transform === "none" ? new DOMMatrixReadOnly() : new DOMMatrixReadOnly(thumbStyle.transform);
+    // Tailwind moves the thumb with the individual `translate` property, not `transform`: count both.
+    const [translateBy = 0, translateDown = 0] = thumbStyle.translate === "none" ? [] : thumbStyle.translate.split(" ").map(number);
+    const shiftX = transform.m41 + translateBy;
+    const shiftY = transform.m42 + translateDown;
     const thumbWidth = number(thumbStyle.width);
     const thumbHeight = number(thumbStyle.height);
-    const thumbX = trackRect.x + number(trackStyle.borderLeftWidth) + number(thumbStyle.left) + transform.m41;
-    const thumbY = trackRect.y + number(trackStyle.borderTopWidth) + number(thumbStyle.top) + transform.m42;
+    const thumbX = trackRect.x + number(trackStyle.borderLeftWidth) + number(thumbStyle.left) + shiftX;
+    const thumbY = trackRect.y + number(trackStyle.borderTopWidth) + number(thumbStyle.top) + shiftY;
     return {
       track: { x: round(trackRect.x), y: round(trackRect.y), width: round(trackRect.width), height: round(trackRect.height) },
       thumb: {
@@ -108,8 +114,8 @@ const switchGeometry = (toggle: Locator): Promise<SwitchGeometry> =>
         y: round(thumbY),
         width: round(thumbWidth),
         height: round(thumbHeight),
-        translateX: round(transform.m41),
-        translateY: round(transform.m42),
+        translateX: round(shiftX),
+        translateY: round(shiftY),
       },
       gaps: {
         left: round(thumbX - trackRect.x),
@@ -140,13 +146,14 @@ function expectSwitchGeometry(value: SwitchGeometry, checked: boolean, disabled:
   expect(value.disabled, `${label}: disabled state`).toBe(disabled);
 }
 
-async function openTokenDetails(page: Page) {
-  const rows = page.getByTestId("token-row");
+async function openKeyDetails(page: Page) {
+  const rows = page.getByTestId("key-row");
   await expect(rows).toHaveCount(1);
-  const details = rows.locator("details");
-  await details.locator("summary").click();
-  await expect(details).toHaveJSProperty("open", true);
-  return rows.getByTestId("token-collaborators-may-ask");
+  const manage = rows.getByTestId("key-manage");
+  await expectTarget(manage, "Manage button", { height: 24 });
+  await manage.click();
+  await expect(manage).toHaveAttribute("aria-expanded", "true");
+  return rows.getByTestId("key-may-ask");
 }
 
 for (const viewport of VIEWPORTS) {
@@ -162,8 +169,8 @@ for (const viewport of VIEWPORTS) {
       await page.goto("/settings");
       await waitForHydration(page);
 
-      let toggle = await openTokenDetails(page);
-      await expectTarget(toggle, "token switch", { width: 44, height: 24 });
+      let toggle = await openKeyDetails(page);
+      await expectTarget(toggle, "key switch", { width: 44, height: 24 });
       await settleSwitch(toggle);
       const unchecked = await switchGeometry(toggle);
       expectSwitchGeometry(unchecked, false, false, "unchecked switch");
@@ -199,7 +206,7 @@ for (const viewport of VIEWPORTS) {
 
       await page.reload();
       await waitForHydration(page);
-      toggle = await openTokenDetails(page);
+      toggle = await openKeyDetails(page);
       await expect(toggle).toHaveAttribute("aria-checked", "true");
       await settleSwitch(toggle);
       const persistedChecked = await switchGeometry(toggle);
@@ -234,7 +241,7 @@ for (const viewport of VIEWPORTS) {
       } finally {
         releaseFailure.resolve();
       }
-      await expect(page.getByTestId("token-collaborators-may-ask-error")).toBeVisible();
+      await expect(page.getByTestId("key-error")).toBeVisible();
       await expect(toggle).toBeEnabled();
       await expect(toggle).toHaveAttribute("aria-checked", "true");
       await settleSwitch(toggle);
@@ -242,17 +249,46 @@ for (const viewport of VIEWPORTS) {
       expectSwitchGeometry(rollbackChecked, true, false, "rollback checked switch");
       expectWithin(unchecked.gaps.left, persistedChecked.gaps.right, "balanced unchecked/checked outer gaps");
 
-      await page.getByTestId("token-manager").getByRole("button", { name: "Connect an MCP client", exact: true }).click();
-      await expect(page.getByTestId("token-manager").getByRole("button", { name: "Connect an MCP client", exact: true })).toHaveAttribute("aria-pressed", "true");
+      // Setup: the account has a key, so the steps start folded behind "Set up".
+      const setupToggle = page.getByTestId("agent-setup-toggle");
+      await expectTarget(setupToggle, "Set up button", { height: 24 });
+      await setupToggle.click();
+      await expect(setupToggle).toHaveAttribute("aria-expanded", "true");
+      const agentPicker = page.getByRole("radiogroup", { name: "Agent" });
+      const tiles = agentPicker.locator("label");
+      await expect(tiles).toHaveCount(6);
+      const tileHeights: number[] = [];
+      for (let index = 0; index < 6; index++) {
+        tileHeights.push((await expectTarget(tiles.nth(index), `agent tile ${index + 1}`, { height: 32 })).height);
+      }
+      await expectTarget(page.getByTestId("agent-create-key"), "Create access key button", { height: 32 });
+      const change = page.getByTestId("agent-options-toggle");
+      await expectTarget(change, "Change options button", { height: 24 });
+      await change.click();
+      await expect(page.getByTestId("agent-options")).toBeVisible();
+      const optionHeights: number[] = [];
+      for (const scope of ["read", "comment", "full"]) {
+        optionHeights.push((await expectTarget(page.getByTestId(`agent-scope-${scope}`).locator(".."), `${scope} access row`, { height: 24 })).height);
+      }
       const agentDocs = page.getByTestId("agent-docs-link");
       const agentDocsBox = await expectTarget(agentDocs, "agent setup documentation link", { height: 24 });
       await expectLinkClick(page, agentDocs, AGENT_DOCS_URL);
 
-      await page.getByTestId("agent-connect-tab-copilot-app").click();
-      const appDocs = page.getByRole("link", { name: "Inside the Copilot app setup and limits" });
+      // The Copilot app is the one client with its own docs link and an install step.
+      await agentPicker.getByText("Copilot app", { exact: true }).click();
+      await page.getByTestId("agent-create-key").click();
+      await expect(page.getByTestId("agent-setup-snippet")).toContainText("MARKDOC_TOKEN=mdk_");
+      const appDocs = page.getByTestId("agent-client-docs-link");
       const appDocsBox = await expectTarget(appDocs, "Copilot app documentation link", { height: 24 });
       await expectLinkClick(page, appDocs, COPILOT_APP_DOCS);
+      const installSummary = page.getByTestId("agent-setup").locator("summary");
+      await expect(installSummary).toHaveCount(1);
+      const installSummaryBox = await expectTarget(installSummary, "install step summary", { height: 24 });
 
+      // Webhooks sit behind Advanced.
+      const advanced = page.getByTestId("advanced-toggle");
+      await expectTarget(advanced, "Advanced toggle", { height: 24 });
+      await advanced.click();
       await page.getByTestId("webhook-add").click();
       const eventCheckboxes = page.locator('[data-testid^="webhook-event-"]');
       await expect(eventCheckboxes).toHaveCount(7);
@@ -288,19 +324,24 @@ for (const viewport of VIEWPORTS) {
 
       await page.keyboard.press("Control+Shift+P");
       await expect(page.getByTestId("command-palette")).toBeVisible();
-      await page.getByTestId("palette-input").fill("keep agent");
-      await page.getByTestId("palette-item-doc:keep-agent").click();
-      await expect(page.getByTestId("keep-agent-dialog")).toBeVisible();
-      const keepAgentDocs = page.getByTestId("keep-agent-docs-link");
-      const keepAgentDocsBox = await expectTarget(keepAgentDocs, "keep-agent documentation link", { height: 24 });
-      await expectLinkClick(page, keepAgentDocs, `${AGENT_DOCS_URL}#sit-in-a-document`);
+      await page.getByTestId("palette-input").fill("connect agent");
+      await page.getByTestId("palette-item-doc:connect-agent").click();
+      const dialog = page.getByTestId("agent-dialog");
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole("radiogroup", { name: "Agent" }).locator("label")).toHaveCount(6);
+      const dialogDocs = dialog.getByTestId("agent-docs-link");
+      const dialogDocsBox = await expectTarget(dialogDocs, "connect dialog documentation link", { height: 24 });
+      await expectLinkClick(page, dialogDocs, AGENT_DOCS_URL);
       const editorOverflow = await expectNoHorizontalOverflow(page, "editor");
       console.log(
         `[2814] control geometry ${viewport.width}x${viewport.height} ${JSON.stringify({
           switch: { unchecked, disabledChecked, persistedChecked, disabledUnchecked, rollbackChecked },
           targets: {
+            agentTiles: tileHeights,
+            accessRows: optionHeights,
+            installSummary: installSummaryBox.height,
             webhookHeights,
-            documentationHeights: [agentDocsBox.height, appDocsBox.height, keepAgentDocsBox.height],
+            documentationHeights: [agentDocsBox.height, appDocsBox.height, dialogDocsBox.height],
             language: { width: languageBox.width, height: languageBox.height },
           },
           overflow: { settings: settingsOverflow, editor: editorOverflow },

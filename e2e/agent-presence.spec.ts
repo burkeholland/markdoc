@@ -77,8 +77,8 @@ test.describe("agent presence and watch", () => {
     await expect(row).toContainText("Agent");
     await expect(row.getByTestId("presence-status")).toHaveText("drafting");
     await expect(row.getByTestId("presence-activity")).toHaveCount(0);
-    // With an agent here, the popover does not offer "Keep an agent here".
-    await expect(popover.getByTestId("keep-agent-here")).toHaveCount(0);
+    // With an agent here, the popover does not offer "Connect an AI agent".
+    await expect(popover.getByTestId("connect-agent")).toHaveCount(0);
     await page.screenshot({ path: "test-results/agent-presence-header.png", clip: { x: 0, y: 0, width: 1280, height: 420 } });
 
     // A status update is live too.

@@ -19,10 +19,10 @@ export const COPILOT_PREALLOW_TOOLS = ["markdoc_suggest", "markdoc_comment", "ma
 /** Token scopes, narrowest first (mirrors `TokenScope` in the schema without importing the server). */
 export type TokenScopeName = "read" | "comment" | "full";
 
-/** The scope radio order (narrowest first), shared with the Share dialog's agent card. */
+/** The scope radio order (narrowest first), used by the connect steps' options. */
 export const SCOPES: TokenScopeName[] = ["read", "comment", "full"];
 
-/** localStorage key set once the user dismisses the agent-connect card (Settings, comments panel, Keep an agent here). */
+/** localStorage key set once the user dismisses the "Connect an agent" row under the comments `@` picker. */
 export const AGENT_CONNECT_DISMISSED_KEY = "markdoc:agent-connect-dismissed";
 
 /** The pre-allow tools a token of this scope can actually run: no point pre-allowing what the server refuses with 403. */
@@ -32,12 +32,12 @@ const PREALLOW_BY_SCOPE: Record<TokenScopeName, readonly (typeof COPILOT_PREALLO
   full: COPILOT_PREALLOW_TOOLS,
 };
 
-/** Short labels for the scope chips and the line under the config blocks. */
-export const TOKEN_SCOPE_LABEL: Record<TokenScopeName, string> = { read: "Read", comment: "Comment & suggest", full: "Full" };
+/** What a key may do, in the words the setup flow and the key list use. */
+export const TOKEN_SCOPE_LABEL: Record<TokenScopeName, string> = { read: "Read only", comment: "Comment & suggest", full: "Full access" };
 export const TOKEN_SCOPE_SUMMARY: Record<TokenScopeName, string> = {
-  read: "reads documents, watches and shows presence — cannot write",
-  comment: "reads, comments, proposes suggestions and reviews, picks up requests — cannot rewrite, publish or delete",
-  full: "everything you can do",
+  read: "Reads and follows along. Changes nothing.",
+  comment: "Comments and suggests edits you approve.",
+  full: "Everything you can do, including rewriting.",
 };
 
 /** The one-liner that starts Copilot CLI with those tools pre-allowed, byte-for-byte what the cards copy. */

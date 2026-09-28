@@ -116,7 +116,7 @@ type MenuVisit = {
   onImage: Mock<() => void>;
   onLink: Mock<() => void>;
   onComment: Mock<() => void>;
-  onKeepAgent: Mock<() => void>;
+  onConnectAgent: Mock<() => void>;
 };
 
 type Visit = Omit<MenuVisit, "controller"> & {
@@ -261,7 +261,7 @@ function makeIntegratedVisit(): IntegratedVisit {
     onImage: vi.fn<() => void>(),
     onLink: vi.fn<() => void>(),
     onComment: vi.fn<() => void>(),
-    onKeepAgent: vi.fn<() => void>(),
+    onConnectAgent: vi.fn<() => void>(),
     host,
     restoreOwnerWindow,
   };
@@ -397,7 +397,7 @@ function makeVisit(controller = new TrackingController()): Visit {
     onImage: vi.fn<() => void>(),
     onLink: vi.fn<() => void>(),
     onComment: vi.fn<() => void>(),
-    onKeepAgent: vi.fn<() => void>(),
+    onConnectAgent: vi.fn<() => void>(),
   };
 }
 
@@ -432,7 +432,7 @@ function BoundaryHarness({
       onImage={visit.onImage}
       onLink={visit.onLink}
       onComment={visit.onComment}
-      onKeepAgent={visit.onKeepAgent}
+      onConnectAgent={visit.onConnectAgent}
     />
   );
 }
@@ -885,8 +885,8 @@ describe("slash-menu native title metadata", () => {
     expect(slashActions.applyItem).toHaveBeenCalledOnce();
     expect(slashActions.applyItem.mock.calls[0][0]).toBe(b.view);
     expect(slashActions.applyItem.mock.calls[0][2]).toBe(b.session.undoManager);
-    expect(b.onKeepAgent).toHaveBeenCalledOnce();
-    expect(a.onKeepAgent).not.toHaveBeenCalled();
+    expect(b.onConnectAgent).toHaveBeenCalledOnce();
+    expect(a.onConnectAgent).not.toHaveBeenCalled();
   });
 
   it.each(["title", "description"] as const)("allows native hover on the agent %s without applying an editor command", (field) => {
@@ -917,7 +917,7 @@ describe("slash-menu native title metadata", () => {
     expect(visit.view.dispatch).not.toHaveBeenCalled();
     expect(visit.view.focus).not.toHaveBeenCalled();
     expect(visit.session.undoManager.stopCapturing).not.toHaveBeenCalled();
-    expect(visit.onKeepAgent).not.toHaveBeenCalled();
+    expect(visit.onConnectAgent).not.toHaveBeenCalled();
 
     clickRow(before, target);
     expect(slashActions.applyItem).not.toHaveBeenCalled();
@@ -925,7 +925,7 @@ describe("slash-menu native title metadata", () => {
     const accepted = clickRow(current, target);
     current.click(accepted.event);
     expect(slashActions.applyItem).toHaveBeenCalledOnce();
-    expect(visit.onKeepAgent).toHaveBeenCalledOnce();
+    expect(visit.onConnectAgent).toHaveBeenCalledOnce();
   });
 });
 
@@ -1212,7 +1212,7 @@ describe("slash-menu pointer presentation", () => {
     clickRow(row, target);
     expect(rejectedDown.preventDefault).not.toHaveBeenCalled();
     expect(slashActions.applyItem).not.toHaveBeenCalled();
-    expect(visit.onKeepAgent).not.toHaveBeenCalled();
+    expect(visit.onConnectAgent).not.toHaveBeenCalled();
     expect(visit.view.focus).not.toHaveBeenCalled();
     if (!restoreBeforeClick) target.setAttribute("title", original);
     clickRow(row, target);
@@ -1230,7 +1230,7 @@ describe("slash-menu pointer presentation", () => {
     expect(slashActions.applyItem).toHaveBeenCalledOnce();
     expect(slashActions.applyItem.mock.calls[0][0]).toBe(visit.view);
     expect(slashActions.applyItem.mock.calls[0][2]).toBe(visit.session.undoManager);
-    expect(visit.onKeepAgent).toHaveBeenCalledOnce();
+    expect(visit.onConnectAgent).toHaveBeenCalledOnce();
   });
 
   it("keeps the exact current controls usable after Strict Mode replays layout effects", () => {
@@ -1321,8 +1321,8 @@ describe("slash-menu pointer presentation", () => {
     open(visit);
 
     expect(screen.getByText("Basic")).toBeInTheDocument();
-    expect(screen.getByText("Keep an agent here")).toBeInTheDocument();
-    expect(screen.getByText("Get the exact sentence that keeps an agent in this document")).toBeInTheDocument();
+    expect(screen.getByText("Connect an AI agent")).toBeInTheDocument();
+    expect(screen.getByText("Set up Copilot, Claude or Cursor, or invite your agent here")).toBeInTheDocument();
     const initialText = captureRow("text");
     expect(initialText.element).toHaveAttribute("aria-selected", "true");
     expect(initialText.element).toHaveClass("bg-accent-soft", "text-ink");
@@ -1587,7 +1587,7 @@ describe("slash-menu pointer presentation", () => {
   it.each([
     ["image", "onImage"],
     ["link", "onLink"],
-    ["agent", "onKeepAgent"],
+    ["agent", "onConnectAgent"],
   ] as const)("applies the frozen %s item context and callback once", (id, callback) => {
     const visit = makeVisit();
     render(<BoundaryHarness visit={visit} />);

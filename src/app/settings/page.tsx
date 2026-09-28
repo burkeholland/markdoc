@@ -3,11 +3,12 @@ import { redirect } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { auth } from "@/auth";
 import { Logo } from "@/components/ui/logo";
-import { TokensPanel } from "@/components/settings/tokens-panel";
-import { WebhooksPanel } from "@/components/settings/webhooks-panel";
+import { AdvancedSettings } from "@/components/settings/advanced-settings";
+import { AgentsPanel } from "@/components/settings/agents-panel";
 import { ThemePicker } from "@/components/ui/theme-toggle";
 import { embeddedDocumentPath } from "@/server/http";
 import { publicOrigin } from "@/server/public-origin";
+import { listApiTokens, serializeApiTokenMetadata } from "@/server/tokens";
 
 export const metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
@@ -22,6 +23,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   const nextParam = Array.isArray(rawNext) ? rawNext[0] : rawNext;
   // Only relative document paths: never bounce the user off-site.
   const next = nextParam && /^\/d\/[a-z0-9]+$/i.test(nextParam) ? nextParam : null;
+  const tokens = (await listApiTokens(session.user.id)).map(serializeApiTokenMetadata);
   return (
     <main className="min-h-screen bg-surface-2">
       <header className="border-b border-line bg-surface">
@@ -45,9 +47,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           </div>
           <ThemePicker />
         </div>
-        <TokensPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} />
+        <AgentsPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} initialTokens={tokens} />
         <div className="mt-6">
-          <WebhooksPanel />
+          <AdvancedSettings />
         </div>
       </section>
     </main>

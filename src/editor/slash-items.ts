@@ -13,8 +13,8 @@ export interface SlashContext {
   openLink: () => void;
   /** Starts a comment on the current selection (see EditorShell.startComment). */
   startComment: () => void;
-  /** Opens the "Keep an agent here" dialog with the sentence that keeps an agent in this document. */
-  keepAgent: () => void;
+  /** Opens the "Connect an AI agent" dialog. */
+  connectAgent: () => void;
   /** Insertion targets the caret is in; used to hide items that do not fit. */
   where: SlashWhere;
 }
@@ -93,12 +93,12 @@ export const SLASH_ITEMS: readonly SlashItem[] = [
   { id: "date", title: "Date", keywords: ["today", "now", "time"], icon: "Calendar", group: "Insert", command: () => insertText(todayIso()) },
   {
     id: "agent",
-    title: "Keep an agent here",
-    description: "Get the exact sentence that keeps an agent in this document",
-    keywords: ["copilot", "bot", "mcp", "watch", "keep"],
+    title: "Connect an AI agent",
+    description: "Set up Copilot, Claude or Cursor, or invite your agent here",
+    keywords: ["copilot", "claude", "cursor", "bot", "mcp", "ai", "connect", "setup", "keep", "watch"],
     icon: "Bot",
     group: "Insert",
-    run: (ctx) => ctx.keepAgent(),
+    run: (ctx) => ctx.connectAgent(),
   },
 ];
 

@@ -88,6 +88,6 @@ describe("GET /api/templates", () => {
     expect(created.status).toBe(201);
     const { document } = (await created.json()) as { document: { id: string; title: string } };
     expect(document.title).toBe("Welcome to Markdoc");
-    expect((await getDocument(document.id))?.content).toContain("- [ ] Open Share → Collaborate with an agent");
+    expect((await getDocument(document.id))?.content).toContain("- [ ] Type /agent and connect an AI agent");
   });
 });
