@@ -378,6 +378,44 @@ describe("requests made from a comment thread (#997)", () => {
     expect(((await done.json()) as { request: { result: { comments: number } } }).request.result.comments).toBe(1);
   });
 
+  it("puts the agent's 👀 on the thread when it picks the comment up and takes it back when it is done or cancelled", async () => {
+    type ReactThread = { id: string; reactions: Record<string, string[]> };
+    const reactionsOf = async (threadId: string) =>
+      ((await (await as(owner, () => GET_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, undefined, "GET"), params(docId)))).json()) as { comments: ReactThread[] }).comments.find((t) => t.id === threadId)!.reactions;
+    const eyes = "agent:olive/copilot-cli";
+    const newThread = async (quote: string) => {
+      const add = await as(commenter, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote, body: `About ${quote}?` }), params(docId)));
+      return ((await add.json()) as { id: string }).id;
+    };
+
+    // Claim → 👀 (kept apart from the owner's own 👀, which survives the agent taking its reaction back).
+    const t1 = await newThread("brown fox");
+    await as(owner, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "react", threadId: t1, emoji: "👀" }), params(docId)));
+    const r1 = await createRequest(docId, { ...commenter }, "commenter", { instruction: "Look", mode: "comment", threadId: t1, agent: "olive/copilot-cli" });
+    expect((await reactionsOf(t1))["👀"]).toEqual([owner.id]);
+    await claimRequest(docId, r1.id, agentActor());
+    expect((await reactionsOf(t1))["👀"]?.slice().sort()).toEqual([eyes, owner.id].sort());
+    await claimRequest(docId, r1.id, agentActor());
+    expect((await reactionsOf(t1))["👀"]).toHaveLength(2);
+    await completeRequest(docId, r1.id, agentActor(), { summary: "Looked." });
+    expect((await reactionsOf(t1))["👀"]).toEqual([owner.id]);
+
+    // Work on an open request claims it implicitly → 👀; cancelling takes it back.
+    const t2 = await newThread("lazy dog");
+    const r2 = await createRequest(docId, { ...commenter }, "commenter", { instruction: "Look", mode: "comment", threadId: t2, agent: "olive/copilot-cli" });
+    await attachWork(docId, r2.id, agentActor(), { comments: 1 });
+    expect((await reactionsOf(t2))["👀"]).toEqual([eyes]);
+    await cancelRequest(docId, r2.id, { ...commenter }, "commenter");
+    expect((await reactionsOf(t2))["👀"]).toBeUndefined();
+
+    // A person claiming their own request directly leaves no reaction.
+    const t3 = await newThread("quick");
+    const r3 = await createRequest(docId, ownerActor(), "owner", { instruction: "Look", mode: "comment", threadId: t3 });
+    await claimRequest(docId, r3.id, ownerActor());
+    expect((await reactionsOf(t3))["👀"]).toBeUndefined();
+    await cancelRequest(docId, r3.id, ownerActor(), "owner");
+  });
+
   it("folds `add` + requestId into the request's thread as a reply (quote ignored, no new thread, no reply notification)", async () => {
     const add = await as(commenter, () => POST_COMMENTS(jsonReq(`/api/documents/${docId}/comments`, { action: "add", quote: "quick", body: "@olive/copilot-cli Quick enough?" }), params(docId)));
     const { id: threadId } = (await add.json()) as { id: string };

@@ -1,4 +1,4 @@
-import type * as Y from "yjs";
+import * as Y from "yjs";
 import { and, desc, eq, gt, inArray, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import type { AgentRequest, AgentRequestMode, AgentRequestResult, AgentRequestSelection, AgentRequestStatus, Role } from "@/server/db/schema";
@@ -10,6 +10,7 @@ import { notify } from "@/server/notifications";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
 import { META_KEY } from "@/server/collab/hocuspocus";
 import { newId } from "@/editor/collab/shared";
+import { reactionKey } from "@/editor/collab/comments";
 import { agentMentionSlug, parseAgentMentions } from "@/editor/collab/mentions";
 import { warnTail, type WarningCode } from "@/server/warnings";
 
@@ -249,12 +250,42 @@ function commentsMap(doc: Y.Doc): Y.Map<Y.Map<unknown>> {
   return doc.getMap<Y.Map<unknown>>("comments");
 }
 
+/** The reaction an agent leaves on a comment it has picked up, and takes back once it has answered. */
+export const SEEN_REACTION = "👀";
+
+/**
+ * The reaction user id for an agent: `agent:login/slug`. Kept apart from the owner's user id so the agent's
+ * 👀 never merges with (or removes) a 👀 the person left themselves. Null when there is no agent to name.
+ */
+export function agentReactorId(login: string | null | undefined, agent: string | null | undefined): string | null {
+  if (!login || !agent) return null;
+  return `agent:${login.toLowerCase()}/${agentMentionSlug(agent).toLowerCase()}`;
+}
+
+/** Add or remove the agent's 👀 on the root of a request's comment thread (no-op when the thread is gone). */
+function setSeenReaction(doc: Y.Doc, threadId: string, reactorId: string, name: string | null) {
+  const thread = commentsMap(doc).get(threadId);
+  if (!thread) return;
+  const key = reactionKey(null, SEEN_REACTION, reactorId);
+  let reactions = thread.get("reactions") as Y.Map<string> | undefined;
+  if (name === null) {
+    if (reactions?.has(key)) reactions.delete(key);
+    return;
+  }
+  if (!reactions) {
+    reactions = new Y.Map<string>();
+    thread.set("reactions", reactions);
+  }
+  if (!reactions.has(key)) reactions.set(key, name);
+}
+
 /**
  * Mirror the request's status into the shared document so connected editors update without polling.
  * With `stampThread`, the thread the request came from gets `requestId` in the same transaction (the
  * latest request on a thread wins), so the thread card can find its request without polling either.
+ * `seen` adds (`"add"`) or removes (`"remove"`) the claiming agent's 👀 on that thread in the same transaction.
  */
-async function mirrorRequest(row: AgentRequest, actor: Actor | null, opts: { stampThread?: boolean } = {}) {
+async function mirrorRequest(row: AgentRequest, actor: Actor | null, opts: { stampThread?: boolean; seen?: "add" | "remove" } = {}) {
   const ctx = {
     userId: actor?.id ?? row.userId,
     docId: row.documentId,
@@ -289,6 +320,10 @@ async function mirrorRequest(row: AgentRequest, actor: Actor | null, opts: { sta
       };
       meta.set("agentRequests", next);
       if (opts.stampThread && row.threadId) commentsMap(doc).get(row.threadId)?.set("requestId", row.id);
+      if (opts.seen && row.threadId) {
+        const reactor = agentReactorId(row.claimedByLogin, row.claimedBy);
+        if (reactor) setSeenReaction(doc, row.threadId, reactor, opts.seen === "add" ? row.claimedBy : null);
+      }
     });
   } catch (err) {
     console.error("[agent-requests] mirror failed", err);
@@ -445,7 +480,7 @@ export async function claimRequest(docId: string, requestId: string, actor: Acto
     .where(and(eq(schema.agentRequests.id, requestId), eq(schema.agentRequests.status, "open")))
     .returning();
   if (!updated) throw new HttpError(409, "Request was just claimed by someone else");
-  await mirrorRequest(updated, actor);
+  await mirrorRequest(updated, actor, { seen: actor.agent ? "add" : undefined });
   return toRequestItem(updated);
 }
 
@@ -484,7 +519,8 @@ export async function attachWork(docId: string, requestId: string, actor: Actor,
     const now = await getRequest(docId, requestId);
     throw new HttpError(409, `Request is ${now.status}`, { status: now.status });
   }
-  await mirrorRequest(updated, actor);
+  // Work on an open request claims it: the agent has picked the comment up, so it gets the same 👀 a claim leaves.
+  await mirrorRequest(updated, actor, { seen: row.status === "open" && actor.agent ? "add" : undefined });
   return toRequestItem(updated);
 }
 
@@ -610,7 +646,7 @@ export async function completeRequest(docId: string, requestId: string, actor: A
   if (!written) return alreadyDone(current);
   wakeDocument(docId);
   const notified = await notifyRequester(current);
-  await mirrorRequest(current, actor);
+  await mirrorRequest(current, actor, { seen: "remove" });
   return answer({ request: toRequestItem(current), notified, alreadyDone: false });
 }
 
@@ -657,7 +693,7 @@ export async function cancelRequest(docId: string, requestId: string, actor: Act
     }
     return { row: cancelled, written: true };
   });
-  if (written) await mirrorRequest(current, actor);
+  if (written) await mirrorRequest(current, actor, { seen: "remove" });
   return toRequestItem(current);
 }
 
