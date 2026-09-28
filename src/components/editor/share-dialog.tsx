@@ -406,7 +406,7 @@ export const ShareDialog = memo(function ShareDialog({
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-medium text-ink">Connect an AI agent</span>
-                <span className="block truncate text-xs text-ink-3">Copilot, Claude, Cursor or any MCP client</span>
+                <span className="block truncate text-xs text-ink-3">Works with any MCP client</span>
               </span>
               <ChevronRight size={16} className="shrink-0 text-ink-3" aria-hidden="true" />
             </button>

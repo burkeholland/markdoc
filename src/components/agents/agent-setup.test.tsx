@@ -68,7 +68,7 @@ const createKey = () => fireEvent.click(screen.getByTestId("agent-create-key"));
 describe("AgentSetup", () => {
   it("starts with one clear action and a plain summary of what it will create", async () => {
     render(<Harness doc={DOC} />);
-    expect(screen.getByTestId("agent-client-copilot-cli")).toBeChecked();
+    expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(screen.getByRole("button", { name: /create access key/i })).toBeEnabled();
     expect(screen.getByTestId("agent-key-summary")).toHaveTextContent("Comment & suggest · all your documents · expires in 90 days");
     expect(screen.queryByTestId("agent-setup-snippet")).toBeNull();
@@ -77,51 +77,18 @@ describe("AgentSetup", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
   });
 
-  it("remembers the chosen agent for next time", async () => {
-    const first = render(<Harness />);
-    fireEvent.click(screen.getByTestId("agent-client-vscode"));
-    expect(localStorage.getItem("markdoc:agent-client")).toBe("vscode");
-    first.unmount();
-
-    render(<Harness />);
-    await waitFor(() => expect(screen.getByTestId("agent-client-vscode")).toBeChecked());
-    expect(screen.getByRole("heading", { name: "Add Markdoc to VS Code" })).toBeInTheDocument();
-  });
-
   it("creates a key and shows the exact command with that key in it", async () => {
     render(<Harness doc={DOC} />);
     createKey();
     const snippet = await screen.findByTestId("agent-setup-snippet");
 
-    expect(server.creates).toEqual([{ name: "Copilot CLI", expiresInDays: 90, scope: "comment", documentIds: null }]);
-    expect(snippet).toHaveTextContent(`copilot mcp add --transport http --header "Authorization: Bearer ${SECRET}" markdoc ${ORIGIN}/api/mcp`);
+    expect(server.creates).toEqual([{ name: "AI agent", expiresInDays: 90, scope: "comment", documentIds: null }]);
+    expect(JSON.parse(snippet.textContent ?? "")).toEqual({ mcpServers: { markdoc: { type: "http", url: `${ORIGIN}/api/mcp`, headers: { Authorization: "Bearer " + SECRET } } } });
     expect(screen.getByText(/shown only once/i)).toBeInTheDocument();
     expect(screen.getByTestId("agent-connection")).toHaveAttribute("data-state", "waiting");
     expect(screen.getByTestId("agent-setup-copy")).toHaveFocus();
     expect(screen.getByTestId("agent-invite-prompt")).toHaveTextContent('Sit in the Markdoc document "Launch plan" (id doc1)');
     expect(screen.queryByTestId("agent-create-key")).toBeNull();
-  });
-
-  it("switches the snippet to another agent with the same key, without making a second one", async () => {
-    render(<Harness doc={DOC} />);
-    createKey();
-    await screen.findByTestId("agent-setup-snippet");
-
-    fireEvent.click(screen.getByTestId("agent-client-vscode"));
-    expect(screen.getByTestId("agent-setup-snippet")).toHaveTextContent(`"Authorization": "Bearer ${SECRET}"`);
-    expect(screen.getByRole("heading", { name: "Add Markdoc to VS Code" })).toBeInTheDocument();
-    expect(server.creates).toHaveLength(1);
-  });
-
-  it("opens the install step and links the setup docs for the Copilot app", async () => {
-    render(<Harness doc={DOC} />);
-    fireEvent.click(screen.getByTestId("agent-client-copilot-app"));
-    createKey();
-    await screen.findByTestId("agent-setup-snippet");
-
-    expect(screen.getByTestId("agent-setup-snippet")).toHaveTextContent(`MARKDOC_TOKEN=${SECRET}`);
-    expect(screen.getByTestId("agent-client-docs-link")).toHaveAttribute("href", expect.stringContaining("#inside-the-copilot-app"));
-    expect(screen.getByText("Install the extension").closest("details")).toHaveAttribute("open");
   });
 
   it("sends the chosen options: access level, this document only, expiry and name", async () => {
@@ -145,14 +112,14 @@ describe("AgentSetup", () => {
   });
 
   it("names the key so it does not collide with one you already have", async () => {
-    server.tokens = [makeKey({ name: "Copilot CLI" })];
+    server.tokens = [makeKey({ name: "AI agent" })];
     render(<Harness doc={DOC} />);
     fireEvent.click(screen.getByTestId("agent-options-toggle"));
-    await waitFor(() => expect(screen.getByTestId("agent-key-name")).toHaveValue("Copilot CLI 2"));
+    await waitFor(() => expect(screen.getByTestId("agent-key-name")).toHaveValue("AI agent 2"));
 
     createKey();
     await screen.findByTestId("agent-setup-snippet");
-    expect(server.creates[0]).toMatchObject({ name: "Copilot CLI 2" });
+    expect(server.creates[0]).toMatchObject({ name: "AI agent 2" });
   });
 
   it("shows a taken-name error with the name field open, keeps what was typed, and lets you try again", async () => {
@@ -184,7 +151,7 @@ describe("AgentSetup", () => {
 
     expect(await screen.findByTestId("agent-error")).toHaveTextContent("Another key already has that name");
     expect(screen.getByTestId("agent-options")).toBeInTheDocument();
-    expect(screen.getByTestId("agent-key-name")).toHaveValue("Copilot CLI");
+    expect(screen.getByTestId("agent-key-name")).toHaveValue("AI agent");
   });
 
   it("keeps the button usable after a server error", async () => {
@@ -201,7 +168,8 @@ describe("AgentSetup", () => {
     createKey();
     await screen.findByTestId("agent-setup-snippet");
     expect(screen.getByTestId("agent-connection")).toHaveAttribute("role", "status");
-    expect(document.body.textContent?.split(SECRET).length).toBe(2);
+    // Once in the config, once in the Authorization field for form-based clients.
+    expect(document.body.textContent?.split(SECRET).length).toBe(3);
   });
 
   it("sends one request for a double click", async () => {
@@ -234,7 +202,7 @@ describe("AgentSetup", () => {
     });
 
     const banner = await screen.findByTestId("agent-connected-banner");
-    expect(banner).toHaveTextContent("Copilot CLI is connected");
+    expect(banner).toHaveTextContent("AI agent is connected");
     expect(screen.queryByTestId("agent-setup-snippet")).toBeNull();
     expect(document.body.textContent).not.toContain(SECRET);
     expect(screen.getByTestId("agent-invite-copy")).toHaveClass("btn-primary");
@@ -253,7 +221,6 @@ describe("AgentSetup", () => {
 
     fireEvent.click(screen.getByTestId("agent-connect-another"));
     expect(screen.getByTestId("agent-create-key")).toBeInTheDocument();
-    expect(screen.getByTestId("agent-client-copilot-cli")).toBeInTheDocument();
     expect(document.body.textContent).not.toContain(SECRET);
   });
 
