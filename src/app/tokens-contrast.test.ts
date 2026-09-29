@@ -111,6 +111,11 @@ describe("tokens", () => {
       it("rich-pane TypeScript token groups retain distinct colours", () => {
         expect(new Set(RICH_TYPESCRIPT_GROUPS.map(hex))).toHaveProperty("size", RICH_TYPESCRIPT_GROUPS.length);
       });
+      it("a horizontal rule is visible (≥ 3:1) on the preview paper and the surface", () => {
+        for (const bg of ["p-paper", "p-surface"]) {
+          expect(contrast(hex("md-rule"), hex(bg)), `md-rule on ${bg}`).toBeGreaterThanOrEqual(3);
+        }
+      });
     });
   }
 });

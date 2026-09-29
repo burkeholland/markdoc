@@ -223,7 +223,8 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
   $registry = 'markdocacrmnd542unepl56.azurecr.io'
   $vm = 'markdoc-pg'
   $publicIp = 'markdoc-web-ip'
-  $azureFqdn = 'markdoc-burkeholland.eastus2.cloudapp.azure.com'
+  $vmOrigin = 'https://markdoc-burkeholland.eastus2.cloudapp.azure.com'
+  # The VM hostname now 308-redirects here, so public health must hit the canonical origin directly.
   $origin = 'https://markdoc.app'
   $resourceRoot = "/subscriptions/$subscription/resourceGroups/$group/providers"
   $vmId = "$resourceRoot/Microsoft.Compute/virtualMachines/$vm"
@@ -258,7 +259,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     $nicId = "$resourceRoot/Microsoft.Network/networkInterfaces/markdoc-pg-nic"
     if ($vmInfo.id -ine $vmId -or $vmInfo.os -cne 'Linux' -or @($vmInfo.nics) -inotcontains $nicId -or
         $ipInfo.id -ine "$resourceRoot/Microsoft.Network/publicIPAddresses/$publicIp" -or
-        $ipInfo.configuration -ine "$nicId/ipConfigurations/primary" -or $ipInfo.fqdn -cne $azureFqdn) {
+        $ipInfo.configuration -ine "$nicId/ipConfigurations/primary" -or "https://$($ipInfo.fqdn)" -cne $vmOrigin) {
       Stop-VmRelease 'VM/public IP association or public origin does not match the configured stable target.'
     }
 

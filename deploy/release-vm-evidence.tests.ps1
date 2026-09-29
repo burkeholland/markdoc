@@ -130,7 +130,8 @@ Assert-True ([regex]::Matches($workflowSource, 'uses: azure/login@v2').Count -eq
   $workflowSource -match '(?m)^\s+tenant-id: \$\{\{ secrets\.AZURE_TENANT_ID \}\}\s*$' -and
   $workflowSource -match '(?m)^\s+subscription-id: \$\{\{ secrets\.AZURE_SUBSCRIPTION_ID \}\}\s*$') 'The workflow must retain one OIDC login with only the established Azure identity.'
 Assert-True ($workflowSource -notmatch '(?i)\bretr(?:y|ies)\b') 'The workflow must not add an automatic retry around the single guarded release.'
-Assert-True ($releaseSource -match '\$origin = ''https://markdoc\.app''' -and
+Assert-True ($releaseSource -match '\$vmOrigin = ''https://markdoc-burkeholland\.eastus2\.cloudapp\.azure\.com''' -and
+  $releaseSource -match '\$origin = ''https://markdoc\.app''' -and
   $releaseSource -match 'Assert-ReleaseHealth \$health \$Commit ''Public''') 'The configured release must retain exact public health verification.'
 Assert-True ($deploySource.IndexOf('MARKDOC_RELEASE_WAL_GATE_OPERATION') -lt $deploySource.IndexOf('rollback_dir=') -and
   $deploySource.IndexOf('MARKDOC_RELEASE_WAL_GATE_OPERATION') -lt $deploySource.IndexOf('aad_token=')) 'Guest deployment must check the exact receipt before mutable work.'

@@ -3,14 +3,13 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Check, ExternalLink, KeyRound, Loader2, TriangleAlert } from "lucide-react";
 import { api, ApiError, apiErrorText, type ApiTokenDto } from "@/lib/api";
-import { AGENT_CLIENTS, agentClient, clientSetup, isAgentClientId, type AgentClientId } from "@/lib/agent-clients";
+import { DEFAULT_KEY_NAME, mcpSetup } from "@/lib/agent-clients";
 import { hasConnected, lastSeenAt, uniqueKeyName } from "@/lib/agent-keys";
 import { AGENT_DOCS_URL, SCOPES, TOKEN_SCOPE_LABEL, TOKEN_SCOPE_SUMMARY, type TokenScopeName } from "@/lib/mcp";
 import { cn } from "@/lib/utils";
 import { ConnectedBanner, InviteBlock, InviteBody, inviteTitle, type DocRef } from "./agent-parts";
 import { CopyBlock } from "./copy-block";
 
-const CLIENT_STORAGE_KEY = "markdoc:agent-client";
 const POLL_MS = 3_000;
 const POLL_LIMIT_MS = 10 * 60_000;
 
@@ -41,15 +40,6 @@ export interface AgentSetupProps {
   onKeyCreated?: () => void;
 }
 
-function readSavedClient(): AgentClientId | null {
-  try {
-    const saved = window.localStorage.getItem(CLIENT_STORAGE_KEY);
-    return isAgentClientId(saved) ? saved : null;
-  } catch {
-    return null;
-  }
-}
-
 function Step({ n, title, state, children }: { n: number; title: string; state: "idle" | "active" | "done"; children: ReactNode }) {
   const id = useId();
   return (
@@ -75,34 +65,9 @@ function Step({ n, title, state, children }: { n: number; title: string; state: 
   );
 }
 
-function ClientPicker({ value, onChange }: { value: AgentClientId; onChange: (id: AgentClientId) => void }) {
-  const group = useId();
-  return (
-    <div role="radiogroup" aria-label="Agent" className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-      {AGENT_CLIENTS.map((client) => (
-        <label key={client.id} className="relative block">
-          <input
-            type="radio"
-            name={group}
-            value={client.id}
-            checked={value === client.id}
-            onChange={() => onChange(client.id)}
-            className="peer sr-only"
-            data-testid={`agent-client-${client.id}`}
-          />
-          <span className="flex h-9 cursor-pointer items-center justify-center rounded-lg border border-line-2 bg-surface px-3 text-sm font-medium text-ink-2 transition-colors hover:bg-surface-2 peer-checked:border-accent peer-checked:bg-accent-soft peer-checked:text-ink peer-focus-visible:ring-2 peer-focus-visible:ring-accent/40">
-            {client.label}
-          </span>
-        </label>
-      ))}
-    </div>
-  );
-}
-
 export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentSetupProps) {
   const uid = useId();
   const optionsId = `${uid}-options`;
-  const [client, setClient] = useState<AgentClientId>("copilot-cli");
   const [scope, setScope] = useState<TokenScopeName>("comment");
   const [onlyThisDoc, setOnlyThisDoc] = useState(false);
   const [expires, setExpires] = useState<ExpiryValue>("90");
@@ -114,27 +79,12 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentS
   const copyButton = useRef<HTMLButtonElement>(null);
   const submitting = useRef(false);
 
-  useEffect(() => {
-    const saved = readSavedClient();
-    if (saved) setClient(saved);
-  }, []);
-
-  const chooseClient = (id: AgentClientId) => {
-    setClient(id);
-    try {
-      window.localStorage.setItem(CLIENT_STORAGE_KEY, id);
-    } catch {
-      // Private mode: the choice just is not remembered.
-    }
-  };
-
-  const selected = agentClient(client);
-  const keyName = typedName ?? uniqueKeyName(selected.keyName, tokens);
+  const keyName = typedName ?? uniqueKeyName(DEFAULT_KEY_NAME, tokens);
   const expiry = EXPIRY_CHOICES.find((choice) => choice.value === expires) ?? EXPIRY_CHOICES[1];
   const summary = `${TOKEN_SCOPE_LABEL[scope]} · ${onlyThisDoc && doc ? "this document only" : "all your documents"} · ${expiry.phrase}`;
   const row = created ? tokens?.find((key) => key.id === created.id) : undefined;
   const connected = Boolean(row && hasConnected(row));
-  const setup = clientSetup(client, { origin, key: created?.key, scope: created?.scope });
+  const setup = mcpSetup({ origin, key: created?.key });
 
   // Watch for the agent's first request so the result of pasting the command shows up right here.
   useEffect(() => {
@@ -202,19 +152,21 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentS
     );
   }
 
-  const clientTitle = selected.id === "other" ? "your MCP client" : selected.label;
-
   return (
     <div className="flex flex-col gap-5" data-testid="agent-setup" data-state={created ? "waiting" : "new"}>
-      <Step n={1} title="Choose your agent" state="idle">
-        <ClientPicker value={client} onChange={chooseClient} />
-      </Step>
-
-      <Step n={2} title={`Add Markdoc to ${clientTitle}`} state="active">
+      <Step n={1} title="Add Markdoc to your agent" state="active">
         {created ? (
           <>
-            <p className="text-sm text-ink-2">{setup.instruction}</p>
-            <CopyBlock value={setup.snippet} label={`Copy ${selected.label} setup`} primary testId="agent-setup-snippet" copyTestId="agent-setup-copy" buttonRef={copyButton} />
+            <p className="text-sm text-ink-2">Paste this into your agent&apos;s MCP config. It is the same for every MCP client.</p>
+            <CopyBlock value={setup.config} label="Copy MCP config" primary testId="agent-setup-snippet" copyTestId="agent-setup-copy" buttonRef={copyButton} />
+            <details className="text-sm">
+              <summary className="w-fit cursor-pointer select-none py-1 text-xs font-medium text-ink-2 hover:text-ink">Adding it through a form instead?</summary>
+              <div className="mt-2 flex flex-col gap-2" data-testid="agent-setup-fields">
+                <p className="text-xs text-ink-3">Add a remote (HTTP) server with this URL and an Authorization header.</p>
+                <CopyBlock value={setup.url} label="Copy server URL" testId="agent-setup-url" />
+                <CopyBlock value={setup.authorization} label="Copy Authorization header" testId="agent-setup-header" />
+              </div>
+            </details>
             <p className="flex items-start gap-1.5 text-xs text-ink-2">
               <TriangleAlert size={14} className="mt-px shrink-0 text-warning" aria-hidden="true" />
               This contains your key. It is shown only once, so copy it before you close this.
@@ -223,30 +175,10 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentS
               <Loader2 size={14} className="shrink-0 animate-spin" aria-hidden="true" />
               Waiting for your agent to connect. Start a new session after you add it.
             </p>
-            {setup.extra && (
-              <details key={client} open={selected.id === "copilot-app"} className="text-sm">
-                <summary className="w-fit cursor-pointer select-none py-1 text-xs font-medium text-ink-2 hover:text-ink">{setup.extra.title}</summary>
-                <div className="mt-2 flex flex-col gap-2">
-                  <p className="text-xs text-ink-3">{setup.extra.instruction}</p>
-                  <CopyBlock value={setup.extra.snippet} label={`Copy: ${setup.extra.title}`} />
-                </div>
-              </details>
-            )}
-            {setup.docs && (
-              <a
-                className="inline-flex min-h-6 w-fit items-center gap-1 text-xs font-medium text-accent hover:underline"
-                href={setup.docs.href}
-                target="_blank"
-                rel="noreferrer"
-                data-testid="agent-client-docs-link"
-              >
-                {setup.docs.label} <ExternalLink size={13} aria-hidden="true" />
-              </a>
-            )}
           </>
         ) : (
           <>
-            <p className="text-sm text-ink-2">Create a key for your agent. Markdoc then shows exactly what to run or paste for {clientTitle}.</p>
+            <p className="text-sm text-ink-2">Create a key for your agent. Markdoc then shows the MCP config to paste.</p>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
               <button type="button" className="btn btn-primary gap-2" onClick={() => void create()} disabled={busy || !keyName.trim()} data-testid="agent-create-key">
                 {busy ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <KeyRound size={16} aria-hidden="true" />}
@@ -323,7 +255,7 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentS
         )}
       </Step>
 
-      <Step n={3} title={inviteTitle(doc)} state="idle">
+      <Step n={2} title={inviteTitle(doc)} state="idle">
         {created ? <InviteBody doc={doc} primary={false} /> : <p className="text-xs text-ink-3">Once your agent is connected, you get a sentence to paste into it.</p>}
       </Step>
 

@@ -214,11 +214,12 @@ All nonsecret defaults are already wired: subscription
 `332d0c98-694c-48a0-91f3-465de6ac30a5`, tenant
 `f1fde69f-c8d3-4b94-adeb-02d045b37f6a`, resource group `markdoc-rg`, ACR
 `markdocacrmnd542unepl56` / `markdocacrmnd542unepl56.azurecr.io`, VM `markdoc-pg`,
-public IP `markdoc-web-ip` with Azure DNS name
-`markdoc-burkeholland.eastus2.cloudapp.azure.com`, and public origin
-`https://markdoc.app`.
+public IP `markdoc-web-ip` (DNS name
+`markdoc-burkeholland.eastus2.cloudapp.azure.com`), and public health at
+`https://markdoc.app`. The Azure hostname now redirects to `markdoc.app`, so the
+release checks health there directly and still refuses redirects.
 The command rejects another subscription/tenant/cloud, registry, VM/NIC/IP
-association or Azure DNS name, and checks public health only on `markdoc.app`. It neither signs in interactively nor changes
+association or public origin. It neither signs in interactively nor changes
 the active account. The guest still uses its managed identity and existing
 root-owned `0600` `/etc/markdoc/markdoc.env` for `markdoc-app`.
 

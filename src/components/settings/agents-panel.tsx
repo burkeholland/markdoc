@@ -31,8 +31,8 @@ export function AgentsPanel({ origin, userLogin, next, initialTokens }: AgentsPa
       <div>
         <h1 className="text-xl font-semibold text-ink">AI agents</h1>
         <p className="mt-1 max-w-2xl text-sm leading-6 text-ink-3">
-          Connect Copilot, Claude, Cursor or any MCP client. It reads your documents, comments and suggests edits; you accept or reject each change. Its work shows up
-          as <strong className="font-medium text-ink-2">{userLogin} via Copilot CLI</strong> (or whatever you name it).
+          Connect any MCP client. It reads your documents, comments and suggests edits; you accept or reject each change. Its work shows up
+          as <strong className="font-medium text-ink-2">{userLogin} via AI agent</strong> (or whatever you name it).
         </p>
         {next && (
           <a className="btn btn-outline btn-sm mt-3 gap-1.5" href={next} data-testid="settings-back-to-document">

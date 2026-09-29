@@ -1713,6 +1713,11 @@ export function EditorShell({
   }, [canDockPanel]);
   // Phones never split: a remembered/initial "split" renders as the preview there.
   const shownLayout: Layout = isPhone && layout === "split" ? "rich" : layout;
+  // With one pane on screen the toolbar, menus and outline act on it, not on a hidden pane focused
+  // earlier (Preview only after typing in the source applied toolbar actions off screen).
+  useEffect(() => {
+    if (shownLayout !== "split") session.setActiveSurface(shownLayout);
+  }, [session, shownLayout]);
   // First load: narrow windows open in the preview unless the user chose Markdown before; tablets
   // start with the outline hidden so both panes get the width.
   useEffect(() => {

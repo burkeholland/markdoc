@@ -131,7 +131,7 @@ describe("AgentsPanel", () => {
     expect(postCall?.[0]).toBe("/api/tokens");
     const postIndex = fetchMock.mock.calls.indexOf(postCall!);
     expect(await requestBody(postIndex)).toMatchObject({
-      name: "Copilot CLI",
+      name: "AI agent",
       expiresInDays: 90,
       scope: "comment",
       documentIds: null,
@@ -156,6 +156,6 @@ describe("AgentsPanel", () => {
     routeTokens([]);
     renderPanel({ userLogin: "mona" });
 
-    expect(screen.getByText("mona via Copilot CLI")).toBeInTheDocument();
+    expect(screen.getByText("mona via AI agent")).toBeInTheDocument();
   });
 });
