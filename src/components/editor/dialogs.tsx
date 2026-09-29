@@ -140,10 +140,15 @@ class LinkPublicationAuthority {
   }
 }
 
+const attachedLinkElements = new WeakSet<HTMLElement>();
+
 class LinkElementOwner<T extends HTMLElement> {
   private current: T | null = null;
 
-  constructor(private readonly retire: () => void) {}
+  constructor(
+    private readonly retire: () => void,
+    private readonly onAttach: () => void = () => {},
+  ) {}
 
   readonly element = () => this.current;
   readonly capture: React.RefCallback<T> = (element) => {
@@ -151,6 +156,11 @@ class LinkElementOwner<T extends HTMLElement> {
     this.current = element;
     this.retire();
     if (!element) return;
+    // Every render re-attaches the same nodes through fresh owners; only a newly mounted node counts.
+    if (!attachedLinkElements.has(element)) {
+      attachedLinkElements.add(element);
+      this.onAttach();
+    }
     return () => {
       if (this.current !== element) return;
       this.current = null;
@@ -159,15 +169,15 @@ class LinkElementOwner<T extends HTMLElement> {
   };
 }
 
-function createLinkElementOwners(authority: LinkPublicationAuthority, identity: object) {
+function createLinkElementOwners(authority: LinkPublicationAuthority, identity: object, onAttach: () => void) {
   const retire = () => authority.retire(identity);
-  const form = new LinkElementOwner<HTMLFormElement>(retire);
-  const url = new LinkElementOwner<HTMLInputElement>(retire);
-  const text = new LinkElementOwner<HTMLInputElement>(retire);
-  const remove = new LinkElementOwner<HTMLButtonElement>(retire);
-  const placeholder = new LinkElementOwner<HTMLSpanElement>(retire);
-  const cancel = new LinkElementOwner<HTMLButtonElement>(retire);
-  const apply = new LinkElementOwner<HTMLButtonElement>(retire);
+  const form = new LinkElementOwner<HTMLFormElement>(retire, onAttach);
+  const url = new LinkElementOwner<HTMLInputElement>(retire, onAttach);
+  const text = new LinkElementOwner<HTMLInputElement>(retire, onAttach);
+  const remove = new LinkElementOwner<HTMLButtonElement>(retire, onAttach);
+  const placeholder = new LinkElementOwner<HTMLSpanElement>(retire, onAttach);
+  const cancel = new LinkElementOwner<HTMLButtonElement>(retire, onAttach);
+  const apply = new LinkElementOwner<HTMLButtonElement>(retire, onAttach);
   return Object.freeze({
     form,
     url,
@@ -291,6 +301,9 @@ function linkDomIsExact(presentation: LinkPresentation, changing: "url" | "text"
   );
 }
 
+/** Successor renders requested per link dialog while its portal content attaches. */
+const linkRecoveries = new WeakMap<LinkPublicationAuthority, number>();
+
 export const LinkDialog = memo(function LinkDialog({
   open,
   onOpenChange,
@@ -319,7 +332,20 @@ export const LinkDialog = memo(function LinkDialog({
   const { href, text } = draft;
   const after = useAfterClose(visit, activeVisit);
   const identity = Object.freeze({});
-  const owners = createLinkElementOwners(authority, identity);
+  const [, setPublicationRevision] = useState(0);
+  // The dialog body mounts through a portal after this component's layout effect has run, so
+  // render once more when new elements attach without a publication; capped per open so it cannot loop.
+  const onAttach = () =>
+    queueMicrotask(() => {
+      const requests = linkRecoveries.get(authority) ?? 0;
+      if (authority.active() || requests >= 3) return;
+      linkRecoveries.set(authority, requests + 1);
+      setPublicationRevision((revision) => revision + 1);
+    });
+  useLayoutEffect(() => {
+    if (open) linkRecoveries.delete(authority);
+  }, [authority, open]);
+  const owners = createLinkElementOwners(authority, identity, onAttach);
   const {
     form: formOwner,
     url: urlOwner,
@@ -1613,7 +1639,9 @@ class ImageDismissalListener {
       proof,
     ]);
     IMAGE_APPLY(IMAGE_SET_ADD, this.#pendingSubmitProofs, [proof]);
-    queueMicrotask(() => {
+    // Expire after the whole dispatch: browsers drain microtasks between listeners of a real
+    // (user-initiated) submit, which would drop the proof before the form's own listener runs.
+    setTimeout(() => {
       const current = IMAGE_APPLY(IMAGE_WEAK_MAP_GET, this.#submitProofs, [
         proof.nativeEvent,
       ]) as ImageSubmitCaptureProof | undefined;
@@ -4092,6 +4120,9 @@ function ImagePublicationBoundary({
   return children;
 }
 
+/** Successor renders requested after a publication retired outside a render, per dialog open. */
+const imageRecoveries = new WeakMap<object, number>();
+
 function createImagePresentation(
   authority: ImageAuthority,
   coordinator: ImagePublicationCoordinator,
@@ -4510,6 +4541,15 @@ function createImagePresentation(
       expectedOwners(),
       () => {
         clearDismissal();
+        // A publication retired by a DOM change outside a render (focus guards, portal settling)
+        // has no successor; render one so typing and Insert keep working. Capped per open.
+        queueMicrotask(() => {
+          if (coordinator.authoritative()) return;
+          const recoveries = imageRecoveries.get(coordinator) ?? 0;
+          if (recoveries >= 5) return;
+          imageRecoveries.set(coordinator, recoveries + 1);
+          requestSuccessor();
+        });
       },
     );
     if (!runtime) {
@@ -4652,6 +4692,7 @@ function createImagePresentation(
       requestSuccessor();
       return;
     }
+    imageRecoveries.delete(coordinator);
     updateOwnedDraft(publication, (current) =>
       nextImageDraft(current, {
         src: value,
@@ -4691,6 +4732,7 @@ function createImagePresentation(
       requestSuccessor();
       return;
     }
+    imageRecoveries.delete(coordinator);
     updateOwnedDraft(publication, (current) =>
       nextImageDraft(current, {
         alt: value,
@@ -5129,6 +5171,9 @@ export const ImageDialog = memo(function ImageDialog({
   const [coordinator] = useState(
     () => new ImagePublicationCoordinator(mount),
   );
+  useLayoutEffect(() => {
+    if (open) imageRecoveries.delete(coordinator);
+  }, [coordinator, open]);
   const [dismissalListener] = useState(
     () => new ImageDismissalListener(coordinator),
   );

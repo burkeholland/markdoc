@@ -1229,7 +1229,13 @@ function createToolbarPublication({
       stableOwners.has(owner) &&
       (element === null || (element !== null && prior !== null && element !== prior))
     ) {
-      retire("element");
+      // Menu content can unmount outside a toolbar render (Radix Presence); if no successor took
+      // over by then, render one so the buttons do not stay dead.
+      if (retire("element")) {
+        queueMicrotask(() => {
+          if (!active.current) requestSuccessor();
+        });
+      }
     }
     if (exactReplayReady()) requestReplaySuccessor();
   };
@@ -1680,6 +1686,11 @@ function createToolbarPublication({
   const recordMutations = (records: readonly MutationRecord[], allowTabStops = false) => {
     if (!domChanged && records.some((record) => mutationIsRelevant(record, allowTabStops))) {
       domChanged = true;
+      // A changed toolbar can no longer act; render a fresh publication so the buttons keep working
+      // (e.g. after the Text style menu content unmounts once a heading is picked).
+      queueMicrotask(() => {
+        if (retire("element")) requestSuccessor();
+      });
     }
     return domChanged;
   };
@@ -2087,7 +2098,7 @@ function createToolbarPublication({
       return undefined;
     }
     domObserver = new MutationObserverConstructor((records) => {
-      if (recordMutations(records)) retire("element");
+      if (recordMutations(records) && retire("element")) requestSuccessor();
     });
     domObserver.observe(ownedRoot.ownerDocument, {
       attributes: true,
@@ -2509,6 +2520,23 @@ function createToolbarPublication({
       blockedRadixOpen = null;
       return;
     }
+    // Closing never needs event proof: a modal menu that refuses to close leaves the page inert.
+    if (!open) {
+      if (!authority.headingOpen || headingOpenChanged) return;
+      const content = headingContent.element() ?? lastHeadingContent;
+      if (content) {
+        pendingHeadingClose.current = Object.freeze({
+          source: publication,
+          content,
+        });
+      }
+      headingOpenChanged = true;
+      consumed = true;
+      setHeadingState((current) =>
+        current.open ? Object.freeze({ mount: current.mount, open: false, disclosure: null }) : current,
+      );
+      return;
+    }
     if (
       open === authority.headingOpen ||
       headingOpenChanged ||
@@ -2571,14 +2599,26 @@ function createToolbarPublication({
     }
     const source = headingContent.element() ?? lastHeadingContent;
     if (
-      !source ||
-      !exactCustomEvent(event, source, "focusScope.autoFocusOnUnmount") ||
-      !claim(closeAction, event)
+      source &&
+      exactCustomEvent(event, source, "focusScope.autoFocusOnUnmount") &&
+      claim(closeAction, event)
     ) {
+      pendingHeadingClose.current = null;
+      event.preventDefault();
+      closeAction.run();
       return;
     }
-    event.preventDefault();
-    closeAction.run();
+    // The menu this toolbar just closed unmounted and retired the publication that opened it; still
+    // put the caret back in the editor so typing continues where the heading was applied.
+    if (
+      closeVisit &&
+      event.type === "focusScope.autoFocusOnUnmount" &&
+      claimEvent(event)
+    ) {
+      pendingHeadingClose.current = null;
+      event.preventDefault();
+      closeAction.run();
+    }
   };
 
   const publication = Object.freeze({

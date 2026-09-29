@@ -88,7 +88,7 @@ code {
   background: #efece6; border-radius: 4px; color: #be185d; padding: 0.1em 0.35em; font-size: 0.875em;
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
-hr { border: none; border-top: 1px solid #e7e5e4; }
+hr { border: none; border-top: 1px solid #948e88; }
 img { max-width: 100%; height: auto; border-radius: 8px; }
 table { border-collapse: collapse; width: 100%; }
 th, td { border: 1px solid #d6d3d1; padding: 6px 10px; vertical-align: top; text-align: left; }

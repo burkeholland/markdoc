@@ -71,7 +71,7 @@ const FIXTURE_BODY = `<h1 id="reader-fixture">Reader Fixture</h1>
 <li class="task-list-item"><input type="checkbox" checked disabled aria-label="done"> done</li>
 <li class="task-list-item"><input type="checkbox" disabled aria-label="todo"> todo</li>
 </ul>`;
-const FIXTURE_SHA256 = "4ad13689da162768ce6c01ee61179827402f185bb5307f51be8eac32192404b1";
+const FIXTURE_SHA256 = "d1adc18cc50aa3078a89e32b5b7d2ad156b46b2a1d127302f4751e2a9b9d4abc";
 const FIXTURE_LENGTH = 5845;
 
 describe("renderMarkdownBody", () => {
