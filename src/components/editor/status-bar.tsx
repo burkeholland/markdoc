@@ -5512,6 +5512,20 @@ function StatusBarIssuesContent({
   );
 }
 
+/**
+ * True while a real user dismissal is being dispatched (Escape, a picked item, focus leaving, or a
+ * trusted outside press). Scripted outside presses stay with the gesture checks below.
+ */
+function isUserDismissal() {
+  const event = typeof window === "undefined" ? undefined : window.event;
+  if (!event) return false;
+  if (event.type === "dismissableLayer.pointerDownOutside") {
+    return (event as CustomEvent<{ originalEvent?: Event }>).detail?.originalEvent?.isTrusted === true;
+  }
+  if (event.type.startsWith("pointer")) return event.isTrusted;
+  return true;
+}
+
 export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLineWrapping, syncScroll, onSyncScroll, onIssueSelect, onShortcuts, onStorage, compact = false }: StatusBarProps) {
   // Linting walks the document and statistics count it: wait for a pause in typing. The tree is the
   // binding's incrementally maintained parse, so no second parse of the document happens here.
@@ -5639,6 +5653,10 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   const menuFocusIntentRef = useRef<StatusBarMenuFocusIntent | null>(null);
   const issuesIntentRef = useRef<StatusBarDisclosureIntent | null>(null);
   const issuesFocusIntentRef = useRef<StatusBarIssuesFocusIntent | null>(null);
+  const latestAuthorityRef = useRef(authority);
+  useLayoutEffect(() => {
+    latestAuthorityRef.current = authority;
+  }, [authority]);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -5717,6 +5735,14 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   }, [authority, createIssuesIntent, manager]);
 
   const changeMenuOpen = useCallback((open: boolean) => {
+    // Closing during a real user dismissal (Escape, a picked item, an outside click) needs no further proof;
+    // requiring one left View options stuck open, and the page inert, after any use.
+    if (!open && latestAuthorityRef.current === authority && isUserDismissal()) {
+      menuIntentRef.current = null;
+      menuFocusIntentRef.current = null;
+      if (authority.menuOpen) setMenuOpen(false);
+      return;
+    }
     const intent = menuIntentRef.current;
     if (
       open === authority.menuOpen
@@ -5809,6 +5835,12 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
   }, [authority, authorizeMenuChange, changeMenuOpen, manager]);
 
   const changeIssuesOpen = useCallback((open: boolean) => {
+    if (!open && latestAuthorityRef.current === authority && isUserDismissal()) {
+      issuesIntentRef.current = null;
+      issuesFocusIntentRef.current = null;
+      if (authority.issuesOpen) setIssuesOpen(false);
+      return;
+    }
     const intent = issuesIntentRef.current;
     if (
       open === authority.issuesOpen
