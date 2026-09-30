@@ -32,6 +32,7 @@ const DOC: DocumentDto = {
   title: "Local notes",
   storage: "gist",
   linkAccess: "private",
+  linkPreview: false,
   ownerId: "owner-auto-test",
   gistId: DESTINATION.gistId,
   gistFile: DESTINATION.filename,

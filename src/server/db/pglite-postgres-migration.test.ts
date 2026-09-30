@@ -104,7 +104,7 @@ describe("PGlite to PostgreSQL migration", () => {
       expect(manifest.tables.gist_auto_update.rows).toBe(0);
       expect(manifest.records.assets).toMatchObject({ count: 2, bytes: 1_048_579 });
       expect(manifest.schema.source).toMatchObject({ count: 15, latestCreatedAt: "1787795284192" });
-      expect(manifest.schema.target).toMatchObject({ count: 21, latestCreatedAt: "1788622003570" });
+      expect(manifest.schema.target).toMatchObject({ count: 22, latestCreatedAt: "1790778877676" });
       expect(JSON.stringify(manifest)).not.toContain("account-access-value");
       expect(JSON.stringify(manifest)).not.toContain("https://fixture.invalid/hook");
       expect(JSON.stringify(manifest)).not.toContain("Unicode");

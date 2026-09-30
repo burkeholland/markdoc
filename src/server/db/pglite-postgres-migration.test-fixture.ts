@@ -117,6 +117,7 @@ export async function seedMigrationFixture(source: PGlite): Promise<void> {
 }
 
 export async function setMigrationFixtureSchemaToVersion15(source: PGlite): Promise<void> {
+  await source.query(`ALTER TABLE document DROP COLUMN link_preview`);
   await source.query(`DROP TRIGGER document_gist_saved ON document`);
   await source.query(`DROP FUNCTION markdoc_queue_gist_save()`);
   await source.query(`DROP TABLE gist_auto_update`);

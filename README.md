@@ -39,7 +39,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 - Version compare: diff any two versions, swap sides, step through hunks, see moved paragraphs as moves, rename a version or copy it as a new document.
 - Activity panel per document: who edited, commented, suggested, published or shared, with agents marked.
 - Notifications: a bell in the editor header and a strip on the dashboard when someone replies to your thread, resolves it, accepts or rejects your suggestion, shares with you or @mentions you; `?thread=` links open the thread.
-- Share by GitHub handle as editor, commenter or viewer, or by link (restricted, view, comment, edit).
+- Share by GitHub handle as editor, commenter or viewer, or by link (restricted, view, comment, edit). A link shared in Slack, Teams or iMessage previews with the document's title and first lines; a restricted document shows them only when its owner turns on *Show title and first lines in link previews*.
 - Reader view at `/p/<id>`: clean read-only page with a table of contents, reading time and download menu.
 - Offline editing that survives a refresh or a closed tab; edits merge on reconnect and the header shows what is unsaved.
 
@@ -111,7 +111,7 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 | --- | --- | --- |
 | `AUTH_SECRET` | yes | Signs sessions and collaboration tokens. |
 | `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` | for GitHub login | GitHub OAuth App credentials. |
-| `AUTH_URL` | in production | Public URL, e.g. `https://markdoc.example.com`. Also the fallback origin for absolute URLs the server builds itself (link-preview `og:image` / `twitter:image`, including the per-document card a shared document link unfurls with — title, first lines, owner) when `MARKDOC_URL` is unset; without either, previews point at `http://localhost:<PORT>`. |
+| `AUTH_URL` | in production | Public URL, e.g. `https://markdoc.example.com`. Also the fallback origin for absolute URLs the server builds itself (link-preview `og:image` / `twitter:image`, including the per-document card with the title, first lines and owner that a shared document link unfurls with, as does a restricted one whose owner turned on link previews) when `MARKDOC_URL` is unset; without either, previews point at `http://localhost:<PORT>`. |
 | `MARKDOC_URL` | optional | Canonical public origin (bare `https://host`, no path) used for MCP tool output and link-preview images; wins over `AUTH_URL`. The server refuses to start on a non-bare-origin value. |
 | `MARKDOC_CANONICAL_HOST` | optional | Bare hostname (e.g. `markdoc.example.com`) the site should be reached on. When set, a top-level `GET`/`HEAD` that arrives on any other host (such as the Container App's default `*.azurecontainerapps.io` name after a custom-domain cutover) is answered `308` to `https://<host>` with the same path and query; `/api/*`, WebSocket upgrades and writes pass through. Unset (the default) changes nothing; an invalid value logs one warning and is ignored. See `docs/custom-domain.md`. |
 | `DATABASE_URL` | in production | Postgres connection string. Missing and blank values fail production startup before PGlite opens or migrates. Omit in development and tests to use PGlite in `.data/pglite`. |

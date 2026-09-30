@@ -11,7 +11,8 @@ import { ImageResponse } from "next/og";
  * TTF/OTF/WOFF, not the woff2 `next/font/google` emits), read once per process; the text is reduced to
  * their repertoire first ({@link cardText}), so `next/og` never reaches for a remote fallback glyph; the
  * brand mark is the JSX below (Satori cannot fetch a relative URL). Access is the caller's business: the
- * routes in `src/app/{d,p}/[id]/opengraph-image.tsx` run the page's access check and 404 before rendering.
+ * routes in `src/app/{d,p}/[id]/opengraph-image.tsx` 404 before rendering unless the caller may read the
+ * document or its link preview is public (see `document-card-route.ts`).
  */
 
 /** 1200×630, the size unfurlers render edge to edge; `og:image:width/height` are derived from it. */

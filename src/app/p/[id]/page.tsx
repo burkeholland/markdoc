@@ -20,7 +20,7 @@ export async function generateMetadata({ params }: PageProps<"/p/[id]">): Promis
   const user = await currentUser();
   const access = await getEffectiveDocumentAccess(id, user);
   const live = access ? await liveTextForRequest(id).catch(() => null) : null;
-  return { ...documentMetadata(access, live, "/p"), robots: { index: false } };
+  return { ...documentMetadata(access?.doc ?? null, live, "/p"), robots: { index: false } };
 }
 
 export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">) {
@@ -39,7 +39,7 @@ export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">)
     if (!(err instanceof UnrenderableDocumentError)) throw err;
     return { html: `<p><em>${UNRENDERABLE_MESSAGE}: it contains more unmatched brackets or emphasis markers than the renderer accepts. Open it in the editor to fix the source.</em></p>`, headings: [] };
   });
-  const title = documentTitle(access, live);
+  const title = documentTitle(doc, live);
 
   return (
     <ReaderPage

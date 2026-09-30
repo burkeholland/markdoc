@@ -1,14 +1,22 @@
 import { redirect } from "next/navigation";
+import type { Metadata } from "next";
 import { GitHubIcon } from "@/components/ui/github-icon";
 import { signIn, auth, devLoginEnabled, githubConfigured } from "@/auth";
 import { Logo } from "@/components/ui/logo";
 import { loginReturnPath } from "./return-path";
 import { embeddedDocumentPath } from "@/server/http";
+import { signInPreviewMetadata } from "@/server/document-metadata";
 
-export const metadata = {
-  title: "Sign in",
-  description: "Sign in to Markdoc, the collaborative Markdown editor for people and AI agents.",
-};
+const SIGN_IN_DESCRIPTION = "Sign in to Markdoc, the collaborative Markdown editor for people and AI agents.";
+
+// A restricted document sends signed-out visitors here, and link unfurlers (Slack, Teams, iMessage)
+// follow that redirect, so this is where they read the document's card: its own title and first lines
+// (which replace the sign-in description) when the owner turned on link previews, else the root
+// layout's generic card.
+export async function generateMetadata({ searchParams }: PageProps<"/login">): Promise<Metadata> {
+  const preview = await signInPreviewMetadata(loginReturnPath((await searchParams).next));
+  return { description: SIGN_IN_DESCRIPTION, ...preview, title: "Sign in" };
+}
 
 export default async function LoginPage({ searchParams }: PageProps<"/login">) {
   const session = await auth();
@@ -17,6 +25,10 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
   const embedPath = await embeddedDocumentPath(session?.user?.id);
   if (embedPath) redirect(embedPath);
   if (session?.user) redirect(next);
+  // The page does not use the card, but waiting for it here (the same cached read `generateMetadata`
+  // makes) puts its tags in <head> for every unfurler. Next.js only holds the head back for the bots it
+  // knows, such as Slackbot; for the rest, Teams included, late tags would land at the end of <body>.
+  await signInPreviewMetadata(next);
   const error = typeof params.error === "string" ? params.error : null;
 
   return (

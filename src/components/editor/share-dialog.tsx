@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { BookOpen, Bot, Check, ChevronRight, Copy, Globe, Link2, Loader2, Lock, Trash2 } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
@@ -96,6 +96,7 @@ export const ShareDialog = memo(function ShareDialog({
   const [busyLogins, setBusyLogins] = useState<ReadonlySet<string>>(new Set());
   const [linkBusy, setLinkBusy] = useState(false);
   const [origin, setOrigin] = useState("");
+  const previewId = useId();
   const roleSelect = useRef<HTMLSelectElement>(null);
   // Stable identity: the handle box keys its bindings on its callbacks, so a new function on every render would make it rebuild them.
   const focusRole = useCallback(() => roleSelect.current?.focus(), []);
@@ -200,16 +201,17 @@ export const ShareDialog = memo(function ShareDialog({
     }
   };
 
-  const setLinkAccess = async (value: LinkAccess) => {
+  // One link change at a time (access or preview): racing responses could land out of order and show a stale setting.
+  const patchLink = async (body: { linkAccess?: LinkAccess; linkPreview?: boolean }, failure: string) => {
     if (linkBusy) return;
     const documentId = doc.id;
     setLinkBusy(true);
     setActionError(null);
     try {
-      const res = await api.documents.patch(documentId, { linkAccess: value });
+      const res = await api.documents.patch(documentId, body);
       if (currentDoc.current === documentId) onDocChange(res.document);
     } catch (e) {
-      if (currentDoc.current === documentId) setActionError(apiErrorText(e, "Could not change who can open the link."));
+      if (currentDoc.current === documentId) setActionError(apiErrorText(e, failure));
     } finally {
       setLinkBusy(false);
     }
@@ -367,7 +369,7 @@ export const ShareDialog = memo(function ShareDialog({
                     className="select w-full"
                     value={doc.linkAccess}
                     disabled={linkBusy}
-                    onChange={(e) => void setLinkAccess(e.target.value as LinkAccess)}
+                    onChange={(e) => void patchLink({ linkAccess: e.target.value as LinkAccess }, "Could not change who can open the link.")}
                     aria-label="Link access"
                     data-testid="link-access"
                   >
@@ -381,6 +383,30 @@ export const ShareDialog = memo(function ShareDialog({
                   <div className="text-sm font-medium text-ink">{linkOption.label}</div>
                 )}
                 <p className="mt-1 text-xs text-ink-3">{linkOption.description}</p>
+                {/* A link-shared document always previews with its title and first lines: anyone with the link can read it. */}
+                {restricted && (
+                  <div className="mt-3 flex items-start gap-2.5">
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={doc.linkPreview === true}
+                      aria-labelledby={`${previewId}-label`}
+                      aria-describedby={`${previewId}-hint`}
+                      className="switch mt-px"
+                      disabled={!isOwner || linkBusy}
+                      onClick={() => void patchLink({ linkPreview: !doc.linkPreview }, "Could not change the link preview.")}
+                      data-testid="link-preview"
+                    />
+                    <div className="min-w-0 text-xs leading-5">
+                      <div id={`${previewId}-label`} className="font-medium text-ink-2">
+                        Show title and first lines in link previews
+                      </div>
+                      <div id={`${previewId}-hint`} className="text-ink-3">
+                        Slack, Teams and other apps show them, with the owner&apos;s name.
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
             <div className="flex flex-col gap-1.5 border-t border-line pt-3">

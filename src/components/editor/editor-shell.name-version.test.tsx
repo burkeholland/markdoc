@@ -131,6 +131,7 @@ const DOC: DocumentDto = {
   title: "First document",
   storage: "local",
   linkAccess: "private",
+  linkPreview: false,
   ownerId: USER.id,
   gistId: null,
   gistFile: null,

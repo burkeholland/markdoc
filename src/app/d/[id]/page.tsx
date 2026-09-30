@@ -17,7 +17,7 @@ export async function generateMetadata({ params }: PageProps<"/d/[id]">): Promis
   const user = await currentUser();
   const access = await getEffectiveDocumentAccess(id, user);
   const live = access ? await liveTextForRequest(id).catch(() => null) : null;
-  return documentMetadata(access, live, "/d");
+  return documentMetadata(access?.doc ?? null, live, "/d");
 }
 
 export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {

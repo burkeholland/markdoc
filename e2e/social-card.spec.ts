@@ -2,20 +2,41 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test } from "./fixtures";
 import type { APIRequestContext, APIResponse } from "@playwright/test";
-import { createDocument, signIn } from "./helpers";
+import { createDocument, openDocument, signIn } from "./helpers";
 
 /**
  * The per-document social card (task #1287): link unfurlers (Slack, Teams, iMessage) fetch a document
  * URL anonymously, so what they see is what an anonymous visitor may know. A link-shared document
  * answers with its own title, excerpt and a rendered 1200×630 image (`src/server/document-metadata.ts`,
  * `src/app/{d,p}/[id]/opengraph-image.tsx`); a private one keeps the root layout's generic card and its
- * image route is a 404 for everyone without access.
+ * image route is a 404 for everyone without access, unless its owner turned on link previews in the
+ * Share dialog: then the sign-in page the unfurler is sent to carries the document's card.
  */
 
 const TITLE = "Quarterly reading plan";
 const CONTENT = `# ${TITLE}\n\nA **short** plan for what the [team](https://example.test) reads this quarter.\n\nOne book a month, notes in here, discussion on the last Friday.\n`;
 const EXCERPT = "A short plan for what the team reads this quarter. One book a month, notes in here, discussion on the last Friday.";
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/** Text past the first 160 characters of prose: no link preview carries it. */
+const TAIL_MARKER = "members-only-tail-1287";
+const LONG_CONTENT = `${CONTENT}\nHosts rotate every month, and the shortlist for next quarter is at the bottom of this plan: ${TAIL_MARKER}.\n`;
+/** The long document's excerpt: the short plan, then as much of the next paragraph as fits in 160 characters. */
+const LONG_EXCERPT = new RegExp(`^${escapeRegExp(EXCERPT)} .{1,${160 - EXCERPT.length - 1}}$`);
+
+/**
+ * Link unfurlers by user agent. Next.js holds `<head>` back until the metadata is ready only for the bots on
+ * its list (Slackbot, facebookexternalhit, Twitterbot); Teams is not on it, so its card must not depend on that.
+ */
+const UNFURLERS = [
+  { name: "Slack", userAgent: "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)" },
+  { name: "Facebook", userAgent: "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)" },
+  { name: "X", userAgent: "Twitterbot/1.0" },
+  {
+    name: "Teams",
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 MicrosoftPreview/2.0 +https://aka.ms/MicrosoftPreview",
+  },
+];
 
 /** `<meta property|name="…" content="…">` tags of `html`, by property/name, in document order. */
 function metaTags(html: string): Map<string, string[]> {
@@ -38,13 +59,25 @@ function pageTitle(html: string): string | undefined {
   return /<title>([^<]*)<\/title>/.exec(html)?.[1];
 }
 
+/** The `<head>` of a page, where unfurlers read the card: most of them miss tags that arrive later in `<body>`. */
+function headOf(html: string): string {
+  const head = /<head[^>]*>([\s\S]*?)<\/head>/.exec(html)?.[1];
+  expect(head, "<head>").toBeDefined();
+  return head!;
+}
+
+/** The page's `<title>` and the excerpt (exactly, or a pattern for a long document) a card is expected to carry. */
+type CardText = { titleTag?: string; excerpt?: string | RegExp };
+
 /** The document's card tags, as an unfurler reads them, pointing at the image route next to `pagePath`. */
-function expectDocumentCard(html: string, baseURL: string, pagePath: string) {
+function expectDocumentCard(html: string, baseURL: string, pagePath: string, { titleTag = `${TITLE} · Markdoc`, excerpt = EXCERPT }: CardText = {}) {
   const tags = metaTags(html);
-  expect(pageTitle(html), "<title>").toBe(`${TITLE} · Markdoc`);
+  const expectExcerpt = (key: string) =>
+    typeof excerpt === "string" ? expect(first(tags, key), key).toBe(excerpt) : expect(first(tags, key), key).toMatch(excerpt);
+  expect(pageTitle(html), "<title>").toBe(titleTag);
   expect(first(tags, "og:title"), "og:title").toBe(TITLE);
-  expect(first(tags, "og:description"), "og:description").toBe(EXCERPT);
-  expect(first(tags, "description"), "description").toBe(EXCERPT);
+  expectExcerpt("og:description");
+  expectExcerpt("description");
   expect(first(tags, "og:site_name"), "og:site_name").toBe("Markdoc");
   expect(first(tags, "og:type"), "og:type").toBe("article");
   expect(first(tags, "og:url"), "og:url").toBe(`${baseURL}${pagePath}`);
@@ -155,6 +188,74 @@ test.describe("social card", () => {
       await expectCardImage(await alice.page.request.get(`/p/${id}/opengraph-image`), "owner /p image");
     } finally {
       await anonymous.dispose();
+      await alice.context.close();
+    }
+  });
+
+  test("a restricted document with link previews on unfurls with its card on the sign-in page, and off again without it", async ({ browser, playwright, baseURL }) => {
+    test.slow();
+    const alice = await signIn(browser, "alice");
+    const bob = await signIn(browser, "bob");
+    try {
+      const id = await createDocument(alice.page, LONG_CONTENT, TITLE);
+
+      // The owner turns previews on in the Share dialog; the link itself stays restricted.
+      await openDocument(alice.page, id);
+      await alice.page.getByTestId("share-button").click();
+      const dialog = alice.page.getByRole("dialog", { name: /share/i });
+      await expect(dialog).toBeVisible();
+      const previews = dialog.getByRole("switch", { name: "Show title and first lines in link previews" });
+      await expect(previews).toHaveAttribute("aria-checked", "false");
+      await previews.click();
+      await expect(previews).toHaveAttribute("aria-checked", "true");
+      await expect(dialog.getByTestId("link-access")).toHaveValue("private");
+
+      for (const pagePath of [`/d/${id}`, `/p/${id}`]) {
+        for (const { name, userAgent } of UNFURLERS) {
+          const unfurler = await playwright.request.newContext({ baseURL, userAgent });
+          try {
+            // Still sent to sign in, and the card is in that page's <head>: title, first lines, image.
+            const res = await unfurler.get(pagePath);
+            expect(res.status(), `${name} ${pagePath}`).toBe(200);
+            const landed = new URL(res.url());
+            expect([landed.pathname, landed.searchParams.get("next")], `${name} ${pagePath}: where it lands`).toEqual(["/login", pagePath]);
+            const html = await res.text();
+            const image = expectDocumentCard(headOf(html), baseURL!, pagePath, { titleTag: "Sign in · Markdoc", excerpt: LONG_EXCERPT });
+            expect(html, `${name} ${pagePath}: nothing past the first lines`).not.toContain(TAIL_MARKER);
+            if (name === UNFURLERS[0].name) await expectCardImage(await unfurler.get(image), `${pagePath} og:image`);
+          } finally {
+            await unfurler.dispose();
+          }
+        }
+      }
+
+      // A preview is not access: a signed-in stranger still gets a 404 that names nothing. The image is as public as the preview.
+      const stranger = await bob.page.request.get(`/d/${id}`);
+      expect(stranger.status(), "signed-in stranger").toBe(404);
+      const strangerHtml = await stranger.text();
+      expect(strangerHtml, "signed-in stranger").not.toContain(TITLE);
+      expect(strangerHtml, "signed-in stranger").not.toContain(TAIL_MARKER);
+      await expectCardImage(await bob.page.request.get(`/d/${id}/opengraph-image`), "signed-in stranger image");
+
+      // Off again: the generic card, and no image for anyone without access.
+      await previews.click();
+      await expect(previews).toHaveAttribute("aria-checked", "false");
+      for (const { name, userAgent } of UNFURLERS) {
+        const unfurler = await playwright.request.newContext({ baseURL, userAgent });
+        try {
+          for (const pagePath of [`/d/${id}`, `/p/${id}`]) {
+            const res = await unfurler.get(pagePath);
+            expect(new URL(res.url()).pathname, `${name} ${pagePath}`).toBe("/login");
+            expectGenericCard(await res.text(), baseURL!, id);
+            const card = await unfurler.get(`${pagePath}/opengraph-image`);
+            expect(card.status(), `${name} ${pagePath}/opengraph-image`).toBe(404);
+          }
+        } finally {
+          await unfurler.dispose();
+        }
+      }
+    } finally {
+      await bob.context.close();
       await alice.context.close();
     }
   });

@@ -17,6 +17,7 @@ export function publicDocument(doc: PublicDocumentSource) {
     title: doc.title,
     storage: doc.storage,
     linkAccess: doc.linkAccess,
+    linkPreview: doc.linkPreview,
     ownerId: doc.ownerId,
     gistId: doc.gistId,
     gistFile: doc.gistFile,

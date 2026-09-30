@@ -285,6 +285,7 @@ const DOC: DocumentDto = {
   title: "First document",
   storage: "repo",
   linkAccess: "private",
+  linkPreview: false,
   ownerId: USER.id,
   gistId: null,
   gistFile: null,
