@@ -279,6 +279,19 @@ function interceptClick(
   };
 }
 
+// Production builds minify React's SyntheticBaseEvent class name, so a real click there has a one-letter constructor.
+const MangledSyntheticEvent = class a {};
+
+function mangledReactEvent(event: unknown): unknown {
+  if (typeof event !== "object" || event === null) throw new Error("React did not deliver an event object");
+  const prototype = Object.create(Object.getPrototypeOf(event), {
+    constructor: { value: MangledSyntheticEvent },
+  });
+  const mangled = Object.assign(Object.create(prototype) as object, event);
+  expect(Object.getPrototypeOf(mangled).constructor.name).toBe("a");
+  return mangled;
+}
+
 function interceptKeyDown(
   element: HTMLElement,
   property: "onKeyDown" | "onKeyDownCapture",
@@ -2331,6 +2344,53 @@ describe("PresenceStack", () => {
         );
         onCancel.mockClear();
       }
+    } finally {
+      act(() => root.unmount());
+      host.remove();
+    }
+  });
+
+  it("accepts a Cancel click with a production-mangled React event constructor", () => {
+    const local = person("mangled-local", "Mangled local", {
+      isLocal: true,
+      role: "owner",
+    });
+    const session = new PresenceSession({
+      localId: local.id,
+      localName: local.name,
+      users: [local],
+      role: "owner",
+    });
+    const onCancel = vi.fn<(requestId: string) => void>();
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    try {
+      act(() => {
+        root.render(
+          <StrictMode>
+            <PresenceRequests
+              session={session.asCollabSession()}
+              pending={[
+                request("mangled-a", local.id),
+                request("mangled-b", local.id),
+              ]}
+              nameOf={(id) => id}
+              onCancel={onCancel}
+            />
+          </StrictMode>,
+        );
+      });
+      const cancel = within(host).getAllByTestId(
+        "presence-request-cancel",
+      )[0] as HTMLButtonElement;
+      const restore = interceptClick(cancel, (current, event) =>
+        current(mangledReactEvent(event)),
+      );
+      act(() => cancel.click());
+      restore();
+      expect(onCancel).toHaveBeenCalledExactlyOnceWith("mangled-a");
     } finally {
       act(() => root.unmount());
       host.remove();

@@ -577,9 +577,6 @@ function exactGitHubSignInReactClick(
       isPropagationStopped?: unknown;
       persist?: unknown;
     };
-    const prototype = Object.getPrototypeOf(event) as {
-      constructor?: { name?: unknown };
-    } | null;
     return (
       event.nativeEvent === nativeEvent &&
       event.type === "click" &&
@@ -606,7 +603,6 @@ function exactGitHubSignInReactClick(
       event.timeStamp === nativeEvent.timeStamp &&
       !event.defaultPrevented &&
       !nativeEvent.defaultPrevented &&
-      prototype?.constructor?.name === "SyntheticBaseEvent" &&
       reactEvent._reactName === "onClick" &&
       typeof event.preventDefault === "function" &&
       typeof event.stopPropagation === "function" &&

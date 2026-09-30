@@ -767,6 +767,54 @@ describe("GitHubSignInPrompt ownership", () => {
     });
   });
 
+  it("starts sign-in from a click whose React events have a production-mangled constructor", () => {
+    const pending = deferred<void>();
+    signIn.mockReturnValue(pending.promise);
+    render(
+      <GitHubSignInPrompt
+        githubConfigured
+        redirectTo="/documents/minified"
+      />,
+    );
+    const mangledConstructor = class a {};
+    const mangledPrototypes = new Map<object, object>();
+    // Sign-in reads both React events again after React clears currentTarget, so a copy would not be faithful.
+    // Give the real events a renamed constructor instead, as a production build does.
+    const mangle = <T extends object>(event: T): T => {
+      const prototype = Object.getPrototypeOf(event) as object;
+      let mangled = mangledPrototypes.get(prototype);
+      if (!mangled) {
+        mangled = Object.create(prototype, { constructor: { value: mangledConstructor } }) as object;
+        mangledPrototypes.set(prototype, mangled);
+      }
+      Object.setPrototypeOf(event, mangled);
+      expect(Object.getPrototypeOf(event).constructor.name).toBe("a");
+      return event;
+    };
+    const root = screen.getByTestId("github-signin-prompt");
+    const button = screen.getByRole<HTMLButtonElement>("button", {
+      name: /Sign in with GitHub/,
+    });
+    const rootCapture = reactProp<SignInRootClickHandler>(
+      root,
+      "onClickCapture",
+    );
+    const click = reactProp<PickerClickHandler>(button, "onClick");
+    replaceReactProp(root, "onClickCapture", (event: ReactMouseEvent<HTMLDivElement>) =>
+      rootCapture(mangle(event)),
+    );
+    replaceReactProp(button, "onClick", (event: ReactMouseEvent<HTMLButtonElement>) =>
+      click(mangle(event)),
+    );
+
+    fireEvent.click(button);
+    expect(mangledPrototypes.size).toBe(1);
+    expect(signIn).toHaveBeenCalledExactlyOnceWith("github", {
+      redirectTo: "/documents/minified",
+    });
+    expect(button).toBeDisabled();
+  });
+
   it("publishes one exact successor after direct-root Strict Mode ref and layout replay", async () => {
     const pending = deferred<void>();
     signIn.mockReturnValue(pending.promise);

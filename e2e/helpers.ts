@@ -176,9 +176,21 @@ export async function mintToken(
   };
 }
 
-/** The shared Markdown text (what both panes render), read from the live session. */
+/**
+ * The shared Markdown text (what both panes render), read from the live session. A production build does not
+ * expose the dev-only `__markdocSession` hook, so under PROD_BASE_URL a missing hook falls back to the code
+ * pane's lines without remote caret labels; the regular suite still fails loudly when the hook is missing.
+ */
 export const codeText = (page: Page) =>
-  page.evaluate(() => (window as unknown as { __markdocSession: { ytext: { toString(): string } } }).__markdocSession.ytext.toString());
+  page.evaluate((renderedFallback) => {
+    const session = (window as unknown as { __markdocSession?: { ytext: { toString(): string } } }).__markdocSession;
+    if (session || !renderedFallback) return session!.ytext.toString();
+    return Array.from(document.querySelectorAll(".cm-content > .cm-line"), (line) => {
+      const clone = line.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll(".cm-ySelectionCaret").forEach((n) => n.remove());
+      return clone.textContent ?? "";
+    }).join("\n");
+  }, Boolean(process.env.PROD_BASE_URL));
 
 /** Visible text of the rich pane without remote caret labels. */
 export const richText = (page: Page) =>
