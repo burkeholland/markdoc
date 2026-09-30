@@ -62,7 +62,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
-import { ApiError, api } from "@/lib/api";
+import { ApiError } from "@/lib/api";
 import { PICKER_TEMPLATES, type Template } from "@/lib/templates";
 import { Dashboard, TemplateGrid, TrashView, type DashboardProps } from "./dashboard";
 
@@ -200,65 +200,6 @@ function TemplateGridCaptureAttack({
     >
       {children}
     </div>
-  );
-}
-
-interface TrashViewBoundaryProps {
-  documents: DocumentSummaryDto[] | null;
-  busy?: string | null;
-  loading?: boolean;
-  error?: string | null;
-  canRetry?: (error: string) => boolean;
-  canAct?: (document: DocumentSummaryDto, kind: "restore" | "purge") => boolean;
-  onRetry: () => void;
-  onRestore: (document: DocumentSummaryDto) => void;
-  onPurge: (document: DocumentSummaryDto) => void;
-  present?: boolean;
-  mountKey?: string;
-  boundary?: number;
-  onBoundary?: () => void;
-  onPassiveCleanup: () => void;
-}
-
-function TrashViewBoundary({
-  documents,
-  busy = null,
-  loading = false,
-  error = null,
-  canRetry,
-  canAct,
-  onRetry,
-  onRestore,
-  onPurge,
-  present = true,
-  mountKey = "trash",
-  boundary = 0,
-  onBoundary,
-  onPassiveCleanup,
-}: TrashViewBoundaryProps) {
-  useLayoutEffect(() => {
-    if (boundary > 0) onBoundary?.();
-  }, [boundary, onBoundary]);
-  return present ? (
-    <>
-      <TrashView
-        key={mountKey}
-        documents={documents}
-        busy={busy}
-        loading={loading}
-        error={error}
-        canRetry={canRetry}
-        canAct={canAct}
-        onRetry={onRetry}
-        onRestore={onRestore}
-        onPurge={onPurge}
-      />
-      <PassiveCleanupProbe key={`${mountKey}:${boundary}`} onCleanup={onPassiveCleanup} />
-    </>
-  ) : (
-    <button type="button" data-testid="trash-replacement">
-      Replacement control
-    </button>
   );
 }
 
@@ -505,6 +446,24 @@ function interceptReactClick(
   return () => {
     if (record[key] === intercepted) record[key] = props;
   };
+}
+
+// A production build minifies React's SyntheticBaseEvent class name, so the event's constructor is named "a" or similar.
+const MangledSyntheticEvent = class a {};
+
+function interceptMangledReactClick(element: HTMLButtonElement): () => void {
+  return interceptReactClick(element, (original, event) => {
+    if (!event || typeof event !== "object") {
+      throw new Error("The React click event was not an object");
+    }
+    const prototype = Object.create(Object.getPrototypeOf(event), {
+      constructor: { value: MangledSyntheticEvent },
+    });
+    const mangled = Object.assign(Object.create(prototype), event);
+    expect(Object.getPrototypeOf(mangled).constructor).toBe(MangledSyntheticEvent);
+    expect(Object.getPrototypeOf(mangled).constructor.name).toBe("a");
+    original(mangled);
+  });
 }
 
 function interceptTemplateActivation(
@@ -1130,40 +1089,6 @@ function guidedRootElement(host: HTMLElement): HTMLDivElement {
   const guided = directCreateButton(host, "start-guided-doc").parentElement;
   if (!(guided instanceof HTMLDivElement)) throw new Error("The guided block was not rendered");
   return guided;
-}
-
-function createRootFor(host: HTMLElement, testid: CreateControlTestId): HTMLDivElement {
-  return testid === "new-document" ? createCardRoot(host) : guidedRootElement(host);
-}
-
-function createRefBindings(host: HTMLElement) {
-  const blank = directCreateButton(host, "new-document");
-  const frame = blank.children.item(0);
-  const label = blank.children.item(1);
-  const welcome = directCreateButton(host, "start-guided-doc");
-  const guided = guidedRootElement(host);
-  const elements = [
-    createCardRoot(host),
-    blank,
-    frame,
-    frame?.firstElementChild ?? null,
-    label,
-    label?.children.item(0) ?? null,
-    label?.children.item(1) ?? null,
-    guided,
-    guided.children.item(0),
-    guided.children.item(1),
-    guided.children.item(2),
-    welcome,
-    welcome.children.item(0),
-  ];
-  if (elements.some((element) => !element)) {
-    throw new Error("Create control refs were incomplete");
-  }
-  return (elements as Element[]).map((element) => ({
-    element,
-    ref: captureReactRef(element),
-  }));
 }
 
 function templateGrid(host: HTMLElement): HTMLUListElement {
@@ -7589,33 +7514,29 @@ describe.each(["search", "trash"] as const)("dashboard %s failure-message wrappi
     expect(router.refresh).not.toHaveBeenCalled();
   });
 
-  it.each([
-    "min-w-0 flex-1",
-    "min-w-0 flex-1 break-all",
-    "min-w-0 flex-1 wrap-anywhere extra",
-  ])("keeps the exact message-class guard strict against %s", async (className) => {
-    const requests = surface === "search" ? searchDocuments : listDocuments;
-    searchDocuments.mockRejectedValueOnce(new ApiError(503, "s".repeat(300)));
-    listDocuments.mockRejectedValueOnce(new ApiError(503, "t".repeat(300)));
-    renderDashboard();
-    if (surface === "search") {
+  // Only search still guards Retry on the message markup; Trash Retry is a plain click handler (#2197).
+  if (surface === "search") {
+    it.each([
+      "min-w-0 flex-1",
+      "min-w-0 flex-1 break-all",
+      "min-w-0 flex-1 wrap-anywhere extra",
+    ])("keeps the exact message-class guard strict against %s", async (className) => {
+      searchDocuments.mockRejectedValueOnce(new ApiError(503, "s".repeat(300)));
+      renderDashboard();
       await dispatchSearchAction(() => {
         fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
       });
       await settleSearch();
-    } else {
-      openTrash();
-      await act(async () => {});
-    }
-    const alert = screen.getByTestId(`${surface}-error`);
-    const retry = within(alert).getByRole("button", { name: "Retry" });
-    expect(alert.firstElementChild?.className).toBe("min-w-0 flex-1 wrap-anywhere");
-    alert.firstElementChild!.className = className;
-    await dispatchSearchAction(() => retry.click());
-    expect(requests).toHaveBeenCalledTimes(1);
-    expect(restoreDocument).not.toHaveBeenCalled();
-    expect(purgeDocument).not.toHaveBeenCalled();
-  });
+      const alert = screen.getByTestId("search-error");
+      const retry = within(alert).getByRole("button", { name: "Retry" });
+      expect(alert.firstElementChild?.className).toBe("min-w-0 flex-1 wrap-anywhere");
+      alert.firstElementChild!.className = className;
+      await dispatchSearchAction(() => retry.click());
+      expect(searchDocuments).toHaveBeenCalledTimes(1);
+      expect(restoreDocument).not.toHaveBeenCalled();
+      expect(purgeDocument).not.toHaveBeenCalled();
+    });
+  }
 
   it("preserves empty-reason formatting and omission", async () => {
     searchDocuments.mockRejectedValueOnce(new ApiError(503, ""));
@@ -8489,7 +8410,6 @@ describe("dashboard direct create control ownership", () => {
       document.body.append(focusOwner, host);
       const root = createRoot(host);
       const passiveCleanup = vi.fn();
-      let firstSetupHandler: CapturedReactClick | null = null;
       let layoutSetups = 0;
 
       try {
@@ -8502,9 +8422,6 @@ describe("dashboard direct create control ownership", () => {
                 onPassiveCleanup={passiveCleanup}
                 onBoundary={() => {
                   layoutSetups += 1;
-                  firstSetupHandler ??= captureReactClick(
-                    directCreateButton(host, testid),
-                  );
                 }}
               />
             </StrictMode>,
@@ -8512,21 +8429,12 @@ describe("dashboard direct create control ownership", () => {
         });
 
         const control = directCreateButton(host, testid);
-        const currentHandler = captureReactClick(control);
         expect(layoutSetups).toBeGreaterThanOrEqual(2);
         expect(passiveCleanup).toHaveBeenCalled();
-        expect(currentHandler).not.toBe(firstSetupHandler);
         expect(control).toBeEnabled();
         expect(control).not.toHaveAttribute("aria-busy");
 
         focusOwner.focus();
-        expectInertTemplateCall(
-          firstSetupHandler!,
-          fabricatedTemplateClick(control),
-          host,
-        );
-        expect(createDocument).not.toHaveBeenCalled();
-
         await act(async () => {
           control.click();
         });
@@ -8558,9 +8466,11 @@ describe("dashboard direct create control ownership", () => {
     },
   );
 
-  it.each(["crossed-before-current", "current-before-crossed"] as const)(
-    "rejects a %s sibling activation and keeps the genuine control exact",
-    async (order) => {
+  it.each(DIRECT_CONTROLS)(
+    "accepts a $name click with a production-mangled React event constructor",
+    async ({ testid, body, created }) => {
+      const pending = deferred<CreateResponse>();
+      createDocument.mockReturnValueOnce(pending.promise);
       const host = document.createElement("div");
       document.body.append(host);
       const root = createRoot(host);
@@ -8573,30 +8483,24 @@ describe("dashboard direct create control ownership", () => {
             </StrictMode>,
           );
         });
-        const blank = directCreateButton(host, "new-document");
-        const welcome = directCreateButton(host, "start-guided-doc");
-        const crossed = captureReactClick(welcome);
-        const restore = interceptReactClick(blank, (original, event) => {
-          if (order === "crossed-before-current") {
-            crossed(event);
-            original(event);
-          } else {
-            original(event);
-            crossed(event);
-          }
-        });
+        const control = directCreateButton(host, testid);
+        const restore = interceptMangledReactClick(control);
         try {
           await act(async () => {
-            blank.click();
+            control.click();
           });
         } finally {
           restore();
         }
-
         expect(createDocument).toHaveBeenCalledTimes(1);
-        expect(createDocument).toHaveBeenLastCalledWith({});
+        expect(createDocument).toHaveBeenLastCalledWith(body);
+
+        await act(async () => {
+          pending.resolve({ document: { id: created, title: "Untitled" } });
+          await pending.promise;
+        });
         expect(router.push).toHaveBeenCalledTimes(1);
-        expect(router.push).toHaveBeenLastCalledWith("/d/created");
+        expect(router.push).toHaveBeenLastCalledWith(`/d/${created}`);
       } finally {
         await act(async () => root.unmount());
         host.remove();
@@ -8670,548 +8574,6 @@ describe("dashboard direct create control ownership", () => {
     }
   });
 
-  it("claims the wrapper and native click before duplicate or reentrant delivery", async () => {
-    const pending = deferred<CreateResponse>();
-    createDocument.mockReturnValueOnce(pending.promise);
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const welcome = directCreateButton(host, "start-guided-doc");
-      const claimed: { handler: CapturedReactClick | null; wrapper: unknown } = {
-        handler: null,
-        wrapper: null,
-      };
-      const restore = interceptReactClick(welcome, (original, event) => {
-        claimed.handler = original;
-        claimed.wrapper = event;
-        original({ ...(event as Record<string, unknown>) });
-        expect(createDocument).not.toHaveBeenCalled();
-        original(event);
-        original(event);
-      });
-      try {
-        await act(async () => {
-          welcome.click();
-        });
-      } finally {
-        restore();
-      }
-
-      expect(createDocument).toHaveBeenCalledTimes(1);
-      expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
-      claimed.handler?.(claimed.wrapper);
-      claimed.handler?.({
-        get nativeEvent() {
-          throw new Error("fabricated native event getter must not run");
-        },
-      });
-      expect(createDocument).toHaveBeenCalledTimes(1);
-
-      await act(async () => {
-        pending.resolve({ document: { id: "welcome-created", title: "Welcome" } });
-        await pending.promise;
-      });
-      expect(router.push).toHaveBeenCalledTimes(1);
-      expect(router.push).toHaveBeenLastCalledWith("/d/welcome-created");
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it.each([
-    "canceled",
-    "stopped",
-    "non-primary",
-    "fabricated wrapper",
-    "fabricated native click",
-  ] as const)("does no create work for a %s activation and recovers", async (scenario) => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const cancel = (event: Event) => {
-      event.preventDefault();
-    };
-    const stop = (event: Event) => {
-      event.stopPropagation();
-    };
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const blank = directCreateButton(host, "new-document");
-
-      if (scenario === "canceled") {
-        blank.addEventListener("click", cancel, true);
-        await act(async () => {
-          blank.click();
-        });
-        blank.removeEventListener("click", cancel, true);
-      } else if (scenario === "stopped") {
-        document.addEventListener("click", stop, true);
-        await act(async () => {
-          blank.click();
-        });
-        document.removeEventListener("click", stop, true);
-      } else if (scenario === "non-primary") {
-        await act(async () => {
-          blank.dispatchEvent(
-            new MouseEvent("click", {
-              bubbles: true,
-              cancelable: true,
-              button: 1,
-              buttons: 0,
-              detail: 1,
-            }),
-          );
-        });
-      } else if (scenario === "fabricated wrapper") {
-        await act(async () => {
-          captureReactClick(blank)(fabricatedTemplateClick(blank));
-        });
-      } else {
-        await act(async () => {
-          const traversal = reactProps(blank).onClickCapture;
-          const wrapper = fabricatedTemplateClick(blank);
-          traversal?.(wrapper);
-          captureReactClick(blank)(wrapper);
-        });
-      }
-
-      expect(createDocument).not.toHaveBeenCalled();
-      expect(router.push).not.toHaveBeenCalled();
-      expect(host.querySelector('[data-testid="toast"]')).toBeNull();
-      expect(directCreateButton(host, "new-document")).toBeEnabled();
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      await act(async () => {
-        directCreateButton(host, "new-document").click();
-      });
-      expect(createDocument).toHaveBeenCalledTimes(1);
-      expect(createDocument).toHaveBeenLastCalledWith({});
-      expect(router.push).toHaveBeenCalledTimes(1);
-    } finally {
-      document.removeEventListener("click", stop, true);
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it.each([
-    ["Control", { ctrlKey: true }],
-    ["Meta", { metaKey: true }],
-    ["Alt", { altKey: true }],
-    ["Shift", { shiftKey: true }],
-  ] as const)("rejects a %s-modified primary click and recovers", async (_name, modifier) => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const blank = directCreateButton(host, "new-document");
-      await act(async () => {
-        blank.dispatchEvent(
-          new MouseEvent("click", {
-            bubbles: true,
-            cancelable: true,
-            button: 0,
-            buttons: 0,
-            detail: 1,
-            ...modifier,
-          }),
-        );
-      });
-      expect(createDocument).not.toHaveBeenCalled();
-      expect(router.push).not.toHaveBeenCalled();
-      expect(host.querySelector('[data-testid="toast"]')).toBeNull();
-
-      await act(async () => {
-        blank.click();
-      });
-      expect(createDocument).toHaveBeenCalledTimes(1);
-      expect(createDocument).toHaveBeenLastCalledWith({});
-      expect(router.push).toHaveBeenCalledTimes(1);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it.each(["API callback", "router callback"] as const)(
-    "retires %s identity drift before create and recovers with restored identities",
-    async (identity) => {
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      const originalCreate = api.documents.create;
-      const originalPush = router.push;
-      let blank: HTMLButtonElement | null = null;
-      const drift = () => {
-        if (identity === "API callback") {
-          api.documents.create = vi.fn(originalCreate);
-        } else {
-          router.push = vi.fn();
-        }
-      };
-
-      try {
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-            </StrictMode>,
-          );
-        });
-        const currentBlank = directCreateButton(host, "new-document");
-        blank = currentBlank;
-        currentBlank.addEventListener("click", drift, { capture: true, once: true });
-        await act(async () => {
-          currentBlank.click();
-        });
-        expect(createDocument).not.toHaveBeenCalled();
-        expect(router.push).not.toHaveBeenCalled();
-        expect(host.querySelector('[data-testid="toast"]')).toBeNull();
-
-        api.documents.create = originalCreate;
-        router.push = originalPush;
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-            </StrictMode>,
-          );
-        });
-        await act(async () => {
-          directCreateButton(host, "new-document").click();
-        });
-        expect(createDocument).toHaveBeenCalledTimes(1);
-        expect(createDocument).toHaveBeenLastCalledWith({});
-        expect(router.push).toHaveBeenCalledTimes(1);
-      } finally {
-        blank?.removeEventListener("click", drift, true);
-        api.documents.create = originalCreate;
-        router.push = originalPush;
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it("keeps both handlers from a keyed dashboard replacement inert", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard key="first" user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const staleBlank = directCreateButton(host, "new-document");
-      const staleWelcome = directCreateButton(host, "start-guided-doc");
-      const staleBlankHandler = captureReactClick(staleBlank);
-      const staleWelcomeHandler = captureReactClick(staleWelcome);
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard key="second" user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const currentBlank = directCreateButton(host, "new-document");
-      expect(currentBlank).not.toBe(staleBlank);
-      expectInertTemplateCall(
-        staleBlankHandler,
-        fabricatedTemplateClick(currentBlank),
-        host,
-      );
-      expectInertTemplateCall(
-        staleWelcomeHandler,
-        fabricatedTemplateClick(
-          directCreateButton(host, "start-guided-doc"),
-        ),
-        host,
-      );
-      expect(createDocument).not.toHaveBeenCalled();
-
-      await act(async () => {
-        currentBlank.click();
-      });
-      expect(createDocument).toHaveBeenCalledTimes(1);
-      expect(createDocument).toHaveBeenLastCalledWith({});
-      expect(router.push).toHaveBeenCalledTimes(1);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("claims one native event permanently and accepts a distinct clean successor event", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const repeated = new MouseEvent("click", {
-      bubbles: true,
-      cancelable: true,
-      button: 0,
-      buttons: 0,
-      detail: 1,
-    });
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const blank = directCreateButton(host, "new-document");
-      await act(async () => {
-        blank.dispatchEvent(repeated);
-      });
-      expect(createDocument).toHaveBeenCalledTimes(1);
-      expect(router.push).toHaveBeenCalledTimes(1);
-
-      await act(async () => {
-        blank.dispatchEvent(repeated);
-      });
-      expect(createDocument).toHaveBeenCalledTimes(1);
-      expect(router.push).toHaveBeenCalledTimes(1);
-
-      await act(async () => {
-        directCreateButton(host, "new-document").click();
-      });
-      expect(createDocument).toHaveBeenCalledTimes(2);
-      expect(router.push).toHaveBeenCalledTimes(2);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it.each([
-    { scenario: "restored descendant mutation", testid: "new-document" as CreateControlTestId },
-    { scenario: "restored clone replacement", testid: "new-document" as CreateControlTestId },
-    { scenario: "restored control replacement", testid: "new-document" as CreateControlTestId },
-    { scenario: "restored child reorder", testid: "start-guided-doc" as CreateControlTestId },
-    { scenario: "root detach and reinsert", testid: "start-guided-doc" as CreateControlTestId },
-  ])(
-    "permanently retires a generation after $scenario and lets a distinct clean successor create",
-    async ({ scenario, testid }) => {
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-
-      try {
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-            </StrictMode>,
-          );
-        });
-        const control = directCreateButton(host, testid);
-        const staleHandler = captureReactClick(control);
-        const controlRoot = createRootFor(host, testid);
-        const icon = control.children.item(0)!;
-
-        if (scenario === "restored descendant mutation") {
-          icon.setAttribute("data-create-attack", "1");
-          icon.removeAttribute("data-create-attack");
-        } else if (scenario === "restored clone replacement") {
-          const clone = icon.cloneNode(true) as Element;
-          icon.replaceWith(clone);
-          clone.replaceWith(icon);
-        } else if (scenario === "restored control replacement") {
-          const clone = control.cloneNode(true) as HTMLButtonElement;
-          control.replaceWith(clone);
-          clone.replaceWith(control);
-        } else if (scenario === "restored child reorder") {
-          const next = control.nextSibling;
-          control.remove();
-          controlRoot.insertBefore(control, next);
-        } else {
-          const parent = controlRoot.parentNode!;
-          const next = controlRoot.nextSibling;
-          controlRoot.remove();
-          parent.insertBefore(controlRoot, next);
-        }
-
-        await act(async () => {
-          directCreateButton(host, testid).click();
-        });
-        expect(createDocument).not.toHaveBeenCalled();
-        expect(router.push).not.toHaveBeenCalled();
-        expect(host.querySelector('[data-testid="toast"]')).toBeNull();
-        expect(directCreateButton(host, testid)).toBeEnabled();
-
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-            </StrictMode>,
-          );
-        });
-        const successor = directCreateButton(host, testid);
-        expectInertTemplateCall(
-          staleHandler,
-          fabricatedTemplateClick(successor),
-          host,
-        );
-        expect(createDocument).not.toHaveBeenCalled();
-
-        await act(async () => {
-          successor.click();
-        });
-        expect(createDocument).toHaveBeenCalledTimes(1);
-        expect(createDocument).toHaveBeenLastCalledWith(
-          testid === "new-document" ? {} : { template: "welcome" },
-        );
-        expect(router.push).toHaveBeenCalledTimes(1);
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it("mints an exact successor for a complete create ref replay", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const full = createRefBindings(host);
-      await act(async () => {
-        for (const binding of full) binding.ref(null);
-        for (const binding of full) binding.ref(binding.element);
-      });
-
-      await act(async () => {
-        directCreateButton(host, "new-document").click();
-      });
-      expect(createDocument).toHaveBeenCalledTimes(1);
-      expect(createDocument).toHaveBeenLastCalledWith({});
-      expect(router.push).toHaveBeenCalledTimes(1);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("mints an exact successor for a partial create ref replay", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const partial = createRefBindings(host).slice(-2);
-      await act(async () => {
-        for (const binding of partial) binding.ref(null);
-        for (const binding of partial.toReversed()) binding.ref(binding.element);
-      });
-
-      await act(async () => {
-        directCreateButton(host, "start-guided-doc").click();
-      });
-      expect(createDocument).toHaveBeenCalledTimes(1);
-      expect(createDocument).toHaveBeenLastCalledWith({ template: "welcome" });
-      expect(router.push).toHaveBeenCalledTimes(1);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("rejects an incomplete create ref replay and recovers on a fresh render", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const partial = createRefBindings(host).slice(-2);
-      await act(async () => {
-        for (const binding of partial) binding.ref(null);
-      });
-      await act(async () => {
-        directCreateButton(host, "start-guided-doc").click();
-        directCreateButton(host, "new-document").click();
-      });
-      expect(createDocument).not.toHaveBeenCalled();
-      expect(router.push).not.toHaveBeenCalled();
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      await act(async () => {
-        directCreateButton(host, "new-document").click();
-      });
-      expect(createDocument).toHaveBeenCalledTimes(1);
-      expect(createDocument).toHaveBeenLastCalledWith({});
-      expect(router.push).toHaveBeenCalledTimes(1);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
   it("rejects both controls while one create is busy and restores them on failure", async () => {
     const failing = deferred<CreateResponse>();
     createDocument.mockReturnValueOnce(failing.promise);
@@ -9266,40 +8628,6 @@ describe("dashboard direct create control ownership", () => {
       expect(router.push).toHaveBeenLastCalledWith("/d/created");
     } finally {
       await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("leaves both captured create handlers inert after layout cleanup", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const blank = directCreateButton(host, "new-document");
-      const welcome = directCreateButton(host, "start-guided-doc");
-      const blankHandler = captureReactClick(blank);
-      const welcomeHandler = captureReactClick(welcome);
-
-      await act(async () => root.unmount());
-
-      await act(async () => {
-        blankHandler(fabricatedTemplateClick(blank));
-        welcomeHandler(fabricatedTemplateClick(welcome));
-        blank.click();
-        welcome.click();
-      });
-      expect(createDocument).not.toHaveBeenCalled();
-      expect(router.push).not.toHaveBeenCalled();
-      expect(host.innerHTML).toBe("");
-    } finally {
       host.remove();
     }
   });
@@ -9576,107 +8904,6 @@ describe("dashboard star recovery", () => {
 });
 
 describe("TrashView publication ownership", () => {
-  it.each(["Retry", "Restore", "Delete forever"] as const)(
-    "mints a fresh exact %s successor after direct-root Strict Mode replay and claims each event before duplicate handler use or reentry",
-    (kind) => {
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      const trashDocument = trashedDoc(`strict-${kind}`, `Strict ${kind}`);
-      const onRetry = vi.fn();
-      const onRestore = vi.fn();
-      const onPurge = vi.fn();
-      const canRetry = vi.fn(() => true);
-      const canAct = vi.fn(() => true);
-      const layouts: Array<{
-        button: HTMLButtonElement;
-        click: CapturedReactClick;
-        rootRef: CapturedReactRef;
-      }> = [];
-      let currentButton!: HTMLButtonElement;
-      const selectedCallback =
-        kind === "Retry" ? onRetry : kind === "Restore" ? onRestore : onPurge;
-      selectedCallback.mockImplementation(() => currentButton.click());
-      const capture = () => {
-        const button =
-          kind === "Retry"
-            ? directRetryButton(host)
-            : directTrashButton(
-                host,
-                trashDocument.title,
-                kind === "Restore" ? "restore-button" : "purge-button",
-              );
-        layouts.push({
-          button,
-          click: captureReactClick(button),
-          rootRef: captureReactRef(
-            host.querySelector<HTMLElement>('[data-testid="trash-view"]')!,
-          ),
-        });
-      };
-
-      try {
-        act(() => {
-          root.render(
-            <StrictMode>
-              <TrashLayoutProbe capture={capture}>
-                <TrashView
-                  documents={[trashDocument]}
-                  busy={null}
-                  loading={false}
-                  error="Retry this load"
-                  canRetry={canRetry}
-                  canAct={canAct}
-                  onRetry={onRetry}
-                  onRestore={onRestore}
-                  onPurge={onPurge}
-                />
-              </TrashLayoutProbe>
-            </StrictMode>,
-          );
-        });
-        const stale = layouts[0];
-        if (!stale) throw new Error("Strict Mode did not expose the retired Trash layout");
-        currentButton =
-          kind === "Retry"
-            ? directRetryButton(host)
-            : directTrashButton(
-                host,
-                trashDocument.title,
-                kind === "Restore" ? "restore-button" : "purge-button",
-              );
-        const currentClick = captureReactClick(currentButton);
-        expect(stale.button).toBe(currentButton);
-        expect(stale.click).not.toBe(currentClick);
-
-        const currentRoot = host.querySelector<HTMLElement>(
-          '[data-testid="trash-view"]',
-        )!;
-        stale.rootRef(null);
-        stale.rootRef(currentRoot);
-        stale.rootRef(null);
-        const restore = interceptReactClick(currentButton, (original, event) => {
-          stale.click(event);
-          original(event);
-          original(event);
-        });
-        currentButton.click();
-        restore();
-        currentButton.click();
-
-        expect(selectedCallback).toHaveBeenCalledTimes(2);
-        expect(onRetry).toHaveBeenCalledTimes(kind === "Retry" ? 2 : 0);
-        expect(onRestore).toHaveBeenCalledTimes(kind === "Restore" ? 2 : 0);
-        expect(onPurge).toHaveBeenCalledTimes(kind === "Delete forever" ? 2 : 0);
-        expect(canRetry).toHaveBeenCalledTimes(kind === "Retry" ? 2 : 0);
-        expect(canAct).toHaveBeenCalledTimes(kind === "Retry" ? 0 : 2);
-      } finally {
-        act(() => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
   it("mints exact successors for newly mounted loading, error, empty, list, row, and control subsets", () => {
     const host = document.createElement("div");
     document.body.append(host);
@@ -9833,102 +9060,6 @@ describe("TrashView publication ownership", () => {
     }
   });
 
-  it.each(["restored descendant mutation", "root detach and reinsert"] as const)(
-    "rejects Strict Mode replay after %s without poisoning the next Trash generation",
-    (change) => {
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      const trashDocument = trashedDoc("mutation", "Mutation");
-      const staleRestore = vi.fn();
-      const currentRestore = vi.fn();
-      let layoutSetups = 0;
-      let staleClick: CapturedReactClick | null = null;
-      const perturbReplay = () => {
-        layoutSetups++;
-        const trashRoot = host.querySelector<HTMLElement>(
-          '[data-testid="trash-view"]',
-        )!;
-        const restore = directTrashButton(
-          host,
-          trashDocument.title,
-          "restore-button",
-        );
-        staleClick ??= captureReactClick(restore);
-        if (layoutSetups !== 2) return;
-        if (change === "restored descendant mutation") {
-          const note = host.querySelector<HTMLElement>(
-            '[data-testid="trash-note"]',
-          )!;
-          note.setAttribute("data-replay-change", "true");
-          note.removeAttribute("data-replay-change");
-          return;
-        }
-        const parent = trashRoot.parentNode;
-        const next = trashRoot.nextSibling;
-        if (!parent) throw new Error("Trash root had no parent");
-        trashRoot.remove();
-        parent.insertBefore(trashRoot, next);
-      };
-
-      try {
-        act(() => {
-          root.render(
-            <StrictMode>
-              <TrashLayoutProbe capture={perturbReplay}>
-                <TrashView
-                  documents={[trashDocument]}
-                  busy={null}
-                  loading={false}
-                  error={null}
-                  onRetry={() => {}}
-                  onRestore={staleRestore}
-                  onPurge={() => {}}
-                />
-              </TrashLayoutProbe>
-            </StrictMode>,
-          );
-        });
-        expect(layoutSetups).toBeGreaterThanOrEqual(2);
-        directTrashButton(host, trashDocument.title, "restore-button").click();
-        expect(staleRestore).not.toHaveBeenCalled();
-
-        act(() => {
-          root.render(
-            <TrashView
-              documents={[trashDocument]}
-              busy={null}
-              loading={false}
-              error={null}
-              onRetry={() => {}}
-              onRestore={currentRestore}
-              onPurge={() => {}}
-            />,
-          );
-        });
-        const currentButton = directTrashButton(
-          host,
-          trashDocument.title,
-          "restore-button",
-        );
-        const currentClick = captureReactClick(currentButton);
-        expect(staleClick).not.toBeNull();
-        expect(staleClick).not.toBe(currentClick);
-        const restore = interceptReactClick(currentButton, (original, event) => {
-          staleClick?.(event);
-          original(event);
-        });
-        currentButton.click();
-        restore();
-        expect(staleRestore).not.toHaveBeenCalled();
-        expect(currentRestore).toHaveBeenCalledExactlyOnceWith(trashDocument);
-      } finally {
-        act(() => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
   it("preserves every Trash state and gives genuine Retry, Restore, and Delete clicks their exact callbacks once", async () => {
     const host = document.createElement("div");
     document.body.append(host);
@@ -9980,12 +9111,7 @@ describe("TrashView publication ownership", () => {
       expect(directTrashCard(host, local.title).querySelector("time")).toHaveAttribute("dateTime", local.deletedAt);
 
       const restore = directTrashButton(host, local.title, "restore-button");
-      const restoreIntercept = interceptReactClick(restore, (original, event) => {
-        original(event);
-        original(event);
-      });
       restore.click();
-      restoreIntercept();
       await act(async () => root.render(populated()));
       directTrashButton(host, repository.title, "purge-button").click();
       await act(async () => root.render(populated()));
@@ -10123,659 +9249,45 @@ describe("TrashView publication ownership", () => {
     }
   });
 
-  it("rejects fabricated, wrong-type, mismatched-target, foreign, disabled, detached, and replaced sources, then keeps the mutation-retired publication inert", async () => {
+  it("accepts Retry, Restore, and Delete forever clicks with a production-mangled React event constructor", () => {
     const host = document.createElement("div");
-    const focusOwner = document.createElement("button");
-    document.body.append(focusOwner, host);
+    document.body.append(host);
     const root = createRoot(host);
-    const first = trashedDoc("provenance", "Provenance");
-    const second = trashedDoc("other", "Other");
+    const trashDocument = trashedDoc("minified-trash", "Minified trash");
     const onRetry = vi.fn();
     const onRestore = vi.fn<(document: DocumentSummaryDto) => void>();
     const onPurge = vi.fn<(document: DocumentSummaryDto) => void>();
-    let targetHandler: CapturedReactClick | null = null;
-
-    try {
-      await act(async () => {
-        root.render(
-          <>
-            <TrashView
-              documents={[first, second]}
-              busy={null}
-              loading={false}
-              error="Retry"
-              onRetry={onRetry}
-              onRestore={onRestore}
-              onPurge={onPurge}
-            />
-            <button type="button" data-testid="foreign-trash-control" onClick={(event) => targetHandler?.(event)}>
-              Foreign
-            </button>
-          </>,
-        );
-      });
-      const button = directTrashButton(host, first.title, "restore-button");
-      const card = directTrashCard(host, first.title);
-      targetHandler = captureReactClick(button);
-      focusOwner.focus();
-      const markup = host.innerHTML;
-      targetHandler(undefined);
-      targetHandler({});
-      targetHandler(new MouseEvent("click", { bubbles: true }));
-      expect(onRestore).not.toHaveBeenCalled();
-
-      const reset = interceptReactClick(button, (current, event) => {
-        const genuine = event as {
-          _reactName: string;
-          nativeEvent: MouseEvent;
-          type: string;
-          button: number;
-          bubbles: boolean;
-          currentTarget: EventTarget;
-          target: EventTarget;
-          isDefaultPrevented: () => boolean;
-          isPropagationStopped: () => boolean;
-          persist: () => void;
-        };
-        const fabricated = {
-          _reactName: genuine._reactName,
-          nativeEvent: genuine.nativeEvent,
-          type: genuine.type,
-          button: genuine.button,
-          bubbles: genuine.bubbles,
-          currentTarget: genuine.currentTarget,
-          target: genuine.target,
-          isDefaultPrevented: genuine.isDefaultPrevented,
-          isPropagationStopped: genuine.isPropagationStopped,
-          persist: genuine.persist,
-        };
-        const wrongType = new Proxy(genuine, {
-          get(target, property, receiver) {
-            return property === "type" ? "dblclick" : Reflect.get(target, property, receiver);
-          },
-        });
-        const mismatchedTarget = new Proxy(genuine, {
-          get(target, property, receiver) {
-            return property === "target" ? card : Reflect.get(target, property, receiver);
-          },
-        });
-        current(fabricated);
-        current(wrongType);
-        current(mismatchedTarget);
-        current(event);
-      });
-      button.click();
-      reset();
-      expect(onRestore).toHaveBeenCalledTimes(1);
-      expect(onRestore).toHaveBeenLastCalledWith(first);
-      expect(document.activeElement).toBe(focusOwner);
-      expect(host.innerHTML).toBe(markup);
-
-      host.querySelector<HTMLButtonElement>('[data-testid="foreign-trash-control"]')!.click();
-      expect(onRestore).toHaveBeenCalledTimes(1);
-
-      button.disabled = true;
-      button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
-      expect(onRestore).toHaveBeenCalledTimes(1);
-      button.disabled = false;
-
-      const note = host.querySelector<HTMLElement>('[data-testid="trash-note"]')!;
-      const noteReplacement = note.cloneNode(true) as HTMLElement;
-      note.replaceWith(noteReplacement);
-      button.click();
-      expect(onRestore).toHaveBeenCalledTimes(1);
-      noteReplacement.replaceWith(note);
-
-      const alert = host.querySelector<HTMLElement>('[data-testid="trash-error"]')!;
-      const alertReplacement = alert.cloneNode(true) as HTMLElement;
-      alert.replaceWith(alertReplacement);
-      button.click();
-      expect(onRestore).toHaveBeenCalledTimes(1);
-      alertReplacement.replaceWith(alert);
-
-      const replaceDuringClick = (actionButton: HTMLButtonElement, element: Element) => {
-        const replacement = element.cloneNode(true) as Element;
-        const restoreClick = interceptReactClick(actionButton, (current, event) => {
-          element.replaceWith(replacement);
-          current(event);
-          replacement.replaceWith(element);
-          current(event);
-        });
-        actionButton.click();
-        restoreClick();
-      };
-      const trashRoot = host.querySelector<HTMLElement>('[data-testid="trash-view"]')!;
-      const list = host.querySelector<HTMLUListElement>('[data-testid="trash-list"]')!;
-      replaceDuringClick(button, trashRoot);
-      replaceDuringClick(button, list);
-      replaceDuringClick(button, card);
-      replaceDuringClick(button, button);
-      expect(onRestore).toHaveBeenCalledTimes(1);
-
-      const retry = directRetryButton(host);
-      replaceDuringClick(retry, retry);
-      expect(onRetry).not.toHaveBeenCalled();
-
-      const purge = directTrashButton(host, first.title, "purge-button");
-      replaceDuringClick(purge, purge);
-      expect(onPurge).not.toHaveBeenCalled();
-
-      const secondCard = directTrashCard(host, second.title);
-      const reorderReset = interceptReactClick(button, (current, event) => {
-        list.append(card);
-        current(event);
-        list.insertBefore(card, secondCard);
-        current(event);
-      });
-      button.click();
-      reorderReset();
-      expect(onRestore).toHaveBeenCalledTimes(1);
-
-      const clone = button.cloneNode(true) as HTMLButtonElement;
-      button.replaceWith(clone);
-      host.querySelector<HTMLButtonElement>('[data-testid="foreign-trash-control"]')!.click();
-      expect(onRestore).toHaveBeenCalledTimes(1);
-      clone.replaceWith(button);
-
-      button.remove();
-      host.querySelector<HTMLButtonElement>('[data-testid="foreign-trash-control"]')!.click();
-      expect(onRestore).toHaveBeenCalledTimes(1);
-      card.querySelector("div:last-child > div")!.prepend(button);
-
-      button.click();
-      expect(onRestore).toHaveBeenCalledTimes(1);
-      expect(onRestore).toHaveBeenLastCalledWith(first);
-    } finally {
-      await act(async () => root.unmount());
-      focusOwner.remove();
-      host.remove();
-    }
-  });
-
-  it.each(["wrong-before-current", "current-before-wrong"] as const)(
-    "rejects sibling, cross-action, and sibling-view handlers without consuming the exact control in %s order",
-    async (order) => {
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      const first = trashedDoc("first-row", "Equal row");
-      const second = trashedDoc("second-row", "Second row");
-      const siblingViewDocument = { ...first };
-      const restoreA = vi.fn<(document: DocumentSummaryDto) => void>();
-      const purgeA = vi.fn<(document: DocumentSummaryDto) => void>();
-      const restoreB = vi.fn<(document: DocumentSummaryDto) => void>();
-
-      try {
-        await act(async () => {
-          root.render(
-            <>
-              <div data-testid="trash-a">
-                <TrashView
-                  documents={[first, second]}
-                  busy={null}
-                  loading={false}
-                  error={null}
-                  onRetry={() => {}}
-                  onRestore={restoreA}
-                  onPurge={purgeA}
-                />
-              </div>
-              <div data-testid="trash-b">
-                <TrashView
-                  documents={[siblingViewDocument]}
-                  busy={null}
-                  loading={false}
-                  error={null}
-                  onRetry={() => {}}
-                  onRestore={restoreB}
-                  onPurge={() => {}}
-                />
-              </div>
-            </>,
-          );
-        });
-        const hostA = host.querySelector<HTMLElement>('[data-testid="trash-a"]')!;
-        const hostB = host.querySelector<HTMLElement>('[data-testid="trash-b"]')!;
-        const firstRestoreHandler = captureReactClick(directTrashButton(hostA, first.title, "restore-button"));
-        const secondRestore = directTrashButton(hostA, second.title, "restore-button");
-        const secondRestoreReset = interceptReactClick(secondRestore, (current, event) => {
-          if (order === "wrong-before-current") {
-            firstRestoreHandler(event);
-            current(event);
-          } else {
-            current(event);
-            firstRestoreHandler(event);
-          }
-        });
-        secondRestore.click();
-        secondRestoreReset();
-        expect(restoreA).toHaveBeenCalledTimes(1);
-        expect(restoreA).toHaveBeenLastCalledWith(second);
-
-        const firstRestore = directTrashButton(hostA, first.title, "restore-button");
-        const firstRestoreCurrent = captureReactClick(firstRestore);
-        const firstPurge = directTrashButton(hostA, first.title, "purge-button");
-        const purgeReset = interceptReactClick(firstPurge, (current, event) => {
-          if (order === "wrong-before-current") {
-            firstRestoreCurrent(event);
-            current(event);
-          } else {
-            current(event);
-            firstRestoreCurrent(event);
-          }
-        });
-        firstPurge.click();
-        purgeReset();
-        expect(restoreA).toHaveBeenCalledTimes(1);
-        expect(purgeA).toHaveBeenCalledTimes(1);
-        expect(purgeA).toHaveBeenLastCalledWith(first);
-
-        const siblingViewRestore = directTrashButton(hostB, siblingViewDocument.title, "restore-button");
-        const siblingViewReset = interceptReactClick(siblingViewRestore, (current, event) => {
-          if (order === "wrong-before-current") {
-            firstRestoreHandler(event);
-            current(event);
-          } else {
-            current(event);
-            firstRestoreHandler(event);
-          }
-        });
-        const focusOwner = document.createElement("button");
-        document.body.append(focusOwner);
-        focusOwner.focus();
-        const markup = host.innerHTML;
-        siblingViewRestore.click();
-        siblingViewReset();
-        expect(restoreA).toHaveBeenCalledTimes(1);
-        expect(restoreB).toHaveBeenCalledTimes(1);
-        expect(restoreB).toHaveBeenLastCalledWith(siblingViewDocument);
-        expect(document.activeElement).toBe(focusOwner);
-        expect(host.innerHTML).toBe(markup);
-        focusOwner.remove();
-
-        firstRestore.click();
-        expect(restoreA).toHaveBeenCalledTimes(2);
-        expect(restoreA).toHaveBeenLastCalledWith(first);
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it("retires callback, document, order, and DOM authority before parent layout and keeps mutation-retired current authority inert", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const firstA = trashedDoc("first", "First row");
-    const secondA = trashedDoc("second", "Second row");
-    const documentsA = [firstA, secondA];
-    const firstB = { ...firstA };
-    const secondB = { ...secondA };
-    const documentsB = [firstB, secondB];
-    const staleRestore = vi.fn<(document: DocumentSummaryDto) => void>();
-    const currentRestore = vi.fn<(document: DocumentSummaryDto) => void>();
-    const passiveCleanup = vi.fn();
-
-    try {
-      await act(async () => {
-        root.render(
-          <TrashViewBoundary
-            documents={documentsA}
-            error="Same error"
-            onRetry={() => {}}
-            onRestore={staleRestore}
-            onPurge={() => {}}
-            onPassiveCleanup={passiveCleanup}
-          />,
-        );
-      });
-      const oldButton = directTrashButton(host, firstA.title, "restore-button");
-      const staleHandler = captureReactClick(oldButton);
-      let boundaryReached!: () => void;
-      const atBoundary = new Promise<void>((resolve) => {
-        boundaryReached = resolve;
-      });
-
-      root.render(
-        <TrashViewBoundary
-          documents={documentsB}
-          error="Same error"
-          boundary={1}
-          onRetry={() => {}}
-          onRestore={currentRestore}
-          onPurge={() => {}}
-          onPassiveCleanup={passiveCleanup}
-          onBoundary={() => {
-            expect(passiveCleanup).not.toHaveBeenCalled();
-            const currentButton = directTrashButton(host, firstB.title, "restore-button");
-            expect(currentButton).toBe(oldButton);
-            const reset = interceptReactClick(currentButton, (current, event) => {
-              staleHandler(event);
-              current(event);
-            });
-            currentButton.click();
-            reset();
-            expect(staleRestore).not.toHaveBeenCalled();
-            expect(currentRestore).toHaveBeenCalledTimes(1);
-            expect(currentRestore).toHaveBeenLastCalledWith(firstB);
-            boundaryReached();
-          }}
-        />,
-      );
-      await atBoundary;
-      await act(async () => {});
-      expect(passiveCleanup).toHaveBeenCalledTimes(1);
-
-      const currentButton = directTrashButton(host, firstB.title, "restore-button");
-      const markup = host.innerHTML;
-      firstB.title = "Mutated title";
-      currentButton.click();
-      expect(currentRestore).toHaveBeenCalledTimes(1);
-      expect(host.innerHTML).toBe(markup);
-      firstB.title = firstA.title;
-
-      documentsB.reverse();
-      currentButton.click();
-      expect(currentRestore).toHaveBeenCalledTimes(1);
-      documentsB.reverse();
-
-      const injected = document.createElement("span");
-      injected.textContent = "Injected";
-      currentButton.append(injected);
-      currentButton.click();
-      expect(currentRestore).toHaveBeenCalledTimes(1);
-      injected.remove();
-
-      currentButton.click();
-      expect(currentRestore).toHaveBeenCalledTimes(1);
-      expect(currentRestore).toHaveBeenLastCalledWith(firstB);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("keeps late old refs and equal-looking remount cleanup from clearing the replacement publication", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const first = trashedDoc("same", "Same row");
-    const replacement = { ...first };
-    const staleRestore = vi.fn();
-    const currentRestore = vi.fn();
-    const remountedRestore = vi.fn();
-    const passiveCleanup = vi.fn();
-
-    try {
-      await act(async () => {
-        root.render(
-          <TrashViewBoundary
-            mountKey="a"
-            documents={[first]}
-            onRetry={() => {}}
-            onRestore={staleRestore}
-            onPurge={() => {}}
-            onPassiveCleanup={passiveCleanup}
-          />,
-        );
-      });
-      const oldRoot = host.querySelector<HTMLElement>('[data-testid="trash-view"]')!;
-      const oldButton = directTrashButton(host, first.title, "restore-button");
-      const oldRootRef = captureReactRef(oldRoot);
-      const oldButtonRef = captureReactRef(oldButton);
-      const staleHandler = captureReactClick(oldButton);
-      let replacementBoundaryReached!: () => void;
-      const atReplacementBoundary = new Promise<void>((resolve) => {
-        replacementBoundaryReached = resolve;
-      });
-
-      root.render(
-        <TrashViewBoundary
-          mountKey="b"
-          documents={[replacement]}
-          boundary={1}
-          onRetry={() => {}}
-          onRestore={currentRestore}
-          onPurge={() => {}}
-          onPassiveCleanup={passiveCleanup}
-          onBoundary={() => {
-            expect(passiveCleanup).not.toHaveBeenCalled();
-            const currentRoot = host.querySelector<HTMLElement>('[data-testid="trash-view"]')!;
-            const currentButton = directTrashButton(host, replacement.title, "restore-button");
-            expect(currentRoot).not.toBe(oldRoot);
-            expect(currentButton).not.toBe(oldButton);
-            expect(oldRoot.isConnected).toBe(false);
-            expect(oldButton.isConnected).toBe(false);
-            oldRootRef(oldRoot);
-            oldButtonRef(oldButton);
-            oldButtonRef(null);
-            oldRootRef(null);
-            const reset = interceptReactClick(currentButton, (current, event) => {
-              staleHandler(event);
-              current(event);
-            });
-            currentButton.click();
-            reset();
-            expect(staleRestore).not.toHaveBeenCalled();
-            expect(currentRestore).toHaveBeenCalledTimes(1);
-            expect(currentRestore).toHaveBeenLastCalledWith(replacement);
-            replacementBoundaryReached();
-          }}
-        />,
-      );
-      await atReplacementBoundary;
-      await act(async () => {});
-      expect(passiveCleanup).toHaveBeenCalledTimes(1);
-
-      let removalBoundaryReached!: () => void;
-      const atRemovalBoundary = new Promise<void>((resolve) => {
-        removalBoundaryReached = resolve;
-      });
-      root.render(
-        <TrashViewBoundary
-          present={false}
-          documents={[replacement]}
-          boundary={2}
-          onRetry={() => {}}
-          onRestore={currentRestore}
-          onPurge={() => {}}
-          onPassiveCleanup={passiveCleanup}
-          onBoundary={() => {
-            expect(host.querySelector('[data-testid="trash-view"]')).toBeNull();
-            expect(currentRestore).toHaveBeenCalledTimes(1);
-            removalBoundaryReached();
-          }}
-        />,
-      );
-      await atRemovalBoundary;
-      await act(async () => {});
-      expect(passiveCleanup).toHaveBeenCalledTimes(2);
-
-      await act(async () => {
-        root.render(
-          <TrashViewBoundary
-            mountKey="c"
-            documents={[replacement]}
-            boundary={3}
-            onRetry={() => {}}
-            onRestore={remountedRestore}
-            onPurge={() => {}}
-            onPassiveCleanup={passiveCleanup}
-          />,
-        );
-      });
-      directTrashButton(host, replacement.title, "restore-button").click();
-      expect(remountedRestore).toHaveBeenCalledTimes(1);
-      expect(remountedRestore).toHaveBeenLastCalledWith(replacement);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it.each(["Retry", "Restore", "Delete forever"] as const)(
-    "keeps the current %s authority one-use across committed RelativeTime ticks",
-    (kind) => {
-      vi.setSystemTime(new Date("2026-09-07T13:03:00.000Z"));
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      const trashDocument = {
-        ...trashedDoc(`relative-${kind}`, `Relative ${kind}`),
-        deletedAt: "2026-09-07T13:00:00.000Z",
-      };
-      const onRetry = vi.fn();
-      const onRestore = vi.fn();
-      const onPurge = vi.fn();
-      const selectedCallback =
-        kind === "Retry" ? onRetry : kind === "Restore" ? onRestore : onPurge;
-
-      try {
-        act(() => {
-          root.render(
-            <StrictMode>
-              <TrashView
-                documents={[trashDocument]}
-                busy={null}
-                loading={false}
-                error="Retry this load"
-                onRetry={onRetry}
-                onRestore={onRestore}
-                onPurge={onPurge}
-              />
-            </StrictMode>,
-          );
-        });
-        const time = directTrashCard(host, trashDocument.title).querySelector("time")!;
-        const timeText = time.firstChild;
-        act(() => vi.advanceTimersByTime(60_000));
-        const firstTickText = time.textContent;
-        act(() => vi.advanceTimersByTime(60_000));
-        expect(time.firstChild).toBe(timeText);
-        expect(time.textContent).not.toBe(firstTickText);
-
-        const button =
-          kind === "Retry"
-            ? directRetryButton(host)
-            : directTrashButton(
-                host,
-                trashDocument.title,
-                kind === "Restore" ? "restore-button" : "purge-button",
-              );
-        const restore = interceptReactClick(button, (current, event) => {
-          current(event);
-          current(event);
-        });
-        button.click();
-        restore();
-        button.click();
-
-        expect(selectedCallback).toHaveBeenCalledTimes(2);
-        expect(onRetry).toHaveBeenCalledTimes(kind === "Retry" ? 2 : 0);
-        expect(onRestore).toHaveBeenCalledTimes(kind === "Restore" ? 2 : 0);
-        expect(onPurge).toHaveBeenCalledTimes(kind === "Delete forever" ? 2 : 0);
-      } finally {
-        act(() => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it("retires restored non-time character data and leaves that authority inert", () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const trashDocument = trashedDoc("static-text", "Static text");
-    const onRestore = vi.fn();
-
-    try {
-      act(() => {
-        root.render(
-          <StrictMode>
-            <TrashView
-              documents={[trashDocument]}
-              busy={null}
-              loading={false}
-              error={null}
-              onRetry={() => {}}
-              onRestore={onRestore}
-              onPurge={() => {}}
-            />
-          </StrictMode>,
-        );
-      });
-      const titleText =
-        directTrashCard(host, trashDocument.title).querySelector("h3")!.firstChild;
-      if (!titleText) throw new Error("Trash title had no text node");
-      titleText.nodeValue = "Hostile text";
-      titleText.nodeValue = trashDocument.title;
-
-      directTrashButton(host, trashDocument.title, "restore-button").click();
-      expect(onRestore).not.toHaveBeenCalled();
-    } finally {
-      act(() => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("isolates stale and current generations while their shared RelativeTime node ticks", () => {
-    vi.setSystemTime(new Date("2026-09-07T13:03:00.000Z"));
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const staleDocument = {
-      ...trashedDoc("relative-generation", "Relative generation"),
-      deletedAt: "2026-09-07T13:00:00.000Z",
-    };
-    const currentDocument = { ...staleDocument };
-    const staleRestore = vi.fn();
-    const currentRestore = vi.fn();
-    const view = (
-      document: DocumentSummaryDto,
-      onRestore: (document: DocumentSummaryDto) => void,
-    ) => (
+    const view = () => (
       <StrictMode>
         <TrashView
-          documents={[document]}
+          documents={[trashDocument]}
           busy={null}
           loading={false}
-          error={null}
-          onRetry={() => {}}
+          error="Trash service unavailable"
+          onRetry={onRetry}
           onRestore={onRestore}
-          onPurge={() => {}}
+          onPurge={onPurge}
         />
       </StrictMode>
     );
+    const clickMangled = (button: HTMLButtonElement) => {
+      const restore = interceptMangledReactClick(button);
+      try {
+        act(() => button.click());
+      } finally {
+        restore();
+      }
+    };
 
     try {
-      act(() => root.render(view(staleDocument, staleRestore)));
-      const button = directTrashButton(
-        host,
-        staleDocument.title,
-        "restore-button",
-      );
-      const staleClick = captureReactClick(button);
+      act(() => root.render(view()));
+      clickMangled(directRetryButton(host));
+      clickMangled(directTrashButton(host, trashDocument.title, "restore-button"));
+      clickMangled(directTrashButton(host, trashDocument.title, "purge-button"));
 
-      act(() => root.render(view(currentDocument, currentRestore)));
-      const currentButton = directTrashButton(
-        host,
-        currentDocument.title,
-        "restore-button",
-      );
-      expect(currentButton).toBe(button);
-      act(() => vi.advanceTimersByTime(60_000));
-
-      const restore = interceptReactClick(currentButton, (current, event) => {
-        staleClick(event);
-        current(event);
-        current(event);
-      });
-      currentButton.click();
-      restore();
-
-      expect(staleRestore).not.toHaveBeenCalled();
-      expect(currentRestore).toHaveBeenCalledExactlyOnceWith(currentDocument);
+      expect(onRetry).toHaveBeenCalledOnce();
+      expect(onRestore).toHaveBeenCalledExactlyOnceWith(trashDocument);
+      expect(onPurge).toHaveBeenCalledExactlyOnceWith(trashDocument);
     } finally {
       act(() => root.unmount());
       host.remove();

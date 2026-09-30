@@ -510,12 +510,10 @@ function claimPresenceClick<Publication extends PresenceExactPublication<unknown
   const nativeEvent = reactEvent.nativeEvent;
   const source = reactEvent.currentTarget;
   const target = reactEvent.target;
-  const prototype = Object.getPrototypeOf(event) as { constructor?: { name?: unknown } } | null;
   if (
     !(nativeEvent instanceof view.MouseEvent) ||
     !(source instanceof view.HTMLButtonElement) ||
     !isNodeFromDocument(target, document) ||
-    prototype?.constructor?.name !== "SyntheticBaseEvent" ||
     reactEvent._reactName !== "onClick" ||
     typeof reactEvent.isDefaultPrevented !== "function" ||
     typeof reactEvent.isPropagationStopped !== "function" ||
