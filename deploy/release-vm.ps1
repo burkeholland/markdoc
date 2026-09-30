@@ -180,7 +180,8 @@ function Assert-ReleaseDependencyReport($Report) {
   }
 }
 
-# Shows only the failed preflight's status and its bounded, already sanitized reason. Anything else stays withheld.
+# Shows only the failed preflight's status and, for command_failed, a reason that matches the fixed grammar of
+# FAILURE_REASON_PATTERN in scripts/lib/dependency-policy.ts. A reason that does not match withholds everything.
 function Get-ReleaseDependencyFailureDetail([Exception]$Failure) {
   try {
     $output = $Failure.Data['ReleaseFailureOutput']
@@ -192,11 +193,13 @@ function Get-ReleaseDependencyFailureDetail([Exception]$Failure) {
         $status -cnotmatch '\A(rejected|invalid_request|invalid_lock|lock_mismatch|malformed_audit|command_failed|stale_audit)\z') {
       return ''
     }
+    if ($status -cne 'command_failed') { return " (status $status)" }
     $reason = $report['reason']
-    if ($status -ceq 'command_failed' -and $reason -is [string] -and $reason.Length -le 200 -and $reason -cmatch '\A[\x20-\x7E]+\z') {
+    if ($reason -is [string] -and
+        $reason -cmatch '\Anpm audit (?:exit (?:0|[1-9][0-9]{0,9})|ended by signal SIG[A-Z0-9]{1,12}|ended without an exit code|timed out|could not start(?: \(E[A-Z0-9_]{1,24}\))?)(?:, npm code E[A-Z0-9_]{1,24})?(?: \(attempt [1-9] of [1-9]\))?\z') {
       return " (status $status; reason: $reason)"
     }
-    return " (status $status)"
+    return ''
   } catch {
     return ''
   }

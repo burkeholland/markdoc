@@ -1,14 +1,14 @@
 import { promises as fs } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runMain } from "../dependency-policy-preflight.mjs";
 import {
   AUDIT_ARGUMENTS,
   BLOCKED_DEPENDENCIES,
+  FAILURE_REASON_PATTERN,
   MAX_AUDIT_AGE_MS,
   MAX_AUDIT_ATTEMPTS,
-  MAX_FAILURE_REASON_LENGTH,
   MAX_REPORTED_PACKAGES,
   evaluateDependencyPolicy,
   evaluateTemporaryAuditFile,
@@ -168,7 +168,8 @@ function withoutKey(record: Record<string, unknown>, key: string): Record<string
   return copy;
 }
 
-// What npm 11 writes when the registry's audit endpoint cannot be reached: no report, only its error object.
+// What npm 11 writes when the registry's audit endpoint cannot be reached: its own error object on stdout, and no
+// `npm error code` line on stderr. npm printed something, so this is judged and never retried.
 const NPM_AUDIT_ERROR: AuditExecutionResult = {
   exitCode: 1,
   stdout: JSON.stringify({
@@ -182,8 +183,23 @@ const NPM_AUDIT_ERROR: AuditExecutionResult = {
     "",
   ].join("\n"),
 };
-const NPM_AUDIT_ERROR_DETAIL =
-  "npm warn audit network timeout at: https://registry.invalid/-/npm/v1/security/advisories/bulk | npm error audit endpoint returned an error";
+
+// A failed attempt that printed nothing on stdout, the only kind that gets a second attempt.
+const NPM_SILENT_FAILURE: AuditExecutionResult = {
+  exitCode: 1,
+  stdout: "",
+  stderr: [
+    "npm error code ECONNRESET",
+    "npm error network aborted",
+    "npm error A complete log of this run can be found in: /tmp/npm-cache/_logs/debug-0.log",
+    "",
+  ].join("\n"),
+};
+
+// The values that got through the old free-text reason in the review of PR #2201.
+const LETTERS_ONLY_PAT = "abcdefghijklmnopqrstuvwxyz".repeat(2);
+const BASE64_AUTH = Buffer.from("bot:FakePass9!").toString("base64");
+const BASE64_PASSWORD = Buffer.from("FakePass9!").toString("base64");
 
 // Built at run time so no token-shaped literal sits in the source.
 const FAKE_NPM_TOKEN = ["npm", "Zx9".repeat(12)].join("_");
@@ -200,11 +216,11 @@ function commandFailure(execution: Partial<AuditExecutionResult>): { reason: str
   const reason = report.reason ?? "";
   expect(report).toEqual({ status: "command_failed", counts: ZERO_REPORT_COUNTS, packages: [], reason });
   expect(Object.keys(report)).toEqual(["status", "counts", "packages", "reason"]);
-  expect(reason.length).toBeGreaterThan(0);
-  expect(reason.length).toBeLessThanOrEqual(MAX_FAILURE_REASON_LENGTH);
-  expect(reason).toMatch(/^[\x20-\x7e]+$/);
+  expect(reason).toMatch(FAILURE_REASON_PATTERN);
   return { reason, output: formatDependencyPolicyReport(report) };
 }
+
+const quietNode = { ...process.env, NODE_OPTIONS: "--no-warnings" };
 
 async function auditWith(executor: AuditExecutor, lock = packageLock()) {
   const fixture = await fixtureDirectory(lock);
@@ -420,7 +436,7 @@ describe("audit execution", () => {
     const messages: string[] = [];
     const warnings: string[] = [];
     const executor = vi.fn<AuditExecutor>()
-      .mockResolvedValueOnce(NPM_AUDIT_ERROR)
+      .mockResolvedValueOnce(NPM_SILENT_FAILURE)
       .mockResolvedValueOnce({ exitCode: 0, stdout: auditJson(), stderr: "" });
     const exitCode = await runMain(["--lock-sha256", fixture.identity, "--run-audit"], {
       cwd: fixture.directory,
@@ -430,13 +446,13 @@ describe("audit execution", () => {
     });
     expect(exitCode).toBe(0);
     expect(messages).toEqual([PASS_OUTPUT]);
-    expect(warnings).toEqual([`Dependency preflight audit failed (npm audit exit 1: ${NPM_AUDIT_ERROR_DETAIL}); retrying once.`]);
+    expect(warnings).toEqual(["Dependency preflight audit failed (npm audit exit 1, npm code ECONNRESET); retrying once."]);
   });
 
   it("prints a bounded command_failed report with its reason when the retry fails too", async () => {
     const fixture = await fixtureDirectory();
     const messages: string[] = [];
-    const executor = vi.fn<AuditExecutor>().mockResolvedValue(NPM_AUDIT_ERROR);
+    const executor = vi.fn<AuditExecutor>().mockResolvedValue(NPM_SILENT_FAILURE);
     const exitCode = await runMain(["--lock-sha256", fixture.identity, "--run-audit"], {
       cwd: fixture.directory,
       executor,
@@ -450,8 +466,29 @@ describe("audit execution", () => {
       status: "command_failed",
       counts: ZERO_REPORT_COUNTS,
       packages: [],
-      reason: `npm audit exit 1 (attempt 2 of 2): ${NPM_AUDIT_ERROR_DETAIL}`,
+      reason: "npm audit exit 1, npm code ECONNRESET (attempt 2 of 2)",
     });
+  });
+
+  it("prints command_failed without a retry when npm printed its own error object", async () => {
+    const fixture = await fixtureDirectory();
+    const messages: string[] = [];
+    const warnings: string[] = [];
+    const executor = vi.fn<AuditExecutor>()
+      .mockResolvedValueOnce(NPM_AUDIT_ERROR)
+      .mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+    const exitCode = await runMain(["--lock-sha256", fixture.identity, "--run-audit"], {
+      cwd: fixture.directory,
+      executor,
+      retryDelayMs: 0,
+      output: { log: (message) => messages.push(message), warn: (message) => warnings.push(message) },
+    });
+    expect(exitCode).toBe(1);
+    expect(executor).toHaveBeenCalledOnce();
+    expect(warnings).toEqual([]);
+    expect(messages).toEqual([
+      '{"status":"command_failed","counts":{"blocked":0,"info":0,"low":0,"moderate":0,"high":0,"critical":0,"vulnerabilities":0,"reported":0,"omitted":0},"packages":[],"reason":"npm audit exit 1"}',
+    ]);
   });
 });
 
@@ -520,131 +557,159 @@ describe("npm advisories with missing optional fields (#2195)", () => {
 describe("command failure reason", () => {
   it.each<[string, Partial<AuditExecutionResult>, string]>([
     ["an exit code", { exitCode: 17 }, "npm audit exit 17"],
+    ["a large Windows exit code", { exitCode: 3_221_225_477 }, "npm audit exit 3221225477"],
     ["a timeout", { exitCode: null, stopped: "timeout" }, "npm audit timed out"],
-    ["oversized output", { exitCode: null, stopped: "output_limit" }, "npm audit output exceeded its size limit"],
+    ["a signal", { exitCode: null, signal: "SIGTERM" }, "npm audit ended by signal SIGTERM"],
+    ["a signal name in an unexpected form", { exitCode: null, signal: "SIGTERM; see private log" }, "npm audit ended without an exit code"],
     ["a missing exit code", { exitCode: null }, "npm audit ended without an exit code"],
+    ["a negative exit code", { exitCode: -1 }, "npm audit ended without an exit code"],
+    ["an exit code that is not a whole number", { exitCode: 1.5 }, "npm audit ended without an exit code"],
   ])("names %s", (_case, execution, reason) => {
     expect(commandFailure(execution).reason).toBe(reason);
   });
 
-  it("adds the first two meaningful stderr lines and skips npm's log noise", () => {
-    const stderr = [
-      "npm warn config production Use `--omit=dev` instead.",
-      "npm warn Unknown env config \"example\". This will stop working in the next major version of npm.",
-      "npm warn audit network timeout at: https://registry.invalid/-/npm/v1/security/advisories/bulk",
-      "npm error",
-      "npm error audit endpoint returned an error",
-      "npm error A complete log of this run can be found in: /tmp/npm-cache/_logs/debug-0.log",
-      "npm error a third meaningful line",
-    ].join("\r\n");
-    expect(commandFailure({ exitCode: 1, stderr }).reason).toBe(`npm audit exit 1: ${NPM_AUDIT_ERROR_DETAIL}`);
+  it.each<[string, string, string]>([
+    ["an npm 7+ code line", "npm error code E401\nnpm error 401 Unauthorized - GET https://registry.invalid/\n", "E401"],
+    ["an npm 6 code line with Windows line endings", "npm ERR! code ENOTFOUND\r\nnpm ERR! errno ENOTFOUND\r\n", "ENOTFOUND"],
+    ["the first of two code lines", "npm error code E401\nnpm error code E403\n", "E401"],
+    ["a code line after other lines", "npm warn config production Use `--omit=dev` instead.\nnpm error code ECONNRESET\n", "ECONNRESET"],
+    ["a last line with no line break", "npm error network aborted\nnpm error code EAI_AGAIN", "EAI_AGAIN"],
+    ["the longest code allowed", `npm error code E${"X".repeat(24)}\n`, `E${"X".repeat(24)}`],
+  ])("adds npm's error code from %s", (_case, stderr, code) => {
+    expect(commandFailure({ exitCode: 1, stderr }).reason).toBe(`npm audit exit 1, npm code ${code}`);
   });
 
-  const home = homedir();
-  it.each<[string, string, string[], string]>([
-    [
-      "credentials and a query in a URL",
-      `npm error 401 Unauthorized - POST https://${["release-bot", "pw-Hunter2x"].join(":")}@registry.invalid/-/npm/v1/security/advisories/bulk?token=qs-Secret9`,
-      ["release-bot", "Hunter2x", "Secret9", "?token"],
-      "POST https://registry.invalid/-/npm/v1/security/advisories/bulk",
-    ],
-    [
-      "a URL password with a slash",
-      `npm error GET https://${["release-bot", "pw/Sl4sh"].join(":")}@registry.invalid/-/npm/v1/security/advisories/bulk`,
-      ["release-bot", "Sl4sh"],
-      "GET https://registry.invalid/-/npm/v1/security/advisories/bulk",
-    ],
-    [
-      "a URL password with an @",
-      `npm error GET https://${["release-bot", "pw@At5x"].join(":")}@registry.invalid/-/npm/v1/security/advisories/bulk`,
-      ["release-bot", "At5x"],
-      "GET https://registry.invalid/-/npm/v1/security/advisories/bulk",
-    ],
-    [
-      "proxy credentials",
-      `npm error connect ECONNREFUSED via http://${["proxy-user", "proxy-Pass7"].join(":")}@proxy.invalid:8080`,
-      ["proxy-user", "proxy-Pass7"],
-      "via http://proxy.invalid:8080",
-    ],
-    [
-      "an Authorization header",
-      `npm http fetch POST 401 https://registry.invalid/-/npm/v1/security/advisories/bulk Authorization: Bearer ${FAKE_NPM_TOKEN}`,
-      [FAKE_NPM_TOKEN, "Zx9Zx9"],
-      "Authorization: [redacted]",
-    ],
-    ["a bearer token", "npm error retry with bearer sh0rtTok,then give up", ["sh0rtTok"], "bearer [redacted],then give up"],
-    [
-      "a proxy-authorization header",
-      `npm error proxy-authorization: Basic ${Buffer.from("release-bot:pw-Basic6").toString("base64")}`,
-      [Buffer.from("release-bot:pw-Basic6").toString("base64")],
-      "proxy-authorization: [redacted]",
-    ],
-    [
-      "an npm _authToken setting",
-      `npm error //registry.invalid/:_authToken=${["tok", "Val1Secret"].join("-")}`,
-      ["Val1Secret"],
-      "//registry.invalid/:_authToken=[redacted]",
-    ],
-    ["a quoted password", 'npm error login failed, password: "hunter two"', ["hunter"], "password: [redacted]"],
-    ["an npm token on its own", `npm error token ${FAKE_NPM_TOKEN} was revoked`, [FAKE_NPM_TOKEN, "Zx9Zx9"], "token [redacted] was revoked"],
-    ["a GitHub token", `npm error fetch failed for ${FAKE_GITHUB_TOKEN}`, [FAKE_GITHUB_TOKEN, "Qw3Qw3"], "fetch failed for [redacted]"],
-    ["a JWT", `npm error session ${FAKE_JWT} expired`, [FAKE_JWT, "c2lnbmF0dXJlLXBhcnQ"], "session [redacted] expired"],
-    [
-      "a long opaque value",
-      "npm error request id a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8 failed",
-      ["a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8"],
-      "request id [redacted] failed",
-    ],
-    [
-      "a cookie",
-      "npm error set-cookie: session=abc123xyz; Path=/",
-      ["abc123xyz"],
-      "set-cookie: [redacted]; Path=/",
-    ],
-    [
-      "the home directory",
-      `npm error path ${home}${path.sep}private-project${path.sep}package-lock.json`,
-      [home],
-      `path ~${path.sep}private-project`,
-    ],
-    [
-      "the home directory with forward slashes",
-      `npm error path ${home.replace(/\\/g, "/")}/private-project/package-lock.json`,
-      [home.replace(/\\/g, "/")],
-      "path ~/private-project",
-    ],
-    [
-      "terminal escapes, control characters and non-ASCII text",
-      "\u001b[31mnpm error\u001b[39m caf\u00e9 \u2603 bell\u0007 tab\tend \u001b]8;;https://example.invalid/docs\u0007docs\u001b]8;;\u0007",
-      ["\u001b", "\u00e9", "\u2603", "\u0007", "\t", "example.invalid"],
-      "npm error caf? ? bell tab end docs",
-    ],
-  ])("removes %s", (_case, line, secrets, kept) => {
-    const { reason, output } = commandFailure({ exitCode: 1, stderr: `${line}\n` });
-    expect(reason).toContain(kept);
-    for (const secret of secrets) expect(output).not.toContain(secret);
+  it.each<[string, string]>([
+    ["a lowercase code", "npm error code e401"],
+    ["a bare E", "npm error code E"],
+    ["a code one character too long", `npm error code E${"X".repeat(25)}`],
+    ["text after the code", "npm error code E401 Unauthorized"],
+    ["a leading space", " npm error code E401"],
+    ["a double space", "npm error  code E401"],
+    ["a warning prefix", "npm warn code E401"],
+    ["a number instead of a code", "npm error code 401"],
+    ["a dash in the code", "npm error code E-401"],
+    ["punctuation after the code", "npm error code E401;"],
+    ["text before npm", "stderr: npm error code E401"],
+    ["terminal colors", "\u001b[31mnpm error\u001b[39m code E401"],
+    ["a trailing non-breaking space", "npm error code E401\u00a0"],
+    ["a trailing tab", "npm error code E401\t"],
+    ["a carriage return inside the line", "npm error code E401\rnpm error code E403"],
+    ["a non-ASCII letter", "npm error code E4\u00c50"],
+  ])("ignores a code line with %s", (_case, line) => {
+    expect(commandFailure({ exitCode: 1, stderr: `${line}\n` }).reason).toBe("npm audit exit 1");
   });
 
-  it("caps the reason at 200 characters", () => {
-    // deploy/release-vm.ps1 shows a reason only when it has at most 200 characters.
-    expect(MAX_FAILURE_REASON_LENGTH).toBe(200);
-    const stderr = Array.from({ length: 20 }, (_, index) => `npm error detail ${index} ${"word ".repeat(60)}`).join("\n");
-    const { reason } = commandFailure({ exitCode: 1, stderr });
-    expect(reason.startsWith("npm audit exit 1: npm error detail 0 word word")).toBe(true);
-    expect(reason.endsWith("...")).toBe(true);
-    expect(reason.length).toBeGreaterThan(190);
-    expect(reason.length).toBeLessThanOrEqual(200);
-  });
-
-  it("drops a stderr line cut off by the capture limit instead of keeping part of it", () => {
-    const { reason, output } = commandFailure({ exitCode: 1, stderr: `npm error ${"padding ".repeat(2_000)}${FAKE_NPM_TOKEN}` });
+  it("takes npm's code only from stderr, never from what npm printed on stdout", () => {
+    const stdout = JSON.stringify({ error: { code: "ENOLOCK", summary: "private summary", detail: "private detail" } });
+    const { reason, output } = commandFailure({ exitCode: 1, stdout, stderr: "" });
     expect(reason).toBe("npm audit exit 1");
-    expect(output).not.toContain("Zx9");
+    expect(output).not.toContain("private");
   });
 
-  it("drops a line too long to cut at a word boundary", () => {
-    const stderr = `npm error ${"x".repeat(1_500)}\nnpm error next line`;
-    expect(commandFailure({ exitCode: 1, stderr }).reason).toBe("npm audit exit 1: npm error next line");
+  it.each<[string, string, string]>([
+    ["a 52-letter Azure DevOps PAT", `npm warn audit access denied for ${LETTERS_ONLY_PAT}`, LETTERS_ONLY_PAT],
+    ["an _auth value on the next line", `npm warn audit //registry.invalid/:_auth=\n${BASE64_AUTH}`, BASE64_AUTH],
+    ["a _password value on the next line", `npm warn audit //registry.invalid/:_password=\n${BASE64_PASSWORD}`, BASE64_PASSWORD],
+  ])("never shows %s from the review of PR #2201", (_case, stderr, secret) => {
+    const { reason, output } = commandFailure({ exitCode: 1, stderr });
+    expect(reason).toBe("npm audit exit 1");
+    expect(output).not.toContain(secret);
+  });
+
+  it("never shows a secret-shaped stderr value, wherever npm prints it", () => {
+    const secrets = [
+      LETTERS_ONLY_PAT,
+      BASE64_AUTH,
+      BASE64_PASSWORD,
+      FAKE_NPM_TOKEN,
+      FAKE_GITHUB_TOKEN,
+      FAKE_JWT,
+      "0123456789abcdef".repeat(4),
+    ];
+    const layouts: Array<(secret: string) => string> = [
+      (secret) => secret,
+      (secret) => `npm error ${secret}`,
+      (secret) => `npm error code ${secret}`,
+      (secret) => `npm ERR! code ${secret}`,
+      (secret) => `npm error code E401${secret}`,
+      (secret) => `npm error code E401 ${secret}`,
+      (secret) => `npm error code E401\nnpm error ${secret}`,
+      (secret) => `${secret}\nnpm error code E401`,
+      (secret) => `npm error _auth=\n${secret}`,
+      (secret) => `npm error _password=\nnpm error ${secret}`,
+      (secret) => `npm error //registry.invalid/:_authToken=${secret}`,
+      (secret) => `npm error Authorization: Bearer ${secret}`,
+      (secret) => `npm error GET https://bot:${secret}@registry.invalid/-/npm/v1/security/advisories/bulk`,
+    ];
+    for (const secret of secrets) {
+      for (const layout of layouts) {
+        for (const lineBreak of ["\n", "\r\n"]) {
+          const stderr = `${layout(secret).replaceAll("\n", lineBreak)}${lineBreak}`;
+          const { reason, output } = commandFailure({ exitCode: 1, stderr });
+          expect(["npm audit exit 1", "npm audit exit 1, npm code E401"]).toContain(reason);
+          expect(output).not.toContain(secret);
+        }
+      }
+    }
+  });
+
+  it("takes nothing from stderr except the code on a whole `npm error code` line", () => {
+    // A seeded generator (mulberry32), so every run checks the same 2,000 inputs.
+    let seed = 2195;
+    function random(): number {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let value = Math.imul(seed ^ (seed >>> 15), seed | 1);
+      value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+      return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+    }
+    function pick<T>(items: readonly T[]): T {
+      return items[Math.floor(random() * items.length)];
+    }
+    const alphabets = [
+      "abcdefghijklmnopqrstuvwxyz234567",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=",
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_",
+      "0123456789abcdef",
+      " \t\r\u001b\u00a0\u2028:=@/\\\"'!;,.-",
+    ].map((alphabet) => [...alphabet]);
+    const prefixes = [
+      "",
+      "npm error ",
+      "npm ERR! ",
+      "npm warn ",
+      "npm error code ",
+      "npm ERR! code ",
+      "npm error code E",
+      "npm ERR! code E",
+      "_auth=",
+    ];
+    let withCode = 0;
+    for (let run = 0; run < 2_000; run += 1) {
+      const lines = Array.from({ length: 1 + Math.floor(random() * 4) }, () => {
+        const alphabet = pick(alphabets);
+        return pick(prefixes) + Array.from({ length: 1 + Math.floor(random() * 40) }, () => pick(alphabet)).join("");
+      });
+      const stderr = lines.join(pick(["\n", "\r\n"]));
+      const { reason } = commandFailure({ exitCode: 1, stderr });
+      const code = /^npm audit exit 1, npm code (E[A-Z0-9_]{1,24})$/.exec(reason)?.[1];
+      if (code === undefined) {
+        expect(reason).toBe("npm audit exit 1");
+        continue;
+      }
+      withCode += 1;
+      const codeLines = stderr.split(/\r?\n/).filter((line) => line === `npm error code ${code}` || line === `npm ERR! code ${code}`);
+      expect(codeLines.length).toBeGreaterThan(0);
+    }
+    expect(withCode).toBeGreaterThan(20);
+  });
+
+  it("uses the same grammar that deploy/release-vm.ps1 checks before it shows a reason", async () => {
+    expect(FAILURE_REASON_PATTERN.flags).toBe("");
+    const { source } = FAILURE_REASON_PATTERN;
+    expect(source.startsWith("^") && source.endsWith("$")).toBe(true);
+    const releaseScript = await fs.readFile(path.resolve("deploy", "release-vm.ps1"), "utf8");
+    expect(releaseScript).toContain(`$reason -cmatch '\\A${source.slice(1, -1)}\\z'`);
   });
 
   it("names a start failure by its error code only", async () => {
@@ -656,45 +721,48 @@ describe("command failure reason", () => {
       packages: [],
       reason: "npm audit could not start (ENOENT) (attempt 2 of 2)",
     });
+    expect(formatDependencyPolicyReport(report)).not.toContain("Zx9");
 
-    const oddCode = Object.assign(new Error("private"), { code: "bad code; see private detail" });
-    const { report: oddReport } = await auditWith(vi.fn<AuditExecutor>().mockRejectedValue(oddCode));
-    expect(oddReport.reason).toBe("npm audit could not start (attempt 2 of 2)");
+    for (const code of ["bad code; see private detail", "enoent", `E${"X".repeat(25)}`, 13]) {
+      const oddError = Object.assign(new Error("private"), { code });
+      const { report: oddReport } = await auditWith(vi.fn<AuditExecutor>().mockRejectedValue(oddError));
+      expect(oddReport.reason).toBe("npm audit could not start (attempt 2 of 2)");
+    }
   });
 });
 
 describe("audit retry", () => {
-  it("retries once when npm printed no audit report, then passes on a clean report", async () => {
+  it("retries once when an attempt printed nothing, then passes on a clean report", async () => {
     const executor = vi.fn<AuditExecutor>()
-      .mockResolvedValueOnce(NPM_AUDIT_ERROR)
+      .mockResolvedValueOnce(NPM_SILENT_FAILURE)
       .mockResolvedValueOnce({ exitCode: 0, stdout: auditJson(), stderr: "" });
     const { report, onRetry } = await auditWith(executor);
     expect(formatDependencyPolicyReport(report)).toBe(PASS_OUTPUT);
     expect(executor).toHaveBeenCalledTimes(2);
     expect(executor).toHaveBeenNthCalledWith(2, expect.objectContaining({ args: AUDIT_ARGUMENTS }));
     expect(onRetry).toHaveBeenCalledOnce();
-    expect(onRetry).toHaveBeenCalledWith(`npm audit exit 1: ${NPM_AUDIT_ERROR_DETAIL}`);
+    expect(onRetry).toHaveBeenCalledWith("npm audit exit 1, npm code ECONNRESET");
   });
 
   it("stops after the second attempt and says so in the reason", async () => {
-    const executor = vi.fn<AuditExecutor>().mockResolvedValue(NPM_AUDIT_ERROR);
+    const executor = vi.fn<AuditExecutor>().mockResolvedValue(NPM_SILENT_FAILURE);
     const { report, onRetry } = await auditWith(executor);
     expect(report).toEqual({
       status: "command_failed",
       counts: ZERO_REPORT_COUNTS,
       packages: [],
-      reason: `npm audit exit 1 (attempt 2 of 2): ${NPM_AUDIT_ERROR_DETAIL}`,
+      reason: "npm audit exit 1, npm code ECONNRESET (attempt 2 of 2)",
     });
     expect(executor).toHaveBeenCalledTimes(MAX_AUDIT_ATTEMPTS);
     expect(onRetry).toHaveBeenCalledOnce();
   });
 
-  it.each<[string, AuditExecutionResult]>([
-    ["timed out", { exitCode: null, stdout: "", stderr: "", stopped: "timeout" }],
-    ["exited without any output", { exitCode: 1, stdout: "", stderr: "" }],
-    ["was stopped without an exit code", { exitCode: null, stdout: "", stderr: "" }],
-    ["printed text that is not an audit report", { exitCode: 1, stdout: "Error: unexpected failure", stderr: "" }],
-  ])("retries once when npm %s", async (_case, failure) => {
+  it.each<[string, AuditExecutionResult, string]>([
+    ["timed out", { exitCode: null, stdout: "", stderr: "", stopped: "timeout" }, "npm audit timed out"],
+    ["exited with an error", { exitCode: 1, stdout: "", stderr: "" }, "npm audit exit 1"],
+    ["was stopped without an exit code", { exitCode: null, stdout: "", stderr: "" }, "npm audit ended without an exit code"],
+    ["was ended by a signal", { exitCode: null, stdout: "", stderr: "", signal: "SIGKILL" }, "npm audit ended by signal SIGKILL"],
+  ])("retries once when npm printed nothing and %s", async (_case, failure, reason) => {
     const executor = vi.fn<AuditExecutor>()
       .mockResolvedValueOnce(failure)
       .mockResolvedValueOnce({ exitCode: 0, stdout: auditJson() });
@@ -702,6 +770,7 @@ describe("audit retry", () => {
     expect(formatDependencyPolicyReport(report)).toBe(PASS_OUTPUT);
     expect(executor).toHaveBeenCalledTimes(2);
     expect(onRetry).toHaveBeenCalledOnce();
+    expect(onRetry).toHaveBeenCalledWith(reason);
   });
 
   it("retries once when npm could not start", async () => {
@@ -716,6 +785,7 @@ describe("audit retry", () => {
 
   const vulnerableLock = packageLock([{ name: "unsafe-package", version: "1.2.3" }]);
   const vulnerableAudit = auditJson([{ name: "unsafe-package", severity: "high" }]);
+  const blockedLock = packageLock([{ ...BLOCKED_DEPENDENCIES[0] }]);
   it.each<[string, string, AuditExecutionResult, DependencyPolicyStatus]>([
     ["a report that lists advisories", vulnerableLock, { exitCode: 1, stdout: vulnerableAudit }, "rejected"],
     ["a report that lists advisories with an unexpected exit code", vulnerableLock, { exitCode: 2, stdout: vulnerableAudit }, "command_failed"],
@@ -727,8 +797,23 @@ describe("audit retry", () => {
       { exitCode: 1, stdout: nextAudit({ ...GHSA_VCVR_ADVISORY, cvss: { score: 0, vectorString: 42 } }) },
       "malformed_audit",
     ],
+    ["npm's own error object", packageLock(), NPM_AUDIT_ERROR, "command_failed"],
+    ["printed text that is not an audit report", packageLock(), { exitCode: 1, stdout: "Error: unexpected failure" }, "command_failed"],
+    ["a single line break", packageLock(), { exitCode: 1, stdout: "\n" }, "command_failed"],
     ["unreadable output with exit code 0", packageLock(), { exitCode: 0, stdout: "not json" }, "malformed_audit"],
-    ["output over the size limit", packageLock(), { exitCode: null, stdout: "", stopped: "output_limit" }, "command_failed"],
+    ["no output with exit code 0", packageLock(), { exitCode: 0, stdout: "" }, "malformed_audit"],
+    ["a report that lists advisories, then a timeout", vulnerableLock, { exitCode: null, stdout: vulnerableAudit, stopped: "timeout" }, "rejected"],
+    ["a clean report, then a timeout", packageLock(), { exitCode: null, stdout: auditJson(), stopped: "timeout" }, "malformed_audit"],
+    [
+      "a report cut off by a timeout",
+      vulnerableLock,
+      { exitCode: null, stdout: vulnerableAudit.slice(0, 80), stopped: "timeout" },
+      "malformed_audit",
+    ],
+    ["text that is not a report, then a timeout", packageLock(), { exitCode: null, stdout: "Error", stopped: "timeout" }, "malformed_audit"],
+    ["a clean report for a lock with a blocked package, then a timeout", blockedLock, { exitCode: null, stdout: auditJson(), stopped: "timeout" }, "rejected"],
+    ["output over the size limit", packageLock(), { exitCode: null, stdout: auditJson(), stopped: "output_limit" }, "malformed_audit"],
+    ["output over a limit that kept none of it", packageLock(), { exitCode: null, stdout: "", stopped: "output_limit" }, "malformed_audit"],
   ])("never retries %s", async (_case, lock, first, status) => {
     // A second call would return a clean report, so any retry here would turn into a pass.
     const executor = vi.fn<AuditExecutor>()
@@ -740,10 +825,26 @@ describe("audit retry", () => {
     expect(onRetry).not.toHaveBeenCalled();
   });
 
+  // The HIGH case from the review of PR #2201: npm prints a report and then hangs until the time limit. The old code
+  // dropped the printed report, retried, got a clean report and passed.
+  it.each<[string, string, unknown]>([
+    ["a complete critical report", nextAudit(), NEXT_REJECTED],
+    ["a report cut off part way through", '{"auditReportVersion":2,"vulnerabilities":', { status: "malformed_audit", counts: ZERO_REPORT_COUNTS, packages: [] }],
+  ])("judges %s that npm printed before it hung, and never retries", async (_case, printed, expected) => {
+    const hang = `process.stdout.write(${JSON.stringify(printed)}); setInterval(() => {}, 1000);`;
+    const executor = vi.fn<AuditExecutor>()
+      .mockImplementationOnce(() => runBoundedProcess(process.execPath, ["-e", hang], { cwd: tmpdir(), env: quietNode, timeoutMs: 1_000 }))
+      .mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+    const { report, onRetry } = await auditWith(executor, NEXT_LOCK);
+    expect(report).toEqual(expected);
+    expect(executor).toHaveBeenCalledOnce();
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
   it("does not retry when the lock changed during the failed attempt", async () => {
     const executor = vi.fn<AuditExecutor>().mockImplementation(async ({ cwd }) => {
       await fs.writeFile(path.join(cwd, "package-lock.json"), packageLock([{ name: "added-package", version: "1.0.0" }]));
-      return NPM_AUDIT_ERROR;
+      return NPM_SILENT_FAILURE;
     });
     const { report } = await auditWith(executor);
     expect(report.status).toBe("lock_mismatch");
@@ -752,7 +853,7 @@ describe("audit retry", () => {
 
   it("checks the lock again after the retry", async () => {
     const executor = vi.fn<AuditExecutor>()
-      .mockResolvedValueOnce(NPM_AUDIT_ERROR)
+      .mockResolvedValueOnce(NPM_SILENT_FAILURE)
       .mockImplementationOnce(async ({ cwd }) => {
         await fs.writeFile(path.join(cwd, "package-lock.json"), packageLock([{ name: "added-package", version: "1.0.0" }]));
         return { exitCode: 0, stdout: auditJson() };
@@ -764,8 +865,6 @@ describe("audit retry", () => {
 });
 
 describe("npm audit process", () => {
-  const quietNode = { ...process.env, NODE_OPTIONS: "--no-warnings" };
-
   it("turns npm's warnings back on after `npm run --silent` turned them off", () => {
     const base: NodeJS.ProcessEnv = {
       NODE_ENV: "test",
@@ -790,20 +889,26 @@ describe("npm audit process", () => {
       .resolves.toEqual({ exitCode: 3, stdout: '{"ok":true}', stderr: "npm error one\n" });
   });
 
-  it("stops a process that runs past its time limit and drops its partial output", async () => {
+  it("stops a process that runs past its time limit and keeps what it printed", async () => {
     const script = "process.stdout.write('partial'); setInterval(() => {}, 1000);";
     await expect(runBoundedProcess(process.execPath, ["-e", script], { cwd: tmpdir(), env: quietNode, timeoutMs: 1_000 }))
-      .resolves.toMatchObject({ exitCode: null, stdout: "", stopped: "timeout" });
+      .resolves.toMatchObject({ exitCode: null, stdout: "partial", stopped: "timeout" });
   });
 
-  it("stops a process whose stdout passes the size limit", async () => {
+  it("stops a process whose stdout passes the size limit and keeps output up to the limit", async () => {
     const script = "process.stdout.write('x'.repeat(64 * 1024)); setInterval(() => {}, 1000);";
     await expect(runBoundedProcess(process.execPath, ["-e", script], {
       cwd: tmpdir(),
       env: quietNode,
       timeoutMs: 20_000,
       maxStdoutBytes: 1024,
-    })).resolves.toMatchObject({ exitCode: null, stdout: "", stopped: "output_limit" });
+    })).resolves.toMatchObject({ exitCode: null, stdout: "x".repeat(1024), stopped: "output_limit" });
+  });
+
+  it.runIf(process.platform !== "win32")("names the signal that ended a process", async () => {
+    const script = "process.kill(process.pid, 'SIGTERM'); setInterval(() => {}, 1000);";
+    await expect(runBoundedProcess(process.execPath, ["-e", script], { cwd: tmpdir(), env: quietNode, timeoutMs: 20_000 }))
+      .resolves.toEqual({ exitCode: null, stdout: "", stderr: "", signal: "SIGTERM" });
   });
 
   it("keeps only whole stderr lines within the stderr limit", async () => {
@@ -814,6 +919,19 @@ describe("npm audit process", () => {
       timeoutMs: 20_000,
       maxStderrBytes: 30,
     })).resolves.toEqual({ exitCode: 0, stdout: "", stderr: "first line\n" });
+  });
+
+  it("never reads npm's code from a stderr line cut off by the limit", async () => {
+    // Keeping 17 bytes of "npm error code E401" would read as the code E4.
+    const script = "process.stderr.write('npm error code E401\\n'); process.exitCode = 1;";
+    const execution = await runBoundedProcess(process.execPath, ["-e", script], {
+      cwd: tmpdir(),
+      env: quietNode,
+      timeoutMs: 20_000,
+      maxStderrBytes: 17,
+    });
+    expect(execution).toEqual({ exitCode: 1, stdout: "", stderr: "" });
+    expect(commandFailure(execution).reason).toBe("npm audit exit 1");
   });
 
   it("rejects when the command cannot start", async () => {

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -13,11 +13,15 @@ export const MAX_REPORTED_PACKAGES = 25;
 export const AUDIT_TIMEOUT_MS = 120_000;
 export const MAX_AUDIT_ATTEMPTS = 2;
 export const AUDIT_RETRY_DELAY_MS = 2_000;
-export const MAX_FAILURE_REASON_LENGTH = 200;
 export const MAX_FAILURE_STDERR_BYTES = 8 * 1024;
+// Every command_failed reason matches this, and deploy/release-vm.ps1 shows a reason only when it matches the same
+// pattern. Each part is fixed text, a number, a signal name or an error code, so no other text from npm fits.
+export const FAILURE_REASON_PATTERN =
+  /^npm audit (?:exit (?:0|[1-9][0-9]{0,9})|ended by signal SIG[A-Z0-9]{1,12}|ended without an exit code|timed out|could not start(?: \(E[A-Z0-9_]{1,24}\))?)(?:, npm code E[A-Z0-9_]{1,24})?(?: \(attempt [1-9] of [1-9]\))?$/;
 
-const MAX_FAILURE_LINE_LENGTH = 1024;
-const FAILURE_DETAIL_LINES = 2;
+const ERROR_CODE_PATTERN = /^E[A-Z0-9_]{1,24}$/;
+const NPM_ERROR_CODE_LINE_PATTERN = /^npm (?:error|ERR!) code (E[A-Z0-9_]{1,24})$/;
+const SIGNAL_PATTERN = /^SIG[A-Z0-9]{1,12}$/;
 const STOP_GRACE_MS = 5_000;
 const MAX_PACKAGE_LOCK_BYTES = 8 * 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -65,7 +69,8 @@ export interface DependencyPolicyReport {
   status: DependencyPolicyStatus;
   counts: DependencyPolicyCounts;
   packages: DependencyPackageResult[];
-  // Only command_failed reports carry this bounded, sanitized summary; every other report keeps exactly three keys.
+  // Only command_failed reports carry this, and it always matches FAILURE_REASON_PATTERN. Every other report keeps
+  // exactly three keys.
   reason?: string;
 }
 
@@ -84,6 +89,7 @@ export interface AuditExecutionResult {
   exitCode: number | null;
   stdout: string;
   stderr?: string;
+  signal?: string;
   stopped?: "timeout" | "output_limit";
 }
 
@@ -322,116 +328,42 @@ function commandFailedReport(reason: string): DependencyPolicyReport {
   return { status: "command_failed", counts: { ...ZERO_COUNTS }, packages: [], reason };
 }
 
-const ANSI_ESCAPE_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u001b[@-_]/g;
-const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/g;
-const AUTHORIZATION_HEADER_PATTERN =
-  /\b((?:proxy-)?authorization)["']?\s*[:=]\s*(?:(?:bearer|basic|token|negotiate|ntlm|digest)\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
-const AUTHORIZATION_SCHEME_PATTERN = /\b(bearer|basic|negotiate|ntlm|digest)\s+[^\s,;]+/gi;
-const URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*/gi;
-const SECRET_ASSIGNMENT_PATTERN =
-  /\b([\w.-]*?(?:token|password|passwd|pwd|secret|auth|apikey|api[_-]?key|signature|sig|credentials?|cookie))(["']?\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&"']+)/gi;
-const KNOWN_TOKEN_PATTERN =
-  /\b(?:npm_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,})/g;
-const OPAQUE_VALUE_PATTERN = /[A-Za-z0-9_+=-]{32,}/g;
-const NOISE_LINE_PATTERN =
-  /^npm(?: (?:error|warn|notice|http|info|verbose|silly|timing))?$|^npm ERR!$|complete log of this run|^npm warn (?:config\b|unknown (?:env|user|project|builtin|global|cli) config\b)/i;
-
-function replaceHomeDirectory(line: string): string {
-  let home: string;
-  try {
-    home = homedir();
-  } catch {
-    return line;
-  }
-  if (home.length < 3) return line;
-  let result = line;
-  for (const variant of new Set([home, home.replace(/\\/g, "/"), home.replace(/\//g, "\\")])) {
-    result = result.replace(new RegExp(variant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), "~");
-  }
-  return result;
+function isExitCode(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 0xffffffff;
 }
 
-function stripUrlSecrets(url: string): string {
-  const schemeEnd = url.indexOf("://") + 3;
-  let rest = url.slice(schemeEnd);
-  const queryStart = rest.search(/[?#]/);
-  if (queryStart >= 0) rest = rest.slice(0, queryStart);
-  const slash = rest.indexOf("/");
-  const authority = slash < 0 ? rest : rest.slice(0, slash);
-  const userInfoEnd = authority.lastIndexOf("@");
-  if (userInfoEnd >= 0) {
-    rest = rest.slice(userInfoEnd + 1);
-  } else if (authority.includes(":")) {
-    // A raw "/" inside a password moves its "@" past the first "/", so drop credentials up to that "@" too.
-    const at = rest.indexOf("@", authority.length);
-    if (at > 0 && rest[at - 1] !== "/") rest = rest.slice(at + 1);
+// Only a whole stderr line such as "npm error code E401" counts, and only its code is kept.
+function npmErrorCode(stderr: string | undefined): string | undefined {
+  for (const line of stderr?.split(/\r?\n/) ?? []) {
+    const code = NPM_ERROR_CODE_LINE_PATTERN.exec(line)?.[1];
+    if (code) return code;
   }
-  return url.slice(0, schemeEnd) + rest;
+  return undefined;
 }
 
-// Cuts at a space so a secret split by the cut can never survive as a fragment too short to redact.
-function boundWords(line: string, maxLength: number): string {
-  if (line.length <= maxLength) return line;
-  const cut = line.lastIndexOf(" ", maxLength);
-  return cut > 0 ? line.slice(0, cut) : "";
-}
-
-function sanitizeFailureLine(rawLine: string): string {
-  const line = boundWords(
-    rawLine.replace(ANSI_ESCAPE_PATTERN, "").replace(CONTROL_CHARACTER_PATTERN, " ").replace(/\s+/g, " ").trim(),
-    MAX_FAILURE_LINE_LENGTH,
-  );
-  return replaceHomeDirectory(line)
-    .replace(AUTHORIZATION_HEADER_PATTERN, "$1: [redacted]")
-    .replace(AUTHORIZATION_SCHEME_PATTERN, "$1 [redacted]")
-    .replace(URL_PATTERN, stripUrlSecrets)
-    .replace(SECRET_ASSIGNMENT_PATTERN, "$1$2[redacted]")
-    .replace(KNOWN_TOKEN_PATTERN, "[redacted]")
-    .replace(OPAQUE_VALUE_PATTERN, (value) => /[A-Za-z]/.test(value) && /[0-9]/.test(value) ? "[redacted]" : value)
-    .replace(/[^\x20-\x7e]/g, "?")
-    .replace(/ {2,}/g, " ")
-    .trim();
-}
-
-function failureDetail(stderr: string): string {
-  let bounded = stderr;
-  if (bounded.length > MAX_FAILURE_STDERR_BYTES) {
-    bounded = bounded.slice(0, MAX_FAILURE_STDERR_BYTES);
-    bounded = bounded.slice(0, Math.max(bounded.lastIndexOf("\n"), bounded.lastIndexOf("\r")) + 1);
-  }
-  const lines: string[] = [];
-  for (const rawLine of bounded.split(/\r\n|\r|\n/)) {
-    const line = sanitizeFailureLine(rawLine);
-    if (!line || NOISE_LINE_PATTERN.test(line)) continue;
-    lines.push(line);
-    if (lines.length === FAILURE_DETAIL_LINES) break;
-  }
-  return lines.join(" | ");
-}
-
+// Built only from fixed text, the exit code, a signal name, error codes and the attempt number. No other text from
+// npm is used, so nothing npm printed (tokens, URLs, paths) can reach the report.
 function commandFailureReason(failure: { execution?: AuditExecutionResult; startError?: unknown }, attempt: number): string {
   const { execution, startError } = failure;
-  let summary: string;
+  let reason: string;
   if (!execution) {
-    const code = isRecord(startError) && typeof startError.code === "string" && /^[A-Z0-9_]{1,32}$/.test(startError.code)
-      ? ` (${startError.code})`
-      : "";
-    summary = `npm audit could not start${code}`;
+    const code = isRecord(startError) ? startError.code : undefined;
+    reason = typeof code === "string" && ERROR_CODE_PATTERN.test(code)
+      ? `npm audit could not start (${code})`
+      : "npm audit could not start";
   } else if (execution.stopped === "timeout") {
-    summary = "npm audit timed out";
-  } else if (execution.stopped === "output_limit") {
-    summary = "npm audit output exceeded its size limit";
-  } else if (execution.exitCode === null) {
-    summary = "npm audit ended without an exit code";
+    reason = "npm audit timed out";
+  } else if (isExitCode(execution.exitCode)) {
+    reason = `npm audit exit ${execution.exitCode}`;
+  } else if (typeof execution.signal === "string" && SIGNAL_PATTERN.test(execution.signal)) {
+    reason = `npm audit ended by signal ${execution.signal}`;
   } else {
-    summary = `npm audit exit ${execution.exitCode}`;
+    reason = "npm audit ended without an exit code";
   }
-  if (attempt > 1) summary += ` (attempt ${attempt} of ${MAX_AUDIT_ATTEMPTS})`;
-  const detail = execution?.stderr ? failureDetail(execution.stderr) : "";
-  const reason = detail ? `${summary}: ${detail}` : summary;
-  return reason.length <= MAX_FAILURE_REASON_LENGTH
-    ? reason
-    : `${reason.slice(0, MAX_FAILURE_REASON_LENGTH - 3).trimEnd()}...`;
+  const npmCode = npmErrorCode(execution?.stderr);
+  if (npmCode) reason += `, npm code ${npmCode}`;
+  if (attempt > 1) reason += ` (attempt ${attempt} of ${MAX_AUDIT_ATTEMPTS})`;
+  return reason;
 }
 
 function comparePackageResults(left: DependencyPackageResult, right: DependencyPackageResult): number {
@@ -474,24 +406,27 @@ interface AuditAssessment {
 // Matches any output where npm began writing audit results, including a report cut off part way through.
 const AUDIT_REPORT_MARKER = /"(?:auditReportVersion|vulnerabilities)"\s*:/;
 
-// A report npm wrote is final: it is either used as is or fails, and is never retried. Only a run that left no
-// report behind (npm's own error object, no output, or a timeout) gets one more attempt, so a retry can never
-// replace listed advisories with a pass.
+// Only an attempt that printed nothing at all to stdout gets one more try, so a retry can never replace or hide
+// anything npm printed. Whatever an attempt printed is judged here, and a timed-out attempt can never pass.
 function assessAuditExecution(lock: PackageLockSnapshot, execution: AuditExecutionResult, attempt: number): AuditAssessment {
   const commandFailed = (retryable: boolean): AuditAssessment => ({
     report: commandFailedReport(commandFailureReason({ execution }, attempt)),
     retryable,
   });
-  if (execution.stopped) return commandFailed(execution.stopped === "timeout");
+  const malformed: AuditAssessment = { report: dependencyPolicyFailure("malformed_audit"), retryable: false };
+  if (execution.stopped === "output_limit") return malformed;
+  if (execution.stdout.length === 0) return execution.exitCode === 0 ? malformed : commandFailed(true);
   const audit = parseAuditJson(execution.stdout, lock);
+  if (execution.stopped === "timeout") {
+    // A report printed before the time limit still counts when it rejects. Anything else is incomplete.
+    const report = audit ? policyReport(lock, audit) : undefined;
+    return report?.status === "rejected" ? { report, retryable: false } : malformed;
+  }
   if (audit) {
     const expectedExit = execution.exitCode === 0 || (execution.exitCode === 1 && audit.counts.total > 0);
     return expectedExit ? { report: policyReport(lock, audit), retryable: false } : commandFailed(false);
   }
-  if (execution.exitCode === 0 || AUDIT_REPORT_MARKER.test(execution.stdout)) {
-    return { report: dependencyPolicyFailure("malformed_audit"), retryable: false };
-  }
-  return commandFailed(true);
+  return execution.exitCode === 0 || AUDIT_REPORT_MARKER.test(execution.stdout) ? malformed : commandFailed(false);
 }
 
 export function evaluateDependencyPolicy(options: {
@@ -654,23 +589,24 @@ export function runBoundedProcess(
       child.stdout?.destroy();
       child.stderr?.destroy();
     };
-    const finish = (exitCode: number | null) => {
+    const finish = (exitCode: number | null, signal: NodeJS.Signals | null = null) => {
       if (settled) return;
       settle();
       if (stopped) child.unref();
       let stderr = Buffer.concat(stderrChunks).toString("utf8");
+      // Whole lines only, so a line cut off by the limit is never read (a cut "npm error code E401" would read as E4).
       if (stderrTruncated) stderr = stderr.slice(0, Math.max(stderr.lastIndexOf("\n"), stderr.lastIndexOf("\r")) + 1);
       resolve({
         exitCode: stopped ? null : exitCode,
-        stdout: stopped ? "" : Buffer.concat(stdoutChunks).toString("utf8"),
+        // Kept after a stop too, so output printed before a timeout is judged instead of dropped and retried.
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
         stderr,
-        ...(stopped ? { stopped } : {}),
+        ...(stopped ? { stopped } : signal ? { signal } : {}),
       });
     };
     const stop = (reason: "timeout" | "output_limit") => {
       if (stopped || settled) return;
       stopped = reason;
-      stdoutChunks.length = 0;
       stopProcessTree(child);
       // Settle even if a stuck descendant keeps the pipes open after the kill.
       graceTimer = setTimeout(() => finish(null), STOP_GRACE_MS);
@@ -678,13 +614,11 @@ export function runBoundedProcess(
     const timeoutTimer = setTimeout(() => stop("timeout"), options.timeoutMs);
 
     child.stdout?.on("data", (chunk: Buffer) => {
-      if (stopped || settled) return;
+      if (settled) return;
+      const room = maxStdoutBytes - stdoutBytes;
       stdoutBytes += chunk.byteLength;
-      if (stdoutBytes > maxStdoutBytes) {
-        stop("output_limit");
-        return;
-      }
-      stdoutChunks.push(chunk);
+      if (room > 0) stdoutChunks.push(chunk.byteLength > room ? chunk.subarray(0, room) : chunk);
+      if (stdoutBytes > maxStdoutBytes) stop("output_limit");
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       if (settled) return;
@@ -697,7 +631,10 @@ export function runBoundedProcess(
     });
     child.on("error", (error) => {
       if (settled) return;
-      if (stopped) {
+      // No IPC or AbortSignal is used and only stop() kills, so an 'error' before a stop means the process never
+      // started. If it printed anything it did start, and that output is judged like any other.
+      if (stopped || stdoutBytes > 0) {
+        if (!stopped) stopProcessTree(child);
         finish(null);
         return;
       }
@@ -705,7 +642,7 @@ export function runBoundedProcess(
       stopProcessTree(child);
       reject(error);
     });
-    child.on("close", (exitCode) => finish(exitCode));
+    child.on("close", (exitCode, signal) => finish(exitCode, signal));
   });
 }
 
