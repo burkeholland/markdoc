@@ -626,10 +626,14 @@ describe("command failure reason", () => {
   });
 
   it("caps the reason at 200 characters", () => {
+    // deploy/release-vm.ps1 shows a reason only when it has at most 200 characters.
+    expect(MAX_FAILURE_REASON_LENGTH).toBe(200);
     const stderr = Array.from({ length: 20 }, (_, index) => `npm error detail ${index} ${"word ".repeat(60)}`).join("\n");
     const { reason } = commandFailure({ exitCode: 1, stderr });
     expect(reason.startsWith("npm audit exit 1: npm error detail 0 word word")).toBe(true);
     expect(reason.endsWith("...")).toBe(true);
+    expect(reason.length).toBeGreaterThan(190);
+    expect(reason.length).toBeLessThanOrEqual(200);
   });
 
   it("drops a stderr line cut off by the capture limit instead of keeping part of it", () => {

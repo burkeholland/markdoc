@@ -392,6 +392,7 @@ Assert-True (-not $commandFailure.Message.Contains($sensitiveMarker)) 'A package
 # A nonzero preflight exit may show only an allowed status and, for command_failed, the bounded printable reason.
 $script:AuditThrows = $false
 $failedReason = 'npm audit exit 1 (attempt 2 of 2): npm warn audit network timeout at: https://registry.invalid/-/npm/v1/security/advisories/bulk'
+$longestReason = ('npm audit exit 1: ' + ('x' * 200)).Substring(0, 200)
 function ConvertTo-TestReport([System.Collections.IDictionary]$Report) {
   return $Report | ConvertTo-Json -Compress -Depth 6
 }
@@ -427,8 +428,13 @@ $detailCases = @(
     Message = 'Dependency preflight failed (status command_failed); raw output withheld.'
   },
   @{
+    Why = 'A reason of exactly 200 characters must be shown.'
+    Output = ConvertTo-TestReport ([ordered]@{ status = 'command_failed'; counts = $zeroCounts; packages = @(); reason = $longestReason })
+    Message = "Dependency preflight failed (status command_failed; reason: $longestReason); raw output withheld."
+  },
+  @{
     Why = 'A reason above 200 characters must be withheld.'
-    Output = ConvertTo-TestReport ([ordered]@{ status = 'command_failed'; counts = $zeroCounts; packages = @(); reason = $sensitiveMarker + ('x' * 170) })
+    Output = ConvertTo-TestReport ([ordered]@{ status = 'command_failed'; counts = $zeroCounts; packages = @(); reason = ($sensitiveMarker + ('x' * 200)).Substring(0, 201) })
     Message = 'Dependency preflight failed (status command_failed); raw output withheld.'
   },
   @{
