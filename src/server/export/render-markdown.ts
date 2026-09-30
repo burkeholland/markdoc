@@ -1,5 +1,6 @@
 /**
- * The Markdown → sanitized HTML pipeline shared by the HTML/PDF export and the reader page.
+ * The Markdown → sanitized HTML pipeline shared by the HTML/PDF export and the reader page. Its first
+ * half, parsing to sanitizing, is `readerHtml` (`markdown-syntax.ts`), which link previews read too.
  *
  * This module doubles as a `worker_threads` entry (see `render-pool.ts`): when loaded off the
  * main thread it answers render requests, and link preview requests (`preview-text.ts`), over
@@ -8,14 +9,12 @@
  * production build bundles it with esbuild).
  */
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
-import remarkRehype from "remark-rehype";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeHighlight from "rehype-highlight";
 import rehypeSlug from "rehype-slug";
 import rehypeStringify from "rehype-stringify";
 import type { Root as HastRoot, Element } from "hast";
 // The extensions are required: in development Node loads this worker entry straight from source.
-import { readerMarkdown } from "./markdown-syntax.ts";
+import { readerHtml } from "./markdown-syntax.ts";
 import { previewText } from "../preview-text.ts";
 
 export const WORKER_ROLE = "markdoc-markdown-render";
@@ -41,17 +40,6 @@ export interface RenderedFragment {
   /** Ids of document assets referenced by `<img>` tags, in document order (deduplicated). */
   assetIds: string[];
 }
-
-const sanitizeSchema = {
-  ...defaultSchema,
-  attributes: {
-    ...defaultSchema.attributes,
-    "*": [...(defaultSchema.attributes?.["*"] ?? []), "data*"],
-    code: ["className"],
-    pre: ["className"],
-    span: [...(defaultSchema.attributes?.span ?? []), "className"],
-  },
-};
 
 function visitElements(node: HastRoot | Element, fn: (el: Element) => void) {
   for (const child of node.children) {
@@ -139,9 +127,7 @@ function rehypeCollectHeadings(sink: RenderedHeading[]): (tree: HastRoot) => voi
 export async function renderMarkdownFragment(markdown: string, { assetBaseUrl }: RenderFragmentOptions): Promise<RenderedFragment> {
   const headings: RenderedHeading[] = [];
   const assetIds: string[] = [];
-  const file = await readerMarkdown()
-    .use(remarkRehype, { handlers: { yaml: () => undefined, toml: () => undefined } })
-    .use(rehypeSanitize, sanitizeSchema)
+  const file = await readerHtml()
     .use(() => rehypeLabelTaskCheckboxes())
     .use(rehypeSlug)
     .use(() => rehypeCollectHeadings(headings))

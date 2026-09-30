@@ -2,28 +2,31 @@
  * The first lines of a document as a link preview shows them: the `description`, `og:description` and
  * `twitter:description` that Slack, Teams, iMessage and X read from `/d/<id>`, `/p/<id>` or the sign-in
  * page they are sent to (see `document-metadata.ts`). Whoever pastes the link may not be able to open
- * the document, so only text the reader page shows as prose may appear here.
+ * the document, so only text the reader page shows may appear here.
  *
- * The text therefore comes from the parse the reader page renders (`readerMarkdown`: GFM plus YAML and
- * TOML front matter), never from a line scanner: front matter, HTML (comments, tags and their
- * attributes), code blocks, link and image URLs and titles, reference definitions and footnotes never
- * reach it, however they are spread over lines. Links keep their text and images their alt text.
+ * The text is therefore read from the page the reader builds (`readerHtml`: the same parse, the same
+ * conversion to HTML and the same sanitizing), never from a line scanner or from the Markdown tree
+ * alone, which holds text the page drops: front matter, HTML (comments, tags and their attributes), link
+ * and image URLs and titles, reference definitions and table cells past the header's columns never reach
+ * the page. Of the text that does, code blocks, footnotes and footnote numbers are left out too, and
+ * headings are used only when there is no other prose. Links keep their text and images their alt text.
  *
- * Some text the guard lets through takes the parser seconds even in a few kilobytes (deeply nested
- * lists or quotes), so this runs on the Markdown worker (`previewOffThread` in `export/render-pool.ts`),
- * never on the event loop. Like the worker's entry (`export/render-markdown.ts`), it must therefore stay
- * free of `@/` path aliases.
+ * Some text the guard lets through takes seconds to parse even in a few kilobytes, and nests deeper
+ * than the main thread's call stack allows when turned into HTML (thousands of quotes), so this runs on
+ * the Markdown worker (`previewOffThread` in `export/render-pool.ts`), never on the event loop. Like the
+ * worker's entry (`export/render-markdown.ts`), it must therefore stay free of `@/` path aliases.
  */
-import type { Nodes, PhrasingContent, Root } from "mdast";
+import type { Nodes, Root } from "mdast";
+import type { Element, ElementContent, Root as HastRoot, RootContent } from "hast";
 import { splitGraphemes } from "unicode-segmenter/grapheme";
 // The extensions are required: in development Node loads the worker straight from source.
 import { findUnrenderable } from "../editor/markdown/renderable.ts";
-import { readerMarkdown } from "./export/markdown-syntax.ts";
+import { readerHtml } from "./export/markdown-syntax.ts";
 
 /** How much of a document is read: enough for a title, front matter and several paragraphs. */
 export const PREVIEW_SOURCE_LIMIT = 4096;
 
-const parser = readerMarkdown().freeze();
+const reader = readerHtml().freeze();
 
 /** A first line that opens front matter; front matter must start the document, without indent. */
 const FRONT_MATTER_OPEN = /^(?:---|\+\+\+)[ \t]*(?:\r\n?|\n)/;
@@ -32,9 +35,10 @@ const FRONT_MATTER_OPEN = /^(?:---|\+\+\+)[ \t]*(?:\r\n?|\n)/;
 const FOOTNOTE_CALL = "[^";
 
 /**
- * The document's first prose, at most `max` UTF-16 code units cut at a character boundary: paragraphs,
- * list items, quotes and table cells in order, headings only when there is nothing else (the title is
- * shown on its own). "" when there is no prose to show, or the guard refuses the text.
+ * The document's first prose, at most `max` UTF-16 code units cut at a character boundary: the text of
+ * paragraphs, list items, quotes and table cells in the order the reader page shows them, headings only
+ * when there is nothing else (the title is shown on its own). "" when there is no prose to show, or the
+ * guard refuses the document (the reader page then shows none of it either).
  *
  * A document longer than {@link PREVIEW_SOURCE_LIMIT} is parsed only up to its last line end within the
  * limit. Text past that cut can change two things before it: the blocks still open at the cut, and which
@@ -44,16 +48,21 @@ const FOOTNOTE_CALL = "[^";
  * closed no link here (`[label]`, which such a definition makes a link, and that can change how the rest
  * of the block parses). A definition on the last line read may be missing from the whole document (a
  * table past the cut can make that line its header row), so when one ends there the document is read
- * without that line. Each block that remains parses exactly as it does in the whole document.
+ * without that line. Each block that remains parses exactly as it does in the whole document; the page
+ * is built from the tree once the others are taken out of it.
  */
 export function previewText(markdown: string, max = 160): string {
+  // As `renderMarkdownBody` does for the reader page. A cut can only lower the guard's counts, so the
+  // part read below passes it too.
+  if (findUnrenderable(markdown)) return "";
   // The parser skips a byte order mark and counts offsets after it; drop it so they match this string.
   const text = markdown.charCodeAt(0) === 0xfeff ? markdown.slice(1) : markdown;
-  const read = text.length > PREVIEW_SOURCE_LIMIT ? readCut(text) : readWhole(text);
+  const read = text.length > PREVIEW_SOURCE_LIMIT ? readCut(text) : { root: reader.parse(text), source: text, cut: false, unsettled: null };
   if (!read) return "";
+  if (read.cut) prune(read);
   const prose: string[] = [];
   const headings: string[] = [];
-  collect(read, prose, headings);
+  collect(reader.runSync(read.root), prose, headings);
   return clip(joined(prose) || joined(headings), max);
 }
 
@@ -65,10 +74,6 @@ interface Read {
   cut: boolean;
   /** The block text past the cut could continue; null when nothing was cut off. */
   unsettled: Nodes | null;
-}
-
-function readWhole(text: string): Read | null {
-  return findUnrenderable(text) ? null : { root: parser.parse(text), source: text, cut: false, unsettled: null };
 }
 
 function readCut(text: string): Read | null {
@@ -87,8 +92,7 @@ function readCut(text: string): Read | null {
 /** The document up to and including the line ending at `lineEnd`, parsed as a cut document. */
 function readUpTo(text: string, lineEnd: number): Read | null {
   const kept = text.slice(0, lineEnd + 1);
-  if (findUnrenderable(kept)) return null;
-  const root = parser.parse(kept);
+  const root = reader.parse(kept);
   // Front matter that closes past the cut parses here as a rule and paragraphs, which the reader hides.
   // mdast's types list `yaml` but not `toml`, which the parser also produces.
   const first: string | undefined = root.children[0]?.type;
@@ -103,7 +107,7 @@ function lastLineEnd(text: string, end: number): number {
 
 /** Whether a definition, anywhere in the tree, ends after `offset`. */
 function definesAfter(root: Root, offset: number): boolean {
-  for (const node of walk(root.children, () => true)) {
+  for (const node of walk(root.children)) {
     if (node.type === "definition" && (node.position?.end.offset ?? Infinity) > offset) return true;
   }
   return false;
@@ -138,7 +142,7 @@ function settled(node: Nodes, read: Read): boolean {
  * block without one parses the same whatever is defined later. Also true for an escaped `\]`, which is fine.
  */
 function hasUnmatchedBracket(block: Nodes): boolean {
-  for (const node of walk([block], () => true)) {
+  for (const node of walk([block])) {
     if (node.type === "text" && node.value.includes("]")) return true;
     if ((node.type === "image" || node.type === "imageReference") && node.alt?.includes("]")) return true;
   }
@@ -146,57 +150,107 @@ function hasUnmatchedBracket(block: Nodes): boolean {
 }
 
 /**
- * The nodes in document order, going into those `descend` accepts. A loop, not recursion: 4 KB of `>`
- * nests thousands of quotes, deeper than the call stack goes.
+ * Every node under `nodes`, in document order. A loop, not recursion: 4 KB of `>` nests thousands of
+ * quotes, deeper than the call stack goes.
  */
-function* walk(nodes: readonly Nodes[], descend: (node: Nodes) => boolean): Generator<Nodes> {
+function* walk(nodes: readonly Nodes[]): Generator<Nodes> {
   const stack = [...nodes].reverse();
   for (let node = stack.pop(); node; node = stack.pop()) {
     yield node;
-    if ("children" in node && descend(node)) for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i]);
+    if ("children" in node) for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i]);
   }
 }
 
+/** The blocks that hold all the text a preview takes: a cut document loses those not settled. */
+const PROSE_BLOCKS: ReadonlySet<string> = new Set(["paragraph", "heading", "table"]);
 const BLOCK_CONTAINERS: ReadonlySet<string> = new Set(["blockquote", "list", "listItem"]);
-const INLINE_CONTAINERS: ReadonlySet<string> = new Set(["emphasis", "strong", "delete", "link", "linkReference"]);
 
-function collect(read: Read, prose: string[], headings: string[]): void {
-  for (const node of walk(read.root.children, (node) => BLOCK_CONTAINERS.has(node.type))) {
-    switch (node.type) {
-      case "paragraph":
-        if (settled(node, read)) prose.push(inline(node.children));
-        break;
-      case "heading":
-        if (settled(node, read)) headings.push(inline(node.children));
-        break;
-      case "table":
-        if (settled(node, read)) for (const row of node.children) for (const cell of row.children) prose.push(inline(cell.children));
-        break;
-      // Front matter, HTML, code, rules, definitions and footnote definitions show no prose.
+/**
+ * Takes the blocks whose text is not settled (see `settled`) out of a cut document's tree. Only the text
+ * of paragraphs, headings and tables reaches a preview (footnotes, the other blocks with text, are left
+ * out of it), and taking blocks out changes no other block's page: definitions stay, and whether a list
+ * is loose was decided by the parser.
+ */
+function prune(read: Read): void {
+  const parents: Nodes[] = [read.root];
+  for (let parent = parents.pop(); parent; parent = parents.pop()) {
+    if (!("children" in parent)) continue;
+    const children: Nodes[] = parent.children;
+    for (let i = children.length - 1; i >= 0; i--) {
+      const node = children[i];
+      if (BLOCK_CONTAINERS.has(node.type)) parents.push(node);
+      else if (PROSE_BLOCKS.has(node.type) && !settled(node, read)) children.splice(i, 1);
     }
   }
 }
 
-function inline(nodes: readonly PhrasingContent[]): string {
+/** Elements whose text is one piece of prose. */
+const PROSE: ReadonlySet<string> = new Set(["p", "td", "th"]);
+const HEADINGS: ReadonlySet<string> = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
+/** Elements holding blocks. Code blocks, rules and the footnotes section are not among them. */
+const CONTAINERS: ReadonlySet<string> = new Set(["blockquote", "ul", "ol", "li", "table", "thead", "tbody", "tr"]);
+/** Inline elements whose text shows. */
+const INLINE_CONTAINERS: ReadonlySet<string> = new Set(["a", "em", "strong", "del", "code"]);
+/** Every inline element the page holds: a footnote number is a `sup`, a task's checkbox an `input`. */
+const INLINE: ReadonlySet<string> = new Set([...INLINE_CONTAINERS, "br", "img", "input", "sup"]);
+
+/** A block element, or a run of inline content that stands for a paragraph (see `blocksOf`). */
+type Block = Element | ElementContent[];
+
+/** The text of the page's paragraphs and table cells, and of its headings, in order. Anything unknown shows nothing. */
+function collect(page: HastRoot, prose: string[], headings: string[]): void {
+  const stack: Block[] = blocksOf(page.children, false).reverse();
+  for (let block = stack.pop(); block; block = stack.pop()) {
+    if (Array.isArray(block)) prose.push(inline(block));
+    else if (PROSE.has(block.tagName)) prose.push(inline(block.children));
+    else if (HEADINGS.has(block.tagName)) headings.push(inline(block.children));
+    else if (CONTAINERS.has(block.tagName)) stack.push(...blocksOf(block.children, block.tagName === "li").reverse());
+  }
+}
+
+/**
+ * A container's blocks in order. In a tight list the page unwraps each item's paragraphs, so in an item
+ * each run of inline content between its blocks is a paragraph; anywhere else, text between blocks is
+ * only line breaks.
+ */
+function blocksOf(children: readonly (RootContent | ElementContent)[], listItem: boolean): Block[] {
+  const blocks: Block[] = [];
+  let run: ElementContent[] = [];
+  for (const child of children) {
+    if (child.type === "text" || (child.type === "element" && INLINE.has(child.tagName))) {
+      if (listItem) run.push(child);
+      continue;
+    }
+    if (run.length > 0) blocks.push(run);
+    run = [];
+    if (child.type === "element") blocks.push(child);
+  }
+  if (run.length > 0) blocks.push(run);
+  return blocks;
+}
+
+/** The text inline content shows. A loop, not recursion, like the rest of the walk. */
+function inline(nodes: readonly ElementContent[]): string {
   let text = "";
-  for (const node of walk(nodes, (node) => INLINE_CONTAINERS.has(node.type))) {
-    switch (node.type) {
-      case "text":
-      case "inlineCode":
-        text += node.value;
-        break;
-      case "break":
-        text += " ";
-        break;
-      case "image":
-      case "imageReference":
-        // The alt keeps inline HTML verbatim (`![a <!-- note --> b](x.png)`), so an alt with a tag is left out.
-        if (node.alt && !node.alt.includes("<")) text += node.alt;
-        break;
-      // Links and emphasis show their text; inline HTML (comments, tags and their attributes) and footnote markers show nothing.
+  const stack = [...nodes].reverse();
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    if (node.type === "text") {
+      text += node.value;
+    } else if (node.type === "element") {
+      if (INLINE_CONTAINERS.has(node.tagName)) for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i]);
+      else if (node.tagName === "br") text += " ";
+      // An image shows its alt text in place of itself, apart from the words next to it.
+      else if (node.tagName === "img") text += ` ${altOf(node)} `;
+      // Footnote numbers, task checkboxes and anything unknown show nothing here.
     }
   }
   return text;
+}
+
+/** The alt keeps inline HTML verbatim (`![a <!-- note --> b](x.png)`), so an alt with a tag is left out. */
+function altOf(img: Element): string {
+  const alt = img.properties.alt;
+  return typeof alt === "string" && !alt.includes("<") ? alt : "";
 }
 
 function joined(pieces: readonly string[]): string {

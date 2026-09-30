@@ -176,7 +176,16 @@ describe("documentDescription", () => {
   it("never carries what the reader page hides, and is the generic line when nothing else is left", async () => {
     expect(await documentDescription(live("H", "<!--\nSECRET do not share\n-->\n\nVisible opening line."))).toBe("Visible opening line.");
     expect(await documentDescription(live("H", '<div data-token="SECRET"\n  class="x">Visible opening line.</div>'))).toBe(EMPTY_DOCUMENT_DESCRIPTION);
+    expect(await documentDescription(live("H", "| Header |\n| --- |\n| Visible | SECRET_TABLE_2194 |"))).toBe("Header Visible");
   });
+
+  // Turning thousands of nested blocks into HTML recurses deeper than the main thread's call stack allows;
+  // the worker's stack takes the deepest nesting that fits in what a preview reads.
+  it("reads blocks nested as deep as the text it reads allows", async () => {
+    expect(await documentDescription(live("H", `${">".repeat(4000)} Deep quote.`))).toBe("Deep quote.");
+    expect(await documentDescription(live("H", `${"- ".repeat(2000)}Deep item.`))).toBe("Deep item.");
+    expect(await documentDescription(live("H", `${"> - ".repeat(1000)}Deep mix.`))).toBe("Deep mix.");
+  }, 60_000);
 
   it("is the generic line when the worker fails or runs out of time", async () => {
     vi.mocked(previewOffThread).mockRejectedValueOnce(new RenderTimeoutError(15_000));

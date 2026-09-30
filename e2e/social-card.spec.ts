@@ -22,10 +22,13 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const TAIL_MARKER = "members-only-tail-1287";
 /** Text the reader page hides (a comment spread over lines, row 1 of the #2194 review): no link preview carries it either. */
 const HIDDEN_MARKER = "hidden-note-1287";
+/** A cell past a table's header columns (the #2194 re-review): the reader page drops it, and so does every link preview. */
+const EXTRA_CELL_MARKER = "extra-cell-1287";
+const TABLE = `| Host |\n| --- |\n| Rotating | ${EXTRA_CELL_MARKER} |`;
 const NEXT_PARAGRAPH = `Hosts rotate every month, and the shortlist for next quarter is at the bottom of this plan: ${TAIL_MARKER}.`;
-const LONG_CONTENT = `${CONTENT}\n<!--\n${HIDDEN_MARKER}\n-->\n\n${NEXT_PARAGRAPH}\n`;
-/** The long document's excerpt: the short plan, then as much of the next paragraph as fits in 160 characters. */
-const LONG_EXCERPT = `${EXCERPT} ${NEXT_PARAGRAPH}`.slice(0, 160).trim();
+const LONG_CONTENT = `${CONTENT}\n<!--\n${HIDDEN_MARKER}\n-->\n\n${TABLE}\n\n${NEXT_PARAGRAPH}\n`;
+/** The long document's excerpt: the short plan, the table's cells the reader page shows, then as much of the next paragraph as fits in 160 characters. */
+const LONG_EXCERPT = `${EXCERPT} Host Rotating ${NEXT_PARAGRAPH}`.slice(0, 160).trim();
 
 /**
  * Link unfurlers by user agent. Next.js holds `<head>` back until the metadata is ready only for the bots on
@@ -235,6 +238,7 @@ test.describe("social card", () => {
             const image = expectDocumentCard(headOf(html), baseURL!, pagePath, { titleTag: "Sign in · Markdoc", excerpt: LONG_EXCERPT });
             expect(html, `${name} ${pagePath}: nothing past the first lines`).not.toContain(TAIL_MARKER);
             expect(html, `${name} ${pagePath}: nothing the reader page hides`).not.toContain(HIDDEN_MARKER);
+            expect(html, `${name} ${pagePath}: no table cell the reader page drops`).not.toContain(EXTRA_CELL_MARKER);
             if (name === UNFURLERS[0].name) await expectCardImage(await unfurler.get(image), `${pagePath} og:image`, RESTRICTED_CARD_CACHE);
           } finally {
             await unfurler.dispose();
@@ -249,6 +253,7 @@ test.describe("social card", () => {
       expect(strangerHtml, "signed-in stranger").not.toContain(TITLE);
       expect(strangerHtml, "signed-in stranger").not.toContain(TAIL_MARKER);
       expect(strangerHtml, "signed-in stranger").not.toContain(HIDDEN_MARKER);
+      expect(strangerHtml, "signed-in stranger").not.toContain(EXTRA_CELL_MARKER);
       await expectCardImage(await bob.page.request.get(`/d/${id}/opengraph-image`), "signed-in stranger image", RESTRICTED_CARD_CACHE);
 
       // Off again, from the keyboard: the generic card, and no image for anyone without access.
