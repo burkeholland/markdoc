@@ -14392,7 +14392,6 @@ function createReviewCardRender(
       isPropagationStopped?: unknown;
       persist?: unknown;
     };
-    const reactEventPrototype = Object.getPrototypeOf(event) as { constructor?: { name?: unknown } } | null;
     if (
       !ownerWindow ||
       !(nativeEvent instanceof ownerWindow.MouseEvent) ||
@@ -14412,7 +14411,6 @@ function createReviewCardRender(
       !source.contains(target) ||
       !nativeEvent.composedPath().includes(source) ||
       !nativeEvent.composedPath().includes(presentation.elements.card) ||
-      reactEventPrototype?.constructor?.name !== "SyntheticBaseEvent" ||
       reactEvent._reactName !== "onClick" ||
       typeof reactEvent.isDefaultPrevented !== "function" ||
       typeof reactEvent.isPropagationStopped !== "function" ||

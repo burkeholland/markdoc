@@ -334,10 +334,23 @@ The configured workflow supplies pinned Node 22 before invoking the command,
 whose policy CLI needs no repository dependency install. Before Azure resource
 validation or any source archive/build, VM, database or production mutation,
 the command binds the working `package-lock.json` to the exact bytes committed
-at the selected SHA, runs one package audit with no retry, rechecks the lock
-and withholds raw output. It accepts only the bounded pass report with an
-empty package list and all blocked, severity, vulnerability, reported and
-omitted counts equal to zero.
+at the selected SHA, runs the package audit, rechecks the lock and withholds
+raw output. It accepts only the bounded pass report with an empty package list
+and all blocked, severity, vulnerability, reported and omitted counts equal to
+zero. An advisory whose optional fields npm sends as null, such as a CVSS
+vector, still counts as a finding. Each audit attempt gets 120 seconds. The
+preflight retries once, after 2 seconds, only when an attempt printed nothing
+on stdout and ended with an error exit or signal, a failed start or a timeout.
+Anything npm printed is judged and never retried. A timed-out attempt never
+passes: output it printed counts as `rejected` when it is a complete report
+with findings and as `malformed_audit` otherwise. A `command_failed` report
+adds a `reason` built only from fixed pieces, never from npm's own text: how
+the attempt ended (exit code, signal name, timeout or start error code), npm's
+error code when a whole stderr line reads like `npm error code E401`, and the
+attempt number, for example `npm audit exit 1, npm code E401 (attempt 2 of 2)`.
+On failure the command prints at most the preflight status and, for
+`command_failed`, a reason in exactly that format. If the reason does not
+match that format, it prints only that the raw output was withheld.
 
 The current lock resolves the audited transitive packages to
 `fast-uri@3.1.8`, `qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and

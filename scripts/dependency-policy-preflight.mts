@@ -13,6 +13,7 @@ import {
 
 interface CliOutput {
   log(message: string): void;
+  warn?(message: string): void;
 }
 
 interface RunMainDependencies {
@@ -20,6 +21,7 @@ interface RunMainDependencies {
   executor?: AuditExecutor;
   now?: number;
   output?: CliOutput;
+  retryDelayMs?: number;
 }
 
 function printReport(output: CliOutput, report: DependencyPolicyReport): number {
@@ -69,6 +71,9 @@ export async function runMain(argv: string[], dependencies: RunMainDependencies 
         lockPath,
         expectedLockSha256,
         executor: dependencies.executor ?? createNpmAuditExecutor(),
+        retryDelayMs: dependencies.retryDelayMs,
+        // stderr only, so stdout stays a single JSON report for the release script.
+        onRetry: (reason) => output.warn?.(`Dependency preflight audit failed (${reason}); retrying once.`),
       });
   return printReport(output, report);
 }

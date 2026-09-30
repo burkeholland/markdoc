@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { devLogin, richText } from "./helpers";
+import { createDocument, devLogin, ensureCommentsOpen, mintToken, openDocument, richText, uniqueLogin, waitForHydration } from "./helpers";
 
 /** Text of the code pane as rendered. The dev-only `__markdocSession` hook used by the regular suite is not exposed by a production build. */
 const codeText = (page: Page) => page.locator(".cm-content").innerText();
@@ -67,5 +67,253 @@ test.describe("production build", () => {
     const text = await content.text();
     expect(text).toContain("Typed in the rich pane on the production build.");
     expect(text).toContain("Typed in the code pane on the production build.");
+  });
+
+  /**
+   * Real mouse clicks on controls that ignored every click on a production build (#2197). Five handlers
+   * accepted only a React event whose constructor was named "SyntheticBaseEvent", a name minification
+   * changes; the dashboard create buttons lost their click proof to a microtask that a real browser runs
+   * between React's capture and bubble listeners. jsdom stayed green for both. Each test proves the click
+   * with what the user sees and, where there is one, with the server's own record.
+   */
+  test.describe("real clicks (#2197)", () => {
+    const docIdOf = (page: Page) => new URL(page.url()).pathname.match(/^\/d\/([^/]+)$/)![1];
+
+    /** A user of its own on a hydrated dashboard: a click that lands before hydration is dropped and would prove nothing. */
+    async function signInFresh(page: Page, prefix: string) {
+      await devLogin(page, uniqueLogin(prefix));
+      await waitForHydration(page);
+    }
+
+    async function serverText(page: Page, id: string): Promise<string> {
+      const res = await page.request.get(`/api/documents/${id}/content`);
+      expect(res.status()).toBe(200);
+      return ((await res.json()) as { content: string }).content;
+    }
+
+    async function threadsOf(page: Page, id: string) {
+      const res = await page.request.get(`/api/documents/${id}/comments`);
+      expect(res.status()).toBe(200);
+      return ((await res.json()) as { comments: { id: string; resolved: boolean; suggestion: { state: string } | null }[] }).comments;
+    }
+
+    const storedTheme = (page: Page) => page.evaluate(() => localStorage.getItem("markdoc:theme"));
+
+    test("the header theme toggle and the Settings theme picker change the theme", async ({ page }) => {
+      await page.emulateMedia({ colorScheme: "dark" });
+      await signInFresh(page, "prod-theme");
+      const html = page.locator("html");
+      const toggle = page.getByTestId("theme-toggle");
+      await expect(toggle).toHaveAttribute("data-theme-preference", "system");
+      await expect(html).toHaveAttribute("data-theme", "dark");
+
+      for (const [preference, resolved] of [
+        ["light", "light"],
+        ["dark", "dark"],
+        ["system", "dark"],
+      ] as const) {
+        await toggle.click();
+        await expect(toggle).toHaveAttribute("data-theme-preference", preference);
+        await expect(html).toHaveAttribute("data-theme", resolved);
+        expect(await storedTheme(page)).toBe(preference);
+      }
+
+      await page.goto("/settings");
+      await waitForHydration(page);
+      for (const [preference, resolved] of [
+        ["light", "light"],
+        ["dark", "dark"],
+        ["system", "dark"],
+      ] as const) {
+        const option = page.getByTestId(`theme-option-${preference}`);
+        await option.click();
+        await expect(option).toHaveAttribute("aria-checked", "true");
+        await expect(html).toHaveAttribute("data-theme", resolved);
+        expect(await storedTheme(page)).toBe(preference);
+      }
+    });
+
+    test("the editor status bar theme toggle cycles System, Light, Dark, System", async ({ page }) => {
+      await page.emulateMedia({ colorScheme: "dark" });
+      await signInFresh(page, "prod-theme-editor");
+      const id = await createDocument(page, "# Smoke theme\n\nThe status bar toggle.\n", "Smoke theme");
+      await openDocument(page, id);
+      const html = page.locator("html");
+      const toggle = page.getByTestId("status-bar").getByTestId("theme-toggle");
+      await expect(toggle).toHaveAttribute("data-theme-preference", "system");
+      await expect(html).toHaveAttribute("data-theme", "dark");
+
+      for (const [preference, resolved] of [
+        ["light", "light"],
+        ["dark", "dark"],
+        ["system", "dark"],
+      ] as const) {
+        await toggle.click();
+        await expect(toggle).toHaveAttribute("data-theme-preference", preference);
+        await expect(html).toHaveAttribute("data-theme", resolved);
+        expect(await storedTheme(page)).toBe(preference);
+      }
+    });
+
+    test("Trash: Restore brings a document back and Delete forever removes it", async ({ page }) => {
+      await signInFresh(page, "prod-trash");
+      const title = `Disposable ${Date.now().toString(36)}`;
+      const id = await createDocument(page, `# ${title}\n\nThrow me away.\n`, title);
+      const openTrash = async () => {
+        await page.goto("/");
+        await waitForHydration(page);
+        await page.getByTestId("filter-trash").click();
+        const card = page.getByTestId("trash-card").filter({ hasText: title });
+        await expect(card).toHaveCount(1);
+        return card;
+      };
+
+      expect((await page.request.delete(`/api/documents/${id}`)).ok()).toBeTruthy();
+      const card = await openTrash();
+      await card.getByTestId("restore-button").click();
+      await expect(card).toHaveCount(0);
+      expect((await page.request.get(`/api/documents/${id}`)).status()).toBe(200);
+      await page.getByTestId("filter-all").click();
+      await expect(page.getByTestId("document-card").filter({ hasText: title })).toHaveCount(1);
+
+      expect((await page.request.delete(`/api/documents/${id}`)).ok()).toBeTruthy();
+      const again = await openTrash();
+      page.once("dialog", (dialog) => dialog.accept());
+      await again.getByTestId("purge-button").click();
+      await expect(again).toHaveCount(0);
+      const trash = (await (await page.request.get("/api/documents?trash=1")).json()) as { documents: { id: string }[] };
+      expect(trash.documents.map((d) => d.id)).not.toContain(id);
+      expect((await page.request.get(`/api/documents/${id}`)).status()).toBe(404);
+    });
+
+    test("a review card expands, and its Accept all, Reject all and Resolve all buttons act", async ({ page }) => {
+      await signInFresh(page, "prod-review");
+      const id = await createDocument(page, "# Smoke review\n\nOur product is very unique.\n\nWe launched recently and sales are good.\n\nThe end is near.\n", "Smoke review");
+      const agent = await mintToken(page, "Smoke Reviewer", { expiresInDays: 1 });
+      const postReview = async (summary: string, comments: { quote: string; body: string }[]) => {
+        const res = await page.request.post(`/api/documents/${id}/reviews`, {
+          headers: { Authorization: ["Bearer", agent.token].join(" "), "Content-Type": "application/json" },
+          data: { summary, verdict: "comment", comments },
+        });
+        expect(res.status(), await res.text()).toBe(201);
+        return ((await res.json()) as { review: { id: string; threadIds: string[] } }).review;
+      };
+      const accept = await postReview("Softer close.", [{ quote: "The end is near.", body: "Softer.\n\n```suggestion\nThat is all for now.\n```" }]);
+      const reject = await postReview("Tighter wording.", [{ quote: "very unique", body: "Redundant.\n\n```suggestion\nunique\n```" }]);
+      const resolve = await postReview("Just a note.", [{ quote: "sales are good", body: "Nice numbers." }]);
+      const cardOf = (reviewId: string) => page.locator(`[data-testid="review-card"][data-review-id="${reviewId}"]`);
+
+      await openDocument(page, id);
+      await ensureCommentsOpen(page);
+
+      const acceptCard = cardOf(accept.id);
+      await acceptCard.getByTestId("review-toggle").click();
+      await expect(acceptCard.getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "true");
+      await expect(acceptCard.getByTestId("review-thread-link")).toHaveCount(1);
+      await acceptCard.getByTestId("review-accept-all").click();
+      await expect(page.getByTestId("toast")).toContainText(`Accepted 1 suggestion from ${agent.name}`);
+      await expect.poll(() => serverText(page, id), { timeout: 30_000 }).toContain("That is all for now.");
+      expect(await serverText(page, id)).not.toContain("The end is near.");
+
+      await cardOf(reject.id).getByTestId("review-reject-all").click();
+      await expect
+        .poll(async () => (await threadsOf(page, id)).find((t) => t.id === reject.threadIds[0])?.suggestion?.state, { timeout: 30_000 })
+        .toBe("rejected");
+      expect(await serverText(page, id)).toContain("Our product is very unique.");
+
+      await cardOf(resolve.id).getByTestId("review-resolve-all").click();
+      await expect.poll(async () => (await threadsOf(page, id)).find((t) => t.id === resolve.threadIds[0])?.resolved, { timeout: 30_000 }).toBe(true);
+      await agent.revoke();
+    });
+
+    test("Cancel on a waiting request in the presence popover cancels it", async ({ page }) => {
+      await signInFresh(page, "prod-request");
+      const id = await createDocument(page, "# Smoke request\n\nTighten this sentence please.\n", "Smoke request");
+      await openDocument(page, id);
+      const posted = await page.request.post(`/api/documents/${id}/requests`, { data: { instruction: "Tighten this", mode: "suggest" } });
+      expect(posted.status()).toBe(201);
+      const request = ((await posted.json()) as { request: { id: string } }).request;
+
+      await expect(page.getByTestId("presence").getByTestId("presence-waiting")).toBeVisible();
+      await page.getByTestId("presence").click();
+      await expect(page.getByTestId("presence-requests")).toBeVisible();
+      await page.getByTestId("presence-request-cancel").first().click();
+      await expect(page.getByTestId("presence-requests")).toHaveCount(0);
+      await expect(page.getByTestId("presence").getByTestId("presence-waiting")).toHaveCount(0);
+      // The popover hides the row at once; the cancel reaches the server on its own request.
+      await expect
+        .poll(
+          async () => {
+            const listed = (await (await page.request.get(`/api/documents/${id}/requests`)).json()) as { requests: { id: string; status: string }[] };
+            return listed.requests.find((r) => r.id === request.id)?.status;
+          },
+          { timeout: 30_000 },
+        )
+        .toBe("cancelled");
+    });
+
+    test("New document creates a document and opens it", async ({ page }) => {
+      await signInFresh(page, "prod-new");
+      const created = page.waitForResponse((res) => res.request().method() === "POST" && new URL(res.url()).pathname === "/api/documents");
+      await page.getByTestId("new-document").click();
+      expect((await created).status()).toBe(201);
+      await page.waitForURL(/\/d\/[a-z0-9]+$/i);
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      expect((await page.request.get(`/api/documents/${docIdOf(page)}`)).status()).toBe(200);
+    });
+
+    test("Start with a guided doc creates the Welcome doc and opens it", async ({ page }) => {
+      await signInFresh(page, "prod-guided");
+      await expect(page.getByTestId("empty-state")).toBeVisible();
+      await page.getByTestId("start-guided-doc").click();
+      await page.waitForURL(/\/d\/[a-z0-9]+$/i);
+      await expect(page.getByTestId("title")).toContainText("Welcome to Markdoc");
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      expect((await page.request.get(`/api/documents/${docIdOf(page)}`)).status()).toBe(200);
+    });
+
+    // A production server answers the create before the second click of a double click lands. The
+    // buttons must stay busy until the document page replaces the dashboard, or that click makes a
+    // second document.
+    for (const { name, testid, prefix } of [
+      { name: "New document", testid: "new-document", prefix: "prod-double-new" },
+      { name: "Start with a guided doc", testid: "start-guided-doc", prefix: "prod-double-guided" },
+    ]) {
+      test(`a fast real double click on ${name} creates exactly one document`, async ({ page }) => {
+        await signInFresh(page, prefix);
+        await expect(page.getByTestId("empty-state")).toBeVisible();
+        let posts = 0;
+        page.on("request", (req) => {
+          if (req.method() === "POST" && new URL(req.url()).pathname === "/api/documents") posts += 1;
+        });
+
+        const box = (await page.getByTestId(testid).boundingBox())!;
+        await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2, { delay: 20 });
+        await page.waitForURL(/\/d\/[a-z0-9]+$/i);
+        await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+
+        const listed = (await (await page.request.get("/api/documents")).json()) as { documents: { id: string }[] };
+        expect.soft(posts, "POST /api/documents requests").toBe(1);
+        expect(listed.documents.map((d) => d.id), "the user's documents").toEqual([docIdOf(page)]);
+      });
+    }
+
+    test("Sign in with GitHub in the Open from GitHub dialog starts the GitHub sign-in", async ({ page }) => {
+      await signInFresh(page, "prod-github");
+      const card = page.getByTestId("open-github");
+      await expect(card).toBeVisible();
+      test.skip(await card.isDisabled(), "this server has no GitHub OAuth app (AUTH_GITHUB_ID / AUTH_GITHUB_SECRET)");
+
+      await card.click();
+      const dialog = page.getByRole("dialog", { name: "Open from GitHub" });
+      await expect(dialog).toBeVisible();
+      // github.com itself is never reached: the stub proves the browser was sent to the authorize URL.
+      await page.route("https://github.com/**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<title>github stub</title>" }));
+      const authorize = page.waitForRequest((req) => req.url().startsWith("https://github.com/login/oauth/authorize"));
+      await dialog.getByRole("button", { name: /Sign in with GitHub/ }).click();
+      const url = new URL((await authorize).url());
+      expect(url.searchParams.get("client_id")).toBeTruthy();
+      expect(url.searchParams.get("redirect_uri")).toMatch(/\/api\/auth\/callback\/github$/);
+    });
   });
 });

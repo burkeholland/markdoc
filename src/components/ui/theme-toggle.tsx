@@ -684,9 +684,6 @@ function exactNativeClick<A extends PublicationAuthority>(
     isPropagationStopped?: unknown;
     persist?: unknown;
   };
-  const eventPrototype = Object.getPrototypeOf(event) as {
-    constructor?: { name?: unknown };
-  } | null;
   return (
     view
     && nativeEvent instanceof view.MouseEvent
@@ -707,7 +704,6 @@ function exactNativeClick<A extends PublicationAuthority>(
     && nativeEvent.composedPath().includes(control)
     && nativeEvent.composedPath().includes(publication.root)
     && snapshotContains(publication.dom, target)
-    && eventPrototype?.constructor?.name === "SyntheticBaseEvent"
     && reactEvent._reactName === "onClick"
     && typeof reactEvent.isDefaultPrevented === "function"
     && !reactEvent.isDefaultPrevented()

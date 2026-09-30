@@ -43,6 +43,15 @@ try {
 } catch [InvalidOperationException] {
   Assert-Equal 17 $_.Exception.Data['ReleaseExitCode'] 'Native exit code must survive.'
   Assert-True ($_.Exception.Message -notmatch 'withheld (stdout|stderr)') 'Native error must not expose raw output.'
+  Assert-True (-not $_.Exception.Data.Contains('ReleaseFailureOutput')) 'Native failure output must not be kept unless a caller asks for it.'
+}
+try {
+  & $native 'pwsh' @('-NoProfile', '-NonInteractive', '-Command', '[Console]::Out.Write(" structured stdout "); [Console]::Error.Write("withheld stderr"); exit 17') $PSScriptRoot 10 -KeepFailureOutput
+  throw 'Expected native failure.'
+} catch [InvalidOperationException] {
+  Assert-Equal 17 $_.Exception.Data['ReleaseExitCode'] 'Native exit code must survive when failure output is kept.'
+  Assert-Equal 'structured stdout' $_.Exception.Data['ReleaseFailureOutput'] 'A caller that asks for it must receive only trimmed stdout.'
+  Assert-True ($_.Exception.Message -notmatch 'structured stdout|withheld stderr') 'Kept failure output must not reach the error message.'
 }
 try {
   & $native 'pwsh' @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 30') $PSScriptRoot 1
@@ -130,9 +139,10 @@ function Get-TestHealth {
   return @{ ok = $true; db = $true; collab = $true; version = $script:sha }
 }
 
-function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds) {
+function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds, [switch]$KeepFailureOutput) {
   $script:calls.Add(@{ Command = $Command; Arguments = $Arguments; Directory = $Directory; Timeout = $TimeoutSeconds })
   Assert-True ($TimeoutSeconds -gt 0 -and $TimeoutSeconds -le $script:ReleaseDeadlineSeconds) 'Every native call must be bounded.'
+  Assert-True (-not $KeepFailureOutput) 'Only the dependency preflight may keep native failure output.'
   if ($Command -ceq 'git') {
     switch ($Arguments[0]) {
       'rev-parse' {

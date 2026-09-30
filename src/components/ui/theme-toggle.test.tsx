@@ -347,6 +347,30 @@ function retainedClick(element: HTMLButtonElement): () => void {
   return () => click(event);
 }
 
+// Production builds minify React's SyntheticBaseEvent class name, so a real click there has a one-letter constructor.
+const MangledSyntheticEvent = class a {};
+
+function interceptMangledClick(element: HTMLButtonElement): () => void {
+  const { propsKey, record, props } = reactPropsEntry(element);
+  const original = props.onClick as ThemeClick | undefined;
+  if (typeof original !== "function") throw new Error("The theme control did not have an onClick handler");
+  const intercepted = {
+    ...props,
+    onClick: (event: ReactMouseEvent<HTMLButtonElement>) => {
+      const prototype = Object.create(Object.getPrototypeOf(event), {
+        constructor: { value: MangledSyntheticEvent },
+      });
+      const mangled = Object.assign(Object.create(prototype), event) as ReactMouseEvent<HTMLButtonElement>;
+      expect(Object.getPrototypeOf(mangled).constructor.name).toBe("a");
+      original(mangled);
+    },
+  };
+  record[propsKey] = intercepted;
+  return () => {
+    if (record[propsKey] === intercepted) record[propsKey] = props;
+  };
+}
+
 function ThemeConsumer({ capture }: { capture: (control: ConsumerControl) => void }) {
   const [preference, setPreference] = useTheme();
   capture({ preference, setPreference });
@@ -1755,6 +1779,36 @@ describe("mounted theme controls", () => {
     });
     expect(effects.storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY).map(([, value]) => value))
       .toEqual(["light", "dark", "system"]);
+  });
+
+  it("accepts Toggle and Picker clicks with a production-mangled React event constructor", () => {
+    const { host } = renderDirect(<><ThemeToggle /><ThemePicker /></>);
+    const effects = trackThemeEffects();
+
+    for (const preference of ["light", "dark", "system"] as const) {
+      const button = toggle(host);
+      const restore = interceptMangledClick(button);
+      act(() => dispatchClick(button.querySelector("svg") ?? button));
+      restore();
+      expect(toggle(host).dataset.themePreference).toBe(preference);
+    }
+
+    for (const preference of ["dark", "light", "system"] as const) {
+      const row = option(host, preference);
+      const restore = interceptMangledClick(row);
+      act(() => dispatchClick(row.querySelector("svg") ?? row));
+      restore();
+      expect(option(host, preference)).toHaveAttribute("aria-checked", "true");
+      expect(toggle(host).dataset.themePreference).toBe(preference);
+    }
+
+    expect(effectCounts(effects)).toMatchObject({
+      attribute: 6,
+      emission: 6,
+      storage: 6,
+    });
+    expect(effects.storage.mock.calls.filter(([key]) => key === THEME_STORAGE_KEY).map(([, value]) => value))
+      .toEqual(["light", "dark", "system", "dark", "light", "system"]);
   });
 
   it("keeps the attached Toggle callback inert while hydration still has it disabled", async () => {

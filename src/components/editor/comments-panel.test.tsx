@@ -523,6 +523,33 @@ function interceptReviewClick(
   };
 }
 
+// Production builds minify React's SyntheticBaseEvent class name, so a real click there has a one-letter constructor.
+const MangledSyntheticEvent = class a {};
+
+function interceptMangledReviewClick(element: HTMLElement) {
+  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
+  if (!propsKey) throw new Error("React props were not attached while intercepting onClick");
+  const record = element as unknown as Record<string, Record<string, unknown>>;
+  const props = record[propsKey];
+  const original = props.onClick;
+  if (typeof original !== "function") throw new Error("React did not publish onClick");
+  const intercepted = {
+    ...props,
+    onClick: (event: CapturedReviewMouseEvent) => {
+      const prototype = Object.create(Object.getPrototypeOf(event), {
+        constructor: { value: MangledSyntheticEvent },
+      });
+      const mangled = Object.assign(Object.create(prototype), event) as CapturedReviewMouseEvent;
+      expect(Object.getPrototypeOf(mangled).constructor.name).toBe("a");
+      (original as ReviewMouseHandler)(mangled);
+    },
+  };
+  record[propsKey] = intercepted;
+  return () => {
+    if (record[propsKey] === intercepted) record[propsKey] = props;
+  };
+}
+
 function captureReviewControl(element: HTMLElement, clickProperty = "onClick"): CapturedReviewControl {
   const Button = element.ownerDocument.defaultView?.HTMLButtonElement;
   if (!Button || !(element instanceof Button)) throw new Error("The review control was not a button");
@@ -7666,6 +7693,44 @@ describe("CommentsPanel", () => {
         } finally {
           act(() => root.unmount());
           host.remove();
+        }
+      },
+    );
+
+    it.each(["toggle", "accept", "reject", "resolve", "thread"] as const)(
+      "accepts a %s review click with a production-mangled React event constructor",
+      async (kind) => {
+        Element.prototype.scrollIntoView ??= () => {};
+        const suggestions = kind !== "resolve" && kind !== "thread";
+        const fixture = makeBatchSession(`review-mangled-${kind}`, 1, undefined, suggestions);
+        const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
+        vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+        const active = vi.spyOn(fixture.session, "setActiveComment");
+        render(batchPanel(fixture.session));
+        const card = await screen.findByTestId("review-card");
+        const mangledClick = (element: HTMLElement) => {
+          const restore = interceptMangledReviewClick(element);
+          act(() => dispatchReviewClick(element));
+          restore();
+        };
+
+        if (kind === "toggle" || kind === "thread") {
+          mangledClick(within(card).getByTestId("review-toggle"));
+          expect(within(card).getByTestId("review-toggle")).toHaveAttribute("aria-expanded", "true");
+        }
+        if (kind === "thread") {
+          mangledClick(within(card).getByTestId("review-thread-link"));
+          expect(active).toHaveBeenCalledExactlyOnceWith(fixture.threadIds[0]);
+        } else if (kind !== "toggle") {
+          const testId = kind === "accept" ? "review-accept-all" : kind === "reject" ? "review-reject-all" : "review-resolve-all";
+          mangledClick(within(card).getByTestId(testId));
+          expect(api.documents.comment).toHaveBeenCalledTimes(1);
+          expect(api.documents.comment).toHaveBeenCalledWith(
+            fixture.session.docId,
+            kind === "resolve"
+              ? { action: "resolve", threadId: fixture.threadIds[0], resolved: true }
+              : { action: "suggestion", threadId: fixture.threadIds[0], replyId: undefined, decision: kind },
+          );
         }
       },
     );

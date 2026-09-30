@@ -223,6 +223,19 @@ try {
   $rejectResult = ConvertFrom-Json -InputObject $rejectExecution.Output -AsHashtable
   Assert-Equal 'rejected' $rejectResult['status'] 'The fresh-copy preflight must report a rejected policy result.'
   Assert-Equal 1 $rejectResult['counts']['high'] 'The fresh-copy rejection must retain the sanitized severity count.'
+
+  # GHSA-vcvr-r3jv-pc5j came from npm with cvss.vectorString null (#2195); it is a finding, not malformed output.
+  $nullVectorAdvisory = $rejectedAudit['vulnerabilities']['unsafe-package']['via'][0]
+  $nullVectorAdvisory['cvss'] = [ordered]@{ score = 0; vectorString = $null }
+  $nullVectorAdvisory['cwe'] = @()
+  [IO.File]::WriteAllText($auditPath, ($rejectedAudit | ConvertTo-Json -Compress -Depth 8), $utf8)
+  Assert-True ((Get-Content -LiteralPath $auditPath -Raw).Contains('"vectorString":null')) `
+    'The fresh-copy fixture must carry a null CVSS vector.'
+  $nullVectorExecution = Invoke-FreshCopyPreflight $freshRoot $arguments
+  Assert-Equal 1 $nullVectorExecution.ExitCode 'The exact package preflight command must reject an advisory with a null CVSS vector.'
+  $nullVectorResult = ConvertFrom-Json -InputObject $nullVectorExecution.Output -AsHashtable
+  Assert-Equal 'rejected' $nullVectorResult['status'] 'A null CVSS vector must be a rejection, not malformed audit output.'
+  Assert-Equal 'unsafe-package' $nullVectorResult['packages'][0]['name'] 'The null-vector rejection must name the package.'
   Assert-True (-not (Test-Path -LiteralPath (Join-Path $freshRoot 'node_modules'))) `
     'The exact preflight command must not create node_modules.'
 } finally {
@@ -236,6 +249,7 @@ foreach ($name in @(
   'Get-ReleaseCommittedLockIdentity',
   'Test-ReleaseExactKeys',
   'Assert-ReleaseDependencyReport',
+  'Get-ReleaseDependencyFailureDetail',
   'Assert-ReleaseDependencyPreflight'
 )) {
   . ([scriptblock]::Create((Get-ReleaseFunctionAst $name).Extent.Text))
@@ -300,6 +314,8 @@ $passReport = [ordered]@{
 }
 $script:AuditOutput = $passReport | ConvertTo-Json -Compress -Depth 4
 $script:AuditThrows = $false
+$script:AuditFailureOutput = $null
+$script:KeptFailureOutput = $false
 $script:FinalLockFails = $false
 $script:Events = [Collections.Generic.List[string]]::new()
 $sensitiveMarker = 'sensitive-audit-output-must-not-appear'
@@ -309,9 +325,17 @@ function Get-ReleaseCommittedLockIdentity([string]$Commit) {
   return 'a' * 64
 }
 
-function Invoke-ReleaseStep([string]$Command, [string[]]$Arguments, [int]$Limit = 30) {
+function Invoke-ReleaseStep([string]$Command, [string[]]$Arguments, [int]$Limit = 30, [switch]$KeepFailureOutput) {
   $script:Events.Add('audit')
+  $script:KeptFailureOutput = $KeepFailureOutput.IsPresent
   if ($script:AuditThrows) { throw [InvalidOperationException]::new($sensitiveMarker) }
+  if ($null -ne $script:AuditFailureOutput) {
+    # Mirrors Invoke-ReleaseNative when the preflight exits nonzero.
+    $failure = [InvalidOperationException]::new('Native command failed (exit 1); raw output withheld.')
+    $failure.Data['ReleaseExitCode'] = 1
+    if ($KeepFailureOutput) { $failure.Data['ReleaseFailureOutput'] = $script:AuditFailureOutput }
+    throw $failure
+  }
   return $script:AuditOutput
 }
 
@@ -323,6 +347,7 @@ function Assert-ReleaseWorkingLock([string]$ExpectedSha256) {
 Assert-ReleaseDependencyPreflight $commit
 $script:Events.Add('azure')
 Assert-Equal 'identity,audit,lock,azure' ($script:Events -join ',') 'A valid zero-count pass must continue to the first provider operation.'
+Assert-True $script:KeptFailureOutput 'The preflight must ask the native boundary to keep its structured failure report.'
 
 $script:Events.Clear()
 $script:FinalLockFails = $true
@@ -363,5 +388,169 @@ $commandFailure = Assert-Rejected {
 Assert-Equal 1 @($script:Events | Where-Object { $_ -ceq 'audit' }).Count 'A package-manager failure must not retry.'
 Assert-True (-not $script:Events.Contains('azure')) 'A package-manager failure must stop before the first provider operation.'
 Assert-True (-not $commandFailure.Message.Contains($sensitiveMarker)) 'A package-manager failure must withhold raw output.'
+
+# A nonzero preflight exit may show only an allowed status and, for command_failed, a reason that fits the fixed
+# reason grammar. Any other reason, including one with extra text, prints only the plain withheld message.
+$script:AuditThrows = $false
+function ConvertTo-TestReport([System.Collections.IDictionary]$Report) {
+  return $Report | ConvertTo-Json -Compress -Depth 6
+}
+function New-FailedAuditReport($Reason) {
+  return ConvertTo-TestReport ([ordered]@{ status = 'command_failed'; counts = $zeroCounts; packages = @(); reason = $Reason })
+}
+$withheld = 'Dependency preflight failed; raw output withheld.'
+$lettersOnlyPat = 'abcdefghijklmnopqrstuvwxyz' * 2
+$base64Credential = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('bot:FakePass9!'))
+$longestReason = 'npm audit could not start (E' + ('X' * 24) + '), npm code E' + ('Y' * 24) + ' (attempt 2 of 2)'
+$detailCases = [Collections.Generic.List[hashtable]]::new()
+foreach ($shownReason in @(
+  'npm audit exit 1',
+  'npm audit exit 0',
+  'npm audit exit 1, npm code ECONNRESET (attempt 2 of 2)',
+  'npm audit exit 3221225477, npm code E401',
+  'npm audit timed out (attempt 2 of 2)',
+  'npm audit ended by signal SIGKILL',
+  'npm audit ended without an exit code',
+  'npm audit could not start',
+  'npm audit could not start (ENOENT)',
+  $longestReason
+)) {
+  $detailCases.Add(@{
+    Why = "The reason '$shownReason' fits the reason grammar and must be shown."
+    Output = New-FailedAuditReport $shownReason
+    Message = "Dependency preflight failed (status command_failed; reason: $shownReason); raw output withheld."
+  })
+}
+foreach ($hiddenReason in @(
+  @{ Why = 'Free text from npm'; Reason = "npm audit exit 1 (attempt 2 of 2): npm error $sensitiveMarker"; Secret = $sensitiveMarker },
+  @{ Why = 'A token made only of letters'; Reason = "npm audit exit 1, $lettersOnlyPat"; Secret = $lettersOnlyPat },
+  @{ Why = 'A token made only of letters in the code position'; Reason = "npm audit exit 1, npm code E$lettersOnlyPat"; Secret = $lettersOnlyPat },
+  @{
+    Why = 'An upper-case token in the code position'
+    Reason = "npm audit exit 1, npm code E$($lettersOnlyPat.ToUpperInvariant())"
+    Secret = $lettersOnlyPat.ToUpperInvariant()
+  },
+  @{ Why = 'A base64 credential in the code position'; Reason = "npm audit exit 1, npm code E$base64Credential"; Secret = $base64Credential },
+  @{ Why = 'A base64 credential after the reason'; Reason = "npm audit exit 1 $base64Credential"; Secret = $base64Credential },
+  @{ Why = 'A code of 25 characters after the E'; Reason = 'npm audit exit 1, npm code E' + ('A' * 25); Secret = 'A' * 25 },
+  @{ Why = 'A lower-case code'; Reason = 'npm audit exit 1, npm code e401'; Secret = '' },
+  @{ Why = 'Text after a valid reason'; Reason = "npm audit exit 1 $sensitiveMarker"; Secret = $sensitiveMarker },
+  @{ Why = 'A trailing line feed'; Reason = "npm audit exit 1`n"; Secret = '' },
+  @{ Why = 'A second line'; Reason = "npm audit exit 1`n$sensitiveMarker"; Secret = $sensitiveMarker },
+  @{ Why = 'A trailing carriage return and line feed'; Reason = "npm audit exit 1`r`n"; Secret = '' },
+  @{ Why = 'An escape sequence'; Reason = "npm audit exit 1$([char]27)[31m"; Secret = '' },
+  @{ Why = 'A trailing no-break space'; Reason = "npm audit exit 1$([char]0xA0)"; Secret = '' },
+  @{ Why = 'An exit code with a leading zero'; Reason = 'npm audit exit 01'; Secret = '' },
+  @{ Why = 'A negative exit code'; Reason = 'npm audit exit -1'; Secret = '' },
+  @{ Why = 'An exit code longer than 10 digits'; Reason = 'npm audit exit 12345678901'; Secret = '' },
+  @{ Why = 'A digit outside ASCII'; Reason = "npm audit exit $([char]0x0661)"; Secret = '' },
+  @{ Why = 'A digit outside ASCII after the first digit'; Reason = "npm audit exit 1$([char]0x0661)"; Secret = '' },
+  @{ Why = 'A digit outside ASCII in the attempt number'; Reason = "npm audit exit 1 (attempt $([char]0x0662) of 2)"; Secret = '' },
+  @{ Why = 'A lower-case signal'; Reason = 'npm audit ended by signal sigterm'; Secret = '' },
+  @{ Why = 'A different letter case'; Reason = 'NPM audit exit 1'; Secret = '' },
+  @{ Why = 'An attempt number above 9'; Reason = 'npm audit exit 1 (attempt 10 of 10)'; Secret = '' },
+  @{ Why = 'An empty reason'; Reason = ''; Secret = '' },
+  @{ Why = 'A null reason'; Reason = $null; Secret = '' }
+)) {
+  $detailCases.Add(@{
+    Why = "$($hiddenReason.Why) must be withheld."
+    Output = New-FailedAuditReport $hiddenReason.Reason
+    Message = $withheld
+    Secret = $hiddenReason.Secret
+  })
+}
+$detailCases.Add(@{
+  Why = 'A reason that is not a string must be withheld.'
+  Output = ConvertTo-TestReport ([ordered]@{ status = 'command_failed'; counts = $zeroCounts; packages = @(); reason = @('npm audit exit 1') })
+  Message = $withheld
+})
+$detailCases.Add(@{
+  Why = 'A command failure without a reason must be withheld.'
+  Output = ConvertTo-TestReport ([ordered]@{ status = 'command_failed'; counts = $zeroCounts; packages = @() })
+  Message = $withheld
+})
+$detailCases.Add(@{
+  Why = 'Only the status and reason may be shown, never other report fields.'
+  Output = ConvertTo-TestReport ([ordered]@{
+    status = 'command_failed'
+    counts = $zeroCounts
+    packages = @()
+    reason = 'npm audit exit 1'
+    detail = $sensitiveMarker
+  })
+  Message = 'Dependency preflight failed (status command_failed; reason: npm audit exit 1); raw output withheld.'
+})
+$detailCases.Add(@{
+  Why = 'A rejected audit must show its status and nothing else.'
+  Output = ConvertTo-TestReport ([ordered]@{
+    status = 'rejected'
+    counts = $nonzeroCounts
+    packages = @([ordered]@{ name = $sensitiveMarker; version = '1.0.0'; status = 'vulnerable' })
+  })
+  Message = 'Dependency preflight failed (status rejected); raw output withheld.'
+})
+$detailCases.Add(@{
+  Why = 'Only a command failure may carry a reason.'
+  Output = ConvertTo-TestReport ([ordered]@{ status = 'malformed_audit'; counts = $zeroCounts; packages = @(); reason = $sensitiveMarker })
+  Message = 'Dependency preflight failed (status malformed_audit); raw output withheld.'
+})
+$detailCases.Add(@{
+  Why = 'Only a command failure may carry a reason, even one that fits the reason grammar.'
+  Output = ConvertTo-TestReport ([ordered]@{ status = 'malformed_audit'; counts = $zeroCounts; packages = @(); reason = 'npm audit timed out' })
+  Message = 'Dependency preflight failed (status malformed_audit); raw output withheld.'
+})
+$detailCases.Add(@{
+  Why = 'A pass status on a nonzero exit must not be shown.'
+  Output = ConvertTo-TestReport $passReport
+  Message = $withheld
+})
+$detailCases.Add(@{
+  Why = 'An unknown status must be withheld.'
+  Output = ConvertTo-TestReport ([ordered]@{ status = $sensitiveMarker; counts = $zeroCounts; packages = @() })
+  Message = $withheld
+})
+$detailCases.Add(@{
+  Why = 'The status must match exactly.'
+  Output = ConvertTo-TestReport ([ordered]@{ status = 'Command_Failed'; counts = $zeroCounts; packages = @(); reason = 'npm audit exit 1' })
+  Message = $withheld
+})
+$detailCases.Add(@{
+  Why = 'Output that is not JSON must be withheld.'
+  Output = "npm error $sensitiveMarker"
+  Message = $withheld
+})
+$detailCases.Add(@{
+  Why = 'A JSON array must be withheld.'
+  Output = '[' + (New-FailedAuditReport 'npm audit exit 1') + ']'
+  Message = $withheld
+})
+$detailCases.Add(@{
+  Why = 'Output above the release bound must be withheld.'
+  Output = ConvertTo-TestReport ([ordered]@{
+    status = 'command_failed'
+    counts = $zeroCounts
+    packages = @()
+    reason = 'npm audit exit 1'
+    padding = 'x' * 8192
+  })
+  Message = $withheld
+})
+foreach ($case in $detailCases) {
+  $script:Events.Clear()
+  $script:AuditFailureOutput = $case.Output
+  $failure = Assert-Rejected {
+    Assert-ReleaseDependencyPreflight $commit
+    $script:Events.Add('azure')
+  } $case.Why $case.Message
+  Assert-Equal 1 $failure.Data['ReleaseExitCode'] "$($case.Why) The nonzero exit code must survive."
+  Assert-Equal 1 @($script:Events | Where-Object { $_ -ceq 'audit' }).Count "$($case.Why) The audit must run exactly once."
+  Assert-True (-not $script:Events.Contains('azure')) "$($case.Why) The release must stop before the first provider operation."
+  Assert-True (-not $failure.Message.Contains($sensitiveMarker)) "$($case.Why) Raw output must stay withheld."
+  if ($case.Secret) {
+    Assert-True (-not $failure.Message.Contains($case.Secret)) "$($case.Why) The secret-shaped value must stay withheld."
+  }
+  Assert-True (-not $failure.Data.Contains('ReleaseFailureOutput')) "$($case.Why) The raw report must not leave the preflight."
+}
+$script:AuditFailureOutput = $null
 
 Write-Host "release VM dependency preflight tests passed: $script:Passed assertions"
