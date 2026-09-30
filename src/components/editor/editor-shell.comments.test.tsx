@@ -508,11 +508,15 @@ describe("responsive comment opening at the real shell boundary", () => {
     expect(screen.getByRole("tab", { name: /Open/ })).toHaveAttribute("aria-selected", "true");
   });
 
-  it("returns a hidden source selection to the same passage in preview after narrowing", async () => {
+  it.each([
+    { anchor: 12, head: 5, remote: false },
+    { anchor: 5, head: 12, remote: false },
+    { anchor: 12, head: 5, remote: true },
+  ])("returns a hidden source selection ($anchor to $head, remote edit: $remote) to the same passage in preview after narrowing", async ({ anchor, head, remote }) => {
     const { container } = mount(1280);
     const view = await sourceEditorReady(container);
     act(() => {
-      view.dispatch({ selection: { anchor: 12, head: 5 } });
+      view.dispatch({ selection: { anchor, head } });
       view.focus();
       codeHighlight!("comment", threadId, view.state.selection.main.head);
     });
@@ -520,12 +524,17 @@ describe("responsive comment opening at the real shell boundary", () => {
     fireEvent.pointerDown(screen.getByTestId("comments-panel"));
     viewport(390);
     await expectPanel(390);
+    expect(session.activeSurface).toBe("rich");
+    if (remote) {
+      act(() => session.ydoc.transact(() => session.ytext.insert(0, "Remote "), "remote-test"));
+      await waitFor(() => expect(rich!.state.doc.textContent).toContain("Remote A commented"));
+    }
     await userEvent.click(screen.getByRole("button", { name: "Close comments" }));
     await waitFor(() => expect(rich!.hasFocus()).toBe(true));
     const map = session.binding.getSourceMap();
-    expect(map.pmToSrc(rich!.state.selection.anchor)).toBe(12);
-    expect(map.pmToSrc(rich!.state.selection.head)).toBe(5);
-    expect(session.ytext.toString()).toBe(TEXT);
+    expect(map.pmToSrc(rich!.state.selection.anchor)).toBe(anchor + (remote ? 7 : 0));
+    expect(map.pmToSrc(rich!.state.selection.head)).toBe(head + (remote ? 7 : 0));
+    expect(session.ytext.toString()).toBe((remote ? "Remote " : "") + TEXT);
   });
 
   it("does not activate a thread for ordinary text or native non-click gestures", () => {

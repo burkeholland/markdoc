@@ -316,4 +316,61 @@ test.describe("production build", () => {
       expect(url.searchParams.get("redirect_uri")).toMatch(/\/api\/auth\/callback\/github$/);
     });
   });
+
+  test.describe("image dialog real input (#2193)", () => {
+    test.skip(!base, "PROD_BASE_URL not set");
+    test.use({ baseURL: base ?? "http://localhost:3900" });
+
+    test("Upload, typed URL and alt text, Insert, Cancel and Escape work with real input", async ({ page }) => {
+      await devLogin(page, uniqueLogin("prod-image"));
+      const id = await createDocument(page, "# Images\n\nGallery.\n", "Images");
+      await openDocument(page, id);
+      await page.locator(".md-rich").click();
+      await page.keyboard.press("Control+End");
+
+      await page.getByTestId("tb-image").click();
+      const dialog = page.getByRole("dialog", { name: "Insert image" });
+      await expect(dialog).toBeVisible();
+      const chooser = page.waitForEvent("filechooser");
+      await page.getByTestId("image-upload").click();
+      await (await chooser).setFiles({
+        name: "Smoke pixel.png",
+        mimeType: "image/png",
+        buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"),
+      });
+      await expect(page.getByTestId("image-url")).toHaveValue(/^\/api\/assets\/[a-z0-9]+$/);
+      const uploaded = await page.getByTestId("image-url").inputValue();
+      await page.getByTestId("image-alt").click();
+      await page.keyboard.press("Control+A");
+      await page.keyboard.type("Uploaded pixel");
+      await page.getByTestId("image-submit").click();
+      await expect(dialog).toHaveCount(0);
+      await expect.poll(() => codeText(page)).toContain(`![Uploaded pixel](${uploaded})`);
+
+      await page.getByTestId("tb-image").click();
+      await page.getByTestId("image-url").click();
+      await page.keyboard.type(uploaded);
+      await page.getByTestId("image-alt").click();
+      await page.keyboard.type("Keyboard pixel");
+      await page.keyboard.press("Enter");
+      await expect(dialog).toHaveCount(0);
+      await expect.poll(() => codeText(page)).toContain(`![Keyboard pixel](${uploaded})`);
+
+      const beforeCancel = await codeText(page);
+      await page.getByTestId("tb-image").click();
+      await page.getByTestId("image-url").click();
+      await page.keyboard.type(uploaded);
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      await page.getByTestId("tb-image").click();
+      await expect(page.getByTestId("image-url")).toHaveValue("");
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      expect(await codeText(page)).toBe(beforeCancel);
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      const content = await page.request.get(`/api/documents/${id}/content`);
+      expect(content.status()).toBe(200);
+      expect(((await content.json()) as { content: string }).content).toContain(`![Keyboard pixel](${uploaded})`);
+    });
+  });
 });

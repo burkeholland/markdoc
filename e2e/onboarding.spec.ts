@@ -238,7 +238,9 @@ test.describe("onboarding: Settings agent setup", () => {
     await expect(setup).toHaveAttribute("data-state", "new");
     await expect(page.getByTestId("agent-setup-toggle")).toHaveCount(0);
     await expect(page.getByTestId("keys-card")).toHaveCount(0);
-    await expect(setup.getByRole("radiogroup", { name: "Agent" })).toBeVisible();
+    await expect(setup.getByRole("radiogroup", { name: "Agent" })).toHaveCount(0);
+    await expect(setup.getByRole("heading", { name: "Add Markdoc to your agent" })).toBeVisible();
+    await expect(setup.getByTestId("agent-create-key")).toBeVisible();
     await expect(setup.getByTestId("agent-setup-snippet")).toHaveCount(0);
     const docsLink = page.getByTestId("agent-docs-link");
     await expect(docsLink).toBeVisible();
@@ -286,7 +288,7 @@ test.describe("onboarding: Settings agent setup", () => {
     await expect(row.getByTestId("key-last-request").locator("time")).toHaveAttribute("datetime", tokens.tokens[0].lastMcpSeenAt!);
     await expect(row.getByTestId("key-last-tool-call").locator("time")).toHaveAttribute("datetime", tokens.tokens[0].lastMcpCallAt!);
 
-    // "Set up" brings the steps back for another agent; it shows no snippet until a new key is made, and never this key.
+    // "Set up" brings the steps back for another agent; it shows no config until a new key is made, and never this key.
     await page.getByTestId("agent-setup-toggle").click();
     await expect(page.getByTestId("agent-setup")).toHaveAttribute("data-state", "new");
     await expect(page.getByTestId("agent-setup-snippet")).toHaveCount(0);
