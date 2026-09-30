@@ -2,23 +2,21 @@
  * The Markdown → sanitized HTML pipeline shared by the HTML/PDF export and the reader page.
  *
  * This module doubles as a `worker_threads` entry (see `render-pool.ts`): when loaded off the
- * main thread it answers render requests over `parentPort`. It must therefore stay free of
- * database access and of `@/` path aliases, and use only syntax Node can strip (it is started
- * straight from this .ts file in development; the production build bundles it with esbuild).
+ * main thread it answers render requests, and link preview requests (`preview-text.ts`), over
+ * `parentPort`. It must therefore stay free of database access and of `@/` path aliases, and use
+ * only syntax Node can strip (it is started straight from this .ts file in development; the
+ * production build bundles it with esbuild).
  */
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
-import { unified, type Plugin } from "unified";
-import remarkParse from "remark-parse";
-import remarkGfm from "remark-gfm";
 import remarkRehype from "remark-rehype";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeHighlight from "rehype-highlight";
 import rehypeSlug from "rehype-slug";
 import rehypeStringify from "rehype-stringify";
-import { frontmatter } from "micromark-extension-frontmatter";
-import { frontmatterFromMarkdown } from "mdast-util-frontmatter";
 import type { Root as HastRoot, Element } from "hast";
-import type { Root as MdastRoot } from "mdast";
+// The extensions are required: in development Node loads this worker entry straight from source.
+import { readerMarkdown } from "./markdown-syntax.ts";
+import { previewText } from "../preview-text.ts";
 
 export const WORKER_ROLE = "markdoc-markdown-render";
 
@@ -43,13 +41,6 @@ export interface RenderedFragment {
   /** Ids of document assets referenced by `<img>` tags, in document order (deduplicated). */
   assetIds: string[];
 }
-
-/** Same front matter tokenizer as the editor's parser, so `---` blocks are not rendered as text or rules. */
-const remarkFrontmatter: Plugin<[], MdastRoot> = function () {
-  const data = this.data() as { micromarkExtensions?: unknown[]; fromMarkdownExtensions?: unknown[] };
-  (data.micromarkExtensions ??= []).push(frontmatter(["yaml", "toml"]));
-  (data.fromMarkdownExtensions ??= []).push(frontmatterFromMarkdown(["yaml", "toml"]));
-};
 
 const sanitizeSchema = {
   ...defaultSchema,
@@ -148,10 +139,7 @@ function rehypeCollectHeadings(sink: RenderedHeading[]): (tree: HastRoot) => voi
 export async function renderMarkdownFragment(markdown: string, { assetBaseUrl }: RenderFragmentOptions): Promise<RenderedFragment> {
   const headings: RenderedHeading[] = [];
   const assetIds: string[] = [];
-  const file = await unified()
-    .use(remarkParse)
-    .use(remarkFrontmatter)
-    .use(remarkGfm)
+  const file = await readerMarkdown()
     .use(remarkRehype, { handlers: { yaml: () => undefined, toml: () => undefined } })
     .use(rehypeSanitize, sanitizeSchema)
     .use(() => rehypeLabelTaskCheckboxes())
@@ -164,18 +152,22 @@ export async function renderMarkdownFragment(markdown: string, { assetBaseUrl }:
   return { html: String(file), headings, assetIds };
 }
 
-export interface WorkerRequest {
-  id: number;
-  markdown: string;
-  assetBaseUrl: string;
-}
+/** A job for the worker: render `markdown`, or with `preview` find its link preview text (`previewText`). */
+export type WorkerTask = { markdown: string; assetBaseUrl: string } | { markdown: string; preview: true };
 
-export type WorkerResponse = { id: number; ok: true; result: RenderedFragment } | { id: number; ok: false; error: string };
+export type WorkerRequest = WorkerTask & { id: number };
+
+export type WorkerResponse = { id: number; ok: true; result: RenderedFragment | string } | { id: number; ok: false; error: string };
+
+function runTask(task: WorkerTask): Promise<RenderedFragment | string> {
+  if ("preview" in task) return new Promise((resolve) => resolve(previewText(task.markdown)));
+  return renderMarkdownFragment(task.markdown, { assetBaseUrl: task.assetBaseUrl });
+}
 
 if (!isMainThread && parentPort && (workerData as { role?: string } | null)?.role === WORKER_ROLE) {
   const port = parentPort;
   port.on("message", (req: WorkerRequest) => {
-    renderMarkdownFragment(req.markdown, { assetBaseUrl: req.assetBaseUrl }).then(
+    runTask(req).then(
       (result) => port.postMessage({ id: req.id, ok: true, result } satisfies WorkerResponse),
       (err: unknown) => port.postMessage({ id: req.id, ok: false, error: err instanceof Error ? err.message : String(err) } satisfies WorkerResponse),
     );

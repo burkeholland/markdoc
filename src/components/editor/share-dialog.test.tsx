@@ -274,7 +274,8 @@ describe("ShareDialog", () => {
     const toggle = screen.getByRole("switch", { name: "Show title and first lines in link previews" });
     expect(toggle).toHaveAttribute("aria-checked", "false");
     expect(toggle).toBeEnabled();
-    expect(toggle).toHaveAccessibleDescription(/Slack, Teams and other apps show them/);
+    // Everything a preview carries: the metadata's title, description and modified time, the card's name and date.
+    expect(toggle).toHaveAccessibleDescription("Slack, Teams and other apps show the title, first lines, your name and when it was last updated.");
 
     // A link-shared document always previews with its title and first lines: nothing to switch.
     rerender(<ShareDialog open onOpenChange={vi.fn()} doc={doc({ linkAccess: "view", linkPreview: false })} isOwner onDocChange={vi.fn()} />);
@@ -289,14 +290,22 @@ describe("ShareDialog", () => {
 
     const { rerender } = renderShare({ document: doc({ linkPreview: false }), onDocChange });
     await loadedRows();
-    fireEvent.click(screen.getByTestId("link-preview"));
+    const toggle = screen.getByTestId("link-preview");
+    toggle.focus();
+    fireEvent.click(toggle);
 
     expect(api.documents.patch).toHaveBeenCalledWith("doc-1", { linkPreview: true });
-    expect(screen.getByTestId("link-preview")).toBeDisabled();
+    // Saving: marked, not disabled (which would drop keyboard focus to the page), and a second toggle waits its turn.
+    expect(toggle).toHaveAttribute("aria-disabled", "true");
+    expect(toggle).toBeEnabled();
+    expect(toggle).toHaveFocus();
+    fireEvent.click(toggle);
+    expect(api.documents.patch).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("link-access")).toBeDisabled();
     patchRequest.resolve({ document: turnedOn });
     await waitFor(() => expect(onDocChange).toHaveBeenCalledWith(turnedOn));
-    await waitFor(() => expect(screen.getByTestId("link-preview")).toBeEnabled());
+    await waitFor(() => expect(toggle).not.toHaveAttribute("aria-disabled"));
+    expect(toggle).toHaveFocus();
 
     rerender(<ShareDialog open onOpenChange={vi.fn()} doc={turnedOn} isOwner onDocChange={onDocChange} />);
     expect(screen.getByTestId("link-preview")).toHaveAttribute("aria-checked", "true");
@@ -325,6 +334,9 @@ describe("ShareDialog", () => {
 
     expect(toggle).toHaveAttribute("aria-checked", "true");
     expect(toggle).toBeDisabled();
+    expect(toggle).toHaveAccessibleDescription(
+      "Slack, Teams and other apps show the title, first lines, the owner's name and when it was last updated. Only the owner can change this.",
+    );
     fireEvent.click(toggle);
     expect(api.documents.patch).not.toHaveBeenCalled();
   });

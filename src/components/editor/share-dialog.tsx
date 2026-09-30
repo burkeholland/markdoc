@@ -383,7 +383,10 @@ export const ShareDialog = memo(function ShareDialog({
                   <div className="text-sm font-medium text-ink">{linkOption.label}</div>
                 )}
                 <p className="mt-1 text-xs text-ink-3">{linkOption.description}</p>
-                {/* A link-shared document always previews with its title and first lines: anyone with the link can read it. */}
+                {/* A link-shared document always previews with its title and first lines: anyone with the link can read it.
+                    The hint names all a preview shows: see document-metadata.ts and og/document-card-route.ts.
+                    Saving marks the switch aria-disabled, not disabled, which would drop keyboard focus to the page;
+                    patchLink ignores a toggle while one is saving. */}
                 {restricted && (
                   <div className="mt-3 flex items-start gap-2.5">
                     <button
@@ -392,8 +395,9 @@ export const ShareDialog = memo(function ShareDialog({
                       aria-checked={doc.linkPreview === true}
                       aria-labelledby={`${previewId}-label`}
                       aria-describedby={`${previewId}-hint`}
+                      aria-disabled={linkBusy || undefined}
                       className="switch mt-px"
-                      disabled={!isOwner || linkBusy}
+                      disabled={!isOwner}
                       onClick={() => void patchLink({ linkPreview: !doc.linkPreview }, "Could not change the link preview.")}
                       data-testid="link-preview"
                     />
@@ -401,8 +405,10 @@ export const ShareDialog = memo(function ShareDialog({
                       <div id={`${previewId}-label`} className="font-medium text-ink-2">
                         Show title and first lines in link previews
                       </div>
-                      <div id={`${previewId}-hint`} className="text-ink-3">
-                        Slack, Teams and other apps show them, with the owner&apos;s name.
+                      <div id={`${previewId}-hint`} className="text-ink-3" data-testid="link-preview-hint">
+                        {isOwner
+                          ? "Slack, Teams and other apps show the title, first lines, your name and when it was last updated."
+                          : "Slack, Teams and other apps show the title, first lines, the owner's name and when it was last updated. Only the owner can change this."}
                       </div>
                     </div>
                   </div>

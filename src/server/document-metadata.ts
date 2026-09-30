@@ -1,8 +1,9 @@
 import { cache } from "react";
 import type { Metadata } from "next";
-import { excerpt, getLinkPreviewDocument, type DocumentMeta } from "@/server/documents";
+import { getLinkPreviewDocument, type DocumentMeta } from "@/server/documents";
 import { readLiveText, type LiveText } from "@/server/livedoc";
 import { CARD_ALT, CARD_CONTENT_TYPE, CARD_SIZE } from "@/server/og/document-card";
+import { previewOffThread } from "@/server/export/render-pool";
 
 /** What a link preview says about a document whose text has no prose yet. */
 export const EMPTY_DOCUMENT_DESCRIPTION = "A document on Markdoc";
@@ -25,9 +26,14 @@ export function documentTitle(doc: Pick<DocumentMeta, "title">, live: Pick<LiveT
   return live?.title || doc.title || "Untitled";
 }
 
-/** The first 160 characters of the document's prose, Markdown removed, or the generic line for an empty document. */
-export function documentDescription(live: Pick<LiveText, "clean"> | null): string {
-  return (live ? excerpt(live.clean) : "") || EMPTY_DOCUMENT_DESCRIPTION;
+/**
+ * The document's first prose (160 characters, see `previewText`), or the generic line when there is none.
+ * The only document text a link preview carries, so it may hold nothing the reader page hides. Parsed on
+ * the Markdown worker; if that fails (a time-out, say) the preview carries the generic line.
+ */
+export async function documentDescription(live: Pick<LiveText, "clean"> | null): Promise<string> {
+  const text = live ? await previewOffThread(live.clean).catch(() => "") : "";
+  return text || EMPTY_DOCUMENT_DESCRIPTION;
 }
 
 /**
@@ -39,15 +45,15 @@ export function documentDescription(live: Pick<LiveText, "clean"> | null): strin
  * `opengraph-image.tsx` next to each page supplies it (and `og:image:width/height`, `twitter:image`)
  * with the same access check; the sign-in page has no such file and points at the document's.
  */
-export function documentMetadata(
+export async function documentMetadata(
   doc: MetadataDocument | null,
   live: DocumentCardText | null,
   path: "/d" | "/p",
   { cardImage = false }: { cardImage?: boolean } = {},
-): Metadata {
+): Promise<Metadata> {
   if (!doc) return { title: "Document" };
   const title = documentTitle(doc, live);
-  const description = documentDescription(live);
+  const description = await documentDescription(live);
   const image = `${path}/${doc.id}/opengraph-image`;
   return {
     title,
@@ -85,5 +91,5 @@ export const signInPreviewMetadata = cache(async (next: string): Promise<Metadat
   const doc = await getLinkPreviewDocument(page[2]);
   if (!doc) return null;
   const live = await liveTextForRequest(doc.id).catch(() => null);
-  return { ...documentMetadata(doc, live, `/${page[1]}` as "/d" | "/p", { cardImage: true }), robots: { index: false } };
+  return { ...(await documentMetadata(doc, live, `/${page[1]}` as "/d" | "/p", { cardImage: true })), robots: { index: false } };
 });

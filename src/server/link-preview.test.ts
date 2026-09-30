@@ -208,12 +208,11 @@ describe("the card image (opengraph-image of /d/<id> and /p/<id>)", () => {
     vi.mocked(renderDocumentCard).mockClear();
     const res = await as(null, () => card(doc.id));
     expect(res.status).toBe(200);
-    expect(renderDocumentCard).toHaveBeenCalledWith({
-      title: "Board memo",
-      ownerName: "Olive",
-      readingMinutes: expect.any(Number),
-      updatedAt: (await row(doc.id)).updatedAt,
-    });
+    // What the Share dialog says a preview shows, and nothing else: no reading time, never stored.
+    expect(renderDocumentCard).toHaveBeenCalledWith(
+      { title: "Board memo", ownerName: "Olive", readingMinutes: 0, updatedAt: (await row(doc.id)).updatedAt },
+      { cacheControl: "private, no-store" },
+    );
     expect((await as(stranger, () => card(doc.id))).status).toBe(200);
   });
 
@@ -221,6 +220,21 @@ describe("the card image (opengraph-image of /d/<id> and /p/<id>)", () => {
     const doc = await restrictedDocument();
     expect((await as(owner, () => card(doc.id))).status).toBe(200);
     expect((await as(editor, () => card(doc.id))).status).toBe(200);
+  });
+
+  it("is the same restricted card, never stored, when the owner asks for it", async () => {
+    const doc = await restrictedDocument();
+    vi.mocked(renderDocumentCard).mockClear();
+    await as(owner, () => card(doc.id));
+    expect(renderDocumentCard).toHaveBeenCalledWith(expect.objectContaining({ readingMinutes: 0 }), { cacheControl: "private, no-store" });
+  });
+
+  it("keeps the reading time and the five-minute cache for a link-shared document", async () => {
+    const doc = await restrictedDocument();
+    await updateDocument(doc.id, { linkAccess: "view" });
+    vi.mocked(renderDocumentCard).mockClear();
+    await as(null, () => card(doc.id));
+    expect(renderDocumentCard).toHaveBeenCalledWith(expect.objectContaining({ title: "Board memo", readingMinutes: 1 }), { cacheControl: "public, max-age=300" });
   });
 
   it("answers 404 for a document in the trash even with link previews on", async () => {

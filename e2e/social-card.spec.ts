@@ -20,9 +20,12 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 
 /** Text past the first 160 characters of prose: no link preview carries it. */
 const TAIL_MARKER = "members-only-tail-1287";
-const LONG_CONTENT = `${CONTENT}\nHosts rotate every month, and the shortlist for next quarter is at the bottom of this plan: ${TAIL_MARKER}.\n`;
+/** Text the reader page hides (a comment spread over lines, row 1 of the #2194 review): no link preview carries it either. */
+const HIDDEN_MARKER = "hidden-note-1287";
+const NEXT_PARAGRAPH = `Hosts rotate every month, and the shortlist for next quarter is at the bottom of this plan: ${TAIL_MARKER}.`;
+const LONG_CONTENT = `${CONTENT}\n<!--\n${HIDDEN_MARKER}\n-->\n\n${NEXT_PARAGRAPH}\n`;
 /** The long document's excerpt: the short plan, then as much of the next paragraph as fits in 160 characters. */
-const LONG_EXCERPT = new RegExp(`^${escapeRegExp(EXCERPT)} .{1,${160 - EXCERPT.length - 1}}$`);
+const LONG_EXCERPT = `${EXCERPT} ${NEXT_PARAGRAPH}`.slice(0, 160).trim();
 
 /**
  * Link unfurlers by user agent. Next.js holds `<head>` back until the metadata is ready only for the bots on
@@ -102,11 +105,15 @@ function expectGenericCard(html: string, baseURL: string, docId: string) {
   expect(first(tags, "og:image"), "og:image").toBe(`${baseURL}/brand/og.png`);
 }
 
-/** A rendered card: 200, PNG, at least 10 kB, IHDR 1200×630, cacheable for five minutes. */
-async function expectCardImage(res: APIResponse, label: string): Promise<Buffer> {
+/** Cache-Control of a link-shared document's card, and of a restricted one's: never stored, so turning previews off takes effect at once. */
+const SHARED_CARD_CACHE = "public, max-age=300";
+const RESTRICTED_CARD_CACHE = "private, no-store";
+
+/** A rendered card: 200, PNG, at least 10 kB, IHDR 1200×630, with the cache header for its kind of document. */
+async function expectCardImage(res: APIResponse, label: string, cacheControl = SHARED_CARD_CACHE): Promise<Buffer> {
   expect(res.status(), `${label}: status`).toBe(200);
   expect(res.headers()["content-type"], `${label}: content-type`).toBe("image/png");
-  expect(res.headers()["cache-control"], `${label}: cache-control`).toBe("public, max-age=300");
+  expect(res.headers()["cache-control"], `${label}: cache-control`).toBe(cacheControl);
   const body = await res.body();
   expect(body.length, `${label}: size`).toBeGreaterThanOrEqual(10_000);
   expect(body.subarray(0, 8).equals(PNG_SIGNATURE), `${label}: PNG signature`).toBe(true);
@@ -183,9 +190,9 @@ test.describe("social card", () => {
         expect(res.status(), `anonymous ${route}`).toBe(404);
         expect(res.headers()["content-type"], `anonymous ${route}`).not.toBe("image/png");
       }
-      // Access, not secrecy, gates the card: the owner sees it on both routes.
-      await expectCardImage(await alice.page.request.get(`/d/${id}/opengraph-image`), "owner /d image");
-      await expectCardImage(await alice.page.request.get(`/p/${id}/opengraph-image`), "owner /p image");
+      // Access, not secrecy, gates the card: the owner sees it on both routes. A restricted document's card is never stored.
+      await expectCardImage(await alice.page.request.get(`/d/${id}/opengraph-image`), "owner /d image", RESTRICTED_CARD_CACHE);
+      await expectCardImage(await alice.page.request.get(`/p/${id}/opengraph-image`), "owner /p image", RESTRICTED_CARD_CACHE);
     } finally {
       await anonymous.dispose();
       await alice.context.close();
@@ -199,15 +206,20 @@ test.describe("social card", () => {
     try {
       const id = await createDocument(alice.page, LONG_CONTENT, TITLE);
 
-      // The owner turns previews on in the Share dialog; the link itself stays restricted.
+      // The owner turns previews on in the Share dialog, from the keyboard; the link itself stays restricted.
       await openDocument(alice.page, id);
       await alice.page.getByTestId("share-button").click();
       const dialog = alice.page.getByRole("dialog", { name: /share/i });
       await expect(dialog).toBeVisible();
       const previews = dialog.getByRole("switch", { name: "Show title and first lines in link previews" });
       await expect(previews).toHaveAttribute("aria-checked", "false");
-      await previews.click();
+      await expect(previews).toHaveAccessibleDescription("Slack, Teams and other apps show the title, first lines, your name and when it was last updated.");
+      await previews.focus();
+      await alice.page.keyboard.press("Space");
       await expect(previews).toHaveAttribute("aria-checked", "true");
+      // Saving must not drop focus to the page: the switch stays focused, so Space can turn it off again.
+      await expect(previews).not.toHaveAttribute("aria-disabled");
+      await expect(previews).toBeFocused();
       await expect(dialog.getByTestId("link-access")).toHaveValue("private");
 
       for (const pagePath of [`/d/${id}`, `/p/${id}`]) {
@@ -222,7 +234,8 @@ test.describe("social card", () => {
             const html = await res.text();
             const image = expectDocumentCard(headOf(html), baseURL!, pagePath, { titleTag: "Sign in · Markdoc", excerpt: LONG_EXCERPT });
             expect(html, `${name} ${pagePath}: nothing past the first lines`).not.toContain(TAIL_MARKER);
-            if (name === UNFURLERS[0].name) await expectCardImage(await unfurler.get(image), `${pagePath} og:image`);
+            expect(html, `${name} ${pagePath}: nothing the reader page hides`).not.toContain(HIDDEN_MARKER);
+            if (name === UNFURLERS[0].name) await expectCardImage(await unfurler.get(image), `${pagePath} og:image`, RESTRICTED_CARD_CACHE);
           } finally {
             await unfurler.dispose();
           }
@@ -235,11 +248,15 @@ test.describe("social card", () => {
       const strangerHtml = await stranger.text();
       expect(strangerHtml, "signed-in stranger").not.toContain(TITLE);
       expect(strangerHtml, "signed-in stranger").not.toContain(TAIL_MARKER);
-      await expectCardImage(await bob.page.request.get(`/d/${id}/opengraph-image`), "signed-in stranger image");
+      expect(strangerHtml, "signed-in stranger").not.toContain(HIDDEN_MARKER);
+      await expectCardImage(await bob.page.request.get(`/d/${id}/opengraph-image`), "signed-in stranger image", RESTRICTED_CARD_CACHE);
 
-      // Off again: the generic card, and no image for anyone without access.
-      await previews.click();
+      // Off again, from the keyboard: the generic card, and no image for anyone without access.
+      await expect(previews).toBeFocused();
+      await alice.page.keyboard.press("Space");
       await expect(previews).toHaveAttribute("aria-checked", "false");
+      await expect(previews).not.toHaveAttribute("aria-disabled");
+      await expect(previews).toBeFocused();
       for (const { name, userAgent } of UNFURLERS) {
         const unfurler = await playwright.request.newContext({ baseURL, userAgent });
         try {

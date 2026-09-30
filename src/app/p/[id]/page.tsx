@@ -20,7 +20,7 @@ export async function generateMetadata({ params }: PageProps<"/p/[id]">): Promis
   const user = await currentUser();
   const access = await getEffectiveDocumentAccess(id, user);
   const live = access ? await liveTextForRequest(id).catch(() => null) : null;
-  return { ...documentMetadata(access?.doc ?? null, live, "/p"), robots: { index: false } };
+  return { ...(await documentMetadata(access?.doc ?? null, live, "/p")), robots: { index: false } };
 }
 
 export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">) {
