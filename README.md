@@ -266,8 +266,10 @@ Next bundles server dependencies; `serverExternalPackages` in `next.config.ts` l
 ## Deploy to Azure
 
 Markdoc's current hosting route is the existing Linux VM **`markdoc-pg` in
-`markdoc-rg`** (hyphen), serving
-**`https://markdoc-burkeholland.eastus2.cloudapp.azure.com`**. The September 4
+`markdoc-rg`** (hyphen), serving **`https://markdoc.app`**. The old Azure name
+`markdoc-burkeholland.eastus2.cloudapp.azure.com` still resolves and redirects
+to it; the GitHub OAuth callback is `https://markdoc.app/api/auth/callback/github`
+(see [Public domain](docs/vm-hosting.md#public-domain-markdocapp)). The September 4
 hosting record describes nginx/Let's Encrypt in front of the resource-limited
 Docker/systemd service `markdoc-app.service`, co-located with PostgreSQL. The
 Container App, maintenance job and managed environment are retired; the old
@@ -312,8 +314,8 @@ removed; the protected rollback bundle and recovery/upgrade limits are unchanged
 
 Production is the existing Linux VM **`markdoc-pg` in `markdoc-rg`**. It runs
 PostgreSQL and the Docker-backed `markdoc-app.service` on the same host; nginx
-terminates public HTTPS for
-`https://markdoc-burkeholland.eastus2.cloudapp.azure.com`. The application
+terminates public HTTPS for `https://markdoc.app` (config in
+[`infra/nginx-markdoc.conf`](infra/nginx-markdoc.conf)). The application
 continues to use the existing root-owned `/etc/markdoc/markdoc.env` and the
 VM's managed identity to pull from
 `markdocacrmnd542unepl56.azurecr.io`. This is one systemd service restart on a

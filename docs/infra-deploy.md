@@ -4,7 +4,7 @@
 
 Application releases target `markdoc-app.service` on `markdoc-pg` in
 **`markdoc-rg`**, at
-`https://markdoc-burkeholland.eastus2.cloudapp.azure.com`. Follow the
+`https://markdoc.app` (the old Azure name redirects there). Follow the
 [README VM release summary](../README.md#production-runbook-vm-application-releases)
 and [VM hosting runbook](vm-hosting.md): the manual
 [deployment workflow](../.github/workflows/deploy.yml) builds a selected

@@ -27,7 +27,7 @@ release, a readable recovered database or full database health.
 
 | Item | Recorded value and evidence |
 | --- | --- |
-| Public origin | `https://markdoc-burkeholland.eastus2.cloudapp.azure.com`; lead/manager supplied the exact DNS name on `markdoc-web-ip`. No former Container Apps endpoint is a fallback. |
+| Public origin | `https://markdoc.app` (apex, Cloudflare DNS-only A record to `markdoc-web-ip` = `20.62.106.80`). The Azure DNS label `markdoc-burkeholland.eastus2.cloudapp.azure.com` on `markdoc-web-ip` stays in place and only redirects to it; see [Public domain](#public-domain-markdocapp). No former Container Apps endpoint is a fallback. |
 | Resource group and VM | `markdoc-rg` (hyphen), `markdoc-pg`; supplied metadata says Linux, provisioning `Succeeded`, VM agent enabled, and `markdoc-web-ip` attached to `markdoc-pg-nic/primary`. |
 | Azure context | Lead confirmed tenant `f1fde69f-c8d3-4b94-adeb-02d045b37f6a` and enabled subscription `332d0c98-694c-48a0-91f3-465de6ac30a5`. This is not proof of guest command access or workflow identity permissions. |
 | Application service | Lead observed `markdoc-app.service` loaded, active, running at `/etc/systemd/system/markdoc-app.service`; systemd working directory empty. Source writes a Docker unit with host networking, 768 MiB memory and 0.6 CPU; unit contents/resource limits were not read back. |
@@ -304,6 +304,32 @@ captured restore-point LSN `F/81000090`, exact segment and checksum-suffixed
 repository object archived, scratch restore and SQL readiness succeeded, replay
 reached exactly `F/81000090`, and owned cleanup succeeded. The application
 image was not pulled or restarted during this rehearsal.
+
+## Public domain (markdoc.app)
+
+Production moved from the shared Azure name to `https://markdoc.app` after
+Google Safe Browsing flagged `markdoc-burkeholland.eastus2.cloudapp.azure.com`
+as phishing. `.app` is on the HSTS preload list, so browsers only ever use
+HTTPS for it: the certificate must exist before anyone opens the site.
+
+| Piece | Value |
+| --- | --- |
+| DNS (Cloudflare, **DNS only**, grey cloud) | `A markdoc.app -> 20.62.106.80`, `CNAME www -> markdoc.app`. The Cloudflare proxy must stay off: certbot validates over plain HTTP on the VM, and nginx terminates TLS itself. |
+| Certificates | Let's Encrypt `markdoc.app` (covers `markdoc.app` and `www.markdoc.app`) plus the existing `markdoc-burkeholland.eastus2.cloudapp.azure.com`; both renew through `certbot.timer`. |
+| nginx | [`infra/nginx-markdoc.conf`](../infra/nginx-markdoc.conf) is the source for `/etc/nginx/sites-available/markdoc`. `markdoc.app` proxies to the app on `127.0.0.1:3000`; `www.markdoc.app`, the Azure name and plain HTTP redirect to `https://markdoc.app` with the same path and query (`301` for pages, `308` for `/api/*` so writes keep their method). |
+| App environment (`/etc/markdoc/markdoc.env`) | `AUTH_URL=https://markdoc.app`, `MARKDOC_URL=https://markdoc.app`, `MARKDOC_CANONICAL_HOST=markdoc.app`. |
+| GitHub OAuth app | Homepage URL `https://markdoc.app`, authorization callback URL `https://markdoc.app/api/auth/callback/github`. |
+
+Cutover order (each step reversible until the OAuth change):
+
+1. Wait until `Resolve-DnsName markdoc.app` and `Resolve-DnsName www.markdoc.app` return `20.62.106.80`.
+2. On the VM: `certbot certonly --nginx --cert-name markdoc.app -d markdoc.app -d www.markdoc.app`. This only issues the certificate; nginx config is unchanged.
+3. Back up `/etc/nginx/sites-available/markdoc` and `/etc/markdoc/markdoc.env`, install `infra/nginx-markdoc.conf`, `nginx -t`, `systemctl reload nginx`.
+4. Set the three environment values above and `systemctl restart markdoc-app.service`.
+5. Update the GitHub OAuth app (GitHub allows one callback URL, so the old origin stops signing in; it only redirects now anyway).
+6. Verify `https://markdoc.app/api/health` reports `ok`, `db`, `collab` true, that the old name answers `301` to `https://markdoc.app/...`, and that GitHub sign-in completes.
+
+Rollback before step 5: restore both backups, `nginx -t && systemctl reload nginx`, restart `markdoc-app.service`. After step 5, also set the OAuth callback back to the Azure name.
 
 ## Health and safe diagnostics
 

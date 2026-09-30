@@ -5,7 +5,10 @@ import { Logo } from "@/components/ui/logo";
 import { loginReturnPath } from "./return-path";
 import { embeddedDocumentPath } from "@/server/http";
 
-export const metadata = { title: "Sign in" };
+export const metadata = {
+  title: "Sign in",
+  description: "Sign in to Markdoc, the collaborative Markdown editor for people and AI agents.",
+};
 
 export default async function LoginPage({ searchParams }: PageProps<"/login">) {
   const session = await auth();
@@ -19,13 +22,16 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
   return (
     <main className="flex min-h-screen items-center justify-center bg-surface-2 px-4 py-4">
       <div className="w-full max-w-sm rounded-2xl border border-line bg-surface p-6 shadow-xl shadow-black/5 sm:p-8" data-testid="login-card">
-        <div className="mb-6 flex items-center gap-3">
+        <div className="mb-4 flex items-center gap-3">
           <Logo className="h-9 w-9" />
           <div>
-            <h1 className="text-xl font-semibold text-ink">Markdoc</h1>
-            <p className="text-sm text-ink-3">Collaborative Markdown editing.</p>
+            <h1 className="text-xl font-semibold text-ink">Sign in to Markdoc</h1>
+            <p className="text-sm text-ink-3">Markdown, together.</p>
           </div>
         </div>
+        <p className="mb-6 text-sm text-ink-2" data-testid="login-about">
+          A collaborative Markdown editor. People and AI agents write the same document in real time, with comments, suggestions and version history.
+        </p>
         {error && <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">Sign in failed ({error}). Please try again.</div>}
         {githubConfigured ? (
           <form

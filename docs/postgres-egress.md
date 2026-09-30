@@ -16,8 +16,8 @@ co-located Markdoc application require:
 All other Internet egress remains denied. PostgreSQL port 5432 remains reachable
 only from the legacy Container Apps subnet and from the VM's own
 `10.42.2.4/32` address. The public application uses `markdoc-web-ip` on the
-primary NIC configuration and the static hostname
-`markdoc-burkeholland.eastus2.cloudapp.azure.com`; ports 80 and 443 are the only
+primary NIC configuration, served as `markdoc.app` (the static Azure hostname
+`markdoc-burkeholland.eastus2.cloudapp.azure.com` redirects there); ports 80 and 443 are the only
 public inbound paths.
 
 ## Current production state
