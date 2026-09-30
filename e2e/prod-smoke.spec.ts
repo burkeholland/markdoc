@@ -133,6 +133,28 @@ test.describe("production build", () => {
       }
     });
 
+    test("the editor status bar theme toggle cycles System, Light, Dark, System", async ({ page }) => {
+      await page.emulateMedia({ colorScheme: "dark" });
+      await signInFresh(page, "prod-theme-editor");
+      const id = await createDocument(page, "# Smoke theme\n\nThe status bar toggle.\n", "Smoke theme");
+      await openDocument(page, id);
+      const html = page.locator("html");
+      const toggle = page.getByTestId("status-bar").getByTestId("theme-toggle");
+      await expect(toggle).toHaveAttribute("data-theme-preference", "system");
+      await expect(html).toHaveAttribute("data-theme", "dark");
+
+      for (const [preference, resolved] of [
+        ["light", "light"],
+        ["dark", "dark"],
+        ["system", "dark"],
+      ] as const) {
+        await toggle.click();
+        await expect(toggle).toHaveAttribute("data-theme-preference", preference);
+        await expect(html).toHaveAttribute("data-theme", resolved);
+        expect(await storedTheme(page)).toBe(preference);
+      }
+    });
+
     test("Trash: Restore brings a document back and Delete forever removes it", async ({ page }) => {
       await signInFresh(page, "prod-trash");
       const title = `Disposable ${Date.now().toString(36)}`;
