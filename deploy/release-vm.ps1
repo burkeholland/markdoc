@@ -19,7 +19,7 @@ function Stop-VmRelease([string]$Message, [int]$ExitCode = 1) {
   throw $failure
 }
 
-function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds) {
+function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds, [switch]$KeepFailureOutput) {
   $executable = (Get-Command $Command -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
   # A child PowerShell handles az.cmd without shell-string argument interpolation.
   $quoted = @($executable) + $Arguments | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }
@@ -56,7 +56,11 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     [void]$stderr.GetAwaiter().GetResult()
     $output = $stdout.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) {
-      Stop-VmRelease "Native command failed (exit $($process.ExitCode)); raw output withheld." $process.ExitCode
+      $failure = [InvalidOperationException]::new("Native command failed (exit $($process.ExitCode)); raw output withheld.")
+      $failure.Data['ReleaseExitCode'] = $process.ExitCode
+      # Kept only for a caller that validates its own structured fields; it is never printed. Stderr is never kept.
+      if ($KeepFailureOutput) { $failure.Data['ReleaseFailureOutput'] = $output.Trim() }
+      throw $failure
     }
     return $output.Trim()
   } finally {
@@ -64,10 +68,10 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
   }
 }
 
-function Invoke-ReleaseStep([string]$Command, [string[]]$Arguments, [int]$Limit = 30) {
+function Invoke-ReleaseStep([string]$Command, [string[]]$Arguments, [int]$Limit = 30, [switch]$KeepFailureOutput) {
   $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
   if ($remaining -lt 1) { Stop-VmRelease 'Release deadline exceeded; remote work may still be running. Do not retry.' 124 }
-  Invoke-ReleaseNative $Command $Arguments $sourceRoot ([math]::Min($Limit, $remaining))
+  Invoke-ReleaseNative $Command $Arguments $sourceRoot ([math]::Min($Limit, $remaining)) -KeepFailureOutput:$KeepFailureOutput
 }
 
 function Invoke-ReleaseStepBytes([string]$Command, [string[]]$Arguments, [int]$Limit = 30) {
@@ -176,13 +180,38 @@ function Assert-ReleaseDependencyReport($Report) {
   }
 }
 
+# Shows only the failed preflight's status and, for command_failed, a reason that matches the fixed grammar of
+# FAILURE_REASON_PATTERN in scripts/lib/dependency-policy.ts. A reason that does not match withholds everything.
+function Get-ReleaseDependencyFailureDetail([Exception]$Failure) {
+  try {
+    $output = $Failure.Data['ReleaseFailureOutput']
+    if ($output -isnot [string] -or [Text.Encoding]::UTF8.GetByteCount($output) -gt 8192) { return '' }
+    $report = ConvertFrom-Json -InputObject $output -AsHashtable -NoEnumerate -ErrorAction Stop
+    if ($report -isnot [System.Collections.IDictionary]) { return '' }
+    $status = $report['status']
+    if ($status -isnot [string] -or
+        $status -cnotmatch '\A(rejected|invalid_request|invalid_lock|lock_mismatch|malformed_audit|command_failed|stale_audit)\z') {
+      return ''
+    }
+    if ($status -cne 'command_failed') { return " (status $status)" }
+    $reason = $report['reason']
+    if ($reason -is [string] -and
+        $reason -cmatch '\Anpm audit (?:exit (?:0|[1-9][0-9]{0,9})|ended by signal SIG[A-Z0-9]{1,12}|ended without an exit code|timed out|could not start(?: \(E[A-Z0-9_]{1,24}\))?)(?:, npm code E[A-Z0-9_]{1,24})?(?: \(attempt [1-9] of [1-9]\))?\z') {
+      return " (status $status; reason: $reason)"
+    }
+    return ''
+  } catch {
+    return ''
+  }
+}
+
 function Assert-ReleaseDependencyPreflight([string]$Commit) {
   try {
     $lockIdentity = Get-ReleaseCommittedLockIdentity $Commit
     $output = Invoke-ReleaseStep 'npm' @(
       'run', '--silent', 'dependency:preflight', '--',
       '--lock-sha256', $lockIdentity, '--run-audit'
-    ) 300
+    ) 300 -KeepFailureOutput
     if ([Text.Encoding]::UTF8.GetByteCount($output) -gt 8192) {
       Stop-VmRelease 'Dependency preflight output exceeded its release bound.'
     }
@@ -191,7 +220,8 @@ function Assert-ReleaseDependencyPreflight([string]$Commit) {
   } catch {
     $code = 1
     if ($_.Exception.Data.Contains('ReleaseExitCode')) { $code = $_.Exception.Data['ReleaseExitCode'] }
-    Stop-VmRelease 'Dependency preflight failed; raw output withheld.' $code
+    $detail = Get-ReleaseDependencyFailureDetail $_.Exception
+    Stop-VmRelease "Dependency preflight failed$detail; raw output withheld." $code
   }
 }
 
