@@ -10194,15 +10194,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       try {
         const res = await api.documents.create(template ? { template: template.id } : {});
         if (!isCurrent()) return;
+        // Stay busy after a success: router.push() returns before the document page replaces the
+        // dashboard, and a second click in that gap would create a second document. Unmount clears it.
         router.push(`/d/${res.document.id}`);
       } catch (err) {
         if (!isCurrent()) return;
-        console.error(err);
-        publishNotice({ message: apiErrorText(err, "Could not create the document"), kind: "error" });
-      } finally {
-        if (createOperation.current !== operation) return;
         createOperation.current = null;
         setCreateBusyOperation((current) => (current === operation ? null : current));
+        console.error(err);
+        publishNotice({ message: apiErrorText(err, "Could not create the document"), kind: "error" });
       }
     },
     [publishNotice, router, user.id],

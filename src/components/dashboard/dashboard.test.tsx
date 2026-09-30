@@ -8316,7 +8316,17 @@ describe("dashboard create ownership", () => {
 
     expect(router.push).toHaveBeenCalledTimes(1);
     expect(router.push).toHaveBeenLastCalledWith("/d/one-created");
-    expect(blank).toBeEnabled();
+    // A success stays busy until the document page replaces the dashboard.
+    expect(blank).toBeDisabled();
+    expect(welcome).toBeDisabled();
+    expect(template).toBeDisabled();
+    fireEvent.keyDown(window, { key: "p", ctrlKey: true, shiftKey: true });
+    fireEvent.click(screen.getByTestId("palette-item-dash:new"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(createDocument).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledTimes(1);
   });
 
   it("shows the current failure, restores every control, and retries to one navigation", async () => {
@@ -8501,6 +8511,56 @@ describe("dashboard direct create control ownership", () => {
         });
         expect(router.push).toHaveBeenCalledTimes(1);
         expect(router.push).toHaveBeenLastCalledWith(`/d/${created}`);
+      } finally {
+        await act(async () => root.unmount());
+        host.remove();
+      }
+    },
+  );
+
+  it.each(DIRECT_CONTROLS)(
+    "keeps every create control busy after a successful $name create, so a late second click creates nothing",
+    async ({ testid, body, created }) => {
+      const pending = deferred<CreateResponse>();
+      createDocument.mockReturnValueOnce(pending.promise);
+      const host = document.createElement("div");
+      document.body.append(host);
+      const root = createRoot(host);
+
+      try {
+        await act(async () => {
+          root.render(
+            <StrictMode>
+              <Dashboard user={USER} documents={[]} githubAvailable githubConfigured />
+            </StrictMode>,
+          );
+        });
+        await act(async () => {
+          directCreateButton(host, testid).click();
+        });
+        await act(async () => {
+          pending.resolve({ document: { id: created, title: "Untitled" } });
+          await pending.promise;
+        });
+        expect(router.push).toHaveBeenCalledTimes(1);
+        expect(router.push).toHaveBeenLastCalledWith(`/d/${created}`);
+
+        const control = directCreateButton(host, testid);
+        expect(control).toBeDisabled();
+        expect(control.querySelector("svg")).toHaveClass("lucide-loader-circle", "animate-spin");
+        expect(directCreateButton(host, "new-document")).toBeDisabled();
+        expect(directCreateButton(host, "start-guided-doc")).toBeDisabled();
+        expect(templateButton(host, "meeting-notes")).toBeDisabled();
+
+        // The handler itself refuses too, not only the disabled attribute.
+        await act(async () => {
+          for (const button of [directCreateButton(host, "new-document"), directCreateButton(host, "start-guided-doc")]) {
+            captureReactClick(button)(fabricatedTemplateClick(button));
+          }
+        });
+        expect(createDocument).toHaveBeenCalledTimes(1);
+        expect(createDocument).toHaveBeenLastCalledWith(body);
+        expect(router.push).toHaveBeenCalledTimes(1);
       } finally {
         await act(async () => root.unmount());
         host.remove();

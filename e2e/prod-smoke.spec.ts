@@ -272,6 +272,32 @@ test.describe("production build", () => {
       expect((await page.request.get(`/api/documents/${docIdOf(page)}`)).status()).toBe(200);
     });
 
+    // A production server answers the create before the second click of a double click lands. The
+    // buttons must stay busy until the document page replaces the dashboard, or that click makes a
+    // second document.
+    for (const { name, testid, prefix } of [
+      { name: "New document", testid: "new-document", prefix: "prod-double-new" },
+      { name: "Start with a guided doc", testid: "start-guided-doc", prefix: "prod-double-guided" },
+    ]) {
+      test(`a fast real double click on ${name} creates exactly one document`, async ({ page }) => {
+        await signInFresh(page, prefix);
+        await expect(page.getByTestId("empty-state")).toBeVisible();
+        let posts = 0;
+        page.on("request", (req) => {
+          if (req.method() === "POST" && new URL(req.url()).pathname === "/api/documents") posts += 1;
+        });
+
+        const box = (await page.getByTestId(testid).boundingBox())!;
+        await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2, { delay: 20 });
+        await page.waitForURL(/\/d\/[a-z0-9]+$/i);
+        await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+
+        const listed = (await (await page.request.get("/api/documents")).json()) as { documents: { id: string }[] };
+        expect.soft(posts, "POST /api/documents requests").toBe(1);
+        expect(listed.documents.map((d) => d.id), "the user's documents").toEqual([docIdOf(page)]);
+      });
+    }
+
     test("Sign in with GitHub in the Open from GitHub dialog starts the GitHub sign-in", async ({ page }) => {
       await signInFresh(page, "prod-github");
       const card = page.getByTestId("open-github");
