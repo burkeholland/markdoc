@@ -334,10 +334,17 @@ The configured workflow supplies pinned Node 22 before invoking the command,
 whose policy CLI needs no repository dependency install. Before Azure resource
 validation or any source archive/build, VM, database or production mutation,
 the command binds the working `package-lock.json` to the exact bytes committed
-at the selected SHA, runs one package audit with no retry, rechecks the lock
-and withholds raw output. It accepts only the bounded pass report with an
-empty package list and all blocked, severity, vulnerability, reported and
-omitted counts equal to zero.
+at the selected SHA, runs the package audit, rechecks the lock and withholds
+raw output. It accepts only the bounded pass report with an empty package list
+and all blocked, severity, vulnerability, reported and omitted counts equal to
+zero. An advisory whose optional fields npm sends as null, such as a CVSS
+vector, still counts as a finding. Each audit attempt gets 120 seconds, and
+the preflight retries once, after 2 seconds, only when npm produced no audit
+report (an error exit without one, or a timeout); it never retries a report.
+A `command_failed` report adds a `reason` of at most 200 printable characters:
+how npm ended (exit code or timeout) and up to two stderr lines, with tokens,
+auth headers and URL credentials removed. On failure the command prints at
+most the preflight status and that reason.
 
 The current lock resolves the audited transitive packages to
 `fast-uri@3.1.8`, `qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and
