@@ -25,7 +25,8 @@ import {
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
-  await Promise.all(temporaryDirectories.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })));
+  await Promise.all(temporaryDirectories.splice(0).map((directory) =>
+    fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
 
 function packageLock(packages: Array<{ name: string; version: string }> = []): string {
@@ -600,10 +601,10 @@ describe("command failure reason", () => {
     expect(commandFailure({ exitCode: 1, stderr: `${line}\n` }).reason).toBe("npm audit exit 1");
   });
 
-  it("takes npm's code only from stderr, never from what npm printed on stdout", () => {
+  it("takes only the validated code from npm's exact error object on stdout", () => {
     const stdout = JSON.stringify({ error: { code: "ENOLOCK", summary: "private summary", detail: "private detail" } });
     const { reason, output } = commandFailure({ exitCode: 1, stdout, stderr: "" });
-    expect(reason).toBe("npm audit exit 1");
+    expect(reason).toBe("npm audit exit 1, npm code ENOLOCK");
     expect(output).not.toContain("private");
   });
 
@@ -861,6 +862,190 @@ describe("audit retry", () => {
     const { report } = await auditWith(executor);
     expect(report.status).toBe("lock_mismatch");
     expect(executor).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("npm error-only stdout (#2202)", () => {
+  const errorOnly = (code = "ENOTFOUND") => JSON.stringify({
+    error: { code, summary: LETTERS_ONLY_PAT, detail: `${BASE64_AUTH}\n${BASE64_PASSWORD}` },
+  });
+
+  async function fakeNpmAudit(
+    responses: AuditExecutionResult[],
+    lock = packageLock(),
+  ) {
+    const fixture = await fixtureDirectory(lock);
+    const scriptPath = path.join(fixture.directory, "fake-npm.cjs");
+    await fs.writeFile(scriptPath, [
+      "const fs = require('node:fs');",
+      `const responses = ${JSON.stringify(responses)};`,
+      "const counter = 'calls.txt';",
+      "const calls = fs.existsSync(counter) ? Number(fs.readFileSync(counter, 'utf8')) : 0;",
+      "fs.writeFileSync(counter, String(calls + 1));",
+      "const result = responses[Math.min(calls, responses.length - 1)];",
+      "process.stdout.write(result.stdout);",
+      "process.stderr.write(result.stderr || '');",
+      "if (result.stopped === 'timeout') setInterval(() => {}, 1000);",
+      "else process.exitCode = result.exitCode;",
+    ].join("\n"));
+    const executor: AuditExecutor = ({ args, cwd }) => runBoundedProcess(process.execPath, [scriptPath, ...args], {
+      cwd, env: quietNode, timeoutMs: responses.some((response) => response.stopped === "timeout") ? 1_000 : 20_000,
+    });
+    const output = { log: vi.fn<(message: string) => void>(), warn: vi.fn<(message: string) => void>() };
+    const exitCode = await runMain(["--run-audit", "--lock-sha256", fixture.identity], {
+      cwd: fixture.directory, executor, output, retryDelayMs: 0,
+    });
+    const calls = Number(await fs.readFile(path.join(fixture.directory, "calls.txt"), "utf8"));
+    const printed = output.log.mock.calls[0][0];
+    expect(output.log).toHaveBeenCalledOnce();
+    for (const text of [printed, ...output.warn.mock.calls.map(([message]) => message)]) {
+      for (const secret of [LETTERS_ONLY_PAT, BASE64_AUTH, BASE64_PASSWORD]) expect(text).not.toContain(secret);
+    }
+    return { calls, exitCode, printed, output };
+  }
+
+  it("retries ENOTFOUND, then returns the exact pass report", async () => {
+    const result = await fakeNpmAudit([
+      { exitCode: 1, stdout: errorOnly() },
+      { exitCode: 0, stdout: auditJson() },
+    ]);
+    expect(result.calls).toBe(2);
+    expect(result.exitCode).toBe(0);
+    expect(result.printed).toBe(PASS_OUTPUT);
+    expect(result.output.warn).toHaveBeenCalledExactlyOnceWith(
+      "Dependency preflight audit failed (npm audit exit 1, npm code ENOTFOUND); retrying once.",
+    );
+  });
+
+  it("retries the error object, then rejects the critical null-vector advisory", async () => {
+    const result = await fakeNpmAudit([
+      { exitCode: 1, stdout: errorOnly() },
+      { exitCode: 1, stdout: nextAudit() },
+    ], NEXT_LOCK);
+    expect(result.calls).toBe(2);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.printed)).toEqual(NEXT_REJECTED);
+  });
+
+  it("stops after two error objects with the exact bounded reason", async () => {
+    const result = await fakeNpmAudit([{ exitCode: 1, stdout: errorOnly() }]);
+    expect(result.calls).toBe(2);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.printed)).toEqual({
+      status: "command_failed", counts: ZERO_REPORT_COUNTS, packages: [],
+      reason: "npm audit exit 1, npm code ENOTFOUND (attempt 2 of 2)",
+    });
+    expect(result.output.warn).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the longest valid stdout code", async () => {
+    const code = `E${"X".repeat(24)}`;
+    const result = await fakeNpmAudit([{ exitCode: 1, stdout: errorOnly(code) }]);
+    expect(result.calls).toBe(2);
+    expect(JSON.parse(result.printed).reason).toBe(`npm audit exit 1, npm code ${code} (attempt 2 of 2)`);
+  });
+
+  it.each([{}, { summary: "private", detail: "private" }])(
+    "retries a string-only error object without a code: %j",
+    async (error) => {
+      const result = await fakeNpmAudit([{ exitCode: 1, stdout: JSON.stringify({ error }) }]);
+      expect(result.calls).toBe(2);
+      expect(JSON.parse(result.printed).reason).toBe("npm audit exit 1 (attempt 2 of 2)");
+      expect(result.printed).not.toContain("private");
+    },
+  );
+
+  it("uses a valid stdout code before stderr, falling back when the stdout code is invalid", async () => {
+    for (const [stdoutCode, expected] of [["ENOTFOUND", "ENOTFOUND"], ["enotfound", "E401"]]) {
+      const result = await fakeNpmAudit([{
+        exitCode: 1, stdout: errorOnly(stdoutCode), stderr: "npm error code E401\n",
+      }]);
+      expect(result.calls).toBe(2);
+      expect(JSON.parse(result.printed).reason).toBe(`npm audit exit 1, npm code ${expected} (attempt 2 of 2)`);
+    }
+  });
+
+  it.each([
+    "enotfound", `E${"X".repeat(25)}`, LETTERS_ONLY_PAT, BASE64_AUTH,
+    BASE64_PASSWORD, FAKE_NPM_TOKEN, FAKE_GITHUB_TOKEN, "ENOTFOUND\n",
+    "ENOTFOUND\r", "ENOTFOUND private", "E", "",
+  ])("retries but withholds invalid stdout code %j", async (code) => {
+    const result = await fakeNpmAudit([{ exitCode: 1, stdout: errorOnly(code) }]);
+    expect(result.calls).toBe(2);
+    expect(JSON.parse(result.printed).reason).toBe("npm audit exit 1 (attempt 2 of 2)");
+    expect(result.output.warn).toHaveBeenCalledExactlyOnceWith(
+      "Dependency preflight audit failed (npm audit exit 1); retrying once.",
+    );
+  });
+
+  it.each(["auditReportVersion", "vulnerabilities", "metadata", "message", "unexpected"])(
+    "never retries an error object with extra top-level %s",
+    async (key) => {
+      const result = await fakeNpmAudit([
+        { exitCode: 1, stdout: JSON.stringify({ ...JSON.parse(errorOnly()), [key]: {} }) },
+        { exitCode: 0, stdout: auditJson() },
+      ]);
+      expect(result.calls).toBe(1);
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.printed)).toEqual(
+        key === "auditReportVersion" || key === "vulnerabilities"
+          ? { status: "malformed_audit", counts: ZERO_REPORT_COUNTS, packages: [] }
+          : { status: "command_failed", counts: ZERO_REPORT_COUNTS, packages: [], reason: "npm audit exit 1" },
+      );
+      expect(result.output.warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([null, [], "private", { code: "ENOTFOUND", detail: {} }, { code: 42 }])(
+    "never retries an error field that is not a string-only object: %j",
+    async (error) => {
+      const result = await fakeNpmAudit([
+        { exitCode: 1, stdout: JSON.stringify({ error }) },
+        { exitCode: 0, stdout: auditJson() },
+      ]);
+      expect(result.calls).toBe(1);
+      expect(result.exitCode).toBe(1);
+      expect(result.output.warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([["unexpected", true], ["error", { code: "EAUDIT", summary: "endpoint failed" }]])(
+    "rejects a clean audit with extra top-level %s as malformed, without retry",
+    async (key, value) => {
+      const result = await fakeNpmAudit([
+        { exitCode: 0, stdout: JSON.stringify({ ...JSON.parse(auditJson()), [String(key)]: value }) },
+        { exitCode: 0, stdout: auditJson() },
+      ]);
+      expect(result.calls).toBe(1);
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.printed)).toEqual({ status: "malformed_audit", counts: ZERO_REPORT_COUNTS, packages: [] });
+      expect(result.output.warn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not retry an error-only object with a successful exit", async () => {
+    const result = await fakeNpmAudit([{ exitCode: 0, stdout: errorOnly() }]);
+    expect(result.calls).toBe(1);
+    expect(JSON.parse(result.printed).status).toBe("malformed_audit");
+  });
+
+  it("retries an error-only object after a timeout but never passes that attempt", async () => {
+    const result = await fakeNpmAudit([
+      { exitCode: null, stdout: errorOnly(), stopped: "timeout" },
+      { exitCode: 0, stdout: auditJson() },
+    ]);
+    expect(result.calls).toBe(2);
+    expect(result.printed).toBe(PASS_OUTPUT);
+    expect(result.output.warn).toHaveBeenCalledExactlyOnceWith(
+      "Dependency preflight audit failed (npm audit timed out, npm code ENOTFOUND); retrying once.",
+    );
+  });
+
+  it("never passes when both error-only attempts time out", async () => {
+    const result = await fakeNpmAudit([{ exitCode: null, stdout: errorOnly(), stopped: "timeout" }]);
+    expect(result.calls).toBe(2);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.printed).reason).toBe("npm audit timed out, npm code ENOTFOUND (attempt 2 of 2)");
   });
 });
 

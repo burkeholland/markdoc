@@ -247,6 +247,9 @@ function parseAuditJson(auditJson: string, lock: PackageLockSnapshot): ParsedAud
   }
   if (
     !isRecord(value)
+    // npm 11.12.1 emits exactly these three keys. Fail closed on additions, especially an accompanying error;
+    // a future npm schema change needs an explicit policy review rather than silently passing a release.
+    || Object.keys(value).length !== 3
     || value.auditReportVersion !== 2
     || !isRecord(value.vulnerabilities)
     || !isRecord(value.metadata)
@@ -341,6 +344,23 @@ function npmErrorCode(stderr: string | undefined): string | undefined {
   return undefined;
 }
 
+function parseNpmErrorJson(stdout: string): { code?: string } | null {
+  if (Buffer.byteLength(stdout, "utf8") > MAX_AUDIT_JSON_BYTES) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (
+    !isRecord(value)
+    || Object.keys(value).length !== 1
+    || !isRecord(value.error)
+    || !Object.values(value.error).every(isString)
+  ) return null;
+  return { code: typeof value.error.code === "string" ? value.error.code : undefined };
+}
+
 // Built only from fixed text, the exit code, a signal name, error codes and the attempt number. No other text from
 // npm is used, so nothing npm printed (tokens, URLs, paths) can reach the report.
 function commandFailureReason(failure: { execution?: AuditExecutionResult; startError?: unknown }, attempt: number): string {
@@ -360,7 +380,11 @@ function commandFailureReason(failure: { execution?: AuditExecutionResult; start
   } else {
     reason = "npm audit ended without an exit code";
   }
-  const npmCode = npmErrorCode(execution?.stderr);
+  const stdoutCode = execution ? parseNpmErrorJson(execution.stdout)?.code : undefined;
+  // JavaScript's $ also matches before a final newline, so require the matched code to equal the whole value.
+  const npmCode = typeof stdoutCode === "string" && ERROR_CODE_PATTERN.exec(stdoutCode)?.[0] === stdoutCode
+    ? stdoutCode
+    : npmErrorCode(execution?.stderr);
   if (npmCode) reason += `, npm code ${npmCode}`;
   if (attempt > 1) reason += ` (attempt ${attempt} of ${MAX_AUDIT_ATTEMPTS})`;
   return reason;
@@ -406,8 +430,8 @@ interface AuditAssessment {
 // Matches any output where npm began writing audit results, including a report cut off part way through.
 const AUDIT_REPORT_MARKER = /"(?:auditReportVersion|vulnerabilities)"\s*:/;
 
-// Only an attempt that printed nothing at all to stdout gets one more try, so a retry can never replace or hide
-// anything npm printed. Whatever an attempt printed is judged here, and a timed-out attempt can never pass.
+// Only empty stdout or npm's exact string-only error object means no report. Reports, malformed reports and
+// all other printed output are never retried, and a timed-out attempt can never pass.
 function assessAuditExecution(lock: PackageLockSnapshot, execution: AuditExecutionResult, attempt: number): AuditAssessment {
   const commandFailed = (retryable: boolean): AuditAssessment => ({
     report: commandFailedReport(commandFailureReason({ execution }, attempt)),
@@ -416,6 +440,7 @@ function assessAuditExecution(lock: PackageLockSnapshot, execution: AuditExecuti
   const malformed: AuditAssessment = { report: dependencyPolicyFailure("malformed_audit"), retryable: false };
   if (execution.stopped === "output_limit") return malformed;
   if (execution.stdout.length === 0) return execution.exitCode === 0 ? malformed : commandFailed(true);
+  if (parseNpmErrorJson(execution.stdout)) return execution.exitCode === 0 ? malformed : commandFailed(true);
   const audit = parseAuditJson(execution.stdout, lock);
   if (execution.stopped === "timeout") {
     // A report printed before the time limit still counts when it rejects. Anything else is incomplete.
