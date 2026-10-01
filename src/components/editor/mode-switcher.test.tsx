@@ -222,7 +222,35 @@ describe("ModeSwitcher", () => {
     expect(menu()).toBeInTheDocument();
   });
 
-  it("closes on Escape and on an outside click, returning focus only for a plain close", async () => {
+  it.each([
+    ["owner", "Editing"],
+    ["viewer", "Viewing"],
+  ] as const)("opens with ArrowUp for a %s, focuses %s and keeps the page from scrolling", async (role, focused) => {
+    const session = new ModeSession(`arrow-up-${role}`, role, "viewing");
+    render(<ModeSwitcher session={session.asCollabSession()} />);
+    const modeTrigger = trigger();
+    modeTrigger.focus();
+    const prevented: boolean[] = [];
+    const recordArrowUp = (event: KeyboardEvent) => {
+      if (event.key === "ArrowUp") prevented.push(event.defaultPrevented);
+    };
+    document.addEventListener("keydown", recordArrowUp);
+
+    await userEvent.keyboard("{ArrowUp}");
+
+    expect(menu()).toBeInTheDocument();
+    expect(modeTrigger).toHaveAttribute("data-state", "open");
+    await waitFor(() => expect(radio(focused)).toHaveFocus());
+    expect(prevented).toEqual([true]);
+    expect(session.setMode).not.toHaveBeenCalled();
+
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    await waitFor(() => expect(modeTrigger).toHaveFocus());
+    document.removeEventListener("keydown", recordArrowUp);
+  });
+
+  it("closes on Escape and on outside clicks, returning focus only after Escape or a plain click", async () => {
     const session = new ModeSession("close-current", "editor", "editing");
     render(
       <>
@@ -252,6 +280,14 @@ describe("ModeSwitcher", () => {
     pointerDown(outside, { button: 2 });
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
     expect(modeTrigger).not.toHaveFocus();
+
+    await userEvent.click(modeTrigger);
+    await waitFor(() => expect(menu()).toBeInTheDocument());
+    menu().focus();
+    await waitForOutsideListener();
+    pointerDown(outside, { ctrlKey: true });
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(modeTrigger).not.toHaveFocus();
     expect(session.setMode).not.toHaveBeenCalled();
   });
 
@@ -264,6 +300,7 @@ describe("ModeSwitcher", () => {
     pointerDown(modeTrigger);
 
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    await waitFor(() => expect(modeTrigger).toHaveFocus());
     expect(session.setMode).not.toHaveBeenCalled();
   });
 

@@ -1501,9 +1501,18 @@ const MODE_LABELS: Record<EditMode, string> = { editing: "Editing", suggesting: 
 export function ModeSwitcher({ session }: { session: CollabSession }) {
   const mode = useSessionValue(session, (s) => s.mode);
   const editable = session.role === "owner" || session.role === "editor";
+  const [open, setOpen] = useState(false);
   return (
-    <Menu>
-      <MenuTrigger asChild>
+    <Menu open={open} onOpenChange={setOpen}>
+      <MenuTrigger
+        asChild
+        // Radix's trigger opens on Enter, Space and ArrowDown; ArrowUp opens it too, and Radix then focuses the first enabled row.
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowUp" || open) return;
+          event.preventDefault();
+          setOpen(true);
+        }}
+      >
         <button
           type="button"
           className={cn(

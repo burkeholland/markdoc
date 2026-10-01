@@ -3,9 +3,9 @@ import type { Page } from "@playwright/test";
 import { codeText, createDocument, focusRichEnd, openDocument, signIn } from "./helpers";
 
 /**
- * #2224: picking Suggesting in the mode switcher with a real click, or Enter or Space on the focused
- * menu row, must switch the mode and close the menu. Before the fix the pick was dropped and the menu
- * stayed open.
+ * #2224 reported that picking Suggesting with a real click, or Enter or Space on the focused menu row,
+ * was dropped and left the menu open. That did not reproduce on main 264f1827 (dev or production), so
+ * these tests guard the plain Radix menu that replaced the hand-rolled gate against that regression.
  */
 
 const CONTENT = "# Mode switcher\n\nA paragraph.\n";
@@ -67,3 +67,38 @@ for (const input of ["click", "Enter", "Space"] as const) {
     }
   });
 }
+
+test("ArrowUp on the closed trigger opens the menu, focuses Editing, and does not scroll the page", async ({ browser }) => {
+  const alice = await signIn(browser, "alice");
+  try {
+    const docId = await createDocument(alice.page, CONTENT, "Mode switcher: ArrowUp");
+    await openDocument(alice.page, docId);
+    const page = alice.page;
+    const trigger = page.getByTestId("mode-switcher");
+    await expect(trigger).toContainText("Editing");
+    await page.evaluate(() => {
+      const record = window as unknown as { __arrowUpPrevented?: boolean[] };
+      record.__arrowUpPrevented = [];
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowUp") record.__arrowUpPrevented!.push(event.defaultPrevented);
+      });
+    });
+
+    await trigger.focus();
+    const scrollBefore = await page.evaluate(() => window.scrollY);
+    await page.keyboard.press("ArrowUp");
+
+    await expect(page.getByRole("menu")).toBeVisible();
+    await expect(trigger).toHaveAttribute("data-state", "open");
+    await expect(page.getByRole("menuitemradio", { name: /Editing/ })).toBeFocused();
+    expect(await page.evaluate(() => window.scrollY)).toBe(scrollBefore);
+    expect(await page.evaluate(() => (window as unknown as { __arrowUpPrevented: boolean[] }).__arrowUpPrevented)).toEqual([true]);
+
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    await expect(trigger).toContainText("Editing");
+  } finally {
+    await alice.context.close();
+  }
+});
