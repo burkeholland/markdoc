@@ -259,6 +259,41 @@ window for the unique submission tag, so a successful Azure CLI call does not
 depend on returning a run ID. It then waits for ACR success, requires a single
 well-formed digest for the full-SHA tag matching that build's output, and makes
 one VM invocation containing the WAL gate and existing deployment script.
+Only the read-only `az acr manifest list-metadata` digest lookup can retry:
+one additional call after a fixed two-second delay, for `transport`, `timeout`,
+`throttled` (HTTP 429) or `server_error` (HTTP 5xx). `auth`, `configuration`,
+`not_found` and `unknown` fail immediately. Conflicting HTTP statuses are not
+treated as transient; recognizable permanent failures take precedence.
+Each call retains the native wrapper's 30-second limit, capped by the remaining
+35-minute release deadline. The retry adds at most **32 seconds** (two seconds
+of delay plus one 30-second lookup), never extends the deadline, and is refused
+if fewer than three whole seconds remain before the delay. No ACR build
+submission or VM command is retried. A successful retry must still return
+exactly one well-formed digest matching the completed build run.
+
+The following digest-lookup log lines print before `Release: guest invocation`,
+so a failure at this stage has not changed the VM:
+
+```text
+Release: ACR digest lookup failed; category=<category>; HTTP status=<status>.
+Release: ACR digest lookup retry 1/1 in 2 seconds; read-only lookup only.
+```
+
+The first line prints once per failed lookup. `<category>` is only one of the
+eight fixed categories above; `<status>` is a single recognized three-digit
+HTTP status or `none` when absent or conflicting. The second line prints at
+most once and only for a permitted retry. Insufficient retry time instead
+produces this terminal failure line:
+
+```text
+Release failed/unverified at immutable image identity: No time remains for the ACR digest lookup retry; no VM command was sent.
+```
+
+The native wrapper reduces stderr to these allow-listed values in memory.
+It never prints or stores raw stderr, response bodies, URLs, tokens or
+credentials in exception data. Other native commands do not opt into this
+classification.
+
 Before image pull, environment
 change, unit rewrite or service start, the gate creates an operation-named
 restore point, captures its exact WAL record LSN, performs an explicit

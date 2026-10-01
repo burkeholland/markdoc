@@ -19,7 +19,39 @@ function Stop-VmRelease([string]$Message, [int]$ExitCode = 1) {
   throw $failure
 }
 
-function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds, [switch]$KeepFailureOutput) {
+function Get-ReleaseDigestLookupFailure([string]$ErrorText) {
+  $statusMatches = [regex]::Matches($ErrorText,
+    '(?i)\b(?:response\s+status|status(?:\s+code)?|http(?:/\d(?:\.\d)?)?(?:\s+(?:status(?:\s+code)?|error))?)\s*[:=]?\s*[''"]?(?<status>[1-5][0-9]{2})\b')
+  $statuses = @($statusMatches | ForEach-Object { $_.Groups['status'].Value } | Select-Object -Unique)
+  $status = 'none'
+  if ($statuses.Count -eq 1) { $status = $statuses[0] }
+  $category = 'unknown'
+  # Permanent errors take precedence over transient wording in an error body.
+  if ($statuses -contains '401' -or $statuses -contains '403' -or
+      $ErrorText -match '(?i)\b(?:unauthorized|forbidden|AuthenticationFailed|AuthorizationFailed|InvalidAuthenticationToken|AADSTS[0-9]+)\b|\baz login\b') {
+    $category = 'auth'
+  } elseif ($statuses -contains '400' -or
+      $ErrorText -match '(?i)\b(?:unrecognized arguments|InvalidArgument|InvalidSubscription|SubscriptionNotFound|BadRequest)\b') {
+    $category = 'configuration'
+  } elseif ($statuses -contains '404' -or $ErrorText -match '(?i)\b(?:ManifestUnknown|RepositoryNotFound|ResourceNotFound)\b') {
+    $category = 'not_found'
+  } elseif ($statuses.Count -gt 1) {
+    $category = 'unknown'
+  } elseif ($status -ceq '429') {
+    $category = 'throttled'
+  } elseif ($status -cmatch '^5[0-9]{2}$') {
+    $category = 'server_error'
+  } elseif ($status -cne 'none') {
+    $category = 'unknown'
+  } elseif ($ErrorText -match '(?i)\b(?:TimeoutError|ConnectTimeout|ReadTimeout|timed out)\b') {
+    $category = 'timeout'
+  } elseif ($ErrorText -match '(?i)\b(?:ConnectionError|ConnectionResetError|ConnectionAbortedError|NameResolutionError|RemoteDisconnected)\b|connection (?:reset|aborted|refused)|failed to (?:establish a new connection|resolve)') {
+    $category = 'transport'
+  }
+  return @{ Category = $category; HttpStatus = $status }
+}
+
+function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds, [switch]$KeepFailureOutput, [switch]$ClassifyDigestFailure) {
   $executable = (Get-Command $Command -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
   # A child PowerShell handles az.cmd without shell-string argument interpolation.
   $quoted = @($executable) + $Arguments | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }
@@ -53,25 +85,36 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), $drainMs)) {
       Stop-VmRelease 'Native output did not close within the deadline; remote work may still be running.' 124
     }
-    [void]$stderr.GetAwaiter().GetResult()
+    $errorText = $stderr.GetAwaiter().GetResult()
     $output = $stdout.GetAwaiter().GetResult()
     if ($process.ExitCode -ne 0) {
       $failure = [InvalidOperationException]::new("Native command failed (exit $($process.ExitCode)); raw output withheld.")
       $failure.Data['ReleaseExitCode'] = $process.ExitCode
+      if ($ClassifyDigestFailure) {
+        $diagnostic = Get-ReleaseDigestLookupFailure $errorText
+        $failure.Data['ReleaseDigestFailureCategory'] = $diagnostic.Category
+        $failure.Data['ReleaseDigestFailureHttpStatus'] = $diagnostic.HttpStatus
+      }
       # Kept only for a caller that validates its own structured fields; it is never printed. Stderr is never kept.
       if ($KeepFailureOutput) { $failure.Data['ReleaseFailureOutput'] = $output.Trim() }
       throw $failure
     }
     return $output.Trim()
+  } catch [InvalidOperationException] {
+    if ($ClassifyDigestFailure -and $_.Exception.Data['ReleaseExitCode'] -eq 124) {
+      $_.Exception.Data['ReleaseDigestFailureCategory'] = 'timeout'
+      $_.Exception.Data['ReleaseDigestFailureHttpStatus'] = 'none'
+    }
+    throw
   } finally {
     $process.Dispose()
   }
 }
 
-function Invoke-ReleaseStep([string]$Command, [string[]]$Arguments, [int]$Limit = 30, [switch]$KeepFailureOutput) {
+function Invoke-ReleaseStep([string]$Command, [string[]]$Arguments, [int]$Limit = 30, [switch]$KeepFailureOutput, [switch]$ClassifyDigestFailure) {
   $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
   if ($remaining -lt 1) { Stop-VmRelease 'Release deadline exceeded; remote work may still be running. Do not retry.' 124 }
-  Invoke-ReleaseNative $Command $Arguments $sourceRoot ([math]::Min($Limit, $remaining)) -KeepFailureOutput:$KeepFailureOutput
+  Invoke-ReleaseNative $Command $Arguments $sourceRoot ([math]::Min($Limit, $remaining)) -KeepFailureOutput:$KeepFailureOutput -ClassifyDigestFailure:$ClassifyDigestFailure
 }
 
 function Invoke-ReleaseStepBytes([string]$Command, [string[]]$Arguments, [int]$Limit = 30) {
@@ -117,6 +160,31 @@ function Invoke-ReleaseStepBytes([string]$Command, [string[]]$Arguments, [int]$L
 
 function Invoke-ReleaseAz([string[]]$Arguments, [int]$Limit = 30) {
   Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) $Limit
+}
+
+function Invoke-ReleaseDigestLookup([string[]]$Arguments) {
+  for ($attempt = 0; $attempt -le 1; $attempt++) {
+    try {
+      return Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) -ClassifyDigestFailure
+    } catch {
+      $category = 'unknown'
+      $status = 'none'
+      if ($_.Exception.Data['ReleaseDigestFailureCategory'] -cin @('transport', 'timeout', 'throttled', 'server_error', 'auth', 'configuration', 'not_found', 'unknown')) {
+        $category = $_.Exception.Data['ReleaseDigestFailureCategory']
+      }
+      if ($_.Exception.Data['ReleaseDigestFailureHttpStatus'] -cmatch '^[1-5][0-9]{2}$') {
+        $status = $_.Exception.Data['ReleaseDigestFailureHttpStatus']
+      }
+      Write-Host "Release: ACR digest lookup failed; category=$category; HTTP status=$status."
+      if ($attempt -eq 1 -or $category -cnotin @('transport', 'timeout', 'throttled', 'server_error')) { throw }
+      $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
+      if ($remaining -lt 3) {
+        Stop-VmRelease 'No time remains for the ACR digest lookup retry; no VM command was sent.' 124
+      }
+      Write-Host 'Release: ACR digest lookup retry 1/1 in 2 seconds; read-only lookup only.'
+      Start-Sleep -Seconds 2
+    }
+  }
 }
 
 function ConvertFrom-ReleaseJson([string]$Text) {
@@ -363,7 +431,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     } while ($true)
 
     $releaseStage = 'immutable image identity'
-    $digests = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@('acr', 'manifest', 'list-metadata', '--registry', $acr, '--name', 'markdoc',
+    $digests = ConvertFrom-ReleaseJson (Invoke-ReleaseDigestLookup (@('acr', 'manifest', 'list-metadata', '--registry', $acr, '--name', 'markdoc',
       '--query', "[?tags != null && contains(tags, '$Commit')].digest") + $subscriptionScope))
     if ($digests -isnot [array] -or $digests.Count -ne 1 -or $digests[0] -isnot [string] -or $digests[0] -cnotmatch '^sha256:[0-9a-f]{64}$') {
       Stop-VmRelease 'The exact commit tag has an absent, ambiguous or malformed digest.'

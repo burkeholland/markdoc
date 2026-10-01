@@ -1,7 +1,79 @@
 #requires -Version 7.2
+param([switch]$DigestLookupOnly)
+
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'release-vm-evidence.ps1')
+
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) "markdoc-digest-tests-$([guid]::NewGuid().ToString('N'))"
+$priorEnvironment = @{}
+foreach ($name in @('PATH', 'AZURE_CONFIG_DIR', 'MARKDOC_DIGEST_CASE', 'MARKDOC_DIGEST_COUNT', 'MARKDOC_DIGEST_VALUE')) {
+  $priorEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
+}
+[void](New-Item -ItemType Directory -Path $testRoot)
+[void](New-Item -ItemType Directory -Path (Join-Path $testRoot 'azure'))
+$env:AZURE_CONFIG_DIR = Join-Path $testRoot 'azure'
+$env:PATH = "$testRoot;$env:PATH"
+$env:MARKDOC_DIGEST_COUNT = Join-Path $testRoot 'count'
+[IO.File]::WriteAllText((Join-Path $testRoot 'az.cmd'), "@echo off`r`n`"$PSHOME\pwsh.exe`" -NoProfile -NonInteractive -File `"%~dp0fake-az.ps1`" %*`r`nexit /b %errorlevel%`r`n")
+[IO.File]::WriteAllText((Join-Path $testRoot 'fake-az.ps1'), @'
+$ErrorActionPreference = 'Stop'
+$commandKey = ($args | Select-Object -First 3) -join ' '
+if ($commandKey -cne 'acr manifest list-metadata' -or
+    $args -notcontains '--only-show-errors' -or $args -notcontains '--subscription' -or
+    $args -contains '--resource-group' -or $args -contains '--debug' -or $args -contains '--verbose' -or
+    $env:AZURE_EXTENSION_USE_DYNAMIC_INSTALL -cne 'no' -or
+    $env:AZURE_CORE_COLLECT_TELEMETRY -cne 'no' -or $env:AZURE_LOGGING_ENABLE_LOG_FILE -cne 'no' -or
+    @(Get-ChildItem -LiteralPath $env:AZURE_CONFIG_DIR -Force).Count -ne 0) {
+  throw 'Fake az permits only the isolated read-only digest lookup.'
+}
+$count = 0
+if (Test-Path -LiteralPath $env:MARKDOC_DIGEST_COUNT) {
+  $count = [int](Get-Content -LiteralPath $env:MARKDOC_DIGEST_COUNT -Raw)
+}
+$count++
+[IO.File]::WriteAllText($env:MARKDOC_DIGEST_COUNT, [string]$count)
+$case = $env:MARKDOC_DIGEST_CASE
+$errorText = ''
+switch ($case) {
+  'digest-throttled-twice' { $errorText = 'ERROR: HTTP status: 429' }
+  'digest-auth' { $errorText = 'ERROR: Status Code: 401' }
+  'digest-unknown' { $errorText = 'ERROR: unrecognized failure' }
+  'digest-secret' { $errorText = 'ERROR: secret body without a known category' }
+  'digest-configuration' { $errorText = 'ERROR: HTTP status: 400' }
+  'digest-not-found' { $errorText = 'ERROR: HTTP status: 404' }
+  'digest-conflicting-status' { $errorText = "ERROR: HTTP status: 503`nHTTP status: 401" }
+  'digest-ambiguous-status' { $errorText = "ERROR: HTTP status: 503`nHTTP status: 502" }
+  'digest-unknown-http' { $errorText = 'ERROR: HTTP status: 409 ReadTimeout' }
+  'digest-auth-transient' { $errorText = 'ERROR: HTTP status: 503 Unauthorized ConnectionError' }
+  default {
+    if ($count -eq 1) {
+      $errorText = 'ERROR: HTTP status: 503'
+      if ($case -eq 'digest-transport-success') { $errorText = 'ERROR: ConnectionError: connection reset' }
+      if ($case -eq 'digest-timeout-success') { $errorText = 'ERROR: ReadTimeout: request timed out' }
+      if ($case -eq 'digest-native-timeout') { Start-Sleep -Seconds 30 }
+    }
+  }
+}
+[Console]::Error.WriteLine('FAKE_DIGEST_SECRET_2211 https://private.example.test/token?credential=FAKE_DIGEST_SECRET_2211')
+if ($errorText) {
+  [Console]::Out.WriteLine('FAKE_DIGEST_SECRET_2211 response body')
+  [Console]::Error.WriteLine($errorText)
+  exit 1
+}
+switch ($case) {
+  'digest-retry-missing' { [Console]::Out.WriteLine('[]') }
+  'digest-retry-ambiguous' { [Console]::Out.WriteLine('["' + $env:MARKDOC_DIGEST_VALUE + '","' + $env:MARKDOC_DIGEST_VALUE + '"]') }
+  'digest-retry-malformed' { [Console]::Out.WriteLine('["sha256:bad"]') }
+  'digest-retry-null' { [Console]::Out.WriteLine('null') }
+  'digest-retry-scalar' { [Console]::Out.WriteLine('"' + $env:MARKDOC_DIGEST_VALUE + '"') }
+  'digest-retry-tag-raced' { [Console]::Out.WriteLine('["sha256:' + ('b' * 64) + '"]') }
+  default { [Console]::Out.WriteLine('["' + $env:MARKDOC_DIGEST_VALUE + '"]') }
+}
+exit 0
+'@)
+
+try {
 
 function Assert-True([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw $Message }
@@ -27,6 +99,7 @@ foreach ($statement in $ast.EndBlock.Statements) {
 
 # Exercise the real native boundary with harmless local children, never Azure.
 $native = ${function:Invoke-ReleaseNative}
+if (-not $DigestLookupOnly) {
 $output = & $native 'pwsh' @('-NoProfile', '-NonInteractive', '-Command', '[Console]::Out.Write("native output"); [Console]::Error.Write("withheld stderr"); exit 0') $PSScriptRoot 10
 Assert-Equal 'native output' $output 'Native output must exclude stderr.'
 $output = & $native 'pwsh' @('-NoProfile', '-NonInteractive', '-Command', '[Console]::Error.Write(("x" * 131072)); [Console]::Out.Write("drained")') $PSScriptRoot 10
@@ -44,6 +117,7 @@ try {
   Assert-Equal 17 $_.Exception.Data['ReleaseExitCode'] 'Native exit code must survive.'
   Assert-True ($_.Exception.Message -notmatch 'withheld (stdout|stderr)') 'Native error must not expose raw output.'
   Assert-True (-not $_.Exception.Data.Contains('ReleaseFailureOutput')) 'Native failure output must not be kept unless a caller asks for it.'
+  Assert-True (-not $_.Exception.Data.Contains('ReleaseDigestFailureCategory')) 'Other native failures must not opt into digest classification.'
 }
 try {
   & $native 'pwsh' @('-NoProfile', '-NonInteractive', '-Command', '[Console]::Out.Write(" structured stdout "); [Console]::Error.Write("withheld stderr"); exit 17') $PSScriptRoot 10 -KeepFailureOutput
@@ -108,6 +182,7 @@ cleanup
     }
   }
 }
+}
 
 $script:sha = '0123456789abcdef0123456789abcdef01234567'
 $script:digest = 'sha256:' + ('a' * 64)
@@ -124,11 +199,13 @@ $script:pollCount = 0
 $script:reconcileCount = 0
 $script:sourceChecks = 0
 $script:submissionTag = ''
+$script:sleeps = [Collections.Generic.List[int]]::new()
+$env:MARKDOC_DIGEST_VALUE = $script:digest
 
 function New-Item { param($ItemType, $Path) }
 function Remove-Item { param($LiteralPath, [switch]$Recurse, [switch]$Force) }
 function Test-Path { param($LiteralPath) return $true }
-function Start-Sleep { param($Seconds) }
+function Start-Sleep { param($Seconds) $script:sleeps.Add($Seconds) }
 function Write-Host { param([string]$Object) $script:messages.Add($Object) }
 
 function Assert-ReleaseDependencyPreflight([string]$Commit) {
@@ -139,10 +216,31 @@ function Get-TestHealth {
   return @{ ok = $true; db = $true; collab = $true; version = $script:sha }
 }
 
-function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds, [switch]$KeepFailureOutput) {
+function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds, [switch]$KeepFailureOutput, [switch]$ClassifyDigestFailure) {
   $script:calls.Add(@{ Command = $Command; Arguments = $Arguments; Directory = $Directory; Timeout = $TimeoutSeconds })
   Assert-True ($TimeoutSeconds -gt 0 -and $TimeoutSeconds -le $script:ReleaseDeadlineSeconds) 'Every native call must be bounded.'
   Assert-True (-not $KeepFailureOutput) 'Only the dependency preflight may keep native failure output.'
+  $isDigestLookup = $Command -ceq 'az' -and (($Arguments | Select-Object -First 3) -join ' ' -ceq 'acr manifest list-metadata')
+  Assert-True (-not $ClassifyDigestFailure -or $isDigestLookup) 'Only the digest lookup may classify native failure output.'
+  if ($isDigestLookup -and $script:scenario.StartsWith('digest-')) {
+    Assert-Equal (Join-Path $testRoot 'az.cmd') (Get-Command az -CommandType Application | Select-Object -First 1).Source 'Fake az must be first on PATH.'
+    $limit = [math]::Min(10, $TimeoutSeconds)
+    if ($script:scenario -eq 'digest-native-timeout' -and -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $env:MARKDOC_DIGEST_COUNT)) {
+      $limit = 3
+    }
+    try {
+      if ($ClassifyDigestFailure) {
+        return & $native $Command $Arguments $Directory $limit -ClassifyDigestFailure
+      }
+      return & $native $Command $Arguments $Directory $limit
+    } catch [InvalidOperationException] {
+      Assert-True (($_.Exception.Message + ($_.Exception.Data.Values -join ' ')) -notmatch 'FAKE_DIGEST_SECRET_2211|private\.example\.test|response body') 'Raw native failure output must not survive in the exception.'
+      if ($script:scenario -eq 'digest-deadline') {
+        $script:ReleaseDeadlineSeconds = [math]::Floor($releaseClock.Elapsed.TotalSeconds) + 1
+      }
+      throw
+    }
+  }
   if ($Command -ceq 'git') {
     switch ($Arguments[0]) {
       'rev-parse' {
@@ -349,6 +447,33 @@ $cases = @(
   'wrong-public-version', 'public-ok-false', 'public-db-false', 'public-collab-false', 'public-health-string', 'public-array',
   'public-request-failed', 'malformed-public-json', 'success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning'
 )
+$digestCases = @(
+  @{ Name = 'digest-server-success'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Success = $true },
+  @{ Name = 'digest-throttled-twice'; Category = 'throttled'; Status = '429'; Calls = 2; Retry = 1 },
+  @{ Name = 'digest-auth'; Category = 'auth'; Status = '401'; Calls = 1; Retry = 0 },
+  @{ Name = 'digest-unknown'; Category = 'unknown'; Status = 'none'; Calls = 1; Retry = 0 },
+  @{ Name = 'digest-secret'; Category = 'unknown'; Status = 'none'; Calls = 1; Retry = 0 },
+  @{ Name = 'digest-retry-missing'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Reason = 'absent, ambiguous or malformed digest' },
+  @{ Name = 'digest-retry-ambiguous'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Reason = 'absent, ambiguous or malformed digest' },
+  @{ Name = 'digest-configuration'; Category = 'configuration'; Status = '400'; Calls = 1; Retry = 0 },
+  @{ Name = 'digest-not-found'; Category = 'not_found'; Status = '404'; Calls = 1; Retry = 0 },
+  @{ Name = 'digest-transport-success'; Category = 'transport'; Status = 'none'; Calls = 2; Retry = 1; Success = $true },
+  @{ Name = 'digest-timeout-success'; Category = 'timeout'; Status = 'none'; Calls = 2; Retry = 1; Success = $true },
+  @{ Name = 'digest-native-timeout'; Category = 'timeout'; Status = 'none'; Calls = 2; Retry = 1; Success = $true },
+  @{ Name = 'digest-retry-malformed'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Reason = 'absent, ambiguous or malformed digest' },
+  @{ Name = 'digest-retry-null'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Reason = 'absent, ambiguous or malformed digest' },
+  @{ Name = 'digest-retry-scalar'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Reason = 'absent, ambiguous or malformed digest' },
+  @{ Name = 'digest-retry-tag-raced'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Reason = 'does not match this successful build run' },
+  @{ Name = 'digest-deadline'; Category = 'server_error'; Status = '503'; Calls = 1; Retry = 0; Reason = 'No time remains for the ACR digest lookup retry; no VM command was sent' },
+  @{ Name = 'digest-conflicting-status'; Category = 'auth'; Status = 'none'; Calls = 1; Retry = 0 },
+  @{ Name = 'digest-ambiguous-status'; Category = 'unknown'; Status = 'none'; Calls = 1; Retry = 0 },
+  @{ Name = 'digest-unknown-http'; Category = 'unknown'; Status = '409'; Calls = 1; Retry = 0 },
+  @{ Name = 'digest-auth-transient'; Category = 'auth'; Status = '503'; Calls = 1; Retry = 0 }
+)
+$existingCaseCount = $cases.Count
+if ($DigestLookupOnly) { $cases = @() }
+$cases += @($digestCases | ForEach-Object { $_.Name })
+$digestFailures = [Collections.Generic.List[string]]::new()
 $priorReleaseSha = $env:RELEASE_SHA
 try {
   foreach ($case in $cases) {
@@ -360,6 +485,10 @@ try {
     $script:reconcileCount = 0
     $script:sourceChecks = 0
     $script:submissionTag = ''
+    $script:sleeps.Clear()
+    $script:ReleaseDeadlineSeconds = 2100
+    $env:MARKDOC_DIGEST_CASE = $case
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $env:MARKDOC_DIGEST_COUNT -Force -ErrorAction SilentlyContinue
     $env:RELEASE_SHA = $null
     $commit = $script:sha
     if ($case -eq 'missing-sha') { $commit = '' }
@@ -374,7 +503,10 @@ try {
       if (-not $_.Exception.Data.Contains('ReleaseExitCode')) { throw }
       $code = $_.Exception.Data['ReleaseExitCode']
     }
-    $success = $case -in @('success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning')
+    $digestCase = @($digestCases | Where-Object { $_.Name -ceq $case }) | Select-Object -First 1
+    $success = $case -in @('success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning') -or ($digestCase -and $digestCase.Success -eq $true)
+    $log = $script:messages -join "`n"
+    try {
     Assert-Equal $success ($code -eq 0) "Unexpected exit outcome for $case. Log: $log"
     $log = $script:messages -join "`n"
     Assert-Equal $success ($log -match 'Release complete:') "Completion reporting mismatch for $case."
@@ -409,8 +541,47 @@ try {
     if ($expectedNativeCodes.ContainsKey($case)) {
       Assert-Equal $expectedNativeCodes[$case] $code "Exact native error code must survive for $case. Log: $log"
     }
+    if ($digestCase) {
+      $diagnostic = "Release: ACR digest lookup failed; category=$($digestCase.Category); HTTP status=$($digestCase.Status)."
+      $retry = 'Release: ACR digest lookup retry 1/1 in 2 seconds; read-only lookup only.'
+      Assert-True ($script:messages.Contains($diagnostic)) "Missing safe diagnostic for $case. Log: $log"
+      Assert-Equal $digestCase.Calls ([int](Get-Content -LiteralPath $env:MARKDOC_DIGEST_COUNT -Raw)) "Digest call count mismatch for $case."
+      Assert-Equal $digestCase.Retry @($script:messages | Where-Object { $_ -ceq $retry }).Count "Retry line count mismatch for $case."
+      Assert-Equal $digestCase.Retry @($script:sleeps | Where-Object { $_ -eq 2 }).Count "Retry must use the fixed two-second delay for $case."
+      $failureLines = 1
+      if ($case -eq 'digest-throttled-twice') { $failureLines = 2 }
+      Assert-Equal $failureLines @($script:messages | Where-Object { $_ -ceq $diagnostic }).Count "Failure line count mismatch for $case."
+      Assert-True ($log -notmatch 'FAKE_DIGEST_SECRET_2211|private\.example\.test|credential=|response body') "Fake secret escaped for $case."
+      Assert-Equal 1 $builds.Count "A digest failure must never repeat the build for $case."
+      Assert-Equal ([int]$success) $invocations.Count "Failed digest checks must never reach the VM for $case."
+      if ($digestCase.Reason) { Assert-True ($log.Contains($digestCase.Reason)) "Digest validation reason missing for $case. Log: $log" }
+      if ($case -eq 'digest-deadline') { Assert-Equal 124 $code 'Insufficient retry deadline must retain timeout exit code.' }
+      if ($success) {
+        Assert-True ($log.IndexOf($diagnostic) -lt $log.IndexOf('Release: guest invocation')) 'Digest diagnostics must precede the guest invocation.'
+        Assert-True ($log.IndexOf($retry) -lt $log.IndexOf('Release: guest invocation')) 'Digest retry must precede the guest invocation.'
+      } elseif ($case -ne 'digest-deadline' -and -not $digestCase.Reason) {
+        Assert-Equal 1 $code 'Native digest failure exit code must survive.'
+      }
+      Microsoft.PowerShell.Utility\Write-Host "PASS: $case ($($digestCase.Calls) lookup calls, $($digestCase.Retry) retry lines)"
+    }
+    } catch {
+      if (-not $digestCase) { throw }
+      $digestFailures.Add($case)
+      Microsoft.PowerShell.Utility\Write-Host "FAIL: $case - $($_.Exception.Message)"
+    }
   }
 } finally {
   $env:RELEASE_SHA = $priorReleaseSha
 }
-Microsoft.PowerShell.Utility\Write-Host "VM release tests: ok ($($cases.Count) offline scenarios plus native/guest cleanup boundaries)."
+if ($digestFailures.Count -gt 0) { throw "Digest lookup tests: $($digestFailures.Count)/$($digestCases.Count) failed: $($digestFailures -join ', ')." }
+if ($DigestLookupOnly) {
+  Microsoft.PowerShell.Utility\Write-Host "Digest lookup tests: ok ($($digestCases.Count) offline fake-az scenarios)."
+} else {
+  Microsoft.PowerShell.Utility\Write-Host "VM release tests: ok ($existingCaseCount existing + $($digestCases.Count) new = $($cases.Count) offline scenarios plus native/guest cleanup boundaries)."
+}
+} finally {
+  foreach ($name in $priorEnvironment.Keys) {
+    [Environment]::SetEnvironmentVariable($name, $priorEnvironment[$name])
+  }
+  Microsoft.PowerShell.Management\Remove-Item -LiteralPath $testRoot -Recurse -Force
+}
