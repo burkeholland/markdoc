@@ -21,19 +21,19 @@ function Stop-VmRelease([string]$Message, [int]$ExitCode = 1) {
 
 function Get-ReleaseDigestLookupFailure([string]$ErrorText) {
   $statusMatches = [regex]::Matches($ErrorText,
-    '(?i)\b(?:response\s+status|status(?:\s+code)?|http(?:/\d(?:\.\d)?)?(?:\s+(?:status(?:\s+code)?|error))?)\s*[:=]?\s*[''"]?(?<status>[1-5][0-9]{2})\b')
+    '(?i)\b(?:response\s+(?:status|code)|status(?:\s+code)?|http(?:/\d(?:\.\d)?)?(?:\s+(?:status(?:\s+code)?|error))?)\s*[:=]?\s*[''"]?(?<status>[1-5][0-9]{2})\b|\b(?<status>[1-5][0-9]{2})\s+(?:Server|Client)\s+Error\b|\((?<status>[1-5][0-9]{2})\)')
   $statuses = @($statusMatches | ForEach-Object { $_.Groups['status'].Value } | Select-Object -Unique)
   $status = 'none'
   if ($statuses.Count -eq 1) { $status = $statuses[0] }
   $category = 'unknown'
   # Permanent errors take precedence over transient wording in an error body.
   if ($statuses -contains '401' -or $statuses -contains '403' -or
-      $ErrorText -match '(?i)\b(?:unauthorized|forbidden|AuthenticationFailed|AuthorizationFailed|InvalidAuthenticationToken|AADSTS[0-9]+)\b|\baz login\b') {
+      $ErrorText -match '(?i)\b(?:unauthorized|forbidden|AuthenticationFailed|AuthorizationFailed|InvalidAuthenticationToken|AADSTS[0-9]+|authentication required|unable to authenticate|CONNECTIVITY_FORBIDDEN_ERROR)\b|\baz login\b') {
     $category = 'auth'
   } elseif ($statuses -contains '400' -or
       $ErrorText -match '(?i)\b(?:unrecognized arguments|InvalidArgument|InvalidSubscription|SubscriptionNotFound|BadRequest|SSLError|CertificateError|InvalidURL)\b|certificate verify failed') {
     $category = 'configuration'
-  } elseif ($statuses -contains '404' -or $ErrorText -match '(?i)\b(?:ManifestUnknown|RepositoryNotFound|ResourceNotFound)\b') {
+  } elseif ($statuses -contains '404' -or $ErrorText -match '(?i)\b(?:ManifestUnknown|RepositoryNotFound|ResourceNotFound|the requested data does not exist)\b') {
     $category = 'not_found'
   } elseif ($statuses.Count -gt 1) {
     $category = 'unknown'
@@ -45,6 +45,10 @@ function Get-ReleaseDigestLookupFailure([string]$ErrorText) {
     $category = 'timeout'
   } elseif ($status -cne 'none') {
     $category = 'unknown'
+  } elseif ($ErrorText -match '(?i)\b(?:too\s*many\s*requests|CONNECTIVITY_TOOMANYREQUESTS_ERROR)\b') {
+    $category = 'throttled'
+  } elseif ($ErrorText -match '(?i)\b(?:service\s*unavailable|internal\s*server\s*error|bad\s*gateway|gateway\s*timeout)\b') {
+    $category = 'server_error'
   } elseif ($ErrorText -match '(?i)\b(?:TimeoutError|ConnectTimeout|ReadTimeout|timed out)\b') {
     $category = 'timeout'
   } elseif ($ErrorText -match '(?i)\b(?:ConnectionError|ConnectionResetError|ConnectionAbortedError|NameResolutionError|RemoteDisconnected)\b|connection (?:reset|aborted|refused)|failed to (?:establish a new connection|resolve)') {

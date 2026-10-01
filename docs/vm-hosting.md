@@ -272,8 +272,11 @@ if fewer than three whole seconds remain before the delay. No ACR build
 submission or VM command is retried. A successful retry must still return
 exactly one well-formed digest matching the completed build run.
 
-The following digest-lookup log lines print before `Release: guest invocation`,
-so a failure at this stage has not changed the VM:
+The following digest-lookup log lines print before `Release: guest invocation`.
+Both **can appear in a successful release**, for example when a 503 lookup fails
+and the single retry returns the correct digest. They describe a failed lookup
+attempt and a retry, not the final release outcome. A terminal failure at this
+stage has not changed the VM:
 
 ```text
 Release: ACR digest lookup failed; category=<category>; HTTP status=<status>.
@@ -282,13 +285,19 @@ Release: ACR digest lookup retry 1/1 in 2 seconds; read-only lookup only.
 
 The first line prints once per failed lookup. `<category>` is only one of the
 eight fixed categories above; `<status>` is a single recognized three-digit
-HTTP status or `none` when absent or conflicting. The second line prints at
+HTTP status or `none` when absent or conflicting. Known Azure CLI error wording
+can identify the category without retaining a status number; the status then
+stays `none` rather than being inferred from the wording. The second line prints at
 most once and only for a permitted retry. Insufficient retry time instead
 produces this terminal failure line:
 
 ```text
 Release failed/unverified at immutable image identity: No time remains for the ACR digest lookup retry; no VM command was sent.
 ```
+
+Only this `No time remains` line and the existing `Release failed/unverified`
+failure lines mean the release failed. The lookup-failed and retry lines alone
+do not mean the release failed.
 
 The native wrapper reduces stderr to these allow-listed values in memory.
 It never prints or stores raw stderr, response bodies, URLs, tokens or
