@@ -1575,10 +1575,10 @@ test.describe("dialog focus return (#161)", () => {
     await context.close();
   });
 
-  // #2223: on main the shared dialog only honored Escape once a hand-rolled coordinator had "published"
-  // the dialog, and a lazy dialog mounted from a closing menu could miss that, so Escape did nothing.
-  // These open each dialog the way a person does (real keys walking the menu, or real mouse clicks) and
-  // press Escape as soon as the dialog shows.
+  // #2223: on main the shared dialog closed on Escape only once a hand-rolled coordinator had "published"
+  // it. After any other dialog had opened and closed on the page, a dialog opened from the ⋮ menu was
+  // never published, so Escape did nothing. These tests use a dialog first, then open each dialog the way
+  // a person does (real keys walking the menu, or real mouse clicks) and press Escape as soon as it shows.
   const focusedId = (page: Page) =>
     page.evaluate(() => {
       const el = document.activeElement;
@@ -1586,10 +1586,13 @@ test.describe("dialog focus return (#161)", () => {
       return el.getAttribute("data-testid") ?? (el.closest(".md-rich") ? "rich" : el.closest(".cm-content") ? "code" : el.tagName.toLowerCase());
     });
   const arrowToItem = async (page: Page, name: string) => {
-    const item = page.getByRole("menuitem", { name, exact: true });
     await expect(page.getByRole("menu")).toBeVisible();
-    for (let i = 0; i < 40 && !(await item.evaluate((el) => el === document.activeElement).catch(() => false)); i++) await page.keyboard.press("ArrowDown");
-    await expect(item).toBeFocused();
+    for (let i = 0; i < 30; i++) {
+      const text = await page.evaluate(() => (document.activeElement?.getAttribute("role") === "menuitem" ? document.activeElement.textContent : null));
+      if (text?.includes(name)) return;
+      await page.keyboard.press("ArrowDown");
+    }
+    throw new Error(`ArrowDown never reached the "${name}" menu item`);
   };
   const escapeCloses = async (page: Page, name: RegExp | string) => {
     const dialog = page.getByRole("dialog", { name });
@@ -1603,6 +1606,12 @@ test.describe("dialog focus return (#161)", () => {
     const id = await createDocument(page, "# Escape\n\nAlpha bravo charlie.\n", "Escape fixture");
     await openDocument(page, id);
 
+    // Use another dialog first (Ctrl+K, then Escape): on main this is what left later dialogs unclosable.
+    await selectTextInRich(page, "bravo");
+    await page.keyboard.press("Control+k");
+    await expect(page.getByTestId("link-url")).toBeFocused();
+    await escapeCloses(page, /link/i);
+
     await page.getByTestId("more-menu").focus();
     await page.keyboard.press("Enter");
     await arrowToItem(page, "Keyboard shortcuts");
@@ -1613,7 +1622,7 @@ test.describe("dialog focus return (#161)", () => {
   });
 
   for (const via of ["mouse", "keyboard"] as const) {
-    test(`Shortcuts, GitHub, Name version, Image and Link opened by ${via} close on the first Escape and focus returns to the opener (#2223)`, async ({ browser }) => {
+    test(`Image, Link, Shortcuts, GitHub and Name version opened by ${via} close on the first Escape and focus returns to the opener (#2223)`, async ({ browser }) => {
       const { page, context } = await signIn(browser, `a11y-esc-${via}`);
       const id = await createDocument(page, "# Escape\n\nAlpha bravo charlie.\n", "Escape fixture");
       await openDocument(page, id);
@@ -1621,7 +1630,7 @@ test.describe("dialog focus return (#161)", () => {
       const fromMore = async (item: string) => {
         if (via === "mouse") {
           await page.getByTestId("more-menu").click();
-          await page.getByRole("menuitem", { name: item, exact: true }).click();
+          await page.getByRole("menuitem", { name: item }).click();
         } else {
           await page.getByTestId("more-menu").focus();
           await page.keyboard.press("Enter");
@@ -1637,20 +1646,6 @@ test.describe("dialog focus return (#161)", () => {
         }
       };
 
-      // Shortcuts first, so it is the lazy dialog's very first mount on this page.
-      await fromMore("Keyboard shortcuts");
-      await escapeCloses(page, "Keyboard shortcuts");
-      await expect.poll(() => focusedId(page)).toBe("more-menu");
-
-      await fromMore("Connect to GitHub…");
-      await escapeCloses(page, "Connect to GitHub");
-      await expect.poll(() => focusedId(page)).toBe("more-menu");
-
-      await fromMore("Name current version");
-      await expect(page.getByTestId("version-name")).toBeFocused();
-      await escapeCloses(page, "Name this version");
-      await expect.poll(() => focusedId(page)).toBe("more-menu");
-
       // A mouse click on a toolbar button keeps the caret in the editor, so the editor is the opener;
       // Enter on a focused button makes the button the opener.
       const toolbarOpener = (testId: string) => (via === "mouse" ? "rich" : testId);
@@ -1665,6 +1660,19 @@ test.describe("dialog focus return (#161)", () => {
       await expect(page.getByTestId("link-url")).toBeFocused();
       await escapeCloses(page, /link/i);
       await expect.poll(() => focusedId(page)).toBe(toolbarOpener("tb-link"));
+
+      await fromMore("Keyboard shortcuts");
+      await escapeCloses(page, "Keyboard shortcuts");
+      await expect.poll(() => focusedId(page)).toBe("more-menu");
+
+      await fromMore("Connect to GitHub");
+      await escapeCloses(page, "Connect to GitHub");
+      await expect.poll(() => focusedId(page)).toBe("more-menu");
+
+      await fromMore("Name current version");
+      await expect(page.getByTestId("version-name")).toBeFocused();
+      await escapeCloses(page, "Name this version");
+      await expect.poll(() => focusedId(page)).toBe("more-menu");
       await context.close();
     });
   }

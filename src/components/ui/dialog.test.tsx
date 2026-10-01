@@ -236,6 +236,9 @@ describe("DialogContent focus lifecycle", () => {
                   data-testid="shortcuts-item"
                   onKeyDown={(event) => {
                     if (event.key !== "Enter") return;
+                    // The closing menu hands focus back to its trigger in a later task (Radix FocusScope).
+                    const menuTrigger = document.getElementById("more-trigger");
+                    setTimeout(() => menuTrigger?.focus(), 0);
                     setMenuOpen(false);
                     setOpen(true);
                     setEverOpened(true);
@@ -260,15 +263,17 @@ describe("DialogContent focus lifecycle", () => {
       fireEvent.keyDown(item, { key: "Enter", code: "Enter" });
       expect(screen.queryByRole("menu")).toBeNull();
 
-      // The closing menu hands focus back to its trigger in a later task (Radix FocusScope).
-      const returnMenuFocus = () => act(() => trigger.focus());
-      if (load === "after") returnMenuFocus();
+      if (load === "after") {
+        await flushTasks();
+        expect(trigger).toHaveFocus();
+      }
       await act(async () => {
         finishLoading();
         await loaded;
       });
-      const shortcuts = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
-      if (load === "before") returnMenuFocus();
+      // Synchronous lookup: `findByRole` waits a task, which would run the menu's queued focus first.
+      const shortcuts = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
+      if (load === "before") expect(trigger).not.toHaveFocus();
       await flushTasks();
       expect(shortcuts).toContainElement(document.activeElement as HTMLElement);
 
