@@ -119,6 +119,7 @@ const DOC_A: DocumentDto = {
   title: "Toast document A",
   storage: "local",
   linkAccess: "private",
+  linkPreview: false,
   ownerId: USER.id,
   gistId: null,
   gistFile: null,

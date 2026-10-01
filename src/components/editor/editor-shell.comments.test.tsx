@@ -111,7 +111,7 @@ const TEXT = "A commented paragraph for editing.\n\nOrdinary plain text.\n";
 const TYPED = "abcdefghijklmnopqrst";
 const user = makeCollabUser("synthetic", "Synthetic");
 const doc: DocumentDto = {
-  id: "synthetic-doc", title: "Responsive comments", ownerId: user.id, storage: "local", linkAccess: "private",
+  id: "synthetic-doc", title: "Responsive comments", ownerId: user.id, storage: "local", linkAccess: "private", linkPreview: false,
   gistId: null, gistFile: null, repoOwner: null, repoName: null, repoBranch: null, repoPath: null,
   publishedAt: null, hasUnpublishedChanges: false, githubUrl: null,
   createdAt: "2026-09-05T00:00:00Z", updatedAt: "2026-09-05T00:00:00Z",

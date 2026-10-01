@@ -54,7 +54,7 @@ test.describe("share dialog", () => {
     expect(size.scrollHeight).toBeLessThanOrEqual(size.height + 1);
 
     const top = (testId: string) => page.getByTestId(testId).evaluate((el) => el.getBoundingClientRect().top);
-    const order = ["share-login", "owner-row", "link-access", "editor-link", "share-connect-agent", "share-footer"];
+    const order = ["share-login", "owner-row", "link-access", "link-preview", "editor-link", "share-connect-agent", "share-footer"];
     const tops: number[] = [];
     for (const testId of order) tops.push(await top(testId));
     for (let i = 1; i < tops.length; i++) expect(tops[i], `${order[i]} sits below ${order[i - 1]}`).toBeGreaterThan(tops[i - 1]);
@@ -63,22 +63,26 @@ test.describe("share dialog", () => {
     await expect(footerButtons).toHaveText("Done");
     await expect(page.getByTestId("share-connect-agent")).toContainText("Connect an AI agent");
 
-    // Restricted by default: one link. Copy puts exactly that URL on the clipboard.
+    // Restricted by default: one link, and link previews off. Copy puts exactly that URL on the clipboard.
     await expect(page.getByTestId("link-access")).toHaveValue("private");
+    await expect(page.getByTestId("link-preview")).toHaveAttribute("aria-checked", "false");
     await expect(page.getByTestId("reader-link")).toHaveCount(0);
     await expect(page.getByTestId("editor-link")).toContainText(`/d/${id}`);
     await page.getByTestId("copy-link").click();
     await expect(page.getByTestId("copy-link")).toHaveText("Copied", { timeout: 1_000 });
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`${origin}/d/${id}`);
 
-    // Opening the link up adds the reader page, with its own Copy; closing it again takes it away.
+    // Opening the link up adds the reader page, with its own Copy, and drops the previews switch (a shared link
+    // always previews); closing it again brings the switch back and takes the reader page away.
     await page.getByTestId("link-access").selectOption("view");
     await expect(page.getByTestId("reader-link")).toContainText(`/p/${id}`);
+    await expect(page.getByTestId("link-preview")).toHaveCount(0);
     await page.getByTestId("copy-reader-link").click();
     await expect(page.getByTestId("copy-reader-link")).toHaveText("Copied", { timeout: 1_000 });
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`${origin}/p/${id}`);
     await page.getByTestId("link-access").selectOption("private");
     await expect(page.getByTestId("reader-link")).toHaveCount(0);
+    await expect(page.getByTestId("link-preview")).toHaveAttribute("aria-checked", "false");
 
     await footerButtons.click();
     await expect(dialog).toHaveCount(0);

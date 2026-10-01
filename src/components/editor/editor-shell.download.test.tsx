@@ -66,6 +66,7 @@ const DOC: DocumentDto = {
   title: "Previous title",
   storage: "local",
   linkAccess: "private",
+  linkPreview: false,
   ownerId: USER.id,
   gistId: null,
   gistFile: null,
