@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StrictMode, createElement, useEffect, useLayoutEffect, type KeyboardEvent as ReactKeyboardEvent, type RefCallback } from "react";
+import { StrictMode, createElement, useEffect, useLayoutEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefCallback } from "react";
 import { createRoot, hydrateRoot } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import * as Y from "yjs";
@@ -474,10 +474,6 @@ interface CapturedReviewControl {
   ref: ReviewElementRef<HTMLButtonElement>;
 }
 
-interface CapturedSuggestionControl extends CapturedReviewControl {
-  clickCapture: ReviewMouseHandler;
-}
-
 function reactProperty<T>(element: HTMLElement, property: string): T {
   const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
   if (!propsKey) throw new Error(`React props were not attached while capturing ${property}`);
@@ -590,51 +586,38 @@ function dispatchReviewClick(element: HTMLElement, event?: MouseEvent) {
 
 interface CapturedSuggestionActions {
   root: HTMLDivElement;
-  rootCapture: ReviewMouseHandler;
-  rootClick: ReviewMouseHandler;
-  rootKeyCapture: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-  rootKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-  rootRef: ReviewElementRef<HTMLDivElement>;
-  accept: CapturedSuggestionControl | null;
-  reject: CapturedSuggestionControl | null;
+  accept: { element: HTMLButtonElement } | null;
+  reject: { element: HTMLButtonElement } | null;
 }
 
-function captureSuggestionControl(element: HTMLElement): CapturedSuggestionControl {
+function captureSuggestionGroup(
+  scope: ParentNode,
+  rootTestId: string,
+  acceptTestId: string,
+  rejectTestId: string,
+  index = 0,
+): CapturedSuggestionActions {
+  const root = scope.querySelectorAll<HTMLElement>(`[data-testid="${rootTestId}"]`).item(index);
+  const Root = root?.ownerDocument.defaultView?.HTMLDivElement;
+  if (!Root || !(root instanceof Root)) throw new Error(`${rootTestId} was not rendered`);
+  const accept = root.querySelector<HTMLButtonElement>(`[data-testid="${acceptTestId}"]`);
+  const reject = root.querySelector<HTMLButtonElement>(`[data-testid="${rejectTestId}"]`);
   return {
-    ...captureReviewControl(element),
-    clickCapture: reactProperty<ReviewMouseHandler>(element, "onClickCapture"),
+    root,
+    accept: accept ? { element: accept } : null,
+    reject: reject ? { element: reject } : null,
   };
 }
 
 function captureSuggestionActions(scope: ParentNode = document, index = 0): CapturedSuggestionActions {
-  const root = scope.querySelectorAll<HTMLElement>('[data-testid="suggestion-actions"]').item(index);
-  const Root = root?.ownerDocument.defaultView?.HTMLDivElement;
-  if (!Root || !(root instanceof Root)) throw new Error("Suggestion actions were not rendered");
-  const accept = root.querySelector<HTMLElement>('[data-testid="suggestion-accept-comment"]');
-  const reject = root.querySelector<HTMLElement>('[data-testid="suggestion-reject-comment"]');
-  return {
-    root,
-    rootCapture: reactProperty<ReviewMouseHandler>(root, "onClickCapture"),
-    rootClick: reactProperty<ReviewMouseHandler>(root, "onClick"),
-    rootKeyCapture: reactProperty<
-      (event: ReactKeyboardEvent<HTMLDivElement>) => void
-    >(root, "onKeyDownCapture"),
-    rootKeyDown: reactProperty<
-      (event: ReactKeyboardEvent<HTMLDivElement>) => void
-    >(root, "onKeyDown"),
-    rootRef: reactProperty<ReviewElementRef<HTMLDivElement>>(root, "ref"),
-    accept: accept ? captureSuggestionControl(accept) : null,
-    reject: reject ? captureSuggestionControl(reject) : null,
-  };
+  return captureSuggestionGroup(
+    scope,
+    "suggestion-actions",
+    "suggestion-accept-comment",
+    "suggestion-reject-comment",
+    index,
+  );
 }
-
-type SuggestionNavigationKey =
-  | "ArrowLeft"
-  | "ArrowUp"
-  | "ArrowRight"
-  | "ArrowDown"
-  | "Home"
-  | "End";
 
 function suggestionEventView(
   ownerDocument: Document,
@@ -686,156 +669,64 @@ function dispatchSuggestionKey(
   return event;
 }
 
-function replaceKeyboardWrapperMethods(
-  event: ReactKeyboardEvent<HTMLDivElement>,
-) {
-  const originalPreventDefault = event.preventDefault;
-  const originalStopPropagation = event.stopPropagation;
-  const originalIsDefaultPrevented = event.isDefaultPrevented;
-  const originalIsPropagationStopped = event.isPropagationStopped;
-  const preventDefault = vi.fn(function (
-    this: ReactKeyboardEvent<HTMLDivElement>,
-  ) {
-    return Reflect.apply(originalPreventDefault, this, []);
-  });
-  const stopPropagation = vi.fn(function (
-    this: ReactKeyboardEvent<HTMLDivElement>,
-  ) {
-    return Reflect.apply(originalStopPropagation, this, []);
-  });
-  const isDefaultPrevented = vi.fn(function (
-    this: ReactKeyboardEvent<HTMLDivElement>,
-  ) {
-    return Reflect.apply(originalIsDefaultPrevented, this, []);
-  });
-  const isPropagationStopped = vi.fn(function (
-    this: ReactKeyboardEvent<HTMLDivElement>,
-  ) {
-    return Reflect.apply(originalIsPropagationStopped, this, []);
-  });
-  Object.setPrototypeOf(event, Object.create(Object.getPrototypeOf(event)));
-  Object.defineProperties(event, {
-    preventDefault: { configurable: true, value: preventDefault },
-    stopPropagation: { configurable: true, value: stopPropagation },
-    isDefaultPrevented: { configurable: true, value: isDefaultPrevented },
-    isPropagationStopped: {
-      configurable: true,
-      value: isPropagationStopped,
-    },
-  });
-  return {
-    preventDefault,
-    stopPropagation,
-    isDefaultPrevented,
-    isPropagationStopped,
-  };
-}
-
-function dispatchSuggestionKeyWithReactPairMutation(
-  actions: CapturedSuggestionActions,
-  target: HTMLButtonElement,
-  key: SuggestionNavigationKey,
-  mutations: {
-    captureBefore?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-    captureAfter?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-    bubbleBefore?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-  } = {},
-) {
-  const propsKey = Object.keys(actions.root).find((entry) =>
-    entry.startsWith("__reactProps$"),
-  );
-  if (!propsKey) throw new Error("React props were not attached to the suggestion root");
-  const record = actions.root as unknown as Record<
-    string,
-    Record<string, unknown>
-  >;
-  const props = record[propsKey];
-  const capture = props.onKeyDownCapture;
-  const bubble = props.onKeyDown;
-  const currentTarget = Object.getOwnPropertyDescriptor(
-    target.ownerDocument.defaultView!.Event.prototype,
-    "currentTarget",
-  )?.get;
-  if (
-    typeof capture !== "function" ||
-    typeof bubble !== "function" ||
-    !currentTarget
-  ) {
-    throw new Error("The suggestion root has no complete key delivery pair");
-  }
-  const delivery: {
-    capture: ReactKeyboardEvent<HTMLDivElement> | null;
-    bubble: ReactKeyboardEvent<HTMLDivElement> | null;
-    nativeCaptureTarget: EventTarget | null;
-    nativeBubbleTarget: EventTarget | null;
-  } = {
-    capture: null,
-    bubble: null,
-    nativeCaptureTarget: null,
-    nativeBubbleTarget: null,
-  };
-  const wrapped = {
-    ...props,
-    onKeyDownCapture: (value: ReactKeyboardEvent<HTMLDivElement>) => {
-      delivery.capture = value;
-      delivery.nativeCaptureTarget = Reflect.apply(
-        currentTarget,
-        value.nativeEvent,
-        [],
-      ) as EventTarget | null;
-      mutations.captureBefore?.(value);
-      Reflect.apply(capture, undefined, [value]);
-      mutations.captureAfter?.(value);
-    },
-    onKeyDown: (value: ReactKeyboardEvent<HTMLDivElement>) => {
-      delivery.bubble = value;
-      delivery.nativeBubbleTarget = Reflect.apply(
-        currentTarget,
-        value.nativeEvent,
-        [],
-      ) as EventTarget | null;
-      mutations.bubbleBefore?.(value);
-      Reflect.apply(bubble, undefined, [value]);
-    },
-  };
-  record[propsKey] = wrapped;
-  try {
-    const nativeEvent = dispatchSuggestionKey(target, key);
-    if (!delivery.capture || !delivery.bubble) {
-      throw new Error("React did not deliver both suggestion key wrappers");
-    }
-    return {
-      nativeEvent,
-      captureEvent: delivery.capture,
-      bubbleEvent: delivery.bubble,
-      nativeCaptureTarget: delivery.nativeCaptureTarget,
-      nativeBubbleTarget: delivery.nativeBubbleTarget,
-    };
-  } finally {
-    if (record[propsKey] === wrapped) record[propsKey] = props;
-  }
-}
-
 function captureSuggestionBatchActions(scope: ParentNode = document): CapturedSuggestionActions {
-  const root = scope.querySelector<HTMLElement>('[data-testid="suggestion-batch-actions"]');
-  const Root = root?.ownerDocument.defaultView?.HTMLDivElement;
-  if (!Root || !(root instanceof Root)) throw new Error("Suggestion batch actions were not rendered");
-  const accept = root.querySelector<HTMLElement>('[data-testid="accept-all"]');
-  const reject = root.querySelector<HTMLElement>('[data-testid="reject-all"]');
-  return {
-    root,
-    rootCapture: reactProperty<ReviewMouseHandler>(root, "onClickCapture"),
-    rootClick: reactProperty<ReviewMouseHandler>(root, "onClick"),
-    rootKeyCapture: reactProperty<
-      (event: ReactKeyboardEvent<HTMLDivElement>) => void
-    >(root, "onKeyDownCapture"),
-    rootKeyDown: reactProperty<
-      (event: ReactKeyboardEvent<HTMLDivElement>) => void
-    >(root, "onKeyDown"),
-    rootRef: reactProperty<ReviewElementRef<HTMLDivElement>>(root, "ref"),
-    accept: accept ? captureSuggestionControl(accept) : null,
-    reject: reject ? captureSuggestionControl(reject) : null,
-  };
+  return captureSuggestionGroup(scope, "suggestion-batch-actions", "accept-all", "reject-all");
+}
+
+/**
+ * A browser runs a microtask checkpoint after every event listener it calls, so microtasks queued by an earlier
+ * listener (a window capture listener, say) have all run before React's root listener sees the click (#2212). jsdom
+ * calls the listeners back to back inside one dispatch. This root delays its React click listeners until pending
+ * microtasks have drained, the way a real click reaches them.
+ */
+function createCheckpointRoot(host: HTMLElement) {
+  const delivered: Promise<void>[] = [];
+  const add = host.addEventListener;
+  host.addEventListener = function (
+    this: HTMLElement,
+    type: string,
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | AddEventListenerOptions,
+  ) {
+    if (type !== "click" || typeof listener !== "function") return add.call(this, type, listener!, options);
+    return add.call(
+      this,
+      type,
+      (event: Event) => {
+        delivered.push(
+          new Promise<void>((resolve) => {
+            setTimeout(() => {
+              listener.call(host, event);
+              resolve();
+            }, 0);
+          }),
+        );
+      },
+      options,
+    );
+  } as typeof host.addEventListener;
+  try {
+    return { root: createRoot(host), delivered };
+  } finally {
+    Reflect.deleteProperty(host, "addEventListener");
+  }
+}
+
+async function checkpointActivate(
+  element: HTMLElement,
+  delivered: Promise<void>[],
+  activation: "pointer" | "Enter" | "Space",
+) {
+  const user = userEvent.setup({ document: element.ownerDocument });
+  await act(async () => {
+    if (activation === "pointer") {
+      await user.pointer({ keys: "[MouseLeft]", target: element });
+    } else {
+      element.focus();
+      await user.keyboard(activation === "Enter" ? "{Enter}" : " ");
+    }
+    while (delivered.length > 0) await Promise.all(delivered.splice(0));
+  });
 }
 
 function reviewSession(docId: string) {
@@ -851,41 +742,6 @@ function suggestionPanel(session: CollabSession) {
       <CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />
     </TooltipProvider>
   );
-}
-
-async function hydrateSuggestionFrame(
-  session: CollabSession,
-  hydrationTarget: "host" | "document",
-  beforeHydrate?: (target: HTMLElement | Document) => void,
-) {
-  const frame = document.createElement("iframe");
-  document.body.append(frame);
-  const ownerDocument = frame.contentDocument;
-  const ownerWindow = ownerDocument?.defaultView;
-  if (!ownerDocument || !ownerWindow) throw new Error("The hydration frame did not have a document window");
-  const panel = <StrictMode>{suggestionPanel(session)}</StrictMode>;
-  const page = (
-    <html>
-      {createElement("head")}
-      <body>{panel}</body>
-    </html>
-  );
-  ownerDocument.open();
-  ownerDocument.write(
-    hydrationTarget === "document"
-      ? `<!doctype html>${renderToString(page)}`
-      : `<!doctype html><html><head></head><body><div id="root">${renderToString(panel)}</div></body></html>`,
-  );
-  ownerDocument.close();
-  const target =
-    hydrationTarget === "document"
-      ? ownerDocument
-      : ownerDocument.getElementById("root");
-  if (!target) throw new Error("The host hydration root was not rendered");
-  beforeHydrate?.(target);
-  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-  const root = await act(async () => hydrateRoot(target, hydrationTarget === "document" ? page : panel));
-  return { frame, ownerDocument, ownerWindow, target, errors, root };
 }
 
 function addCommentSuggestion(
@@ -1577,242 +1433,6 @@ describe("CommentsPanel", () => {
       },
     );
 
-    it("authenticates distinct root wrappers, the delegated root, and the backing Window receiver", async () => {
-      const fixture = reviewSession("suggestion-keyboard-provenance");
-      session = fixture.session;
-      addCommentSuggestion(session, fixture.user);
-      const nativePreventDefault = Event.prototype.preventDefault;
-      const nativeFocus = HTMLElement.prototype.focus;
-      const preventDefault = vi
-        .spyOn(Event.prototype, "preventDefault")
-        .mockImplementation(function (this: Event) {
-          Reflect.apply(nativePreventDefault, this, []);
-        });
-      const focus = vi
-        .spyOn(HTMLElement.prototype, "focus")
-        .mockImplementation(function (
-          this: HTMLElement,
-          options?: FocusOptions,
-        ) {
-          Reflect.apply(
-            nativeFocus,
-            this,
-            options === undefined ? [] : [options],
-          );
-        });
-      const currentTarget = Object.getOwnPropertyDescriptor(
-        Event.prototype,
-        "currentTarget",
-      )?.get;
-      const composedPath = Event.prototype.composedPath;
-      if (!currentTarget) throw new Error("Event.currentTarget has no getter");
-      const observations: {
-        receiver: EventTarget;
-        currentTarget: EventTarget | null;
-        terminal: EventTarget | undefined;
-      }[] = [];
-      const observeWindow = function (this: EventTarget, event: Event) {
-        observations.push({
-          receiver: this,
-          currentTarget: Reflect.apply(currentTarget, event, []) as EventTarget,
-          terminal: (
-            Reflect.apply(composedPath, event, []) as EventTarget[]
-          ).at(-1),
-        });
-      };
-      window.addEventListener("keydown", observeWindow, true);
-      const implementationSymbol = Object.getOwnPropertySymbols(document).find(
-        (symbol) => String(symbol) === "Symbol(impl)",
-      );
-      const backingReceiver = implementationSymbol
-        ? (
-            document as unknown as Record<
-              symbol,
-              { _globalObject: EventTarget }
-            >
-          )[implementationSymbol]._globalObject
-        : window;
-      const rendered = render(
-        <StrictMode>{suggestionPanel(session)}</StrictMode>,
-      );
-      try {
-        await screen.findByTestId("suggestion-accept-comment");
-        const actions = captureSuggestionActions();
-        const source = actions.accept!.element as HTMLButtonElement;
-        const destination = actions.reject!.element;
-        source.focus();
-        preventDefault.mockClear();
-        focus.mockClear();
-        let captureMethods:
-          | ReturnType<typeof replaceKeyboardWrapperMethods>
-          | null = null;
-        let bubbleMethods:
-          | ReturnType<typeof replaceKeyboardWrapperMethods>
-          | null = null;
-
-        const delivery = dispatchSuggestionKeyWithReactPairMutation(
-          actions,
-          source,
-          "ArrowRight",
-          {
-            captureBefore: (event) => {
-              captureMethods = replaceKeyboardWrapperMethods(event);
-            },
-            bubbleBefore: (event) => {
-              bubbleMethods = replaceKeyboardWrapperMethods(event);
-            },
-          },
-        );
-
-        expect(delivery.nativeEvent.defaultPrevented).toBe(true);
-        expect(delivery.captureEvent).not.toBe(delivery.bubbleEvent);
-        expect(delivery.captureEvent.nativeEvent).toBe(delivery.nativeEvent);
-        expect(delivery.bubbleEvent.nativeEvent).toBe(delivery.nativeEvent);
-        expect(Object.getPrototypeOf(delivery.captureEvent)).not.toBe(
-          Object.getPrototypeOf(delivery.bubbleEvent),
-        );
-        expect(captureMethods!.preventDefault).not.toBe(
-          bubbleMethods!.preventDefault,
-        );
-        expect(captureMethods!.preventDefault).not.toHaveBeenCalled();
-        expect(bubbleMethods!.preventDefault).toHaveBeenCalledOnce();
-        expect(preventDefault).toHaveBeenCalledOnce();
-        expect(focus).toHaveBeenCalledExactlyOnceWith({
-          preventScroll: true,
-        });
-        expect(destination).toHaveFocus();
-        expect(delivery.nativeCaptureTarget).toBe(rendered.container);
-        expect(delivery.nativeBubbleTarget).toBe(rendered.container);
-        expect(observations).toEqual([
-          {
-            receiver: backingReceiver,
-            currentTarget: backingReceiver,
-            terminal: backingReceiver,
-          },
-        ]);
-      } finally {
-        rendered.unmount();
-        window.removeEventListener("keydown", observeWindow, true);
-        focus.mockRestore();
-        preventDefault.mockRestore();
-      }
-    });
-
-    it("rejects untrusted, modified, repeated, composing, cancelled, foreign, wrong-focus, and plain keys before clean recovery", async () => {
-      const fixture = reviewSession("suggestion-keyboard-invalid-input");
-      const currentSession: CollabSession = fixture.session;
-      session = currentSession;
-      addCommentSuggestion(currentSession, fixture.user);
-      const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
-        Element.prototype,
-        "scrollIntoView",
-      );
-      const scrollIntoView = vi.fn(() => {
-        throw new Error("Suggestion keyboard navigation must not scroll");
-      });
-      Object.defineProperty(Element.prototype, "scrollIntoView", {
-        configurable: true,
-        writable: true,
-        value: scrollIntoView,
-      });
-      let frame: HTMLIFrameElement | null = null;
-      let outsider: HTMLButtonElement | null = null;
-      try {
-        const rendered = render(
-          <StrictMode>{suggestionPanel(currentSession)}</StrictMode>,
-        );
-        await screen.findByTestId("suggestion-accept-comment");
-        const actions = captureSuggestionActions();
-        const source = actions.accept!.element as HTMLButtonElement;
-        const destination = actions.reject!.element;
-        outsider = document.createElement("button");
-        document.body.append(outsider);
-        const rejected = [
-          suggestionKeyboardEvent(source, "ArrowRight", {}, false),
-          suggestionKeyboardEvent(source, "ArrowRight", { ctrlKey: true }),
-          suggestionKeyboardEvent(source, "ArrowRight", { metaKey: true }),
-          suggestionKeyboardEvent(source, "ArrowRight", { altKey: true }),
-          suggestionKeyboardEvent(source, "ArrowRight", { shiftKey: true }),
-          suggestionKeyboardEvent(source, "ArrowRight", { repeat: true }),
-          suggestionKeyboardEvent(source, "ArrowRight", {
-            isComposing: true,
-          }),
-          suggestionKeyboardEvent(source, "Enter"),
-          suggestionKeyboardEvent(source, " "),
-          suggestionKeyboardEvent(source, "Tab"),
-        ];
-        const cancelled = suggestionKeyboardEvent(source, "ArrowRight");
-        cancelled.preventDefault();
-        rejected.push(cancelled);
-        frame = document.createElement("iframe");
-        document.body.append(frame);
-        const foreignWindow = frame.contentWindow as
-          | (Window & typeof globalThis)
-          | null;
-        if (!foreignWindow) throw new Error("The foreign frame has no window");
-        const foreign = new foreignWindow.KeyboardEvent("keydown", {
-          key: "ArrowRight",
-          code: "ArrowRight",
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-          view: suggestionEventView(foreignWindow.document, foreignWindow),
-        });
-        markRequestModeEventTrusted(foreign);
-        rejected.push(foreign);
-
-        for (const event of rejected) {
-          source.focus();
-          act(() => source.dispatchEvent(event));
-          expect(destination).not.toHaveFocus();
-        }
-        outsider.focus();
-        const wrongFocus = dispatchSuggestionKey(source, "ArrowRight");
-        expect(wrongFocus.defaultPrevented).toBe(false);
-        expect(outsider).toHaveFocus();
-        expect(scrollIntoView).not.toHaveBeenCalled();
-
-        await act(async () => {
-          rendered.rerender(
-            <StrictMode>{suggestionPanel(currentSession)}</StrictMode>,
-          );
-        });
-        const current = captureSuggestionActions();
-        expect(current.accept!.element).toBe(source);
-        expect(current.reject!.element).toBe(destination);
-        expect(current.rootKeyCapture).not.toBe(actions.rootKeyCapture);
-        expect(current.rootKeyDown).not.toBe(actions.rootKeyDown);
-        expect(scrollIntoView).not.toHaveBeenCalled();
-        const currentSource = current.accept!.element as HTMLButtonElement;
-        const currentDestination = current.reject!.element;
-        currentSource.focus();
-
-        const accepted = dispatchSuggestionKeyWithReactPairMutation(
-          current,
-          currentSource,
-          "ArrowRight",
-        );
-
-        expect(accepted.nativeEvent.defaultPrevented).toBe(true);
-        expect(accepted.bubbleEvent.defaultPrevented).toBe(true);
-        expect(accepted.bubbleEvent.isDefaultPrevented()).toBe(true);
-        expect(currentDestination).toHaveFocus();
-        expect(scrollIntoView).not.toHaveBeenCalled();
-      } finally {
-        frame?.remove();
-        outsider?.remove();
-        if (scrollIntoViewDescriptor) {
-          Object.defineProperty(
-            Element.prototype,
-            "scrollIntoView",
-            scrollIntoViewDescriptor,
-          );
-        } else {
-          Reflect.deleteProperty(Element.prototype, "scrollIntoView");
-        }
-      }
-    });
-
     it("skips absent decisions and accepts a clean successor event", async () => {
       const fixture = reviewSession("suggestion-keyboard-enabled-actions");
       session = fixture.session;
@@ -1979,375 +1599,6 @@ describe("CommentsPanel", () => {
       },
     );
 
-    it.each(["pointer Accept", "keyboard Reject"] as const)(
-      "rejects a post-root %s bubble forgery before document delegation and recovers",
-      async (activation) => {
-        const fixture = reviewSession(`suggestion-document-bubble-forgery-${activation.replace(" ", "-")}`);
-        session = fixture.session;
-        addCommentSuggestion(session, fixture.user);
-        const accept = vi.spyOn(session, "acceptCommentSuggestion");
-        const reject = vi.spyOn(session.comments, "rejectSuggestion");
-        const frame = document.createElement("iframe");
-        document.body.append(frame);
-        const ownerDocument = frame.contentDocument;
-        if (!ownerDocument?.defaultView) throw new Error("The hydration frame did not have a document window");
-        const page = (
-          <html>
-            {createElement("head")}
-            <body>
-              <StrictMode>{suggestionPanel(session)}</StrictMode>
-            </body>
-          </html>
-        );
-        ownerDocument.open();
-        ownerDocument.write(`<!doctype html>${renderToString(page)}`);
-        ownerDocument.close();
-        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-        const root = await act(async () => hydrateRoot(ownerDocument, page));
-
-        try {
-          const actions = captureSuggestionActions(ownerDocument);
-          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
-          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
-          const stopPropagation = vi.fn();
-          const ancestor = actions.root.parentElement;
-          if (!ancestor) throw new Error("The suggestion action root did not have an ancestor");
-          const forgeBubble = (nativeEvent: Event) => {
-            const click = nativeEvent as MouseEvent;
-            const forged = {
-              type: click.type,
-              currentTarget: control.element as EventTarget | null,
-              target: click.target,
-              nativeEvent: click,
-              button: click.button,
-              buttons: click.buttons,
-              bubbles: click.bubbles,
-              cancelable: click.cancelable,
-              defaultPrevented: click.defaultPrevented,
-              stopPropagation,
-            };
-            control.click(forged);
-            forged.currentTarget = actions.root;
-            actions.rootClick(forged);
-            click.stopImmediatePropagation();
-          };
-          ancestor.addEventListener("click", forgeBubble, { once: true });
-          const user = userEvent.setup({ document: ownerDocument });
-
-          if (activation === "pointer Accept") {
-            await user.pointer({ keys: "[MouseLeft]", target: control.element });
-          } else {
-            control.element.focus();
-            await user.keyboard("{Enter}");
-          }
-          expect(accept).not.toHaveBeenCalled();
-          expect(reject).not.toHaveBeenCalled();
-          expect(stopPropagation).not.toHaveBeenCalled();
-
-          if (activation === "pointer Accept") {
-            await user.pointer({ keys: "[MouseLeft]", target: control.element });
-          } else {
-            control.element.focus();
-            await user.keyboard("{Enter}");
-          }
-          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
-          expect(errors).not.toHaveBeenCalled();
-        } finally {
-          await act(async () => root.unmount());
-          errors.mockRestore();
-          frame.remove();
-        }
-      },
-    );
-
-    it.each([
-      ["host", "pointer Accept"],
-      ["host", "keyboard Reject"],
-      ["document", "pointer Accept"],
-      ["document", "keyboard Reject"],
-    ] as const)(
-      "ignores an own currentTarget poison during %s hydration with %s and recovers",
-      async (hydrationTarget, activation) => {
-        const fixture = reviewSession(
-          `suggestion-${hydrationTarget}-current-target-poison-${activation.replace(" ", "-")}`,
-        );
-        session = fixture.session;
-        addCommentSuggestion(session, fixture.user);
-        const accept = vi.spyOn(session, "acceptCommentSuggestion");
-        const reject = vi.spyOn(session.comments, "rejectSuggestion");
-        const frame = document.createElement("iframe");
-        document.body.append(frame);
-        const ownerDocument = frame.contentDocument;
-        const ownerWindow = ownerDocument?.defaultView;
-        if (!ownerDocument || !ownerWindow) throw new Error("The hydration frame did not have a document window");
-        const panel = <StrictMode>{suggestionPanel(session)}</StrictMode>;
-        const page = (
-          <html>
-            {createElement("head")}
-            <body>{panel}</body>
-          </html>
-        );
-        ownerDocument.open();
-        ownerDocument.write(
-          hydrationTarget === "document"
-            ? `<!doctype html>${renderToString(page)}`
-            : `<!doctype html><html><head></head><body><div id="root">${renderToString(panel)}</div></body></html>`,
-        );
-        ownerDocument.close();
-        const target =
-          hydrationTarget === "document"
-            ? ownerDocument
-            : ownerDocument.getElementById("root");
-        if (!target) throw new Error("The host hydration root was not rendered");
-        const currentTargetDescriptor = Object.getOwnPropertyDescriptor(
-          ownerWindow.Event.prototype,
-          "currentTarget",
-        );
-        const originalCurrentTargetGetter = currentTargetDescriptor?.get;
-        if (!currentTargetDescriptor || !originalCurrentTargetGetter) {
-          throw new Error("The owner realm did not expose Event.currentTarget");
-        }
-        Object.defineProperty(ownerWindow.Event.prototype, "currentTarget", {
-          ...currentTargetDescriptor,
-          get(this: Event) {
-            const own = Object.getOwnPropertyDescriptor(this, "currentTarget");
-            return own && "value" in own
-              ? own.value
-              : Reflect.apply(originalCurrentTargetGetter, this, []);
-          },
-        });
-        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-        const root = await act(async () => hydrateRoot(target, hydrationTarget === "document" ? page : panel));
-        Object.defineProperty(ownerWindow.Event.prototype, "currentTarget", currentTargetDescriptor);
-
-        try {
-          const actions = captureSuggestionActions(target);
-          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
-          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
-          const forgedStopPropagation = vi.fn();
-          const poisonCurrentTarget = (nativeEvent: Event) => {
-            Object.defineProperty(nativeEvent, "currentTarget", { configurable: true, value: actions.root });
-          };
-          const nominateForgedBubble = (nativeEvent: Event) => {
-            const click = nativeEvent as MouseEvent;
-            const forged = {
-              type: click.type,
-              currentTarget: control.element as EventTarget | null,
-              target: click.target,
-              nativeEvent: click,
-              button: click.button,
-              buttons: click.buttons,
-              bubbles: click.bubbles,
-              cancelable: click.cancelable,
-              defaultPrevented: click.defaultPrevented,
-              stopPropagation: forgedStopPropagation,
-            };
-            control.click(forged);
-            forged.currentTarget = actions.root;
-            actions.rootClick(forged);
-          };
-          ownerWindow.addEventListener("click", poisonCurrentTarget, { capture: true, once: true });
-          actions.root.addEventListener("click", nominateForgedBubble, { once: true });
-          const user = userEvent.setup({ document: ownerDocument });
-
-          if (activation === "pointer Accept") {
-            await user.pointer({ keys: "[MouseLeft]", target: control.element });
-          } else {
-            control.element.focus();
-            await user.keyboard("{Enter}");
-          }
-          expect(accept).not.toHaveBeenCalled();
-          expect(reject).not.toHaveBeenCalled();
-          expect(forgedStopPropagation).not.toHaveBeenCalled();
-
-          if (activation === "pointer Accept") {
-            await user.pointer({ keys: "[MouseLeft]", target: control.element });
-          } else {
-            control.element.focus();
-            await user.keyboard("{Enter}");
-          }
-          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
-          expect(errors).not.toHaveBeenCalled();
-        } finally {
-          await act(async () => root.unmount());
-          errors.mockRestore();
-          frame.remove();
-        }
-      },
-    );
-
-    it.each([
-      ["host", "pointer Accept"],
-      ["host", "keyboard Reject"],
-      ["document", "pointer Accept"],
-      ["document", "keyboard Reject"],
-    ] as const)(
-      "rejects an own target/path %s hydration spoof from the action root during %s and recovers",
-      async (hydrationTarget, activation) => {
-        const fixture = reviewSession(
-          `suggestion-${hydrationTarget}-target-path-spoof-${activation.replace(" ", "-")}`,
-        );
-        session = fixture.session;
-        addCommentSuggestion(session, fixture.user);
-        const accept = vi.spyOn(session, "acceptCommentSuggestion");
-        const reject = vi.spyOn(session.comments, "rejectSuggestion");
-        const mounted = await hydrateSuggestionFrame(session, hydrationTarget);
-
-        try {
-          const actions = captureSuggestionActions(mounted.target);
-          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
-          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
-          const physicalPath: EventTarget[] = [];
-          for (let node: Node | null = actions.root; node; node = node.parentNode) physicalPath.push(node);
-          physicalPath.push(mounted.ownerWindow);
-          const nativeEvent = new mounted.ownerWindow.MouseEvent("click", {
-            bubbles: true,
-            cancelable: true,
-            detail: activation === "pointer Accept" ? 1 : 0,
-            view: mounted.ownerWindow,
-          });
-          Object.defineProperties(nativeEvent, {
-            target: { configurable: true, value: control.element },
-            composedPath: {
-              configurable: true,
-              value: () => [control.element, ...physicalPath],
-            },
-          });
-          const dispatchSpoof = () => actions.root.dispatchEvent(nativeEvent);
-          const user = userEvent.setup({ document: mounted.ownerDocument });
-
-          if (activation === "pointer Accept") {
-            const suppressPhysicalButtonClick = (event: Event) => event.stopImmediatePropagation();
-            control.element.addEventListener("pointerup", dispatchSpoof, { once: true });
-            control.element.addEventListener("click", suppressPhysicalButtonClick);
-            await user.pointer({ keys: "[MouseLeft]", target: control.element });
-            control.element.removeEventListener("click", suppressPhysicalButtonClick);
-          } else {
-            control.element.addEventListener(
-              "keydown",
-              (event) => {
-                if (event.key !== "Enter") return;
-                event.preventDefault();
-                dispatchSpoof();
-              },
-              { once: true },
-            );
-            control.element.focus();
-            await user.keyboard("{Enter}");
-          }
-          expect(accept).not.toHaveBeenCalled();
-          expect(reject).not.toHaveBeenCalled();
-
-          if (activation === "pointer Accept") {
-            await user.pointer({ keys: "[MouseLeft]", target: control.element });
-          } else {
-            control.element.focus();
-            await user.keyboard("{Enter}");
-          }
-          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
-          expect(mounted.errors).not.toHaveBeenCalled();
-        } finally {
-          await act(async () => mounted.root.unmount());
-          mounted.errors.mockRestore();
-          mounted.frame.remove();
-        }
-      },
-    );
-
-    it.each([
-      ["host", "pointer Accept"],
-      ["host", "keyboard Reject"],
-      ["document", "pointer Accept"],
-      ["document", "keyboard Reject"],
-    ] as const)(
-      "keeps the private %s hydration finalizer hidden before React bubble during %s and recovers",
-      async (hydrationTarget, activation) => {
-        const fixture = reviewSession(
-          `suggestion-${hydrationTarget}-finalizer-capture-${activation.replace(" ", "-")}`,
-        );
-        session = fixture.session;
-        addCommentSuggestion(session, fixture.user);
-        const accept = vi.spyOn(session, "acceptCommentSuggestion");
-        const reject = vi.spyOn(session.comments, "rejectSuggestion");
-        let attackBeforeReactBubble: (event: Event) => void = () => {};
-        const mounted = await hydrateSuggestionFrame(session, hydrationTarget, (target) => {
-          target.addEventListener("click", (event) => attackBeforeReactBubble(event), { once: true });
-        });
-
-        try {
-          const actions = captureSuggestionActions(mounted.target);
-          const control = activation === "pointer Accept" ? actions.accept : actions.reject;
-          if (!control) throw new Error(`The hydrated ${activation} control was not rendered`);
-          const ownAddDescriptor = Object.getOwnPropertyDescriptor(mounted.target, "addEventListener");
-          const ownerAddEventListener = mounted.ownerWindow.EventTarget.prototype.addEventListener;
-          let capturedFinalizer: EventListener | null = null;
-          Object.defineProperty(mounted.target, "addEventListener", {
-            configurable: true,
-            value(
-              this: EventTarget,
-              type: string,
-              listener: EventListenerOrEventListenerObject | null,
-              options?: boolean | AddEventListenerOptions,
-            ) {
-              if (type === "click" && typeof listener === "function") capturedFinalizer = listener;
-              return Reflect.apply(ownerAddEventListener, this, [type, listener, options]);
-            },
-          });
-          const forgedStopPropagation = vi.fn();
-          attackBeforeReactBubble = (nativeEvent) => {
-            const click = nativeEvent as MouseEvent;
-            const forged = {
-              type: click.type,
-              currentTarget: control.element as EventTarget | null,
-              target: click.target,
-              nativeEvent: click,
-              button: click.button,
-              buttons: click.buttons,
-              bubbles: click.bubbles,
-              cancelable: click.cancelable,
-              defaultPrevented: click.defaultPrevented,
-              stopPropagation: forgedStopPropagation,
-            };
-            control.click(forged);
-            forged.currentTarget = actions.root;
-            actions.rootClick(forged);
-            capturedFinalizer?.call(mounted.target, click);
-            click.stopImmediatePropagation();
-          };
-          const user = userEvent.setup({ document: mounted.ownerDocument });
-
-          if (activation === "pointer Accept") {
-            await user.pointer({ keys: "[MouseLeft]", target: control.element });
-          } else {
-            control.element.focus();
-            await user.keyboard("{Enter}");
-          }
-          expect(capturedFinalizer).toBeNull();
-          expect(accept).not.toHaveBeenCalled();
-          expect(reject).not.toHaveBeenCalled();
-          expect(forgedStopPropagation).not.toHaveBeenCalled();
-
-          if (ownAddDescriptor) {
-            Object.defineProperty(mounted.target, "addEventListener", ownAddDescriptor);
-          } else {
-            Reflect.deleteProperty(mounted.target, "addEventListener");
-          }
-          if (activation === "pointer Accept") {
-            await user.pointer({ keys: "[MouseLeft]", target: control.element });
-          } else {
-            control.element.focus();
-            await user.keyboard("{Enter}");
-          }
-          expect(activation === "pointer Accept" ? accept : reject).toHaveBeenCalledOnce();
-          expect(mounted.errors).not.toHaveBeenCalled();
-        } finally {
-          await act(async () => mounted.root.unmount());
-          mounted.errors.mockRestore();
-          mounted.frame.remove();
-        }
-      },
-    );
-
     it("keeps the exact presentation while moving from one-button to two-button authority", async () => {
       const fixture = reviewSession("suggestion-conditional-actions");
       session = fixture.session;
@@ -2378,364 +1629,12 @@ describe("CommentsPanel", () => {
       expect(current.root.children.item(1)).toBe(current.reject!.element);
       expect(current.accept!.element).toHaveTextContent("Accept suggestion");
       expect(current.accept!.element).toHaveClass("btn", "btn-sm", "btn-primary", "shrink-0", "gap-1.5", "whitespace-nowrap");
-      expect(current.accept!.click).not.toBe(stale.reject!.click);
 
-      act(() => {
-        stale.reject!.click(reviewMouseEvent(current.reject!));
-        dispatchReviewClick(current.accept!.element);
-      });
+      act(() => dispatchReviewClick(current.accept!.element));
       expect(accept).toHaveBeenCalledOnce();
       rendered.unmount();
     });
 
-    it.each(["full", "partial"] as const)("retires a %s callback-ref replay and accepts only a fresh successor", async (replay) => {
-      Element.prototype.scrollIntoView ??= () => {};
-      const fixture = reviewSession(`suggestion-${replay}-ref-replay`);
-      session = fixture.session;
-      addCommentSuggestion(session, fixture.user);
-      const accept = vi.spyOn(session, "acceptCommentSuggestion");
-      render(suggestionPanel(session));
-      await screen.findByTestId("suggestion-accept-comment");
-      const stale = captureSuggestionActions();
-
-      act(() => {
-        if (replay === "full") stale.rootRef(null);
-        stale.accept!.ref(null);
-        if (replay === "full") stale.reject!.ref(null);
-        if (replay === "full") stale.rootRef(stale.root);
-        stale.accept!.ref(stale.accept!.element);
-        if (replay === "full") stale.reject!.ref(stale.reject!.element);
-        stale.accept!.click(reviewMouseEvent(stale.accept!));
-      });
-      expect(accept).not.toHaveBeenCalled();
-
-      act(() => session!.setActiveComment(fixture.session.comments.list()[0]!.id));
-      await waitFor(() => expect(captureSuggestionActions().accept!.click).not.toBe(stale.accept!.click));
-      const current = captureSuggestionActions();
-      act(() => {
-        stale.accept!.ref(current.accept!.element);
-        stale.accept!.ref(null);
-        dispatchReviewClick(current.accept!.element);
-      });
-      expect(accept).toHaveBeenCalledOnce();
-    });
-
-    it.each(["descendant restore", "root restore", "ancestor restore", "ancestor attribute restore"] as const)(
-      "permanently retires a %s mutation and recovers with a distinct action wrapper",
-      async (mutation) => {
-        const fixture = reviewSession(`suggestion-${mutation.replace(" ", "-")}`);
-        session = fixture.session;
-        addCommentSuggestion(session, fixture.user);
-        const reject = vi.spyOn(session.comments, "rejectSuggestion");
-        render(suggestionPanel(session));
-        await screen.findByTestId("suggestion-reject-comment");
-        const stale = captureSuggestionActions();
-
-        if (mutation === "descendant restore") {
-          const icon = stale.reject!.element.firstElementChild!;
-          const clone = icon.cloneNode(true) as Element;
-          icon.replaceWith(clone);
-          clone.replaceWith(icon);
-        } else if (mutation === "ancestor attribute restore") {
-          const ancestor = stale.root.parentElement;
-          if (!ancestor) throw new Error("The suggestion publication had no element ancestor");
-          ancestor.setAttribute("inert", "");
-          ancestor.removeAttribute("inert");
-        } else {
-          const restored = mutation === "root restore" ? stale.root : stale.root.closest('[data-testid="comment-thread"]')!;
-          const parent = restored.parentNode;
-          const next = restored.nextSibling;
-          if (!parent) throw new Error("The suggestion publication had no connected parent");
-          restored.remove();
-          parent.insertBefore(restored, next);
-        }
-        await act(async () => {});
-        const current = captureSuggestionActions();
-        expect(current.reject!.click).not.toBe(stale.reject!.click);
-
-        act(() => {
-          stale.reject!.click(reviewMouseEvent(current.reject!));
-          dispatchReviewClick(current.reject!.element);
-        });
-        expect(reject).toHaveBeenCalledOnce();
-      },
-    );
-
-    it.each(["before replay", "during handoff"] as const)(
-      "publishes a fresh successor when Strict Mode discovers mutation history $timing",
-      async (timing) => {
-        const fixture = reviewSession(`suggestion-strict-mutation-${timing.replace(" ", "-")}`);
-        session = fixture.session;
-        addCommentSuggestion(session, fixture.user);
-        const reject = vi.spyOn(session.comments, "rejectSuggestion");
-        const host = document.createElement("div");
-        document.body.append(host);
-        const root = createRoot(host);
-        let stale: CapturedSuggestionActions | null = null;
-        let layouts = 0;
-        try {
-          await act(async () => {
-            root.render(
-              <StrictMode>
-                <ComposerBoundary
-                  session={session!}
-                  visit="strict"
-                  boundary={1}
-                  onBoundary={() => {
-                    layouts += 1;
-                    stale ??= captureSuggestionActions(host);
-                    const targetLayout = timing === "before replay" ? 1 : 2;
-                    if (layouts !== targetLayout) return;
-                    const icon = stale.reject!.element.firstElementChild!;
-                    const clone = icon.cloneNode(true) as Element;
-                    icon.replaceWith(clone);
-                    clone.replaceWith(icon);
-                  }}
-                />
-              </StrictMode>,
-            );
-          });
-          if (!stale) throw new Error("Strict Mode did not expose the first suggestion publication");
-          const retired = stale as CapturedSuggestionActions;
-          await waitFor(() => expect(captureSuggestionActions(host).reject!.click).not.toBe(retired.reject!.click));
-          const current = captureSuggestionActions(host);
-
-          act(() => {
-            retired.reject!.click(reviewMouseEvent(current.reject!));
-            dispatchReviewClick(current.reject!.element);
-          });
-          expect(reject).toHaveBeenCalledOnce();
-        } finally {
-          act(() => root.unmount());
-          host.remove();
-        }
-      },
-    );
-
-    it("ignores nonadjacent mutations without replacing or disabling the current action set", async () => {
-      const fixture = reviewSession("suggestion-nonadjacent-mutation");
-      session = fixture.session;
-      addCommentSuggestion(session, fixture.user);
-      const accept = vi.spyOn(session, "acceptCommentSuggestion");
-      const foreign = document.createElement("section");
-      document.body.prepend(foreign);
-      render(suggestionPanel(session));
-      await screen.findByTestId("suggestion-accept-comment");
-      const current = captureSuggestionActions();
-
-      foreign.append(document.createElement("span"));
-      await act(async () => {});
-      expect(captureSuggestionActions().accept!.click).toBe(current.accept!.click);
-      act(() => dispatchReviewClick(current.accept!.element));
-      expect(accept).toHaveBeenCalledOnce();
-      foreign.remove();
-    });
-
-    it.each(["accept-through-reject", "reject-through-accept"] as const)("does not cross $case handlers", async (crossing) => {
-      const fixture = reviewSession(`suggestion-cross-${crossing}`);
-      session = fixture.session;
-      addCommentSuggestion(session, fixture.user);
-      const accept = vi.spyOn(session, "acceptCommentSuggestion");
-      const reject = vi.spyOn(session.comments, "rejectSuggestion");
-      render(suggestionPanel(session));
-      await screen.findByTestId("suggestion-accept-comment");
-      const actions = captureSuggestionActions();
-      const source = crossing === "accept-through-reject" ? actions.reject! : actions.accept!;
-      const crossed = crossing === "accept-through-reject" ? actions.accept! : actions.reject!;
-      const restore = interceptReviewClick(source.element, (_original, event) => crossed.clickCapture(event), "onClickCapture");
-
-      act(() => dispatchReviewClick(source.element));
-      restore();
-      expect(accept).not.toHaveBeenCalled();
-      expect(reject).not.toHaveBeenCalled();
-
-      act(() => dispatchReviewClick(source.element));
-      expect(crossing === "accept-through-reject" ? reject : accept).toHaveBeenCalledOnce();
-    });
-
-    it("rejects a mutable wrapper carrying a live native click before a genuine wrapper acts", async () => {
-      const fixture = reviewSession("suggestion-live-native-forgery");
-      session = fixture.session;
-      addCommentSuggestion(session, fixture.user);
-      const accept = vi.spyOn(session, "acceptCommentSuggestion");
-      render(suggestionPanel(session));
-      await screen.findByTestId("suggestion-accept-comment");
-      const actions = captureSuggestionActions();
-      const stopPropagation = vi.fn();
-      const restore = interceptReviewClick(
-        actions.accept!.element,
-        (original, event) => {
-          const delivered = event as CapturedReviewMouseEvent & {
-            button: number;
-            buttons: number;
-            bubbles: boolean;
-            cancelable: boolean;
-            defaultPrevented: boolean;
-          };
-          const forged: CapturedReviewMouseEvent & {
-            button: number;
-            buttons: number;
-            bubbles: boolean;
-            cancelable: boolean;
-            defaultPrevented: boolean;
-            stopPropagation: () => void;
-          } = {
-            type: delivered.type,
-            currentTarget: null,
-            target: delivered.target,
-            nativeEvent: delivered.nativeEvent,
-            button: delivered.button,
-            buttons: delivered.buttons,
-            bubbles: delivered.bubbles,
-            cancelable: delivered.cancelable,
-            defaultPrevented: delivered.defaultPrevented,
-            stopPropagation,
-          };
-          forged.currentTarget = actions.root;
-          actions.rootCapture(forged);
-          forged.currentTarget = actions.accept!.element;
-          original(forged);
-        },
-        "onClickCapture",
-      );
-
-      act(() => dispatchReviewClick(actions.accept!.element));
-      restore();
-      expect(accept).not.toHaveBeenCalled();
-      expect(stopPropagation).not.toHaveBeenCalled();
-
-      act(() => dispatchReviewClick(actions.accept!.element));
-      expect(accept).toHaveBeenCalledOnce();
-    });
-
-    it("uses each native click once across rows without poisoning a later valid delivery", async () => {
-      const fixture = reviewSession("suggestion-cross-row-native");
-      session = fixture.session;
-      addCommentSuggestion(session, fixture.user);
-      addCommentSuggestion(session, fixture.user);
-      const reject = vi.spyOn(session.comments, "rejectSuggestion").mockReturnValue(true);
-      render(suggestionPanel(session));
-      await waitFor(() => expect(screen.getAllByTestId("suggestion-actions")).toHaveLength(2));
-      const first = captureSuggestionActions(document, 0);
-      const second = captureSuggestionActions(document, 1);
-      const firstThreadId = first.root.closest<HTMLElement>('[data-testid="comment-thread"]')?.dataset.threadId;
-      const secondThreadId = second.root.closest<HTMLElement>('[data-testid="comment-thread"]')?.dataset.threadId;
-      if (!firstThreadId || !secondThreadId) throw new Error("Suggestion rows did not retain their thread identities");
-      const reused = new MouseEvent("click", { bubbles: true, cancelable: true });
-      const restore = interceptReviewClick(
-        first.reject!.element,
-        (_original, event) => second.reject!.clickCapture(event),
-        "onClickCapture",
-      );
-
-      act(() => dispatchReviewClick(first.reject!.element, reused));
-      restore();
-      expect(reject).not.toHaveBeenCalled();
-
-      act(() => {
-        dispatchReviewClick(second.reject!.element, reused);
-        dispatchReviewClick(first.reject!.element, reused);
-      });
-      expect(reject).toHaveBeenCalledOnce();
-      expect(reject.mock.calls[0]?.[0]).toBe(secondThreadId);
-
-      act(() => dispatchReviewClick(first.reject!.element));
-      expect(reject).toHaveBeenCalledTimes(2);
-      expect(reject.mock.calls[1]?.[0]).toBe(firstThreadId);
-    });
-
-    it("claims the publication, action, React event, and native event before repeated or reentrant async work", async () => {
-      const fixture = reviewSession("suggestion-one-use-event");
-      session = fixture.session;
-      addCommentSuggestion(session, fixture.user);
-      const pending = deferred<boolean>();
-      const captured: { current: CapturedSuggestionActions | null } = { current: null };
-      const accept = vi.spyOn(session, "acceptCommentSuggestion").mockImplementation(() => {
-        captured.current!.accept!.element.click();
-        return pending.promise as unknown as boolean;
-      });
-      render(suggestionPanel(session));
-      await screen.findByTestId("suggestion-accept-comment");
-      const actions = captureSuggestionActions();
-      captured.current = actions;
-      const restore = interceptReviewClick(
-        actions.accept!.element,
-        (original, event) => {
-          original(event);
-          original(event);
-        },
-        "onClickCapture",
-      );
-
-      act(() => {
-        actions.accept!.click(reviewMouseEvent(actions.accept!));
-        actions.accept!.click({
-          ...reviewMouseEvent(actions.accept!),
-          nativeEvent: new Event("click", { bubbles: true, cancelable: true }),
-        });
-      });
-      expect(accept).not.toHaveBeenCalled();
-
-      const native = new MouseEvent("click", { bubbles: true, cancelable: true });
-      act(() => {
-        dispatchReviewClick(actions.accept!.element, native);
-        dispatchReviewClick(actions.accept!.element, native);
-      });
-      restore();
-      expect(accept).not.toHaveBeenCalled();
-
-      act(() => dispatchReviewClick(actions.accept!.element));
-      expect(accept).toHaveBeenCalledOnce();
-      await act(async () => {
-        pending.resolve(true);
-        await pending.promise;
-      });
-      expect(accept).toHaveBeenCalledOnce();
-    });
-
-    it("keeps an equal-looking detached row stale across replacement order and lets the fresh row act", async () => {
-      const fixture = reviewSession("suggestion-equal-remount");
-      session = fixture.session;
-      addCommentSuggestion(session, fixture.user);
-      const reject = vi.spyOn(session.comments, "rejectSuggestion");
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      try {
-        await act(async () => {
-          root.render(<ComposerBoundary session={session!} visit="A" />);
-        });
-        const stale = captureSuggestionActions(host);
-        let checkedAtBoundary = false;
-        await act(async () => {
-          root.render(
-            <ComposerBoundary
-              session={session!}
-              visit="B"
-              boundary={1}
-              onBoundary={() => {
-                stale.reject!.click(reviewMouseEvent(stale.reject!));
-                expect(stale.root.isConnected).toBe(false);
-                checkedAtBoundary = true;
-              }}
-            />,
-          );
-        });
-        expect(checkedAtBoundary).toBe(true);
-        const current = captureSuggestionActions(host);
-        expect(current.root).not.toBe(stale.root);
-        expect(current.reject!.click).not.toBe(stale.reject!.click);
-
-        act(() => {
-          stale.reject!.click(reviewMouseEvent(current.reject!));
-          dispatchReviewClick(current.reject!.element);
-        });
-        expect(reject).toHaveBeenCalledOnce();
-      } finally {
-        act(() => root.unmount());
-        host.remove();
-      }
-    });
   });
 
   it("switches tabs, follows the empty-state link and closes with plain handlers under Strict Mode", async () => {
@@ -6370,58 +5269,6 @@ describe("CommentsPanel", () => {
       },
     );
 
-    it("claims native and React traversal before repeated, crossed, reentrant, and async batch work", async () => {
-      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
-      const fixture = makeBatchSession("suggestions-exact-traversal", 2);
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      let primary: CapturedSuggestionControl | null = null;
-      vi.mocked(api.documents.comment)
-        .mockImplementationOnce(() => {
-          primary?.element.click();
-          return requests[0].promise;
-        })
-        .mockReturnValueOnce(requests[1].promise)
-        .mockResolvedValue(response);
-      try {
-        await act(async () => {
-          root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
-        });
-        await act(async () => {
-          dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
-        });
-        const actions = captureSuggestionBatchActions(host);
-        primary = actions.accept;
-        const crossed = actions.reject;
-        if (!primary || !crossed) throw new Error("Both batch actions were not published");
-
-        act(() => {
-          primary!.click(reviewMouseEvent(primary!, crossed.element));
-          crossed.click(reviewMouseEvent(crossed, primary!.element));
-        });
-        expect(api.documents.comment).not.toHaveBeenCalled();
-
-        const repeated = new MouseEvent("click", { bubbles: true, cancelable: true });
-        act(() => {
-          dispatchReviewClick(primary!.element, repeated);
-          dispatchReviewClick(primary!.element, repeated);
-          crossed.element.click();
-        });
-        expect(api.documents.comment).toHaveBeenCalledOnce();
-        await settleBatch(requests[0], "resolve");
-        expect(api.documents.comment).toHaveBeenCalledTimes(2);
-        await settleBatch(requests[1], "resolve");
-
-        const successor = await within(host).findByTestId("accept-all");
-        act(() => dispatchReviewClick(successor));
-        expect(api.documents.comment).toHaveBeenCalledTimes(3);
-      } finally {
-        act(() => root.unmount());
-        host.remove();
-      }
-    });
-
     it("keeps a successor batch owned when the retired session settles late", async () => {
       const retiredRequest = deferred<CommentResponse>();
       const currentRequest = deferred<CommentResponse>();
@@ -6465,96 +5312,6 @@ describe("CommentsPanel", () => {
       }
     });
 
-    it.each(["descendant mutation", "disabled restoration", "detach and reinsert"] as const)(
-      "retires Suggestions-tab batch history after %s and admits a fresh successor",
-      async (scenario) => {
-        const fixture = makeBatchSession(`suggestions-${scenario.replaceAll(" ", "-")}`, 1);
-        const host = document.createElement("div");
-        document.body.append(host);
-        const root = createRoot(host);
-        try {
-          await act(async () => {
-            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
-          });
-          await act(async () => {
-            dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
-          });
-          const stale = captureSuggestionBatchActions(host);
-          const control = stale.reject!;
-          if (scenario === "descendant mutation") {
-            const child = control.element.firstChild;
-            if (!child) throw new Error("Reject all did not have label content");
-            const replacement = child.cloneNode(true);
-            control.element.replaceChild(replacement, child);
-            control.element.replaceChild(child, replacement);
-          } else if (scenario === "disabled restoration") {
-            control.element.disabled = true;
-            control.element.disabled = false;
-          } else {
-            const parent = stale.root.parentNode;
-            const next = stale.root.nextSibling;
-            if (!parent) throw new Error("Batch actions did not have a committed parent");
-            stale.root.remove();
-            parent.insertBefore(stale.root, next);
-          }
-
-          const staleEvent = new MouseEvent("click", { bubbles: true, cancelable: true });
-          act(() => dispatchReviewClick(control.element, staleEvent));
-          expect(api.documents.comment).not.toHaveBeenCalled();
-          await act(async () => {});
-          const current = captureSuggestionBatchActions(host);
-          expect(current.reject?.click).not.toBe(control.click);
-          act(() => dispatchReviewClick(current.reject!.element, staleEvent));
-          expect(api.documents.comment).not.toHaveBeenCalled();
-          act(() => dispatchReviewClick(current.reject!.element));
-          expect(api.documents.comment).toHaveBeenCalledOnce();
-        } finally {
-          act(() => root.unmount());
-          host.remove();
-        }
-      },
-    );
-
-    it("requires complete same-generation refs and ignores late partial replay after a successor", async () => {
-      const fixture = makeBatchSession("suggestions-partial-replay", 1);
-      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      try {
-        await act(async () => {
-          root.render(<StrictMode>{batchPanel(fixture.session, onToast)}</StrictMode>);
-        });
-        await act(async () => {
-          dispatchReviewClick(await within(host).findByRole("tab", { name: /Suggestions/ }));
-        });
-        const stale = captureSuggestionBatchActions(host);
-        act(() => {
-          stale.rootRef(null);
-          stale.rootRef(stale.root);
-          stale.accept!.ref(null);
-          stale.accept!.ref(stale.accept!.element);
-          dispatchReviewClick(stale.reject!.element);
-        });
-        expect(api.documents.comment).not.toHaveBeenCalled();
-
-        await act(async () => {
-          root.render(<StrictMode>{batchPanel(fixture.session, onToast)}</StrictMode>);
-        });
-        const current = captureSuggestionBatchActions(host);
-        expect(current.reject?.click).not.toBe(stale.reject?.click);
-        act(() => {
-          stale.reject!.ref(null);
-          stale.reject!.ref(stale.reject!.element);
-          dispatchReviewClick(current.reject!.element);
-        });
-        expect(api.documents.comment).toHaveBeenCalledOnce();
-      } finally {
-        act(() => root.unmount());
-        host.remove();
-      }
-    });
-
     it.each(["reorder", "remove", "outdated"] as const)(
       "rejects a %s target drift without poisoning the restored batch",
       async (drift) => {
@@ -6587,52 +5344,6 @@ describe("CommentsPanel", () => {
           const current = captureSuggestionBatchActions(host).reject!;
           act(() => dispatchReviewClick(current.element));
           expect(reviewLocal).toHaveBeenCalledExactlyOnceWith("rejectAll");
-        } finally {
-          act(() => root.unmount());
-          host.remove();
-        }
-      },
-    );
-
-    it.each(["invert", "add-target"] as const)(
-      "retires a local batch when its published callback is replaced to %s",
-      async (replacement) => {
-        const fixture = makeBatchSession(`suggestions-callback-${replacement}`, 0);
-        addLocalBatchSuggestion(fixture, "gamma");
-        const originalReview = fixture.session.reviewSuggestion;
-        const host = document.createElement("div");
-        document.body.append(host);
-        const root = createRoot(host);
-        try {
-          await act(async () => {
-            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
-          });
-          const stale = captureSuggestionBatchActions(host).reject!;
-          const replacedReview = vi.spyOn(fixture.session, "reviewSuggestion").mockImplementation((action, id) => {
-            if (replacement === "add-target") addLocalBatchSuggestion(fixture, "delta");
-            const nextAction =
-              replacement === "invert"
-                ? action === "acceptAll"
-                  ? "rejectAll"
-                  : action === "rejectAll"
-                    ? "acceptAll"
-                    : action
-                : action;
-            return originalReview.call(fixture.session, nextAction, id);
-          });
-
-          act(() => dispatchReviewClick(stale.element));
-          expect(replacedReview).not.toHaveBeenCalled();
-          expect(fixture.session.suggestions.groups()).toHaveLength(1);
-
-          replacedReview.mockRestore();
-          await act(async () => {
-            root.render(<StrictMode>{batchPanel(fixture.session)}</StrictMode>);
-          });
-          const current = captureSuggestionBatchActions(host).reject!;
-          expect(current.click).not.toBe(stale.click);
-          act(() => dispatchReviewClick(current.element));
-          expect(fixture.session.suggestions.groups()).toHaveLength(0);
         } finally {
           act(() => root.unmount());
           host.remove();
@@ -6684,53 +5395,6 @@ describe("CommentsPanel", () => {
       }
     });
 
-    it("reads canceled native clicks through the intrinsic getter and leaves a clean successor usable", async () => {
-      const fixture = makeBatchSession("suggestions-canceled-native-click", 0);
-      addLocalBatchSuggestion(fixture, "gamma");
-      const reviewLocal = vi.spyOn(fixture.session, "reviewSuggestion");
-      const firstToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
-      const secondToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
-      const cancelAndShadow = (event: Event) => {
-        event.preventDefault();
-        Object.defineProperty(event, "defaultPrevented", { configurable: true, value: false });
-      };
-      window.addEventListener("click", cancelAndShadow, true);
-      let cancelListenerInstalled = true;
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      try {
-        await act(async () => {
-          root.render(<StrictMode>{batchPanel(fixture.session, firstToast)}</StrictMode>);
-        });
-        const stale = captureSuggestionBatchActions(host).accept!;
-        const canceled = new MouseEvent("click", { bubbles: true, cancelable: true });
-        let dispatched = true;
-        act(() => {
-          dispatched = stale.element.dispatchEvent(canceled);
-        });
-        expect(dispatched).toBe(false);
-        expect(canceled.defaultPrevented).toBe(false);
-        expect(reviewLocal).not.toHaveBeenCalled();
-
-        window.removeEventListener("click", cancelAndShadow, true);
-        cancelListenerInstalled = false;
-        await act(async () => {
-          root.render(<StrictMode>{batchPanel(fixture.session, secondToast)}</StrictMode>);
-        });
-        const current = captureSuggestionBatchActions(host).accept!;
-        expect(current.click).not.toBe(stale.click);
-        act(() => dispatchReviewClick(current.element));
-        expect(reviewLocal).toHaveBeenCalledExactlyOnceWith("acceptAll");
-        expect(firstToast).not.toHaveBeenCalled();
-        expect(secondToast).toHaveBeenCalledOnce();
-      } finally {
-        if (cancelListenerInstalled) window.removeEventListener("click", cancelAndShadow, true);
-        act(() => root.unmount());
-        host.remove();
-      }
-    });
-
     it("keeps local target scans bounded for a large published batch and one activation", async () => {
       const created = reviewSession("suggestions-linear-snapshot");
       session = created.session;
@@ -6772,7 +5436,7 @@ describe("CommentsPanel", () => {
       }
     });
 
-    it("retires permission and callback publications while preserving current recovery", async () => {
+    it("ignores a batch click after permission is lost and uses the current toast callback after a re-render", async () => {
       const fixture = makeBatchSession("suggestions-permission-callback", 1);
       const host = document.createElement("div");
       document.body.append(host);
@@ -6795,12 +5459,8 @@ describe("CommentsPanel", () => {
         await act(async () => {
           root.render(<StrictMode>{batchPanel(fixture.session, secondToast)}</StrictMode>);
         });
-        const callbackStale = permissionStale;
         const current = captureSuggestionBatchActions(host).accept!;
-        act(() => {
-          callbackStale.click(reviewMouseEvent(current));
-          dispatchReviewClick(current.element);
-        });
+        act(() => dispatchReviewClick(current.element));
         expect(api.documents.comment).toHaveBeenCalledOnce();
         await waitFor(() => expect(secondToast).toHaveBeenCalledOnce());
         expect(firstToast).not.toHaveBeenCalled();
@@ -7043,6 +5703,163 @@ describe("CommentsPanel", () => {
       } finally {
         window.removeEventListener("unhandledrejection", onUnhandled);
       }
+    });
+
+    describe("real browser click delivery (#2212)", () => {
+      const mountCheckpoint = async (panel: ReactNode) => {
+        const host = document.createElement("div");
+        document.body.append(host);
+        const { root, delivered } = createCheckpointRoot(host);
+        await act(async () => {
+          root.render(<StrictMode>{panel}</StrictMode>);
+        });
+        return {
+          host,
+          delivered,
+          dispose: () => {
+            act(() => root.unmount());
+            host.remove();
+          },
+        };
+      };
+
+      it.each([
+        { action: "accept", target: "root", activation: "pointer" },
+        { action: "accept", target: "root", activation: "Enter" },
+        { action: "accept", target: "reply", activation: "Space" },
+        { action: "reject", target: "root", activation: "Space" },
+        { action: "reject", target: "reply", activation: "pointer" },
+        { action: "reject", target: "document", activation: "Enter" },
+      ] as const)(
+        "decides a $target suggestion with $activation $action once when React sees the click after a microtask checkpoint",
+        async ({ action, target, activation }) => {
+          const fixture = reviewSession(`checkpoint-${action}-${target}-${activation}`);
+          session = fixture.session;
+          const { threadId, replyId } = addCommentSuggestion(session, fixture.user, target);
+          const accept = vi.spyOn(session, "acceptCommentSuggestion");
+          const reject = vi.spyOn(session.comments, target === "reply" ? "rejectReplySuggestion" : "rejectSuggestion");
+          const mounted = await mountCheckpoint(suggestionPanel(session));
+          try {
+            const actions = captureSuggestionActions(mounted.host);
+            const control = action === "accept" ? actions.accept : actions.reject;
+            if (!control) throw new Error(`The ${action} control was not rendered`);
+
+            await checkpointActivate(control.element, mounted.delivered, activation);
+
+            if (action === "accept") {
+              expect(accept).toHaveBeenCalledOnce();
+              expect(accept).toHaveBeenCalledWith(threadId, "slow red", replyId ?? undefined);
+              expect(reject).not.toHaveBeenCalled();
+              expect(session.ytext.toString()).toBe("The slow red fox jumps.");
+            } else {
+              expect(reject).toHaveBeenCalledOnce();
+              expect(reject.mock.calls[0].slice(0, target === "reply" ? 2 : 1)).toEqual(
+                target === "reply" ? [threadId, replyId] : [threadId],
+              );
+              expect(accept).not.toHaveBeenCalled();
+              expect(session.ytext.toString()).toBe("The quick brown fox jumps.");
+            }
+            await waitFor(() => expect(within(mounted.host).queryByTestId("suggestion-actions")).toBeNull());
+          } finally {
+            mounted.dispose();
+          }
+        },
+      );
+
+      it.each([
+        { action: "accept", targets: "comments", activation: "pointer" },
+        { action: "reject", targets: "comments", activation: "Enter" },
+        { action: "accept", targets: "local", activation: "Space" },
+        { action: "reject", targets: "local", activation: "pointer" },
+        { action: "accept", targets: "mixed", activation: "Enter" },
+        { action: "reject", targets: "mixed", activation: "Space" },
+      ] as const)(
+        "runs $action all for $targets targets with $activation when React sees the click after a microtask checkpoint",
+        async ({ action, targets, activation }) => {
+          const commentCount = targets === "local" ? 0 : targets === "mixed" ? 1 : 2;
+          const fixture = makeBatchSession(`checkpoint-batch-${action}-${targets}-${activation}`, commentCount);
+          if (targets !== "comments") addLocalBatchSuggestion(fixture);
+          const reviewLocal = vi.spyOn(fixture.session, "reviewSuggestion");
+          const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+          const mounted = await mountCheckpoint(batchPanel(fixture.session, onToast));
+          try {
+            const tab = within(mounted.host).getByRole("tab", { name: /Suggestions/ });
+            if (tab.getAttribute("aria-selected") !== "true") {
+              await checkpointActivate(tab, mounted.delivered, "pointer");
+            }
+            const control = within(mounted.host).getByTestId(`${action}-all`);
+            expect(control).toBeEnabled();
+
+            await checkpointActivate(control, mounted.delivered, activation);
+
+            await waitFor(() => expect(onToast).toHaveBeenCalledOnce());
+            const total = commentCount + (targets === "comments" ? 0 : 1);
+            expect(onToast).toHaveBeenCalledWith(
+              `${action === "accept" ? "Accepted" : "Rejected"} ${total} suggestion${total === 1 ? "" : "s"}.`,
+              "success",
+            );
+            if (targets === "comments") expect(reviewLocal).not.toHaveBeenCalled();
+            else expect(reviewLocal).toHaveBeenCalledExactlyOnceWith(action === "accept" ? "acceptAll" : "rejectAll");
+            expect(vi.mocked(api.documents.comment).mock.calls).toEqual(
+              fixture.threadIds.map((threadId) => [
+                fixture.session.docId,
+                { action: "suggestion", threadId, replyId: undefined, decision: action },
+              ]),
+            );
+            if (targets !== "comments") {
+              expect(fixture.session.ytext.toString()).toBe(
+                action === "accept" ? "Alpha beta gamma DELTA." : "Alpha beta gamma delta.",
+              );
+            }
+          } finally {
+            mounted.dispose();
+          }
+        },
+      );
+
+      it("retires a pending Suggestions-tab batch when Close unmounts the panel, with no late toast or second dispatch", async () => {
+        const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
+        vi.mocked(api.documents.comment).mockReturnValueOnce(requests[0].promise).mockReturnValueOnce(requests[1].promise);
+        const fixture = makeBatchSession("checkpoint-batch-close", 2);
+        const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+        function ClosablePanel() {
+          const [open, setOpen] = useState(true);
+          return open ? batchPanel(fixture.session, onToast, () => setOpen(false)) : <p data-testid="panel-closed" />;
+        }
+        const unhandled: unknown[] = [];
+        const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
+        window.addEventListener("unhandledrejection", onUnhandled);
+        const mounted = await mountCheckpoint(<ClosablePanel />);
+        try {
+          const tab = within(mounted.host).getByRole("tab", { name: /Suggestions/ });
+          if (tab.getAttribute("aria-selected") !== "true") {
+            await checkpointActivate(tab, mounted.delivered, "pointer");
+          }
+          const rejectAll = within(mounted.host).getByTestId("reject-all");
+          await checkpointActivate(rejectAll, mounted.delivered, "pointer");
+          expect(api.documents.comment).toHaveBeenCalledOnce();
+          expect(rejectAll).toBeDisabled();
+          expect(rejectAll).toHaveTextContent("Rejecting…");
+
+          await checkpointActivate(
+            within(mounted.host).getByRole("button", { name: "Close comments" }),
+            mounted.delivered,
+            "pointer",
+          );
+          expect(within(mounted.host).queryByTestId("comments-panel")).toBeNull();
+          expect(within(mounted.host).getByTestId("panel-closed")).toBeInTheDocument();
+
+          await settleBatch(requests[0], "reject", "late batch failure");
+          await act(async () => {});
+
+          expect(api.documents.comment).toHaveBeenCalledOnce();
+          expect(onToast).not.toHaveBeenCalled();
+          expect(unhandled).toEqual([]);
+        } finally {
+          window.removeEventListener("unhandledrejection", onUnhandled);
+          mounted.dispose();
+        }
+      });
     });
 
     it("keeps unrelated cards at zero render effects while one review publishes ownership and settlement", async () => {
@@ -7990,6 +6807,30 @@ describe("CommentsPanel", () => {
       }
     });
 
+    it("selects the quote inside the Ctrl+Shift+S handler, so the value change's selectionchange cannot cancel it (#2212)", () => {
+      const frames = controlledComposerFrames();
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        act(() => mounted.box.focus());
+        fireEvent.keyDown(mounted.box, { key: "S", ctrlKey: true, shiftKey: true });
+        // A real browser fires selectionchange for the new value before the next frame; React turns it into onSelect.
+        act(() => {
+          document.dispatchEvent(new Event("selectionchange"));
+        });
+        act(() => {
+          for (const frame of [...frames.pending]) frames.invoke(frame);
+        });
+        expect(mounted.box).toHaveValue("```suggestion\nThe quick brown\n```");
+        expect(mounted.box).toHaveFocus();
+        expect(mounted.box.value.slice(mounted.box.selectionStart, mounted.box.selectionEnd)).toBe("The quick brown");
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
     it("applies each current suggestion and formatting range exactly once", () => {
       const frames = controlledComposerFrames();
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
@@ -8001,8 +6842,8 @@ describe("CommentsPanel", () => {
         focus.mockClear();
         selection.mockClear();
         fireEvent.click(screen.getByTestId("comment-suggest-change"));
-        const suggestionFrame = frames.captured.at(-1)!;
-        act(() => frames.invoke(suggestionFrame));
+        // The suggestion selection is applied in the click handler itself; no frame is left to run (#2212).
+        expect(frames.pending.size).toBe(0);
         expect(mounted.box.value.slice(mounted.box.selectionStart, mounted.box.selectionEnd)).toBe("The quick brown");
         expect(focusCallsFor(focus, mounted.box)).toHaveLength(1);
         expect(focusCallsFor(selection, mounted.box)).toHaveLength(1);
@@ -8034,12 +6875,11 @@ describe("CommentsPanel", () => {
       }
     });
 
+    // Suggestion insertion selects its quote synchronously (#2212), so only formatting leaves a selection pending.
     it.each([
-      ["suggestion", "replacement"],
-      ["suggestion", "removal"],
       ["formatting", "replacement"],
       ["formatting", "removal"],
-    ] as const)("retires a pending %s selection before parent layout on %s and keeps B usable", (operation, transition) => {
+    ] as const)("retires a pending %s selection before parent layout on %s and keeps B usable", (_operation, transition) => {
       const frames = controlledComposerFrames(true);
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
       const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
@@ -8047,13 +6887,9 @@ describe("CommentsPanel", () => {
 
       try {
         act(() => frames.invoke(frames.captured[0]));
-        if (operation === "suggestion") {
-          fireEvent.click(screen.getByTestId("comment-suggest-change"));
-        } else {
-          fireEvent.change(mounted.box, { target: { value: "draft" } });
-          mounted.box.setSelectionRange(0, 5);
-          fireEvent.keyDown(mounted.box, { key: "b", ctrlKey: true });
-        }
+        fireEvent.change(mounted.box, { target: { value: "draft" } });
+        mounted.box.setSelectionRange(0, 5);
+        fireEvent.keyDown(mounted.box, { key: "b", ctrlKey: true });
         const staleFrame = frames.captured.at(-1)!;
         expect(frames.pending.has(staleFrame)).toBe(true);
         let passiveCleanups = 0;
