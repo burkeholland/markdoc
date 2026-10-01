@@ -6807,6 +6807,30 @@ describe("CommentsPanel", () => {
       }
     });
 
+    it("selects the quote inside the Ctrl+Shift+S handler, so the value change's selectionchange cannot cancel it (#2212)", () => {
+      const frames = controlledComposerFrames();
+      const mounted = mountDirectComposer(frames);
+
+      try {
+        act(() => frames.invoke(frames.captured[0]));
+        act(() => mounted.box.focus());
+        fireEvent.keyDown(mounted.box, { key: "S", ctrlKey: true, shiftKey: true });
+        // A real browser fires selectionchange for the new value before the next frame; React turns it into onSelect.
+        act(() => {
+          document.dispatchEvent(new Event("selectionchange"));
+        });
+        act(() => {
+          for (const frame of [...frames.pending]) frames.invoke(frame);
+        });
+        expect(mounted.box).toHaveValue("```suggestion\nThe quick brown\n```");
+        expect(mounted.box).toHaveFocus();
+        expect(mounted.box.value.slice(mounted.box.selectionStart, mounted.box.selectionEnd)).toBe("The quick brown");
+      } finally {
+        act(() => mounted.root.unmount());
+        mounted.host.remove();
+      }
+    });
+
     it("applies each current suggestion and formatting range exactly once", () => {
       const frames = controlledComposerFrames();
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
@@ -6818,8 +6842,8 @@ describe("CommentsPanel", () => {
         focus.mockClear();
         selection.mockClear();
         fireEvent.click(screen.getByTestId("comment-suggest-change"));
-        const suggestionFrame = frames.captured.at(-1)!;
-        act(() => frames.invoke(suggestionFrame));
+        // The suggestion selection is applied in the click handler itself; no frame is left to run (#2212).
+        expect(frames.pending.size).toBe(0);
         expect(mounted.box.value.slice(mounted.box.selectionStart, mounted.box.selectionEnd)).toBe("The quick brown");
         expect(focusCallsFor(focus, mounted.box)).toHaveLength(1);
         expect(focusCallsFor(selection, mounted.box)).toHaveLength(1);
@@ -6851,12 +6875,11 @@ describe("CommentsPanel", () => {
       }
     });
 
+    // Suggestion insertion selects its quote synchronously (#2212), so only formatting leaves a selection pending.
     it.each([
-      ["suggestion", "replacement"],
-      ["suggestion", "removal"],
       ["formatting", "replacement"],
       ["formatting", "removal"],
-    ] as const)("retires a pending %s selection before parent layout on %s and keeps B usable", (operation, transition) => {
+    ] as const)("retires a pending %s selection before parent layout on %s and keeps B usable", (_operation, transition) => {
       const frames = controlledComposerFrames(true);
       const focus = vi.spyOn(HTMLElement.prototype, "focus");
       const selection = vi.spyOn(HTMLTextAreaElement.prototype, "setSelectionRange");
@@ -6864,13 +6887,9 @@ describe("CommentsPanel", () => {
 
       try {
         act(() => frames.invoke(frames.captured[0]));
-        if (operation === "suggestion") {
-          fireEvent.click(screen.getByTestId("comment-suggest-change"));
-        } else {
-          fireEvent.change(mounted.box, { target: { value: "draft" } });
-          mounted.box.setSelectionRange(0, 5);
-          fireEvent.keyDown(mounted.box, { key: "b", ctrlKey: true });
-        }
+        fireEvent.change(mounted.box, { target: { value: "draft" } });
+        mounted.box.setSelectionRange(0, 5);
+        fireEvent.keyDown(mounted.box, { key: "b", ctrlKey: true });
         const staleFrame = frames.captured.at(-1)!;
         expect(frames.pending.has(staleFrame)).toBe(true);
         let passiveCleanups = 0;

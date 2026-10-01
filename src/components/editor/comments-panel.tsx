@@ -8282,12 +8282,19 @@ function Composer<Result>({
   const insertSuggestion = () => {
     if (activeSubmission.current) return;
     const el = ref.current;
-    if (!el || quote === undefined || parseSuggestionBlock(value)) return;
+    const visit = activeVisit.current;
+    if (!el || !visit || visit.retired || quote === undefined || parseSuggestionBlock(value)) return;
     const next = suggestionBlockFor(quote, value);
-    setValue(next);
-    setTrigger(null);
     const start = next.lastIndexOf(quote);
-    scheduleFocusSelection(el, [start, start + quote.length]);
+    // Commit the value and select the quote in this same handler. A selection deferred to the next frame loses a race
+    // with the selectionchange the value change fires: onSelect counts it as a caret move and cancels the frame (#2212).
+    cancelComposerDeferredWork(visit);
+    flushSync(() => {
+      setValue(next);
+      setTrigger(null);
+    });
+    el.focus();
+    el.setSelectionRange(start, start + quote.length);
   };
 
   /** Apply a formatting shortcut to the textarea selection and restore the selection afterwards. */
