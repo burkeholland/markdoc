@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { createDocument, devLogin, ensureCommentsOpen, mintToken, openDocument, richText, uniqueLogin, waitForHydration } from "./helpers";
+import { createDocument, devLogin, ensureCommentsOpen, expectCommentsTab, expectThemeOption, mintToken, openDocument, openPhoneComments, richText, uniqueLogin, waitForHydration } from "./helpers";
 
 /** Text of the code pane as rendered. The dev-only `__markdocSession` hook used by the regular suite is not exposed by a production build. */
 const codeText = (page: Page) => page.locator(".cm-content").innerText();
@@ -152,6 +152,62 @@ test.describe("production build", () => {
         await expect(toggle).toHaveAttribute("data-theme-preference", preference);
         await expect(html).toHaveAttribute("data-theme", resolved);
         expect(await storedTheme(page)).toBe(preference);
+      }
+    });
+
+    test("the comments tabs change on a click and on the arrow, Home and End keys (#2198)", async ({ page }) => {
+      await signInFresh(page, "prod-tabs");
+      const id = await createDocument(page, "# Smoke tabs\n\nThe comments tabs.\n", "Smoke tabs");
+      await openDocument(page, id);
+      await ensureCommentsOpen(page);
+      await expectCommentsTab(page, "open");
+
+      for (const tab of ["resolved", "suggestions", "open"] as const) {
+        await page.getByTestId(`comments-tab-${tab}`).click();
+        await expectCommentsTab(page, tab, { focused: true });
+      }
+      for (const [key, tab] of [
+        ["ArrowRight", "resolved"],
+        ["ArrowLeft", "open"],
+        ["ArrowLeft", "suggestions"],
+        ["Home", "open"],
+        ["End", "suggestions"],
+      ] as const) {
+        await page.keyboard.press(key);
+        await expectCommentsTab(page, tab, { focused: true });
+      }
+
+      await page.getByRole("button", { name: "Close comments" }).click();
+      await expect(page.getByTestId("comments-panel")).toHaveCount(0);
+    });
+
+    test("the Close comments button closes the sheet at phone width (#2198)", async ({ page }) => {
+      await signInFresh(page, "prod-close-phone");
+      await page.setViewportSize({ width: 390, height: 844 });
+      const id = await createDocument(page, "# Smoke close\n\nThe phone sheet.\n", "Smoke close");
+      await openPhoneComments(page, id);
+      await page.getByTestId("comments-tab-suggestions").click();
+      await expectCommentsTab(page, "suggestions", { focused: true });
+
+      await page.getByRole("button", { name: "Close comments" }).click();
+      await expect(page.getByTestId("comments-panel")).toHaveCount(0);
+    });
+
+    test("the Settings theme picker follows the arrow keys and saves the theme (#2198)", async ({ page }) => {
+      await signInFresh(page, "prod-picker-keys");
+      await page.goto("/settings");
+      await waitForHydration(page);
+      await page.getByTestId("theme-option-system").focus();
+
+      for (const [key, preference] of [
+        ["ArrowLeft", "dark"],
+        ["ArrowRight", "system"],
+        ["ArrowDown", "light"],
+        ["End", "dark"],
+        ["Home", "system"],
+      ] as const) {
+        await page.keyboard.press(key);
+        await expectThemeOption(page, preference);
       }
     });
 
