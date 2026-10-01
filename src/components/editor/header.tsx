@@ -13646,16 +13646,6 @@ function PublishMenu({ props }: { props: HeaderProps }) {
     onOpenAutoFocus,
   } = presentation;
   const openAutoFocusProps = { onOpenAutoFocus };
-  // #2203: the same stuck-open bug (see the More menu's onMoreMenuPlainSelect comment for the root
-  // cause) applies to every plain item here too - none of them run through a direct-close helper
-  // like the More menu's dom.actions items do, so they all depend on the same broken close paths.
-  const onPlainSelect = (action: () => void) => () => {
-    setStoredState(Object.freeze({ visit, open: false }));
-    action();
-  };
-  const onWindowOpenSelect = (url: string) => onPlainSelect(
-    () => window.open(url, "_blank", "noopener"),
-  );
 
   return (
     <Menu open={state.open} onOpenChange={onOpenChange}>
@@ -13699,24 +13689,24 @@ function PublishMenu({ props }: { props: HeaderProps }) {
               {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
               {props.sync && <span className="ml-1 font-normal text-ink-3">· {SYNC_LABELS[props.sync.status]}</span>}
             </MenuLabel>
-            <MenuItem ref={capturePublish} icon={<UploadCloud size={15} />} onSelect={onPlainSelect(props.onPublishNow)} disabled={!canEdit}>
+            <MenuItem ref={capturePublish} icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
               {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
             </MenuItem>
-            <MenuItem ref={capturePull} icon={<RefreshCw size={15} />} onSelect={onPlainSelect(props.onPull)} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
+            <MenuItem ref={capturePull} icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
               Pull latest from GitHub
             </MenuItem>
-            <MenuItem ref={captureSync} icon={<GitMerge size={15} />} onSelect={onPlainSelect(props.onSync)} disabled={!canEdit} data-testid="menu-sync">
+            <MenuItem ref={captureSync} icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
               Sync…
             </MenuItem>
             {doc.githubUrl && (
-              <MenuItem ref={captureOpen} icon={<ExternalLink size={15} />} onSelect={onWindowOpenSelect(doc.githubUrl!)}>
+              <MenuItem ref={captureOpen} icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
                 Open on GitHub
               </MenuItem>
             )}
             {props.isOwner && (
               <>
                 <MenuSeparator />
-                <MenuItem ref={captureChange} icon={<Link2 size={15} />} onSelect={onPlainSelect(props.onPublish)}>
+                <MenuItem ref={captureChange} icon={<Link2 size={15} />} onSelect={props.onPublish}>
                   Change connection…
                 </MenuItem>
               </>
@@ -13728,7 +13718,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
             <MenuItem
               ref={captureConnect}
               icon={<GitHubIcon size={15} />}
-              onSelect={onPlainSelect(props.onPublish)}
+              onSelect={props.onPublish}
               disabled={!props.isOwner || !githubConfigured}
               title={!githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
               data-testid="menu-publish-github"
@@ -13736,10 +13726,10 @@ function PublishMenu({ props }: { props: HeaderProps }) {
               <GitHubEntryLabel configured={githubConfigured}>Gist or repository…</GitHubEntryLabel>
             </MenuItem>
             <MenuSeparator />
-            <MenuItem ref={captureDownload} icon={<Download size={15} />} onSelect={onPlainSelect(() => props.onDownload("md", false))}>
+            <MenuItem ref={captureDownload} icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
               Download Markdown
             </MenuItem>
-            <MenuItem ref={captureShare} icon={<Share2 size={15} />} onSelect={onPlainSelect(props.onShare)}>
+            <MenuItem ref={captureShare} icon={<Share2 size={15} />} onSelect={props.onShare}>
               Share link…
             </MenuItem>
             </>
@@ -13882,6 +13872,7 @@ interface MoreMenuPresentation {
   readonly onEscapeKeyDown: (event: KeyboardEvent) => void;
   readonly onOutside: (event: CustomEvent<{ originalEvent: Event }>) => void;
   readonly onCloseAutoFocus: (event: Event) => void;
+  readonly closeForPlainSelect: () => boolean;
 }
 
 class MoreMenuElementOwner<T extends HTMLElement> {
@@ -16703,6 +16694,14 @@ function createMoreMenuPresentation({
     onEscapeKeyDown,
     onOutside,
     onCloseAutoFocus: (event: Event) => event.preventDefault(),
+    // Reused by a plain MenuItem's own onSelect (see the Header component's onMoreMenuPlainSelect)
+    // so a mouse-driven close gets the exact same focus handoff Enter already gets through
+    // genericSelectListener's `close(publication, true, null, mode)` call above - no new gate,
+    // just the existing close path invoked from a different caller.
+    closeForPlainSelect: () => {
+      const publication = currentPublication();
+      return publication ? close(publication) : false;
+    },
   });
 }
 
@@ -16826,19 +16825,24 @@ export const Header = memo(function Header(props: HeaderProps) {
     onEscapeKeyDown: onMoreMenuEscapeKeyDown,
     onOutside: onMoreMenuOutside,
     onCloseAutoFocus: onMoreMenuCloseAutoFocus,
+    closeForPlainSelect: closeMoreMenuForPlainSelect,
   } = moreMenuPresentation;
-  // #2203 root cause: every plain MenuItem here relies on Radix's own close-on-select, which this
-  // menu only honors through `onMoreMenuOpenChange` -> `coordinator.consumeDisclosure`, and that
-  // call requires a matching `publishDisclosure` that nothing issues for an item select. The other
-  // native-event path, `genericSelectListener`, also never sees it: `genericClickListener` clears
-  // its one-shot `genericSelection` admission token in a `queueMicrotask` that always resolves
-  // before Radix dispatches its internal "menu.itemSelect" custom event, so `hasAdmission` is always
-  // false there too (confirmed with a timestamped trace: both paths no-op for the same click,
-  // window.open or not - window.open() just makes the stuck-open menu obvious because it swallows
-  // the very next click). Close the menu ourselves, directly, before running the item's action,
-  // instead of depending on either of those paths.
+  // #2203 root cause: a plain MenuItem's own onSelect always runs (that's Radix's own
+  // close-on-select contract), but on a REAL, trusted mouse click the menu's native-event close
+  // path never fires: the capture-phase `genericClickListener` stages a one-shot `genericSelection`
+  // admission token and queues a microtask to clear it, and that microtask always runs - clearing
+  // the token - before Radix's separately-scheduled click handling gets around to dispatching its
+  // internal "menu.itemSelect" custom event, so `genericSelectListener`'s admission check always
+  // sees a cleared token and never calls `close()`. Enter doesn't hit this: Radix handles it by
+  // calling the item's `.click()` from script, which drives the whole chain - including
+  // "menu.itemSelect" - synchronously in one task, ahead of the queued microtask. So close the menu
+  // ourselves, directly, before running the item's action, instead of depending on that race - and
+  // reuse the menu's own `close()` (`closeForPlainSelect` above) so the mouse path gets the same
+  // focus handoff Enter already gets, rather than just flipping state.
   const onMoreMenuPlainSelect = (action: () => void) => () => {
-    setStoredMoreMenuState(Object.freeze({ visit: moreMenuVisit, open: false }));
+    if (!closeMoreMenuForPlainSelect()) {
+      setStoredMoreMenuState(Object.freeze({ visit: moreMenuVisit, open: false }));
+    }
     action();
   };
   const onMoreMenuWindowOpenSelect = (url: string) => onMoreMenuPlainSelect(

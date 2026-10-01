@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { createDocument, devLogin, ensureCommentsOpen, expectCommentsTab, expectThemeOption, mintToken, openDocument, openPhoneComments, richText, signIn, uniqueLogin, waitForHydration } from "./helpers";
+import { createDocument, devLogin, ensureCommentsOpen, expectCommentsTab, expectThemeOption, mintToken, openDocument, openPhoneComments, richText, signIn, uniqueLogin, waitForEditor, waitForHydration } from "./helpers";
 
 /** Text of the code pane as rendered. The dev-only `__markdocSession` hook used by the regular suite is not exposed by a production build. */
 const codeText = (page: Page) => page.locator(".cm-content").innerText();
@@ -94,6 +94,66 @@ test.describe("production build", () => {
     await expect(page.getByTestId("copy-link")).toBeVisible();
     await page.keyboard.press("Escape");
     await owner.context.close();
+  });
+
+  // #2207: on 1f423812 a real mouse click on these items closed the More menu (that part was already
+  // fixed) but left focus on <body> instead of handing it back to the More trigger, the same way Enter
+  // already did. Only Keyboard shortcuts and compact Share are exercised here; Connect to GitHub, compact
+  // Publish and a linked GitHub connection need the GitHub mock or are disabled on this production build,
+  // so those are covered on dev only (e2e/a11y.spec.ts).
+  test("a real mouse click on Keyboard shortcuts hands focus back to the More trigger, never <body>", async ({ browser }) => {
+    const owner = await signIn(browser, "prod-focus-shortcuts");
+    const { page } = owner;
+    const id = await createDocument(page, "# Focus check\n", "Focus check");
+    await openDocument(page, id);
+
+    const active = () =>
+      page.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body) return "body";
+        return el.getAttribute("data-testid") ?? el.tagName.toLowerCase();
+      });
+
+    await page.getByTestId("more-menu").click();
+    await page.getByRole("menuitem", { name: "Keyboard shortcuts" }).click();
+    const dialog = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+    await expect(dialog).toBeVisible();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect.poll(active).toBe("more-menu");
+    await owner.context.close();
+  });
+
+  test("a real mouse click on compact Share hands focus back to the More trigger, never <body>", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 393, height: 851 } });
+    const page = await context.newPage();
+    await devLogin(page, uniqueLogin("prod-focus-share"));
+    await waitForHydration(page);
+
+    const id = await createDocument(page, "# Focus check\n", "Focus check");
+    // Not `openDocument`: on a phone layout only one pane renders at a time (#1121), so its
+    // `.cm-content` + `.md-rich` both-visible check never passes here.
+    await page.goto(`/d/${id}`);
+    await waitForEditor(page);
+    await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+
+    const active = () =>
+      page.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body) return "body";
+        return el.getAttribute("data-testid") ?? el.tagName.toLowerCase();
+      });
+
+    await page.getByTestId("more-menu").click();
+    await page.getByTestId("menu-share").click();
+    const dialog = page.getByRole("dialog", { name: /^Share / });
+    await expect(dialog).toBeVisible();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect.poll(active).toBe("more-menu");
+    await context.close();
   });
 
   /**

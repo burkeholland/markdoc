@@ -203,12 +203,16 @@ test.describe("reader view", () => {
     await owner.context.close();
   });
 
-  // #2203: a capture-phase click listener on the document armed a one-shot admission token and
-  // cleared it again on a microtask queued before Radix's own "menu.itemSelect" event arrived, so
-  // the plain-select close path never ran for a keyboard Enter either - only real clicks exercised
-  // the (also broken) path tests had been covering. This proves the keyboard path independently:
-  // focus the item, press Enter, and check the reader opens, the menu is actually gone, and the
-  // very next click (on Share) lands on the first try rather than being swallowed by a stuck menu.
+  // #2203: the stuck-open bug only ever hit a real, trusted mouse click. A capture-phase click
+  // listener on the document stages a one-shot admission token and queues a microtask to clear it;
+  // that microtask always runs - clearing the token - before Radix's separately-scheduled click
+  // handling gets around to dispatching its own "menu.itemSelect" event, so the old close path's
+  // admission check always saw a cleared token. Enter doesn't hit this: Radix drives it by calling
+  // the item's `.click()` from script, which runs the whole chain, including "menu.itemSelect",
+  // synchronously in one task, ahead of the queued microtask - so Enter already worked on main.
+  // This test proves that Enter keeps working with the new direct-close handler: focus the item,
+  // press Enter, and check the reader opens, the menu is actually gone, and the very next click (on
+  // Share) lands on the first try rather than being swallowed by a stuck menu.
   test("keyboard Enter on header menu's Open reader view opens the reader, closes the menu, and the next click lands", async ({
     browser,
   }) => {

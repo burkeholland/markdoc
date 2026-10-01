@@ -1278,7 +1278,13 @@ describe("editor header More menu authority", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
-  it("closes before opening the reader view in a new tab (#2203)", async () => {
+  // Basic coverage for the #2203 plain-select close path, not a regression guard: fireEvent.click
+  // dispatches synchronously from script, the same way Radix's Enter handling does, so these pass
+  // against main's unmodified header.tsx too - jsdom can't reproduce the real (trusted) mouse
+  // click's async timing that actually causes the menu to stay open. The regression guards are
+  // the mouse-driven e2e/reader.spec.ts:182 test and the e2e/prod-smoke.spec.ts "Open reader view"
+  // test, both of which fail against main's header.tsx and pass against this PR's.
+  it("closes before opening the reader view in a new tab (basic coverage)", async () => {
     const session = createSession();
     const actions = createActions();
     await renderStrict(header(headerProps(session, actions)));
@@ -1291,7 +1297,7 @@ describe("editor header More menu authority", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
-  it("closes before opening a linked document's GitHub URL in a new tab (#2203)", async () => {
+  it("closes before opening a linked document's GitHub URL in a new tab (basic coverage)", async () => {
     const session = createSession();
     const actions = createActions();
     const linkedDoc: DocumentDto = {
@@ -1313,7 +1319,7 @@ describe("editor header More menu authority", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
-  it("closes the Publish menu's own Open on GitHub item before opening the URL (#2203)", async () => {
+  it("closes the Publish menu's own Open on GitHub item before opening the URL (basic coverage; Publish's onOpenChange close path was never affected by #2203)", async () => {
     const doc = linkedDocument();
     const props = headerProps(createSession(doc.id, "viewer"), createActions(), {
       doc,
