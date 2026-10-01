@@ -393,14 +393,25 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     $terminal = [regex]::Match($stdout.Groups['output'].Value.TrimEnd(),
       "(?m)^(?<health>\{[^\r\n]+\})\nmarkdoc-vm-image-ready\nmarkdoc-vm-image-operation-ready:$operation\z")
     if (-not $terminal.Success) {
+      $spaceFailure = Get-ReleaseImageSpaceFailure $stdout.Groups['output'].Value $operation
+      if ($spaceFailure) { Stop-VmRelease $spaceFailure }
       $walFailure = Get-ReleaseWalFailure $stdout.Groups['output'].Value $operation
       if ($walFailure) {
-        Stop-VmRelease "Release WAL gate failed during $($walFailure.Stage); owned cleanup=$($walFailure.Cleanup)."
+        $details = @($walFailure.Budget) + @($walFailure.Diagnostics)
+        $details = @($details | Where-Object { $_ })
+        $reason = "Release WAL gate failed during $($walFailure.Stage); owned cleanup=$($walFailure.Cleanup)."
+        if ($details.Count -gt 0) { $reason += "`n" + ($details -join "`n") }
+        Stop-VmRelease $reason
       }
       Stop-VmRelease 'VM transport succeeded without exact terminal guest-ready and local-health evidence.'
     }
     [void](Assert-ReleaseWalEvidence $stdout.Groups['output'].Value $operation $terminal.Index)
     Assert-ReleaseHealth (ConvertFrom-ReleaseJson $terminal.Groups['health'].Value) $Commit 'Local'
+    $retentionWarnings = [regex]::Matches($stdout.Groups['output'].Value,
+      "(?m)^markdoc-vm-image-warning:$operation`:retention-failed$")
+    if ($retentionWarnings.Count -gt 0) {
+      Write-Host 'Release warning: old-image retention failed; the healthy application was not rolled back. Reconcile disk capacity before another release.'
+    }
     $releaseStage = 'public health after guest ready (no automatic rollback)'
     Write-Host 'Release: guest ready; waiting for exact public health.'
     $healthLimit = [math]::Min(20, [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds))

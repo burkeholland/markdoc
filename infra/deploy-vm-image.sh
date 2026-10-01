@@ -50,18 +50,85 @@ fi
 unset MARKDOC_RELEASE_WAL_GATE_OPERATION
 printf 'markdoc-vm-image-operation:%s\n' "$operation_id"
 
+require_image_space() {
+  local phase="$1"
+  local required="$2"
+  local free_bytes=''
+  if ! free_bytes="$(timeout --signal=TERM --kill-after=1s 5s \
+    df --output=avail -B1 /var/lib/docker | tail -n 1 | tr -d '[:space:]')" ||
+    ! [[ "$free_bytes" =~ ^[0-9]{1,18}$ ]]; then
+    printf 'markdoc-vm-image-space-failed:%s:%s:reason=unavailable\n' "$operation_id" "$phase"
+    return 1
+  fi
+  if [ "$free_bytes" -lt "$required" ]; then
+    printf 'markdoc-vm-image-space-failed:%s:%s:available=%s:required=%s:reserve=2147483648\n' \
+      "$operation_id" "$phase" "$free_bytes" "$required"
+    return 1
+  fi
+}
+
+retain_release_images() {
+  local current_id="$1"
+  local previous_id="$2"
+  local protected_id='sha256:21546bc69066d93d3c7844af139e7925b3b838c4c63bb6fd87ae840abfb7c313'
+  local ids
+  local candidate
+  local references
+  local reference
+  local users
+  local markdoc_image
+  local kept
+  local remaining
+  local deadline=$((SECONDS + 120))
+  [[ "$current_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  [[ "$previous_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  ids="$(timeout 15s docker images --no-trunc --format '{{.ID}}' | sort -u)" || return 1
+  for kept in "$current_id" "$previous_id" "$protected_id"; do
+    grep -Fxq "$kept" <<<"$ids" || return 1
+  done
+  for candidate in $ids; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    [[ "$candidate" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    case "$candidate" in
+      "$current_id"|"$previous_id"|"$protected_id") continue ;;
+    esac
+    references="$(timeout 15s docker image inspect \
+      --format '{{range .RepoDigests}}{{println .}}{{end}}{{range .RepoTags}}{{println .}}{{end}}' \
+      "$candidate")" || return 1
+    markdoc_image=false
+    while IFS= read -r reference; do
+      case "$reference" in
+        "${registry}/markdoc@sha256:"*|"${registry}/markdoc:"*) markdoc_image=true ;;
+      esac
+    done <<<"$references"
+    [ "$markdoc_image" = true ] || continue
+    users="$(timeout 15s docker ps -a --filter "ancestor=$candidate" --format '{{.ID}}')" || return 1
+    [ -z "$users" ] || continue
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || return 1
+    timeout "$remaining" docker rmi "$candidate" >/dev/null 2>&1 || return 1
+  done
+}
+
+# Allow 4 GiB for the current ~2.2 GB image's download/unpacking, plus the reserve.
+require_image_space pull 6442450944
+previous_image="$(timeout 15s docker ps --filter 'name=^/markdoc-app$' --format '{{.Image}}')"
+previous_id="$(timeout 15s docker image inspect --format '{{.Id}}' "$previous_image")"
+[[ "$previous_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+
 rollback_dir="$(mktemp -d)"
 chmod 0700 "$rollback_dir"
 cp /etc/markdoc/markdoc.env "$rollback_dir/markdoc.env"
 cp /etc/systemd/system/markdoc-app.service "$rollback_dir/markdoc-app.service"
 deployment_succeeded=false
+production_changed=false
 
 cleanup() {
   local status=$?
   trap - EXIT
   docker logout "$registry" >/dev/null 2>&1 || true
   rm -f /root/.docker/config.json
-  if [ "$deployment_succeeded" != true ]; then
+  if [ "$deployment_succeeded" != true ] && [ "$production_changed" = true ]; then
     cp "$rollback_dir/markdoc.env" /etc/markdoc/markdoc.env
     cp "$rollback_dir/markdoc-app.service" /etc/systemd/system/markdoc-app.service
     chmod 0600 /etc/markdoc/markdoc.env
@@ -130,7 +197,11 @@ printf '%s' "$registry_token" | docker login "$registry" \
   --username 00000000-0000-0000-0000-000000000000 \
   --password-stdin >/dev/null
 docker pull "$image"
+require_image_space activate 2147483648
+current_id="$(timeout 15s docker image inspect --format '{{.Id}}' "$image")"
+[[ "$current_id" =~ ^sha256:[0-9a-f]{64}$ ]]
 
+production_changed=true
 python3 - "$app_version" <<'PY'
 import pathlib
 import sys
@@ -183,6 +254,9 @@ expected = sys.argv[2]
 raise SystemExit(0 if all(health.get(key) is True for key in ("ok", "db", "collab")) and health.get("version") == expected else 1)
 ' "$health" "$app_version"; then
     deployment_succeeded=true
+    if ! retain_release_images "$current_id" "$previous_id"; then
+      printf 'markdoc-vm-image-warning:%s:retention-failed\n' "$operation_id"
+    fi
     exit 0
   fi
   sleep 3

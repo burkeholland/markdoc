@@ -60,13 +60,69 @@ function Get-ReleaseWalFailure([string]$Output, [string]$Operation) {
   $escapedOperation = [regex]::Escape($Operation)
   $matches = [regex]::Matches(
     $Output,
-    "(?m)^markdoc-release-wal-failed:$escapedOperation`:(?<stage>lock|capture|switch|archive|restore|start|sql-ready|replay|cleanup):cleanup=(?<cleanup>true|false)$"
+    "(?m)^markdoc-release-wal-failed:$escapedOperation`:(?<stage>lock|capture|switch|archive|space|restore|start|sql-ready|replay|cleanup):cleanup=(?<cleanup>true|false)$"
   )
   if ($matches.Count -ne 1) {
     return $null
   }
+
+  $budget = ''
+  $space = [regex]::Matches($Output,
+    "(?m)^markdoc-release-wal-space:$escapedOperation`:available=(?<available>[0-9]{1,18}):required=(?<required>[0-9]{1,18}):reserve=(?<reserve>2147483648)$")
+  if ($space.Count -eq 1) {
+    $available = [long]$space[0].Groups['available'].Value
+    $required = [long]$space[0].Groups['required'].Value
+    $reserve = [long]$space[0].Groups['reserve'].Value
+    if ($available -lt $required -and $required -ge $reserve) {
+      $budget = "Available $available bytes; required $required bytes, including a $reserve-byte production reserve."
+    }
+  }
+  $reasons = @{
+    'disk-full' = 'No space left on device.'
+    'no-memory' = 'Memory allocation failed.'
+    'recovery-target-unreached' = 'Recovery ended before the configured target was reached.'
+    'recovery-target-before-consistency' = 'The recovery target precedes the consistent recovery point.'
+    'invalid-checkpoint' = 'No valid checkpoint record was found.'
+    'wal-unavailable' = 'A required WAL file could not be restored.'
+    'permission-denied' = 'Permission was denied.'
+    'io-error' = 'An input/output error occurred.'
+    'message-withheld' = 'Unrecognized server message withheld.'
+    'diagnostics-unavailable' = 'Server diagnostics could not be read.'
+  }
+  $diagnostics = @(
+    [regex]::Matches($Output,
+      "(?m)^markdoc-release-wal-log:$escapedOperation`:(?<severity>WARNING|ERROR|FATAL|PANIC):(?<reason>[a-z-]{1,40})$") |
+      Select-Object -Last 10 |
+      ForEach-Object {
+        $reason = $_.Groups['reason'].Value
+        if ($reasons.ContainsKey($reason)) {
+          "Scratch $($_.Groups['severity'].Value): $($reasons[$reason])"
+        }
+      }
+  )
   return @{
     Stage = $matches[0].Groups['stage'].Value
     Cleanup = $matches[0].Groups['cleanup'].Value
+    Budget = $budget
+    Diagnostics = $diagnostics
   }
+}
+
+function Get-ReleaseImageSpaceFailure([string]$Output, [string]$Operation) {
+  $escapedOperation = [regex]::Escape($Operation)
+  $failures = [regex]::Matches($Output,
+    "(?m)^markdoc-vm-image-space-failed:$escapedOperation`:(?<phase>pull|activate):(?<reason>reason=unavailable|available=(?<available>[0-9]{1,18}):required=(?<required>6442450944|2147483648):reserve=2147483648)$")
+  if ($failures.Count -ne 1) { return $null }
+  $failure = $failures[0]
+  $phase = $failure.Groups['phase'].Value
+  $reason = "Image disk budget could not be verified before $phase; application unchanged."
+  if ($failure.Groups['available'].Success) {
+    $available = [long]$failure.Groups['available'].Value
+    $required = [long]$failure.Groups['required'].Value
+    if ($available -ge $required -or
+      ($phase -ceq 'pull' -and $required -ne 6442450944) -or
+      ($phase -ceq 'activate' -and $required -ne 2147483648)) { return $null }
+    $reason = "Insufficient disk space before image $phase; application unchanged. Available $available bytes; required $required bytes, including a 2147483648-byte production reserve."
+  }
+  return $reason
 }
