@@ -1,6 +1,6 @@
 #requires -Version 7.2
-# Poll scenarios require node on PATH. Nested pwsh fixture startup exceeded eight seconds at 100% CPU.
-# Node removes that extra startup; wall-clock slow-call cases still exercise the real native timeout.
+# Poll scenarios require node on PATH. Slow-call timers start after the fixture records its call,
+# so pwsh/node startup under load cannot consume the test-only eight-second native timeout.
 param(
   [switch]$DigestLookupOnly, [string[]]$DigestLookupCase = @(),
   [switch]$AcrPollOnly, [string[]]$AcrPollCase = @(),
@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "markdoc-digest-tests-$([guid]::NewGuid().ToString('N'))"
 $priorEnvironment = @{}
 foreach ($name in @('PATH', 'AZURE_CONFIG_DIR', 'MARKDOC_DIGEST_CASE', 'MARKDOC_DIGEST_COUNT', 'MARKDOC_DIGEST_VALUE', 'MARKDOC_DIGEST_ERROR',
-    'MARKDOC_POLL_CASE', 'MARKDOC_POLL_COUNT', 'MARKDOC_POLL_LOG', 'MARKDOC_POLL_TAG', 'MARKDOC_POLL_SHA', 'MARKDOC_POLL_DIGEST')) {
+    'MARKDOC_POLL_CASE', 'MARKDOC_POLL_COUNT', 'MARKDOC_POLL_LOG', 'MARKDOC_POLL_READY', 'MARKDOC_POLL_TAG', 'MARKDOC_POLL_SHA', 'MARKDOC_POLL_DIGEST')) {
   $priorEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
 try {
@@ -25,6 +25,7 @@ $env:PATH = "$testRoot;$env:PATH"
 $env:MARKDOC_DIGEST_COUNT = Join-Path $testRoot 'count'
 $env:MARKDOC_POLL_COUNT = Join-Path $testRoot 'poll-count'
 $env:MARKDOC_POLL_LOG = Join-Path $testRoot 'poll-calls'
+$env:MARKDOC_POLL_READY = Join-Path $testRoot 'poll-ready'
 $env:MARKDOC_POLL_CASE = ''
 $node = ''
 if (-not $DigestLookupOnly) {
@@ -50,6 +51,9 @@ async function main() {
     JSON.parse(fs.readFileSync(env.MARKDOC_POLL_COUNT, 'utf8')) : { 'acr task list-runs': 0, 'acr task show-run': 0 };
   const count = ++counts[command];
   fs.writeFileSync(env.MARKDOC_POLL_COUNT, JSON.stringify(counts));
+  // Publish only after the writer closes, so Windows readers cannot race an open write.
+  fs.writeFileSync(env.MARKDOC_POLL_READY + '.tmp', command);
+  fs.renameSync(env.MARKDOC_POLL_READY + '.tmp', env.MARKDOC_POLL_READY);
   const name = env.MARKDOC_POLL_CASE;
   const target = name.startsWith('poll-show-') ? 'acr task show-run' : 'acr task list-runs';
   const mode = name.replace(/^poll-(list|show)-/, '');
@@ -189,6 +193,30 @@ function Get-TestPollLimit([string[]]$Arguments) {
   return 30
 }
 
+function Wait-TestPollReady([Diagnostics.Process]$Process, [Diagnostics.Stopwatch]$Clock, [int]$Limit) {
+  if ($Limit -ne 8 -or $script:scenario -cnotmatch '^poll-(list|show)-(slow|three-slow-misses)$') { return }
+  $ready = $false
+  try {
+    while ($true) {
+      if ([IO.File]::Exists($env:MARKDOC_POLL_READY) -and
+          [IO.File]::ReadAllText($env:MARKDOC_POLL_READY) -ceq $pollCase.Command) {
+        $Clock.Restart()
+        $script:slowPollClock = $Clock
+        $ready = $true
+        return
+      }
+      if ($Process.HasExited) { throw 'Slow poll fixture exited before recording its call.' }
+      if ($Clock.Elapsed.TotalSeconds -ge 30) { throw 'Slow poll fixture did not record its call within the 30-second startup bound.' }
+      [Threading.Thread]::Sleep(50)
+    }
+  } finally {
+    if (-not $ready -and -not $Process.HasExited) {
+      $Process.Kill($true)
+      $Process.WaitForExit()
+    }
+  }
+}
+
 $path = $ReleaseScriptPath
 $tokens = $null
 $parseErrors = $null
@@ -204,7 +232,9 @@ foreach ($statement in $ast.EndBlock.Statements) {
     }
     if ($statement.Name -ceq 'Invoke-ReleaseAcrPoll') {
       # Only extracted test code gets a short per-call limit. Production has no test override.
-      $definition = $definition.Replace('[int]$Limit = 30', '[int]$Limit = (Get-TestPollLimit $Arguments)')
+      $updated = $definition.Replace('[int]$Limit = 30', '[int]$Limit = (Get-TestPollLimit $Arguments)')
+      Assert-True ($updated -cne $definition) 'Test-only poll limit replacement must match the production default.'
+      $definition = $updated
     }
     . ([scriptblock]::Create($definition))
   }
@@ -212,6 +242,10 @@ foreach ($statement in $ast.EndBlock.Statements) {
 
 # Exercise the real native boundary with harmless local children, never Azure.
 $native = ${function:Invoke-ReleaseNative}
+$pollNativeSource = $native.ToString()
+$pollWait = '    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {'
+Assert-True ($pollNativeSource.Contains($pollWait)) 'Test-only readiness handshake must match the native wait.'
+$pollNative = [scriptblock]::Create($pollNativeSource.Replace($pollWait, "    Wait-TestPollReady `$process `$clock `$TimeoutSeconds`n$pollWait"))
 if (-not $DigestLookupOnly -and -not $AcrPollOnly) {
 $output = & $native 'pwsh' @('-NoProfile', '-NonInteractive', '-Command', '[Console]::Out.Write("native output"); [Console]::Error.Write("withheld stderr"); exit 0') $PSScriptRoot 10
 Assert-Equal 'native output' $output 'Native output must exclude stderr.'
@@ -356,13 +390,20 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     if ($isTarget -and $pollCase.StartAt) {
       Assert-True ($TimeoutSeconds -le [math]::Floor($pollCase.Budget - $pollCase.StartAt)) 'Poll timeout must be capped by the remaining stage budget.'
     }
+    $script:slowPollClock = $null
+    if ([IO.File]::Exists($env:MARKDOC_POLL_READY)) {
+      Microsoft.PowerShell.Management\Remove-Item -LiteralPath $env:MARKDOC_POLL_READY -Force
+    }
     try {
       # Synthetic budget clocks check the caller's exact bound above, without making process startup a one-second race.
       $nativeLimit = [math]::Min((Get-TestPollLimit $Arguments), $TimeoutSeconds)
       if ($pollCase.Budget) { $nativeLimit = 30 }
-      $result = & $native $Command $Arguments $Directory $nativeLimit -ClassifyDigestFailure:$ClassifyDigestFailure
+      $result = & $pollNative $Command $Arguments $Directory $nativeLimit -ClassifyDigestFailure:$ClassifyDigestFailure
     } catch [InvalidOperationException] {
       Assert-True (($_.Exception.Message + ($_.Exception.Data.Values -join ' ')) -notmatch 'FAKE_POLL_SECRET_2221|private\.example\.test|response body') 'Poll exceptions must not retain raw output.'
+      if ($nativeLimit -eq 8 -and $_.Exception.Data['ReleaseExitCode'] -eq 124) {
+        Assert-True ($null -ne $script:slowPollClock -and $script:slowPollClock.Elapsed.TotalSeconds -ge 8) 'Slow fixture must run for eight wall-clock seconds after recording its call before the native timeout.'
+      }
       if ($isTarget -and $pollCase.EndAt) { $releaseClock.Elapsed.TotalSeconds = $pollCase.EndAt }
       throw
     }
@@ -808,7 +849,7 @@ try {
     $env:MARKDOC_POLL_CASE = if ($pollCase) { $case } else { '' }
     $env:MARKDOC_POLL_SHA = $script:sha
     $env:MARKDOC_POLL_DIGEST = $script:digest
-    foreach ($file in @($env:MARKDOC_POLL_COUNT, $env:MARKDOC_POLL_LOG)) {
+    foreach ($file in @($env:MARKDOC_POLL_COUNT, $env:MARKDOC_POLL_LOG, $env:MARKDOC_POLL_READY)) {
       if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $file) {
         Microsoft.PowerShell.Management\Remove-Item -LiteralPath $file -Force
       }
@@ -913,7 +954,7 @@ try {
         Assert-True ($missedLines[$index] -cmatch $pattern) "Exact safe missed-poll line mismatch for $case."
         if ($case -match 'slow') {
           $seconds = [int]([regex]::Match($missedLines[$index], 'elapsed seconds=([0-9]+)').Groups[1].Value)
-          Assert-True ($seconds -ge 8 -and $seconds -lt 20) 'Test-only native timeout must really kill the slow fake call promptly.'
+          Assert-True ($seconds -ge 8) 'Slow poll diagnostics must include the real eight-second wait, plus any fixture startup time.'
         }
         if ($success) {
           Assert-True ($log.IndexOf($missedLines[$index]) -lt $log.IndexOf('Release: guest invocation')) "Poll diagnostics must precede the guest for $case."
