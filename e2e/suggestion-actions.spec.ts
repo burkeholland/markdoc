@@ -22,7 +22,8 @@ import {
  *
  * "local" = Alice (who decides) made the suggestion herself; "remote" = Bob made it in his own browser.
  * Runs on the dev server, and on a production build with PROD_BASE_URL set (the code pane is read through
- * `codeText`, which falls back to the rendered lines when the dev-only session hook is absent).
+ * `codeText`, which falls back to the rendered lines when the dev-only session hook is absent, and the rich
+ * selection is placed with `selectRich` / `caretAfter`, which do not need the dev-only editor hook).
  */
 
 const SOURCE = "# Actions\n\nOur product is very unique.\n\nSales are good.\n\nThe end is near.\n";
@@ -61,6 +62,74 @@ async function mcp<T>(page: Page, token: string, name: string, args: Record<stri
   return (body.result.structuredContent ?? JSON.parse(body.result.content[0].text)) as T;
 }
 
+const PROD = Boolean(process.env.PROD_BASE_URL);
+
+/**
+ * A production build has no `__markdocRichView` hook, which the shared selection helpers poll. There the
+ * DOM selection is set and the test waits for the browser's `selectionchange` (ProseMirror reads the
+ * selection on it) plus a frame; callers then check the result in the UI (the composer quote, the text).
+ */
+async function selectRich(page: Page, text: string) {
+  if (!PROD) return selectTextInRich(page, text);
+  const rich = page.locator(".md-rich");
+  await expect(rich).toContainText(text);
+  await rich.evaluate(
+    (root, needle) =>
+      new Promise<void>((resolve, reject) => {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+          const idx = node.textContent!.indexOf(needle);
+          if (idx < 0) continue;
+          const range = document.createRange();
+          range.setStart(node, idx);
+          range.setEnd(node, idx + needle.length);
+          document.addEventListener("selectionchange", () => requestAnimationFrame(() => resolve()), { once: true });
+          (root as HTMLElement).focus();
+          const sel = window.getSelection()!;
+          sel.removeAllRanges();
+          sel.addRange(range);
+          return;
+        }
+        reject(new Error(`text not found: ${needle}`));
+      }),
+    text,
+  );
+}
+
+/** Caret at the end of `text` in the rich pane (the start of the next typed words). */
+async function caretAfter(page: Page, text: string) {
+  if (!PROD) {
+    await selectTextInRich(page, text);
+    await page.keyboard.press("End");
+    return;
+  }
+  await selectRich(page, text);
+  // Arm the wait before the key, so the browser's `selectionchange` for the collapse is not missed.
+  await page.evaluate(() => {
+    (window as unknown as { __caretMoved?: Promise<void> }).__caretMoved = new Promise<void>((resolve) =>
+      document.addEventListener("selectionchange", () => requestAnimationFrame(() => resolve()), { once: true }),
+    );
+  });
+  await page.keyboard.press("ArrowRight");
+  await page.evaluate(() => (window as unknown as { __caretMoved?: Promise<void> }).__caretMoved);
+  await expect
+    .poll(() =>
+      page.evaluate((needle) => {
+        const sel = window.getSelection();
+        const node = sel?.focusNode;
+        return Boolean(sel?.isCollapsed && node?.nodeType === Node.TEXT_NODE && node.textContent!.slice(0, sel.focusOffset).endsWith(needle));
+      }, text),
+    )
+    .toBe(true);
+}
+
+/** Caret at the end of the rich document. */
+async function caretAtEnd(page: Page) {
+  if (!PROD) return focusRichEnd(page);
+  await caretAfter(page, "The end is near.");
+}
+
 async function switchToSuggesting(page: Page) {
   await page.getByTestId("mode-switcher").click();
   await page.getByRole("menuitemradio", { name: /Suggesting/ }).click();
@@ -69,8 +138,9 @@ async function switchToSuggesting(page: Page) {
 
 /** A comment on `quote` whose body carries a ```suggestion block proposing `replacement`. */
 async function commentSuggestion(page: Page, quote: string, replacement: string, body: string) {
-  await selectTextInRich(page, quote);
+  await selectRich(page, quote);
   await page.getByTestId("tb-comment").click();
+  await expect(page.getByTestId("pending-comment").getByTestId("comment-quote")).toHaveText(quote);
   const composer = page.getByTestId("comment-composer");
   await expect(composer).toBeFocused();
   await composer.fill(`${body}\n\n\`\`\`suggestion\n${replacement}\n\`\`\``);
@@ -120,6 +190,11 @@ test.describe("suggestion Accept / Reject / Accept all / Reject all with real cl
 
             await activate(thread.getByTestId(action === "accept" ? "suggestion-accept-comment" : "suggestion-reject-comment"), input);
 
+            if (action === "accept") {
+              // Accepting resolves the thread, so it moves from the Open tab to the Resolved tab.
+              await expect(thread).toHaveCount(0, { timeout: DECIDED_MS });
+              await page.getByTestId("comments-tab-resolved").click();
+            }
             await expect(thread).toHaveAttribute("data-suggestion", action === "accept" ? "accepted" : "rejected", { timeout: DECIDED_MS });
             await expect(thread.getByTestId("suggestion-accept-comment")).toHaveCount(0);
             await expect(thread.getByTestId("suggestion-reject-comment")).toHaveCount(0);
@@ -137,8 +212,9 @@ test.describe("suggestion Accept / Reject / Accept all / Reject all with real cl
         test(`remote | ${action} | ${input}`, async () => {
           const docId = await freshDocument();
           await ensureCommentsOpen(bob.page);
-          await selectTextInRich(bob.page, "Sales are good");
+          await selectRich(bob.page, "Sales are good");
           await bob.page.getByTestId("tb-comment").click();
+          await expect(bob.page.getByTestId("pending-comment").getByTestId("comment-quote")).toHaveText("Sales are good");
           await bob.page.getByTestId("comment-composer").fill("Can an agent tighten this?");
           await bob.page.keyboard.press("ControlOrMeta+Enter");
           const authored = bob.page.getByTestId("comment-thread").filter({ hasText: "Can an agent tighten this?" }).first();
@@ -174,10 +250,10 @@ test.describe("suggestion Accept / Reject / Accept all / Reject all with real cl
       await freshDocument();
       const author = origin === "local" ? alice : bob;
       await switchToSuggesting(author.page);
-      await focusRichEnd(author.page);
+      await caretAtEnd(author.page);
       await author.page.keyboard.type(" closing-words");
-      await selectTextInRich(author.page, "Sales are good.");
-      await author.page.keyboard.press("End");
+      await expect.poll(() => codeText(author.page)).toContain("near. closing-words");
+      await caretAfter(author.page, "Sales are good.");
       await author.page.keyboard.type(" middle-words");
       const page = alice.page;
       await expect.poll(() => codeText(page)).toContain("near. closing-words");
@@ -235,7 +311,7 @@ test.describe("suggestion Accept / Reject / Accept all / Reject all with real cl
         await ensureCommentsOpen(bob.page);
         await commentSuggestion(bob.page, "very unique", "unique", "Redundant.");
         await switchToSuggesting(bob.page);
-        await focusRichEnd(bob.page);
+        await caretAtEnd(bob.page);
         await bob.page.keyboard.type(" closing-words");
         const page = alice.page;
         await expect.poll(() => codeText(page)).toContain("near. closing-words");
