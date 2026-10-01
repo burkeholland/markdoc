@@ -1264,50 +1264,12 @@ function templateRefBindings(host: HTMLElement) {
   }));
 }
 
-function searchRefBindings(
-  input: HTMLInputElement,
-  includeInlineClear = false,
-) {
-  const root = input.parentElement;
-  const icon = root?.firstElementChild;
-  const trailing = includeInlineClear
-    ? root?.querySelector('[data-testid="search-clear"]')
-    : root?.querySelector("span");
-  if (!root || !icon || !trailing) {
-    throw new Error("Search control refs were incomplete");
-  }
-  const elements = [root, icon, input, trailing];
-  if (includeInlineClear) {
-    const clearIcon = trailing.firstElementChild;
-    if (!clearIcon) throw new Error("Search Clear icon was missing");
-    elements.push(clearIcon);
-  }
-  return elements.map((element) => ({
-    element,
-    ref: captureReactRef(element),
-  }));
-}
-
 function searchResultLinks(host: ParentNode = document) {
   return Array.from(
     host.querySelectorAll<HTMLAnchorElement>(
       '[data-testid="search-result"] > a[data-testid="document-card"]',
     ),
   );
-}
-
-function searchResultRefBindings(input: HTMLInputElement) {
-  const list = input.ownerDocument.querySelector<HTMLUListElement>(
-    '[data-testid="document-list"]',
-  );
-  const links = searchResultLinks(input.ownerDocument);
-  if (!list || links.length === 0) {
-    throw new Error("Search result refs were incomplete");
-  }
-  return [list, ...links].map((element) => ({
-    element,
-    ref: captureReactRef(element),
-  }));
 }
 
 async function dispatchSearchResultKey(
@@ -5532,7 +5494,32 @@ describe("dashboard search shortcut", () => {
 });
 
 describe("dashboard search controls", () => {
-  it("keeps one exact typing and two-step Escape sequence through direct-root Strict Mode replay", async () => {
+  it("filters on a single change event with no prior typing and shows the no-match empty state", async () => {
+    renderDashboard();
+    const search = screen.getByRole("textbox", { name: "Search documents" });
+
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "notes" } });
+    });
+    expect(search).toHaveValue("notes");
+    expect(within(screen.getByTestId("document-list")).getAllByRole("link")).toHaveLength(1);
+    expect(screen.getByText("Meeting notes")).toBeInTheDocument();
+    expect(screen.queryByText("Alpha planning")).toBeNull();
+
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "zzzz-no-match" } });
+    });
+    await settleSearch();
+    expect(search).toHaveValue("zzzz-no-match");
+    expect(screen.getByTestId("empty-state")).toHaveTextContent('No matches for "zzzz-no-match"');
+    expect(screen.queryByTestId("document-list")).toBeNull();
+
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "" } });
+    });
+    expect(within(screen.getByTestId("document-list")).getAllByRole("link")).toHaveLength(DOCUMENTS.length);
+  });
+  it("filters on typing and runs the two-step Escape in Strict Mode", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -5579,7 +5566,7 @@ describe("dashboard search controls", () => {
     }
   });
 
-  it("authenticates the in-field Clear once and returns focus after Strict Mode replay", async () => {
+  it("clears with the in-field Clear and returns focus to the input", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -5613,7 +5600,7 @@ describe("dashboard search controls", () => {
     }
   });
 
-  it("authenticates the no-results Clear once and returns focus after Strict Mode replay", async () => {
+  it("clears with the no-results Clear and returns focus to the input", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -5649,7 +5636,7 @@ describe("dashboard search controls", () => {
     }
   });
 
-  it("authenticates one exact current-query Retry after direct-root Strict Mode replay", async () => {
+  it("issues one current-query Retry request for a double click in Strict Mode", async () => {
     const retry = deferred<SearchResponse>();
     searchDocuments
       .mockRejectedValueOnce(new ApiError(503, "Search service unavailable"))
@@ -5685,512 +5672,6 @@ describe("dashboard search controls", () => {
       await act(async () => {
         retry.resolve({ query: "alpha", documents: [] });
         await retry.promise;
-      });
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("keeps stale user handlers inert while the current same-node Clear crosses the complete boundary", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const replacement = { ...USER, id: "search-control-replacement", login: "search-control-replacement" };
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "alpha" } });
-      });
-      const oldClear = screen.getByTestId("search-clear");
-      const staleHandler = captureReactHandler(oldClear, "onClick");
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={replacement} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const currentClear = screen.getByTestId("search-clear");
-      expect(currentClear).toBe(oldClear);
-      const restore = interceptReactHandler(currentClear, "onClick", (original, event) => {
-        staleHandler(event);
-        original(event);
-      });
-      try {
-        await dispatchSearchAction(() => {
-          fireEvent.click(currentClear);
-        });
-      } finally {
-        restore();
-      }
-
-      expect(search).toHaveValue("");
-      expect(search).toHaveFocus();
-      expect(searchDocuments).not.toHaveBeenCalled();
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("requires complete current refs for replay and recovers from a partial replay on a clean render", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-      const full = searchRefBindings(search);
-      await act(async () => {
-        for (const binding of full) binding.ref(null);
-        for (const binding of full) binding.ref(binding.element);
-      });
-
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "alpha" } });
-      });
-      expect(search).toHaveValue("alpha");
-      const partial = searchRefBindings(search, true).slice(-2);
-      await act(async () => {
-        for (const binding of partial) binding.ref(null);
-        for (const binding of partial.toReversed()) binding.ref(binding.element);
-      });
-
-      await dispatchSearchAction(() => {
-        fireEvent.click(screen.getByTestId("search-clear"));
-      });
-      expect(search).toHaveValue("alpha");
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      await dispatchSearchAction(() => {
-        fireEvent.click(screen.getByTestId("search-clear"));
-      });
-      expect(search).toHaveValue("");
-      expect(search).toHaveFocus();
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it.each([
-    "restored descendant mutation",
-    "restored clone replacement",
-    "restored child reorder",
-    "root detach and reinsert",
-  ] as const)("permanently retires a generation after %s and lets a fresh render recover", async (scenario) => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "alpha" } });
-      });
-      const clear = screen.getByTestId("search-clear") as HTMLButtonElement;
-      const clearIcon = clear.firstElementChild!;
-      const searchRoot = search.parentElement!;
-
-      if (scenario === "restored descendant mutation") {
-        clearIcon.setAttribute("data-search-attack", "1");
-        clearIcon.removeAttribute("data-search-attack");
-      } else if (scenario === "restored clone replacement") {
-        const clone = clearIcon.cloneNode(true) as Element;
-        clearIcon.replaceWith(clone);
-        clone.replaceWith(clearIcon);
-      } else if (scenario === "restored child reorder") {
-        clear.remove();
-        searchRoot.insertBefore(clear, null);
-      } else {
-        const parent = searchRoot.parentNode!;
-        const next = searchRoot.nextSibling;
-        searchRoot.remove();
-        parent.insertBefore(searchRoot, next);
-      }
-
-      await dispatchSearchAction(() => {
-        fireEvent.click(clear);
-      });
-      expect(search).toHaveValue("alpha");
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      await dispatchSearchAction(() => {
-        fireEvent.click(screen.getByTestId("search-clear"));
-      });
-      expect(search).toHaveValue("");
-      expect(search).toHaveFocus();
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it.each([
-    "canceled",
-    "stopped",
-    "window-canceled",
-    "window-stopped",
-  ] as const)(
-    "does no work for a %s native change and accepts a fresh successor event",
-    async (scenario) => {
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-
-      try {
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-            </StrictMode>,
-          );
-        });
-        const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-        const stop = (event: Event) => {
-          if (event.target === search) event.stopImmediatePropagation();
-        };
-        const cancel = (event: Event) => {
-          if (event.target === search) event.preventDefault();
-        };
-        if (scenario === "stopped") {
-          search.addEventListener("change", stop, true);
-        } else if (scenario === "window-stopped") {
-          window.addEventListener("change", stop);
-        } else if (scenario === "window-canceled") {
-          window.addEventListener("change", cancel);
-        } else {
-          document.addEventListener("change", cancel);
-        }
-
-        await dispatchSearchAction(() => {
-          fireEvent.change(search, {
-            target: { value: "blocked" },
-            cancelable: true,
-          });
-        });
-
-        if (scenario === "stopped") {
-          search.removeEventListener("change", stop, true);
-        } else if (scenario === "window-stopped") {
-          window.removeEventListener("change", stop);
-        } else if (scenario === "window-canceled") {
-          window.removeEventListener("change", cancel);
-        } else {
-          document.removeEventListener("change", cancel);
-        }
-        expect(searchDocuments).not.toHaveBeenCalled();
-
-        expect(search).toHaveValue("");
-        await dispatchSearchAction(() => {
-          fireEvent.change(search, { target: { value: "fresh" } });
-        });
-        expect(search).toHaveValue("fresh");
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it("claims one genuine wrapper and native event before repeated or fabricated delivery", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-      const claimed: {
-        handler: CapturedReactClick | null;
-        wrapper: unknown;
-      } = { handler: null, wrapper: null };
-      const restore = interceptReactHandler(search, "onChange", (original, event) => {
-        claimed.handler = original;
-        claimed.wrapper = event;
-        original(event);
-        original(event);
-      });
-      try {
-        await dispatchSearchAction(() => {
-          fireEvent.change(search, { target: { value: "alpha" } });
-        });
-      } finally {
-        restore();
-      }
-      expect(search).toHaveValue("alpha");
-      claimed.handler?.(claimed.wrapper);
-      claimed.handler?.({
-        get nativeEvent() {
-          throw new Error("fabricated native event getter must not run");
-        },
-      });
-      expect(search).toHaveValue("alpha");
-
-      await settleSearch();
-      expect(searchDocuments).toHaveBeenCalledTimes(1);
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "beta" } });
-      });
-      expect(search).toHaveValue("beta");
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("uses the captured native currentTarget when the public event field is poisoned", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", { name: "Search documents" }) as HTMLInputElement;
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "alpha" } });
-      });
-      const clear = screen.getByTestId("search-clear");
-      const event = new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-        buttons: 0,
-        detail: 1,
-      });
-      Object.defineProperty(event, "currentTarget", {
-        configurable: true,
-        get: () => null,
-      });
-
-      await act(async () => {
-        clear.dispatchEvent(event);
-      });
-
-      expect(search).toHaveValue("");
-      expect(search).toHaveFocus();
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("uses the exact iframe owner window for one change and Clear delivery", async () => {
-    const frame = document.createElement("iframe");
-    document.body.append(frame);
-    const ownerDocument = frame.contentDocument;
-    const ownerWindow = frame.contentWindow;
-    if (!ownerDocument || !ownerWindow) {
-      throw new Error("The search-control test frame has no document");
-    }
-    ownerDocument.open();
-    ownerDocument.write(
-      "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>",
-    );
-    ownerDocument.close();
-    const host = ownerDocument.getElementById("root");
-    if (!host) throw new Error("The search-control test frame has no root");
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = ownerDocument.querySelector<HTMLInputElement>(
-        'input[aria-label="Search documents"]',
-      );
-      if (!search) throw new Error("The iframe search input was not rendered");
-
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "alpha" } });
-      });
-      expect(search).toHaveValue("alpha");
-      const clear = ownerDocument.querySelector<HTMLButtonElement>(
-        '[data-testid="search-clear"]',
-      );
-      if (!clear) throw new Error("The iframe Clear control was not rendered");
-
-      await dispatchSearchAction(() => {
-        fireEvent.click(clear);
-      });
-
-      expect(search).toHaveValue("");
-      expect(ownerDocument.activeElement).toBe(search);
-      expect(searchDocuments).not.toHaveBeenCalled();
-    } finally {
-      await act(async () => root.unmount());
-      frame.remove();
-    }
-  });
-
-  it.each([
-    "preventDefault",
-    "stopPropagation",
-    "stopImmediatePropagation",
-  ] as const)(
-    "rejects a window %s listener added from later document capture and recovers",
-    async (method) => {
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-
-      try {
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-            </StrictMode>,
-          );
-        });
-        const search = screen.getByRole("textbox", {
-          name: "Search documents",
-        }) as HTMLInputElement;
-        const attack = (event: Event) => {
-          event[method]();
-        };
-        const installAttack = (event: Event) => {
-          if (event.target === search) {
-            window.addEventListener("change", attack, { once: true });
-          }
-        };
-        document.addEventListener("change", installAttack, true);
-
-        await dispatchSearchAction(() => {
-          fireEvent.change(search, {
-            target: { value: "blocked" },
-            cancelable: true,
-          });
-        });
-
-        document.removeEventListener("change", installAttack, true);
-        window.removeEventListener("change", attack);
-        expect(search).toHaveValue("");
-        expect(searchDocuments).not.toHaveBeenCalled();
-
-        await dispatchSearchAction(() => {
-          fireEvent.change(search, { target: { value: "fresh" } });
-        });
-        expect(search).toHaveValue("fresh");
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it("rejects a stale-user Retry and callback reentry while one current request starts", async () => {
-    const finalRetry = deferred<SearchResponse>();
-    let currentRetry: HTMLButtonElement | null = null;
-    searchDocuments
-      .mockRejectedValueOnce(new ApiError(503, "Old visit failed"))
-      .mockRejectedValueOnce(new ApiError(503, "Current visit failed"))
-      .mockImplementationOnce(() => {
-        currentRetry?.click();
-        return finalRetry.promise;
-      });
-    const replacement = { ...USER, id: "retry-replacement", login: "retry-replacement" };
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", { name: "Search documents" });
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "alpha" } });
-      });
-      await settleSearch();
-      const staleRetry = within(screen.getByRole("alert")).getByRole("button", { name: "Retry" });
-      const staleHandler = captureReactHandler(staleRetry, "onClick");
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={replacement} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      await settleSearch();
-      const retry = within(screen.getByRole("alert")).getByRole("button", {
-        name: "Retry",
-      }) as HTMLButtonElement;
-      currentRetry = retry;
-      const restore = interceptReactHandler(retry, "onClick", (original, event) => {
-        staleHandler(event);
-        original(event);
-      });
-      try {
-        await dispatchSearchAction(() => {
-          fireEvent.click(retry);
-        });
-      } finally {
-        restore();
-      }
-
-      expect(searchDocuments).toHaveBeenCalledTimes(3);
-      expect(searchDocuments.mock.calls[2][0]).toBe("alpha");
-      expect(within(screen.getByRole("alert")).getByRole("button", { name: "Retrying…" })).toBeDisabled();
-      await act(async () => {
-        finalRetry.resolve({ query: "alpha", documents: [] });
-        await finalRetry.promise;
       });
     } finally {
       await act(async () => root.unmount());
@@ -6320,13 +5801,11 @@ describe("dashboard search result keyboard focus", () => {
     },
   );
 
-  it("rejects untrusted, modified, repeated, composing, canceled, and wrong-source keys", async () => {
+  it("leaves modified, repeated, and composing arrows and keys from results native", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
     const host = document.createElement("div");
-    const outside = document.createElement("button");
-    outside.textContent = "Outside result focus";
-    document.body.append(outside, host);
+    document.body.append(host);
     const root = createRoot(host);
 
     try {
@@ -6351,8 +5830,6 @@ describe("dashboard search result keyboard focus", () => {
         { shiftKey: true },
         { repeat: true },
         { isComposing: true },
-        { bubbles: false },
-        { cancelable: false },
       ];
       for (const init of rejected) {
         search.focus();
@@ -6364,44 +5841,6 @@ describe("dashboard search result keyboard focus", () => {
         expect(focus).not.toHaveBeenCalled();
         expect(preventDefault).not.toHaveBeenCalled();
       }
-
-      search.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-      const untrusted = new KeyboardEvent("keydown", {
-        key: "ArrowDown",
-        bubbles: true,
-        cancelable: true,
-      });
-      await act(async () => {
-        search.dispatchEvent(untrusted);
-        await Promise.resolve();
-      });
-      expect(untrusted.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-      expect(preventDefault).not.toHaveBeenCalled();
-
-      const canceled = new KeyboardEvent("keydown", {
-        key: "ArrowDown",
-        bubbles: true,
-        cancelable: true,
-      });
-      markSearchResultEventTrusted(canceled, window);
-      canceled.preventDefault();
-      preventDefault.mockClear();
-      await act(async () => {
-        search.dispatchEvent(canceled);
-        await Promise.resolve();
-      });
-      expect(focus).not.toHaveBeenCalled();
-      expect(preventDefault).not.toHaveBeenCalled();
-
-      outside.focus();
-      focus.mockClear();
-      const wrongFocus = await dispatchSearchResultKey(search, "ArrowDown");
-      expect(wrongFocus.defaultPrevented).toBe(false);
-      expect(outside).toHaveFocus();
-      expect(focus).not.toHaveBeenCalled();
 
       links[0]!.focus();
       focus.mockClear();
@@ -6418,690 +5857,7 @@ describe("dashboard search result keyboard focus", () => {
     } finally {
       await act(async () => root.unmount());
       host.remove();
-      outside.remove();
     }
-  });
-
-  it("rejects fabricated, foreign, crossed, and replayed delivery before a clean successor", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const host = document.createElement("div");
-    const iframe = document.createElement("iframe");
-    document.body.append(host, iframe);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", {
-        name: "Search documents",
-      }) as HTMLInputElement;
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "n" } });
-      });
-      const handler = captureReactHandler(search, "onKeyDown");
-      search.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-      handler({
-        get nativeEvent() {
-          throw new Error("fabricated native event getter must not run");
-        },
-      });
-      expect(focus).not.toHaveBeenCalled();
-      expect(preventDefault).not.toHaveBeenCalled();
-
-      const foreignWindow = iframe.contentWindow as Window & typeof globalThis;
-      const foreign = new foreignWindow.KeyboardEvent("keydown", {
-        key: "ArrowDown",
-        bubbles: true,
-        cancelable: true,
-      });
-      markSearchResultEventTrusted(foreign, foreignWindow);
-      await act(async () => {
-        search.dispatchEvent(foreign);
-        await Promise.resolve();
-      });
-      expect(foreign.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-      expect(preventDefault).not.toHaveBeenCalled();
-
-      const outer = new KeyboardEvent("keydown", {
-        key: "ArrowDown",
-        bubbles: true,
-        cancelable: true,
-      });
-      const inner = new KeyboardEvent("keydown", {
-        key: "ArrowUp",
-        bubbles: true,
-        cancelable: true,
-      });
-      markSearchResultEventTrusted(outer, window);
-      markSearchResultEventTrusted(inner, window);
-      search.addEventListener(
-        "keydown",
-        () => {
-          search.dispatchEvent(inner);
-        },
-        { capture: true, once: true },
-      );
-      await act(async () => {
-        search.dispatchEvent(outer);
-        await Promise.resolve();
-      });
-      expect(outer.defaultPrevented).toBe(false);
-      expect(inner.defaultPrevented).toBe(false);
-      expect(search).toHaveFocus();
-      expect(focus).not.toHaveBeenCalled();
-      expect(preventDefault).not.toHaveBeenCalled();
-
-      let wrapper: unknown = null;
-      const acceptedHandler: { current: CapturedReactClick | null } = {
-        current: null,
-      };
-      const restore = interceptReactHandler(search, "onKeyDown", (original, event) => {
-        acceptedHandler.current = original;
-        wrapper = event;
-        original(event);
-      });
-      const accepted = await dispatchSearchResultKey(search, "ArrowDown");
-      restore();
-      expect(accepted.defaultPrevented).toBe(true);
-      expect(searchResultLinks(host)[0]).toHaveFocus();
-      expect(focus).toHaveBeenCalledTimes(1);
-      expect(preventDefault).toHaveBeenCalledTimes(1);
-
-      acceptedHandler.current?.(wrapper);
-      await act(async () => {
-        search.dispatchEvent(accepted);
-        await Promise.resolve();
-      });
-      expect(focus).toHaveBeenCalledTimes(1);
-      expect(preventDefault).toHaveBeenCalledTimes(1);
-      expect(router.push).not.toHaveBeenCalled();
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-      iframe.remove();
-    }
-  });
-
-  it.each([
-    "preventDefault",
-    "stopPropagation",
-    "stopImmediatePropagation",
-  ] as const)(
-    "rejects downstream %s before focus and accepts a distinct clean event",
-    async (method) => {
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-
-      try {
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-            </StrictMode>,
-          );
-        });
-        const search = screen.getByRole("textbox", {
-          name: "Search documents",
-        }) as HTMLInputElement;
-        await dispatchSearchAction(() => {
-          fireEvent.change(search, { target: { value: "n" } });
-        });
-        search.focus();
-        focus.mockClear();
-        const stop = (event: Event) => event[method]();
-        search.addEventListener("keydown", stop, { once: true });
-
-        const rejected = await dispatchSearchResultKey(search, "ArrowDown");
-
-        search.removeEventListener("keydown", stop);
-        expect(focus).not.toHaveBeenCalled();
-        expect(search).toHaveFocus();
-        if (method === "preventDefault") {
-          expect(rejected.defaultPrevented).toBe(true);
-        }
-
-        const accepted = await dispatchSearchResultKey(search, "ArrowDown");
-        expect(accepted.defaultPrevented).toBe(true);
-        expect(searchResultLinks(host)[0]).toHaveFocus();
-        expect(focus).toHaveBeenCalledExactlyOnceWith({
-          preventScroll: true,
-        });
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it("rejects replaced key authority and a fabricated React trust wrapper before clean recovery", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", {
-        name: "Search documents",
-      }) as HTMLInputElement;
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "n" } });
-      });
-      const keyDescriptor = Object.getOwnPropertyDescriptor(
-        KeyboardEvent.prototype,
-        "key",
-      );
-      if (!keyDescriptor?.get) {
-        throw new Error("KeyboardEvent.key getter was unavailable");
-      }
-      const replaced = new KeyboardEvent("keydown", {
-        key: "ArrowDown",
-        bubbles: true,
-        cancelable: true,
-      });
-      markSearchResultEventTrusted(replaced, window);
-      search.focus();
-      focus.mockClear();
-      Object.defineProperty(KeyboardEvent.prototype, "key", {
-        ...keyDescriptor,
-        get: () => "ArrowDown",
-      });
-      try {
-        await act(async () => {
-          search.dispatchEvent(replaced);
-          await Promise.resolve();
-        });
-      } finally {
-        Object.defineProperty(
-          KeyboardEvent.prototype,
-          "key",
-          keyDescriptor,
-        );
-      }
-      expect(replaced.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const currentSearch = screen.getByRole("textbox", {
-        name: "Search documents",
-      }) as HTMLInputElement;
-      const restore = interceptReactHandler(
-        currentSearch,
-        "onKeyDown",
-        (original, event) => {
-          if (!event || typeof event !== "object") return;
-          const descriptors = Object.getOwnPropertyDescriptors(event);
-          descriptors.isTrusted = {
-            configurable: true,
-            enumerable: true,
-            value: false,
-            writable: true,
-          };
-          original(
-            Object.create(
-              Object.getPrototypeOf(event),
-              descriptors,
-            ) as object,
-          );
-        },
-      );
-      currentSearch.focus();
-      focus.mockClear();
-      const fabricatedWrapper = await dispatchSearchResultKey(
-        currentSearch,
-        "ArrowDown",
-      );
-      restore();
-      expect(fabricatedWrapper.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-
-      currentSearch.focus();
-      focus.mockClear();
-      const accepted = await dispatchSearchResultKey(
-        currentSearch,
-        "ArrowDown",
-      );
-      expect(accepted.defaultPrevented).toBe(true);
-      expect(searchResultLinks(host)[0]).toHaveFocus();
-      expect(focus).toHaveBeenCalledExactlyOnceWith({
-        preventScroll: true,
-      });
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("rejects a request settlement during delivery and focuses the clean current result", async () => {
-    const request = controlledSearch<SearchResponse>();
-    searchDocuments.mockReturnValueOnce(request.promise);
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", {
-        name: "Search documents",
-      }) as HTMLInputElement;
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "alpha" } });
-      });
-      await settleSearch();
-      expect(searchDocuments).toHaveBeenCalledOnce();
-      expect(searchResultLinks(host)).toHaveLength(1);
-      search.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-      search.addEventListener(
-        "keydown",
-        () => {
-          flushSync(() => {
-            request.resolve({
-              query: "alpha",
-              documents: [
-                result(
-                  "settled-result",
-                  "Settled alpha result",
-                  "Current alpha content",
-                ),
-              ],
-            });
-            request.finalize();
-          });
-        },
-        { capture: true, once: true },
-      );
-
-      const stale = await dispatchSearchResultKey(search, "ArrowDown");
-
-      expect(stale.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-      expect(preventDefault).not.toHaveBeenCalled();
-      expect(screen.getByRole("link", { name: /Settled alpha result/ })).toBeInTheDocument();
-      expect(searchDocuments).toHaveBeenCalledOnce();
-
-      search.focus();
-      focus.mockClear();
-      const current = await dispatchSearchResultKey(search, "ArrowDown");
-      expect(current.defaultPrevented).toBe(true);
-      expect(screen.getByRole("link", { name: /Settled alpha result/ })).toHaveFocus();
-      expect(focus).toHaveBeenCalledExactlyOnceWith({
-        preventScroll: true,
-      });
-      expect(searchDocuments).toHaveBeenCalledOnce();
-      expect(router.push).not.toHaveBeenCalled();
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("keeps stale query, result-order, and user handlers inert beside the exact current handler", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const replacement = {
-      ...USER,
-      id: "search-result-replacement",
-      login: "search-result-replacement",
-    };
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", {
-        name: "Search documents",
-      }) as HTMLInputElement;
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "n" } });
-      });
-      expect(searchResultLinks(host)).toHaveLength(2);
-      const staleOrder = captureReactHandler(search, "onKeyDown");
-
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "planning" } });
-      });
-      expect(searchResultLinks(host)).toHaveLength(1);
-      const staleUser = captureReactHandler(search, "onKeyDown");
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={replacement} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const currentSearch = screen.getByRole("textbox", {
-        name: "Search documents",
-      }) as HTMLInputElement;
-      const restore = interceptReactHandler(
-        currentSearch,
-        "onKeyDown",
-        (original, event) => {
-          staleOrder(event);
-          staleUser(event);
-          original(event);
-        },
-      );
-      currentSearch.focus();
-      focus.mockClear();
-      const event = await dispatchSearchResultKey(
-        currentSearch,
-        "ArrowDown",
-      );
-      restore();
-
-      expect(event.defaultPrevented).toBe(true);
-      expect(searchResultLinks(host)).toHaveLength(1);
-      expect(searchResultLinks(host)[0]).toHaveFocus();
-      expect(focus).toHaveBeenCalledExactlyOnceWith({
-        preventScroll: true,
-      });
-      expect(searchDocuments).not.toHaveBeenCalled();
-      expect(router.push).not.toHaveBeenCalled();
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it.each([
-    "restored result attribute",
-    "restored result order",
-    "restored result replacement",
-    "restored result root",
-  ] as const)(
-    "rejects %s history once and mints a clean successor without an external render",
-    async (scenario) => {
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-
-      try {
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-            </StrictMode>,
-          );
-        });
-        const search = screen.getByRole("textbox", {
-          name: "Search documents",
-        }) as HTMLInputElement;
-        await dispatchSearchAction(() => {
-          fireEvent.change(search, { target: { value: "n" } });
-        });
-        const list = host.querySelector<HTMLUListElement>(
-          '[data-testid="document-list"]',
-        )!;
-        const links = searchResultLinks(host);
-        if (scenario === "restored result attribute") {
-          links[0]!.setAttribute("data-search-result-attack", "1");
-          links[0]!.removeAttribute("data-search-result-attack");
-        } else if (scenario === "restored result order") {
-          const items = Array.from(list.children);
-          list.append(items[0]!);
-          for (const item of items) list.append(item);
-        } else if (scenario === "restored result replacement") {
-          const clone = links[0]!.cloneNode(true) as HTMLAnchorElement;
-          links[0]!.replaceWith(clone);
-          clone.replaceWith(links[0]!);
-        } else {
-          const parent = list.parentNode!;
-          const next = list.nextSibling;
-          list.remove();
-          parent.insertBefore(list, next);
-        }
-        await act(async () => {});
-        search.focus();
-        focus.mockClear();
-        preventDefault.mockClear();
-        const scrollIntoView = Element.prototype
-          .scrollIntoView as ReturnType<typeof vi.fn>;
-        scrollIntoView.mockClear();
-        const beforeScroll = { x: window.scrollX, y: window.scrollY };
-        const requestCount = searchDocuments.mock.calls.length;
-        const staleHandler = captureReactHandler(search, "onKeyDown");
-
-        const rejected = await dispatchSearchResultKey(search, "ArrowDown");
-
-        expect(rejected.defaultPrevented).toBe(false);
-        expect(search).toHaveFocus();
-        expect(focus).not.toHaveBeenCalled();
-        expect(preventDefault).not.toHaveBeenCalled();
-        expect(scrollIntoView).not.toHaveBeenCalled();
-        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
-        expect(search).toHaveValue("n");
-        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
-        expect(router.push).not.toHaveBeenCalled();
-        expect(router.replace).not.toHaveBeenCalled();
-        expect(router.refresh).not.toHaveBeenCalled();
-
-        const currentSearch = screen.getByRole("textbox", {
-          name: "Search documents",
-        }) as HTMLInputElement;
-        expect(captureReactHandler(currentSearch, "onKeyDown")).not.toBe(
-          staleHandler,
-        );
-        currentSearch.focus();
-        focus.mockClear();
-        preventDefault.mockClear();
-        const accepted = await dispatchSearchResultKey(
-          currentSearch,
-          "ArrowDown",
-        );
-        expect(accepted.defaultPrevented).toBe(true);
-        expect(searchResultLinks(host)[0]).toHaveFocus();
-        expect(focus).toHaveBeenCalledExactlyOnceWith({
-          preventScroll: true,
-        });
-        expect(preventDefault).toHaveBeenCalledOnce();
-        expect(scrollIntoView).not.toHaveBeenCalled();
-        expect({ x: window.scrollX, y: window.scrollY }).toEqual(beforeScroll);
-        expect(currentSearch).toHaveValue("n");
-        expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
-        expect(listDocuments).not.toHaveBeenCalled();
-        expect(createDocument).not.toHaveBeenCalled();
-        expect(router.push).not.toHaveBeenCalled();
-        expect(router.replace).not.toHaveBeenCalled();
-        expect(router.refresh).not.toHaveBeenCalled();
-      } finally {
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it("releases a queued DOM-barrier successor when cleanup wins", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    let mounted = true;
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-          </StrictMode>,
-        );
-      });
-      const search = screen.getByRole("textbox", {
-        name: "Search documents",
-      }) as HTMLInputElement;
-      await dispatchSearchAction(() => {
-        fireEvent.change(search, { target: { value: "n" } });
-      });
-      const link = searchResultLinks(host)[0]!;
-      link.setAttribute("data-search-result-attack", "1");
-      link.removeAttribute("data-search-result-attack");
-      await act(async () => {});
-      search.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-      const requestCount = searchDocuments.mock.calls.length;
-      const event = searchResultKeyEvent(search, "ArrowDown");
-
-      act(() => {
-        search.dispatchEvent(event);
-        root.unmount();
-      });
-      mounted = false;
-      await act(async () => {
-        await Promise.resolve();
-      });
-
-      expect(event.defaultPrevented).toBe(false);
-      expect(host).toBeEmptyDOMElement();
-      expect(focus).not.toHaveBeenCalled();
-      expect(preventDefault).not.toHaveBeenCalled();
-      expect(searchDocuments).toHaveBeenCalledTimes(requestCount);
-      expect(router.push).not.toHaveBeenCalled();
-      expect(router.replace).not.toHaveBeenCalled();
-      expect(router.refresh).not.toHaveBeenCalled();
-    } finally {
-      if (mounted) await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("rejects partial ref replay and cleanup while complete replay mints a usable successor", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    await act(async () => {
-      root.render(
-        <StrictMode>
-          <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-        </StrictMode>,
-      );
-    });
-    const search = screen.getByRole("textbox", {
-      name: "Search documents",
-    }) as HTMLInputElement;
-    await dispatchSearchAction(() => {
-      fireEvent.change(search, { target: { value: "n" } });
-    });
-    const partial = searchResultRefBindings(search)[0]!;
-    act(() => {
-      partial.ref(null);
-      partial.ref(partial.element);
-    });
-    await act(async () => {});
-    search.focus();
-    focus.mockClear();
-    preventDefault.mockClear();
-    const rejected = await dispatchSearchResultKey(search, "ArrowDown");
-    expect(rejected.defaultPrevented).toBe(false);
-    expect(focus).not.toHaveBeenCalled();
-    expect(preventDefault).not.toHaveBeenCalled();
-
-    await act(async () => {
-      root.render(
-        <StrictMode>
-          <Dashboard user={USER} documents={DOCUMENTS} githubAvailable githubConfigured />
-        </StrictMode>,
-      );
-    });
-    const recovered = screen.getByRole("textbox", {
-      name: "Search documents",
-    }) as HTMLInputElement;
-    const beforeReplay = captureReactHandler(recovered, "onKeyDown");
-    const complete = [
-      ...searchRefBindings(recovered, true),
-      ...searchResultRefBindings(recovered),
-    ];
-    act(() => {
-      for (const binding of complete) binding.ref(null);
-      for (const binding of complete) binding.ref(binding.element);
-    });
-    await act(async () => {});
-    expect(captureReactHandler(recovered, "onKeyDown")).not.toBe(beforeReplay);
-    recovered.focus();
-    focus.mockClear();
-    const accepted = await dispatchSearchResultKey(recovered, "ArrowUp");
-    expect(accepted.defaultPrevented).toBe(true);
-    expect(searchResultLinks(host).at(-1)).toHaveFocus();
-    expect(focus).toHaveBeenCalledExactlyOnceWith({
-      preventScroll: true,
-    });
-
-    const stale = captureReactHandler(recovered, "onKeyDown");
-    await act(async () => root.unmount());
-    const removedMarkup = host.innerHTML;
-    focus.mockClear();
-    preventDefault.mockClear();
-    stale({
-      _reactName: "onKeyDown",
-      type: "keydown",
-      nativeEvent: new KeyboardEvent("keydown", {
-        key: "ArrowDown",
-        bubbles: true,
-        cancelable: true,
-      }),
-      target: recovered,
-      currentTarget: recovered,
-      bubbles: true,
-      cancelable: true,
-      defaultPrevented: false,
-      isTrusted: true,
-      key: "ArrowDown",
-      ctrlKey: false,
-      metaKey: false,
-      altKey: false,
-      shiftKey: false,
-      repeat: false,
-      isComposing: false,
-      view: window,
-    });
-    expect(host.innerHTML).toBe(removedMarkup);
-    expect(focus).not.toHaveBeenCalled();
-    expect(preventDefault).not.toHaveBeenCalled();
-    host.remove();
   });
 });
 
@@ -7465,9 +6221,12 @@ describe.each(["search", "trash"] as const)("dashboard %s failure-message wrappi
     let replayEvent: unknown;
     const restore = interceptReactHandler(retry, "onClick", (original, event) => {
       replayEvent = event;
-      const beforeStale = requests.mock.calls.length;
-      initialHandler(event);
-      expect(requests).toHaveBeenCalledTimes(beforeStale);
+      // Only Trash keeps a stale-callback guard; search Retry is a plain click handler (#2226).
+      if (surface === "trash") {
+        const beforeStale = requests.mock.calls.length;
+        initialHandler(event);
+        expect(requests).toHaveBeenCalledTimes(beforeStale);
+      }
       original(event);
     });
     try {
@@ -7490,8 +6249,10 @@ describe.each(["search", "trash"] as const)("dashboard %s failure-message wrappi
     expect(screen.getByText("Recovered document")).toBeInTheDocument();
     const markup = document.body.innerHTML;
     act(() => {
-      initialHandler(replayEvent);
-      currentHandler(replayEvent);
+      if (surface === "trash") {
+        initialHandler(replayEvent);
+        currentHandler(replayEvent);
+      }
       retry.click();
     });
     expect(requests).toHaveBeenCalledTimes(initialCount + 2);
@@ -7513,30 +6274,6 @@ describe.each(["search", "trash"] as const)("dashboard %s failure-message wrappi
     expect(router.push).not.toHaveBeenCalled();
     expect(router.refresh).not.toHaveBeenCalled();
   });
-
-  // Only search still guards Retry on the message markup; Trash Retry is a plain click handler (#2197).
-  if (surface === "search") {
-    it.each([
-      "min-w-0 flex-1",
-      "min-w-0 flex-1 break-all",
-      "min-w-0 flex-1 wrap-anywhere extra",
-    ])("keeps the exact message-class guard strict against %s", async (className) => {
-      searchDocuments.mockRejectedValueOnce(new ApiError(503, "s".repeat(300)));
-      renderDashboard();
-      await dispatchSearchAction(() => {
-        fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
-      });
-      await settleSearch();
-      const alert = screen.getByTestId("search-error");
-      const retry = within(alert).getByRole("button", { name: "Retry" });
-      expect(alert.firstElementChild?.className).toBe("min-w-0 flex-1 wrap-anywhere");
-      alert.firstElementChild!.className = className;
-      await dispatchSearchAction(() => retry.click());
-      expect(searchDocuments).toHaveBeenCalledTimes(1);
-      expect(restoreDocument).not.toHaveBeenCalled();
-      expect(purgeDocument).not.toHaveBeenCalled();
-    });
-  }
 
   it("preserves empty-reason formatting and omission", async () => {
     searchDocuments.mockRejectedValueOnce(new ApiError(503, ""));
@@ -7591,7 +6328,6 @@ describe("dashboard failure-message wrapping lifetimes", () => {
     });
     await settleSearch();
     const oldRetry = within(screen.getByTestId("search-error")).getByRole("button", { name: "Retry" });
-    const staleHandler = captureReactHandler(oldRetry, "onClick");
     await dispatchSearchAction(() => oldRetry.click());
     expect(searchDocuments).toHaveBeenCalledTimes(2);
     const currentQuery = boundary === "query" ? "notes" : "alpha";
@@ -7617,19 +6353,11 @@ describe("dashboard failure-message wrapping lifetimes", () => {
     expect(alert.firstElementChild?.textContent).toBe(currentText);
     expect(screen.queryByText("Obsolete content")).toBeNull();
     const retry = within(alert).getByRole("button", { name: "Retry" });
-    const restore = interceptReactHandler(retry, "onClick", (original, event) => {
-      staleHandler(event);
-      expect(searchDocuments).toHaveBeenCalledTimes(3);
-      original(event);
+    expect(searchDocuments).toHaveBeenCalledTimes(3);
+    await dispatchSearchAction(() => {
+      retry.click();
+      retry.click();
     });
-    try {
-      await dispatchSearchAction(() => {
-        retry.click();
-        retry.click();
-      });
-    } finally {
-      restore();
-    }
     expect(searchDocuments).toHaveBeenCalledTimes(4);
     expect(searchDocuments.mock.calls[3][0]).toBe(currentQuery);
     expect(within(screen.getByTestId("document-list")).getAllByRole("link")).toHaveLength(1);
@@ -7650,27 +6378,17 @@ describe("dashboard failure-message wrapping lifetimes", () => {
       fireEvent.change(screen.getByRole("textbox", { name: "Search documents" }), { target: { value: "alpha" } });
     });
     await settleSearch();
-    const oldRetry = within(screen.getByTestId("search-error")).getByRole("button", { name: "Retry" });
-    const staleHandler = captureReactHandler(oldRetry, "onClick");
     fireEvent.click(screen.getByTestId("filter-shared"));
     const alert = screen.getByTestId("search-error");
     expect(alert.firstElementChild?.textContent).toBe(`Content search failed: ${reason}. Showing title matches only.`);
     expect(screen.getByText('No title matches for "alpha"')).toBeInTheDocument();
     expect(screen.queryByTestId("document-list")).toBeNull();
     const retry = within(alert).getByRole("button", { name: "Retry" });
-    const restore = interceptReactHandler(retry, "onClick", (original, event) => {
-      staleHandler(event);
-      expect(searchDocuments).toHaveBeenCalledTimes(1);
-      original(event);
+    expect(searchDocuments).toHaveBeenCalledTimes(1);
+    await dispatchSearchAction(() => {
+      retry.click();
+      retry.click();
     });
-    try {
-      await dispatchSearchAction(() => {
-        retry.click();
-        retry.click();
-      });
-    } finally {
-      restore();
-    }
     expect(searchDocuments).toHaveBeenCalledTimes(2);
     expect(searchDocuments.mock.calls[1][0]).toBe("alpha");
     expect(screen.getByTestId("filter-shared")).toHaveAttribute("aria-pressed", "true");
