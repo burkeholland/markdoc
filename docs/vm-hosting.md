@@ -208,6 +208,18 @@ command prints at most the preflight status and, for `command_failed`, a
 reason in exactly that format. If the reason does not match that format, it
 prints only that the raw output was withheld.
 
+`malformed_audit` can mean cut-off or invalid JSON, wrong field types, or a
+top-level key other than `auditReportVersion`, `vulnerabilities` and `metadata`.
+On a trusted machine, check the top-level key names without printing values:
+
+```powershell
+npm audit --package-lock-only --json | node -e "const o=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(Object.keys(o).join(','))"
+```
+
+The current report prints `auditReportVersion,vulnerabilities,metadata`. A new
+key needs a human to review it and update `parseAuditJson`; it is never a reason
+to bypass the preflight.
+
 The current lock resolves the audited transitive packages to
 `fast-uri@3.1.8`, `qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and
 `sharp@0.35.4`. The bounded dependency preflight reports zero blocked,
