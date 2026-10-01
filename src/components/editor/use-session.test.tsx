@@ -1,15 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, renderHook, screen } from "@testing-library/react";
-import {
-  StrictMode,
-  useLayoutEffect,
-  useState,
-  type MouseEvent as ReactMouseEvent,
-  type ReactNode,
-  type RefCallback,
-} from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { StrictMode } from "react";
 import type { CollabSession, SaveState } from "@/editor/collab/session";
 import type { SavedDocumentVersion } from "@/lib/document-persistence";
 import { SaveIndicator } from "./header";
@@ -64,179 +56,6 @@ function fakeSession(initial: SaveState = "saved") {
 }
 
 const asSession = (s: ReturnType<typeof fakeSession>) => s as unknown as CollabSession;
-
-interface ReactFiber {
-  ref?: unknown;
-}
-
-function reactProperty<T>(element: Element, name: string): T | undefined {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error(`React props were not attached while capturing ${name}`);
-  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  return props?.[name] as T | undefined;
-}
-
-function reactHandler<T extends (...args: never[]) => unknown>(element: Element, name: string): T {
-  const handler = reactProperty<T>(element, name);
-  if (typeof handler !== "function") throw new Error(`${name} was not attached`);
-  return handler;
-}
-
-function reactRef<T extends Element>(element: T): RefCallback<T> {
-  const direct = reactProperty<RefCallback<T>>(element, "ref");
-  if (typeof direct === "function") return direct;
-  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
-  if (!fiberKey) throw new Error("React fiber was not attached while capturing ref");
-  const fiber = (element as unknown as Record<string, ReactFiber>)[fiberKey];
-  if (typeof fiber.ref !== "function") throw new Error("A callback ref was not attached");
-  return fiber.ref as RefCallback<T>;
-}
-
-type SaveClick = (event: ReactMouseEvent<HTMLButtonElement>) => void;
-type SaveRootClick = (event: ReactMouseEvent<HTMLSpanElement>) => void;
-
-interface SaveControl {
-  root: HTMLSpanElement;
-  button: HTMLButtonElement;
-  icon: SVGSVGElement;
-  text: HTMLSpanElement;
-  rootClick: SaveRootClick;
-  click: SaveClick;
-  rootRef: RefCallback<HTMLSpanElement>;
-  buttonRef: RefCallback<HTMLButtonElement>;
-  iconRef: RefCallback<SVGSVGElement>;
-  textRef: RefCallback<HTMLSpanElement>;
-}
-
-function captureSave(root: ParentNode = document): SaveControl {
-  const status = root.querySelector('[data-testid="save-state"]');
-  const button = status?.firstElementChild;
-  const icon = button?.children.item(0);
-  const text = button?.children.item(1);
-  if (
-    !(status instanceof HTMLSpanElement)
-    || !(button instanceof HTMLButtonElement)
-    || !(icon instanceof SVGSVGElement)
-    || !(text instanceof HTMLSpanElement)
-  ) {
-    throw new Error("The SaveIndicator presentation was incomplete");
-  }
-  return {
-    root: status,
-    button,
-    icon,
-    text,
-    rootClick: reactHandler(status, "onClickCapture"),
-    click: reactHandler(button, "onClickCapture"),
-    rootRef: reactRef(status),
-    buttonRef: reactRef(button),
-    iconRef: reactRef(icon),
-    textRef: reactRef(text),
-  };
-}
-
-function directSaveClick(
-  control: SaveControl,
-  nativeEvent: Event = new MouseEvent("click", { bubbles: true, cancelable: true }),
-) {
-  const mouse = nativeEvent instanceof MouseEvent ? nativeEvent : null;
-  control.click({
-    type: nativeEvent.type,
-    currentTarget: control.button,
-    target: control.button,
-    nativeEvent,
-    button: mouse?.button ?? 0,
-    buttons: mouse?.buttons ?? 0,
-    altKey: mouse?.altKey ?? false,
-    ctrlKey: mouse?.ctrlKey ?? false,
-    metaKey: mouse?.metaKey ?? false,
-    shiftKey: mouse?.shiftKey ?? false,
-    clientX: mouse?.clientX ?? 0,
-    clientY: mouse?.clientY ?? 0,
-    detail: mouse?.detail ?? 0,
-    bubbles: nativeEvent.bubbles,
-    cancelable: nativeEvent.cancelable,
-    eventPhase: nativeEvent.eventPhase,
-    isTrusted: nativeEvent.isTrusted,
-    timeStamp: nativeEvent.timeStamp,
-    defaultPrevented: false,
-    preventDefault: () => undefined,
-    stopPropagation: () => undefined,
-    isDefaultPrevented: () => false,
-    isPropagationStopped: () => false,
-    persist: () => undefined,
-  } as unknown as ReactMouseEvent<HTMLButtonElement>);
-}
-
-function SaveLayoutCapture({ capture }: { capture: () => void }) {
-  useLayoutEffect(() => {
-    capture();
-  });
-  return null;
-}
-
-function RemoveSaveDuringReplay({
-  session,
-  remove,
-}: {
-  session: ReturnType<typeof fakeSession>;
-  remove: () => boolean;
-}) {
-  const [present, setPresent] = useState(true);
-  useLayoutEffect(() => {
-    if (remove()) setPresent(false);
-  }, [remove]);
-  return present ? <SaveIndicator session={asSession(session)} /> : null;
-}
-
-function saveTree({
-  session,
-  revision = 0,
-  compact,
-  capture,
-}: {
-  session: ReturnType<typeof fakeSession>;
-  revision?: number;
-  compact?: boolean;
-  capture?: () => void;
-}) {
-  void revision;
-  return (
-    <StrictMode>
-      <section data-testid="save-higher">
-        <i data-testid="save-before" />
-        <div data-testid="save-parent">
-          <SaveIndicator session={asSession(session)} compact={compact} />
-        </div>
-        <i data-testid="save-after" />
-        {capture && <SaveLayoutCapture capture={capture} />}
-      </section>
-    </StrictMode>
-  );
-}
-
-interface DirectSaveRoot {
-  host: HTMLDivElement;
-  root: Root;
-  render: (node: ReactNode) => void;
-  unmount: () => void;
-}
-
-function directSaveRoot(node: ReactNode): DirectSaveRoot {
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  act(() => root.render(node));
-  return {
-    host,
-    root,
-    render: (next) => act(() => root.render(next)),
-    unmount: () => {
-      act(() => root.unmount());
-      host.remove();
-    },
-  };
-}
 
 describe("useSettledSaveState", () => {
   beforeEach(() => {
@@ -639,561 +458,86 @@ describe("SaveIndicator", () => {
     expect(session.flushSave).not.toHaveBeenCalled();
   });
 
-  it("retires the first Strict Mode publication and lets only its exact successor Save", async () => {
+  // #2217: typing updates the session's live fields before the coalesced notify re-renders the chip.
+  // A click in that window used to be dropped by the old render-snapshot gate; it must save like Ctrl+S.
+  it.each([
+    ["unsyncedChanges", (s: ReturnType<typeof fakeSession>) => { s.unsyncedChanges = 0; }],
+    ["dirty", (s: ReturnType<typeof fakeSession>) => { s.dirty = true; }],
+    ["saveState", (s: ReturnType<typeof fakeSession>) => { s.saveState = "saving"; }],
+  ] as const)("saves when the live %s changed without a re-render", (_field, drift) => {
+    const session = fakeSession("pending");
+    session.unsyncedChanges = 1;
+    render(<SaveIndicator session={asSession(session)} />);
+    drift(session);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save document" }));
+    expect(session.flushSave).toHaveBeenCalledOnce();
+  });
+
+  it("does not start a second save from a click made while the first flushSave call is still running", async () => {
+    const session = fakeSession("pending");
+    const save = controlledSave();
+    render(<SaveIndicator session={asSession(session)} />);
+    const button = screen.getByRole("button", { name: "Save document" });
+    session.flushSave.mockImplementationOnce(() => {
+      fireEvent.click(button);
+      return save.promise;
+    });
+
+    fireEvent.click(button);
+    expect(session.flushSave).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      save.resolve(savedVersion);
+      await Promise.resolve();
+    });
+    fireEvent.click(button);
+    expect(session.flushSave).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a non-Error rejection as Save failed and recovers on retry", async () => {
+    const session = fakeSession("pending");
+    const first = controlledSave();
+    session.flushSave.mockReturnValueOnce(first.promise);
+    render(<SaveIndicator session={asSession(session)} />);
+    const button = screen.getByRole("button", { name: "Save document" });
+
+    fireEvent.click(button);
+    await act(async () => {
+      first.reject("offline");
+      await Promise.resolve();
+    });
+    expect(button).toBeEnabled();
+    expect(screen.getByTestId("save-state")).toHaveTextContent("Save failed");
+    expect(screen.getByTestId("save-state")).toHaveAttribute("title", "Save failed");
+
+    fireEvent.click(button);
+    expect(session.flushSave).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("save-state")).toHaveTextContent("Unsaved changes");
+  });
+
+  it("saves once per click under Strict Mode and shows a failure", async () => {
     const session = fakeSession("pending");
     const save = controlledSave();
     session.flushSave.mockReturnValueOnce(save.promise);
-    const layouts: SaveControl[] = [];
-    const view = directSaveRoot(saveTree({
-      session,
-      capture: () => layouts.push(captureSave()),
-    }));
-    try {
-      const retired = layouts[0];
-      const current = captureSave(view.host);
-      if (!retired) throw new Error("Strict Mode did not expose its first Save publication");
-      expect(retired.button).toBe(current.button);
-      expect(retired.click).not.toBe(current.click);
+    render(<StrictMode><SaveIndicator session={asSession(session)} /></StrictMode>);
+    const button = screen.getByRole("button", { name: "Save document" });
 
-      act(() => directSaveClick(retired));
-      expect(session.flushSave).not.toHaveBeenCalled();
+    act(() => {
+      fireEvent.click(button);
+      fireEvent.click(button);
+    });
+    expect(session.flushSave).toHaveBeenCalledOnce();
+    expect(button).toBeDisabled();
 
-      act(() => {
-        current.button.focus();
-        current.button.click();
-        current.button.click();
-      });
-      expect(session.flushSave).toHaveBeenCalledOnce();
-      expect(current.button).toBeDisabled();
-      expect(current.button).toHaveAttribute("aria-busy", "true");
-      expect(current.button).toHaveFocus();
-
-      await act(async () => {
-        save.resolve(savedVersion);
-        await Promise.resolve();
-      });
-      expect(current.button).toBeEnabled();
-      expect(current.button).not.toHaveAttribute("aria-busy");
-    } finally {
-      view.unmount();
-    }
+    await act(async () => {
+      save.reject(new Error("Strict failure"));
+      await Promise.resolve();
+    });
+    expect(button).toBeEnabled();
+    expect(screen.getByTestId("save-state")).toHaveTextContent("Strict failure");
   });
-
-  it.each([
-    "icon attribute",
-    "root comment",
-    "button text node",
-    "nested same-text markup",
-  ] as const)("does not canonize pre-publication %s", (tampering) => {
-    const session = fakeSession("pending");
-    const save = controlledSave();
-    session.flushSave.mockReturnValue(save.promise);
-    let setup = 0;
-    let restore = () => {};
-    const tamperBeforePublication = () => {
-      setup++;
-      if (setup !== 1) return;
-      const current = captureSave();
-      if (tampering === "icon attribute") {
-        current.icon.setAttribute("data-tampered", "true");
-        restore = () => current.icon.removeAttribute("data-tampered");
-      } else if (tampering === "root comment") {
-        const comment = current.root.ownerDocument.createComment("tampered");
-        current.root.append(comment);
-        restore = () => comment.remove();
-      } else if (tampering === "button text node") {
-        const extraText = current.button.ownerDocument.createTextNode("");
-        current.button.append(extraText);
-        restore = () => extraText.remove();
-      } else {
-        const expectedText = current.text.textContent ?? "";
-        const nested = current.text.ownerDocument.createElement("b");
-        nested.textContent = expectedText;
-        current.text.replaceChildren(nested);
-        restore = () => current.text.replaceChildren(
-          current.text.ownerDocument.createTextNode(expectedText),
-        );
-      }
-    };
-    const tree = (revision: number) => {
-      void revision;
-      return (
-        <StrictMode>
-          <section>
-            <SaveLayoutCapture capture={tamperBeforePublication} />
-            <div>
-              <SaveIndicator session={asSession(session)} />
-            </div>
-          </section>
-        </StrictMode>
-      );
-    };
-    const view = directSaveRoot(tree(0));
-    try {
-      const tampered = captureSave(view.host);
-      act(() => tampered.button.click());
-      expect(session.flushSave).not.toHaveBeenCalled();
-
-      restore();
-      act(() => tampered.button.click());
-      expect(session.flushSave).not.toHaveBeenCalled();
-
-      view.render(tree(1));
-      act(() => captureSave(view.host).button.click());
-      expect(session.flushSave).toHaveBeenCalledOnce();
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it("releases the document observer when unmounted during replay handoff", async () => {
-    const disconnect = vi.spyOn(MutationObserver.prototype, "disconnect");
-    const session = fakeSession("pending");
-    let setup = 0;
-    const view = directSaveRoot(
-      <StrictMode>
-        <RemoveSaveDuringReplay
-          session={session}
-          remove={() => ++setup === 2}
-        />
-      </StrictMode>,
-    );
-    try {
-      await act(async () => {
-        await Promise.resolve();
-      });
-      expect(view.host).toBeEmptyDOMElement();
-      expect(disconnect).toHaveBeenCalled();
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it("rejects a custom-prototype wrapper passed through both handlers during a live native click", () => {
-    const session = fakeSession("pending");
-    const save = controlledSave();
-    session.flushSave.mockReturnValue(save.promise);
-    const host = document.createElement("div");
-    document.body.append(host);
-    let current: SaveControl | null = null;
-    const intercept = (nativeEvent: Event) => {
-      const control = current;
-      if (!control || !(nativeEvent instanceof MouseEvent)) return;
-      function ForgedSyntheticEvent() {}
-      const customPrototype = ForgedSyntheticEvent.prototype;
-      const wrapper = Object.assign(Object.create(customPrototype), {
-        type: "click",
-        currentTarget: control.root as EventTarget | null,
-        target: control.button,
-        nativeEvent,
-        button: nativeEvent.button,
-        buttons: nativeEvent.buttons,
-        altKey: nativeEvent.altKey,
-        ctrlKey: nativeEvent.ctrlKey,
-        metaKey: nativeEvent.metaKey,
-        shiftKey: nativeEvent.shiftKey,
-        clientX: nativeEvent.clientX,
-        clientY: nativeEvent.clientY,
-        detail: nativeEvent.detail,
-        bubbles: nativeEvent.bubbles,
-        cancelable: nativeEvent.cancelable,
-        eventPhase: nativeEvent.eventPhase,
-        isTrusted: nativeEvent.isTrusted,
-        timeStamp: nativeEvent.timeStamp,
-        defaultPrevented: false,
-        preventDefault: () => undefined,
-        stopPropagation: () => undefined,
-        isDefaultPrevented: () => false,
-        isPropagationStopped: () => false,
-        persist: () => undefined,
-      });
-      expect(customPrototype.constructor).toBe(ForgedSyntheticEvent);
-      expect(ForgedSyntheticEvent.prototype).toBe(customPrototype);
-      control.rootClick(wrapper as ReactMouseEvent<HTMLSpanElement>);
-      wrapper.currentTarget = null;
-      wrapper.currentTarget = control.button;
-      control.click(wrapper as ReactMouseEvent<HTMLButtonElement>);
-      session.canEdit = false;
-      control.root.addEventListener("click", () => {
-        session.canEdit = true;
-      }, { capture: true, once: true });
-    };
-    host.addEventListener("click", intercept, { capture: true, once: true });
-    const root = createRoot(host);
-    try {
-      act(() => root.render(saveTree({ session })));
-      current = captureSave(host);
-      act(() => current?.button.click());
-      expect(session.flushSave).not.toHaveBeenCalled();
-
-      act(() => current?.button.click());
-      expect(session.flushSave).toHaveBeenCalledOnce();
-    } finally {
-      act(() => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("keeps Strict Mode failure and retry publication ownership exact", async () => {
-    const session = fakeSession("pending");
-    const failed = controlledSave();
-    const retried = controlledSave();
-    session.flushSave
-      .mockReturnValueOnce(failed.promise)
-      .mockReturnValueOnce(retried.promise);
-    const view = directSaveRoot(saveTree({ session }));
-    try {
-      act(() => captureSave(view.host).button.click());
-      await act(async () => {
-        failed.reject(new Error("Strict store unavailable"));
-        await Promise.resolve();
-      });
-      const retry = captureSave(view.host);
-      expect(retry.button).toBeEnabled();
-      expect(retry.root).toHaveTextContent("Strict store unavailable");
-      expect(retry.root).toHaveAttribute("title", "Strict store unavailable");
-
-      act(() => {
-        retry.button.click();
-        retry.button.click();
-      });
-      expect(session.flushSave).toHaveBeenCalledTimes(2);
-      expect(retry.button).toBeDisabled();
-      expect(retry.root).not.toHaveTextContent("Strict store unavailable");
-
-      await act(async () => {
-        retried.resolve(savedVersion);
-        await Promise.resolve();
-      });
-      expect(retry.button).toBeEnabled();
-      expect(retry.root).not.toHaveAttribute("title");
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it.each([
-    "root",
-    "button",
-    "icon",
-    "text",
-  ] as const)("rejects a partial %s ref replay, then admits a fresh exact successor", (part) => {
-    const session = fakeSession("pending");
-    const save = controlledSave();
-    session.flushSave.mockReturnValue(save.promise);
-    let setup = 0;
-    let retired: SaveControl | null = null;
-    const capture = () => {
-      setup++;
-      if (setup === 1) {
-        retired = captureSave();
-      } else if (setup === 2 && retired) {
-        const refs = {
-          root: retired.rootRef,
-          button: retired.buttonRef,
-          icon: retired.iconRef,
-          text: retired.textRef,
-        };
-        refs[part](null);
-      }
-    };
-    const view = directSaveRoot(saveTree({ session, capture }));
-    try {
-      act(() => captureSave(view.host).button.click());
-      expect(session.flushSave).not.toHaveBeenCalled();
-      const retiredControl = retired;
-      if (!retiredControl) throw new Error("Strict Mode did not publish a replay source");
-      act(() => directSaveClick(retiredControl));
-      expect(session.flushSave).not.toHaveBeenCalled();
-
-      view.render(saveTree({ session, revision: 1 }));
-      act(() => captureSave(view.host).button.click());
-      expect(session.flushSave).toHaveBeenCalledOnce();
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it.each([
-    "root attribute",
-    "text",
-    "root detach",
-    "parent detach",
-    "higher detach",
-    "adjacent placement",
-  ] as const)("permanently retires replay after %s mutation and restores only through a fresh render", (change) => {
-    const session = fakeSession("pending");
-    const save = controlledSave();
-    session.flushSave.mockReturnValue(save.promise);
-    let setup = 0;
-    const capture = () => {
-      setup++;
-      if (setup !== 2) return;
-      const current = captureSave();
-      const parent = screen.getByTestId("save-parent");
-      const higher = screen.getByTestId("save-higher");
-      if (change === "root attribute") {
-        current.root.dataset.state = "changed";
-        current.root.dataset.state = "pending";
-      } else if (change === "text") {
-        current.text.textContent = "Changed";
-        current.text.textContent = "Unsaved changes";
-      } else if (change === "root detach") {
-        const next = current.root.nextSibling;
-        current.root.remove();
-        parent.insertBefore(current.root, next);
-      } else if (change === "parent detach") {
-        const next = parent.nextSibling;
-        parent.remove();
-        higher.insertBefore(parent, next);
-      } else if (change === "higher detach") {
-        const container = higher.parentNode;
-        const next = higher.nextSibling;
-        if (!container) throw new Error("The higher Save ancestor had no parent");
-        higher.remove();
-        container.insertBefore(higher, next);
-      } else {
-        const adjacent = document.createElement("b");
-        higher.insertBefore(adjacent, parent);
-        adjacent.remove();
-      }
-    };
-    const view = directSaveRoot(saveTree({ session, capture }));
-    try {
-      act(() => captureSave(view.host).button.click());
-      expect(session.flushSave).not.toHaveBeenCalled();
-
-      view.render(saveTree({ session, revision: 1 }));
-      act(() => captureSave(view.host).button.click());
-      expect(session.flushSave).toHaveBeenCalledOnce();
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it("allows genuinely nonadjacent ancestor churn during replay", () => {
-    const session = fakeSession("pending");
-    const save = controlledSave();
-    session.flushSave.mockReturnValue(save.promise);
-    let setup = 0;
-    const capture = () => {
-      setup++;
-      if (setup !== 2) return;
-      const higher = screen.getByTestId("save-higher");
-      const before = screen.getByTestId("save-before");
-      const distant = document.createElement("b");
-      higher.insertBefore(distant, before);
-      distant.remove();
-    };
-    const view = directSaveRoot(saveTree({ session, capture }));
-    try {
-      act(() => captureSave(view.host).button.click());
-      expect(session.flushSave).toHaveBeenCalledOnce();
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it.each([
-    "canEdit",
-    "flushSave",
-    "saveState",
-    "unsyncedChanges",
-    "dirty",
-    "recovered",
-    "prolongedOffline",
-    "saveError",
-  ] as const)("revalidates the live %s primitive before accepting Save", (field) => {
-    const session = fakeSession("pending");
-    const original = session[field];
-    const replacement = vi.fn<() => Promise<FlushResult>>(async () => null);
-    const view = directSaveRoot(saveTree({ session }));
-    try {
-      if (field === "canEdit") session.canEdit = false;
-      else if (field === "flushSave") session.flushSave = replacement;
-      else if (field === "saveState") session.saveState = "offline";
-      else if (field === "unsyncedChanges") session.unsyncedChanges = 2;
-      else if (field === "dirty") session.dirty = true;
-      else if (field === "recovered") session.recovered = true;
-      else if (field === "prolongedOffline") session.prolongedOffline = true;
-      else session.saveError = "Changed error";
-
-      act(() => captureSave(view.host).button.click());
-      expect(session.flushSave).not.toHaveBeenCalled();
-      expect(replacement).not.toHaveBeenCalled();
-
-      Object.assign(session, { [field]: original });
-      act(() => captureSave(view.host).button.click());
-      expect(session.flushSave).toHaveBeenCalledOnce();
-      expect(replacement).not.toHaveBeenCalled();
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it.each([
-    ["dirty", 1, false, 1, true],
-    ["unsyncedChanges", 0, true, 1, true],
-  ] as const)(
-    "rejects masked %s drift even when the computed unsynced count stays one",
-    (field, beforeUnsynced, beforeDirty, afterUnsynced, afterDirty) => {
-      const session = fakeSession("pending");
-      session.unsyncedChanges = beforeUnsynced;
-      session.dirty = beforeDirty;
-      const save = controlledSave();
-      session.flushSave.mockReturnValue(save.promise);
-      const view = directSaveRoot(saveTree({ session }));
-      try {
-        const stale = captureSave(view.host);
-        session.unsyncedChanges = afterUnsynced;
-        session.dirty = afterDirty;
-        expect(Math.max(beforeUnsynced, beforeDirty ? 1 : 0)).toBe(1);
-        expect(Math.max(afterUnsynced, afterDirty ? 1 : 0)).toBe(1);
-
-        act(() => stale.button.click());
-        expect(session.flushSave).not.toHaveBeenCalled();
-
-        session.unsyncedChanges = beforeUnsynced;
-        session.dirty = beforeDirty;
-        act(() => stale.button.click());
-        expect(session.flushSave).toHaveBeenCalledOnce();
-      } finally {
-        view.unmount();
-      }
-    },
-  );
-
-  it("claims the publication, action, wrapper, native event, and request before reentrant Save work", async () => {
-    const session = fakeSession("pending");
-    const save = controlledSave();
-    const view = directSaveRoot(saveTree({ session }));
-    try {
-      const current = captureSave(view.host);
-      session.flushSave.mockImplementationOnce(() => {
-        current.button.click();
-        directSaveClick(current);
-        return save.promise;
-      });
-      const wrongNative = new Event("click", { bubbles: true, cancelable: true });
-      const detachedNative = new MouseEvent("click", { bubbles: true, cancelable: true });
-
-      act(() => {
-        directSaveClick(current, wrongNative);
-        directSaveClick(current, detachedNative);
-        current.button.click();
-        current.button.click();
-      });
-      expect(session.flushSave).toHaveBeenCalledOnce();
-      expect(current.button).toBeDisabled();
-
-      await act(async () => {
-        save.resolve(savedVersion);
-        await Promise.resolve();
-      });
-      const successor = captureSave(view.host);
-      const next = controlledSave();
-      session.flushSave.mockReturnValueOnce(next.promise);
-      act(() => successor.button.click());
-      expect(session.flushSave).toHaveBeenCalledTimes(2);
-    } finally {
-      view.unmount();
-    }
-  });
-
-  it.each(["session", "callback"] as const)(
-    "retires the old %s handler before the exact same-looking replacement can Save",
-    (replacement) => {
-      const first = fakeSession("pending");
-      let current = first;
-      const oldFlush = first.flushSave;
-      const nextFlush = vi.fn<() => Promise<FlushResult>>(() => controlledSave().promise);
-      const view = directSaveRoot(saveTree({ session: first }));
-      try {
-        const stale = captureSave(view.host);
-        if (replacement === "session") {
-          current = fakeSession("pending");
-          current.flushSave = nextFlush;
-        } else {
-          first.flushSave = nextFlush;
-        }
-        view.render(saveTree({ session: current, revision: 1 }));
-        const successor = captureSave(view.host);
-        expect(successor.button).toBe(stale.button);
-        expect(successor.click).not.toBe(stale.click);
-
-        act(() => directSaveClick(stale));
-        expect(oldFlush).not.toHaveBeenCalled();
-        expect(nextFlush).not.toHaveBeenCalled();
-
-        act(() => successor.button.click());
-        expect(oldFlush).not.toHaveBeenCalled();
-        expect(nextFlush).toHaveBeenCalledOnce();
-      } finally {
-        view.unmount();
-      }
-    },
-  );
-
-  it.each(["success", "failure"] as const)(
-    "keeps B request and status exact through late A %s and finally",
-    async (settlement) => {
-      const first = fakeSession("pending");
-      const firstSave = controlledSave();
-      first.flushSave.mockReturnValueOnce(firstSave.promise);
-      const second = fakeSession("pending");
-      const secondSave = controlledSave();
-      second.flushSave.mockReturnValueOnce(secondSave.promise);
-      const view = directSaveRoot(saveTree({ session: first }));
-      try {
-        act(() => captureSave(view.host).button.click());
-        expect(first.flushSave).toHaveBeenCalledOnce();
-
-        view.render(saveTree({ session: second, revision: 1 }));
-        const current = captureSave(view.host);
-        expect(current.button).toBeEnabled();
-        act(() => current.button.click());
-        expect(second.flushSave).toHaveBeenCalledOnce();
-        expect(current.button).toBeDisabled();
-
-        await act(async () => {
-          if (settlement === "success") firstSave.resolve(savedVersion);
-          else firstSave.reject(new Error("Late A failure"));
-          await Promise.resolve();
-        });
-        expect(current.button).toBeDisabled();
-        expect(current.button).toHaveAttribute("aria-busy", "true");
-        expect(captureSave(view.host).root).not.toHaveTextContent("Late A failure");
-
-        await act(async () => {
-          secondSave.resolve(savedVersion);
-          await Promise.resolve();
-        });
-        expect(current.button).toBeEnabled();
-        act(() => current.button.click());
-        expect(second.flushSave).toHaveBeenCalledTimes(2);
-      } finally {
-        view.unmount();
-      }
-    },
-  );
-
-  it.each(["success", "failure"] as const)(
-    "does not publish a Strict Mode request settlement after unmount (%s)",
-    async (settlement) => {
-      const error = vi.spyOn(console, "error").mockImplementation(() => {});
-      const session = fakeSession("pending");
-      const save = controlledSave();
-      session.flushSave.mockReturnValueOnce(save.promise);
-      const view = directSaveRoot(saveTree({ session }));
-      act(() => captureSave(view.host).button.click());
-      view.unmount();
-
-      await act(async () => {
-        if (settlement === "success") save.resolve(savedVersion);
-        else save.reject(new Error("Unmounted Strict save"));
-        await Promise.resolve();
-      });
-      expect(error).not.toHaveBeenCalled();
-    },
-  );
 });
