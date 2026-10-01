@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { createDocument, devLogin, ensureCommentsOpen, mintToken, openDocument, richText, signIn, uniqueLogin, waitForHydration } from "./helpers";
+import { createDocument, devLogin, ensureCommentsOpen, expectCommentsTab, expectThemeOption, mintToken, openDocument, openPhoneComments, richText, signIn, uniqueLogin, waitForHydration } from "./helpers";
 
 /** Text of the code pane as rendered. The dev-only `__markdocSession` hook used by the regular suite is not exposed by a production build. */
 const codeText = (page: Page) => page.locator(".cm-content").innerText();
@@ -182,6 +182,62 @@ test.describe("production build", () => {
       }
     });
 
+    test("the comments tabs change on a click and on the arrow, Home and End keys (#2198)", async ({ page }) => {
+      await signInFresh(page, "prod-tabs");
+      const id = await createDocument(page, "# Smoke tabs\n\nThe comments tabs.\n", "Smoke tabs");
+      await openDocument(page, id);
+      await ensureCommentsOpen(page);
+      await expectCommentsTab(page, "open");
+
+      for (const tab of ["resolved", "suggestions", "open"] as const) {
+        await page.getByTestId(`comments-tab-${tab}`).click();
+        await expectCommentsTab(page, tab, { focused: true });
+      }
+      for (const [key, tab] of [
+        ["ArrowRight", "resolved"],
+        ["ArrowLeft", "open"],
+        ["ArrowLeft", "suggestions"],
+        ["Home", "open"],
+        ["End", "suggestions"],
+      ] as const) {
+        await page.keyboard.press(key);
+        await expectCommentsTab(page, tab, { focused: true });
+      }
+
+      await page.getByRole("button", { name: "Close comments" }).click();
+      await expect(page.getByTestId("comments-panel")).toHaveCount(0);
+    });
+
+    test("the Close comments button closes the sheet at phone width (#2198)", async ({ page }) => {
+      await signInFresh(page, "prod-close-phone");
+      await page.setViewportSize({ width: 390, height: 844 });
+      const id = await createDocument(page, "# Smoke close\n\nThe phone sheet.\n", "Smoke close");
+      await openPhoneComments(page, id);
+      await page.getByTestId("comments-tab-suggestions").click();
+      await expectCommentsTab(page, "suggestions", { focused: true });
+
+      await page.getByRole("button", { name: "Close comments" }).click();
+      await expect(page.getByTestId("comments-panel")).toHaveCount(0);
+    });
+
+    test("the Settings theme picker follows the arrow keys and saves the theme (#2198)", async ({ page }) => {
+      await signInFresh(page, "prod-picker-keys");
+      await page.goto("/settings");
+      await waitForHydration(page);
+      await page.getByTestId("theme-option-system").focus();
+
+      for (const [key, preference] of [
+        ["ArrowLeft", "dark"],
+        ["ArrowRight", "system"],
+        ["ArrowDown", "light"],
+        ["End", "dark"],
+        ["Home", "system"],
+      ] as const) {
+        await page.keyboard.press(key);
+        await expectThemeOption(page, preference);
+      }
+    });
+
     test("Trash: Restore brings a document back and Delete forever removes it", async ({ page }) => {
       await signInFresh(page, "prod-trash");
       const title = `Disposable ${Date.now().toString(36)}`;
@@ -341,6 +397,63 @@ test.describe("production build", () => {
       const url = new URL((await authorize).url());
       expect(url.searchParams.get("client_id")).toBeTruthy();
       expect(url.searchParams.get("redirect_uri")).toMatch(/\/api\/auth\/callback\/github$/);
+    });
+  });
+
+  test.describe("image dialog real input (#2193)", () => {
+    test.skip(!base, "PROD_BASE_URL not set");
+    test.use({ baseURL: base ?? "http://localhost:3900" });
+
+    test("Upload, typed URL and alt text, Insert, Cancel and Escape work with real input", async ({ page }) => {
+      await devLogin(page, uniqueLogin("prod-image"));
+      const id = await createDocument(page, "# Images\n\nGallery.\n", "Images");
+      await openDocument(page, id);
+      await page.locator(".md-rich").click();
+      await page.keyboard.press("Control+End");
+
+      await page.getByTestId("tb-image").click();
+      const dialog = page.getByRole("dialog", { name: "Insert image" });
+      await expect(dialog).toBeVisible();
+      const chooser = page.waitForEvent("filechooser");
+      await page.getByTestId("image-upload").click();
+      await (await chooser).setFiles({
+        name: "Smoke pixel.png",
+        mimeType: "image/png",
+        buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"),
+      });
+      await expect(page.getByTestId("image-url")).toHaveValue(/^\/api\/assets\/[a-z0-9]+$/);
+      const uploaded = await page.getByTestId("image-url").inputValue();
+      await page.getByTestId("image-alt").click();
+      await page.keyboard.press("Control+A");
+      await page.keyboard.type("Uploaded pixel");
+      await page.getByTestId("image-submit").click();
+      await expect(dialog).toHaveCount(0);
+      await expect.poll(() => codeText(page)).toContain(`![Uploaded pixel](${uploaded})`);
+
+      await page.getByTestId("tb-image").click();
+      await page.getByTestId("image-url").click();
+      await page.keyboard.type(uploaded);
+      await page.getByTestId("image-alt").click();
+      await page.keyboard.type("Keyboard pixel");
+      await page.keyboard.press("Enter");
+      await expect(dialog).toHaveCount(0);
+      await expect.poll(() => codeText(page)).toContain(`![Keyboard pixel](${uploaded})`);
+
+      const beforeCancel = await codeText(page);
+      await page.getByTestId("tb-image").click();
+      await page.getByTestId("image-url").click();
+      await page.keyboard.type(uploaded);
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      await page.getByTestId("tb-image").click();
+      await expect(page.getByTestId("image-url")).toHaveValue("");
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      expect(await codeText(page)).toBe(beforeCancel);
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      const content = await page.request.get(`/api/documents/${id}/content`);
+      expect(content.status()).toBe(200);
+      expect(((await content.json()) as { content: string }).content).toContain(`![Keyboard pixel](${uploaded})`);
     });
   });
 });

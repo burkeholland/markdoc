@@ -296,6 +296,15 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
       "markdoc-release-wal-ready:$operation`:$endpoint`:$wal`:$archive`:$replay"
     ) -join "`n"
     $stdout = "$walEvidence`n$healthText`nmarkdoc-vm-image-ready`nmarkdoc-vm-image-operation-ready:$operation"
+    if ($script:scenario -eq 'retention-warning') {
+      $stdout = "$walEvidence`nmarkdoc-vm-image-warning:${operation}:retention-failed`n$healthText`nmarkdoc-vm-image-ready`nmarkdoc-vm-image-operation-ready:$operation"
+    }
+    if ($script:scenario -eq 'image-space') {
+      $stdout = "$walEvidence`nmarkdoc-vm-image-space-failed:${operation}:pull:available=436326400:required=6442450944:reserve=2147483648"
+    }
+    if ($script:scenario -eq 'wal-diagnostic') {
+      $stdout = "markdoc-release-wal-failed:${operation}:sql-ready:cleanup=true`nmarkdoc-release-wal-log:${operation}:PANIC:disk-full`nmarkdoc-release-wal-log:${operation}:FATAL:private-token"
+    }
     if ($script:scenario -eq 'transport-only') { $stdout = '' }
     if ($script:scenario -eq 'missing-ready-marker') { $stdout = $healthText }
     if ($script:scenario -eq 'missing-local-health') { $stdout = "markdoc-vm-image-ready`nmarkdoc-vm-image-operation-ready:$operation" }
@@ -335,10 +344,10 @@ $cases = @(
   'build-submit-failed', 'build-submit-timeout', 'reconcile-missing', 'reconcile-ambiguous', 'reconcile-malformed-run',
   'build-failed', 'build-timeout', 'build-unknown-status', 'wrong-run',
   'ambiguous-digest', 'missing-digest', 'null-digest', 'malformed-digest', 'scalar-digest', 'tag-raced', 'changed-after-build',
-  'vm-timeout', 'vm-native-failed', 'transport-failed', 'transport-only', 'missing-ready-marker', 'missing-local-health',
+  'vm-timeout', 'vm-native-failed', 'transport-failed', 'transport-only', 'missing-ready-marker', 'missing-local-health', 'image-space', 'wal-diagnostic',
   'wrong-operation', 'nonterminal-marker', 'stderr-marker', 'wrong-local-version', 'local-health-false', 'local-health-string', 'malformed-local-json',
   'wrong-public-version', 'public-ok-false', 'public-db-false', 'public-collab-false', 'public-health-string', 'public-array',
-  'public-request-failed', 'malformed-public-json', 'success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha'
+  'public-request-failed', 'malformed-public-json', 'success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning'
 )
 $priorReleaseSha = $env:RELEASE_SHA
 try {
@@ -365,11 +374,20 @@ try {
       if (-not $_.Exception.Data.Contains('ReleaseExitCode')) { throw }
       $code = $_.Exception.Data['ReleaseExitCode']
     }
-    $success = $case -in @('success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha')
+    $success = $case -in @('success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning')
     Assert-Equal $success ($code -eq 0) "Unexpected exit outcome for $case. Log: $log"
     $log = $script:messages -join "`n"
     Assert-Equal $success ($log -match 'Release complete:') "Completion reporting mismatch for $case."
-    Assert-True ($log -notmatch 'withheld response body|failed after marker|bad json') "Raw diagnostics escaped for $case."
+    Assert-True ($log -notmatch 'withheld response body|failed after marker|bad json|private-token') "Raw diagnostics escaped for $case."
+    if ($case -eq 'retention-warning') {
+      Assert-True ($log -match 'Release warning: old-image retention failed; the healthy application was not rolled back') 'Retention warning was not surfaced without failing release.'
+    }
+    if ($case -eq 'image-space') {
+      Assert-True ($log -match 'Insufficient disk space before image pull; application unchanged') "Image capacity refusal was not surfaced distinctly. Log: $log"
+    }
+    if ($case -eq 'wal-diagnostic') {
+      Assert-True ($log -match 'Scratch PANIC: No space left on device') 'Scratch server diagnostic was not surfaced through the release boundary.'
+    }
     $builds = @($script:calls | Where-Object { ($_.Arguments | Select-Object -First 2) -join ' ' -ceq 'acr build' })
     $invocations = @($script:calls | Where-Object { ($_.Arguments | Select-Object -First 3) -join ' ' -ceq 'vm run-command invoke' })
     Assert-True ($builds.Count -le 1 -and $invocations.Count -le 1) "No write may be automatically retried for $case."

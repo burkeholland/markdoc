@@ -11,7 +11,8 @@ import { ImageResponse } from "next/og";
  * TTF/OTF/WOFF, not the woff2 `next/font/google` emits), read once per process; the text is reduced to
  * their repertoire first ({@link cardText}), so `next/og` never reaches for a remote fallback glyph; the
  * brand mark is the JSX below (Satori cannot fetch a relative URL). Access is the caller's business: the
- * routes in `src/app/{d,p}/[id]/opengraph-image.tsx` run the page's access check and 404 before rendering.
+ * routes in `src/app/{d,p}/[id]/opengraph-image.tsx` 404 before rendering unless the caller may read the
+ * document or its link preview is public (see `document-card-route.ts`).
  */
 
 /** 1200×630, the size unfurlers render edge to edge; `og:image:width/height` are derived from it. */
@@ -19,13 +20,15 @@ export const CARD_SIZE = { width: 1200, height: 630 } as const;
 export const CARD_CONTENT_TYPE = "image/png";
 /** A renamed document shows its new title within five minutes; Slack caches unfurls longer anyway. */
 export const CARD_CACHE_CONTROL = "public, max-age=300";
-export const CARD_ALT = "The document's title, owner and reading time on a Markdoc card";
+/** A restricted document's card is never stored: turning its link previews off takes effect at once. */
+export const RESTRICTED_CARD_CACHE_CONTROL = "private, no-store";
+export const CARD_ALT = "The document's title, owner and last update on a Markdoc card";
 
 export interface DocumentCardInput {
   title: string;
   /** Owner display name; null leaves the "by …" part out. */
   ownerName: string | null;
-  /** From `computeStats(clean).readingMinutes`; 0 hides the reading time, as the reader page does. */
+  /** From `computeStats(clean).readingMinutes`; 0 hides the reading time, as the reader page does and a restricted document's card always does. */
   readingMinutes: number;
   updatedAt: Date;
 }
@@ -72,11 +75,18 @@ async function readFonts(files: FontFiles): Promise<CardFonts | undefined> {
   }
 }
 
+export interface CardOptions {
+  /** The faces to draw with: the vendored ones when left out, `next/og`'s bundled fallback for `null` (tests). */
+  fonts?: CardFonts | null;
+  /** {@link CARD_CACHE_CONTROL} when left out. */
+  cacheControl?: string;
+}
+
 /**
- * Render the card. `fonts` defaults to the vendored faces; `null` forces the bundled fallback (tests).
- * `Cache-Control` replaces `next/og`'s default (a year, immutable, in production: a renamed document must not keep its old card).
+ * Render the card. `Cache-Control` replaces `next/og`'s default (a year, immutable, in production: a
+ * renamed document must not keep its old card).
  */
-export async function renderDocumentCard(input: DocumentCardInput, fonts?: CardFonts | null): Promise<ImageResponse> {
+export async function renderDocumentCard(input: DocumentCardInput, { fonts, cacheControl = CARD_CACHE_CONTROL }: CardOptions = {}): Promise<ImageResponse> {
   const loaded = fonts === undefined ? await loadCardFonts() : (fonts ?? undefined);
   // A title made only of glyphs the card cannot draw leaves the headline out; a blank one reads "Untitled".
   const headline = cardText(input.title) || (input.title.trim() ? "" : "Untitled");
@@ -84,7 +94,7 @@ export async function renderDocumentCard(input: DocumentCardInput, fonts?: CardF
   return new ImageResponse(<Card headline={headline} input={drawn} />, {
     ...CARD_SIZE,
     fonts: loaded,
-    headers: { "cache-control": CARD_CACHE_CONTROL },
+    headers: { "cache-control": cacheControl },
   });
 }
 

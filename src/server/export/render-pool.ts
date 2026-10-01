@@ -1,6 +1,7 @@
 /**
  * Runs the Markdown pipeline on a worker thread with a time-out, so one pathological document
- * can never stall the event loop (health probes, collaboration WebSocket, other users).
+ * can never stall the event loop (health probes, collaboration WebSocket, other users). The same
+ * worker also finds a document's link preview text (`previewOffThread`), which parses it too.
  *
  * One lazily started worker handles jobs in FIFO order; a job that exceeds its budget gets the
  * worker terminated (the only way to stop synchronous parsing) and a fresh one started for the
@@ -9,7 +10,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type { Worker } from "node:worker_threads";
-import { WORKER_ROLE, type RenderedFragment, type WorkerRequest, type WorkerResponse } from "./render-markdown";
+import { WORKER_ROLE, type RenderedFragment, type WorkerRequest, type WorkerResponse, type WorkerTask } from "./render-markdown";
 
 /**
  * Default budget for one render (`MARKDOWN_RENDER_TIMEOUT_MS` overrides). The guard keeps ordinary
@@ -29,10 +30,9 @@ export class RenderTimeoutError extends Error {
 
 interface Job {
   id: number;
-  markdown: string;
-  assetBaseUrl: string;
+  task: WorkerTask;
   timeoutMs: number;
-  resolve: (r: RenderedFragment) => void;
+  resolve: (r: RenderedFragment | string) => void;
   reject: (e: Error) => void;
 }
 
@@ -69,9 +69,9 @@ class RenderPool {
   private idleTimer: NodeJS.Timeout | null = null;
   private seq = 0;
 
-  render(markdown: string, assetBaseUrl: string, timeoutMs: number): Promise<RenderedFragment> {
-    return new Promise<RenderedFragment>((resolve, reject) => {
-      this.queue.push({ id: ++this.seq, markdown, assetBaseUrl, timeoutMs, resolve, reject });
+  run(task: WorkerTask, timeoutMs: number): Promise<RenderedFragment | string> {
+    return new Promise<RenderedFragment | string>((resolve, reject) => {
+      this.queue.push({ id: ++this.seq, task, timeoutMs, resolve, reject });
       this.pump();
     });
   }
@@ -91,7 +91,7 @@ class RenderPool {
         this.fail(job, new RenderTimeoutError(job.timeoutMs), true);
         this.pump();
       }, job.timeoutMs);
-      const req: WorkerRequest = { id: job.id, markdown: job.markdown, assetBaseUrl: job.assetBaseUrl };
+      const req: WorkerRequest = { id: job.id, ...job.task };
       worker.postMessage(req);
     } catch (err) {
       this.fail(job, err instanceof Error ? err : new Error(String(err)), true);
@@ -169,5 +169,15 @@ const pool = new RenderPool();
 
 /** Render on the worker thread; rejects with `RenderTimeoutError` after `timeoutMs`. */
 export function renderOffThread(markdown: string, assetBaseUrl: string, timeoutMs = RENDER_TIMEOUT_MS): Promise<RenderedFragment> {
-  return pool.render(markdown, assetBaseUrl, timeoutMs);
+  return pool.run({ markdown, assetBaseUrl }, timeoutMs) as Promise<RenderedFragment>;
+}
+
+/**
+ * A document's link preview text (`previewText`) from the same worker and queue. It parses at most the
+ * first 4 KB, which takes about 10 ms for ordinary text; the slowest text found, 2,000 list markers
+ * nested on one line, took about 4 s on a machine at full load, the same parse the reader page runs.
+ * Rejects with `RenderTimeoutError` after `timeoutMs`.
+ */
+export function previewOffThread(markdown: string, timeoutMs = RENDER_TIMEOUT_MS): Promise<string> {
+  return pool.run({ markdown, preview: true }, timeoutMs) as Promise<string>;
 }

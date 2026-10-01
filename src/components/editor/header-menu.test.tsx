@@ -52,6 +52,7 @@ const DOC: DocumentDto = {
   title: "Menu source",
   storage: "local",
   linkAccess: "private",
+  linkPreview: false,
   ownerId: "owner-1",
   gistId: null,
   gistFile: null,

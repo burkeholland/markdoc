@@ -1,4 +1,4 @@
-import { and, desc, eq, getTableColumns, ilike, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, ilike, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { getDb, schema, type Db, type Tx } from "@/server/db";
 import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema";
@@ -110,6 +110,28 @@ export async function getDocumentAccess(docId: string, user: SessionUser | null,
   }
   const linkRole = roleFromLink(doc.linkAccess, !!user);
   return linkRole ? { doc, role: linkRole } : null;
+}
+
+/**
+ * The document behind a public link preview (the title, first lines and card that Slack or Teams show
+ * for a pasted link), or null: an unknown id, a document in the trash, or a restricted document whose
+ * owner has not turned on link previews. A link-shared document always qualifies, since anyone with the
+ * link can read it anyway. The preview is all this grants: opening the document still goes through
+ * {@link getDocumentAccess}.
+ */
+export async function getLinkPreviewDocument(docId: string): Promise<DocumentMeta | null> {
+  const db = await getDb();
+  const [doc] = await db
+    .select(documentMetaColumns)
+    .from(schema.documents)
+    .where(
+      and(
+        eq(schema.documents.id, docId),
+        isNull(schema.documents.deletedAt),
+        or(eq(schema.documents.linkPreview, true), ne(schema.documents.linkAccess, "private")),
+      ),
+    );
+  return doc ?? null;
 }
 
 /**

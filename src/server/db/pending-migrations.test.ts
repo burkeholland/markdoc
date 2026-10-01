@@ -21,7 +21,7 @@ import * as currentSchema from "./schema";
 
 const LEDGER_0018_TIME = "1788050213330";
 const LEDGER_0019_TIME = "1788219322678";
-const LEDGER_0020_TIME = "1788622003570";
+const LEDGER_0021_TIME = "1790778877676";
 const MIGRATION_TEST_TIMEOUT_MS = 60_000;
 const PRE_0020_TABLES = APPLICATION_TABLES.filter((table) => table !== "gist_auto_update");
 
@@ -135,7 +135,7 @@ describe("pending production migrations", () => {
         await migrate(database, { migrationsFolder: path.resolve("drizzle") });
         await migrate(database, { migrationsFolder: path.resolve("drizzle") });
 
-        await expectLedger(client, 21, LEDGER_0020_TIME);
+        await expectLedger(client, 22, LEDGER_0021_TIME);
         expect(await applicationDataState(client, projection)).toEqual(before);
         await expectCurrentSchema(client);
         await expectServingSourceCompatibility(client);
@@ -427,7 +427,21 @@ async function expectCurrentSchema(client: PGlite): Promise<void> {
     },
   ]);
 
+  const linkPreview = await client.query<{ data_type: string; is_nullable: string; column_default: string | null }>(
+    `SELECT data_type, is_nullable, column_default
+       FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'document'
+        AND column_name = 'link_preview'`,
+  );
+  expect(linkPreview.rows).toEqual([{ data_type: "boolean", is_nullable: "NO", column_default: "false" }]);
+
   const database = drizzle(client, { schema: currentSchema });
+  const [document] = await database
+    .select({ linkPreview: currentSchema.documents.linkPreview })
+    .from(currentSchema.documents)
+    .where(eq(currentSchema.documents.id, "doc-1"));
+  expect(document?.linkPreview).toBe(false);
   const [token] = await database
     .select({ collaboratorsMayAsk: currentSchema.apiTokens.collaboratorsMayAsk })
     .from(currentSchema.apiTokens)
@@ -512,6 +526,11 @@ async function expectServingSourceCompatibility(client: PGlite): Promise<void> {
     gistId: "fixture-gist",
     gistFile: "fixture.md",
   });
+  const [insertedDocument] = await current
+    .select({ linkPreview: currentSchema.documents.linkPreview })
+    .from(currentSchema.documents)
+    .where(eq(currentSchema.documents.id, "serving-gist-document"));
+  expect(insertedDocument?.linkPreview).toBe(false);
   await current.insert(currentSchema.gistAutoUpdates).values({
     documentId: "serving-gist-document",
     publisherId: "user-1",

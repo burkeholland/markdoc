@@ -52,6 +52,7 @@ const DOC: DocumentDto = {
   title: "Oversized remote",
   storage: "repo",
   linkAccess: "private",
+  linkPreview: false,
   ownerId: "owner-1",
   gistId: null,
   gistFile: null,

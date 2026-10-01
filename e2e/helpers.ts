@@ -6,12 +6,6 @@ export interface User {
   login: string;
 }
 
-/** Multiplier for every timing budget: `E2E_BUDGET_SCALE` (a number ≥ 1), else 3 on CI, else 1. */
-export const budgetScale = (): number => {
-  const raw = Number(process.env.E2E_BUDGET_SCALE);
-  return Number.isFinite(raw) && raw >= 1 ? raw : process.env.CI ? 3 : 1;
-};
-
 /**
  * Wall-clock budget for a timing assertion ("the view follows within a second"). The 2-vCPU CI runner
  * shares its cores between two workers and the dev server, so it gets three times the local
@@ -23,7 +17,7 @@ export const budgetScale = (): number => {
  * under test. A report from a scaled run must say so (the run log's first line states the scale).
  * Release preflight and CI never set it — CI keeps its ×3 by default and preflight runs at ×1.
  */
-export const budgetMs = (ms: number): number => Math.round(ms * budgetScale());
+export { budgetMs, budgetScale } from "../scripts/lib/test-budget";
 
 // `boundingBox()` is CSS px computed from device px: at DPR 2/3 a 40 px control reads 39.99998 (#1350).
 // Assertions on minimum sizes (touch targets) compare whole CSS pixels; the fraction is rounding noise.
@@ -231,18 +225,34 @@ export async function focusRichEnd(page: Page) {
   }
 }
 
-/** Is ProseMirror's *state* selection a focused caret at the very end of the document? (true, or why not) */
+/** Is the focused caret at the document end? Production uses the DOM because its state hook is absent. */
 const pmCaretAtDocEnd = (page: Page) =>
-  page.evaluate(() => {
+  page.evaluate((renderedFallback) => {
     type View = { hasFocus(): boolean; state: { doc: { content: { size: number } }; selection: { empty: boolean; $head: { pos: number; depth: number } } } };
     const view = (window as unknown as { __markdocRichView?: View }).__markdocRichView;
-    if (!view) return "no view";
+    if (!view) {
+      if (!renderedFallback) return "no view";
+      const rich = document.querySelector(".md-rich");
+      const blocks = rich?.querySelectorAll("p, h1, h2, h3, h4, h5, h6, pre");
+      const lastBlock = blocks?.item(blocks.length - 1);
+      const selection = window.getSelection();
+      if (!rich || document.activeElement !== rich) return "editor not focused";
+      if (!lastBlock || !selection?.isCollapsed || !selection.anchorNode || !lastBlock.contains(selection.anchorNode)) {
+        return "caret not in the last text block";
+      }
+      const remainder = document.createRange();
+      remainder.selectNodeContents(lastBlock);
+      remainder.setStart(selection.anchorNode, selection.anchorOffset);
+      return remainder.toString() === "" && !remainder.cloneContents().querySelector("img, br:not(.ProseMirror-trailingBreak)")
+        ? true
+        : "content follows the caret";
+    }
     if (!view.hasFocus()) return "editor not focused";
     const { doc, selection } = view.state;
     const { pos, depth } = selection.$head;
     // At the end of the last textblock every ancestor's closing token follows the caret: one per level of depth.
     return selection.empty && pos === doc.content.size - depth ? true : `selection ${pos} (depth ${depth}, empty ${selection.empty}) vs doc size ${doc.content.size}`;
-  });
+  }, Boolean(process.env.PROD_BASE_URL));
 
 export async function focusCodeEnd(page: Page) {
   await page.locator(".cm-content").click();
@@ -462,4 +472,37 @@ export async function ensureCommentsOpen(page: Page) {
     await page.getByTestId("comments-toggle").click();
   }
   await expect(page.getByTestId("comments-panel")).toBeVisible();
+}
+
+/** Phone width has no code pane, so `openDocument` (which waits for CodeMirror) does not apply: open the document and its Comments sheet. */
+export async function openPhoneComments(page: Page, id: string) {
+  await page.goto(`/d/${id}`);
+  await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+  await expect(page.locator(".md-rich")).toBeVisible();
+  await page.getByTestId("comments-toggle").click();
+  await expect(page.getByTestId("comments-panel")).toBeVisible();
+}
+
+export type CommentsTab = "open" | "resolved" | "suggestions";
+
+/** The comments panel shows exactly `tab`: it alone is selected and the tab stop, and the tab panel is labelled by it. */
+export async function expectCommentsTab(page: Page, tab: CommentsTab, { focused = false }: { focused?: boolean } = {}) {
+  for (const id of ["open", "resolved", "suggestions"] as const) {
+    const el = page.getByTestId(`comments-tab-${id}`);
+    await expect(el).toHaveAttribute("aria-selected", String(id === tab));
+    await expect(el).toHaveAttribute("tabindex", id === tab ? "0" : "-1");
+  }
+  await expect(page.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", `comments-tab-${tab}`);
+  if (focused) await expect(page.getByTestId(`comments-tab-${tab}`)).toBeFocused();
+}
+
+/** The Settings theme picker has `preference` checked, focused and as its only tab stop, and it is saved. */
+export async function expectThemeOption(page: Page, preference: "system" | "light" | "dark") {
+  for (const id of ["system", "light", "dark"] as const) {
+    const el = page.getByTestId(`theme-option-${id}`);
+    await expect(el).toHaveAttribute("aria-checked", String(id === preference));
+    await expect(el).toHaveAttribute("tabindex", id === preference ? "0" : "-1");
+  }
+  await expect(page.getByTestId(`theme-option-${preference}`)).toBeFocused();
+  expect(await page.evaluate(() => localStorage.getItem("markdoc:theme"))).toBe(preference);
 }

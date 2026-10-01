@@ -356,9 +356,10 @@ body {
   .pane-label {
     @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-3;
   }
-  /* A toggle (`role="switch"` button): the track is the button, the thumb slides across on aria-checked. */
+  /* A toggle (`role="switch"` button): the track is the button, the thumb slides across on aria-checked.
+     aria-disabled (a change saving) dims it like disabled but keeps it focusable. */
   .switch {
-    @apply relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-line-2 bg-surface-3 transition-colors aria-checked:border-accent aria-checked:bg-accent disabled:pointer-events-none disabled:opacity-50;
+    @apply relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border border-line-2 bg-surface-3 transition-colors aria-checked:border-accent aria-checked:bg-accent aria-disabled:opacity-50 disabled:pointer-events-none disabled:opacity-50;
   }
   .switch::after {
     content: "";

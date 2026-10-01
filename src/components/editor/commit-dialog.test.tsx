@@ -158,6 +158,7 @@ function repoDocument(id: string, path: string): DocumentDto {
     title: id,
     storage: "repo",
     linkAccess: "private",
+    linkPreview: false,
     ownerId: "owner",
     gistId: null,
     gistFile: null,

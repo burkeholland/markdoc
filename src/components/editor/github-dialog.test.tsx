@@ -128,6 +128,7 @@ function documentDto(id = "doc-current", title = "Current document"): DocumentDt
     title,
     storage: "local",
     linkAccess: "private",
+    linkPreview: false,
     ownerId: "owner-current",
     gistId: null,
     gistFile: null,

@@ -268,6 +268,79 @@ describe("ShareDialog", () => {
     expect(onDocChange).toHaveBeenCalledTimes(1);
   });
 
+  it("offers the link-preview switch, off by default, only while the link is restricted", async () => {
+    const { rerender } = renderShare();
+    await loadedRows();
+    const toggle = screen.getByRole("switch", { name: "Show title and first lines in link previews" });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(toggle).toBeEnabled();
+    // Everything a preview carries: the metadata's title, description and modified time, the card's name and date.
+    expect(toggle).toHaveAccessibleDescription("Slack, Teams and other apps show the title, first lines, your name and when it was last updated.");
+
+    // A link-shared document always previews with its title and first lines: nothing to switch.
+    rerender(<ShareDialog open onOpenChange={vi.fn()} doc={doc({ linkAccess: "view", linkPreview: false })} isOwner onDocChange={vi.fn()} />);
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  });
+
+  it("lets the owner turn link previews on and off, one link change at a time", async () => {
+    const turnedOn = doc({ linkPreview: true });
+    const patchRequest = deferred<{ document: DocumentDto }>();
+    const onDocChange = vi.fn();
+    vi.mocked(api.documents.patch).mockReturnValueOnce(patchRequest.promise).mockResolvedValueOnce({ document: doc({ linkPreview: false }) });
+
+    const { rerender } = renderShare({ document: doc({ linkPreview: false }), onDocChange });
+    await loadedRows();
+    const toggle = screen.getByTestId("link-preview");
+    toggle.focus();
+    fireEvent.click(toggle);
+
+    expect(api.documents.patch).toHaveBeenCalledWith("doc-1", { linkPreview: true });
+    // Saving: marked, not disabled (which would drop keyboard focus to the page), and a second toggle waits its turn.
+    expect(toggle).toHaveAttribute("aria-disabled", "true");
+    expect(toggle).toBeEnabled();
+    expect(toggle).toHaveFocus();
+    fireEvent.click(toggle);
+    expect(api.documents.patch).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("link-access")).toBeDisabled();
+    patchRequest.resolve({ document: turnedOn });
+    await waitFor(() => expect(onDocChange).toHaveBeenCalledWith(turnedOn));
+    await waitFor(() => expect(toggle).not.toHaveAttribute("aria-disabled"));
+    expect(toggle).toHaveFocus();
+
+    rerender(<ShareDialog open onOpenChange={vi.fn()} doc={turnedOn} isOwner onDocChange={onDocChange} />);
+    expect(screen.getByTestId("link-preview")).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(screen.getByTestId("link-preview"));
+    await waitFor(() => expect(api.documents.patch).toHaveBeenLastCalledWith("doc-1", { linkPreview: false }));
+    expect(api.documents.patch).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a failed link-preview change and keeps the confirmed setting", async () => {
+    const onDocChange = vi.fn();
+    vi.mocked(api.documents.patch).mockRejectedValueOnce(apiMessage(500, "Link preview failed"));
+
+    renderShare({ document: doc({ linkPreview: false }), onDocChange });
+    await loadedRows();
+    fireEvent.click(screen.getByTestId("link-preview"));
+
+    expect(await screen.findByTestId("share-action-error")).toHaveTextContent("Link preview failed");
+    expect(screen.getByTestId("link-preview")).toHaveAttribute("aria-checked", "false");
+    expect(onDocChange).not.toHaveBeenCalled();
+  });
+
+  it("shows the link-preview setting to a non owner without letting them change it", async () => {
+    renderShare({ isOwner: false, document: doc({ linkPreview: true }) });
+    await loadedRows();
+    const toggle = screen.getByRole("switch", { name: "Show title and first lines in link previews" });
+
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(toggle).toBeDisabled();
+    expect(toggle).toHaveAccessibleDescription(
+      "Slack, Teams and other apps show the title, first lines, the owner's name and when it was last updated. Only the owner can change this.",
+    );
+    fireEvent.click(toggle);
+    expect(api.documents.patch).not.toHaveBeenCalled();
+  });
+
   it("shows read only sharing controls to a non owner", async () => {
     vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([alice]));
 

@@ -1713,11 +1713,6 @@ export function EditorShell({
   }, [canDockPanel]);
   // Phones never split: a remembered/initial "split" renders as the preview there.
   const shownLayout: Layout = isPhone && layout === "split" ? "rich" : layout;
-  // With one pane on screen the toolbar, menus and outline act on it, not on a hidden pane focused
-  // earlier (Preview only after typing in the source applied toolbar actions off screen).
-  useEffect(() => {
-    if (shownLayout !== "split") session.setActiveSurface(shownLayout);
-  }, [session, shownLayout]);
   // First load: narrow windows open in the preview unless the user chose Markdown before; tablets
   // start with the outline hidden so both panes get the width.
   useEffect(() => {
@@ -2059,6 +2054,17 @@ export function EditorShell({
     else setDialog(kind);
   }, [openNameVersion]);
   const actions = useMemo(() => new EditorActions(session, setEditorDialog), [session, setEditorDialog]);
+  // Transfer the live selection before changing surfaces, including while Comments owns focus.
+  useEffect(() => {
+    if (shownLayout === "split" || shownLayout === session.activeSurface) return;
+    const map = session.binding.getSourceMap();
+    const selection = session.activeSurface === "code" ? actions.code?.state.selection.main : actions.rich?.state.selection;
+    const range = selection && (session.activeSurface === "code"
+      ? { from: selection.anchor, to: selection.head }
+      : { from: map.pmToSrc(selection.anchor), to: map.pmToSrc(selection.head) });
+    session.setActiveSurface(shownLayout);
+    if (range) actions.selectSourceRange(range);
+  }, [actions, session, shownLayout]);
   const previewVisit = useMemo(
     () =>
       createEditorPreviewVisit({

@@ -99,6 +99,11 @@ export const documents = pgTable(
     /** Latest Markdown text, denormalized for listing, search, and export. */
     content: text("content").notNull().default(""),
     linkAccess: text("link_access").$type<LinkAccess>().notNull().default("private"),
+    /**
+     * Whether link previews (Slack, Teams, iMessage unfurls) of a restricted document show its title and
+     * first lines instead of the generic Markdoc card. Owner-only; a link-shared document always shows them.
+     */
+    linkPreview: boolean("link_preview").notNull().default(false),
     gistId: text("gist_id"),
     gistFile: text("gist_file"),
     repoOwner: text("repo_owner"),
