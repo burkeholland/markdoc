@@ -264,25 +264,34 @@ export async function selectTextInRich(page: Page, text: string) {
   // "Saved" can precede the deferred rich-pane rebuild, while the server-rendered stand-in is visible.
   await expect(rich).toBeVisible();
   await expect(rich).toContainText(text);
-  await rich.evaluate((root, needle) => {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let node: Node | null;
-    while ((node = walker.nextNode())) {
-      const idx = node.textContent!.indexOf(needle);
-      if (idx >= 0) {
-        const range = document.createRange();
-        range.setStart(node, idx);
-        range.setEnd(node, idx + needle.length);
-        const sel = window.getSelection()!;
-        sel.removeAllRanges();
-        sel.addRange(range);
-        root.focus();
-        return;
-      }
-    }
-    throw new Error(`text not found: ${needle}`);
-  }, text);
-  // Let ProseMirror pick up the DOM selection (it reads it on `selectionchange`, a later task).
+  const prod = Boolean(process.env.PROD_BASE_URL);
+  await rich.evaluate(
+    (root, [needle, waitForSelectionChange]) =>
+      new Promise<void>((resolve, reject) => {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+          const idx = node.textContent!.indexOf(needle);
+          if (idx >= 0) {
+            const range = document.createRange();
+            range.setStart(node, idx);
+            range.setEnd(node, idx + needle.length);
+            if (waitForSelectionChange) document.addEventListener("selectionchange", () => requestAnimationFrame(() => resolve()), { once: true });
+            const sel = window.getSelection()!;
+            sel.removeAllRanges();
+            sel.addRange(range);
+            root.focus();
+            if (!waitForSelectionChange) resolve();
+            return;
+          }
+        }
+        reject(new Error(`text not found: ${needle}`));
+      }),
+    [text, prod] as const,
+  );
+  // Let ProseMirror pick up the DOM selection (it reads it on `selectionchange`, a later task). A production build has
+  // no `__markdocRichView` hook to compare against, so there the helper waits for that selectionchange and one frame.
+  if (prod) return;
   await expect.poll(() => pmSelectionSynced(page), { message: `ProseMirror should read the selection of "${text}"` }).toBe(true);
 }
 

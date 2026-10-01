@@ -23,7 +23,7 @@ import {
  * "local" = Alice (who decides) made the suggestion herself; "remote" = Bob made it in his own browser.
  * Runs on the dev server, and on a production build with PROD_BASE_URL set (the code pane is read through
  * `codeText`, which falls back to the rendered lines when the dev-only session hook is absent, and the rich
- * selection is placed with `selectRich` / `caretAfter`, which do not need the dev-only editor hook).
+ * selection is placed with `selectTextInRich` / `caretAfter`, which do not need the dev-only editor hook there).
  */
 
 const SOURCE = "# Actions\n\nOur product is very unique.\n\nSales are good.\n\nThe end is near.\n";
@@ -64,47 +64,13 @@ async function mcp<T>(page: Page, token: string, name: string, args: Record<stri
 
 const PROD = Boolean(process.env.PROD_BASE_URL);
 
-/**
- * A production build has no `__markdocRichView` hook, which the shared selection helpers poll. There the
- * DOM selection is set and the test waits for the browser's `selectionchange` (ProseMirror reads the
- * selection on it) plus a frame; callers then check the result in the UI (the composer quote, the text).
- */
-async function selectRich(page: Page, text: string) {
-  if (!PROD) return selectTextInRich(page, text);
-  const rich = page.locator(".md-rich");
-  await expect(rich).toContainText(text);
-  await rich.evaluate(
-    (root, needle) =>
-      new Promise<void>((resolve, reject) => {
-        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-        let node: Node | null;
-        while ((node = walker.nextNode())) {
-          const idx = node.textContent!.indexOf(needle);
-          if (idx < 0) continue;
-          const range = document.createRange();
-          range.setStart(node, idx);
-          range.setEnd(node, idx + needle.length);
-          document.addEventListener("selectionchange", () => requestAnimationFrame(() => resolve()), { once: true });
-          (root as HTMLElement).focus();
-          const sel = window.getSelection()!;
-          sel.removeAllRanges();
-          sel.addRange(range);
-          return;
-        }
-        reject(new Error(`text not found: ${needle}`));
-      }),
-    text,
-  );
-}
-
 /** Caret at the end of `text` in the rich pane (the start of the next typed words). */
 async function caretAfter(page: Page, text: string) {
+  await selectTextInRich(page, text);
   if (!PROD) {
-    await selectTextInRich(page, text);
     await page.keyboard.press("End");
     return;
   }
-  await selectRich(page, text);
   // Arm the wait before the key, so the browser's `selectionchange` for the collapse is not missed.
   await page.evaluate(() => {
     (window as unknown as { __caretMoved?: Promise<void> }).__caretMoved = new Promise<void>((resolve) =>
@@ -138,7 +104,7 @@ async function switchToSuggesting(page: Page) {
 
 /** A comment on `quote` whose body carries a ```suggestion block proposing `replacement`. */
 async function commentSuggestion(page: Page, quote: string, replacement: string, body: string) {
-  await selectRich(page, quote);
+  await selectTextInRich(page, quote);
   await page.getByTestId("tb-comment").click();
   await expect(page.getByTestId("pending-comment").getByTestId("comment-quote")).toHaveText(quote);
   const composer = page.getByTestId("comment-composer");
@@ -212,7 +178,7 @@ test.describe("suggestion Accept / Reject / Accept all / Reject all with real cl
         test(`remote | ${action} | ${input}`, async () => {
           const docId = await freshDocument();
           await ensureCommentsOpen(bob.page);
-          await selectRich(bob.page, "Sales are good");
+          await selectTextInRich(bob.page, "Sales are good");
           await bob.page.getByTestId("tb-comment").click();
           await expect(bob.page.getByTestId("pending-comment").getByTestId("comment-quote")).toHaveText("Sales are good");
           await bob.page.getByTestId("comment-composer").fill("Can an agent tighten this?");
