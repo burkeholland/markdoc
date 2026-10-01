@@ -147,6 +147,9 @@ export default async function globalSetup(config: FullConfig) {
       `/api/documents/${docId}/star`,
       // agent-requests.spec.ts l.413 (picker within 2 s) and agent-presence.spec.ts l.138 list the session's tokens; warm only via the hint bar before (#1566).
       "/api/tokens",
+      // review-suggestions.spec.ts l.290 reads it between Accept and the toast's Undo (4.5 s): the cold first hit took
+      // 13.5 s, so the toast had dismissed before the click (#2212).
+      `/api/documents/${docId}/activity?limit=200`,
     ];
     for (const route of apiRoutes) {
       await timed(`GET ${route.replace(docId!, "<id>")}`, async () => {

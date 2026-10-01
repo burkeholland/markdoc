@@ -242,6 +242,37 @@ test.describe("production build", () => {
       }
     });
 
+    test("the command palette closes on Escape and on an outside click and gives focus back (#2216)", async ({ page }) => {
+      await signInFresh(page, "prod-palette-dismiss");
+      const id = await createDocument(page, "# Smoke palette\n\nThe command palette.\n", "Smoke palette");
+      await openDocument(page, id);
+      const palette = page.getByTestId("command-palette");
+      const more = page.getByTestId("more-menu");
+
+      // More > Search commands with Enter, then Escape: focus goes back to More.
+      await more.focus();
+      await page.keyboard.press("Enter");
+      await page.getByTestId("menu-command-palette").focus();
+      await page.keyboard.press("Enter");
+      await expect(page.getByTestId("palette-input")).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(palette).toHaveCount(0);
+      await expect(more).toBeFocused();
+
+      // The keyboard shortcut in the editor, then a real click outside: focus goes back to the editor.
+      const rich = page.locator(".md-rich");
+      await page.locator(".md-rich p").first().click();
+      await page.keyboard.press("Control+Shift+P");
+      await expect(page.getByTestId("palette-input")).toBeFocused();
+      await page.mouse.click(24, page.viewportSize()!.height - 24);
+      await expect(palette).toHaveCount(0);
+      await expect(rich).toBeFocused();
+
+      // The next click lands on the first try.
+      await page.getByTestId("share-button").click();
+      await expect(page.getByTestId("share-connect-agent")).toBeVisible();
+    });
+
     test("the comments tabs change on a click and on the arrow, Home and End keys (#2198)", async ({ page }) => {
       await signInFresh(page, "prod-tabs");
       const id = await createDocument(page, "# Smoke tabs\n\nThe comments tabs.\n", "Smoke tabs");
@@ -367,6 +398,49 @@ test.describe("production build", () => {
       await cardOf(resolve.id).getByTestId("review-resolve-all").click();
       await expect.poll(async () => (await threadsOf(page, id)).find((t) => t.id === resolve.threadIds[0])?.resolved, { timeout: 30_000 }).toBe(true);
       await agent.revoke();
+    });
+
+    /**
+     * A suggestion card's Accept, then the Suggestions tab's Reject all (#2212). Both used to keep their click
+     * proof in a map that a real browser emptied before React's handler read it, so each click did nothing.
+     */
+    test("Accept on one suggestion, then Reject all on the rest (#2212)", async ({ page }) => {
+      await signInFresh(page, "prod-suggest");
+      const id = await createDocument(page, "# Smoke suggestions\n\nOur product is very unique.\n\nSales are good.\n\nThe end is near.\n", "Smoke suggestions");
+      const suggest = async (quote: string, replacement: string) => {
+        const res = await page.request.post(`/api/documents/${id}/comments`, {
+          data: { action: "add", quote, body: `Edit.\n\n\`\`\`suggestion\n${replacement}\n\`\`\`` },
+        });
+        expect(res.ok(), await res.text()).toBeTruthy();
+        return ((await res.json()) as { id: string }).id;
+      };
+      const accepted = await suggest("very unique", "unique");
+      const rejected = [await suggest("Sales are good.", "Sales are strong."), await suggest("The end is near.", "That is all.")];
+      const stateOf = async (threadId: string) => (await threadsOf(page, id)).find((t) => t.id === threadId)?.suggestion?.state;
+
+      await openDocument(page, id);
+      await ensureCommentsOpen(page);
+      const thread = page.locator(`[data-testid="comment-thread"][data-thread-id="${accepted}"]`);
+      await expect(thread).toHaveAttribute("data-suggestion", "pending");
+      await thread.getByTestId("suggestion-accept-comment").click();
+      // Accepting resolves the thread, so it leaves the Open tab.
+      await expect(thread).toHaveCount(0);
+      await expect.poll(() => stateOf(accepted), { timeout: 30_000 }).toBe("accepted");
+      await expect.poll(() => serverText(page, id), { timeout: 30_000 }).toContain("Our product is unique.");
+      await page.getByTestId("comments-tab-resolved").click();
+      await expect(thread).toHaveAttribute("data-suggestion", "accepted");
+      await expect(thread.getByTestId("suggestion-accept-comment")).toHaveCount(0);
+
+      await page.getByTestId("comments-tab-suggestions").click();
+      await expect(page.getByTestId("comments-tab-suggestions")).toHaveText(/Suggestions\s*2$/);
+      await page.getByTestId("reject-all").click();
+      await expect(page.getByTestId("toast").filter({ hasText: "Rejected 2 suggestions." })).toHaveCount(1);
+      for (const threadId of rejected) await expect.poll(() => stateOf(threadId), { timeout: 30_000 }).toBe("rejected");
+      await expect(page.getByTestId("reject-all")).toHaveCount(0);
+      const text = await serverText(page, id);
+      expect(text).toContain("Our product is unique.");
+      expect(text).toContain("Sales are good.");
+      expect(text).toContain("The end is near.");
     });
 
     test("Cancel on a waiting request in the presence popover cancels it", async ({ page }) => {
