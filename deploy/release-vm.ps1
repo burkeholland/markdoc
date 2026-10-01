@@ -57,6 +57,18 @@ function Get-ReleaseDigestLookupFailure([string]$ErrorText) {
   return @{ Category = $category; HttpStatus = $status }
 }
 
+function Get-ReleaseSafeAzFailure([Exception]$Failure) {
+  $category = 'unknown'
+  $status = 'none'
+  if ($Failure.Data['ReleaseDigestFailureCategory'] -cin @('transport', 'timeout', 'throttled', 'server_error', 'auth', 'configuration', 'not_found', 'unknown')) {
+    $category = $Failure.Data['ReleaseDigestFailureCategory']
+  }
+  if ($Failure.Data['ReleaseDigestFailureHttpStatus'] -cmatch '^[1-5][0-9]{2}$') {
+    $status = $Failure.Data['ReleaseDigestFailureHttpStatus']
+  }
+  return @{ Category = $category; HttpStatus = $status }
+}
+
 function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds, [switch]$KeepFailureOutput, [switch]$ClassifyDigestFailure) {
   $executable = (Get-Command $Command -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
   # A child PowerShell handles az.cmd without shell-string argument interpolation.
@@ -111,6 +123,9 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
         -not $_.Exception.Data.Contains('ReleaseDigestFailureCategory')) {
       $_.Exception.Data['ReleaseDigestFailureCategory'] = 'timeout'
       $_.Exception.Data['ReleaseDigestFailureHttpStatus'] = 'none'
+    }
+    if ($ClassifyDigestFailure -and $_.Exception.Data.Contains('ReleaseDigestFailureCategory')) {
+      $_.Exception.Data['ReleaseNativeCallFailure'] = $true
     }
     throw
   } finally {
@@ -169,19 +184,48 @@ function Invoke-ReleaseAz([string[]]$Arguments, [int]$Limit = 30) {
   Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) $Limit
 }
 
+function Invoke-ReleaseAcrPoll([string[]]$Arguments, [ref]$MissedPolls, [int]$BudgetSeconds = $ReleaseDeadlineSeconds, [int]$Limit = 30) {
+  $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
+  if ($remaining -lt 1) { Stop-VmRelease 'Release deadline exceeded; remote work may still be running. Do not retry.' 124 }
+  $budgetRemaining = [math]::Floor($BudgetSeconds - $releaseClock.Elapsed.TotalSeconds)
+  if ($budgetRemaining -lt 1) { Stop-VmRelease 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' 124 }
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  $failure = $null
+  $output = $null
+  try {
+    $output = Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) ([math]::Min($Limit, $budgetRemaining)) -ClassifyDigestFailure
+  } catch [InvalidOperationException] {
+    if ($_.Exception.Data['ReleaseNativeCallFailure'] -ne $true) { throw }
+    $diagnostic = Get-ReleaseSafeAzFailure $_.Exception
+    if ($diagnostic.Category -cnotin @('transport', 'timeout', 'throttled', 'server_error')) { throw }
+    $failure = $_
+  }
+  # Check terminal budgets outside the per-call catch, even when the last poll succeeded.
+  if ($releaseClock.Elapsed.TotalSeconds -ge $ReleaseDeadlineSeconds) {
+    Stop-VmRelease 'Release deadline exceeded; remote work may still be running. Do not retry.' 124
+  }
+  if ($releaseClock.Elapsed.TotalSeconds -ge $BudgetSeconds) {
+    Stop-VmRelease 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' 124
+  }
+  if ($failure) {
+    $MissedPolls.Value++
+    $elapsed = [math]::Floor($clock.Elapsed.TotalSeconds)
+    Write-Host "Release: ACR read-only poll missed; category=$($diagnostic.Category); HTTP status=$($diagnostic.HttpStatus); elapsed seconds=$elapsed; consecutive missed polls=$($MissedPolls.Value)/3."
+    if ($MissedPolls.Value -ge 3) { throw $failure }
+    return $null
+  }
+  $MissedPolls.Value = 0
+  return $output
+}
+
 function Invoke-ReleaseDigestLookup([string[]]$Arguments) {
   for ($attempt = 0; $attempt -le 1; $attempt++) {
     try {
       return Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) -ClassifyDigestFailure
     } catch {
-      $category = 'unknown'
-      $status = 'none'
-      if ($_.Exception.Data['ReleaseDigestFailureCategory'] -cin @('transport', 'timeout', 'throttled', 'server_error', 'auth', 'configuration', 'not_found', 'unknown')) {
-        $category = $_.Exception.Data['ReleaseDigestFailureCategory']
-      }
-      if ($_.Exception.Data['ReleaseDigestFailureHttpStatus'] -cmatch '^[1-5][0-9]{2}$') {
-        $status = $_.Exception.Data['ReleaseDigestFailureHttpStatus']
-      }
+      $diagnostic = Get-ReleaseSafeAzFailure $_.Exception
+      $category = $diagnostic.Category
+      $status = $diagnostic.HttpStatus
       Write-Host "Release: ACR digest lookup failed; category=$category; HTTP status=$status."
       if ($attempt -eq 1 -or $category -cnotin @('transport', 'timeout', 'throttled', 'server_error')) { throw }
       $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
@@ -394,11 +438,17 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     ) + $nativeScope) 90)
 
     $releaseStage = 'ACR build reconciliation'
+    $missedPolls = 0
     for ($attempt = 1; $attempt -le 132; $attempt++) {
-      $runs = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@(
+      $poll = Invoke-ReleaseAcrPoll (@(
         'acr', 'task', 'list-runs', '--registry', $acr, '--top', '50',
         '--query', '[].{runId:runId,runType:runType,status:status,outputImages:outputImages}'
-      ) + $nativeScope))
+      ) + $nativeScope) ([ref]$missedPolls)
+      if ($null -eq $poll) {
+        if ($attempt -lt 132) { Start-Sleep -Seconds 5 }
+        continue
+      }
+      $runs = ConvertFrom-ReleaseJson $poll
       if ($runs -isnot [array]) {
         Stop-VmRelease 'ACR build reconciliation did not return a run list.'
       }
@@ -428,9 +478,15 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     }
     Write-Host "Release: ACR run $buildRun; registry $acr."
     $releaseStage = 'ACR build completion'
+    $missedPolls = 0
     do {
       if ($releaseClock.Elapsed.TotalSeconds -ge 750) { Stop-VmRelease 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' 124 }
-      $run = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@('acr', 'task', 'show-run', '--registry', $acr, '--run-id', $buildRun, '--query', '{runId:runId,status:status,outputImages:outputImages}') + $nativeScope))
+      $poll = Invoke-ReleaseAcrPoll (@('acr', 'task', 'show-run', '--registry', $acr, '--run-id', $buildRun, '--query', '{runId:runId,status:status,outputImages:outputImages}') + $nativeScope) ([ref]$missedPolls) 750
+      if ($null -eq $poll) {
+        Start-Sleep -Seconds 5
+        continue
+      }
+      $run = ConvertFrom-ReleaseJson $poll
       if ($run.runId -cne $buildRun) { Stop-VmRelease 'ACR returned a different run identity.' }
       if ($run.status -ceq 'Succeeded') { break }
       if ($run.status -cnotin @('Queued', 'Started', 'Running')) { Stop-VmRelease 'ACR build failed or returned an unknown status.' }
