@@ -20,8 +20,8 @@ function currentFocusReturnTarget() {
   return typeof document === "undefined" ? null : focusReturnTarget();
 }
 
-/** The element that had focus when the enclosing `Dialog` opened; undefined outside a `Dialog`. */
-const DialogOpenerContext = React.createContext<HTMLElement | null | undefined>(undefined);
+/** The enclosing `Dialog`'s open state and the element that had focus when it opened; undefined outside a `Dialog`. */
+const DialogOpenerContext = React.createContext<{ open: boolean; opener: HTMLElement | null } | undefined>(undefined);
 
 /**
  * Radix's Root, plus the element that opened it. Dialogs here mostly open from state (no Radix Trigger),
@@ -51,7 +51,7 @@ export function Dialog({
     onOpenChange?.(next);
   };
   return (
-    <DialogOpenerContext.Provider value={opening.opener}>
+    <DialogOpenerContext.Provider value={opening}>
       <RadixDialog.Root {...props} open={actualOpen} onOpenChange={handleOpenChange}>
         {children}
       </RadixDialog.Root>
@@ -84,8 +84,8 @@ function OpeningFocus({
   contentRef: React.RefObject<HTMLDivElement | null>;
   returnRef: React.RefObject<HTMLElement | null>;
 }) {
-  const rootOpener = React.useContext(DialogOpenerContext);
-  const [opener] = React.useState(() => rootOpener ?? currentFocusReturnTarget());
+  const root = React.useContext(DialogOpenerContext);
+  const [opener] = React.useState(() => root?.opener ?? currentFocusReturnTarget());
   React.useLayoutEffect(() => {
     returnRef.current = opener;
   }, [opener, returnRef]);
@@ -135,6 +135,14 @@ export function DialogContent({
 }) {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const returnRef = React.useRef<HTMLElement | null>(null);
+  // Close runs the callback from the last render while the dialog was open. A caller may hand a new
+  // callback to its closing render (the Image dialog's carries a per-render close token, and only the
+  // open one may insert the image).
+  const open = React.useContext(DialogOpenerContext)?.open ?? true;
+  const onClosedRef = React.useRef(onClosed);
+  React.useLayoutEffect(() => {
+    if (open) onClosedRef.current = onClosed;
+  }, [open, onClosed]);
   return (
     <RadixDialog.Portal>
       <RadixDialog.Overlay className={OVERLAY_CLASS_NAME} />
@@ -163,7 +171,7 @@ export function DialogContent({
           const returnTarget = returnRef.current;
           returnRef.current = null;
           restoreFocus(returnTarget);
-          onClosed?.();
+          onClosedRef.current?.();
         }}
       >
         <OpeningFocus contentRef={contentRef} returnRef={returnRef} />

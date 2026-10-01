@@ -519,6 +519,28 @@ describe("DialogContent dismissal", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
+  it("runs the onClosed of the last open render, not the closing render's", async () => {
+    const calls: string[] = [];
+    function TokenHarness() {
+      const [open, setOpen] = useState(true);
+      const token = open ? "open" : "closed";
+      return (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent title="Close token" onClosed={() => calls.push(token)}>
+            <input data-testid="token-input" />
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><TokenHarness /></StrictMode>);
+
+    fireEvent.click(closeButton());
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(calls).toEqual(["open"]);
+  });
+
   it("stays open and keeps Close working when the controlled owner keeps it open", async () => {
     const onOpenChange = vi.fn();
     function VetoHarness() {
