@@ -21,7 +21,7 @@ import {
   Quote, Redo2, Replace, Search, Share2, SquareCode, Star, Strikethrough, SunMoon, Table, Trash2, Type, Undo2, UploadCloud, User, Users, type LucideIcon,
 } from "lucide-react";
 import { Kbd } from "@/components/ui/primitives";
-import { focusedElement, restoreFocus } from "@/lib/a11y";
+import { focusedElement, focusReturnTarget, restoreFocus } from "@/lib/a11y";
 import { apiErrorText } from "@/lib/api";
 import { cn, shortcut } from "@/lib/utils";
 import { filterCommands, groupCommands, loadRecent, pushRecent, saveRecent, withRecentFirst, type Command } from "./commands";
@@ -156,29 +156,6 @@ interface CommittedElement {
   element: HTMLElement;
 }
 
-type NativeDismissal =
-  | { kind: "escape"; event: KeyboardEvent }
-  | { kind: "pointer"; event: PointerEvent | Event; click: MouseEvent }
-  | { kind: "focus"; event: FocusEvent };
-
-type CapturedDismissal =
-  | {
-      kind: "instant";
-      document: Document;
-      event: Event;
-    }
-  | {
-      kind: "pointer";
-      document: Document;
-      event: PointerEvent | Event;
-      target: Node;
-      pointerId: number | null;
-      button: number;
-      pointerUp: PointerEvent | Event | null;
-      click: MouseEvent | null;
-      expiration: number | null;
-    };
-
 interface CommittedPresentation {
   token: symbol;
   source: PalettePresentation;
@@ -287,18 +264,6 @@ interface CloseTransition {
   command: Command | null;
   autoFocusClaimed: boolean;
   focusRestored: boolean;
-}
-
-interface DismissalProof {
-  authority: PaletteAuthority;
-  visit: PaletteVisit;
-  token: symbol;
-  presentation: CommittedPresentation;
-  content: HTMLDivElement;
-  overlay: HTMLDivElement;
-  event: Event;
-  source: "escape" | "pointer" | "focus";
-  consumed: boolean;
 }
 
 interface CommandExecution {
@@ -822,16 +787,12 @@ function exactNativeInput(
 function exactNativeKey(
   event: ReactKeyboardEvent<HTMLInputElement>,
   input: HTMLInputElement,
-  captured: CapturedDismissal | null,
 ): KeyboardEvent | null {
   const ownerDocument = input.ownerDocument;
   const ownerWindow = ownerDocument.defaultView;
   const nativeEvent = event.nativeEvent;
   if (
     !ownerWindow ||
-    captured?.kind !== "instant" ||
-    captured.document !== ownerDocument ||
-    captured.event !== nativeEvent ||
     !(nativeEvent instanceof ownerWindow.KeyboardEvent) ||
     Object.getPrototypeOf(nativeEvent) !== ownerWindow.KeyboardEvent.prototype
   ) {
@@ -949,15 +910,9 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
   const claimedEventsRef = useRef(new WeakSet<object>());
   const childRequestRef = useRef<ChildRequest | null>(null);
   const successorRef = useRef<PresentationSuccessor | null>(null);
-  const dismissalRef = useRef<DismissalProof | null>(null);
   const closeRef = useRef<CloseTransition | null>(null);
   const commandTimersRef = useRef(new Set<CommandExecution>());
   const claimedControlsRef = useRef(new WeakSet<object>());
-  const capturedDismissalRef = useRef<CapturedDismissal | null>(null);
-  const dismissalCaptureRef = useRef<{
-    document: Document;
-    remove: () => void;
-  } | null>(null);
   const portalElementsRef = useRef<{ overlay: HTMLDivElement | null; content: HTMLDivElement | null }>({
     overlay: null,
     content: null,
@@ -970,135 +925,6 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     overlay: null,
     content: null,
   });
-  const clearCapturedDismissal = useCallback((expected?: CapturedDismissal) => {
-    const captured = capturedDismissalRef.current;
-    if (!captured || (expected && captured !== expected)) return;
-    if (captured.kind === "pointer" && captured.expiration !== null) {
-      captured.document.defaultView?.clearTimeout(captured.expiration);
-      captured.expiration = null;
-    }
-    capturedDismissalRef.current = null;
-  }, []);
-  const ensureDismissalCapture = useCallback((ownerDocument: Document) => {
-    const existing = dismissalCaptureRef.current;
-    if (existing?.document === ownerDocument) return;
-    existing?.remove();
-    clearCapturedDismissal();
-    const ownerWindow = ownerDocument.defaultView;
-    if (!ownerWindow) return;
-    const exactPointer = (
-      captured: Extract<CapturedDismissal, { kind: "pointer" }>,
-      event: Event,
-    ) => {
-      const pointerId = Reflect.get(event, "pointerId");
-      const button = Reflect.get(event, "button");
-      return (
-        event.target === captured.target &&
-        (captured.pointerId === null
-          ? typeof pointerId !== "number"
-          : pointerId === captured.pointerId) &&
-        (event.type === "pointercancel" ||
-          typeof button !== "number" ||
-          button === captured.button)
-      );
-    };
-    const remember = (event: Event) => {
-      const current = capturedDismissalRef.current;
-      if (event.type === "pointercancel") {
-        if (current?.kind === "pointer" && exactPointer(current, event)) {
-          clearCapturedDismissal(current);
-        }
-        return;
-      }
-      if (event.type === "pointerup") {
-        if (current?.kind !== "pointer") return;
-        if (!exactPointer(current, event)) {
-          clearCapturedDismissal(current);
-          return;
-        }
-        current.pointerUp = event;
-        current.expiration = ownerWindow.setTimeout(
-          () => clearCapturedDismissal(current),
-          0,
-        );
-        return;
-      }
-      if (event.type === "click") {
-        if (current?.kind !== "pointer") return;
-        if (
-          !current.pointerUp ||
-          !(event instanceof ownerWindow.MouseEvent) ||
-          event.button !== current.button ||
-          event.target !== current.target
-        ) {
-          clearCapturedDismissal(current);
-          return;
-        }
-        current.click = event;
-        queueMicrotask(() => clearCapturedDismissal(current));
-        return;
-      }
-      if (event.type === "focusin" && current?.kind === "pointer") return;
-      if (
-        event.type !== "keydown" &&
-        event.type !== "pointerdown" &&
-        event.type !== "focusin"
-      ) {
-        return;
-      }
-      clearCapturedDismissal();
-      if (event.type === "pointerdown") {
-        const target = event.target;
-        const pointerId = Reflect.get(event, "pointerId");
-        const button = Reflect.get(event, "button");
-        const isPrimary = Reflect.get(event, "isPrimary");
-        if (
-          !(target instanceof ownerWindow.Node) ||
-          target.ownerDocument !== ownerDocument ||
-          (typeof button === "number" && button !== 0) ||
-          isPrimary === false
-        ) {
-          return;
-        }
-        capturedDismissalRef.current = {
-          kind: "pointer",
-          document: ownerDocument,
-          event,
-          target,
-          pointerId: typeof pointerId === "number" ? pointerId : null,
-          button: typeof button === "number" ? button : 0,
-          pointerUp: null,
-          click: null,
-          expiration: null,
-        };
-        return;
-      }
-      const captured: CapturedDismissal = {
-        kind: "instant",
-        document: ownerDocument,
-        event,
-      };
-      capturedDismissalRef.current = captured;
-      queueMicrotask(() => clearCapturedDismissal(captured));
-    };
-    ownerDocument.addEventListener("keydown", remember, true);
-    ownerDocument.addEventListener("pointerdown", remember, true);
-    ownerDocument.addEventListener("pointerup", remember, true);
-    ownerDocument.addEventListener("pointercancel", remember, true);
-    ownerDocument.addEventListener("click", remember, true);
-    ownerDocument.addEventListener("focusin", remember, true);
-    dismissalCaptureRef.current = {
-      document: ownerDocument,
-      remove: () => {
-        ownerDocument.removeEventListener("keydown", remember, true);
-        ownerDocument.removeEventListener("pointerdown", remember, true);
-        ownerDocument.removeEventListener("pointerup", remember, true);
-        ownerDocument.removeEventListener("pointercancel", remember, true);
-        ownerDocument.removeEventListener("click", remember, true);
-        ownerDocument.removeEventListener("focusin", remember, true);
-      },
-    };
-  }, [clearCapturedDismissal]);
   const retirePortalElement = useCallback((element: HTMLDivElement) => {
     const commit = activeCommitRef.current;
     if (!commit) return;
@@ -1163,7 +989,6 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         portalTokensRef.current.content = null;
       };
       const previous = portalElementsRef.current.content;
-      ensureDismissalCapture(element.ownerDocument);
       if (previous === element) {
         noteRefReplay(element, portalElementsRef.current.content, "content");
         return cleanup;
@@ -1178,7 +1003,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     },
     // Ref publication is mount-stable and resolves replay state through refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [ensureDismissalCapture, retirePortalElement],
+    [retirePortalElement],
   );
   const visit = useMemo<PaletteVisit | null>(
     () =>
@@ -1186,7 +1011,8 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         ? {
             authority,
             token: Symbol("command-palette-visit"),
-            returnFocus: focusedElement(),
+            // A menu item that opened the palette unmounts with its menu, so this resolves it to the menu's trigger.
+            returnFocus: focusReturnTarget(),
           }
         : null,
     [authority, open],
@@ -1194,8 +1020,6 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
 
   useLayoutEffect(() => {
     authorityRef.current = authority;
-    const content = portalElementsRef.current.content;
-    if (content) ensureDismissalCapture(content.ownerDocument);
     const commandTimers = commandTimersRef.current;
 
     return () => {
@@ -1208,7 +1032,6 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         childRequestRef.current = null;
       }
       if (successorRef.current?.request.authority === authority) successorRef.current = null;
-      if (dismissalRef.current?.authority === authority) dismissalRef.current = null;
       if (closeRef.current?.authority === authority) closeRef.current = null;
       for (const execution of commandTimers) {
         if (execution.authority !== authority) continue;
@@ -1218,22 +1041,10 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
       const active = activeCommitRef.current;
       if (active?.source.authority === authority) retireCommittedPresentation(active, "layout");
       if (committedPresentationRef.current?.authority === authority) committedPresentationRef.current = null;
-      const capture = dismissalCaptureRef.current;
-      queueMicrotask(() => {
-        if (
-          authorityRef.current !== authority &&
-          capture &&
-          dismissalCaptureRef.current === capture
-        ) {
-          capture.remove();
-          dismissalCaptureRef.current = null;
-          clearCapturedDismissal();
-        }
-      });
     };
     // Authority teardown must not restart for each render-local retirement closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authority, clearCapturedDismissal, ensureDismissalCapture]);
+  }, [authority]);
 
   useLayoutEffect(() => {
     if (!visit || authorityRef.current !== authority) return;
@@ -1373,13 +1184,11 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     reason: "layout" | "ref" | "ordinary",
     detached?: ElementPublication<HTMLElement>,
   ): void {
-    clearCapturedDismissal();
     let replay = replayRef.current?.source === commit ? replayRef.current : null;
     if (!commit.retired) {
       commit.retired = true;
       if (activeCommitRef.current === commit) activeCommitRef.current = null;
       if (presentationRef.current === commit.source) presentationRef.current = null;
-      if (dismissalRef.current?.presentation === commit) dismissalRef.current = null;
       replay = {
         source: commit,
         layoutRetired: false,
@@ -1620,103 +1429,6 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     return true;
   }
 
-  function publishDismissal(
-    value: PalettePresentation,
-    event:
-      | KeyboardEvent
-      | CustomEvent<{ originalEvent: PointerEvent | FocusEvent }>,
-    source: DismissalProof["source"],
-  ): void {
-    const commit = activeCommitRef.current;
-    const content = commit?.content ?? null;
-    const overlay = commit?.overlay ?? null;
-    const visit = value.visit;
-    const nativeEvent =
-      source === "escape"
-        ? event
-        : (event as CustomEvent<{
-            originalEvent: PointerEvent | FocusEvent;
-          }>).detail?.originalEvent;
-    const captured = capturedDismissalRef.current;
-    const ownerWindow = content?.ownerDocument.defaultView;
-    const target = nativeEvent?.target;
-    let proof: NativeDismissal | null = null;
-    if (
-      !proof &&
-      content &&
-      ownerWindow &&
-      captured?.document === content.ownerDocument &&
-      captured.event === nativeEvent &&
-      target instanceof ownerWindow.Node &&
-      target.isConnected &&
-      target.ownerDocument === content.ownerDocument
-    ) {
-      if (
-        source === "escape" &&
-        nativeEvent instanceof ownerWindow.KeyboardEvent &&
-        nativeEvent.type === "keydown" &&
-        nativeEvent.key === "Escape" &&
-        content.contains(target)
-      ) {
-        proof = { kind: "escape", event: nativeEvent };
-      } else if (
-        source === "pointer" &&
-        captured.kind === "pointer" &&
-        nativeEvent.type === "pointerdown" &&
-        captured.pointerUp !== null &&
-        captured.click !== null &&
-        !content.contains(target)
-      ) {
-        proof = { kind: "pointer", event: nativeEvent, click: captured.click };
-      } else if (
-        source === "focus" &&
-        captured.kind === "instant" &&
-        nativeEvent instanceof ownerWindow.FocusEvent &&
-        nativeEvent.type === "focusin" &&
-        !content.contains(target)
-      ) {
-        proof = { kind: "focus", event: nativeEvent };
-      }
-    }
-    if (
-      !commit ||
-      !content ||
-      !overlay ||
-      !visit ||
-      !captured ||
-      !ownsPresentation(value) ||
-      !content.isConnected ||
-      !overlay.isConnected ||
-      !proof ||
-      proof.kind !== source
-    ) {
-      return;
-    }
-    if (
-      nativeEvent !== proof.event ||
-      !claimEvent(
-        value,
-        event,
-        nativeEvent,
-        proof.kind === "pointer" ? proof.click : undefined,
-      )
-    ) {
-      return;
-    }
-    clearCapturedDismissal(captured);
-    dismissalRef.current = {
-      authority: value.authority,
-      visit,
-      token: Symbol("command-palette-dismissal"),
-      presentation: commit,
-      content,
-      overlay,
-      event,
-      source,
-      consumed: false,
-    };
-  }
-
   function ownsChildRequest(request: ChildRequest): boolean {
     const owner = request.owner;
     const transferring = successorRef.current?.request === request && successorRef.current.from === owner;
@@ -1829,9 +1541,9 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     const form = value.form.element;
     const input = value.input.element;
     const list = value.list.element;
-    const closeOwns = ownsPresentation(value);
+    // Running a command needs the exact presentation the user picked from; a dismissal just closes.
     if (
-      !closeOwns ||
+      (command !== null && !ownsPresentation(value)) ||
       !currentVisit ||
       claimedControlsRef.current.has(value) ||
       closeRef.current ||
@@ -2134,7 +1846,6 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
         if (staged?.source === commit) releaseReplay(staged);
         return;
       }
-      if (dismissalRef.current?.presentation !== commit) dismissalRef.current = null;
       const request = value.state.childLoad?.request;
       const requestOwner = request?.owner;
       const adoptsRequest =
@@ -2220,22 +1931,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
     <RadixDialog.Root
       open={open}
       onOpenChange={(next) => {
-        const dismissal = dismissalRef.current;
-        if (
-          next ||
-          !dismissal ||
-          dismissal.consumed ||
-          dismissal.authority !== presentation.authority ||
-          dismissal.visit !== presentation.visit ||
-          dismissal.presentation !== activeCommitRef.current ||
-          dismissal.content !== presentation.content.element ||
-          dismissal.overlay !== presentation.overlay.element ||
-          !ownsPresentation(presentation)
-        ) {
-          return;
-        }
-        dismissal.consumed = true;
-        if (dismissalRef.current === dismissal) dismissalRef.current = null;
+        if (next) return;
         invalidateChildRequest(presentation.state.childLoad?.request ?? null);
         const nextState =
           presentation.state.childLoad || presentation.state.childError
@@ -2254,9 +1950,6 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
           className="fixed left-1/2 top-[12vh] z-50 w-[min(92vw,600px)] -translate-x-1/2 overflow-hidden rounded-2xl border border-line bg-surface shadow-2xl shadow-black/20 outline-none animate-fade-in"
           aria-label="Command palette"
           data-testid="command-palette"
-          onEscapeKeyDown={(event) => publishDismissal(presentation, event, "escape")}
-          onPointerDownOutside={(event) => publishDismissal(presentation, event, "pointer")}
-          onFocusOutside={(event) => publishDismissal(presentation, event, "focus")}
           onOpenAutoFocus={(event) => {
             const input = presentation.input.element;
             const currentVisit = presentation.visit;
@@ -2418,11 +2111,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                 const isPage = key === "PageDown" || key === "PageUp";
                 if (!["ArrowDown", "ArrowUp", "Home", "End", "Enter"].includes(key) && !isBack && !isPage) return;
                 if (isPage && presentation.flat.length === 0) return;
-                const nativeEvent = exactNativeKey(
-                  event,
-                  event.currentTarget,
-                  capturedDismissalRef.current,
-                );
+                const nativeEvent = exactNativeKey(event, event.currentTarget);
                 if (!nativeEvent || !claimEvent(presentation, event, nativeEvent)) return;
                 event.preventDefault();
 

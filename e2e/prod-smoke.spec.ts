@@ -155,6 +155,37 @@ test.describe("production build", () => {
       }
     });
 
+    test("the command palette closes on Escape and on an outside click and gives focus back (#2216)", async ({ page }) => {
+      await signInFresh(page, "prod-palette-dismiss");
+      const id = await createDocument(page, "# Smoke palette\n\nThe command palette.\n", "Smoke palette");
+      await openDocument(page, id);
+      const palette = page.getByTestId("command-palette");
+      const more = page.getByTestId("more-menu");
+
+      // More > Search commands with Enter, then Escape: focus goes back to More.
+      await more.focus();
+      await page.keyboard.press("Enter");
+      await page.getByTestId("menu-command-palette").focus();
+      await page.keyboard.press("Enter");
+      await expect(page.getByTestId("palette-input")).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(palette).toHaveCount(0);
+      await expect(more).toBeFocused();
+
+      // The keyboard shortcut in the editor, then a real click outside: focus goes back to the editor.
+      const rich = page.locator(".md-rich");
+      await page.locator(".md-rich p").first().click();
+      await page.keyboard.press("Control+Shift+P");
+      await expect(page.getByTestId("palette-input")).toBeFocused();
+      await page.mouse.click(24, page.viewportSize()!.height - 24);
+      await expect(palette).toHaveCount(0);
+      await expect(rich).toBeFocused();
+
+      // The next click lands on the first try.
+      await page.getByTestId("share-button").click();
+      await expect(page.getByTestId("share-connect-agent")).toBeVisible();
+    });
+
     test("the comments tabs change on a click and on the arrow, Home and End keys (#2198)", async ({ page }) => {
       await signInFresh(page, "prod-tabs");
       const id = await createDocument(page, "# Smoke tabs\n\nThe comments tabs.\n", "Smoke tabs");
