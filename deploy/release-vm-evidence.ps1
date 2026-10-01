@@ -67,6 +67,9 @@ function Get-ReleaseWalFailure([string]$Output, [string]$Operation) {
   }
 
   $budget = ''
+  if ($matches[0].Groups['stage'].Value -ceq 'space') {
+    $budget = 'Scratch disk budget could not be verified.'
+  }
   $space = [regex]::Matches($Output,
     "(?m)^markdoc-release-wal-space:$escapedOperation`:available=(?<available>[0-9]{1,18}):required=(?<required>[0-9]{1,18}):reserve=(?<reserve>2147483648)$")
   if ($space.Count -eq 1) {

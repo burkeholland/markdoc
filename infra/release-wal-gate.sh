@@ -212,6 +212,7 @@ print("\n".join(entries[-10:]), end="\n" if entries else "")
     local status=0
     local poll
     if [ "$space_guard_active" = true ]; then
+      check_space "$production_reserve" || return 1
       while kill -0 "$active_pid" 2>/dev/null; do
         check_space "$production_reserve" || return 1
         for poll in $(seq 1 10); do
@@ -417,6 +418,7 @@ if matches:
   [ -x "$pg_bin/pg_ctl" ]
 
   stage='space'
+  space_failure='reason=unavailable'
   run_capture "$query_timeout" sudo -u postgres psql -X -d postgres \
     -v ON_ERROR_STOP=1 -Atq -c "select pg_size_bytes(current_setting('wal_segment_size'))"
   local wal_segment_size
@@ -479,6 +481,7 @@ print(f"{label}|{required}")
   local required_bytes
   IFS='|' read -r backup_set required_bytes <<<"$restore_budget"
   check_space "$required_bytes"
+  space_failure=''
   space_guard_active=true
 
   stage='restore'

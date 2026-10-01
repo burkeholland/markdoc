@@ -217,6 +217,9 @@ printf 'pg_ctl-%s\n' "$action" >>"$TEST_EVENTS"
 if [ "$action" = start ]; then
   printf '%s\n' "$server_log" >"$TEST_EVENTS.server-log"
   if [ "${TEST_SERVER_ERROR:-0}" = 1 ]; then
+    for _ in $(seq 1 400); do
+      printf 'DETAIL: private-token private-document-content private-password\n' >>"$server_log"
+    done
     for _ in $(seq 1 15); do
       printf '2026-10-01 01:01:00 UTC [42] FATAL: recovery ended before configured recovery target was reached\n' >>"$server_log"
     done
@@ -275,6 +278,8 @@ test "$(tr '\n' ',' <"$success_dir/events")" = \
   fail 'recovery operations did not run in the required order'
 passed=$((passed + 1))
 assert_no_scratch "$success_dir"
+assert_contains "$success_dir/events.backup-set" '20260930-023424F' \
+  'restore did not pin the same backup that was measured for the disk budget'
 
 space_dir="$(make_case)"
 if run_gate "$space_dir" TEST_FREE_BYTES=436326400; then
@@ -298,6 +303,41 @@ assert_contains "$invalid_space_dir/output" \
   'unknown free space did not fail closed'
 grep -q '^restore$' "$invalid_space_dir/events" && fail 'unknown-space gate started a restore'
 assert_no_scratch "$invalid_space_dir"
+
+backup_metadata='[{"archive":[{"database":{"id":1,"repo-key":1},"id":"16-1"}],"backup":[{"label":"20260930-023424F","database":{"repo-key":1},"timestamp":{"stop":1790735673},"info":{"size":38587596},"archive":{"start":"0000000100000002000000FE"}}],"name":"markdoc"}]'
+wal_budget_dir="$(make_case)"
+if run_gate "$wal_budget_dir" TEST_FREE_BYTES=2684354560 TEST_BACKUP_INFO="$backup_metadata"; then
+  fail 'disk budget ignored the WAL span across a log-ID boundary'
+fi
+assert_contains "$wal_budget_dir/output" \
+  "markdoc-release-wal-space:$operation:available=2684354560:required=2890714316:reserve=2147483648" \
+  'complete WAL span was not included in the measured disk budget'
+grep -q '^restore$' "$wal_budget_dir/events" && fail 'WAL-budget refusal started restore'
+assert_no_scratch "$wal_budget_dir"
+
+missing_backup_dir="$(make_case)"
+if run_gate "$missing_backup_dir" \
+  TEST_BACKUP_INFO='[{"archive":[{"database":{"repo-key":1},"id":"16-1"}],"backup":[],"name":"markdoc"}]'; then
+  fail 'missing backup metadata was accepted'
+fi
+assert_contains "$missing_backup_dir/output" \
+  "markdoc-release-wal-failed:$operation:space:cleanup=true" \
+  'missing backup did not fail at disk budgeting'
+assert_contains "$missing_backup_dir/output" \
+  "markdoc-release-wal-space:$operation:reason=unavailable" \
+  'unverifiable backup budget did not state its reason'
+assert_no_scratch "$missing_backup_dir"
+
+timeline_dir="$(make_case)"
+if run_gate "$timeline_dir" \
+  TEST_BACKUP_INFO="${backup_metadata/0000000100000002000000FE/0000000200000002000000FE}"; then
+  fail 'an unbudgeted timeline span was accepted'
+fi
+assert_contains "$timeline_dir/output" \
+  "markdoc-release-wal-failed:$operation:space:cleanup=true" \
+  'unsupported timeline did not fail closed before restore'
+grep -q '^restore$' "$timeline_dir/events" && fail 'timeline-budget refusal started restore'
+assert_no_scratch "$timeline_dir"
 
 space_drop_dir="$(make_case)"
 if run_gate "$space_drop_dir" TEST_SPACE_DROP=1 TEST_RESTORE_SLEEP=1; then
@@ -419,6 +459,8 @@ fi
 test "$(cat "$server_log_dir/events.server-log")" != \
   "$(dirname "$(cat "$server_log_dir/events.server-log")")/command.log" ||
   fail 'server and per-command stderr share one log file'
+test "$(wc -c <"$server_log_dir/output")" -lt 4096 ||
+  fail 'failure output exceeded the Azure guest-output tail limit'
 passed=$((passed + 3))
 assert_no_scratch "$server_log_dir"
 
@@ -483,5 +525,6 @@ rm -rf \
   "$archive_info_dir" "$malformed_dir" "$restore_dir" "$start_dir" "$sql_retry_dir" "$sql_dir" \
   "$replay_dir" "$lock_dir" "$signal_dir"
 rm -rf "$space_dir" "$invalid_space_dir" "$space_drop_dir" "$server_log_dir"
+rm -rf "$wal_budget_dir" "$missing_backup_dir" "$timeline_dir"
 
 printf 'release WAL gate tests passed: %s assertions\n' "$passed"

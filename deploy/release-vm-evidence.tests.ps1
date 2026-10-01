@@ -103,9 +103,9 @@ $failure = Get-ReleaseWalFailure $spaceFailure $operation
 Assert-True ($null -ne $failure -and $failure.Stage -ceq 'space') 'Low-space gate failure was not recognized.'
 Assert-True ($failure.Budget -ceq 'Available 436326400 bytes; required 2253180108 bytes, including a 2147483648-byte production reserve.') 'Validated space budget was not surfaced.'
 $failure = Get-ReleaseWalFailure ($spaceFailure.Replace('available=436326400', 'available=private-token')) $operation
-Assert-True (-not $failure.Budget) 'Untrusted space values were exposed.'
+Assert-True ($failure.Budget -ceq 'Scratch disk budget could not be verified.') 'Untrusted space values were exposed.'
 $failure = Get-ReleaseWalFailure ($spaceFailure.Replace('available=436326400', 'available=8589934592')) $operation
-Assert-True (-not $failure.Budget) 'A contradictory space failure was accepted as a measured budget.'
+Assert-True ($failure.Budget -ceq 'Scratch disk budget could not be verified.') 'A contradictory space failure was accepted as a measured budget.'
 
 $diagnosticFailure = @(
   "markdoc-release-wal-failed:${operation}:sql-ready:cleanup=true"
