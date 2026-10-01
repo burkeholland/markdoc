@@ -10,6 +10,7 @@ $priorEnvironment = @{}
 foreach ($name in @('PATH', 'AZURE_CONFIG_DIR', 'MARKDOC_DIGEST_CASE', 'MARKDOC_DIGEST_COUNT', 'MARKDOC_DIGEST_VALUE')) {
   $priorEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
+try {
 [void](New-Item -ItemType Directory -Path $testRoot)
 [void](New-Item -ItemType Directory -Path (Join-Path $testRoot 'azure'))
 $env:AZURE_CONFIG_DIR = Join-Path $testRoot 'azure'
@@ -76,8 +77,6 @@ switch ($case) {
 }
 exit 0
 '@)
-
-try {
 
 function Assert-True([bool]$Condition, [string]$Message) {
   if (-not $Condition) { throw $Message }
@@ -498,7 +497,9 @@ try {
     $script:sleeps.Clear()
     $script:ReleaseDeadlineSeconds = 2100
     $env:MARKDOC_DIGEST_CASE = $case
-    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $env:MARKDOC_DIGEST_COUNT -Force -ErrorAction SilentlyContinue
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $env:MARKDOC_DIGEST_COUNT) {
+      Microsoft.PowerShell.Management\Remove-Item -LiteralPath $env:MARKDOC_DIGEST_COUNT -Force
+    }
     $env:RELEASE_SHA = $null
     $commit = $script:sha
     if ($case -eq 'missing-sha') { $commit = '' }
@@ -595,5 +596,7 @@ if ($DigestLookupOnly) {
   foreach ($name in $priorEnvironment.Keys) {
     [Environment]::SetEnvironmentVariable($name, $priorEnvironment[$name])
   }
-  Microsoft.PowerShell.Management\Remove-Item -LiteralPath $testRoot -Recurse -Force
+  if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $testRoot) {
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $testRoot -Recurse -Force
+  }
 }
