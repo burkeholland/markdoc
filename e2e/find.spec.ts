@@ -85,81 +85,134 @@ test.describe("find & replace", () => {
     await user.context.close();
   });
 
-  test("trusted F3 advances while synthetic F3 is rejected", async ({ browser }) => {
-    const user = await signIn(browser, "f3-trust");
+  test("F3 and Shift+F3 step from the find bar and from the editor", async ({ browser }) => {
+    const user = await signIn(browser, "f3-keys");
     const id = await createDocument(user.page, SAMPLE);
     await openDocument(user.page, id);
     const { page } = user;
 
     await openFromCodePane(page);
     const input = page.getByTestId("find-input");
+    const count = page.getByTestId("find-count");
     await page.keyboard.type("cat");
-    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
-    const syntheticPrevented = await input.evaluate((element) => {
-      const observations: boolean[] = [];
-      Reflect.set(window, "__markdocF3Trust", observations);
-      element.addEventListener("keydown", (event) => {
-        const keyboardEvent = event as KeyboardEvent;
-        if (keyboardEvent.key === "F3") {
-          observations.push(keyboardEvent.isTrusted);
-        }
-      }, { capture: true });
-      const synthetic = new KeyboardEvent("keydown", {
-        bubbles: true,
-        cancelable: true,
-        key: "F3",
-        code: "F3",
-        view: window,
-      });
-      element.dispatchEvent(synthetic);
-      return synthetic.defaultPrevented;
-    });
-    expect(syntheticPrevented).toBe(false);
-    expect(await page.evaluate(() =>
-      Reflect.get(window, "__markdocF3Trust"))).toEqual([false]);
-    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
-
-    await input.evaluate((element) => {
-      const bar = element.closest<HTMLElement>('[data-testid="find-bar"]');
-      const propsKey = bar &&
-        Object.keys(bar).find((key) => key.startsWith("__reactProps$"));
-      const props = bar && propsKey
-        ? Reflect.get(bar, propsKey) as {
-            onKeyDown?: (event: { nativeEvent: KeyboardEvent }) => void;
-          }
-        : null;
-      if (!props?.onKeyDown) throw new Error("Find React key handler is unavailable");
-      const observation = {
-        defaultPreventedBeforeCancel: true,
-        isTrusted: false,
-      };
-      Reflect.set(window, "__markdocF3EarlyDelivery", observation);
-      element.addEventListener("keydown", (event) => {
-        if (!(event instanceof KeyboardEvent) || event.key !== "F3") return;
-        props.onKeyDown?.({ nativeEvent: event });
-        observation.defaultPreventedBeforeCancel = event.defaultPrevented;
-        observation.isTrusted = event.isTrusted;
-        event.preventDefault();
-        event.stopPropagation();
-      }, { capture: true, once: true });
-    });
-    await page.keyboard.press("F3");
-    expect(await page.evaluate(() =>
-      Reflect.get(window, "__markdocF3EarlyDelivery"))).toEqual({
-      defaultPreventedBeforeCancel: false,
-      isTrusted: true,
-    });
-    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
+    await expect(count).toHaveText("1 of 3");
 
     await page.keyboard.press("F3");
-    await expect.poll(() => page.evaluate(() =>
-      Reflect.get(window, "__markdocF3Trust"))).toEqual([false, true, true]);
-    await expect(page.getByTestId("find-count")).toHaveText("2 of 3");
+    await expect(count).toHaveText("2 of 3");
     await expect(input).toBeFocused();
-
     await page.keyboard.press("Shift+F3");
-    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
+    await expect(count).toHaveText("1 of 3");
     await expect(input).toBeFocused();
+    await page.keyboard.press("Shift+F3");
+    await expect(count).toHaveText("3 of 3");
+    await page.keyboard.press("F3");
+    await expect(count).toHaveText("1 of 3");
+
+    // From an option toggle in the bar.
+    await page.getByTestId("find-match-case").focus();
+    await page.keyboard.press("F3");
+    await expect(count).toHaveText("2 of 3");
+    await expect(page.getByTestId("find-match-case")).toBeFocused();
+    await expect(page.getByTestId("find-match-case")).toHaveAttribute("aria-pressed", "false");
+
+    // From the editor while the bar stays open: the match moves, focus stays in the editor.
+    await page.locator(".cm-content").click();
+    await expect(page.getByTestId("find-bar")).toBeVisible();
+    const before = (await count.textContent()) ?? "";
+    await page.keyboard.press("F3");
+    await expect(count).not.toHaveText(before);
+    await expect(page.locator(".cm-content")).toBeFocused();
+    await page.keyboard.press("Shift+F3");
+    await expect(count).toHaveText(before);
+    await expect(page.locator(".cm-content")).toBeFocused();
+    expect(await codeText(page)).toBe(SAMPLE);
+    await user.context.close();
+  });
+
+  test("real typing, inserted text, paste and keyboard-driven buttons all reach the bar", async ({ browser }) => {
+    const user = await signIn(browser, "find-real-input");
+    const id = await createDocument(user.page, SAMPLE);
+    await openDocument(user.page, id);
+    const { page } = user;
+    const input = page.getByTestId("find-input");
+    const count = page.getByTestId("find-count");
+
+    // Text committed without key events (the closest automation gets to an IME commit).
+    await openFromCodePane(page);
+    await page.keyboard.insertText("cat");
+    await expect(input).toHaveValue("cat");
+    await expect(count).toHaveText("1 of 3");
+
+    // Clearing and typing key by key.
+    await page.keyboard.press("Control+a");
+    await page.keyboard.press("Backspace");
+    await expect(input).toHaveValue("");
+    await page.keyboard.type("mat");
+    await expect(count).toHaveText("1 of 1");
+
+    // Escape returns focus to the editor with the match selected; copy it for the paste below.
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("find-bar")).toHaveCount(0);
+    await expect(page.locator(".cm-content")).toBeFocused();
+    expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("mat");
+    await page.keyboard.press("Control+c");
+
+    // The first keys after reopening are honoured.
+    await page.keyboard.press("Control+f");
+    await expect(input).toBeFocused();
+    await page.keyboard.press("Control+a");
+    await page.keyboard.press("Backspace");
+    await expect(input).toHaveValue("");
+    await page.keyboard.press("Control+v");
+    await expect(input).toHaveValue("mat");
+    await expect(count).toHaveText("1 of 1");
+
+    await input.fill("cat");
+    await expect(count).toHaveText("1 of 3");
+
+    // Enter and Space activate the step buttons; arrows move between the first-row actions.
+    await page.getByTestId("find-next").focus();
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("2 of 3");
+    await page.keyboard.press("Space");
+    await expect(count).toHaveText("3 of 3");
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByTestId("find-prev")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(count).toHaveText("2 of 3");
+
+    // The Replace toggle hides and reshows the row from the keyboard, then focus lands in it.
+    await page.keyboard.press("End");
+    await expect(page.getByTestId("find-close")).toBeFocused();
+    await page.keyboard.press("ArrowLeft");
+    const toggle = page.getByTestId("find-toggle-replace");
+    await expect(toggle).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("find-replace-row")).toHaveCount(0);
+    await expect(toggle).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("replace-input")).toBeFocused();
+
+    // Enter in the replace input replaces the active (second) match.
+    await page.keyboard.type("dog");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => codeText(page)).toContain("The cat sat on the mat. The dog ran.");
+    await expect(count).toHaveText("2 of 2");
+
+    // Tab to Replace all and activate it with the keyboard.
+    await page.keyboard.press("Tab");
+    await expect(page.getByTestId("replace-one")).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(page.getByTestId("replace-all")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => codeText(page)).toBe(SAMPLE.replace(/cat/g, "dog"));
+    await expect(count).toHaveText("0 of 0");
+
+    // Escape from a button closes the bar too (Replace all is disabled now, so use the toggle).
+    await toggle.focus();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("find-bar")).toHaveCount(0);
+    await expect(page.locator(".cm-content")).toBeFocused();
     await user.context.close();
   });
 

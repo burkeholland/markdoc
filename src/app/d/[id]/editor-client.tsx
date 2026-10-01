@@ -3,7 +3,6 @@
 import dynamic from "next/dynamic";
 import { createContext, useContext, useEffect, useState } from "react";
 import type { EditorShellProps } from "@/components/editor/editor-shell";
-import { primeFindKeyboardTrust } from "@/components/editor/find-keyboard-trust";
 import { cn } from "@/lib/utils";
 import {
   CODE_COLUMN_BOX,
@@ -22,8 +21,6 @@ import {
   STATUS_BOX,
   TOOLBAR_BOX,
 } from "@/components/editor/chrome-classes";
-
-primeFindKeyboardTrust();
 
 /**
  * The editor stack (ProseMirror, Yjs, micromark, Radix, the shell itself — 8 chunks, ≈ 925 kB) loads
