@@ -12544,6 +12544,7 @@ interface MoreMenuPresentation {
   readonly onEscapeKeyDown: (event: KeyboardEvent) => void;
   readonly onOutside: (event: CustomEvent<{ originalEvent: Event }>) => void;
   readonly onCloseAutoFocus: (event: Event) => void;
+  readonly closeForPlainSelect: () => boolean;
 }
 
 class MoreMenuElementOwner<T extends HTMLElement> {
@@ -15365,6 +15366,14 @@ function createMoreMenuPresentation({
     onEscapeKeyDown,
     onOutside,
     onCloseAutoFocus: (event: Event) => event.preventDefault(),
+    // Reused by a plain MenuItem's own onSelect (see the Header component's onMoreMenuPlainSelect)
+    // so a mouse-driven close gets the exact same focus handoff Enter already gets through
+    // genericSelectListener's `close(publication, true, null, mode)` call above - no new gate,
+    // just the existing close path invoked from a different caller.
+    closeForPlainSelect: () => {
+      const publication = currentPublication();
+      return publication ? close(publication) : false;
+    },
   });
 }
 
@@ -15488,7 +15497,29 @@ export const Header = memo(function Header(props: HeaderProps) {
     onEscapeKeyDown: onMoreMenuEscapeKeyDown,
     onOutside: onMoreMenuOutside,
     onCloseAutoFocus: onMoreMenuCloseAutoFocus,
+    closeForPlainSelect: closeMoreMenuForPlainSelect,
   } = moreMenuPresentation;
+  // #2203 root cause: a plain MenuItem's own onSelect always runs (that's Radix's own
+  // close-on-select contract), but on a REAL, trusted mouse click the menu's native-event close
+  // path never fires: the capture-phase `genericClickListener` stages a one-shot `genericSelection`
+  // admission token and queues a microtask to clear it, and that microtask always runs - clearing
+  // the token - before Radix's separately-scheduled click handling gets around to dispatching its
+  // internal "menu.itemSelect" custom event, so `genericSelectListener`'s admission check always
+  // sees a cleared token and never calls `close()`. Enter doesn't hit this: Radix handles it by
+  // calling the item's `.click()` from script, which drives the whole chain - including
+  // "menu.itemSelect" - synchronously in one task, ahead of the queued microtask. So close the menu
+  // ourselves, directly, before running the item's action, instead of depending on that race - and
+  // reuse the menu's own `close()` (`closeForPlainSelect` above) so the mouse path gets the same
+  // focus handoff Enter already gets, rather than just flipping state.
+  const onMoreMenuPlainSelect = (action: () => void) => () => {
+    if (!closeMoreMenuForPlainSelect()) {
+      setStoredMoreMenuState(Object.freeze({ visit: moreMenuVisit, open: false }));
+    }
+    action();
+  };
+  const onMoreMenuWindowOpenSelect = (url: string) => onMoreMenuPlainSelect(
+    () => window.open(url, "_blank", "noopener"),
+  );
   // Star state and the notifications poll wait for the first sync: the socket handshake and the
   // collab-token call get the server to themselves on open (#118).
   const settled = useOpenSettled(session);
@@ -15590,12 +15621,12 @@ export const Header = memo(function Header(props: HeaderProps) {
           >
             {compact && (
               <>
-                <MenuItem icon={<UserPlus size={15} />} onSelect={props.onShare} data-testid="menu-share">
+                <MenuItem icon={<UserPlus size={15} />} onSelect={onMoreMenuPlainSelect(props.onShare)} data-testid="menu-share">
                   Share…
                 </MenuItem>
                 <MenuItem
                   icon={linked ? <UploadCloud size={15} /> : <GitHubIcon size={15} />}
-                  onSelect={linked ? props.onPublishNow : props.onPublish}
+                  onSelect={onMoreMenuPlainSelect(linked ? props.onPublishNow : props.onPublish)}
                   disabled={props.publishing || (linked ? !canEdit : !props.isOwner || !githubConfigured)}
                   title={!linked && !githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
                   data-testid="menu-publish"
@@ -15610,7 +15641,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MenuItem ref={captureHistory} icon={<History size={15} />} onSelect={onHistorySelect} data-testid="menu-history">
               Version history
             </MenuItem>
-            <MenuItem icon={<Activity size={15} />} onSelect={props.onActivity} data-testid="menu-activity">
+            <MenuItem icon={<Activity size={15} />} onSelect={onMoreMenuPlainSelect(props.onActivity)} data-testid="menu-activity">
               Activity
             </MenuItem>
             {canEdit && (
@@ -15619,16 +15650,16 @@ export const Header = memo(function Header(props: HeaderProps) {
               </MenuItem>
             )}
             <MenuSeparator />
-            <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)} data-testid="download-md">
+            <MenuItem icon={<Download size={15} />} onSelect={onMoreMenuPlainSelect(() => props.onDownload("md", false))} data-testid="download-md">
               Download Markdown
             </MenuItem>
-            <MenuItem icon={<FileCode2 size={15} />} onSelect={() => props.onDownload("html", false)} data-testid="download-html">
+            <MenuItem icon={<FileCode2 size={15} />} onSelect={onMoreMenuPlainSelect(() => props.onDownload("html", false))} data-testid="download-html">
               Download HTML
             </MenuItem>
-            <MenuItem icon={<FileText size={15} />} onSelect={() => props.onDownload("pdf", false)} data-testid="download-pdf">
+            <MenuItem icon={<FileText size={15} />} onSelect={onMoreMenuPlainSelect(() => props.onDownload("pdf", false))} data-testid="download-pdf">
               Download PDF
             </MenuItem>
-            <MenuItem icon={<Copy size={15} />} onSelect={props.onCopyMarkdown}>
+            <MenuItem icon={<Copy size={15} />} onSelect={onMoreMenuPlainSelect(props.onCopyMarkdown)}>
               Copy Markdown
             </MenuItem>
             <MenuItem
@@ -15641,19 +15672,19 @@ export const Header = memo(function Header(props: HeaderProps) {
             >
               {props.documentMutation === "duplicate" ? "Making a copy…" : "Make a copy"}
             </MenuItem>
-            <MenuItem icon={<BookOpen size={15} />} onSelect={() => window.open(`/p/${doc.id}`, "_blank", "noopener")} data-testid="menu-reader">
+            <MenuItem icon={<BookOpen size={15} />} onSelect={onMoreMenuWindowOpenSelect(`/p/${doc.id}`)} data-testid="menu-reader">
               Open reader view
             </MenuItem>
             <MenuSeparator />
             {linked && doc.githubUrl && (
-              <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
+              <MenuItem icon={<ExternalLink size={15} />} onSelect={onMoreMenuWindowOpenSelect(doc.githubUrl)}>
                 Open on GitHub
               </MenuItem>
             )}
             {props.isOwner && (
               <MenuItem
                 icon={<GitHubIcon size={15} />}
-                onSelect={props.onPublish}
+                onSelect={onMoreMenuPlainSelect(props.onPublish)}
                 disabled={!linked && !githubConfigured}
                 title={!linked && !githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
                 data-testid="menu-github"
@@ -15662,18 +15693,18 @@ export const Header = memo(function Header(props: HeaderProps) {
               </MenuItem>
             )}
             {props.onCommandPalette && (
-              <MenuItem icon={<Command size={15} />} onSelect={props.onCommandPalette} shortcut={shortcut("Mod-K")} data-testid="menu-command-palette">
+              <MenuItem icon={<Command size={15} />} onSelect={onMoreMenuPlainSelect(props.onCommandPalette)} shortcut={shortcut("Mod-K")} data-testid="menu-command-palette">
                 Search commands
               </MenuItem>
             )}
-            <MenuItem icon={<Keyboard size={15} />} onSelect={props.onShortcuts}>
+            <MenuItem icon={<Keyboard size={15} />} onSelect={onMoreMenuPlainSelect(props.onShortcuts)}>
               Keyboard shortcuts
             </MenuItem>
             <MenuSeparator />
-            <MenuItem icon={<ArrowLeft size={15} />} onSelect={props.onHome}>
+            <MenuItem icon={<ArrowLeft size={15} />} onSelect={onMoreMenuPlainSelect(props.onHome)}>
               All documents
             </MenuItem>
-            <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
+            <MenuItem icon={<LogOut size={15} />} onSelect={onMoreMenuPlainSelect(() => void signOutSafely())}>
               Sign out
             </MenuItem>
             {props.isOwner && (
