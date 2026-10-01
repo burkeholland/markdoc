@@ -124,6 +124,20 @@ $manyDiagnostics = "markdoc-release-wal-failed:${operation}:start:cleanup=true`n
 $failure = Get-ReleaseWalFailure $manyDiagnostics $operation
 Assert-True ($failure.Diagnostics.Count -eq 10) 'Client diagnostic output was not bounded to ten records.'
 
+$signalFailure = @(
+  "markdoc-release-wal-failed:${operation}:sql-ready:cleanup=true"
+  "markdoc-release-wal-log:${operation}:LOG:killed-by-signal-9"
+  "markdoc-release-wal-log:${operation}:LOG:killed-by-signal-15"
+  "markdoc-release-wal-log:${operation}:LOG:startup-aborted"
+  "markdoc-release-wal-log:${operation}:LOG:killed-by-signal-0"
+  "markdoc-release-wal-log:${operation}:LOG:killed-by-signal-999"
+  "markdoc-release-wal-log:${operation}:LOG:private-token"
+) -join "`n"
+$failure = Get-ReleaseWalFailure $signalFailure $operation
+Assert-True ($failure.Diagnostics.Count -eq 3) 'Signal diagnostics were not restricted to valid signal numbers and fixed startup reasons.'
+Assert-True ($failure.Diagnostics[0] -ceq 'Scratch LOG: A server process was terminated by signal 9.') 'Signal-9 diagnosis was not surfaced.'
+Assert-True ($failure.Diagnostics[2] -ceq 'Scratch LOG: Startup was aborted after a startup process failure.') 'Startup abort diagnosis was not surfaced.'
+
 $imageSpace = "markdoc-vm-image-space-failed:${operation}:pull:available=436326400:required=6442450944:reserve=2147483648"
 Assert-True ((Get-ReleaseImageSpaceFailure $imageSpace $operation) -cmatch 'Insufficient disk space before image pull; application unchanged') 'Pre-pull disk refusal was not surfaced.'
 Assert-True ($null -eq (Get-ReleaseImageSpaceFailure $imageSpace $otherOperation)) 'Wrong-operation image space failure was accepted.'

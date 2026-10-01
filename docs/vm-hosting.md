@@ -294,7 +294,10 @@ and a **2 GiB production reserve**. The WAL estimate deliberately does not rely
 on recycling during replay. Invalid metadata, an unsupported timeline span,
 unreadable capacity or insufficient space fails closed before restore. During
 restore, startup and SQL checks, the gate checks free space about once per
-second and stops its owned work if it drops below the reserve. This guard
+second and stops its owned work if it drops below the reserve. It checks
+before and after every SQL-readiness poll, including failed queries.
+A reserve breach is permanent for that gate attempt even if space later
+recovers, and no additional SQL poll or replay is started afterward. This guard
 does not reserve blocks against unrelated writers, so single-operator
 coordination and sufficient filesystem capacity remain required.
 
@@ -307,6 +310,10 @@ statements, details, credentials and user text are never forwarded. The terminal
 release command validates these records again and prints the fixed explanation
 alongside the failure stage and cleanup result. Raw scratch logs are removed
 with the owned cluster, not left on the production disk.
+Known `LOG` messages also preserve fixed startup-abort and signal-termination
+categories, including signal 9 (which can indicate an OOM-killer termination).
+A signal-9 record alone does not prove OOM; confirming that cause still requires
+kernel evidence. Other unrecognized `LOG` text is not forwarded.
 
 After the WAL gate and before registry authentication, pull or app changes,
 the image deployment requires **6 GiB free**: a conservative 4 GiB download/
@@ -325,6 +332,14 @@ commands, never force, system/volume pruning or rollback-bundle deletion.
 A retention failure produces a fixed warning that the terminal command prints;
 it does **not** roll back a healthy release. Reconcile that warning and free
 capacity before another release.
+Previous-image lookup includes stopped containers and is best-effort. If the
+container is missing during a crash-loop restart, or its image cannot be
+resolved, the release can still repair the app. After successful local health,
+image retention is skipped with the same fixed warning; an unknown previous
+image is never guessed or deleted.
+
+Run the offline Bash gate/image suites under WSL or Linux with a real `python3`.
+The Windows Python Store alias is not a usable interpreter for those suites.
 
 A public failure after guest readiness is a failed/unverified release, **not** an
 automatic rollback. Existing local rollback restores configuration/image only;

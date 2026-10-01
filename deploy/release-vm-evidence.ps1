@@ -91,15 +91,19 @@ function Get-ReleaseWalFailure([string]$Output, [string]$Operation) {
     'io-error' = 'An input/output error occurred.'
     'message-withheld' = 'Unrecognized server message withheld.'
     'diagnostics-unavailable' = 'Server diagnostics could not be read.'
+    'startup-aborted' = 'Startup was aborted after a startup process failure.'
   }
   $diagnostics = @(
     [regex]::Matches($Output,
-      "(?m)^markdoc-release-wal-log:$escapedOperation`:(?<severity>WARNING|ERROR|FATAL|PANIC):(?<reason>[a-z-]{1,40})$") |
+      "(?m)^markdoc-release-wal-log:$escapedOperation`:(?<severity>LOG|WARNING|ERROR|FATAL|PANIC):(?<reason>[a-z0-9-]{1,40})$") |
       Select-Object -Last 10 |
       ForEach-Object {
         $reason = $_.Groups['reason'].Value
+        $signalMatch = [regex]::Match($reason, '^killed-by-signal-(?<signal>[1-9]|[1-5][0-9]|6[0-4])$')
         if ($reasons.ContainsKey($reason)) {
           "Scratch $($_.Groups['severity'].Value): $($reasons[$reason])"
+        } elseif ($signalMatch.Success) {
+          "Scratch $($_.Groups['severity'].Value): A server process was terminated by signal $($signalMatch.Groups['signal'].Value)."
         }
       }
   )

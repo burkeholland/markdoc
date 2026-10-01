@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-gate="$root/infra/release-wal-gate.sh"
+gate="${MARKDOC_RELEASE_WAL_GATE_TEST_SOURCE:-$root/infra/release-wal-gate.sh}"
 operation='12345678-1234-4abc-8def-1234567890ab'
 wal='000000010000000300000025'
 archive_object="${wal}-0123456789abcdef0123456789abcdef01234567.gz"
@@ -60,6 +60,15 @@ STUB
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'Avail\n'
+if [ "${TEST_SQL_SPACE_DROP:-}" != '' ] && [ -f "$TEST_EVENTS.sql-ready-count" ]; then
+  if [ "$TEST_SQL_SPACE_DROP" = persistent ] || [ ! -f "$TEST_EVENTS.space-breached" ]; then
+    if [ ! -f "$TEST_EVENTS.space-breached" ]; then
+      cp "$TEST_EVENTS.sql-ready-count" "$TEST_EVENTS.space-breached"
+    fi
+    printf '1024\n'
+    exit 0
+  fi
+fi
 if [ "${TEST_SPACE_DROP:-0}" = 1 ] && grep -q '^restore$' "$TEST_EVENTS"; then
   printf '1024\n'
 else
@@ -216,6 +225,13 @@ test -n "$data_dir"
 printf 'pg_ctl-%s\n' "$action" >>"$TEST_EVENTS"
 if [ "$action" = start ]; then
   printf '%s\n' "$server_log" >"$TEST_EVENTS.server-log"
+  if [ "${TEST_SERVER_SIGNAL:-0}" = 1 ]; then
+    printf '2026-10-01 01:01:01 UTC [42] LOG: startup process (PID 123) was terminated by signal 9: Killed private-token\n' >>"$server_log"
+    printf '2026-10-01 01:01:01 UTC [42] LOG: startup process (PID 123) was terminated by signal 15: Terminated private-token\n' >>"$server_log"
+    printf '2026-10-01 01:01:01 UTC [42] LOG: aborting startup due to startup process failure\n' >>"$server_log"
+    printf 'LOG: arbitrary private-token private-document-content\n' >>"$server_log"
+    printf 'LOG: startup process (PID 123) was terminated by signal 999: private-token\n' >>"$server_log"
+  fi
   if [ "${TEST_SERVER_ERROR:-0}" = 1 ]; then
     for _ in $(seq 1 400); do
       printf 'DETAIL: private-token private-document-content private-password\n' >>"$server_log"
@@ -256,6 +272,60 @@ run_gate() {
     "$@" \
     bash "$gate" "$operation" >"$case_dir/output" 2>"$case_dir/error"
 }
+
+test_sql_reserve() {
+  local mode
+  local case_dir
+  local modes="${1:-transient persistent}"
+  for mode in $modes; do
+    case_dir="$(make_case)"
+    if run_gate "$case_dir" TEST_SQL_SPACE_DROP="$mode" \
+      TEST_SQL_READY_AFTER=3 MARKDOC_RELEASE_WAL_GATE_RECOVERY_TIMEOUT=8; then
+      fail "$mode SQL reserve breach was accepted"
+    fi
+    assert_contains "$case_dir/output" \
+      "markdoc-release-wal-failed:$operation:space:cleanup=true" \
+      "$mode SQL reserve breach did not stop owned work"
+    test -f "$case_dir/events.space-breached" || fail 'SQL reserve case did not reach a breach'
+    test "$(cat "$case_dir/events.sql-ready-count")" = \
+      "$(cat "$case_dir/events.space-breached")" ||
+      fail "$mode reserve breach launched another SQL poll"
+    grep -q '^replay$' "$case_dir/events" && fail 'replay ran after a SQL reserve breach'
+    passed=$((passed + 2))
+    assert_no_scratch "$case_dir"
+  done
+}
+
+test_server_signal() {
+  local case_dir
+  case_dir="$(make_case)"
+  if run_gate "$case_dir" TEST_SQL_READY=not-ready TEST_SERVER_SIGNAL=1; then
+    fail 'signal diagnostic fixture returned success'
+  fi
+  assert_contains "$case_dir/output" \
+    "markdoc-release-wal-log:$operation:LOG:killed-by-signal-9" \
+    'scratch startup signal-9 kill was not diagnosed'
+  assert_contains "$case_dir/output" \
+    "markdoc-release-wal-log:$operation:LOG:killed-by-signal-15" \
+    'scratch startup signal-15 kill was not diagnosed'
+  assert_contains "$case_dir/output" \
+    "markdoc-release-wal-log:$operation:LOG:startup-aborted" \
+    'scratch startup abort was not diagnosed'
+  test "$(grep -c '^markdoc-release-wal-log:' "$case_dir/output")" = 3 ||
+    fail 'unknown or invalid signal LOG text was forwarded'
+  grep -Eq 'private-|signal-999' "$case_dir/output" &&
+    fail 'signal diagnostics exposed unvalidated log content'
+  passed=$((passed + 2))
+  assert_no_scratch "$case_dir"
+}
+
+case "${MARKDOC_RELEASE_WAL_GATE_REVIEW_CASE:-all}" in
+  reserve) test_sql_reserve; printf 'SQL reserve regression passed\n'; exit 0 ;;
+  reserve-persistent) test_sql_reserve persistent; printf 'persistent SQL reserve regression passed\n'; exit 0 ;;
+  signals) test_server_signal; printf 'signal diagnostic regression passed\n'; exit 0 ;;
+  all) test_sql_reserve; test_server_signal ;;
+  *) fail 'unknown focused review case' ;;
+esac
 
 success_dir="$(make_case)"
 run_gate "$success_dir"
@@ -419,7 +489,7 @@ assert_contains "$start_dir/output" \
 assert_no_scratch "$start_dir"
 
 sql_retry_dir="$(make_case)"
-run_gate "$sql_retry_dir" TEST_SQL_READY_AFTER=2
+run_gate "$sql_retry_dir" TEST_SQL_READY_AFTER=2 MARKDOC_RELEASE_WAL_GATE_RECOVERY_TIMEOUT=5
 assert_contains "$sql_retry_dir/output" \
   "markdoc-release-wal-sql-ready:$operation:true" \
   'temporary SQL rejection was not retried'

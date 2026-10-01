@@ -25,7 +25,7 @@ assert_line() {
   passed=$((passed + 1))
 }
 
-for helper in require_image_space retain_release_images; do
+for helper in require_image_space retain_release_images capture_previous_image; do
   sed -n "/^${helper}() {/,/^}/p" "$source_file" >"$test_dir/$helper.sh"
   test -s "$test_dir/$helper.sh" || fail "missing $helper behavior"
   source "$test_dir/$helper.sh"
@@ -41,13 +41,25 @@ docker() {
       printf '%s\n' "$current" "$previous" "$old" "$used" "$other" "$protected"
       ;;
     'image inspect')
+      if [[ "$*" == *'{{.Id}}'* ]]; then
+        [ "${TEST_PREVIOUS_INSPECT_FAIL:-0}" = 0 ] || return 1
+        printf '%s\n' "${TEST_PREVIOUS_ID:-$previous}"
+        return 0
+      fi
       case "${!#}" in
         "$other") printf 'another.example.test/unrelated:latest\n' ;;
         *) printf '%s/markdoc@%s\n' "$registry" "${!#}" ;;
       esac
       ;;
     'ps -a')
-      [[ "$*" != *"ancestor=$used"* ]] || printf 'another-container\n'
+      if [[ "$*" == *'name=^/markdoc-app$'* ]]; then
+        [ "${TEST_PREVIOUS_PS_FAIL:-0}" = 0 ] || return 1
+        if [ "${TEST_PREVIOUS_EMPTY:-0}" != 1 ]; then
+          printf 'stopped-image\n'
+        fi
+      elif [[ "$*" == *"ancestor=$used"* ]]; then
+        printf 'another-container\n'
+      fi
       ;;
     rmi*)
       test "${TEST_RMI_FAIL:-0}" = 0
@@ -63,6 +75,25 @@ for command in df docker; do
   chmod +x "$test_dir/bin/$command"
 done
 export PATH="$test_dir/bin:$PATH"
+
+: >"$test_dir/events"
+capture_previous_image
+test "$previous_id" = "$previous" || fail 'stopped container image was not retained for rollback'
+passed=$((passed + 1))
+for unavailable in TEST_PREVIOUS_EMPTY=1 TEST_PREVIOUS_PS_FAIL=1 \
+  TEST_PREVIOUS_INSPECT_FAIL=1 TEST_PREVIOUS_ID=malformed; do
+  if ! env "$unavailable" bash -c '
+    set -euo pipefail
+    source "$test_dir/capture_previous_image.sh"
+    capture_previous_image
+    test -z "$previous_id"
+    printf "release-can-continue\n"
+  ' >"$test_dir/previous-result"; then
+    fail 'unavailable previous image blocked a repair release'
+  fi
+  assert_line "$test_dir/previous-result" 'release-can-continue' \
+    'previous-image failure did not preserve release execution'
+done
 
 : >"$test_dir/events"
 if TEST_FREE_BYTES=436326400 require_image_space pull 6442450944 >"$test_dir/space"; then
@@ -115,6 +146,17 @@ previous_id="$previous"
 assert_line "$test_dir/warning" \
   "markdoc-vm-image-warning:$operation_id:retention-failed" \
   'retention failure did not warn while preserving successful release completion'
+retain_release_images() {
+  printf 'retention-called\n' >>"$test_dir/retention-called"
+  return 0
+}
+previous_id=''
+( eval "$healthy_finish" ) >"$test_dir/warning"
+assert_line "$test_dir/warning" \
+  "markdoc-vm-image-warning:$operation_id:retention-failed" \
+  'missing previous identity did not warn after healthy repair'
+test ! -e "$test_dir/retention-called" || fail 'unknown previous identity allowed image removal'
+passed=$((passed + 1))
 
 pull_guard="$(grep -n '^require_image_space pull ' "$source_file" | cut -d: -f1)"
 rollback="$(grep -n '^rollback_dir=' "$source_file" | cut -d: -f1)"

@@ -180,10 +180,18 @@ with open(sys.argv[1], "rb") as stream:
     tail = stream.read(16384).decode("utf-8", errors="replace")
 entries = []
 for line in tail.splitlines():
-    match = re.search(r"(?:^| )(WARNING|ERROR|FATAL|PANIC):\s+(.*)", line)
+    match = re.search(r"(?:^| )(LOG|WARNING|ERROR|FATAL|PANIC):\s+(.*)", line)
     if match is None:
         continue
     reason = next((code for text, code in reasons if text in match[2]), "message-withheld")
+    if match[1] == "LOG":
+        signal = re.search(r"terminated by signal ([1-9][0-9]?)(?=[:\s]|$)", match[2])
+        if signal is not None and int(signal[1]) <= 64:
+            reason = f"killed-by-signal-{int(signal[1])}"
+        elif "aborting startup due to startup process failure" in match[2]:
+            reason = "startup-aborted"
+        elif reason == "message-withheld":
+            continue
     entries.append(f"markdoc-release-wal-log:{sys.argv[2]}:{match[1]}:{reason}")
 print("\n".join(entries[-10:]), end="\n" if entries else "")
 ' "$server_log" "$operation_id"
@@ -537,6 +545,8 @@ CONF
   stage='sql-ready'
   local recovery_deadline=$((SECONDS + recovery_timeout))
   while true; do
+    [ "$space_failed" != true ] || return 1
+    check_space "$production_reserve" || return 1
     local recovery_remaining=$((recovery_deadline - SECONDS))
     if [ "$recovery_remaining" -le 0 ]; then
       return 1
@@ -544,15 +554,18 @@ CONF
     if [ "$recovery_remaining" -gt "$query_timeout" ]; then
       recovery_remaining="$query_timeout"
     fi
+    local sql_ready=false
     if run_capture "$recovery_remaining" sudo -u postgres psql -X \
       -h "$socket_dir" -p "$scratch_port" -d postgres \
       -v ON_ERROR_STOP=1 -Atq -c \
       "select case when not pg_is_in_recovery() and current_setting('archive_mode') = 'off' and current_setting('listen_addresses') = '' then 'ready' else 'not-ready' end"; then
       if [ "$(read_control)" = ready ]; then
-        break
+        sql_ready=true
       fi
-      [ "$space_failed" != true ] || return 1
     fi
+    [ "$space_failed" != true ] || return 1
+    check_space "$production_reserve" || return 1
+    [ "$sql_ready" != true ] || break
     if [ -z "$test_root" ] &&
       [[ "$owned_postgres_pid" =~ ^[1-9][0-9]*$ ]] &&
       ! kill -0 "$owned_postgres_pid" 2>/dev/null; then

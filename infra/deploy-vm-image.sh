@@ -110,11 +110,22 @@ retain_release_images() {
   done
 }
 
+capture_previous_image() {
+  local previous_image=''
+  local resolved_id=''
+  previous_id=''
+  previous_image="$(timeout 15s docker ps -a --filter 'name=^/markdoc-app$' \
+    --format '{{.Image}}' 2>/dev/null)" || return 0
+  [ -n "$previous_image" ] || return 0
+  resolved_id="$(timeout 15s docker image inspect --format '{{.Id}}' \
+    "$previous_image" 2>/dev/null)" || return 0
+  [[ "$resolved_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 0
+  previous_id="$resolved_id"
+}
+
 # Allow 4 GiB for the current ~2.2 GB image's download/unpacking, plus the reserve.
 require_image_space pull 6442450944
-previous_image="$(timeout 15s docker ps --filter 'name=^/markdoc-app$' --format '{{.Image}}')"
-previous_id="$(timeout 15s docker image inspect --format '{{.Id}}' "$previous_image")"
-[[ "$previous_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+capture_previous_image
 
 rollback_dir="$(mktemp -d)"
 chmod 0700 "$rollback_dir"
@@ -254,7 +265,7 @@ expected = sys.argv[2]
 raise SystemExit(0 if all(health.get(key) is True for key in ("ok", "db", "collab")) and health.get("version") == expected else 1)
 ' "$health" "$app_version"; then
     deployment_succeeded=true
-    if ! retain_release_images "$current_id" "$previous_id"; then
+    if [ -z "$previous_id" ] || ! retain_release_images "$current_id" "$previous_id"; then
       printf 'markdoc-vm-image-warning:%s:retention-failed\n' "$operation_id"
     fi
     exit 0
