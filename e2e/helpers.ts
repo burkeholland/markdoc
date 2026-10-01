@@ -270,6 +270,10 @@ export async function selectTextInRich(page: Page, text: string) {
     while ((node = walker.nextNode())) {
       const idx = node.textContent!.indexOf(needle);
       if (idx >= 0) {
+        // A real click/dblclick auto-scrolls its target into view; this synthetic Range selection
+        // does not, so a target scrolled off-screen (e.g. below a table from an earlier step)
+        // lands outside the selection bubble's visible-bounds check and the bubble never shows.
+        node.parentElement?.scrollIntoView({ block: "center" });
         const range = document.createRange();
         range.setStart(node, idx);
         range.setEnd(node, idx + needle.length);
