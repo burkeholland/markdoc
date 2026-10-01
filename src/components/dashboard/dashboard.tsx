@@ -7149,10 +7149,11 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     searchingOwner?.authority === searchAuthority &&
     searchingOwner.query === trimmed;
   const currentSearchError = searchError?.authority === searchAuthority && searchError.query === trimmed ? searchError : null;
+  // runSearch sets searchRequestOwner synchronously, so a second click before the re-render sends nothing.
   const retrySearch = useCallback(() => {
-    if (!currentSearchError || currentSearchError.authority !== searchAuthority || currentSearchError.query !== trimmed || searchRequestOwner.current) return;
+    if (!currentSearchError || searchRequestOwner.current) return;
     runSearch(searchAuthority, currentSearchError.query);
-  }, [currentSearchError, trimmed, runSearch, searchAuthority]);
+  }, [currentSearchError, runSearch, searchAuthority]);
 
   // Server results for the current query win; otherwise filter the loaded list by title so typing
   // feels instant while the request is in flight (or for queries too short to send).

@@ -5503,8 +5503,8 @@ describe("dashboard search controls", () => {
     });
     expect(search).toHaveValue("notes");
     expect(within(screen.getByTestId("document-list")).getAllByRole("link")).toHaveLength(1);
-    expect(screen.getByText("Meeting notes")).toBeInTheDocument();
-    expect(screen.queryByText("Alpha planning")).toBeNull();
+    expect(within(screen.getByTestId("document-list")).getByRole("link", { name: /Meeting notes/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Alpha planning/ })).toBeNull();
 
     await dispatchSearchAction(() => {
       fireEvent.change(search, { target: { value: "zzzz-no-match" } });
