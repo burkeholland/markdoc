@@ -54,7 +54,7 @@ switch ($case) {
       if ($case -eq 'digest-transport-success') { $errorText = 'ERROR: ConnectionError: connection reset' }
       if ($case -eq 'digest-timeout-success') { $errorText = 'ERROR: ReadTimeout: request timed out' }
       if ($case -eq 'digest-http-timeout-success') { $errorText = 'ERROR: HTTP status: 408' }
-      if ($case -eq 'digest-native-timeout') { Start-Sleep -Seconds 30 }
+      if ($case -eq 'digest-native-timeout') { Start-Sleep -Seconds 60 }
     }
   }
 }
@@ -228,15 +228,11 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
   Assert-True (-not $ClassifyDigestFailure -or $isDigestLookup) 'Only the digest lookup may classify native failure output.'
   if ($isDigestLookup -and $script:scenario.StartsWith('digest-')) {
     Assert-Equal (Join-Path $testRoot 'az.cmd') (Get-Command az -CommandType Application | Select-Object -First 1).Source 'Fake az must be first on PATH.'
-    $limit = [math]::Min(10, $TimeoutSeconds)
-    if ($script:scenario -eq 'digest-native-timeout' -and -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $env:MARKDOC_DIGEST_COUNT)) {
-      $limit = 3
-    }
     try {
       if ($ClassifyDigestFailure) {
-        return & $native $Command $Arguments $Directory $limit -ClassifyDigestFailure
+        return & $native $Command $Arguments $Directory $TimeoutSeconds -ClassifyDigestFailure
       }
-      return & $native $Command $Arguments $Directory $limit
+      return & $native $Command $Arguments $Directory $TimeoutSeconds
     } catch [InvalidOperationException] {
       Assert-True (($_.Exception.Message + ($_.Exception.Data.Values -join ' ')) -notmatch 'FAKE_DIGEST_SECRET_2211|private\.example\.test|response body') 'Raw native failure output must not survive in the exception.'
       if ($script:scenario -eq 'digest-deadline') {
