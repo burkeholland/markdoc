@@ -1739,12 +1739,12 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
       [value.overlay, value.content],
       [value.form, value.input, value.list],
     ] as readonly (readonly ElementPublication<HTMLElement>[])[];
-    const rowPublications = value.rows as readonly ElementPublication<HTMLElement>[];
+    // Rows are not a group: Strict Mode replays newly placed rows one subtree at a time,
+    // so a reopen after a dismissal can replay only some of them.
     const completeRefReplay =
       noPartialRefReplay &&
       replay.refs.some((entry) => entry.detached) &&
-      primaryGroups.every(completeGroupReplay) &&
-      completeGroupReplay(rowPublications);
+      primaryGroups.every(completeGroupReplay);
     const exact =
       !replay.invalid &&
       !replay.source.claimed &&

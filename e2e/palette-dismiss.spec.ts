@@ -150,6 +150,44 @@ for (const how of ["escape", "outside click"] as const) {
   });
 }
 
+// A dismissal must leave the palette fully reusable: typing in the reopened palette filters it and never edits the document.
+for (const how of ["escape", "outside click"] as const) {
+  test(`typing still filters the palette after it is closed with ${how} and reopened (#2216)`, async ({ browser }) => {
+    const { page, context } = await signIn(browser, uniqueLogin("palette-dismiss-retype"));
+    await openDoc(page);
+    const rich = page.locator(".md-rich");
+    await page.locator(".md-rich p").first().click();
+    await expect(rich).toBeFocused();
+    const text = await rich.innerText();
+    const input = page.getByTestId("palette-input");
+    const options = palette(page).getByRole("option");
+
+    // The first visit, then three close-and-reopen cycles.
+    for (let visit = 1; visit <= 4; visit++) {
+      await page.keyboard.press(`${mod}+Shift+P`);
+      await expect(palette(page)).toBeVisible();
+      await expect(input).toHaveValue("");
+      const all = await options.count();
+      expect(all).toBeGreaterThan(1);
+
+      await page.keyboard.type("outline");
+      const keysWentTo = await page.evaluate(() => {
+        const active = document.activeElement;
+        return active?.getAttribute("data-testid") ?? active?.className ?? active?.tagName ?? "nothing";
+      });
+      expect.soft(await rich.innerText(), `visit ${visit}: the document is unchanged`).toBe(text);
+      await expect(input, `visit ${visit}: the query shows what was typed (keys went to ${keysWentTo})`).toHaveValue("outline");
+      await expect(options.first()).toHaveAttribute("data-testid", "palette-item-view:outline");
+      await expect.poll(() => options.count(), { message: `visit ${visit}: the list filters` }).toBeLessThan(all);
+
+      await dismiss(page, how);
+      await expectFocusBack(page, rich);
+    }
+    expect(await rich.innerText()).toBe(text);
+    await context.close();
+  });
+}
+
 test("picking a command from a palette opened from the More menu runs it and closes the palette", async ({ browser }) => {
   const { page, context } = await signIn(browser, uniqueLogin("palette-dismiss-run"));
   await openDoc(page);
