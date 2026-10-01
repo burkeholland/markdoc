@@ -108,11 +108,6 @@ interface ReplayRequest {
   revision: number;
   consumed: boolean;
 }
-type OpenChangeClaim = {
-  publication: DialogEventPublication;
-  target: EventTarget | null;
-  retired: boolean;
-};
 type ActionOwner = {
   presentation: SyncPresentation;
   publication: ActionControlPublication;
@@ -1337,9 +1332,9 @@ export const SyncDialog = memo(function SyncDialog({
   const replaySetupRef = useRef<{ presentation: SyncPresentation; active: boolean } | null>(null);
   const replayRequestRef = useRef<ReplayRequest | null>(null);
   const revisionRef = useRef(publicationRevision);
+  const latestPresentationRef = useRef<SyncPresentation | null>(null);
   const inFlightRef = useRef<ActionOwner | null>(null);
   const successCloseRef = useRef<SuccessClose | null>(null);
-  const openChangeClaimRef = useRef<OpenChangeClaim | null>(null);
   const capturedNavigationRef = useRef(
     new WeakMap<
       SyncNavigationPublication,
@@ -1460,6 +1455,7 @@ export const SyncDialog = memo(function SyncDialog({
       takeRemote,
     ],
   );
+  latestPresentationRef.current = presentation;
   const initialMessageVisit = useMemo(
     () => (open ? { mount, docId, repoPath, gistFile, message: `Update ${repoPath ?? gistFile ?? "document"}` } : null),
     [docId, gistFile, mount, open, repoPath],
@@ -1541,11 +1537,6 @@ export const SyncDialog = memo(function SyncDialog({
       lastCommit !== activeCommit
     ) {
       lastCommit.navigation?.retire();
-    }
-    const claim = openChangeClaimRef.current;
-    if (claim?.publication.generation === generation) {
-      claim.retired = true;
-      openChangeClaimRef.current = null;
     }
   }, []);
   const snapshotDomMatches = useCallback(
@@ -1792,11 +1783,6 @@ export const SyncDialog = memo(function SyncDialog({
         clearTimeout(scheduledClose.timer);
         successCloseRef.current = null;
       }
-      const claim = openChangeClaimRef.current;
-      if (claim?.publication.generation.presentation === candidate) {
-        claim.retired = true;
-        openChangeClaimRef.current = null;
-      }
       return wasActive;
     },
     [retireGeneration],
@@ -1858,6 +1844,13 @@ export const SyncDialog = memo(function SyncDialog({
         !sawCompleteRefReplay(predecessorCommit) ||
         !sameCommittedElements(commit, predecessorCommit)
       ) {
+        // A rejected replay request must still be marked consumed so it
+        // isn't silently re-attached (via matching revision) to every
+        // subsequent presentation object recreated on later renders. Leaving
+        // it unconsumed here caused every freshly created presentation to be
+        // retired immediately, which left the dialog permanently unable to
+        // close (e.g. via Escape) once a replay was rejected.
+        replayRequest.consumed = true;
         return false;
       }
       replayRequest.consumed = true;
@@ -2015,19 +2008,6 @@ export const SyncDialog = memo(function SyncDialog({
         presentationFactsAreCurrent(publication.generation.presentation);
     },
     [presentationFactsAreCurrent, publicationDomMatches],
-  );
-  const ownsDialogEvent = useCallback(
-    (
-      publication: DialogEventPublication,
-      element: HTMLDivElement,
-    ) => {
-      const commit = activePublicationRef.current;
-      return !retiredPublicationRef.current.has(publication) &&
-        commit?.generation === publication.generation &&
-        commit.bridge === element &&
-        ownsPresentation(publication.generation.presentation);
-    },
-    [ownsPresentation],
   );
   const ownsNavigation = useCallback(
     (publication: SyncNavigationPublication) => {
@@ -2531,42 +2511,6 @@ export const SyncDialog = memo(function SyncDialog({
     if (initialMessageVisit) setMessage(initialMessageVisit.message);
   }, [initialMessageVisit]);
 
-  // Radix handles Escape and outside pointer events in document capture, before portal React capture.
-  useLayoutEffect(() => {
-    const authorizeNativeOpenChange = (event: KeyboardEvent | PointerEvent) => {
-      if (event instanceof KeyboardEvent && event.key !== "Escape") return;
-      const commit = activePublicationRef.current;
-      const publication = commit?.generation.publications?.dialogEvent;
-      if (
-        !commit ||
-        !publication ||
-        !ownsDialogEvent(publication, commit.bridge)
-      ) {
-        return;
-      }
-      const previous = openChangeClaimRef.current;
-      if (previous) previous.retired = true;
-      const claim: OpenChangeClaim = {
-        publication,
-        target: event.target,
-        retired: false,
-      };
-      openChangeClaimRef.current = claim;
-      queueMicrotask(() => {
-        if (openChangeClaimRef.current === claim) {
-          claim.retired = true;
-          openChangeClaimRef.current = null;
-        }
-      });
-    };
-    document.addEventListener("keydown", authorizeNativeOpenChange, true);
-    document.addEventListener("pointerdown", authorizeNativeOpenChange, true);
-    return () => {
-      document.removeEventListener("keydown", authorizeNativeOpenChange, true);
-      document.removeEventListener("pointerdown", authorizeNativeOpenChange, true);
-    };
-  }, [ownsDialogEvent]);
-
   const activateCompare = (
     publication: CompareControlPublication,
     element: HTMLButtonElement,
@@ -2584,53 +2528,19 @@ export const SyncDialog = memo(function SyncDialog({
     publication.invoke();
     candidate.onOpenChange(false);
   };
-  const handleOpenChange = (nextOpen: boolean) => {
-    if (nextOpen) {
-      const commit = activePublicationRef.current;
-      if (commit && ownsDialogEvent(dialogEventPublication, commit.bridge)) {
-        presentation.onOpenChange(true);
-      }
-      return;
-    }
-    const claim = openChangeClaimRef.current;
-    if (
-      !claim ||
-      claim.retired ||
-      claim.publication !== dialogEventPublication
-    ) {
-      return;
-    }
-    claim.retired = true;
-    openChangeClaimRef.current = null;
-    closePresentation(presentation);
-  };
-  const authorizeOpenChange = (
-    publication: DialogEventPublication,
-    element: HTMLDivElement,
-    target: EventTarget | null,
-  ) => {
-    if (!ownsDialogEvent(publication, element)) return;
-    const previous = openChangeClaimRef.current;
-    if (previous) previous.retired = true;
-    openChangeClaimRef.current = {
-      publication,
-      target,
-      retired: false,
-    };
-  };
-  const releaseOpenChange = (
-    publication: DialogEventPublication,
-    target: EventTarget | null,
-  ) => {
-    const claim = openChangeClaimRef.current;
-    if (
-      claim?.publication === publication &&
-      claim.target === target
-    ) {
-      claim.retired = true;
-      openChangeClaimRef.current = null;
-    }
-  };
+  // Stable identity (unlike a plain inline function) so that the root dialog's cached
+  // presentation - and its Radix Escape-close binding - survives the frequent re-renders
+  // that a live sync-status poll causes (regression for #2215: Escape stopped closing Sync).
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      const current = latestPresentationRef.current;
+      if (nextOpen) return;
+      if (!current || retiredPresentationRef.current.has(current)) return;
+      retirePresentation(current);
+      onOpenChange(false);
+    },
+    [onOpenChange, retirePresentation],
+  );
   const where = presentation.storage === "gist"
     ? "the gist"
     : `${presentation.repoOwner}/${presentation.repoName} (${presentation.repoBranch})`;
@@ -2650,12 +2560,6 @@ export const SyncDialog = memo(function SyncDialog({
         ref={(element) =>
           setPublicationElement(dialogEventPublication, "bridge", element)}
         className="contents"
-        onClickCapture={(event) => authorizeOpenChange(dialogEventPublication, event.currentTarget, event.target)}
-        onClick={(event) => releaseOpenChange(dialogEventPublication, event.target)}
-        onPointerDownCapture={(event) => authorizeOpenChange(dialogEventPublication, event.currentTarget, event.target)}
-        onPointerDown={(event) => releaseOpenChange(dialogEventPublication, event.target)}
-        onKeyDownCapture={(event) => authorizeOpenChange(dialogEventPublication, event.currentTarget, event.target)}
-        onKeyDown={(event) => releaseOpenChange(dialogEventPublication, event.target)}
       >
         <DialogContent
           title="Sync with GitHub"

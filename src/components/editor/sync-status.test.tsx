@@ -210,10 +210,6 @@ type SyncChangeHandler = (event: { currentTarget: HTMLInputElement }) => void;
 type SyncKeyHandler = (
   event: ReactKeyboardEvent<HTMLButtonElement>,
 ) => void;
-type SyncDialogCaptureHandler = (event: {
-  currentTarget: HTMLDivElement;
-  target: EventTarget | null;
-}) => void;
 
 interface CapturedSyncCallbacks {
   mergeElement: HTMLButtonElement | null;
@@ -233,8 +229,6 @@ interface CapturedSyncCallbacks {
 interface CapturedSyncFrame extends CapturedSyncCallbacks {
   bridgeElement: HTMLDivElement;
   rootElement: HTMLDivElement;
-  authorizePointer: SyncDialogCaptureHandler;
-  releasePointer: SyncDialogCaptureHandler;
   refs: readonly {
     element: HTMLElement;
     ref: (element: HTMLElement | null) => void;
@@ -448,14 +442,6 @@ function captureSyncFrame(host: HTMLElement): CapturedSyncFrame {
     ...callbacks,
     bridgeElement,
     rootElement,
-    authorizePointer: reactHandler<SyncDialogCaptureHandler>(
-      bridgeElement,
-      "onPointerDownCapture",
-    ),
-    releasePointer: reactHandler<SyncDialogCaptureHandler>(
-      bridgeElement,
-      "onPointerDown",
-    ),
     refs: elements.map((element) => ({
       element,
       ref: captureElementRef(element),
@@ -2896,6 +2882,24 @@ describe("Sync dialog action lifecycle", () => {
     expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
   });
 
+  it("closes on Escape even after a background sync poll has updated the status prop (regression for #2215)", () => {
+    const onOpenChange = vi.fn();
+    const view = renderDirect(
+      <SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={DIVERGED} actions={syncActions()} />,
+    );
+
+    // Simulate useSyncPolling delivering a fresher status while the dialog is still open.
+    act(() => {
+      view.root.render(
+        <SyncDialog open onOpenChange={onOpenChange} doc={DOC} sync={UPDATED_SYNC} actions={syncActions()} />,
+      );
+    });
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
   it.each([
     "message",
     "merge",
@@ -2968,7 +2972,7 @@ describe("Sync dialog action lifecycle", () => {
     await act(async () => {});
   });
 
-  it("rejects crossed replay handlers, refs, and native intent without poisoning the current Strict Mode dialog", async () => {
+  it("rejects crossed replay handlers and refs without poisoning the current Strict Mode dialog", async () => {
     vi.useRealTimers();
     const staleActions = syncActions();
     const currentKeep = deferred<void>();
@@ -2991,10 +2995,6 @@ describe("Sync dialog action lifecycle", () => {
       </StrictMode>,
     );
     const stale = captureSyncFrame(view.host);
-    stale.authorizePointer({
-      currentTarget: stale.bridgeElement,
-      target: stale.keepElement,
-    });
 
     act(() => {
       view.root.render(
@@ -3018,14 +3018,6 @@ describe("Sync dialog action lifecycle", () => {
         ref(current.refs[index]?.element ?? current.rootElement);
       });
       [...stale.refs].reverse().forEach(({ ref }) => ref(null));
-      stale.authorizePointer({
-        currentTarget: current.bridgeElement,
-        target: current.keepElement,
-      });
-      current.authorizePointer({
-        currentTarget: stale.bridgeElement,
-        target: stale.keepElement,
-      });
       stale.change({ currentTarget: current.inputElement });
       stale.merge?.({
         currentTarget: current.mergeElement!,
@@ -3116,14 +3108,6 @@ describe("Sync dialog action lifecycle", () => {
     );
     const closeCurrent = captureSyncFrame(view.host);
     act(() => {
-      closeCurrent.authorizePointer({
-        currentTarget: closeCurrent.bridgeElement,
-        target: closeCurrent.closeElement,
-      });
-      stale.releasePointer({
-        currentTarget: stale.bridgeElement,
-        target: closeCurrent.closeElement,
-      });
       closeCurrent.close({
         currentTarget: closeCurrent.closeElement,
         defaultPrevented: false,

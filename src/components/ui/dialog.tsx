@@ -1377,7 +1377,12 @@ function dialogAuthoritiesMatch(
     && previous.root === current.root
     && previous.title === current.title
     && previous.description === current.description
-    && previous.children === current.children
+    // `children` is rendered straight from the live prop (see the `{children}` output below),
+    // never read back off this cached authority, so comparing it here serves no rendering
+    // purpose. Dialogs whose children re-render often (e.g. SyncDialog's polling-driven status)
+    // would otherwise get a brand-new presentation - and a brand-new `actions.escape` identity -
+    // on every such render, which can transiently desync `coordinator.active()` from the
+    // currently bound `onEscapeKeyDown` closure and silently drop a real Escape keypress.
     && previous.classNameInput === current.classNameInput
     && previous.className === current.className
     && previous.wide === current.wide
