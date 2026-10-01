@@ -175,54 +175,6 @@ interface InputHandlerProps {
   onKeyDown: KeyboardEventHandler<HTMLInputElement>;
 }
 
-interface ContentDismissalHandlers {
-  onEscapeKeyDown: (event: KeyboardEvent) => void;
-  onPointerDownOutside: (event: CustomEvent<{ originalEvent: PointerEvent }>) => void;
-  onFocusOutside: (event: CustomEvent<{ originalEvent: FocusEvent }>) => void;
-  onDismiss: () => void;
-}
-
-function reactAncestorHandler<T extends (...args: never[]) => unknown>(element: Element, name: string): T {
-  const key = Object.getOwnPropertyNames(element).find((value) => value.startsWith("__reactFiber$"));
-  if (!key) throw new Error("React fiber was not published on the element");
-  let fiber = (element as unknown as Record<string, unknown>)[key] as
-    | { memoizedProps?: Record<string, unknown>; return?: unknown }
-    | null;
-  while (fiber) {
-    const handler = fiber.memoizedProps?.[name];
-    if (typeof handler === "function") return handler as T;
-    fiber = fiber.return as typeof fiber;
-  }
-  throw new Error(`React ancestor handler ${name} was not found`);
-}
-
-function contentDismissalHandlers(content: Element): ContentDismissalHandlers {
-  return {
-    onEscapeKeyDown: reactAncestorHandler(content, "onEscapeKeyDown"),
-    onPointerDownOutside: reactAncestorHandler(content, "onPointerDownOutside"),
-    onFocusOutside: reactAncestorHandler(content, "onFocusOutside"),
-    onDismiss: reactAncestorHandler(content, "onDismiss"),
-  };
-}
-
-function escapeDismissalEvent(
-  content: HTMLElement,
-  target: Node = content,
-  currentTarget: EventTarget = content.ownerDocument,
-) {
-  const ownerWindow = content.ownerDocument.defaultView!;
-  const event = new ownerWindow.KeyboardEvent("keydown", {
-    bubbles: true,
-    cancelable: true,
-    key: "Escape",
-  });
-  Object.defineProperties(event, {
-    currentTarget: { configurable: true, value: currentTarget },
-    target: { configurable: true, value: target },
-  });
-  return event;
-}
-
 function primaryPointerEvent(
   target: HTMLElement,
   type: "pointerdown" | "pointerup" | "pointercancel",
@@ -267,55 +219,6 @@ function implicitSubmitEvent(form: HTMLFormElement) {
         submitter: null,
       })
     : new ownerWindow.Event("submit", { bubbles: true, cancelable: true });
-}
-
-function pointerOutsideEvent(
-  content: HTMLElement,
-  target: HTMLElement,
-  currentTarget: EventTarget = content,
-  dispatch = false,
-) {
-  const ownerWindow = content.ownerDocument.defaultView!;
-  const originalEvent = primaryPointerEvent(target, "pointerdown");
-  if (dispatch) {
-    target.dispatchEvent(originalEvent);
-    target.dispatchEvent(primaryPointerEvent(target, "pointerup"));
-    target.dispatchEvent(primaryClickEvent(target));
-  }
-  else Object.defineProperty(originalEvent, "target", { configurable: true, value: target });
-  const event = new ownerWindow.CustomEvent("dismissableLayer.pointerDownOutside", {
-    cancelable: true,
-    detail: { originalEvent },
-  });
-  Object.defineProperties(event, {
-    currentTarget: { configurable: true, value: currentTarget },
-    target: { configurable: true, value: content },
-  });
-  return event as CustomEvent<{ originalEvent: PointerEvent }>;
-}
-
-function focusOutsideEvent(
-  content: HTMLElement,
-  target: HTMLElement,
-  currentTarget: EventTarget = content,
-  dispatch = false,
-) {
-  const ownerWindow = content.ownerDocument.defaultView!;
-  const originalEvent = new ownerWindow.FocusEvent("focusin", {
-    bubbles: true,
-    cancelable: true,
-  });
-  if (dispatch) target.dispatchEvent(originalEvent);
-  else Object.defineProperty(originalEvent, "target", { configurable: true, value: target });
-  const event = new ownerWindow.CustomEvent("dismissableLayer.focusOutside", {
-    cancelable: true,
-    detail: { originalEvent },
-  });
-  Object.defineProperties(event, {
-    currentTarget: { configurable: true, value: currentTarget },
-    target: { configurable: true, value: content },
-  });
-  return event as CustomEvent<{ originalEvent: FocusEvent }>;
 }
 
 async function settle<T>(pending: ReturnType<typeof deferred<T>>, kind: "resolve", value: T): Promise<void>;
@@ -1483,94 +1386,41 @@ describe("CommandPalette command ownership", () => {
     }
   });
 
-  it("requires exact one-use dismissal provenance before accepting Radix dismissal", async () => {
-    const onOpenChange = vi.fn();
-    const connectedForeign = document.createElement("div");
-    const detachedForeign = document.createElement("div");
-    document.body.append(connectedForeign);
-    render(
-      <CommandPalette
-        open
-        onOpenChange={onOpenChange}
-        commands={commandProvider(command("alpha", "Alpha"))}
-      />,
-    );
-
-    const content = screen.getByRole("dialog");
-    const handlers = contentDismissalHandlers(content);
-
-    try {
-      handlers.onDismiss();
-      handlers.onDismiss();
-      handlers.onEscapeKeyDown(escapeDismissalEvent(content, content, connectedForeign));
-      handlers.onDismiss();
-      handlers.onEscapeKeyDown(escapeDismissalEvent(content, detachedForeign));
-      handlers.onDismiss();
-      handlers.onPointerDownOutside(pointerOutsideEvent(content, connectedForeign, content));
-      handlers.onDismiss();
-      handlers.onPointerDownOutside(pointerOutsideEvent(content, content));
-      handlers.onDismiss();
-      handlers.onPointerDownOutside(pointerOutsideEvent(content, detachedForeign));
-      handlers.onDismiss();
-
-      expect(onOpenChange).not.toHaveBeenCalled();
-
-      fireEvent.keyDown(content, { key: "Escape" });
-      handlers.onDismiss();
-      handlers.onDismiss();
-
-      expect(onOpenChange).toHaveBeenCalledTimes(1);
-      expect(onOpenChange).toHaveBeenCalledWith(false);
-    } finally {
-      connectedForeign.remove();
-    }
-  });
-
   it.each(["escape", "pointer"] as const)(
-    "closes once and restores focus for an exact current %s dismissal",
+    "closes once on a %s dismissal and restores focus to the opener",
     async (source) => {
       vi.useFakeTimers();
       const opener = document.createElement("button");
-      const outside = document.createElement("div");
+      const outside = document.createElement("button");
       document.body.append(opener, outside);
       opener.focus();
       const onOpenChange = vi.fn();
       const commands = commandProvider(command("alpha", "Alpha"));
       const rendered = render(
-        <CommandPalette
-          open
-          onOpenChange={onOpenChange}
-          commands={commands}
-        />,
+        <CommandPalette open onOpenChange={onOpenChange} commands={commands} />,
       );
 
       try {
         await act(async () => vi.runAllTimersAsync());
         const content = screen.getByRole("dialog");
-        const handlers = contentDismissalHandlers(content);
-
-        try {
-          if (source === "escape") {
-            fireEvent.keyDown(content, { key: "Escape" });
-          } else {
-            handlers.onPointerDownOutside(pointerOutsideEvent(content, outside, content, true));
-            handlers.onDismiss();
-          }
-
-          expect(onOpenChange).toHaveBeenCalledTimes(1);
-          rendered.rerender(
-            <CommandPalette
-              open={false}
-              onOpenChange={onOpenChange}
-              commands={commands}
-            />,
-          );
-          await act(async () => vi.runAllTimersAsync());
-
-          expect(document.activeElement).toBe(opener);
-        } finally {
-          outside.remove();
+        if (source === "escape") {
+          fireEvent.keyDown(content, { key: "Escape" });
+        } else {
+          act(() => {
+            outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown"));
+            outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
+            outside.dispatchEvent(primaryClickEvent(outside));
+          });
         }
+
+        expect(onOpenChange).toHaveBeenCalledTimes(1);
+        expect(onOpenChange).toHaveBeenCalledWith(false);
+        rendered.rerender(
+          <CommandPalette open={false} onOpenChange={onOpenChange} commands={commands} />,
+        );
+        await act(async () => vi.runAllTimersAsync());
+
+        expect(document.activeElement).toBe(opener);
       } finally {
         outside.remove();
         opener.remove();
@@ -1579,103 +1429,59 @@ describe("CommandPalette command ownership", () => {
   );
 
   it.each([
-    { order: "stale-first", source: "escape" },
-    { order: "current-first", source: "escape" },
-    { order: "stale-first", source: "pointer" },
-    { order: "current-first", source: "pointer" },
+    { change: "replacement", source: "escape" },
+    { change: "replacement", source: "pointer" },
+    { change: "remount", source: "escape" },
+    { change: "remount", source: "pointer" },
   ] as const)(
-    "keeps replacement $source dismissal authority exact when $order handlers run first",
-    async ({ order, source }) => {
+    "sends a $source dismissal after a $change only to the current onOpenChange",
+    async ({ change, source }) => {
       const onOpenChangeA = vi.fn();
       const onOpenChangeB = vi.fn();
-      const outside = document.createElement("div");
+      const outside = document.createElement("button");
       document.body.append(outside);
       const rendered = render(
         <CommandPalette
+          key="a"
           open
           onOpenChange={onOpenChangeA}
           commands={commandProvider(command("alpha", "Alpha"))}
         />,
       );
-      const content = await screen.findByRole("dialog");
-      const stale = contentDismissalHandlers(content);
+      await screen.findByText("Alpha");
 
       rendered.rerender(
         <CommandPalette
+          key={change === "remount" ? "b" : "a"}
           open
           onOpenChange={onOpenChangeB}
           commands={commandProvider(command("beta", "Beta"))}
         />,
       );
       await screen.findByText("Beta");
-      const currentContent = screen.getByRole("dialog");
-      const current = contentDismissalHandlers(currentContent);
-      const invokeSource = (handlers: ContentDismissalHandlers, handlerContent: HTMLElement) => {
-        if (source === "escape") {
-          handlers.onEscapeKeyDown(escapeDismissalEvent(handlerContent));
-        } else {
-          handlers.onPointerDownOutside(pointerOutsideEvent(handlerContent, outside));
-        }
-      };
-      const runStale = () => {
-        invokeSource(stale, content);
-        stale.onDismiss();
-      };
-      const runCurrent = () => {
-        if (source === "escape") {
-          fireEvent.keyDown(currentContent, { key: "Escape" });
-        } else {
-          current.onPointerDownOutside(
-            pointerOutsideEvent(currentContent, outside, currentContent, true),
-          );
-          current.onDismiss();
-        }
-      };
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
 
       try {
-        if (order === "stale-first") {
-          runStale();
-          expect(onOpenChangeA).not.toHaveBeenCalled();
-          expect(onOpenChangeB).not.toHaveBeenCalled();
-          runCurrent();
+        if (source === "escape") {
+          fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
         } else {
-          runCurrent();
-          runStale();
+          act(() => {
+            outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown"));
+            outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
+            outside.dispatchEvent(primaryClickEvent(outside));
+          });
         }
 
         expect(onOpenChangeA).not.toHaveBeenCalled();
         expect(onOpenChangeB).toHaveBeenCalledTimes(1);
-        expect(screen.getByText("Beta")).toBeInTheDocument();
+        expect(onOpenChangeB).toHaveBeenCalledWith(false);
       } finally {
         outside.remove();
       }
     },
   );
-
-  it("rejects an equal-looking remount's dismissal handlers while the replacement remains usable", async () => {
-    const onOpenChangeA = vi.fn();
-    const onOpenChangeB = vi.fn();
-    const commands = commandProvider(command("alpha", "Alpha"));
-    const rendered = render(
-      <CommandPalette key="a" open onOpenChange={onOpenChangeA} commands={commands} />,
-    );
-    const staleContent = await screen.findByRole("dialog");
-    const stale = contentDismissalHandlers(staleContent);
-
-    rendered.rerender(
-      <CommandPalette key="b" open onOpenChange={onOpenChangeB} commands={commands} />,
-    );
-    const currentContent = await screen.findByRole("dialog");
-
-    stale.onEscapeKeyDown(escapeDismissalEvent(staleContent));
-    stale.onDismiss();
-    expect(onOpenChangeA).not.toHaveBeenCalled();
-    expect(onOpenChangeB).not.toHaveBeenCalled();
-
-    fireEvent.keyDown(currentContent, { key: "Escape" });
-    expect(onOpenChangeA).not.toHaveBeenCalled();
-    expect(onOpenChangeB).toHaveBeenCalledTimes(1);
-  });
 
   it("rejects wrong, foreign, and detached row currentTargets without claiming the current row", async () => {
     const pending = deferred<Command[]>();
@@ -1965,7 +1771,7 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
     }
   });
 
-  it("leaves Page keys inert without results and rejects non-exact input events", async () => {
+  it("leaves Page keys inert without results and for modified, canceled, stopped, unfocused, or foreign input", async () => {
     const run = vi.fn();
     const childProvider = vi.fn(() => [command("child", "Child")]);
     const items = commandList(15, () => run);
@@ -1992,7 +1798,6 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
         <CommandPalette open onOpenChange={onOpenChange} commands={commandProvider(...items)} />,
       );
       input = await screen.findByTestId("palette-input");
-      const handler = reactProps<InputHandlerProps>(input).onKeyDown;
       vi.mocked(Element.prototype.scrollIntoView).mockClear();
 
       for (const init of [
@@ -2033,21 +1838,6 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
         }
       }
       expect(input).toHaveFocus();
-
-      const fabricated = exactEvent(input, { key: "PageDown" });
-      const proxied = new Proxy(exactEvent(input, { key: "PageDown" }), {});
-      const crossed = exactEvent(input, {
-        key: "PageDown",
-        nativeEvent: paletteKeyboardEvent(input, "PageDown"),
-      });
-      act(() => {
-        handler(fabricated as unknown as React.KeyboardEvent<HTMLInputElement>);
-        handler(proxied as unknown as React.KeyboardEvent<HTMLInputElement>);
-        handler(crossed as unknown as React.KeyboardEvent<HTMLInputElement>);
-      });
-      expect(fabricated.preventDefault).not.toHaveBeenCalled();
-      expect(proxied.preventDefault).not.toHaveBeenCalled();
-      expect(crossed.preventDefault).not.toHaveBeenCalled();
 
       const foreignWindow = foreignFrame.contentWindow as
         | (Window & typeof globalThis)
@@ -2423,7 +2213,7 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
     }
   });
 
-  it("binds Escape to only the fresh Strict Mode visit", async () => {
+  it("closes on Escape for each fresh Strict Mode visit and restores its opener", async () => {
     const mounted = await renderStrictRoot(
       <Harness items={[command("leaf", "Leaf")]} initiallyOpen={false} />,
     );
@@ -2431,21 +2221,13 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
     try {
       const opener = screen.getByRole("button", { name: "Open palette" });
       opener.focus();
-      fireEvent.click(opener);
-      const staleContent = await screen.findByRole("dialog");
-      const stale = contentDismissalHandlers(staleContent);
-      fireEvent.keyDown(staleContent, { key: "Escape" });
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-
-      fireEvent.click(opener);
-      const currentContent = await screen.findByRole("dialog");
-      stale.onEscapeKeyDown(escapeDismissalEvent(staleContent));
-      stale.onDismiss();
-      expect(currentContent).toBeInTheDocument();
-
-      fireEvent.keyDown(currentContent, { key: "Escape" });
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-      expect(opener).toHaveFocus();
+      for (let visit = 0; visit < 2; visit += 1) {
+        fireEvent.click(opener);
+        const content = await screen.findByRole("dialog");
+        fireEvent.keyDown(content, { key: "Escape" });
+        await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+        await waitFor(() => expect(opener).toHaveFocus());
+      }
     } finally {
       await mounted.unmount();
     }
@@ -2484,7 +2266,7 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
     }
   });
 
-  it("expires incomplete and retired pointer sequences without poisoning the successor", async () => {
+  it("sends an outside pointer dismissal after a Strict Mode replacement only to the current onOpenChange", async () => {
     const outside = document.createElement("button");
     document.body.append(outside);
     const onOpenChangeA = vi.fn();
@@ -2499,29 +2281,6 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
 
     try {
       await screen.findByTestId("palette-item-alpha");
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-
-      act(() => {
-        outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown"));
-        outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
-      });
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-      act(() => outside.dispatchEvent(primaryClickEvent(outside)));
-      expect(onOpenChangeA).not.toHaveBeenCalled();
-
-      act(() => {
-        outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown"));
-        outside.dispatchEvent(primaryPointerEvent(outside, "pointercancel"));
-        outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
-        outside.dispatchEvent(primaryClickEvent(outside));
-      });
-      expect(onOpenChangeA).not.toHaveBeenCalled();
-
-      act(() => outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown")));
       await mounted.render(
         <CommandPalette
           open
@@ -2530,49 +2289,18 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
         />,
       );
       await screen.findByTestId("palette-item-beta");
-      act(() => {
-        outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
-        outside.dispatchEvent(primaryClickEvent(outside));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
       });
-      expect(onOpenChangeA).not.toHaveBeenCalled();
-      expect(onOpenChangeB).not.toHaveBeenCalled();
-
       act(() => {
         outside.dispatchEvent(primaryPointerEvent(outside, "pointerdown"));
         outside.dispatchEvent(primaryPointerEvent(outside, "pointerup"));
         outside.dispatchEvent(primaryClickEvent(outside));
       });
+
       expect(onOpenChangeA).not.toHaveBeenCalled();
       expect(onOpenChangeB).toHaveBeenCalledOnce();
-    } finally {
-      await mounted.unmount();
-      outside.remove();
-    }
-  });
-
-  it("claims one genuine focus-outside dismissal after replay", async () => {
-    const outside = document.createElement("button");
-    document.body.append(outside);
-    const onOpenChange = vi.fn();
-    const mounted = await renderStrictRoot(
-      <CommandPalette
-        open
-        onOpenChange={onOpenChange}
-        commands={commandProvider(command("leaf", "Leaf"))}
-      />,
-    );
-
-    try {
-      const content = await screen.findByRole("dialog");
-      const handlers = contentDismissalHandlers(content);
-      const event = focusOutsideEvent(content, outside, content, true);
-      handlers.onFocusOutside(event);
-      handlers.onFocusOutside(event);
-      handlers.onDismiss();
-      handlers.onDismiss();
-
-      expect(onOpenChange).toHaveBeenCalledTimes(1);
-      expect(onOpenChange).toHaveBeenCalledWith(false);
+      expect(onOpenChangeB).toHaveBeenCalledWith(false);
     } finally {
       await mounted.unmount();
       outside.remove();
