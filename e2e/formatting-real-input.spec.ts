@@ -167,6 +167,20 @@ async function pressOn(page: Page, control: Locator, key: string) {
   await page.keyboard.press(key);
 }
 
+/**
+ * Press real Tab (or Shift+Tab) until focus is inside `surface`, the way a keyboard user gets there.
+ * The Markdown pane keeps Tab for indenting; Esc first is its escape hatch (as in a11y.spec.ts).
+ */
+async function tabInto(page: Page, surface: Locator, key: "Tab" | "Shift+Tab", max = 40) {
+  const inside = () => surface.evaluate((element) => element.contains(document.activeElement));
+  for (let i = 0; i < max; i++) {
+    if (await inside()) return;
+    if (await page.evaluate(() => Boolean(document.activeElement?.closest(".cm-content")))) await page.keyboard.press("Escape");
+    await page.keyboard.press(key);
+  }
+  expect(await inside(), `${key} reaches the control within ${max} presses`).toBe(true);
+}
+
 /** Hold `key` down for `count` keydowns (the repeats carry `repeat: true`), then release it. */
 async function holdKey(page: Page, key: string, count: number) {
   for (let i = 0; i < count; i++) await page.keyboard.down(key);
@@ -204,8 +218,13 @@ test.describe("formatting toolbar: real input", () => {
       const id = await newDocument(browser);
       const { page, context } = await openAs(browser, "owner", id, layout);
 
-      // Roving focus on a fresh document (Undo and Redo are disabled, so they are skipped).
-      await pressOn(page, toolButton(page, "Bold"), "ArrowRight");
+      // Real Tab from page load reaches the toolbar's single tab stop, its first enabled button. Roving
+      // focus then skips the disabled Undo and Redo on a fresh document.
+      await tabInto(page, toolbar(page), "Tab");
+      await expect(headingMenu(page), "Tab lands on the first enabled button").toBeFocused();
+      await page.keyboard.press("ArrowRight");
+      await expect(toolButton(page, "Bold"), "ArrowRight moves one button").toBeFocused();
+      await page.keyboard.press("ArrowRight");
       await expect(toolButton(page, "Italic"), "ArrowRight moves one button").toBeFocused();
       await holdKey(page, "ArrowRight", 3);
       await expect(page.getByTestId("tb-code"), "a held ArrowRight moves once per repeat").toBeFocused();
@@ -230,12 +249,31 @@ test.describe("formatting toolbar: real input", () => {
       await toolButton(page, "Bold").click();
       await expectTarget(page, layout, "plain", `${layout}: click Bold again`);
 
-      // Keyboard: Enter, then Space, on a focused button.
+      // Keyboard: Enter, then Space, on a focused button. In the preview-only layout a keyboard user gets
+      // back to the toolbar with Shift+Tab from the selection (no Markdown pane in between); the toolbar
+      // keeps its last-used button as the tab stop. A preview action hands focus back to the editor.
       await selectTarget(page, layout);
-      await pressOn(page, toolButton(page, "Italic"), "Enter");
+      if (layout === "rich") {
+        await tabInto(page, toolbar(page), "Shift+Tab", 15);
+        await page.keyboard.press("Home");
+        await page.keyboard.press("ArrowRight");
+        await page.keyboard.press("ArrowRight");
+        await expect(toolButton(page, "Italic")).toBeFocused();
+        await page.keyboard.press("Enter");
+      } else {
+        await pressOn(page, toolButton(page, "Italic"), "Enter");
+      }
       await expectTarget(page, layout, "em", `${layout}: Enter on Italic`);
-      await pressOn(page, toolButton(page, "Italic"), " ");
+      if (layout !== "code") await expect(page.locator(".md-rich"), `${layout}: focus after Enter on Italic`).toBeFocused();
+      if (layout === "rich") {
+        await tabInto(page, toolbar(page), "Shift+Tab", 15);
+        await expect(toolButton(page, "Italic"), "Shift+Tab comes back to the last-used button").toBeFocused();
+        await page.keyboard.press(" ");
+      } else {
+        await pressOn(page, toolButton(page, "Italic"), " ");
+      }
       await expectTarget(page, layout, "plain", `${layout}: Space on Italic`);
+      if (layout !== "code") await expect(page.locator(".md-rich"), `${layout}: focus after Space on Italic`).toBeFocused();
 
       // Two actions back to back: the second click lands on the re-render the first one caused.
       await selectTarget(page, layout);
@@ -365,7 +403,9 @@ test.describe("selection bubble: real input", () => {
     await bubbleButton(page, "Bold").click();
     await expectTarget(page, "split", "plain", "bubble Bold click again");
 
-    // Keyboard: held arrows, Home/End and wrapping, then Enter and Space.
+    // Keyboard: held arrows, Home/End and wrapping, then Enter and Space. The bubble layer sits at the
+    // end of the page and hides when the editor loses focus, so Tab from the editor does not reach it;
+    // this case starts on a focused button (checked against main in a real browser).
     await dragSelect(page, "Target");
     await bubbleButton(page, "Bold").focus();
     await expect(bubbleButton(page, "Bold")).toBeFocused();
@@ -381,9 +421,11 @@ test.describe("selection bubble: real input", () => {
     await expect(bubbleButton(page, "Bold"), "ArrowRight wraps").toBeFocused();
     await page.keyboard.press("Enter");
     await expectTarget(page, "split", "strong", "Enter on bubble Bold");
+    await expect(page.locator(".md-rich"), "focus after Enter on bubble Bold").toBeFocused();
     await expect(bubble(page)).toBeVisible();
     await pressOn(page, bubbleButton(page, "Italic"), " ");
     await expectTarget(page, "split", "both", "Space on bubble Italic");
+    await expect(page.locator(".md-rich"), "focus after Space on bubble Italic").toBeFocused();
 
     // Link.
     await dragSelect(page, "After");
@@ -437,10 +479,16 @@ test.describe("table menu: real input", () => {
     await page.getByTestId("table-align-right").click();
     await expect.poll(delimiter, { message: "right again clears it" }).toMatch(/^\|[^|]*\|\s*-+\s*\|/);
 
-    // Keyboard: held arrows, Home/End and wrapping, then Enter and Space.
-    await clickCell(page, 1, 0);
-    await page.getByTestId("table-row-before").focus();
-    await expect(page.getByTestId("table-row-before")).toBeFocused();
+    // Keyboard: a keyboard user reaches the menu with Shift+Tab from the first cell (from any other cell
+    // Shift+Tab moves to the previous cell). The menu sits just before the editor, so focus lands on its
+    // last button. Then held arrows, Home/End and wrapping, Enter and Space; each action hands focus back
+    // to the editor.
+    const menu = page.getByTestId("table-menu");
+    await clickCell(page, 0, 0);
+    await tabInto(page, menu, "Shift+Tab", 3);
+    await expect(page.getByTestId("table-delete"), "Shift+Tab from the first cell lands on the last button").toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(page.getByTestId("table-row-before"), "Home").toBeFocused();
     await holdKey(page, "ArrowRight", 3);
     await expect(page.getByTestId("table-col-after"), "a held ArrowRight moves once per repeat").toBeFocused();
     await page.keyboard.press("End");
@@ -454,9 +502,15 @@ test.describe("table menu: real input", () => {
     await expect(page.getByTestId("table-row-after")).toBeFocused();
     await page.keyboard.press("Enter");
     await expectTableShape(page, 4, 3);
-    await clickCell(page, 1, 0);
-    await pressOn(page, page.getByTestId("table-col-after"), " ");
+    await expect(page.locator(".md-rich"), "focus after Enter on Row below").toBeFocused();
+    await clickCell(page, 0, 0);
+    await tabInto(page, menu, "Shift+Tab", 3);
+    await page.keyboard.press("Home");
+    for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
+    await expect(page.getByTestId("table-col-after")).toBeFocused();
+    await page.keyboard.press(" ");
     await expectTableShape(page, 4, 4);
+    await expect(page.locator(".md-rich"), "focus after Space on Column right").toBeFocused();
 
     // Escape hides the menu; the first click after it comes back acts on the current table.
     await clickCell(page, 1, 0);
