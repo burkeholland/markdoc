@@ -1278,6 +1278,73 @@ describe("editor header More menu authority", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
+  // Basic coverage for the #2203 plain-select close path, not a regression guard: fireEvent.click
+  // dispatches synchronously from script, the same way Radix's Enter handling does, so these pass
+  // against main's unmodified header.tsx too - jsdom can't reproduce the real (trusted) mouse
+  // click's async timing that actually causes the menu to stay open. The regression guards are
+  // the mouse-driven e2e/reader.spec.ts:182 test and the e2e/prod-smoke.spec.ts "Open reader view"
+  // test, both of which fail against main's header.tsx and pass against this PR's.
+  it("closes before opening the reader view in a new tab (basic coverage)", async () => {
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+    const menuTrigger = trigger();
+    menuTrigger.focus();
+
+    openMenu();
+    fireEvent.click(screen.getByTestId("menu-reader"));
+    expect(window.open).toHaveBeenCalledWith(`/p/${DOC.id}`, "_blank", "noopener");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
+  it("closes before opening a linked document's GitHub URL in a new tab (basic coverage)", async () => {
+    const session = createSession();
+    const actions = createActions();
+    const linkedDoc: DocumentDto = {
+      ...DOC,
+      storage: "repo",
+      repoOwner: "o",
+      repoName: "r",
+      repoBranch: "main",
+      repoPath: "doc.md",
+      githubUrl: "https://github.com/o/r/blob/main/doc.md",
+    };
+    await renderStrict(header(headerProps(session, actions, { doc: linkedDoc })));
+    const menuTrigger = trigger();
+    menuTrigger.focus();
+
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open on GitHub" }));
+    expect(window.open).toHaveBeenCalledWith(linkedDoc.githubUrl, "_blank", "noopener");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
+  it("closes the Publish menu's own Open on GitHub item before opening the URL (basic coverage; Publish's onOpenChange close path was never affected by #2203)", async () => {
+    const doc = linkedDocument();
+    const props = headerProps(createSession(doc.id, "viewer"), createActions(), {
+      doc,
+      sync: syncStatus(),
+      isOwner: false,
+    });
+    await renderStrict(header(props));
+    const menuTrigger = publishTrigger();
+    menuTrigger.focus();
+
+    fireEvent(
+      menuTrigger,
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        ctrlKey: false,
+        pointerType: "mouse",
+      }),
+    );
+    await screen.findByRole("menu");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open on GitHub" }));
+    expect(window.open).toHaveBeenCalledWith(doc.githubUrl, "_blank", "noopener");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
   it("closes a compact Mode selection that changes the current session mode", async () => {
     const session = createSession();
     const actions = createActions();
