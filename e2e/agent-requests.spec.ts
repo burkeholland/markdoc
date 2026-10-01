@@ -538,7 +538,8 @@ test.describe("document comments, the empty state and the connect row (#1025)", 
     await expect(dialog).toBeVisible();
     expect(new URL(page.url()).pathname).toBe(`/d/${docId}`);
     await expect(dialog.getByTestId("agent-setup")).toHaveAttribute("data-state", "new");
-    await expect(dialog.getByRole("radiogroup", { name: "Agent" })).toBeVisible();
+    // One MCP config for every client now (no per-agent picker): step 1 is "create a key" first.
+    await expect(dialog.getByText("Create a key for your agent. Markdoc then shows the MCP config to paste.")).toBeVisible();
     await expect(dialog.getByTestId("agent-create-key")).toBeVisible();
     await expect(dialog.getByTestId("agent-setup-snippet")).toHaveCount(0);
     await page.keyboard.press("Escape");

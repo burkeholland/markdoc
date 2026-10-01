@@ -283,7 +283,7 @@ export async function selectTextInRich(page: Page, text: string) {
     throw new Error(`text not found: ${needle}`);
   }, text);
   // Let ProseMirror pick up the DOM selection (it reads it on `selectionchange`, a later task).
-  await expect.poll(() => pmSelectionSynced(page), { message: `ProseMirror should read the selection of "${text}"` }).toBe(true);
+  await expect.poll(() => pmSelectionSynced(page, text), { message: `ProseMirror should read the selection of "${text}"` }).toBe(true);
 }
 
 
@@ -343,25 +343,42 @@ export async function expectTableShape(page: Page, rows: number, cols: number) {
  * Does ProseMirror's *state* selection agree with the DOM selection? A key pressed while they
  * differ is judged against the stale state (the keymap declines or acts on the wrong block), so
  * every real-click helper waits for this before the test types. `__markdocRichView` is the dev-only
- * hook rich-pane.tsx sets next to `__markdocSession`.
+ * hook rich-pane.tsx sets next to `__markdocSession`. Production uses the DOM instead, since its state
+ * hook is absent: when `text` is given, the DOM selection must be a real (non-collapsed) selection
+ * inside `.md-rich` whose exact text is `text` - never just "something is selected". Without `text`
+ * (the caret-only callers below, which already verified DOM position themselves) it only requires a
+ * collapsed caret inside `.md-rich`.
  */
-export const pmSelectionSynced = (page: Page) =>
-  page.evaluate(() => {
-    type View = { hasFocus(): boolean; state: { selection: { anchor: number; head: number } }; posAtDOM(node: Node, offset: number): number };
-    const view = (window as unknown as { __markdocRichView?: View }).__markdocRichView;
-    const s = document.getSelection();
-    if (!view || !s?.anchorNode || !s.focusNode) return "no view or no DOM selection";
-    if (!view.hasFocus()) return "editor not focused";
-    let anchor: number, head: number;
-    try {
-      anchor = view.posAtDOM(s.anchorNode, s.anchorOffset);
-      head = view.posAtDOM(s.focusNode, s.focusOffset);
-    } catch (e) {
-      return `DOM selection outside the editor: ${String(e)}`;
-    }
-    const { selection } = view.state;
-    return selection.anchor === anchor && selection.head === head ? true : `state ${selection.anchor}-${selection.head} vs DOM ${anchor}-${head}`;
-  });
+export const pmSelectionSynced = (page: Page, text?: string) =>
+  page.evaluate(
+    ([renderedFallback, needle]) => {
+      type View = { hasFocus(): boolean; state: { selection: { anchor: number; head: number } }; posAtDOM(node: Node, offset: number): number };
+      const view = (window as unknown as { __markdocRichView?: View }).__markdocRichView;
+      const s = document.getSelection();
+      if (!view) {
+        if (!renderedFallback) return "no view";
+        if (!s?.anchorNode || !s.focusNode) return "no DOM selection";
+        const rich = document.querySelector(".md-rich");
+        if (!rich || !rich.contains(s.anchorNode) || !rich.contains(s.focusNode)) return "selection outside .md-rich";
+        if (needle === null) return s.isCollapsed ? true : "selection is not collapsed";
+        if (s.isCollapsed) return "selection is collapsed, expected selected text";
+        const selected = s.toString();
+        return selected === needle ? true : `DOM selection "${selected}" vs expected "${needle}"`;
+      }
+      if (!s?.anchorNode || !s.focusNode) return "no view or no DOM selection";
+      if (!view.hasFocus()) return "editor not focused";
+      let anchor: number, head: number;
+      try {
+        anchor = view.posAtDOM(s.anchorNode, s.anchorOffset);
+        head = view.posAtDOM(s.focusNode, s.focusOffset);
+      } catch (e) {
+        return `DOM selection outside the editor: ${String(e)}`;
+      }
+      const { selection } = view.state;
+      return selection.anchor === anchor && selection.head === head ? true : `state ${selection.anchor}-${selection.head} vs DOM ${anchor}-${head}`;
+    },
+    [Boolean(process.env.PROD_BASE_URL), text ?? null] as const,
+  );
 
 /**
  * Put the caret at the start or end of the text of the first element matching `selector`, with a

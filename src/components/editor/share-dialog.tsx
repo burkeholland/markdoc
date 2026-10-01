@@ -277,8 +277,10 @@ export const ShareDialog = memo(function ShareDialog({
             </h3>
             <ul className="flex flex-col divide-y divide-line rounded-xl border border-line" aria-label="People with access">
               {list.status === "loading" && (
-                <li className="flex items-center justify-center gap-2 px-3 py-4 text-sm text-ink-3" role="status" data-testid="collaborator-list-loading">
-                  <Loader2 size={15} className="animate-spin" aria-hidden="true" /> Loading…
+                <li className="flex items-center justify-center gap-2 px-3 py-4 text-sm text-ink-3" data-testid="collaborator-list-loading">
+                  <span role="status" className="flex items-center gap-2">
+                    <Loader2 size={15} className="animate-spin" aria-hidden="true" /> Loading…
+                  </span>
                 </li>
               )}
               {list.status === "error" && (

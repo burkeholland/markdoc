@@ -1249,7 +1249,8 @@ test.describe("axe: phone (iPhone 13)", () => {
       { width: 768, height: 1024 },
     ]) {
       await page.setViewportSize(viewport);
-      const download = page.getByRole("button", { name: "Download Markdown", exact: true });
+      // "Download Markdown" is a native `<a href>` link on purpose (pre-hydration downloads work without JS).
+      const download = page.getByRole("link", { name: "Download Markdown", exact: true });
       await expect(download).toHaveAttribute("data-testid", "reader-download");
       await expect(page.getByRole("button", { name: "Download as…", exact: true })).toHaveAttribute("data-testid", "reader-download-menu");
       await expect(download.locator("span")).toBeVisible({ visible: viewport.width >= 640 });

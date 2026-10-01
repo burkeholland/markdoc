@@ -130,6 +130,21 @@ describe("ShareDialog", () => {
     expect(await screen.findByText("Nobody else has been added yet.")).toBeInTheDocument();
   });
 
+  it("keeps the loading row a real list item so the people list stays a valid list for axe", async () => {
+    const firstLoad = deferred<CollaboratorsResponse>();
+    vi.mocked(api.documents.collaborators).mockReturnValueOnce(firstLoad.promise);
+
+    renderShare();
+
+    const loadingRow = screen.getByTestId("collaborator-list-loading");
+    // role="status" must live on an inner element, not the <li> itself: overriding the <li>'s
+    // implicit listitem role breaks axe's "list" rule for the "People with access" <ul>.
+    expect(loadingRow.tagName).toBe("LI");
+    expect(loadingRow).not.toHaveAttribute("role");
+    expect(within(loadingRow).getByRole("status")).toHaveTextContent("Loading");
+    expect(screen.getByRole("list", { name: "People with access" })).toContainElement(loadingRow);
+  });
+
   it("shows a list load error and retries successfully", async () => {
     vi.mocked(api.documents.collaborators)
       .mockRejectedValueOnce(apiMessage(500, "People could not load"))

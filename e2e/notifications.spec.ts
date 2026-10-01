@@ -155,7 +155,12 @@ test.describe("notifications", () => {
     await expect(alice.page.getByTestId("mode-switcher")).toContainText("Suggesting");
     await focusRichEnd(alice.page);
     await alice.page.keyboard.type(" Suggested text.");
-    await expect(bob.page.locator(".md-rich .md-suggest-insert").first()).toContainText("Suggested text.");
+    // Bob's pane renders Alice's live cursor widget inline inside her suggestion mark, which can
+    // transiently split one logical `.md-suggest-insert` span into two DOM spans around it - so
+    // read the whole suggestion (every span's text joined), not just the first span.
+    await expect
+      .poll(() => bob.page.locator(".md-rich .md-suggest-insert").allTextContents().then((texts) => texts.join("")))
+      .toContain("Suggested text.");
 
     await bob.page.getByTestId("comments-tab-suggestions").click();
     await expect(bob.page.getByTestId("suggestion-card")).toHaveCount(1);
