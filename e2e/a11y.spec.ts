@@ -1575,6 +1575,100 @@ test.describe("dialog focus return (#161)", () => {
     await context.close();
   });
 
+  // #2223: on main the shared dialog only honored Escape once a hand-rolled coordinator had "published"
+  // the dialog, and a lazy dialog mounted from a closing menu could miss that, so Escape did nothing.
+  // These open each dialog the way a person does (real keys walking the menu, or real mouse clicks) and
+  // press Escape as soon as the dialog shows.
+  const focusedId = (page: Page) =>
+    page.evaluate(() => {
+      const el = document.activeElement;
+      if (!el || el === document.body) return "body";
+      return el.getAttribute("data-testid") ?? (el.closest(".md-rich") ? "rich" : el.closest(".cm-content") ? "code" : el.tagName.toLowerCase());
+    });
+  const arrowToItem = async (page: Page, name: string) => {
+    const item = page.getByRole("menuitem", { name, exact: true });
+    await expect(page.getByRole("menu")).toBeVisible();
+    for (let i = 0; i < 40 && !(await item.evaluate((el) => el === document.activeElement).catch(() => false)); i++) await page.keyboard.press("ArrowDown");
+    await expect(item).toBeFocused();
+  };
+  const escapeCloses = async (page: Page, name: RegExp | string) => {
+    const dialog = page.getByRole("dialog", { name });
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+  };
+
+  test("Keyboard shortcuts opened from More with the real keyboard closes on the first Escape and focus returns to More (#2223)", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-esc-kbd");
+    const id = await createDocument(page, "# Escape\n\nAlpha bravo charlie.\n", "Escape fixture");
+    await openDocument(page, id);
+
+    await page.getByTestId("more-menu").focus();
+    await page.keyboard.press("Enter");
+    await arrowToItem(page, "Keyboard shortcuts");
+    await page.keyboard.press("Enter");
+    await escapeCloses(page, "Keyboard shortcuts");
+    await expect.poll(() => focusedId(page)).toBe("more-menu");
+    await context.close();
+  });
+
+  for (const via of ["mouse", "keyboard"] as const) {
+    test(`Shortcuts, GitHub, Name version, Image and Link opened by ${via} close on the first Escape and focus returns to the opener (#2223)`, async ({ browser }) => {
+      const { page, context } = await signIn(browser, `a11y-esc-${via}`);
+      const id = await createDocument(page, "# Escape\n\nAlpha bravo charlie.\n", "Escape fixture");
+      await openDocument(page, id);
+
+      const fromMore = async (item: string) => {
+        if (via === "mouse") {
+          await page.getByTestId("more-menu").click();
+          await page.getByRole("menuitem", { name: item, exact: true }).click();
+        } else {
+          await page.getByTestId("more-menu").focus();
+          await page.keyboard.press("Enter");
+          await arrowToItem(page, item);
+          await page.keyboard.press("Enter");
+        }
+      };
+      const fromToolbar = async (testId: string) => {
+        if (via === "mouse") await page.getByTestId(testId).click();
+        else {
+          await page.getByTestId(testId).focus();
+          await page.keyboard.press("Enter");
+        }
+      };
+
+      // Shortcuts first, so it is the lazy dialog's very first mount on this page.
+      await fromMore("Keyboard shortcuts");
+      await escapeCloses(page, "Keyboard shortcuts");
+      await expect.poll(() => focusedId(page)).toBe("more-menu");
+
+      await fromMore("Connect to GitHub…");
+      await escapeCloses(page, "Connect to GitHub");
+      await expect.poll(() => focusedId(page)).toBe("more-menu");
+
+      await fromMore("Name current version");
+      await expect(page.getByTestId("version-name")).toBeFocused();
+      await escapeCloses(page, "Name this version");
+      await expect.poll(() => focusedId(page)).toBe("more-menu");
+
+      // A mouse click on a toolbar button keeps the caret in the editor, so the editor is the opener;
+      // Enter on a focused button makes the button the opener.
+      const toolbarOpener = (testId: string) => (via === "mouse" ? "rich" : testId);
+      await selectTextInRich(page, "charlie");
+      await fromToolbar("tb-image");
+      await expect(page.getByTestId("image-url")).toBeFocused();
+      await escapeCloses(page, "Insert image");
+      await expect.poll(() => focusedId(page)).toBe(toolbarOpener("tb-image"));
+
+      await selectTextInRich(page, "bravo");
+      await fromToolbar("tb-link");
+      await expect(page.getByTestId("link-url")).toBeFocused();
+      await escapeCloses(page, /link/i);
+      await expect.poll(() => focusedId(page)).toBe(toolbarOpener("tb-link"));
+      await context.close();
+    });
+  }
+
   // #2207: the keyboard case above (`fromMenu` + Enter) already passed on main - Radix drives Enter by
   // calling the item's `.click()` from script, so the whole chain runs synchronously ahead of the
   // microtask that the real-mouse bug depended on. A real, trusted mouse click is a different code path
