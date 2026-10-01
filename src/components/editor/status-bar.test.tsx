@@ -236,6 +236,7 @@ function documentDto(overrides: Partial<DocumentDto> = {}): DocumentDto {
     title: "Status publication",
     storage: "repo",
     linkAccess: "private",
+    linkPreview: false,
     ownerId: "owner",
     gistId: null,
     gistFile: null,

@@ -36,6 +36,7 @@ class FakeWorker extends EventEmitter implements Pick<Worker, "postMessage" | "u
 
 const result: RenderedFragment = { html: "<p>rendered</p>", headings: [], assetIds: [] };
 let renderOffThread: typeof import("./render-pool").renderOffThread;
+let previewOffThread: typeof import("./render-pool").previewOffThread;
 let RenderTimeoutError: typeof import("./render-pool").RenderTimeoutError;
 
 function observe(promise: Promise<RenderedFragment>) {
@@ -75,7 +76,7 @@ beforeEach(async () => {
   vi.spyOn(process, "getBuiltinModule").mockImplementation((id) =>
     id === "node:worker_threads" ? { Worker: FakeWorker } : getBuiltinModule(id),
   );
-  ({ renderOffThread, RenderTimeoutError } = await import("./render-pool"));
+  ({ renderOffThread, previewOffThread, RenderTimeoutError } = await import("./render-pool"));
 });
 
 afterEach(() => {
@@ -354,5 +355,30 @@ describe("renderOffThread", () => {
     expect(FakeWorker.instances).toHaveLength(2);
     succeed(FakeWorker.instances[1]);
     await expectSuccess(next);
+  });
+});
+
+describe("previewOffThread", () => {
+  it("queues preview jobs with renders on the same worker, in order, under the same deadline", async () => {
+    const render = observe(renderOffThread("render", ""));
+    const preview = previewOffThread("# Title\n\nFirst lines.");
+    const resolved = vi.fn();
+    void preview.then(resolved);
+    const [worker] = FakeWorker.instances;
+    expect(worker.request()).toEqual({ id: 1, markdown: "render", assetBaseUrl: "" });
+    succeed(worker);
+    await expectSuccess(render);
+    expect(worker.request()).toEqual({ id: 2, markdown: "# Title\n\nFirst lines.", preview: true });
+    worker.respond({ id: 2, ok: true, result: "First lines." });
+    await Promise.resolve();
+    expect(resolved).toHaveBeenCalledExactlyOnceWith("First lines.");
+    expect(FakeWorker.instances).toHaveLength(1);
+
+    const slow = previewOffThread("slow");
+    const rejected = vi.fn();
+    void slow.catch(rejected);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(rejected).toHaveBeenCalledExactlyOnceWith(new RenderTimeoutError(15_000));
+    expect(worker.terminate).toHaveBeenCalledTimes(1);
   });
 });

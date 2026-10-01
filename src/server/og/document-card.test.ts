@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CARD_CACHE_CONTROL, CARD_SIZE, cardMetaLine, cardText, loadCardFonts, renderDocumentCard, titleFontSize, type DocumentCardInput } from "./document-card";
+import {
+  CARD_CACHE_CONTROL,
+  CARD_SIZE,
+  RESTRICTED_CARD_CACHE_CONTROL,
+  cardMetaLine,
+  cardText,
+  loadCardFonts,
+  renderDocumentCard,
+  titleFontSize,
+  type DocumentCardInput,
+} from "./document-card";
 
 const INPUT: DocumentCardInput = {
   title: "Release notes for the evening build",
@@ -16,7 +26,7 @@ function pngSize(bytes: Buffer): { width: number; height: number } {
 }
 
 async function render(input: DocumentCardInput, fonts?: Awaited<ReturnType<typeof loadCardFonts>> | null): Promise<{ res: Response; bytes: Buffer }> {
-  const res = await renderDocumentCard(input, fonts);
+  const res = await renderDocumentCard(input, { fonts });
   return { res, bytes: Buffer.from(await res.arrayBuffer()) };
 }
 
@@ -28,6 +38,12 @@ describe("renderDocumentCard", () => {
     expect(res.headers.get("cache-control")).toBe(CARD_CACHE_CONTROL);
     expect(bytes.length).toBeGreaterThanOrEqual(10_000);
     expect(pngSize(bytes)).toEqual({ width: CARD_SIZE.width, height: CARD_SIZE.height });
+  }, 30_000);
+
+  it("answers the cache header it is given: a restricted document's card is never stored", async () => {
+    const res = await renderDocumentCard(INPUT, { fonts: null, cacheControl: RESTRICTED_CARD_CACHE_CONTROL });
+    expect(res.headers.get("cache-control")).toBe("private, no-store");
+    expect(pngSize(Buffer.from(await res.arrayBuffer()))).toEqual({ width: 1200, height: 630 });
   }, 30_000);
 
   it("renders a 300-character title (clamped to three lines) without throwing", async () => {

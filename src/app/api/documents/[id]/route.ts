@@ -20,6 +20,7 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
 const patchSchema = z.object({
   title: z.string().trim().min(1).max(DOCUMENT_TITLE_MAX).optional(),
   linkAccess: z.enum(["private", "view", "comment", "edit"]).optional(),
+  linkPreview: z.boolean().optional(),
 });
 
 /**
@@ -46,10 +47,13 @@ export const PATCH = handler(async (req: Request, { params }: Params) => {
   const warn = warnTail("documents");
   const { id } = await params;
   const body = await readJson(req, (d) => patchSchema.parse(d));
-  const { doc: current, role, user } = await requireAccess(id, body.linkAccess !== undefined ? "own" : "edit");
+  // Who can open the document, and what its link preview shows to anyone, are the owner's to decide.
+  const ownerOnly = body.linkAccess !== undefined || body.linkPreview !== undefined;
+  const { doc: current, role, user } = await requireAccess(id, ownerOnly ? "own" : "edit");
   if (!user) throw new HttpError(401, "Sign in required");
   const patch: Partial<Document> = {};
   if (body.linkAccess !== undefined) patch.linkAccess = body.linkAccess;
+  if (body.linkPreview !== undefined && body.linkPreview !== current.linkPreview) patch.linkPreview = body.linkPreview;
   if (body.title !== undefined) {
     // Live document first, column second: if the column write fails, the next store heals it from meta.title.
     const title = boundTitle(body.title);

@@ -287,6 +287,60 @@ public `/api/health` with boolean `ok`, `db`, `collab` all true and `version`
 exactly the selected SHA. Missing, duplicate, malformed, reordered,
 wrong-operation, wrong-object or replay-behind evidence fails closed. ARM
 transport success alone never suffices.
+Before restoring, the gate pins the latest measured repository-1 backup and
+requires free space for its uncompressed data, every WAL segment from the
+backup's archive start through the release segment, two additional WAL segments,
+and a **2 GiB production reserve**. The WAL estimate deliberately does not rely
+on recycling during replay. Invalid metadata, an unsupported timeline span,
+unreadable capacity or insufficient space fails closed before restore. During
+restore, startup and SQL checks, the gate checks free space about once per
+second and stops its owned work if it drops below the reserve. It checks
+before and after every SQL-readiness poll, including failed queries.
+A reserve breach is permanent for that gate attempt even if space later
+recovers, and no additional SQL poll or replay is started afterward. This guard
+does not reserve blocks against unrelated writers, so single-operator
+coordination and sufficient filesystem capacity remain required.
+
+Scratch PostgreSQL writes to a dedicated `postgres.log`, never the truncated
+per-command `command.log`. Before cleanup, failures retain at most ten diagnostic
+records from the last 16 KiB of server output. Each record contains only the
+operation UUID, severity and an allow-listed error category, such as disk full
+or recovery target unreached. Unknown messages are explicitly withheld; paths,
+statements, details, credentials and user text are never forwarded. The terminal
+release command validates these records again and prints the fixed explanation
+alongside the failure stage and cleanup result. Raw scratch logs are removed
+with the owned cluster, not left on the production disk.
+Known `LOG` messages also preserve fixed startup-abort and signal-termination
+categories, including signal 9 (which can indicate an OOM-killer termination).
+A signal-9 record alone does not prove OOM; confirming that cause still requires
+kernel evidence. Other unrecognized `LOG` text is not forwarded.
+
+After the WAL gate and before registry authentication, pull or app changes,
+the image deployment requires **6 GiB free**: a conservative 4 GiB download/
+unpacking budget for the current approximately 2.2 GB application image, plus
+the same 2 GiB reserve. Reassess that budget if the image grows substantially.
+After pull it checks the reserve again before changing the environment, unit
+or service. Either refusal produces an operation-bound disk-space status;
+the existing app is not restarted or rolled back when it was never changed.
+
+After the new app passes local health/version checks, bounded image retention
+keeps the new image, the image it replaced, and protected historical image
+`21546bc69066d93d3c7844af139e7925b3b838c4c63bb6fd87ae840abfb7c313`.
+Only older images with a Markdoc registry reference and no running or stopped
+container using them are eligible. Retention uses individual `docker rmi`
+commands, never force, system/volume pruning or rollback-bundle deletion.
+A retention failure produces a fixed warning that the terminal command prints;
+it does **not** roll back a healthy release. Reconcile that warning and free
+capacity before another release.
+Previous-image lookup includes stopped containers and is best-effort. If the
+container is missing during a crash-loop restart, or its image cannot be
+resolved, the release can still repair the app. After successful local health,
+image retention is skipped with the same fixed warning; an unknown previous
+image is never guessed or deleted.
+
+Run the offline Bash gate/image suites under WSL or Linux with a real `python3`.
+The Windows Python Store alias is not a usable interpreter for those suites.
+
 A public failure after guest readiness is a failed/unverified release, **not** an
 automatic rollback. Existing local rollback restores configuration/image only;
 it does not undo schema changes.

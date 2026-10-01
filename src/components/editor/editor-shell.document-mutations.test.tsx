@@ -149,6 +149,7 @@ const DOC: DocumentDto = {
   title: "Frozen source",
   storage: "repo",
   linkAccess: "private",
+  linkPreview: false,
   ownerId: USER.id,
   gistId: null,
   gistFile: null,
