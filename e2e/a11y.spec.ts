@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures";
 import { devices, type Browser, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, devLogin, waitForHydration, reloadHydrated, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme, cssPx, uniqueLogin } from "./helpers";
+import { signIn, devLogin, waitForHydration, waitForEditor, reloadHydrated, createDocument, openDocument, ensureCommentsOpen, codeText, focusRichEnd, selectTextInRich, clickCell, tableCell, expectTableShape, mintToken, setTheme, cssPx, uniqueLogin } from "./helpers";
 import { LONG_DOC } from "./fixtures/burke-scale";
 
 // Some scans use minted fixture tokens or show a one-time key; capture must not retain their API credentials.
@@ -1572,6 +1572,108 @@ test.describe("dialog focus return (#161)", () => {
     await expect(page.getByRole("dialog", { name: /link/i })).toHaveCount(0);
     await expect.poll(active).toBe("rich");
     await expect.poll(() => codeText(page)).toContain("[Alpha](https://example.com)");
+    await context.close();
+  });
+
+  // #2207: the keyboard case above (`fromMenu` + Enter) already passed on main - Radix drives Enter by
+  // calling the item's `.click()` from script, so the whole chain runs synchronously ahead of the
+  // microtask that the real-mouse bug depended on. A real, trusted mouse click is a different code path
+  // and, on main, left focus on <body> instead of handing it back to the More trigger. This test is the
+  // mouse counterpart to the Enter cases already covered above (Keyboard shortcuts, Connect to GitHub).
+  test("a real mouse click on Keyboard shortcuts, Connect to GitHub and a linked GitHub connection hands focus back to the More trigger, never <body> (#2207)", async ({
+    browser,
+  }) => {
+    const { page, context } = await signIn(browser, "a11y-return-mouse");
+    const id = await createDocument(page, "# Return\n\nAlpha bravo charlie.\n", "Return fixture");
+    await openDocument(page, id);
+
+    const active = () =>
+      page.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body) return "body";
+        return el.getAttribute("data-testid") ?? el.tagName.toLowerCase();
+      });
+    const closedWithMouseThenEscape = async (name: RegExp | string) => {
+      const dialog = page.getByRole("dialog", { name });
+      await expect(dialog).toBeVisible();
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+    };
+
+    // Keyboard shortcuts: a real mouse click on the item, not Enter.
+    await page.getByTestId("more-menu").click();
+    await page.getByRole("menuitem", { name: "Keyboard shortcuts" }).click();
+    await closedWithMouseThenEscape("Keyboard shortcuts");
+    await expect.poll(active).toBe("more-menu");
+
+    // Connect to GitHub: unlinked document, same mouse-click path.
+    await page.getByTestId("more-menu").click();
+    await page.getByTestId("menu-github").click();
+    await closedWithMouseThenEscape("Connect to GitHub");
+    await expect.poll(active).toBe("more-menu");
+
+    // GitHub connection: a document already linked to a (fake) repo shows the "connected" variant of the
+    // same item, which reads the live doc.storage rather than a window.open target.
+    const linkedId = await createDocument(page, "# Linked\n", "Linked fixture");
+    const seed = await page.request.post("/api/github/mock", { data: { kind: "repo", owner: "mock", repo: "a11y-return", branch: "main", path: "doc.md", content: "# Linked\n" } });
+    expect(seed.ok()).toBeTruthy();
+    const link = await page.request.post(`/api/documents/${linkedId}/link`, { data: { storage: "repo", owner: "mock", repo: "a11y-return", branch: "main", path: "doc.md" } });
+    expect(link.ok()).toBeTruthy();
+    await openDocument(page, linkedId);
+    await page.getByTestId("more-menu").click();
+    await page.getByTestId("menu-github").click();
+    await closedWithMouseThenEscape("GitHub connection");
+    await expect.poll(active).toBe("more-menu");
+
+    await context.close();
+  });
+
+  // #2207: compact-only paths need the phone layout, where Share and Publish move into the More menu
+  // itself instead of having their own toolbar buttons.
+  test("a real mouse click on compact Share and compact Publish hands focus back to the More trigger, never <body> (#2207)", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 393, height: 851 } });
+    const page = await context.newPage();
+    await devLogin(page, uniqueLogin("a11y-return-compact"));
+    await waitForHydration(page);
+
+    const active = () =>
+      page.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body) return "body";
+        return el.getAttribute("data-testid") ?? el.tagName.toLowerCase();
+      });
+
+    const id = await createDocument(page, "# Compact\n", "Compact fixture");
+    // Not `openDocument`: on a phone layout only one pane renders at a time (#1121), so its
+    // `.cm-content` + `.md-rich` both-visible check never passes here (see e2e/phone-overlays.spec.ts).
+    await page.goto(`/d/${id}`);
+    await waitForEditor(page);
+    await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+
+    // compact Share
+    await page.getByTestId("more-menu").click();
+    await page.getByTestId("menu-share").click();
+    const share = page.getByRole("dialog", { name: /^Share /});
+    await expect(share).toBeVisible();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(share).toHaveCount(0);
+    await expect.poll(active).toBe("more-menu");
+
+    // compact Publish to GitHub: the document is unlinked here, so this opens the same
+    // "Connect to GitHub" dialog as menu-github's unlinked state. (The linked "Commit to
+    // GitHub…" state uses CommitDialog, which has its own pre-existing Escape bug tracked
+    // separately and is out of scope for #2203/#2207.)
+    await page.getByTestId("more-menu").click();
+    await page.getByTestId("menu-publish").click();
+    const publish = page.getByRole("dialog", { name: "Connect to GitHub" });
+    await expect(publish).toBeVisible();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(publish).toHaveCount(0);
+    await expect.poll(active).toBe("more-menu");
+
     await context.close();
   });
 });

@@ -57,6 +57,7 @@ dist/
 .next-e2e*/
 .next-manual*/
 .next-probe*/
+.next-prod*/
 
 
 # Agent board CLI (per-directory identity)
