@@ -522,7 +522,7 @@ $cliWordings = @(
   @{ Name = 'digest-cli-get-default'; ErrorText = 'ERROR: Could not get the requested data.'; Category = 'unknown' },
   # azure-cli 2.86.0: acr/_docker_utils.py parse_error_message, synthetic server message and detail.
   @{ Name = 'digest-cli-server-message'; ErrorText = 'ERROR: Error: Too many requests. Detail: FAKE_DIGEST_SECRET_2211. Correlation ID: fake-correlation.'; Category = 'throttled' },
-  # acr/_docker_utils.py default message plus server wording, also accepted for older combined output.
+  # acr/_docker_utils.py default message plus server wording, combined as in the review fixture.
   @{ Name = 'digest-cli-combined-message'; ErrorText = 'ERROR: Could not get the requested data. Error: Too many requests'; Category = 'throttled' },
   # azure-cli 2.86.0: acr/_errors.py CONNECTIVITY_TOOMANYREQUESTS_ERROR.error_message.
   @{ Name = 'digest-cli-throttled-words'; ErrorText = "ERROR: Too many requests, access to registry 'registry.example.test' was denied. Please wait a moment before trying again."; Category = 'throttled' },
