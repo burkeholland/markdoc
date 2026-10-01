@@ -203,6 +203,44 @@ test.describe("reader view", () => {
     await owner.context.close();
   });
 
+  // #2203: the stuck-open bug only ever hit a real, trusted mouse click. A capture-phase click
+  // listener on the document stages a one-shot admission token and queues a microtask to clear it;
+  // that microtask always runs - clearing the token - before Radix's separately-scheduled click
+  // handling gets around to dispatching its own "menu.itemSelect" event, so the old close path's
+  // admission check always saw a cleared token. Enter doesn't hit this: Radix drives it by calling
+  // the item's `.click()` from script, which runs the whole chain, including "menu.itemSelect",
+  // synchronously in one task, ahead of the queued microtask - so Enter already worked on main.
+  // This test proves that Enter keeps working with the new direct-close handler: focus the item,
+  // press Enter, and check the reader opens, the menu is actually gone, and the very next click (on
+  // Share) lands on the first try rather than being swallowed by a stuck menu.
+  test("keyboard Enter on header menu's Open reader view opens the reader, closes the menu, and the next click lands", async ({
+    browser,
+  }) => {
+    const owner = await signIn(browser, "reader-kbd");
+    const { page } = owner;
+    const id = await createDocument(page, CONTENT, "Reader Title");
+    await openDocument(page, id);
+
+    await page.getByTestId("more-menu").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.getByTestId("menu-reader").focus();
+    const popupPromise = page.waitForEvent("popup");
+    await page.keyboard.press("Enter");
+    const reader = await popupPromise;
+    await reader.waitForURL(new RegExp(`/p/${id}$`));
+    await expect(reader.getByTestId("reader-title")).toHaveText("Reader Title");
+    await reader.close();
+
+    await expect(page.getByRole("menu")).toHaveCount(0);
+
+    // The next click must land on the first try - a stuck-open menu would swallow it instead.
+    await page.getByTestId("share-button").click();
+    await expect(page.getByTestId("copy-link")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await owner.context.close();
+  });
+
   test("anonymous reader can dismiss one update and refresh on the next", async ({ browser }) => {
     const owner = await signIn(browser, "reader-owner");
     const id = await createDocument(owner.page, CONTENT, "Reader Title");

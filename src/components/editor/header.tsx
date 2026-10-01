@@ -66,1408 +66,82 @@ import { HEADER_BOX } from "./chrome-classes";
 // open and then stays mounted (mount-once gate below), so Radix's close handling and focus return are unchanged.
 const AgentDialog = lazyOnFirstUse(() => import("@/components/agents/agent-dialog"), (m) => m.AgentDialog);
 
-interface ManualSaveOperation {
-  readonly mount: symbol;
-  readonly session: CollabSession;
-  readonly canEdit: boolean;
-  readonly flushSave: CollabSession["flushSave"];
-  readonly serial: number;
-  readonly publication: ManualSavePublication;
-  readonly action: object;
-}
-
 type ManualSaveState =
-  | { readonly owner: ManualSaveOperation; readonly status: "pending" }
-  | { readonly owner: ManualSaveOperation; readonly status: "failed"; readonly message: string };
+  | { readonly session: CollabSession; readonly status: "pending" }
+  | { readonly session: CollabSession; readonly status: "failed"; readonly message: string };
 
-type ManualSaveIcon = "check" | "cloud-off" | "loader" | "alert";
-
-interface ManualSaveRender {
-  readonly identity: object;
-  readonly mount: symbol;
-  readonly session: CollabSession;
-  readonly canEdit: boolean;
-  readonly flushSave: CollabSession["flushSave"];
-  readonly liveState: SaveState;
-  readonly liveUnsyncedChanges: number;
-  readonly liveDirty: boolean;
-  readonly liveUnsynced: number;
-  readonly liveRecovered: boolean;
-  readonly liveProlonged: boolean;
-  readonly saveError: string | null;
-  readonly hydrated: boolean;
-  readonly compact: boolean | undefined;
-  readonly state: SaveState;
-  readonly unsynced: number;
-  readonly recovered: boolean;
-  readonly prolonged: boolean;
-  readonly label: string;
-  readonly manualSave: ManualSaveState | null;
-  readonly manualPending: boolean;
-  readonly manualError: string | null;
-  readonly flash: boolean;
-  readonly icon: ManualSaveIcon;
-  readonly iconClassName: string | undefined;
-  readonly rootClassName: string;
-  readonly rootTitle: string | undefined;
-  readonly buttonClassName: string;
-  readonly buttonLabel: string;
-  readonly buttonDisabled: boolean;
-  readonly buttonBusy: boolean;
-  readonly textClassName: string;
-  readonly text: string;
-  readonly action: object;
-}
-
-interface ManualSaveElementOwnerView {
-  readonly element: () => Element | null;
-}
-
-class ManualSaveElementOwner<T extends Element> implements ManualSaveElementOwnerView {
-  #current: T | null = null;
-  #last: T | null = null;
-
-  constructor(
-    private readonly onChange: (
-      owner: ManualSaveElementOwnerView,
-      element: T | null,
-      previous: T | null,
-      last: T | null,
-    ) => void,
-  ) {}
-
-  readonly element = () => this.#current;
-
-  readonly capture = (element: T | null) => {
-    if (element === this.#current) return;
-    const previous = this.#current;
-    const last = this.#last;
-    this.#current = element;
-    if (element) this.#last = element;
-    this.onChange(this, element, previous, last);
-  };
-}
-
-interface ManualSaveDomSnapshot {
-  readonly node: Node;
-  readonly nodeValue: string | null;
-  readonly attributes: readonly (readonly [string, string])[] | null;
-  readonly children: readonly ManualSaveDomSnapshot[];
-}
-
-interface ManualSavePlacement {
-  readonly node: Node;
-  readonly parent: Node | null;
-  readonly previousSibling: Node | null;
-  readonly nextSibling: Node | null;
-}
-
-interface ManualSaveDomGuard {
-  readonly isClean: () => boolean;
-  readonly release: () => void;
-}
-
-interface ManualSaveReplay {
-  readonly source: ManualSavePublication;
-  readonly dom: ManualSaveDomSnapshot;
-  readonly placements: readonly ManualSavePlacement[];
-  readonly expectSuccessor: (identity: object) => void;
-  readonly replayIsExact: (identity: object) => boolean;
-  readonly historyIsClean: () => boolean;
-  readonly release: () => void;
-}
-
-interface ManualSavePublication {
-  readonly render: ManualSaveRender;
-  readonly retire: () => boolean;
-  readonly isRetired: () => boolean;
-  readonly isExact: () => boolean;
-}
-
-interface ManualSaveRefReplay {
-  readonly owner: ManualSaveElementOwnerView;
-  readonly element: Element;
-  detached: boolean;
-  reattached: boolean;
-}
-
-interface ManualSavePublicationRuntime {
-  readonly publication: ManualSavePublication;
-  readonly publish: (
-    snapshot: ManualSaveDomSnapshot,
-    placements: readonly ManualSavePlacement[],
-    owners: readonly ManualSaveElementOwnerView[],
-  ) => void;
-  readonly retireForElement: () => void;
-  readonly retireForLayout: () => void;
-  readonly noteRef: (
-    owner: ManualSaveElementOwnerView,
-    element: Element | null,
-    previous: Element | null,
-  ) => void;
-  readonly publishedDomMatches: () => boolean;
-  readonly isExactElementReplay: () => boolean;
-  readonly isExactLayoutReplay: () => boolean;
-  readonly snapshot: () => ManualSaveDomSnapshot | null;
-  readonly placements: () => readonly ManualSavePlacement[] | null;
-  readonly mutationHistoryIsClean: () => boolean;
-  readonly release: () => void;
-  readonly claimActivation: () => boolean;
-  readonly beginReplayHandoff: () => void;
-  readonly expectSuccessor: (identity: object) => void;
-  readonly successorTransitionIsExact: (identity: object) => boolean;
-}
-
-interface ManualSavePublicationSet {
-  readonly captureRoot: React.RefCallback<HTMLSpanElement>;
-  readonly captureButton: React.RefCallback<HTMLButtonElement>;
-  readonly captureIcon: React.RefCallback<SVGSVGElement>;
-  readonly captureText: React.RefCallback<HTMLSpanElement>;
-  readonly establish: () => void | (() => void);
-  readonly onRootClickCapture: (event: React.MouseEvent<HTMLSpanElement>) => void;
-  readonly onButtonClickCapture: (event: React.MouseEvent<HTMLButtonElement>) => void;
-}
-
-interface ManualSaveClickAdmission {
-  readonly publication: ManualSavePublication;
-  readonly nativeEvent: MouseEvent;
-  readonly reactEvent: React.MouseEvent<HTMLSpanElement>;
-  readonly target: Node;
-  readonly root: HTMLSpanElement;
-  readonly button: HTMLButtonElement;
-  readonly deliverButton: (event: object) => boolean;
-  readonly rejectAdditional: (event: object) => void;
-  readonly isExact: () => boolean;
-}
-
-interface ManualSaveCells {
-  readonly active: { current: ManualSavePublication | null };
-  readonly successorOf: { current: ManualSavePublication | null };
-  readonly replay: { current: ManualSaveReplay | null };
-  readonly requestOwner: { current: ManualSaveOperation | null };
-  readonly nextOperation: { current: number };
-  readonly claimedPublications: WeakSet<ManualSavePublication>;
-  readonly claimedActions: WeakSet<object>;
-  readonly claimedReactEvents: WeakSet<object>;
-  readonly claimedNativeEvents: WeakSet<Event>;
-  readonly clickAdmissions: WeakMap<Event, ManualSaveClickAdmission>;
-}
-
-const MANUAL_SAVE_ICON_FACTS: Readonly<Record<ManualSaveIcon, {
-  readonly className: string;
-  readonly strokeWidth: string;
-  readonly paths: readonly string[];
-}>> = Object.freeze({
-  check: Object.freeze({
-    className: "lucide lucide-check",
-    strokeWidth: "2.5",
-    paths: Object.freeze(["M20 6 9 17l-5-5"]),
-  }),
-  "cloud-off": Object.freeze({
-    className: "lucide lucide-cloud-off",
-    strokeWidth: "2",
-    paths: Object.freeze([
-      "M10.94 5.274A7 7 0 0 1 15.71 10h1.79a4.5 4.5 0 0 1 4.222 6.057",
-      "M18.796 18.81A4.5 4.5 0 0 1 17.5 19H9A7 7 0 0 1 5.79 5.78",
-      "m2 2 20 20",
-    ]),
-  }),
-  loader: Object.freeze({
-    className: "lucide lucide-loader-circle animate-spin",
-    strokeWidth: "2",
-    paths: Object.freeze(["M21 12a9 9 0 1 1-6.219-8.56"]),
-  }),
-  alert: Object.freeze({
-    className: "lucide lucide-triangle-alert",
-    strokeWidth: "2",
-    paths: Object.freeze([
-      "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3",
-      "M12 9v4",
-      "M12 17h.01",
-    ]),
-  }),
-});
-
-function manualSaveVisual(state: SaveState): {
-  icon: ManualSaveIcon;
-  iconClassName: string | undefined;
-  className: string;
-} {
+function saveStateVisual(state: SaveState): { className: string; icon: React.ReactNode } {
   switch (state) {
     case "saved":
-      return { icon: "check", iconClassName: undefined, className: "text-success" };
+      return { className: "text-success", icon: <Check size={16} strokeWidth={2.5} /> };
     case "pending":
-      return { icon: "cloud-off", iconClassName: undefined, className: "text-ink-3" };
+      return { className: "text-ink-3", icon: <CloudOff size={16} /> };
     case "saving":
     case "connecting":
-      return { icon: "loader", iconClassName: "animate-spin", className: "text-ink-3" };
+      return { className: "text-ink-3", icon: <Loader2 size={16} className="animate-spin" /> };
     case "reconnecting":
-      return { icon: "loader", iconClassName: "animate-spin", className: "text-warning" };
+      return { className: "text-warning", icon: <Loader2 size={16} className="animate-spin" /> };
     case "offline":
-      return { icon: "cloud-off", iconClassName: undefined, className: "text-warning" };
+      return { className: "text-warning", icon: <CloudOff size={16} /> };
     case "error":
-      return { icon: "alert", iconClassName: undefined, className: "text-danger" };
+      return { className: "text-danger", icon: <AlertTriangle size={16} /> };
   }
-}
-
-function manualSaveOperationMatches(
-  operation: ManualSaveOperation,
-  mount: symbol,
-  session: CollabSession,
-  canEdit: boolean,
-  flushSave: CollabSession["flushSave"],
-) {
-  return operation.mount === mount
-    && operation.session === session
-    && operation.canEdit === canEdit
-    && operation.flushSave === flushSave;
-}
-
-function clearManualSaveRequest(
-  cells: ManualSaveCells,
-  operation: ManualSaveOperation,
-) {
-  if (cells.requestOwner.current === operation) cells.requestOwner.current = null;
-}
-
-function manualSaveStatesMatch(left: ManualSaveState | null, right: ManualSaveState | null) {
-  return left === null
-    ? right === null
-    : right !== null
-      && left.owner === right.owner
-      && left.status === right.status
-      && (left.status !== "failed" || (right.status === "failed" && left.message === right.message));
-}
-
-function manualSaveRendersMatch(left: ManualSaveRender, right: ManualSaveRender) {
-  return left.mount === right.mount
-    && left.session === right.session
-    && left.canEdit === right.canEdit
-    && left.flushSave === right.flushSave
-    && left.liveState === right.liveState
-    && left.liveUnsyncedChanges === right.liveUnsyncedChanges
-    && left.liveDirty === right.liveDirty
-    && left.liveUnsynced === right.liveUnsynced
-    && left.liveRecovered === right.liveRecovered
-    && left.liveProlonged === right.liveProlonged
-    && left.saveError === right.saveError
-    && left.hydrated === right.hydrated
-    && left.compact === right.compact
-    && left.state === right.state
-    && left.unsynced === right.unsynced
-    && left.recovered === right.recovered
-    && left.prolonged === right.prolonged
-    && left.label === right.label
-    && manualSaveStatesMatch(left.manualSave, right.manualSave)
-    && left.manualPending === right.manualPending
-    && left.manualError === right.manualError
-    && left.flash === right.flash
-    && left.icon === right.icon
-    && left.iconClassName === right.iconClassName
-    && left.rootClassName === right.rootClassName
-    && left.rootTitle === right.rootTitle
-    && left.buttonClassName === right.buttonClassName
-    && left.buttonLabel === right.buttonLabel
-    && left.buttonDisabled === right.buttonDisabled
-    && left.buttonBusy === right.buttonBusy
-    && left.textClassName === right.textClassName
-    && left.text === right.text;
-}
-
-function manualSaveFactsAreCurrent(render: ManualSaveRender) {
-  const {
-    session,
-    hydrated,
-    compact,
-    manualSave,
-    manualPending,
-    manualError,
-  } = render;
-  const liveState = session.saveState;
-  const liveUnsyncedChanges = session.unsyncedChanges;
-  const liveDirty = session.dirty;
-  const liveUnsynced = Math.max(liveUnsyncedChanges, liveDirty ? 1 : 0);
-  const liveRecovered = session.recovered;
-  const liveProlonged = session.prolongedOffline;
-  const saveError = session.saveError;
-  const state: SaveState = hydrated ? liveState : "connecting";
-  const unsynced = hydrated ? liveUnsynced : 0;
-  const recovered = hydrated && liveRecovered;
-  const prolonged = hydrated && liveProlonged;
-  const label = state === "error" && saveError
-    ? "Save failed — retry"
-    : saveStateLabel(state, unsynced, recovered, prolonged);
-  const visual = manualSaveVisual(state);
-  const flash = state === "saved" && recovered;
-  const currentError = manualSave?.status === "failed" ? manualSave.message : null;
-  const currentPending = manualSave?.status === "pending";
-  const rootClassName = cn(
-    "inline-flex items-center gap-1.5 rounded-md text-sm font-medium transition-colors",
-    visual.className,
-    flash && "save-state-recovered",
-  );
-  const rootTitle = currentError ?? saveError ?? (compact ? label : undefined);
-  const buttonClassName = "inline-flex items-center gap-1.5";
-  const buttonLabel = "Save document";
-  const buttonDisabled = !session.canEdit || currentPending;
-  const textClassName = cn(compact ? "sr-only" : "max-md:sr-only");
-  return session.canEdit === render.canEdit
-    && session.flushSave === render.flushSave
-    && liveState === render.liveState
-    && liveUnsyncedChanges === render.liveUnsyncedChanges
-    && liveDirty === render.liveDirty
-    && liveUnsynced === render.liveUnsynced
-    && liveRecovered === render.liveRecovered
-    && liveProlonged === render.liveProlonged
-    && saveError === render.saveError
-    && state === render.state
-    && unsynced === render.unsynced
-    && recovered === render.recovered
-    && prolonged === render.prolonged
-    && label === render.label
-    && currentPending === manualPending
-    && currentError === manualError
-    && flash === render.flash
-    && visual.icon === render.icon
-    && visual.iconClassName === render.iconClassName
-    && rootClassName === render.rootClassName
-    && rootTitle === render.rootTitle
-    && buttonClassName === render.buttonClassName
-    && buttonLabel === render.buttonLabel
-    && buttonDisabled === render.buttonDisabled
-    && currentPending === render.buttonBusy
-    && textClassName === render.textClassName
-    && (currentError ?? label) === render.text;
-}
-
-function snapshotManualSaveAttributes(node: Node): readonly (readonly [string, string])[] | null {
-  if (node.nodeType !== 1) return null;
-  return Object.freeze(
-    [...(node as Element).attributes]
-      .map(({ name, value }) => Object.freeze([name, value] as const))
-      .sort(([left], [right]) => left.localeCompare(right)),
-  );
-}
-
-function manualSaveAttributesAreExact(
-  element: Element,
-  expected: readonly (readonly [string, string])[],
-) {
-  const actual = snapshotManualSaveAttributes(element);
-  const sortedExpected = [...expected].sort(([left], [right]) => left.localeCompare(right));
-  return actual !== null
-    && actual.length === sortedExpected.length
-    && actual.every(([name, value], index) => {
-      const pair = sortedExpected[index];
-      return pair?.[0] === name && pair[1] === value;
-    });
-}
-
-function manualSaveIconIsExact(
-  icon: SVGSVGElement,
-  render: ManualSaveRender,
-) {
-  const facts = MANUAL_SAVE_ICON_FACTS[render.icon];
-  const iconAttributes = [
-    ["aria-hidden", "true"],
-    ["class", facts.className],
-    ["fill", "none"],
-    ["height", "16"],
-    ["stroke", "currentColor"],
-    ["stroke-linecap", "round"],
-    ["stroke-linejoin", "round"],
-    ["stroke-width", facts.strokeWidth],
-    ["viewBox", "0 0 24 24"],
-    ["width", "16"],
-    ["xmlns", "http://www.w3.org/2000/svg"],
-  ] as const;
-  if (
-    !manualSaveAttributesAreExact(icon, iconAttributes)
-    || icon.childNodes.length !== facts.paths.length
-  ) {
-    return false;
-  }
-  const SVGElementConstructor = icon.ownerDocument.defaultView?.SVGElement;
-  return facts.paths.every((path, index) => {
-    const child = icon.childNodes.item(index);
-    return Boolean(
-      SVGElementConstructor
-      && child instanceof SVGElementConstructor
-      && child.localName === "path"
-      && child.childNodes.length === 0
-      && manualSaveAttributesAreExact(child, [["d", path]]),
-    );
-  });
-}
-
-function snapshotManualSaveDom(node: Node): ManualSaveDomSnapshot {
-  return Object.freeze({
-    node,
-    nodeValue: node.nodeValue,
-    attributes: snapshotManualSaveAttributes(node),
-    children: Object.freeze([...node.childNodes].map(snapshotManualSaveDom)),
-  });
-}
-
-function manualSaveDomMatches(snapshot: ManualSaveDomSnapshot): boolean {
-  const { node } = snapshot;
-  if (node.nodeValue !== snapshot.nodeValue) return false;
-  const attributes = snapshotManualSaveAttributes(node);
-  if (attributes === null || snapshot.attributes === null) {
-    if (attributes !== snapshot.attributes) return false;
-  } else if (
-    attributes.length !== snapshot.attributes.length
-    || attributes.some(([name, value], index) => {
-      const expected = snapshot.attributes?.[index];
-      return !expected || expected[0] !== name || expected[1] !== value;
-    })
-  ) {
-    return false;
-  }
-  return node.childNodes.length === snapshot.children.length
-    && snapshot.children.every(
-      (child, index) => node.childNodes.item(index) === child.node && manualSaveDomMatches(child),
-    );
-}
-
-function snapshotManualSavePlacement(
-  root: HTMLSpanElement,
-): readonly ManualSavePlacement[] | null {
-  const placements: ManualSavePlacement[] = [];
-  const ownerDocument = root.ownerDocument;
-  for (let node: Node | null = root; node; node = node.parentNode) {
-    placements.push(Object.freeze({
-      node,
-      parent: node.parentNode,
-      previousSibling: node.previousSibling,
-      nextSibling: node.nextSibling,
-    }));
-    if (node === ownerDocument) return Object.freeze(placements);
-  }
-  return null;
-}
-
-function manualSavePlacementsMatch(placements: readonly ManualSavePlacement[]) {
-  return placements.length > 0
-    && placements[placements.length - 1]?.node.nodeType === 9
-    && placements.every(({ node, parent, previousSibling, nextSibling }) =>
-      node.parentNode === parent
-      && node.previousSibling === previousSibling
-      && node.nextSibling === nextSibling);
-}
-
-function createManualSaveDomGuard(
-  root: HTMLSpanElement,
-  placements: readonly ManualSavePlacement[],
-  onInvalidated: () => void,
-): ManualSaveDomGuard | null {
-  const ownerDocument = root.ownerDocument;
-  const MutationObserverConstructor = ownerDocument.defaultView?.MutationObserver;
-  if (!MutationObserverConstructor) return null;
-  const placementNodes = new Set(placements.map(({ node }) => node));
-  let changed = false;
-  let released = false;
-  const isRelevant = (record: MutationRecord) => {
-    if (record.target === root || root.contains(record.target)) return true;
-    if (record.type !== "childList" || !placementNodes.has(record.target)) return false;
-    return (record.previousSibling !== null && placementNodes.has(record.previousSibling))
-      || (record.nextSibling !== null && placementNodes.has(record.nextSibling))
-      || [...record.addedNodes, ...record.removedNodes].some((node) =>
-        placementNodes.has(node) || node.contains(root));
-  };
-  const inspect = (records: readonly MutationRecord[]) => {
-    if (changed || released || !records.some(isRelevant)) return;
-    changed = true;
-    onInvalidated();
-  };
-  const observer = new MutationObserverConstructor(inspect);
-  observer.observe(root, {
-    attributes: true,
-    characterData: true,
-    childList: true,
-    subtree: true,
-  });
-  for (const { node } of placements.slice(1)) {
-    observer.observe(node, { childList: true });
-  }
-  return Object.freeze({
-    isClean: () => {
-      if (!released) inspect(observer.takeRecords());
-      return !changed && !released;
-    },
-    release: () => {
-      if (released) return;
-      inspect(observer.takeRecords());
-      released = true;
-      observer.disconnect();
-    },
-  });
-}
-
-function manualSavePlacementIsExact(
-  root: HTMLSpanElement,
-  placements: readonly ManualSavePlacement[],
-) {
-  return root.isConnected
-    && placements[0]?.node === root
-    && placements[placements.length - 1]?.node === root.ownerDocument
-    && manualSavePlacementsMatch(placements);
-}
-
-function clearDetachedManualSaveReplay(
-  cells: ManualSaveCells,
-  mount: symbol,
-) {
-  const replay = cells.replay.current;
-  if (
-    !replay
-    || replay.source.render.mount !== mount
-    || replay.dom.node.isConnected
-  ) {
-    return;
-  }
-  cells.replay.current = null;
-  if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
-  replay.release();
-}
-
-function manualSaveReactMouseWrapperIsExact(
-  event: React.MouseEvent<Element>,
-  nativeEvent: MouseEvent,
-  currentTarget: Element,
-  target: Node,
-  phase: number,
-): boolean {
-  return (
-    event.nativeEvent !== nativeEvent
-    || event.type !== nativeEvent.type
-    || event.currentTarget !== currentTarget
-    || event.target !== target
-    || nativeEvent.target !== target
-    || event.button !== nativeEvent.button
-    || event.buttons !== nativeEvent.buttons
-    || event.altKey !== nativeEvent.altKey
-    || event.ctrlKey !== nativeEvent.ctrlKey
-    || event.metaKey !== nativeEvent.metaKey
-    || event.shiftKey !== nativeEvent.shiftKey
-    || event.clientX !== nativeEvent.clientX
-    || event.clientY !== nativeEvent.clientY
-    || event.detail !== nativeEvent.detail
-    || event.bubbles !== nativeEvent.bubbles
-    || event.cancelable !== nativeEvent.cancelable
-    || event.eventPhase !== nativeEvent.eventPhase
-    || nativeEvent.eventPhase !== phase
-    || event.isTrusted !== nativeEvent.isTrusted
-    || event.timeStamp !== nativeEvent.timeStamp
-    || event.defaultPrevented
-    || nativeEvent.defaultPrevented
-    || typeof event.preventDefault !== "function"
-    || typeof event.stopPropagation !== "function"
-    || typeof event.isDefaultPrevented !== "function"
-    || typeof event.isPropagationStopped !== "function"
-    || typeof event.persist !== "function"
-  ) === false;
-}
-
-function createManualSaveClickAdmission(
-  publication: ManualSavePublication,
-  nativeEvent: MouseEvent,
-  event: React.MouseEvent<HTMLSpanElement>,
-  target: Node,
-  root: HTMLSpanElement,
-  button: HTMLButtonElement,
-): ManualSaveClickAdmission {
-  let buttonDelivered = false;
-  let invalid = false;
-  return Object.freeze({
-    publication,
-    nativeEvent,
-    reactEvent: event,
-    target,
-    root,
-    button,
-    deliverButton: (candidate: object) => {
-      if (candidate !== event || buttonDelivered) {
-        invalid = true;
-        return false;
-      }
-      buttonDelivered = true;
-      return true;
-    },
-    rejectAdditional: (candidate: object) => {
-      if (candidate !== event || buttonDelivered) invalid = true;
-    },
-    isExact: () => !invalid && buttonDelivered && event.currentTarget === null,
-  });
-}
-
-function createManualSavePublication(
-  render: ManualSaveRender,
-  cells: ManualSaveCells,
-  requestSuccessor: () => void,
-  setManualSave: React.Dispatch<React.SetStateAction<ManualSaveState | null>>,
-): ManualSavePublicationSet {
-  let currentRuntime: ManualSavePublicationRuntime | null = null;
-  let lastRuntime: ManualSavePublicationRuntime | null = null;
-  let successorRequested = false;
-
-  const requestReplaySuccessor = (runtime: ManualSavePublicationRuntime) => {
-    const dom = runtime.snapshot();
-    const placements = runtime.placements();
-    if (
-      successorRequested
-      || !dom
-      || !placements
-      || cells.successorOf.current !== runtime.publication
-      || !manualSaveFactsAreCurrent(render)
-      || !exactDomIsCurrent()
-      || !runtime.publishedDomMatches()
-    ) {
-      return;
-    }
-    successorRequested = true;
-    runtime.beginReplayHandoff();
-    cells.replay.current = Object.freeze({
-      source: runtime.publication,
-      dom,
-      placements,
-      expectSuccessor: runtime.expectSuccessor,
-      replayIsExact: runtime.successorTransitionIsExact,
-      historyIsClean: runtime.mutationHistoryIsClean,
-      release: runtime.release,
-    });
-    requestSuccessor();
-  };
-
-  const onElementChange = (
-    owner: ManualSaveElementOwnerView,
-    element: Element | null,
-    previous: Element | null,
-    last: Element | null,
-  ) => {
-    const runtime = currentRuntime ?? lastRuntime;
-    runtime?.noteRef(owner, element, previous);
-    if (element === null || (element !== null && last !== null && element !== last)) {
-      currentRuntime?.retireForElement();
-    }
-    if (
-      runtime?.isExactElementReplay()
-      && cells.successorOf.current === runtime.publication
-    ) {
-      requestReplaySuccessor(runtime);
-    }
-  };
-  const rootOwner = new ManualSaveElementOwner<HTMLSpanElement>(onElementChange);
-  const buttonOwner = new ManualSaveElementOwner<HTMLButtonElement>(onElementChange);
-  const iconOwner = new ManualSaveElementOwner<SVGSVGElement>(onElementChange);
-  const textOwner = new ManualSaveElementOwner<HTMLSpanElement>(onElementChange);
-
-  const expectedOwners = (): readonly ManualSaveElementOwnerView[] => [
-    rootOwner,
-    buttonOwner,
-    iconOwner,
-    textOwner,
-  ];
-
-  const exactDomIsCurrent = () => {
-    const root = rootOwner.element();
-    const button = buttonOwner.element();
-    const icon = iconOwner.element();
-    const text = textOwner.element();
-    const ownerDocument = root?.ownerDocument;
-    const ownerWindow = ownerDocument?.defaultView;
-    if (
-      !root
-      || !button
-      || !icon
-      || !text
-      || !ownerWindow
-      || !(root instanceof ownerWindow.HTMLSpanElement)
-      || !(button instanceof ownerWindow.HTMLButtonElement)
-      || !(icon instanceof ownerWindow.SVGSVGElement)
-      || !(text instanceof ownerWindow.HTMLSpanElement)
-      || !root.isConnected
-      || !button.isConnected
-      || root.ownerDocument !== ownerDocument
-      || button.ownerDocument !== ownerDocument
-      || icon.ownerDocument !== ownerDocument
-      || text.ownerDocument !== ownerDocument
-      || root.tagName !== "SPAN"
-      || root.className !== render.rootClassName
-      || root.dataset.testid !== "save-state"
-      || root.dataset.state !== render.state
-      || root.dataset.liveState !== render.state
-      || root.dataset.unsynced !== String(render.unsynced)
-      || root.getAttribute("data-recovered") !== (render.flash ? "true" : null)
-      || root.getAttribute("data-prolonged") !== (render.prolonged ? "true" : null)
-      || root.getAttribute("role") !== "status"
-      || root.getAttribute("title") !== (render.rootTitle ?? null)
-      || root.children.length !== 1
-      || root.childNodes.length !== 1
-      || root.childNodes.item(0) !== button
-      || root.firstElementChild !== button
-      || button.parentElement !== root
-      || button.tagName !== "BUTTON"
-      || button.type !== "button"
-      || button.className !== render.buttonClassName
-      || button.disabled !== render.buttonDisabled
-      || button.getAttribute("aria-disabled") !== null
-      || button.getAttribute("aria-busy") !== (render.buttonBusy ? "true" : null)
-      || button.getAttribute("aria-label") !== render.buttonLabel
-      || button.children.length !== 2
-      || button.childNodes.length !== 2
-      || button.childNodes.item(0) !== icon
-      || button.childNodes.item(1) !== text
-      || button.children.item(0) !== icon
-      || button.children.item(1) !== text
-      || icon.parentElement !== button
-      || icon.localName !== "svg"
-      || icon.classList.contains("animate-spin") !== (render.iconClassName === "animate-spin")
-      || text.parentElement !== button
-      || text.tagName !== "SPAN"
-      || text.className !== render.textClassName
-      || text.textContent !== render.text
-      || text.childNodes.length !== 1
-      || text.firstChild?.nodeType !== ownerWindow.Node.TEXT_NODE
-      || text.firstChild.nodeValue !== render.text
-      || button.textContent !== render.text
-      || root.querySelectorAll("button").length !== 1
-    ) {
-      return false;
-    }
-    const rootAttributes: (readonly [string, string])[] = [
-      ["class", render.rootClassName],
-      ["data-live-state", render.state],
-      ["data-state", render.state],
-      ["data-testid", "save-state"],
-      ["data-unsynced", String(render.unsynced)],
-      ["role", "status"],
-    ];
-    if (render.flash) rootAttributes.push(["data-recovered", "true"]);
-    if (render.prolonged) rootAttributes.push(["data-prolonged", "true"]);
-    if (render.rootTitle !== undefined) rootAttributes.push(["title", render.rootTitle]);
-    const buttonAttributes: (readonly [string, string])[] = [
-      ["aria-label", render.buttonLabel],
-      ["class", render.buttonClassName],
-      ["type", "button"],
-    ];
-    if (render.buttonBusy) buttonAttributes.push(["aria-busy", "true"]);
-    if (render.buttonDisabled) buttonAttributes.push(["disabled", ""]);
-    return manualSaveAttributesAreExact(root, rootAttributes)
-      && manualSaveAttributesAreExact(button, buttonAttributes)
-      && manualSaveIconIsExact(icon, render)
-      && manualSaveAttributesAreExact(text, [["class", render.textClassName]]);
-  };
-
-  const createRuntime = (): ManualSavePublicationRuntime => {
-    type Retirement = "element" | "layout" | "mutation" | "other";
-    let retired = false;
-    let retirement: Retirement | null = null;
-    let established = false;
-    let layoutRetired = false;
-    let domSnapshot: ManualSaveDomSnapshot | null = null;
-    let placementSnapshots: readonly ManualSavePlacement[] | null = null;
-    let domGuard: ManualSaveDomGuard | null = null;
-    let replayRefs: ManualSaveRefReplay[] = [];
-    let invalidReplay = false;
-    let activationClaimed = false;
-    let replayHandedOff = false;
-    let replayHandoffInvalid = false;
-    let expectedSuccessor: object | null = null;
-    let nativeClickListenerAttached = false;
-
-    const retire = (reason: Retirement) => {
-      if (retired) return false;
-      retired = true;
-      retirement = reason;
-      const button = buttonOwner.element();
-      if (nativeClickListenerAttached && button) {
-        button.removeEventListener("click", completeNativeClick, true);
-        nativeClickListenerAttached = false;
-      }
-      if (cells.active.current === publication) {
-        cells.active.current = null;
-        cells.successorOf.current = publication;
-      }
-      if (currentRuntime?.publication === publication) currentRuntime = null;
-      queueMicrotask(() => {
-        clearDetachedManualSaveReplay(cells, render.mount);
-        if (cells.replay.current?.source !== publication) domGuard?.release();
-      });
-      return true;
-    };
-    const publishedDomMatches = () => {
-      const root = rootOwner.element();
-      return Boolean(
-        domSnapshot
-        && placementSnapshots
-        && domGuard?.isClean()
-        && root
-        && root === domSnapshot.node
-        && manualSavePlacementIsExact(root, placementSnapshots)
-        && manualSaveDomMatches(domSnapshot)
-      );
-    };
-    const publication: ManualSavePublication = Object.freeze({
-      render,
-      retire: () => retire("other"),
-      isRetired: () => retired,
-      isExact: () => !retired
-        && manualSaveFactsAreCurrent(render)
-        && exactDomIsCurrent()
-        && publishedDomMatches(),
-    });
-    const refsHaveNoReplay = () => !invalidReplay
-      && replayRefs.every((entry) =>
-        !entry.detached
-        && !entry.reattached
-        && entry.owner.element() === entry.element);
-    const refsHaveExactReplay = () => !invalidReplay
-      && replayRefs.length > 0
-      && replayRefs.every((entry) =>
-        entry.detached
-        && entry.reattached
-        && entry.owner.element() === entry.element);
-    const runtime: ManualSavePublicationRuntime = Object.freeze({
-      publication,
-      publish: (
-        snapshot: ManualSaveDomSnapshot,
-        placements: readonly ManualSavePlacement[],
-        owners: readonly ManualSaveElementOwnerView[],
-      ) => {
-        const root = rootOwner.element();
-        if (!root) throw new Error("Cannot publish SaveIndicator without its status root");
-        domGuard = createManualSaveDomGuard(root, placements, () => retire("mutation"));
-        if (!domGuard) {
-          throw new Error("Cannot publish SaveIndicator without a DOM mutation observer");
-        }
-        established = true;
-        domSnapshot = snapshot;
-        placementSnapshots = placements;
-        replayRefs = owners.map((owner) => {
-          const element = owner.element();
-          if (!element) throw new Error("Cannot publish SaveIndicator without every committed ref");
-          return { owner, element, detached: false, reattached: false };
-        });
-        const button = buttonOwner.element();
-        if (!button) throw new Error("Cannot publish SaveIndicator without its Save button");
-        button.addEventListener("click", completeNativeClick, true);
-        nativeClickListenerAttached = true;
-        cells.active.current = publication;
-        cells.successorOf.current = null;
-        cells.replay.current = null;
-      },
-      retireForElement: () => {
-        retire("element");
-      },
-      retireForLayout: () => {
-        layoutRetired = true;
-        retire("layout");
-      },
-      noteRef: (
-        owner: ManualSaveElementOwnerView,
-        element: Element | null,
-        previous: Element | null,
-      ) => {
-        if (!established) return;
-        if (replayHandedOff && expectedSuccessor === null) {
-          replayHandoffInvalid = true;
-        }
-        const proof = replayRefs.find((entry) => entry.owner === owner);
-        if (!proof) {
-          invalidReplay = true;
-          return;
-        }
-        if (element === null && previous === proof.element) {
-          proof.detached = true;
-          proof.reattached = false;
-        } else if (element === proof.element && previous === null && proof.detached) {
-          proof.reattached = true;
-        } else if (element !== previous) {
-          invalidReplay = true;
-        }
-      },
-      publishedDomMatches,
-      isExactElementReplay: () => retired
-        && retirement === "element"
-        && layoutRetired
-        && established
-        && refsHaveExactReplay()
-        && publishedDomMatches(),
-      isExactLayoutReplay: () => retired
-        && retirement === "layout"
-        && established
-        && (refsHaveNoReplay() || refsHaveExactReplay())
-        && publishedDomMatches(),
-      snapshot: () => domSnapshot,
-      placements: () => placementSnapshots,
-      mutationHistoryIsClean: () => domGuard?.isClean() ?? false,
-      release: () => domGuard?.release(),
-      claimActivation: () => {
-        if (activationClaimed) return false;
-        activationClaimed = true;
-        return true;
-      },
-      beginReplayHandoff: () => {
-        replayHandedOff = true;
-      },
-      expectSuccessor: (identity: object) => {
-        expectedSuccessor = identity;
-      },
-      successorTransitionIsExact: (identity: object) =>
-        replayHandedOff
-        && !replayHandoffInvalid
-        && expectedSuccessor === identity
-        && replayRefs.every((entry) =>
-          entry.detached
-          && !entry.reattached
-          && entry.owner.element() === null),
-    });
-    return runtime;
-  };
-
-  const establish = () => {
-    if (lastRuntime) {
-      if (
-        (lastRuntime.isExactLayoutReplay() || lastRuntime.isExactElementReplay())
-        && cells.successorOf.current === lastRuntime.publication
-      ) {
-        requestReplaySuccessor(lastRuntime);
-      }
-      return undefined;
-    }
-    if (!manualSaveFactsAreCurrent(render) || !exactDomIsCurrent()) return undefined;
-    const root = rootOwner.element();
-    const placements = root ? snapshotManualSavePlacement(root) : null;
-    if (!root || !placements || !manualSavePlacementIsExact(root, placements)) return undefined;
-
-    const replay = cells.replay.current;
-    if (replay) {
-      const sameRender = manualSaveRendersMatch(replay.source.render, render);
-      const exactReplay = sameRender
-        && replay.source.isRetired()
-        && cells.successorOf.current === replay.source
-        && replay.replayIsExact(render.identity)
-        && replay.historyIsClean()
-        && root === replay.dom.node
-        && manualSavePlacementIsExact(root, replay.placements)
-        && manualSaveDomMatches(replay.dom);
-      cells.replay.current = null;
-      replay.release();
-      if (cells.successorOf.current === replay.source) cells.successorOf.current = null;
-      if (sameRender && !exactReplay) return undefined;
-    }
-
-    const runtime = createRuntime();
-    const previous = cells.active.current;
-    if (previous && previous !== runtime.publication) previous.retire();
-    currentRuntime = runtime;
-    lastRuntime = runtime;
-    runtime.publish(snapshotManualSaveDom(root), placements, expectedOwners());
-    return runtime.retireForLayout;
-  };
-
-  const replay = cells.replay.current;
-  if (replay && manualSaveRendersMatch(replay.source.render, render)) {
-    replay.expectSuccessor(render.identity);
-  }
-
-  const requestIsCurrent = (operation: ManualSaveOperation) => {
-    const current = cells.active.current;
-    return cells.requestOwner.current === operation
-      && !!current
-      && current.render.mount === operation.mount
-      && current.render.session === operation.session
-      && current.render.canEdit === operation.canEdit
-      && current.render.flushSave === operation.flushSave
-      && current.isExact()
-      && (
-        current === operation.publication
-        || (
-          current.render.manualPending
-          && current.render.manualSave?.owner === operation
-        )
-      );
-  };
-
-  const settle = (
-    operation: ManualSaveOperation,
-    error: unknown | null,
-  ) => {
-    if (!requestIsCurrent(operation)) return;
-    cells.requestOwner.current = null;
-    setManualSave((current) => {
-      if (current?.owner !== operation) return current;
-      return error === null
-        ? null
-        : Object.freeze({
-            owner: operation,
-            status: "failed" as const,
-            message: error instanceof Error ? error.message : "Save failed",
-          });
-    });
-  };
-
-  const onRootClickCapture = (event: React.MouseEvent<HTMLSpanElement>) => {
-    const nativeEvent = event?.nativeEvent;
-    const existing = cells.clickAdmissions.get(nativeEvent);
-    if (existing) {
-      existing.rejectAdditional(event);
-      return;
-    }
-    const runtime = currentRuntime;
-    const publication = runtime?.publication;
-    const root = rootOwner.element();
-    const button = buttonOwner.element();
-    const ownerDocument = root?.ownerDocument;
-    const ownerWindow = ownerDocument?.defaultView;
-    const target = event?.target;
-    if (
-      !runtime
-      || !publication
-      || !root
-      || !button
-      || !ownerDocument
-      || !ownerWindow
-      || !(nativeEvent instanceof ownerWindow.MouseEvent)
-      || nativeEvent.type !== "click"
-      || nativeEvent.button !== 0
-      || !(target instanceof ownerWindow.Node)
-      || target.ownerDocument !== ownerDocument
-      || !button.contains(target)
-      || !isLiveNativeEvent(nativeEvent, ownerDocument)
-      || !nativeEvent.composedPath().includes(root)
-      || !nativeEvent.composedPath().includes(button)
-      || cells.active.current !== publication
-      || publication.render !== render
-      || publication.render.identity !== render.identity
-      || render.buttonDisabled
-      || !render.canEdit
-      || !publication.isExact()
-    ) {
-      return;
-    }
-    if (
-      !manualSaveReactMouseWrapperIsExact(
-        event,
-        nativeEvent,
-        root,
-        target,
-        ownerWindow.Event.CAPTURING_PHASE,
-      )
-    ) {
-      return;
-    }
-    cells.clickAdmissions.set(
-      nativeEvent,
-      createManualSaveClickAdmission(
-        publication,
-        nativeEvent,
-        event,
-        target,
-        root,
-        button,
-      ),
-    );
-  };
-
-  const onButtonClickCapture = (event: React.MouseEvent<HTMLButtonElement>) => {
-    const nativeEvent = event?.nativeEvent;
-    const admission = cells.clickAdmissions.get(nativeEvent);
-    admission?.rejectAdditional(event);
-    if (admission && admission.reactEvent !== event) return;
-    const runtime = currentRuntime;
-    const publication = runtime?.publication;
-    const root = rootOwner.element();
-    const button = buttonOwner.element();
-    const ownerDocument = button?.ownerDocument;
-    const ownerWindow = ownerDocument?.defaultView;
-    const target = event?.target;
-    const wrapperIsExact = (
-      ownerWindow
-      && button
-      && nativeEvent instanceof ownerWindow.MouseEvent
-      && target instanceof ownerWindow.Node
-    )
-      ? manualSaveReactMouseWrapperIsExact(
-          event,
-          nativeEvent,
-          button,
-          target,
-          ownerWindow.Event.CAPTURING_PHASE,
-        )
-      : null;
-    if (
-      !runtime
-      || !publication
-      || !root
-      || !button
-      || !ownerDocument
-      || !ownerWindow
-      || !(nativeEvent instanceof ownerWindow.MouseEvent)
-      || nativeEvent.type !== "click"
-      || !(target instanceof ownerWindow.Node)
-      || target.ownerDocument !== ownerDocument
-      || !button.contains(target)
-      || nativeEvent.button !== 0
-      || !wrapperIsExact
-      || !isLiveNativeEvent(nativeEvent, ownerDocument)
-      || !nativeEvent.composedPath().includes(button)
-      || !admission
-      || admission.publication !== publication
-      || admission.nativeEvent !== nativeEvent
-      || admission.reactEvent !== event
-      || admission.target !== target
-      || admission.root !== root
-      || admission.button !== button
-      || cells.active.current !== publication
-      || publication.render !== render
-      || publication.render.identity !== render.identity
-      || !publication.isExact()
-      || render.buttonDisabled
-      || !render.canEdit
-      || !admission.deliverButton(event)
-    ) {
-      return;
-    }
-  };
-
-  const completeNativeClick = (event: Event) => {
-    const runtime = currentRuntime;
-    const publication = runtime?.publication;
-    const root = rootOwner.element();
-    const button = buttonOwner.element();
-    const ownerDocument = button?.ownerDocument;
-    const ownerWindow = ownerDocument?.defaultView;
-    if (
-      !runtime
-      || !publication
-      || !root
-      || !button
-      || !ownerDocument
-      || !ownerWindow
-      || !(event instanceof ownerWindow.MouseEvent)
-    ) {
-      return;
-    }
-    const admission = cells.clickAdmissions.get(event);
-    cells.clickAdmissions.delete(event);
-    const target = event.target;
-    if (
-      !admission
-      || admission.publication !== publication
-      || admission.nativeEvent !== event
-      || admission.root !== root
-      || admission.button !== button
-      || admission.target !== target
-      || !admission.isExact()
-      || event.type !== "click"
-      || event.button !== 0
-      || event.currentTarget !== button
-      || event.eventPhase === ownerWindow.Event.NONE
-      || !(target instanceof ownerWindow.Node)
-      || target.ownerDocument !== ownerDocument
-      || !button.contains(target)
-      || !event.composedPath().includes(root)
-      || !event.composedPath().includes(button)
-      || cells.requestOwner.current !== null
-      || cells.claimedPublications.has(publication)
-      || cells.claimedActions.has(render.action)
-      || cells.claimedReactEvents.has(admission.reactEvent)
-      || cells.claimedNativeEvents.has(event)
-      || cells.active.current !== publication
-      || publication.render !== render
-      || publication.render.identity !== render.identity
-      || !publication.isExact()
-      || render.buttonDisabled
-      || !render.canEdit
-      || !runtime.claimActivation()
-    ) {
-      return;
-    }
-
-    const operation: ManualSaveOperation = Object.freeze({
-      mount: render.mount,
-      session: render.session,
-      canEdit: render.canEdit,
-      flushSave: render.flushSave,
-      serial: cells.nextOperation.current + 1,
-      publication,
-      action: render.action,
-    });
-    cells.nextOperation.current = operation.serial;
-    cells.claimedPublications.add(publication);
-    cells.claimedActions.add(render.action);
-    cells.claimedReactEvents.add(admission.reactEvent);
-    cells.claimedNativeEvents.add(event);
-    cells.requestOwner.current = operation;
-    setManualSave(Object.freeze({ owner: operation, status: "pending" }));
-
-    void (async () => {
-      try {
-        await operation.flushSave.call(operation.session);
-        settle(operation, null);
-      } catch (error: unknown) {
-        settle(operation, error);
-      } finally {
-        if (cells.requestOwner.current === operation) cells.requestOwner.current = null;
-      }
-    })();
-  };
-
-  return Object.freeze({
-    captureRoot: rootOwner.capture,
-    captureButton: buttonOwner.capture,
-    captureIcon: iconOwner.capture,
-    captureText: textOwner.capture,
-    establish,
-    onRootClickCapture,
-    onButtonClickCapture,
-  });
 }
 
 export function SaveIndicator({ session, compact }: { session: CollabSession; compact?: boolean }) {
   const liveState = useSessionValue(session, (s) => s.saveState);
   const liveUnsyncedChanges = useSessionValue(session, (s) => s.unsyncedChanges);
   const liveDirty = useSessionValue(session, (s) => s.dirty);
-  const liveUnsynced = Math.max(liveUnsyncedChanges, liveDirty ? 1 : 0);
   const liveRecovered = useSessionValue(session, (s) => s.recovered);
   const liveProlonged = useSessionValue(session, (s) => s.prolongedOffline);
   const saveError = useSessionValue(session, (s) => s.saveError);
-  const [mount] = useState(() => Symbol("save indicator"));
-  const [cells] = useState<ManualSaveCells>(() => ({
-    active: { current: null },
-    successorOf: { current: null },
-    replay: { current: null },
-    requestOwner: { current: null },
-    nextOperation: { current: 0 },
-    claimedPublications: new WeakSet(),
-    claimedActions: new WeakSet(),
-    claimedReactEvents: new WeakSet(),
-    claimedNativeEvents: new WeakSet(),
-    clickAdmissions: new WeakMap(),
-  }));
+  // Pending and failure belong to the session they were started on, so a replaced session starts clean.
   const [manualSave, setManualSave] = useState<ManualSaveState | null>(null);
-  const [, setPublicationRevision] = useState(0);
-  const requestPublicationSuccessor = useCallback(() => {
-    setPublicationRevision((revision) => revision + 1);
-  }, []);
+  // Blocks a second click that lands before React re-renders the button as disabled.
+  const savingRef = useRef<CollabSession | null>(null);
+  const current = manualSave?.session === session ? manualSave : null;
+  const manualPending = current?.status === "pending";
+  const manualError = current?.status === "failed" ? current.message : null;
   const canEdit = session.canEdit;
-  const flushSave = session.flushSave;
-  const compatibleManualSave = manualSave
-    && manualSaveOperationMatches(manualSave.owner, mount, session, canEdit, flushSave)
-    && (
-      manualSave.status === "failed"
-      || cells.requestOwner.current === manualSave.owner
-    )
-    ? manualSave
-    : null;
-  const manualPending = compatibleManualSave?.status === "pending";
-  const manualError = compatibleManualSave?.status === "failed" ? compatibleManualSave.message : null;
 
-  useLayoutEffect(() => {
-    const requestOwner = cells.requestOwner.current;
-    if (
-      requestOwner
-      && !manualSaveOperationMatches(requestOwner, mount, session, canEdit, flushSave)
-    ) {
-      clearManualSaveRequest(cells, requestOwner);
-    }
-    if (manualSave && manualSave !== compatibleManualSave) {
-      setManualSave((current) => current === manualSave ? null : current);
-    }
-  }, [canEdit, cells, compatibleManualSave, flushSave, manualSave, mount, session]);
-  useEffect(() => () => {
-    const requestOwner = cells.requestOwner.current;
-    if (requestOwner?.mount === mount) clearManualSaveRequest(cells, requestOwner);
-    clearDetachedManualSaveReplay(cells, mount);
-  }, [cells, mount]);
+  // Same path as Ctrl+S (#2217): flush the session directly on every click or Enter/Space.
+  const onSave = () => {
+    if (!session.canEdit || savingRef.current === session) return;
+    const saving = session;
+    savingRef.current = saving;
+    setManualSave({ session: saving, status: "pending" });
+    saving.flushSave().then(
+      () => {
+        setManualSave((s) => (s?.session === saving ? null : s));
+      },
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : "Save failed";
+        setManualSave((s) => (s?.session === saving ? { session: saving, status: "failed", message } : s));
+      },
+    ).finally(() => {
+      if (savingRef.current === saving) savingRef.current = null;
+    });
+  };
 
   // The server renders a fresh session ("Connecting…"); an offline client may already have
   // failed to connect by the time React hydrates. Match the server markup first, then switch.
   const hydrated = useHydrated();
   const state: SaveState = hydrated ? liveState : "connecting";
-  const unsynced = hydrated ? liveUnsynced : 0;
+  const unsynced = hydrated ? Math.max(liveUnsyncedChanges, liveDirty ? 1 : 0) : 0;
   const recovered = hydrated && liveRecovered;
   const prolonged = hydrated && liveProlonged;
   const label = state === "error" && saveError
     ? "Save failed — retry"
     : saveStateLabel(state, unsynced, recovered, prolonged);
-  const visual = manualSaveVisual(state);
+  const visual = saveStateVisual(state);
   const flash = state === "saved" && recovered;
-  const rootClassName = cn(
-    "inline-flex items-center gap-1.5 rounded-md text-sm font-medium transition-colors",
-    visual.className,
-    flash && "save-state-recovered",
-  );
-  const rootTitle = manualError ?? saveError ?? (compact ? label : undefined);
-  const buttonClassName = "inline-flex items-center gap-1.5";
-  const buttonLabel = "Save document";
-  const buttonDisabled = !canEdit || manualPending;
-  const textClassName = cn(compact ? "sr-only" : "max-md:sr-only");
-  const text = manualError ?? label;
-  const render = Object.freeze<ManualSaveRender>({
-    identity: Object.freeze({}),
-    mount,
-    session,
-    canEdit,
-    flushSave,
-    liveState,
-    liveUnsyncedChanges,
-    liveDirty,
-    liveUnsynced,
-    liveRecovered,
-    liveProlonged,
-    saveError,
-    hydrated,
-    compact,
-    state,
-    unsynced,
-    recovered,
-    prolonged,
-    label,
-    manualSave: compatibleManualSave,
-    manualPending,
-    manualError,
-    flash,
-    icon: visual.icon,
-    iconClassName: visual.iconClassName,
-    rootClassName,
-    rootTitle,
-    buttonClassName,
-    buttonLabel,
-    buttonDisabled,
-    buttonBusy: manualPending,
-    textClassName,
-    text,
-    action: Object.freeze({}),
-  });
-  const publication = createManualSavePublication(
-    render,
-    cells,
-    requestPublicationSuccessor,
-    setManualSave,
-  );
-  useLayoutEffect(() => publication.establish(), [publication]);
-  const {
-    captureRoot,
-    captureButton,
-    captureIcon,
-    captureText,
-    onRootClickCapture,
-    onButtonClickCapture,
-  } = publication;
-  const icon = visual.icon === "check"
-    ? <Check ref={captureIcon} size={16} strokeWidth={2.5} />
-    : visual.icon === "cloud-off"
-      ? <CloudOff ref={captureIcon} size={16} />
-      : visual.icon === "loader"
-        ? <Loader2 ref={captureIcon} size={16} className={visual.iconClassName} />
-        : <AlertTriangle ref={captureIcon} size={16} />;
   return (
     <span
-      ref={captureRoot}
-      className={rootClassName}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md text-sm font-medium transition-colors",
+        visual.className,
+        flash && "save-state-recovered",
+      )}
       data-testid="save-state"
       data-state={state}
       data-live-state={state}
@@ -1475,21 +149,19 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
       data-recovered={flash || undefined}
       data-prolonged={prolonged || undefined}
       role="status"
-      title={rootTitle}
-      onClickCapture={onRootClickCapture}
+      title={manualError ?? saveError ?? (compact ? label : undefined)}
     >
       <button
-        ref={captureButton}
         type="button"
-        className={buttonClassName}
-        disabled={buttonDisabled}
+        className="inline-flex items-center gap-1.5"
+        disabled={!canEdit || manualPending}
         aria-busy={manualPending || undefined}
-        aria-label={buttonLabel}
-        onClickCapture={onButtonClickCapture}
+        aria-label="Save document"
+        onClick={onSave}
       >
-        {icon}
+        {visual.icon}
         {/* Phones show the icon only; the server markup uses the same responsive label. */}
-        <span ref={captureText} className={textClassName}>{text}</span>
+        <span className={cn(compact ? "sr-only" : "max-md:sr-only")}>{manualError ?? label}</span>
       </button>
     </span>
   );
@@ -13872,6 +12544,7 @@ interface MoreMenuPresentation {
   readonly onEscapeKeyDown: (event: KeyboardEvent) => void;
   readonly onOutside: (event: CustomEvent<{ originalEvent: Event }>) => void;
   readonly onCloseAutoFocus: (event: Event) => void;
+  readonly closeForPlainSelect: () => boolean;
 }
 
 class MoreMenuElementOwner<T extends HTMLElement> {
@@ -16693,6 +15366,14 @@ function createMoreMenuPresentation({
     onEscapeKeyDown,
     onOutside,
     onCloseAutoFocus: (event: Event) => event.preventDefault(),
+    // Reused by a plain MenuItem's own onSelect (see the Header component's onMoreMenuPlainSelect)
+    // so a mouse-driven close gets the exact same focus handoff Enter already gets through
+    // genericSelectListener's `close(publication, true, null, mode)` call above - no new gate,
+    // just the existing close path invoked from a different caller.
+    closeForPlainSelect: () => {
+      const publication = currentPublication();
+      return publication ? close(publication) : false;
+    },
   });
 }
 
@@ -16816,7 +15497,29 @@ export const Header = memo(function Header(props: HeaderProps) {
     onEscapeKeyDown: onMoreMenuEscapeKeyDown,
     onOutside: onMoreMenuOutside,
     onCloseAutoFocus: onMoreMenuCloseAutoFocus,
+    closeForPlainSelect: closeMoreMenuForPlainSelect,
   } = moreMenuPresentation;
+  // #2203 root cause: a plain MenuItem's own onSelect always runs (that's Radix's own
+  // close-on-select contract), but on a REAL, trusted mouse click the menu's native-event close
+  // path never fires: the capture-phase `genericClickListener` stages a one-shot `genericSelection`
+  // admission token and queues a microtask to clear it, and that microtask always runs - clearing
+  // the token - before Radix's separately-scheduled click handling gets around to dispatching its
+  // internal "menu.itemSelect" custom event, so `genericSelectListener`'s admission check always
+  // sees a cleared token and never calls `close()`. Enter doesn't hit this: Radix handles it by
+  // calling the item's `.click()` from script, which drives the whole chain - including
+  // "menu.itemSelect" - synchronously in one task, ahead of the queued microtask. So close the menu
+  // ourselves, directly, before running the item's action, instead of depending on that race - and
+  // reuse the menu's own `close()` (`closeForPlainSelect` above) so the mouse path gets the same
+  // focus handoff Enter already gets, rather than just flipping state.
+  const onMoreMenuPlainSelect = (action: () => void) => () => {
+    if (!closeMoreMenuForPlainSelect()) {
+      setStoredMoreMenuState(Object.freeze({ visit: moreMenuVisit, open: false }));
+    }
+    action();
+  };
+  const onMoreMenuWindowOpenSelect = (url: string) => onMoreMenuPlainSelect(
+    () => window.open(url, "_blank", "noopener"),
+  );
   // Star state and the notifications poll wait for the first sync: the socket handshake and the
   // collab-token call get the server to themselves on open (#118).
   const settled = useOpenSettled(session);
@@ -16918,12 +15621,12 @@ export const Header = memo(function Header(props: HeaderProps) {
           >
             {compact && (
               <>
-                <MenuItem icon={<UserPlus size={15} />} onSelect={props.onShare} data-testid="menu-share">
+                <MenuItem icon={<UserPlus size={15} />} onSelect={onMoreMenuPlainSelect(props.onShare)} data-testid="menu-share">
                   Share…
                 </MenuItem>
                 <MenuItem
                   icon={linked ? <UploadCloud size={15} /> : <GitHubIcon size={15} />}
-                  onSelect={linked ? props.onPublishNow : props.onPublish}
+                  onSelect={onMoreMenuPlainSelect(linked ? props.onPublishNow : props.onPublish)}
                   disabled={props.publishing || (linked ? !canEdit : !props.isOwner || !githubConfigured)}
                   title={!linked && !githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
                   data-testid="menu-publish"
@@ -16938,7 +15641,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MenuItem ref={captureHistory} icon={<History size={15} />} onSelect={onHistorySelect} data-testid="menu-history">
               Version history
             </MenuItem>
-            <MenuItem icon={<Activity size={15} />} onSelect={props.onActivity} data-testid="menu-activity">
+            <MenuItem icon={<Activity size={15} />} onSelect={onMoreMenuPlainSelect(props.onActivity)} data-testid="menu-activity">
               Activity
             </MenuItem>
             {canEdit && (
@@ -16947,16 +15650,16 @@ export const Header = memo(function Header(props: HeaderProps) {
               </MenuItem>
             )}
             <MenuSeparator />
-            <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)} data-testid="download-md">
+            <MenuItem icon={<Download size={15} />} onSelect={onMoreMenuPlainSelect(() => props.onDownload("md", false))} data-testid="download-md">
               Download Markdown
             </MenuItem>
-            <MenuItem icon={<FileCode2 size={15} />} onSelect={() => props.onDownload("html", false)} data-testid="download-html">
+            <MenuItem icon={<FileCode2 size={15} />} onSelect={onMoreMenuPlainSelect(() => props.onDownload("html", false))} data-testid="download-html">
               Download HTML
             </MenuItem>
-            <MenuItem icon={<FileText size={15} />} onSelect={() => props.onDownload("pdf", false)} data-testid="download-pdf">
+            <MenuItem icon={<FileText size={15} />} onSelect={onMoreMenuPlainSelect(() => props.onDownload("pdf", false))} data-testid="download-pdf">
               Download PDF
             </MenuItem>
-            <MenuItem icon={<Copy size={15} />} onSelect={props.onCopyMarkdown}>
+            <MenuItem icon={<Copy size={15} />} onSelect={onMoreMenuPlainSelect(props.onCopyMarkdown)}>
               Copy Markdown
             </MenuItem>
             <MenuItem
@@ -16969,19 +15672,19 @@ export const Header = memo(function Header(props: HeaderProps) {
             >
               {props.documentMutation === "duplicate" ? "Making a copy…" : "Make a copy"}
             </MenuItem>
-            <MenuItem icon={<BookOpen size={15} />} onSelect={() => window.open(`/p/${doc.id}`, "_blank", "noopener")} data-testid="menu-reader">
+            <MenuItem icon={<BookOpen size={15} />} onSelect={onMoreMenuWindowOpenSelect(`/p/${doc.id}`)} data-testid="menu-reader">
               Open reader view
             </MenuItem>
             <MenuSeparator />
             {linked && doc.githubUrl && (
-              <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
+              <MenuItem icon={<ExternalLink size={15} />} onSelect={onMoreMenuWindowOpenSelect(doc.githubUrl)}>
                 Open on GitHub
               </MenuItem>
             )}
             {props.isOwner && (
               <MenuItem
                 icon={<GitHubIcon size={15} />}
-                onSelect={props.onPublish}
+                onSelect={onMoreMenuPlainSelect(props.onPublish)}
                 disabled={!linked && !githubConfigured}
                 title={!linked && !githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
                 data-testid="menu-github"
@@ -16990,18 +15693,18 @@ export const Header = memo(function Header(props: HeaderProps) {
               </MenuItem>
             )}
             {props.onCommandPalette && (
-              <MenuItem icon={<Command size={15} />} onSelect={props.onCommandPalette} shortcut={shortcut("Mod-K")} data-testid="menu-command-palette">
+              <MenuItem icon={<Command size={15} />} onSelect={onMoreMenuPlainSelect(props.onCommandPalette)} shortcut={shortcut("Mod-K")} data-testid="menu-command-palette">
                 Search commands
               </MenuItem>
             )}
-            <MenuItem icon={<Keyboard size={15} />} onSelect={props.onShortcuts}>
+            <MenuItem icon={<Keyboard size={15} />} onSelect={onMoreMenuPlainSelect(props.onShortcuts)}>
               Keyboard shortcuts
             </MenuItem>
             <MenuSeparator />
-            <MenuItem icon={<ArrowLeft size={15} />} onSelect={props.onHome}>
+            <MenuItem icon={<ArrowLeft size={15} />} onSelect={onMoreMenuPlainSelect(props.onHome)}>
               All documents
             </MenuItem>
-            <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
+            <MenuItem icon={<LogOut size={15} />} onSelect={onMoreMenuPlainSelect(() => void signOutSafely())}>
               Sign out
             </MenuItem>
             {props.isOwner && (
