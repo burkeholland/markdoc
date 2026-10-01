@@ -463,3 +463,36 @@ export async function ensureCommentsOpen(page: Page) {
   }
   await expect(page.getByTestId("comments-panel")).toBeVisible();
 }
+
+/** Phone width has no code pane, so `openDocument` (which waits for CodeMirror) does not apply: open the document and its Comments sheet. */
+export async function openPhoneComments(page: Page, id: string) {
+  await page.goto(`/d/${id}`);
+  await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+  await expect(page.locator(".md-rich")).toBeVisible();
+  await page.getByTestId("comments-toggle").click();
+  await expect(page.getByTestId("comments-panel")).toBeVisible();
+}
+
+export type CommentsTab = "open" | "resolved" | "suggestions";
+
+/** The comments panel shows exactly `tab`: it alone is selected and the tab stop, and the tab panel is labelled by it. */
+export async function expectCommentsTab(page: Page, tab: CommentsTab, { focused = false }: { focused?: boolean } = {}) {
+  for (const id of ["open", "resolved", "suggestions"] as const) {
+    const el = page.getByTestId(`comments-tab-${id}`);
+    await expect(el).toHaveAttribute("aria-selected", String(id === tab));
+    await expect(el).toHaveAttribute("tabindex", id === tab ? "0" : "-1");
+  }
+  await expect(page.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", `comments-tab-${tab}`);
+  if (focused) await expect(page.getByTestId(`comments-tab-${tab}`)).toBeFocused();
+}
+
+/** The Settings theme picker has `preference` checked, focused and as its only tab stop, and it is saved. */
+export async function expectThemeOption(page: Page, preference: "system" | "light" | "dark") {
+  for (const id of ["system", "light", "dark"] as const) {
+    const el = page.getByTestId(`theme-option-${id}`);
+    await expect(el).toHaveAttribute("aria-checked", String(id === preference));
+    await expect(el).toHaveAttribute("tabindex", id === preference ? "0" : "-1");
+  }
+  await expect(page.getByTestId(`theme-option-${preference}`)).toBeFocused();
+  expect(await page.evaluate(() => localStorage.getItem("markdoc:theme"))).toBe(preference);
+}
