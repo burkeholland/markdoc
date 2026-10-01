@@ -190,14 +190,19 @@ bounded pass report with an empty package list and all blocked, severity,
 vulnerability, reported and omitted counts equal to zero. An advisory whose
 optional fields npm sends as null, such as a CVSS vector, still counts as a
 finding. Each audit attempt gets 120 seconds. The preflight retries once, after
-2 seconds, only when an attempt printed nothing on stdout and ended with an
-error exit or signal, a failed start or a timeout. Anything npm printed is
-judged and never retried. A timed-out attempt never passes: output it printed
+2 seconds, only when an attempt printed nothing on stdout or exactly npm's
+string-only `{"error":{...}}` object, and ended with an error exit or signal,
+a failed start or a timeout. Any other output, including a malformed report
+or an error object with extra top-level keys, is judged and never retried.
+Audit reports must have exactly `auditReportVersion`, `vulnerabilities` and
+`metadata` at the top level; unknown keys fail closed as `malformed_audit`.
+A timed-out attempt never passes: a report it printed
 counts as `rejected` when it is a complete report with findings and as
 `malformed_audit` otherwise. A `command_failed` report adds a `reason` built
 only from fixed pieces, never from npm's own text: how the attempt ended (exit
-code, signal name, timeout or start error code), npm's error code when a whole
-stderr line reads like `npm error code E401`, and the attempt number, for
+code, signal name, timeout or start error code), npm's error code from that
+exact error object's `code` or a whole stderr line like `npm error code E401`,
+accepting only a whole `E[A-Z0-9_]{1,24}` code, and the attempt number, for
 example `npm audit exit 1, npm code E401 (attempt 2 of 2)`. On failure the
 command prints at most the preflight status and, for `command_failed`, a
 reason in exactly that format. If the reason does not match that format, it
