@@ -28,8 +28,8 @@ async function openConnectFromShare(page: Page) {
 const postsToTokens = (page: Page) => page.waitForRequest((req) => req.url().endsWith("/api/tokens") && req.method() === "POST");
 
 /**
- * The Share dialog is people, link, and one row that leads to the agent steps. The steps themselves (pick an agent,
- * make a key, paste one command) are src/components/agents; the endpoint is covered by src/app/api/mcp/route.test.ts
+ * The Share dialog is people, link, and one row that leads to the agent steps. The steps themselves (make a key,
+ * paste the common MCP config) are src/components/agents; the endpoint is covered by src/app/api/mcp/route.test.ts
  * and scripts/mcp-smoke.mjs. Here: how it lays out, and that what it hands out really works.
  */
 test.describe("share dialog", () => {
@@ -99,9 +99,10 @@ test.describe("share dialog", () => {
 
     const { dialog, setup } = await openConnectFromShare(page);
     await expect(page.getByRole("dialog", { name: /share/i })).toHaveCount(0);
-    // A new account starts at the beginning: Copilot CLI picked, sensible defaults, and nothing secret on the page yet.
+    // A new account starts with the common MCP setup, sensible defaults, and no secret on the page.
     await expect(setup).toHaveAttribute("data-state", "new");
-    await expect(setup.getByRole("radio", { name: "Copilot CLI" })).toBeChecked();
+    await expect(setup.getByRole("radiogroup", { name: "Agent" })).toHaveCount(0);
+    await expect(setup.getByRole("heading", { name: "Add Markdoc to your agent" })).toBeVisible();
     await expect(setup.getByTestId("agent-key-summary")).toHaveText("Comment & suggest · all your documents · expires in 90 days");
     await expect(setup.getByTestId("agent-setup-snippet")).toHaveCount(0);
     await expect(setup).toContainText("Once your agent is connected, you get a sentence to paste into it.");
@@ -111,28 +112,23 @@ test.describe("share dialog", () => {
 
     // One click makes the key, with the defaults.
     const [request] = await Promise.all([postsToTokens(page), setup.getByTestId("agent-create-key").click()]);
-    expect(request.postDataJSON()).toEqual({ name: "Copilot CLI", expiresInDays: 90, scope: "comment", documentIds: null });
+    expect(request.postDataJSON()).toEqual({ name: "AI agent", expiresInDays: 90, scope: "comment", documentIds: null });
     await expect(setup).toHaveAttribute("data-state", "waiting");
     const snippet = setup.getByTestId("agent-setup-snippet");
     await expect(snippet).toBeVisible();
     const command = await readBlock(snippet);
     const key = keyIn(command);
     expect(key, "the command carries the new key").not.toBe("");
-    expect(command).toBe(`copilot mcp add --transport http --header "Authorization: ${bearer(key)}" markdoc ${origin}/api/mcp`);
+    expect(JSON.parse(command)).toEqual({ mcpServers: { markdoc: { type: "http", url: `${origin}/api/mcp`, headers: { Authorization: bearer(key) } } } });
     await expect(setup).toContainText("It is shown only once");
     await expect(setup.getByTestId("agent-connection")).toHaveAttribute("data-state", "waiting");
-    // Step 3 has come alive: the sentence names this document.
+    // The invite has come alive: the sentence names this document.
     await expect(setup.getByTestId("agent-invite-prompt")).toContainText(`(id ${id})`);
     // Copy is already focused, and puts exactly the command on the clipboard.
     await expect(setup.getByTestId("agent-setup-copy")).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(setup.getByTestId("agent-setup-copy")).toHaveText("Copied");
     expect((await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n")).toBe(command);
-
-    // "Skip permission prompts" lists only the tools a comment-scoped key can run.
-    await setup.getByText("Skip permission prompts", { exact: true }).click();
-    const allowLine = setup.locator("details", { hasText: "Skip permission prompts" }).locator("pre");
-    expect(await readBlock(allowLine)).toBe("copilot --allow-tool 'markdoc(markdoc_suggest),markdoc(markdoc_comment),markdoc(markdoc_presence)'");
 
     // The URL in the command is live, and the key in it works.
     const alive = await page.request.get(`${origin}/api/mcp`);
@@ -151,7 +147,7 @@ test.describe("share dialog", () => {
 
     // The dialog notices (it looks every few seconds): the command has done its job, so it and the key leave the screen.
     await expect(setup).toHaveAttribute("data-state", "connected", { timeout: 15_000 });
-    await expect(dialog.getByTestId("agent-connected-banner")).toContainText("Copilot CLI is connected");
+    await expect(dialog.getByTestId("agent-connected-banner")).toContainText("AI agent is connected");
     await expect(dialog.getByTestId("agent-invite-prompt")).toContainText(`(id ${id})`);
     await expect(dialog.getByTestId("agent-setup-snippet")).toHaveCount(0);
     expect(await page.locator("body").innerText()).not.toContain(key);
@@ -167,7 +163,7 @@ test.describe("share dialog", () => {
     await context.close();
   });
 
-  test("the command follows the agent you pick: one key, six formats, and the pick is remembered", async ({ browser }) => {
+  test("one key supplies the common MCP config and form fields, and closing clears the secret", async ({ browser }) => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
     await devLogin(page, uniqueLogin("share-agent-picker"));
@@ -181,8 +177,7 @@ test.describe("share dialog", () => {
     });
 
     const { dialog, setup } = await openConnectFromShare(page);
-    const picker = setup.getByRole("radiogroup", { name: "Agent" });
-    await expect(picker.getByRole("radio")).toHaveCount(6);
+    await expect(setup.getByRole("radiogroup", { name: "Agent" })).toHaveCount(0);
     await setup.getByTestId("agent-create-key").click();
     const snippet = setup.getByTestId("agent-setup-snippet");
     await expect(snippet).toBeVisible();
@@ -190,36 +185,25 @@ test.describe("share dialog", () => {
     expect(key).not.toBe("");
     const authorization = bearer(key);
 
-    await picker.getByText("Claude Code", { exact: true }).click();
-    await expect(setup.getByRole("heading", { name: "Add Markdoc to Claude Code" })).toBeVisible();
-    expect(await readBlock(snippet)).toBe(`claude mcp add --transport http --scope user markdoc ${url} --header "Authorization: ${authorization}"`);
-
-    await picker.getByText("Cursor", { exact: true }).click();
-    expect(JSON.parse(await readBlock(snippet))).toEqual({ mcpServers: { markdoc: { url, headers: { Authorization: authorization } } } });
-
-    await picker.getByText("VS Code", { exact: true }).click();
-    expect(JSON.parse(await readBlock(snippet))).toEqual({ servers: { markdoc: { type: "http", url, headers: { Authorization: authorization } } } });
-    await expect(setup).toContainText("MCP: Open User Configuration");
-
-    await picker.getByText("Other", { exact: true }).click();
-    expect(JSON.parse(await readBlock(snippet))).toEqual({ mcpServers: { markdoc: { type: "http", url, headers: { Authorization: authorization }, tools: ["*"] } } });
-    await setup.getByText("No HTTP support?", { exact: true }).click();
-    const stdio = JSON.parse(await readBlock(setup.locator("details", { hasText: "No HTTP support?" }).locator("pre"))) as { mcpServers: { markdoc: { env: Record<string, string> } } };
-    expect(stdio.mcpServers.markdoc.env).toEqual({ MARKDOC_URL: origin, MARKDOC_TOKEN: key });
-
-    await picker.getByText("Copilot app", { exact: true }).click();
-    expect(await readBlock(snippet)).toBe(`MARKDOC_URL=${origin}\nMARKDOC_TOKEN=${key}`);
-    await expect(setup.getByText("Install the extension", { exact: true })).toBeVisible();
-    await expect(setup.getByTestId("agent-client-docs-link")).toHaveAttribute("href", `${AGENT_DOCS_URL}#inside-the-copilot-app`);
-
-    // Six formats, one key.
+    expect(JSON.parse(await readBlock(snippet))).toEqual({ mcpServers: { markdoc: { type: "http", url, headers: { Authorization: authorization } } } });
+    await setup.getByText("Adding it through a form instead?", { exact: true }).click();
+    const fields = setup.getByTestId("agent-setup-fields");
+    await expect(fields).toBeVisible();
+    expect(await readBlock(fields.getByTestId("agent-setup-url"))).toBe(url);
+    expect(await readBlock(fields.getByTestId("agent-setup-header"))).toBe(authorization);
+    await expect(setup.getByTestId("agent-docs-link")).toHaveAttribute("href", AGENT_DOCS_URL);
     expect(creates).toBe(1);
 
-    // The pick is remembered the next time the steps open.
+    // The key stays on the server, but its one-time config is never recovered from a reopened dialog.
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
     const again = await openConnectFromShare(page);
-    await expect(again.setup.getByRole("radio", { name: "Copilot app" })).toBeChecked();
+    await expect(again.setup).toHaveAttribute("data-state", "new");
+    await expect(again.setup.getByTestId("agent-setup-snippet")).toHaveCount(0);
+    expect(await page.locator("body").innerText()).not.toContain(key);
+    await again.setup.getByTestId("agent-options-toggle").click();
+    await expect(again.setup.getByTestId("agent-key-name")).toHaveValue("AI agent 2");
+    expect(creates).toBe(1);
     await context.close();
   });
 
@@ -294,14 +278,7 @@ test.describe("share dialog", () => {
     await options.getByTestId("agent-expires").selectOption("never");
     await expect(setup.getByTestId("agent-key-summary")).toHaveText("Full access · this document only · never expires");
     const [request] = await Promise.all([postsToTokens(page), setup.getByTestId("agent-create-key").click()]);
-    expect(request.postDataJSON()).toEqual({ name: "Copilot CLI", expiresInDays: null, scope: "full", documentIds: [id] });
-
-    // The pre-allow line grows with what a full key can run.
-    await setup.getByText("Skip permission prompts", { exact: true }).click();
-    const allowLine = setup.locator("details", { hasText: "Skip permission prompts" }).locator("pre");
-    expect(await readBlock(allowLine)).toBe(
-      "copilot --allow-tool 'markdoc(markdoc_suggest),markdoc(markdoc_comment),markdoc(markdoc_presence),markdoc(markdoc_append),markdoc(markdoc_create_document)'",
-    );
+    expect(request.postDataJSON()).toEqual({ name: "AI agent", expiresInDays: null, scope: "full", documentIds: [id] });
 
     const key = keyIn(await readBlock(setup.getByTestId("agent-setup-snippet")));
     const auth = { Authorization: bearer(key), "Content-Type": "application/json" };

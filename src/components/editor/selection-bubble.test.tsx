@@ -21,6 +21,7 @@ import { schema } from "@/editor/markdown/schema";
 import { createRichEditorState } from "@/editor/prosemirror/setup";
 import { EditorActions, EMPTY_FORMAT } from "./actions";
 import { SelectionBubble } from "./selection-bubble";
+import { budgetMs } from "../../../scripts/lib/test-budget";
 
 const screen = within(document.documentElement);
 type SelectionBubbleProps = ComponentProps<typeof SelectionBubble>;
@@ -2281,5 +2282,5 @@ describe("SelectionBubble geometry scheduling", () => {
     expect(env.frames.size).toBe(0);
     expect(env.opened.size).toBe(0);
     expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
-  }, 60_000);
+  }, budgetMs(60_000));
 });

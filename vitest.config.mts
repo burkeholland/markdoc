@@ -1,6 +1,9 @@
 import { defineConfig } from "vitest/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { budgetScale } from "./scripts/lib/test-budget.ts";
+
+console.info(`[vitest] stress timing budgets x${budgetScale()}`);
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const include = ["src/**/*.test.ts", "src/**/*.test.tsx", "server/**/*.test.ts", "scripts/**/*.test.ts"];

@@ -23,6 +23,7 @@ import { serializeBlocks } from "../markdown/serialize";
 import { insertHardBreak } from "../prosemirror/commands";
 import { textChangeSpan } from "../markdown/incremental";
 import { diffOps, diffOpsWords, applyOps } from "./text-diff";
+import { budgetMs } from "../../../scripts/lib/test-budget";
 
 function makeEditor(ytext: Y.Text) {
   const binding = new MarkdownBinding(ytext);
@@ -3985,7 +3986,7 @@ describe("MarkdownBinding", () => {
       findDiffStart.mockRestore();
       findDiffEnd.mockRestore();
     },
-    180_000,
+    budgetMs(180_000),
   );
 
   it.each([

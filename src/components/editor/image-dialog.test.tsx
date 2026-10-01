@@ -917,7 +917,7 @@ describe("ImageDialog upload lifecycle", () => {
     },
   );
 
-  it("abandons a current upload invalidated before terminal settlement and permits retry", async () => {
+  it("recovers a current upload after a restored DOM change and permits another upload", async () => {
     const failed = deferred<UploadResult>();
     const retry = deferred<UploadResult>();
     const onUpload = vi
@@ -931,18 +931,18 @@ describe("ImageDialog upload lifecycle", () => {
     content.className = "mutated-before-terminal-settlement";
     content.className = className;
     await act(async () => {});
-    const readUrl = vi.fn(() => "/api/assets/untrusted");
-    const result = { alt: "Untrusted Alt" } as UploadResult;
+    const readUrl = vi.fn(() => "/api/assets/recovered");
+    const result = { alt: "Recovered Alt" } as UploadResult;
     Object.defineProperty(result, "url", { get: readUrl });
 
     await act(async () => {
       failed.resolve(result);
       await failed.promise;
     });
-    expect(readUrl).not.toHaveBeenCalled();
+    expect(readUrl).toHaveBeenCalledOnce();
     expect(screen.getByTestId("image-upload")).toBeEnabled();
-    expect(screen.getByTestId("image-url")).toHaveValue("");
-    expect(screen.getByTestId("image-alt")).toHaveValue("");
+    expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/recovered");
+    expect(screen.getByTestId("image-alt")).toHaveValue("Recovered Alt");
     expect(screen.queryByRole("alert")).toBeNull();
 
     const retryFile = new File(["retry"], "retry.png", {
@@ -1537,7 +1537,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     },
   );
 
-  it("retires restored content mutation queued before passive settlement", async () => {
+  it("recovers controls after restored content mutation queued before passive settlement", async () => {
     const staleClose = vi.fn();
     const currentClose = vi.fn();
     const onUpload = vi.fn();
@@ -1570,7 +1570,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     );
     expect(mutationQueued).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleClose).toHaveBeenCalledExactlyOnceWith(false);
 
     await view.render(
       <ImageDialog
@@ -1581,7 +1581,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleClose).toHaveBeenCalledOnce();
     expect(currentClose).toHaveBeenCalledOnce();
   });
 
@@ -2137,7 +2137,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
-  it("does not recover a partial replay after an unexpected ref replay", async () => {
+  it("publishes fresh controls after an unexpected ref replay", async () => {
     const staleClose = vi.fn();
     const currentClose = vi.fn();
     const onUpload = vi.fn();
@@ -2165,7 +2165,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     });
     await act(async () => {});
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleClose).toHaveBeenCalledExactlyOnceWith(false);
 
     try {
       await view.render(
@@ -2177,7 +2177,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         />,
       );
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleClose).toHaveBeenCalledOnce();
       expect(currentClose).toHaveBeenCalledOnce();
     } finally {
       foreign.remove();
@@ -4133,7 +4133,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
   );
 
   it.each(["ancestor", "files"] as const)(
-    "keeps the replay guard alive while reading successor %s",
+    "keeps dirty ancestor replay retired but recovers restored file mutation while reading successor %s",
     async (kind) => {
       const staleClose = vi.fn();
       const currentClose = vi.fn();
@@ -4202,7 +4202,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       }
       expect(dirty).toHaveBeenCalledOnce();
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleClose).toHaveBeenCalledTimes(kind === "files" ? 1 : 0);
 
       await view.render(
         <ImageDialog
@@ -4213,7 +4213,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         />,
       );
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleClose).toHaveBeenCalledTimes(kind === "files" ? 1 : 0);
       expect(currentClose).toHaveBeenCalledOnce();
     },
   );
@@ -4479,7 +4479,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
   });
 
   it.each(["value", "files"] as const)(
-    "rejects a candidate when its file %s getter detaches a required ref",
+    "publishes fresh controls when its file %s getter detaches a required ref",
     async (property) => {
       const staleClose = vi.fn();
       const currentClose = vi.fn();
@@ -4521,7 +4521,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       }
       expect(detach).toHaveBeenCalledOnce();
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleClose).toHaveBeenCalledExactlyOnceWith(false);
 
       await view.render(
         <ImageDialog
@@ -4532,7 +4532,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         />,
       );
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleClose).toHaveBeenCalledOnce();
       expect(currentClose).toHaveBeenCalledOnce();
     },
   );
