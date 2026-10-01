@@ -190,18 +190,35 @@ bounded pass report with an empty package list and all blocked, severity,
 vulnerability, reported and omitted counts equal to zero. An advisory whose
 optional fields npm sends as null, such as a CVSS vector, still counts as a
 finding. Each audit attempt gets 120 seconds. The preflight retries once, after
-2 seconds, only when an attempt printed nothing on stdout and ended with an
-error exit or signal, a failed start or a timeout. Anything npm printed is
-judged and never retried. A timed-out attempt never passes: output it printed
+2 seconds, only when an attempt printed nothing on stdout or exactly npm's
+string-only `{"error":{...}}` object, and ended with an error exit or signal,
+a failed start or a timeout. Any other output, including a malformed report
+or an error object with extra top-level keys, is judged and never retried.
+Audit reports must have exactly `auditReportVersion`, `vulnerabilities` and
+`metadata` at the top level; unknown keys fail closed as `malformed_audit`.
+A timed-out attempt never passes: a report it printed
 counts as `rejected` when it is a complete report with findings and as
 `malformed_audit` otherwise. A `command_failed` report adds a `reason` built
 only from fixed pieces, never from npm's own text: how the attempt ended (exit
-code, signal name, timeout or start error code), npm's error code when a whole
-stderr line reads like `npm error code E401`, and the attempt number, for
+code, signal name, timeout or start error code), npm's error code from that
+exact error object's `code` or a whole stderr line like `npm error code E401`,
+accepting only a whole `E[A-Z0-9_]{1,24}` code, and the attempt number, for
 example `npm audit exit 1, npm code E401 (attempt 2 of 2)`. On failure the
 command prints at most the preflight status and, for `command_failed`, a
 reason in exactly that format. If the reason does not match that format, it
 prints only that the raw output was withheld.
+
+`malformed_audit` can mean cut-off or invalid JSON, wrong field types, or a
+top-level key other than `auditReportVersion`, `vulnerabilities` and `metadata`.
+On a trusted machine, check the top-level key names without printing values:
+
+```powershell
+npm audit --package-lock-only --json | node -e "const o=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(Object.keys(o).join(','))"
+```
+
+The current report prints `auditReportVersion,vulnerabilities,metadata`. A new
+key needs a human to review it and update `parseAuditJson`; it is never a reason
+to bypass the preflight.
 
 The current lock resolves the audited transitive packages to
 `fast-uri@3.1.8`, `qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and
