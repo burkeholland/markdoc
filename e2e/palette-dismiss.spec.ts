@@ -62,8 +62,8 @@ for (const how of ["escape", "outside click"] as const) {
       await context.close();
     });
 
-    // blocked by #2203 (More menu stays open after a mouse pick), fixed by PR #2207
-    test.fixme("More > Search commands with the mouse: the next click lands", async ({ browser }) => {
+    // The More menu must close after a mouse pick (#2203) or the leftover body pointer-events block this click.
+    test("More > Search commands with the mouse: the next click lands", async ({ browser }) => {
       const { page, context } = await signIn(browser, uniqueLogin("palette-dismiss-more-mouse-next"));
       await openDoc(page);
       await page.getByTestId("more-menu").click();
