@@ -464,6 +464,15 @@ export async function ensureCommentsOpen(page: Page) {
   await expect(page.getByTestId("comments-panel")).toBeVisible();
 }
 
+/** Phone width has no code pane, so `openDocument` (which waits for CodeMirror) does not apply: open the document and its Comments sheet. */
+export async function openPhoneComments(page: Page, id: string) {
+  await page.goto(`/d/${id}`);
+  await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+  await expect(page.locator(".md-rich")).toBeVisible();
+  await page.getByTestId("comments-toggle").click();
+  await expect(page.getByTestId("comments-panel")).toBeVisible();
+}
+
 export type CommentsTab = "open" | "resolved" | "suggestions";
 
 /** The comments panel shows exactly `tab`: it alone is selected and the tab stop, and the tab panel is labelled by it. */

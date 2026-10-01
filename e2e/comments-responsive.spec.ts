@@ -86,6 +86,8 @@ for (const width of [390, 520, 768, 1024, 1280]) {
 
       const mark = page.locator(`.md-rich [data-highlight-id="${thread}"]`).first();
       await mark.click();
+      // A highlight click activates its thread after a 750 ms window (highlights.ts); typing sooner cancels it.
+      await expect.poll(() => page.evaluate(() => (window as EditorWindow).__markdocSession?.activeCommentId ?? null)).toBe(thread);
       if (width < TABLET_MAX) await noOverlay(page);
       else await checkPanel(page, width, thread);
       const before = await reading(page);

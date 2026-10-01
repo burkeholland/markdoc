@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { createDocument, ensureCommentsOpen, expectCommentsTab, expectThemeOption, openDocument, signIn } from "./helpers";
+import { PHONE_MAX } from "../src/lib/viewport";
+import { createDocument, ensureCommentsOpen, expectCommentsTab, expectThemeOption, openDocument, openPhoneComments, signIn } from "./helpers";
 
 /**
  * Real mouse clicks and real key presses on the two radio-like controls whose handlers used to sit behind
@@ -46,18 +47,26 @@ test.describe("comments panel tabs", () => {
     await user.context.close();
   });
 
-  test("the close button closes the panel", async ({ browser }) => {
-    const user = await signIn(browser, "tabs-close");
-    const { page } = user;
-    const id = await createDocument(page, "# Close\n\nText.\n", "Close");
-    await openDocument(page, id);
-    await ensureCommentsOpen(page);
+  for (const width of [390, 768, 1280]) {
+    test(`the close button closes the panel at ${width} CSS px`, async ({ browser }) => {
+      const user = await signIn(browser, `tabs-close-${width}`);
+      const { page } = user;
+      await page.setViewportSize({ width, height: 844 });
+      const id = await createDocument(page, "# Close\n\nText.\n", "Close");
+      if (width < PHONE_MAX) await openPhoneComments(page, id);
+      else {
+        await openDocument(page, id);
+        await ensureCommentsOpen(page);
+      }
+      await page.getByTestId("comments-tab-resolved").click();
+      await expectCommentsTab(page, "resolved", { focused: true });
 
-    await page.getByRole("button", { name: "Close comments" }).click();
+      await page.getByRole("button", { name: "Close comments" }).click();
 
-    await expect(page.getByTestId("comments-panel")).toHaveCount(0);
-    await user.context.close();
-  });
+      await expect(page.getByTestId("comments-panel")).toHaveCount(0);
+      await user.context.close();
+    });
+  }
 });
 
 test.describe("Settings theme picker", () => {

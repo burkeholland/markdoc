@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { createDocument, devLogin, ensureCommentsOpen, expectCommentsTab, expectThemeOption, mintToken, openDocument, richText, uniqueLogin, waitForHydration } from "./helpers";
+import { createDocument, devLogin, ensureCommentsOpen, expectCommentsTab, expectThemeOption, mintToken, openDocument, openPhoneComments, richText, uniqueLogin, waitForHydration } from "./helpers";
 
 /** Text of the code pane as rendered. The dev-only `__markdocSession` hook used by the regular suite is not exposed by a production build. */
 const codeText = (page: Page) => page.locator(".cm-content").innerText();
@@ -176,6 +176,18 @@ test.describe("production build", () => {
         await page.keyboard.press(key);
         await expectCommentsTab(page, tab, { focused: true });
       }
+
+      await page.getByRole("button", { name: "Close comments" }).click();
+      await expect(page.getByTestId("comments-panel")).toHaveCount(0);
+    });
+
+    test("the Close comments button closes the sheet at phone width (#2198)", async ({ page }) => {
+      await signInFresh(page, "prod-close-phone");
+      await page.setViewportSize({ width: 390, height: 844 });
+      const id = await createDocument(page, "# Smoke close\n\nThe phone sheet.\n", "Smoke close");
+      await openPhoneComments(page, id);
+      await page.getByTestId("comments-tab-suggestions").click();
+      await expectCommentsTab(page, "suggestions", { focused: true });
 
       await page.getByRole("button", { name: "Close comments" }).click();
       await expect(page.getByTestId("comments-panel")).toHaveCount(0);
