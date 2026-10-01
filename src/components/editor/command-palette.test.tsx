@@ -1798,7 +1798,6 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
         <CommandPalette open onOpenChange={onOpenChange} commands={commandProvider(...items)} />,
       );
       input = await screen.findByTestId("palette-input");
-      const handler = reactProps<InputHandlerProps>(input).onKeyDown;
       vi.mocked(Element.prototype.scrollIntoView).mockClear();
 
       for (const init of [
