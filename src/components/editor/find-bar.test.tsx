@@ -152,6 +152,24 @@ function press(target: HTMLElement, key: string, init: KeyboardEventInit = {}) {
   return event;
 }
 
+/** Stand-in for an editor pane: CodeMirror's `.cm-editor > .cm-content` or ProseMirror's `.md-rich`. */
+function editorPane(kind: "code" | "rich" = "code") {
+  const content = document.createElement("div");
+  content.contentEditable = "true";
+  content.tabIndex = 0;
+  if (kind === "code") {
+    const editor = document.createElement("div");
+    editor.className = "cm-editor";
+    content.className = "cm-content";
+    editor.append(content);
+    document.body.append(editor);
+  } else {
+    content.className = "md-rich";
+    document.body.append(content);
+  }
+  return content;
+}
+
 function trackFocus() {
   const focused: string[] = [];
   const selected: string[] = [];
@@ -293,10 +311,7 @@ describe("FindBar focus and session lifetime", () => {
     const rendered = render(<FindBoundary session={s} replaceVisible={false} {...cb} />);
     rendered.rerender(<FindBoundary session={s} present={false} replaceVisible={false} {...cb} />);
 
-    const editor = document.createElement("div");
-    editor.tabIndex = 0;
-    document.body.append(editor);
-    const event = press(editor, "F3");
+    const event = press(editorPane(), "F3");
 
     expect(event.defaultPrevented).toBe(false);
     expect(stepFind).not.toHaveBeenCalled();
@@ -559,15 +574,12 @@ describe("FindBar F3 navigation", () => {
     expect(target).toHaveFocus();
   });
 
-  it("steps from the editor while the bar is open and leaves focus in the editor", async () => {
-    const s = session("owner", "f3-editor");
+  it.each(["code", "rich"] as const)("steps from the %s pane while the bar is open and leaves focus there", async (kind) => {
+    const s = session("owner", `f3-editor-${kind}`);
     const cb = callbacks();
     const view = renderStrict(s, cb);
     await act(async () => {});
-    const editor = document.createElement("div");
-    editor.contentEditable = "true";
-    editor.tabIndex = 0;
-    document.body.append(editor);
+    const editor = editorPane(kind);
 
     const forward = press(editor, "F3");
     expect(forward.defaultPrevented).toBe(true);
@@ -639,14 +651,61 @@ describe("FindBar F3 navigation", () => {
     const s = session("owner", "f3-prevented");
     const stepFind = vi.spyOn(s, "stepFind");
     render(<FindBoundary session={s} replaceVisible={false} {...callbacks()} />);
-    const editor = document.createElement("div");
-    editor.tabIndex = 0;
+    const editor = editorPane();
     editor.addEventListener("keydown", (e) => e.preventDefault());
-    document.body.append(editor);
 
     press(editor, "F3");
 
     expect(stepFind).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["an input in an open dialog", () => {
+      const dialog = document.createElement("div");
+      dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      const input = document.createElement("input");
+      dialog.append(input);
+      document.body.append(dialog);
+      return input;
+    }],
+    ["a header input", () => {
+      const header = document.createElement("header");
+      const input = document.createElement("input");
+      header.append(input);
+      document.body.append(header);
+      return input;
+    }],
+    ["a page button", () => {
+      const button = document.createElement("button");
+      document.body.append(button);
+      return button;
+    }],
+  ] as const)("leaves F3 alone with focus in %s", (_label, make) => {
+    const s = session("owner", `f3-outside-${_label}`);
+    const stepFind = vi.spyOn(s, "stepFind");
+    const cb = callbacks();
+    render(<FindBoundary session={s} replaceVisible={false} {...cb} />);
+
+    const event = press(make(), "F3");
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(stepFind).not.toHaveBeenCalled();
+    expect(cb.onReveal).not.toHaveBeenCalled();
+  });
+
+  it("steps exactly once per press from the bar and from each editor pane", async () => {
+    const s = session("owner", "f3-once-each");
+    const stepFind = vi.spyOn(s, "stepFind");
+    const cb = callbacks();
+    const view = renderStrict(s, cb);
+    await act(async () => {});
+    const targets = [view.element("find-input"), view.element("replace-input"), view.action("find-next"), editorPane("code"), editorPane("rich")];
+
+    for (const [index, target] of targets.entries()) {
+      press(target, "F3");
+      expect([index, stepFind.mock.calls.length, vi.mocked(cb.onReveal).mock.calls.length]).toEqual([index, index + 1, index + 1]);
+    }
   });
 });
 

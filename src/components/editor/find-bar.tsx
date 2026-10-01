@@ -62,6 +62,9 @@ function actionDestination(key: string, index: number, length: number): number |
   }
 }
 
+/** The code pane (CodeMirror) and the rich pane (ProseMirror), where F3 also steps. */
+const EDITOR_PANES = ".cm-editor, .md-rich";
+
 /** Mouse down on these controls keeps focus (and the caret) in the find input. */
 const keepInputFocus = (e: ReactMouseEvent) => e.preventDefault();
 
@@ -109,6 +112,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
     shallowEqual,
   );
   const [replacementDraft, setReplacementDraft] = useState<ReplacementDraft>(() => ({ visit, value: "" }));
+  const barRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
   const prevRef = useRef<HTMLButtonElement>(null);
@@ -202,11 +206,15 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
     onReplaceVisible(nextVisible);
   };
 
-  // F3 / Shift+F3 step through matches while the bar is open, from the bar or from the editor.
+  // F3 / Shift+F3 step through matches while the bar is open, from the bar or from the editor panes.
+  // This one listener is the only F3 handler, so each press steps exactly once.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "F3" || e.defaultPrevented || e.isComposing) return;
       if (e.altKey || e.ctrlKey || e.metaKey) return;
+      const target = e.target instanceof Element ? e.target : null;
+      const inBar = !!target && !!barRef.current?.contains(target);
+      if (!inBar && !target?.closest(EDITOR_PANES)) return;
       e.preventDefault();
       if (!actionsDisabled) step(e.shiftKey ? -1 : 1);
     };
@@ -255,6 +263,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
 
   return (
     <div
+      ref={barRef}
       className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-surface-2 px-3 py-1.5 text-[13px]"
       role="search"
       aria-label="Find and replace"

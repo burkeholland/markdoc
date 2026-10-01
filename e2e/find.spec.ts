@@ -125,6 +125,24 @@ test.describe("find & replace", () => {
     await page.keyboard.press("Shift+F3");
     await expect(count).toHaveText(before);
     await expect(page.locator(".cm-content")).toBeFocused();
+
+    // From the rich pane too: one press, one step.
+    await page.locator(".md-rich p").first().click();
+    await expect(page.getByTestId("find-bar")).toBeVisible();
+    const richBefore = (await count.textContent()) ?? "";
+    await page.keyboard.press("F3");
+    await expect(count).not.toHaveText(richBefore);
+    await page.keyboard.press("Shift+F3");
+    await expect(count).toHaveText(richBefore);
+    await expect(page.locator(".md-rich")).toBeFocused();
+
+    // With a dialog open, F3 belongs to the dialog and the match does not move.
+    await page.keyboard.press("Control+Shift+P");
+    await expect(page.getByTestId("palette-input")).toBeFocused();
+    await page.keyboard.press("F3");
+    await page.keyboard.press("F3");
+    await expect(page.getByTestId("palette-input")).toBeFocused();
+    await expect(count).toHaveText(richBefore);
     expect(await codeText(page)).toBe(SAMPLE);
     await user.context.close();
   });
@@ -170,6 +188,14 @@ test.describe("find & replace", () => {
     await input.fill("cat");
     await expect(count).toHaveText("1 of 3");
 
+    // The Replace toggle by mouse: hiding keeps focus in the find input, showing moves it to the replace input.
+    const toggle = page.getByTestId("find-toggle-replace");
+    await toggle.click();
+    await expect(page.getByTestId("find-replace-row")).toHaveCount(0);
+    await expect(input).toBeFocused();
+    await toggle.click();
+    await expect(page.getByTestId("replace-input")).toBeFocused();
+
     // Enter and Space activate the step buttons; arrows move between the first-row actions.
     await page.getByTestId("find-next").focus();
     await page.keyboard.press("Enter");
@@ -185,7 +211,6 @@ test.describe("find & replace", () => {
     await page.keyboard.press("End");
     await expect(page.getByTestId("find-close")).toBeFocused();
     await page.keyboard.press("ArrowLeft");
-    const toggle = page.getByTestId("find-toggle-replace");
     await expect(toggle).toBeFocused();
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("find-replace-row")).toHaveCount(0);
