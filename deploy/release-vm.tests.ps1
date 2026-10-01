@@ -59,14 +59,14 @@ async function main() {
       ['three-misses', 'three-slow-misses'].includes(mode) ? count <= 3 : count === 1;
     if (miss) {
       if (['slow', 'three-slow-misses'].includes(mode)) { await new Promise(resolve => setTimeout(resolve, 20000)); }
-      else if (mode === '429') { error = 'ERROR: HTTP status: 429'; }
-      else if (mode === '408') { error = 'ERROR: HTTP status: 408'; }
-      else if (mode === 'transport') { error = 'ERROR: ConnectionError: connection reset'; }
-      else if (['auth', 'auth-exit-124'].includes(mode)) { error = 'ERROR: HTTP status: 401 ReadTimeout'; }
-      else if (mode === 'configuration') { error = 'ERROR: HTTP status: 400 ConnectionError'; }
-      else if (mode === 'unknown') { error = 'ERROR: HTTP status: 409 ReadTimeout'; }
+      else if (mode === '429') { error = 'ERROR: HTTP status: 429 FAKE_POLL_SECRET_2221'; }
+      else if (mode === '408') { error = 'ERROR: HTTP status: 408 FAKE_POLL_SECRET_2221'; }
+      else if (mode === 'transport') { error = 'ERROR: ConnectionError: connection reset FAKE_POLL_SECRET_2221'; }
+      else if (['auth', 'auth-exit-124'].includes(mode)) { error = 'ERROR: HTTP status: 401 ReadTimeout FAKE_POLL_SECRET_2221'; }
+      else if (mode === 'configuration') { error = 'ERROR: HTTP status: 400 ConnectionError FAKE_POLL_SECRET_2221'; }
+      else if (mode === 'unknown') { error = 'ERROR: HTTP status: 409 ReadTimeout FAKE_POLL_SECRET_2221'; }
       else if (!['malformed', 'ambiguous', 'unknown-status', 'wrong-identity', 'foreign-exception',
-          'terminal-exception', 'deadline-before', 'success-at-budget'].includes(mode)) { error = 'ERROR: HTTP status: 503'; }
+          'terminal-exception', 'deadline-before', 'success-at-budget'].includes(mode)) { error = 'ERROR: HTTP status: 503 FAKE_POLL_SECRET_2221'; }
     }
   }
   console.error('FAKE_POLL_SECRET_2221 https://private.example.test/?credential=FAKE_POLL_SECRET_2221');
