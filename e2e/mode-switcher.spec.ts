@@ -55,10 +55,12 @@ for (const input of ["click", "Enter", "Space"] as const) {
       await expect(alice.page.locator(".md-rich .md-suggest-insert", { hasText: suggested.trim() })).toHaveCount(1);
 
       await pickMode(alice.page, "Editing", input);
-      const direct = ` direct-${input.toLowerCase()}`;
-      await focusRichEnd(alice.page);
+      // Type at the start of the heading, away from the suggestion, so the text cannot join it.
+      const direct = `direct-${input.toLowerCase()} `;
+      await alice.page.locator(".md-rich h1").click();
+      await alice.page.keyboard.press("Control+Home");
       await alice.page.keyboard.type(direct);
-      await expect.poll(() => codeText(alice.page)).toContain(direct.trim());
+      await expect.poll(() => codeText(alice.page)).toContain(`# ${direct}Mode switcher`);
       await expect(alice.page.locator(".md-rich .md-suggest-insert", { hasText: direct.trim() })).toHaveCount(0);
     } finally {
       await alice.context.close();
