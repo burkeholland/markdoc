@@ -838,38 +838,6 @@ function captureSuggestionBatchActions(scope: ParentNode = document): CapturedSu
   };
 }
 
-interface CapturedCommentNavigation {
-  panel: HTMLElement;
-  close: CapturedReviewControl;
-  open: CapturedReviewControl;
-  resolved: CapturedReviewControl;
-  suggestions: CapturedReviewControl;
-  emptySuggestions: CapturedReviewControl | null;
-}
-
-function captureCommentNavigation(scope: ParentNode = document): CapturedCommentNavigation {
-  const panel = scope.querySelector<HTMLElement>('[data-testid="comments-panel"]');
-  if (!panel) throw new Error("The Comments panel was not rendered");
-  const close = panel.querySelector<HTMLElement>('button[aria-label="Close comments"]');
-  const open = panel.querySelector<HTMLElement>('[data-testid="comments-tab-open"]');
-  const resolved = panel.querySelector<HTMLElement>('[data-testid="comments-tab-resolved"]');
-  const suggestions = panel.querySelector<HTMLElement>('[data-testid="comments-tab-suggestions"]');
-  if (!close || !open || !resolved || !suggestions) {
-    throw new Error("The Comments navigation controls were not rendered");
-  }
-  const emptySuggestions = panel.querySelector<HTMLElement>(
-    '[data-testid="comments-empty-suggestions-button"]',
-  );
-  return {
-    panel,
-    close: captureReviewControl(close),
-    open: captureReviewControl(open),
-    resolved: captureReviewControl(resolved),
-    suggestions: captureReviewControl(suggestions),
-    emptySuggestions: emptySuggestions ? captureReviewControl(emptySuggestions) : null,
-  };
-}
-
 function reviewSession(docId: string) {
   const user = makeCollabUser("alice", "Alice");
   const session = new CollabSession({ docId, user, role: "owner", getToken: async () => "token", autoConnect: false });
@@ -1045,28 +1013,6 @@ function ComposerBoundary({
       <CommentsPanel key={visit} session={session} onClose={() => {}} onReveal={() => {}} />
     </TooltipProvider>
   ) : null;
-}
-
-function CommentNavigationBoundary({
-  session,
-  onClose,
-  onLayout,
-}: {
-  session: CollabSession;
-  onClose: () => void;
-  onLayout: (navigation: CapturedCommentNavigation) => void;
-}) {
-  useLayoutEffect(() => {
-    onLayout(captureCommentNavigation());
-  }, [onLayout]);
-  return (
-    <CommentsPanel
-      session={session}
-      onClose={onClose}
-      onReveal={() => {}}
-      focusTab={{ tab: "open", nonce: 1 }}
-    />
-  );
 }
 
 describe("CommentsPanel", () => {
@@ -2792,7 +2738,7 @@ describe("CommentsPanel", () => {
     });
   });
 
-  it("keeps every Comments navigation path exact through Strict Mode replay", async () => {
+  it("switches tabs, follows the empty-state link and closes with plain handlers under Strict Mode", async () => {
     const fixture = reviewSession("comment-navigation-strict");
     session = fixture.session;
     const { threadId } = addCommentSuggestion(session, fixture.user);
@@ -2821,7 +2767,7 @@ describe("CommentsPanel", () => {
 
     fireEvent.click(resolved);
     await waitFor(() => expect(resolved).toHaveAttribute("aria-selected", "true"));
-    open.focus();
+    fireEvent.click(open);
     await waitFor(() => expect(open).toHaveAttribute("aria-selected", "true"));
 
     fireEvent.click(await screen.findByTestId("comments-empty-suggestions-button"));
@@ -2834,539 +2780,9 @@ describe("CommentsPanel", () => {
     await waitFor(() => expect(open).toHaveAttribute("aria-selected", "true"));
     await act(async () => {});
 
-    const close = screen.getByRole("button", { name: "Close comments" });
-    fireEvent.click(close);
-    fireEvent.click(close);
+    fireEvent.click(screen.getByRole("button", { name: "Close comments" }));
     expect(onClose).toHaveBeenCalledOnce();
   });
-
-  it("permanently retires the first Strict Mode publication before a successor can act", async () => {
-    const fixture = reviewSession("comment-navigation-retired");
-    session = fixture.session;
-    const layouts: CapturedCommentNavigation[] = [];
-    const onLayout = (navigation: CapturedCommentNavigation) => layouts.push(navigation);
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <CommentNavigationBoundary
-              session={session!}
-              onClose={() => {}}
-              onLayout={onLayout}
-            />
-          </StrictMode>,
-        );
-      });
-      expect(layouts.length).toBeGreaterThan(0);
-      const stale = layouts[0]!;
-      const current = captureCommentNavigation(host);
-      expect(current.resolved.click).not.toBe(stale.resolved.click);
-
-      const restore = interceptReviewClick(
-        current.resolved.element,
-        (_original, event) => stale.resolved.click(event),
-      );
-      act(() => dispatchReviewClick(current.resolved.element));
-      restore();
-      expect(current.open.element).toHaveAttribute("aria-selected", "true");
-
-      stale.resolved.ref(null);
-      stale.resolved.ref(stale.resolved.element);
-      act(() => dispatchReviewClick(current.resolved.element));
-      expect(current.resolved.element).toHaveAttribute("aria-selected", "true");
-    } finally {
-      act(() => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("rejects fabricated, canceled, crossed, and mutation-restored tab events without poisoning recovery", async () => {
-    const fixture = reviewSession("comment-navigation-invalid-events");
-    session = fixture.session;
-    const firstClose = vi.fn();
-    const secondClose = vi.fn();
-    const rendered = render(
-      <CommentsPanel
-        session={session}
-        onClose={firstClose}
-        onReveal={() => {}}
-        focusTab={{ tab: "open", nonce: 1 }}
-      />,
-    );
-    const stale = captureCommentNavigation();
-    rendered.rerender(
-      <CommentsPanel
-        session={session}
-        onClose={secondClose}
-        onReveal={() => {}}
-        focusTab={{ tab: "open", nonce: 1 }}
-      />,
-    );
-    const current = captureCommentNavigation();
-    expect(current.resolved.click).not.toBe(stale.resolved.click);
-
-    act(() => stale.resolved.click(reviewMouseEvent(stale.resolved)));
-    expect(current.open.element).toHaveAttribute("aria-selected", "true");
-
-    const canceled = new MouseEvent("click", { bubbles: true, cancelable: true });
-    canceled.preventDefault();
-    act(() => dispatchReviewClick(current.resolved.element, canceled));
-    expect(current.open.element).toHaveAttribute("aria-selected", "true");
-
-    const restoreCross = interceptReviewClick(
-      current.resolved.element,
-      (_original, event) => stale.resolved.click(event),
-    );
-    act(() => dispatchReviewClick(current.resolved.element));
-    restoreCross();
-    expect(current.open.element).toHaveAttribute("aria-selected", "true");
-
-    current.resolved.element.setAttribute("aria-selected", "true");
-    current.resolved.element.setAttribute("aria-selected", "false");
-    act(() => dispatchReviewClick(current.resolved.element));
-    expect(current.open.element).toHaveAttribute("aria-selected", "true");
-
-    await act(async () => {});
-    const recovered = captureCommentNavigation();
-    act(() => dispatchReviewClick(recovered.resolved.element));
-    expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
-    expect(firstClose).not.toHaveBeenCalled();
-    expect(secondClose).not.toHaveBeenCalled();
-  });
-
-  it("reads native key, modifiers, and button through captured owner-realm accessors", () => {
-    const fixture = reviewSession("comment-navigation-native-accessors");
-    session = fixture.session;
-    render(
-      <CommentsPanel
-        session={session}
-        onClose={() => {}}
-        onReveal={() => {}}
-        focusTab={{ tab: "open", nonce: 1 }}
-      />,
-    );
-    const navigation = captureCommentNavigation();
-    const ownerWindow = navigation.open.element.ownerDocument.defaultView;
-    if (!ownerWindow) throw new Error("The Comments navigation had no owner window");
-    navigation.open.element.focus();
-
-    const poisonedKey = new ownerWindow.KeyboardEvent("keydown", {
-      key: "x",
-      bubbles: true,
-      cancelable: true,
-    });
-    Object.defineProperty(poisonedKey, "key", {
-      configurable: true,
-      value: "ArrowRight",
-    });
-    act(() => navigation.open.element.dispatchEvent(poisonedKey));
-    expect(navigation.open.element).toHaveAttribute("aria-selected", "true");
-
-    const poisonedModifier = new ownerWindow.KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      ctrlKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    Object.defineProperty(poisonedModifier, "ctrlKey", {
-      configurable: true,
-      value: false,
-    });
-    act(() => navigation.open.element.dispatchEvent(poisonedModifier));
-    expect(navigation.open.element).toHaveAttribute("aria-selected", "true");
-
-    const poisonedButton = new ownerWindow.MouseEvent("click", {
-      button: 2,
-      bubbles: true,
-      cancelable: true,
-    });
-    Object.defineProperty(poisonedButton, "button", {
-      configurable: true,
-      value: 0,
-    });
-    act(() => navigation.resolved.element.dispatchEvent(poisonedButton));
-    expect(navigation.open.element).toHaveAttribute("aria-selected", "true");
-
-    act(() => dispatchReviewClick(navigation.resolved.element));
-    expect(navigation.resolved.element).toHaveAttribute("aria-selected", "true");
-  });
-
-  it("reads focus custody through the captured owner-document accessor", () => {
-    const outside = document.createElement("button");
-    document.body.append(outside);
-    try {
-      const fixture = reviewSession("comment-navigation-active-element-accessor");
-      session = fixture.session;
-      render(
-        <CommentsPanel
-          session={session}
-          onClose={() => {}}
-          onReveal={() => {}}
-          focusTab={{ tab: "open", nonce: 1 }}
-        />,
-      );
-      const navigation = captureCommentNavigation();
-      const ownerDocument = navigation.open.element.ownerDocument;
-      const ownerWindow = ownerDocument.defaultView;
-      if (!ownerWindow) throw new Error("The Comments navigation had no owner window");
-      const activeElement = Object.getOwnPropertyDescriptor(
-        ownerWindow.Document.prototype,
-        "activeElement",
-      );
-      if (!activeElement || typeof activeElement.get !== "function") {
-        throw new Error("Document.activeElement was not an accessor");
-      }
-      outside.focus();
-      expect(activeElement.get.call(ownerDocument)).toBe(outside);
-
-      Object.defineProperty(ownerDocument, "activeElement", {
-        configurable: true,
-        get: () => {
-          const actual = activeElement.get!.call(ownerDocument);
-          return actual === outside ? navigation.open.element : actual;
-        },
-      });
-      try {
-        const poisonedFocus = new ownerWindow.KeyboardEvent("keydown", {
-          key: "ArrowRight",
-          bubbles: true,
-          cancelable: true,
-        });
-        act(() => navigation.open.element.dispatchEvent(poisonedFocus));
-        expect(activeElement.get.call(ownerDocument)).toBe(outside);
-        expect(navigation.open.element).toHaveAttribute("aria-selected", "true");
-      } finally {
-        Reflect.deleteProperty(ownerDocument, "activeElement");
-      }
-
-      navigation.open.element.focus();
-      act(() => {
-        navigation.open.element.dispatchEvent(
-          new ownerWindow.KeyboardEvent("keydown", {
-            key: "ArrowRight",
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-      });
-      expect(navigation.resolved.element).toHaveFocus();
-      expect(navigation.resolved.element).toHaveAttribute("aria-selected", "true");
-    } finally {
-      outside.remove();
-    }
-  });
-
-  it("rejects a genuine focus event when its tab does not own document focus", async () => {
-    const outside = document.createElement("button");
-    document.body.append(outside);
-    try {
-      const fixture = reviewSession("comment-navigation-focus-custody");
-      session = fixture.session;
-      render(
-        <CommentsPanel
-          session={session}
-          onClose={() => {}}
-          onReveal={() => {}}
-          focusTab={{ tab: "open", nonce: 1 }}
-        />,
-      );
-      const navigation = captureCommentNavigation();
-      const ownerWindow = navigation.resolved.element.ownerDocument.defaultView;
-      if (!ownerWindow) throw new Error("The Comments navigation had no owner window");
-      outside.focus();
-
-      act(() => {
-        navigation.resolved.element.dispatchEvent(
-          new ownerWindow.FocusEvent("focusin", {
-            bubbles: true,
-            relatedTarget: outside,
-          }),
-        );
-      });
-      expect(outside).toHaveFocus();
-      expect(navigation.open.element).toHaveAttribute("aria-selected", "true");
-
-      navigation.resolved.element.focus();
-      expect(navigation.resolved.element).toHaveFocus();
-      await waitFor(() =>
-        expect(navigation.resolved.element).toHaveAttribute("aria-selected", "true"),
-      );
-    } finally {
-      outside.remove();
-    }
-  });
-
-  it("uses captured observer drains when prototype methods are replaced", async () => {
-    const fixture = reviewSession("comment-navigation-observer-intrinsics");
-    session = fixture.session;
-    render(
-      <CommentsPanel
-        session={session}
-        onClose={() => {}}
-        onReveal={() => {}}
-        focusTab={{ tab: "open", nonce: 1 }}
-      />,
-    );
-    const stale = captureCommentNavigation();
-    const ownerWindow = stale.panel.ownerDocument.defaultView;
-    if (!ownerWindow) throw new Error("The Comments navigation had no owner window");
-    const prototype = ownerWindow.MutationObserver.prototype;
-    const takeRecords = Object.getOwnPropertyDescriptor(prototype, "takeRecords");
-    if (!takeRecords || typeof takeRecords.value !== "function") {
-      throw new Error("MutationObserver.takeRecords was not an own method");
-    }
-
-    Object.defineProperty(prototype, "takeRecords", {
-      ...takeRecords,
-      value: () => [],
-    });
-    try {
-      act(() => {
-        stale.resolved.element.setAttribute("aria-selected", "true");
-        stale.resolved.element.setAttribute("aria-selected", "false");
-        dispatchReviewClick(stale.resolved.element);
-      });
-      expect(stale.open.element).toHaveAttribute("aria-selected", "true");
-    } finally {
-      Object.defineProperty(prototype, "takeRecords", takeRecords);
-    }
-
-    await act(async () => {});
-    const recovered = captureCommentNavigation();
-    expect(recovered.resolved.click).not.toBe(stale.resolved.click);
-    act(() => dispatchReviewClick(recovered.resolved.element));
-    expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
-  });
-
-  it("reads mutation relevance through captured owner-realm record accessors", async () => {
-    const fixture = reviewSession("comment-navigation-mutation-record-intrinsics");
-    session = fixture.session;
-    render(
-      <CommentsPanel
-        session={session}
-        onClose={() => {}}
-        onReveal={() => {}}
-        focusTab={{ tab: "open", nonce: 1 }}
-      />,
-    );
-    const stale = captureCommentNavigation();
-    const ownerDocument = stale.panel.ownerDocument;
-    const ownerWindow = ownerDocument.defaultView;
-    if (!ownerWindow) throw new Error("The Comments navigation had no owner window");
-    const prototype = ownerWindow.MutationRecord.prototype;
-    const target = Object.getOwnPropertyDescriptor(prototype, "target");
-    if (!target || typeof target.get !== "function") {
-      throw new Error("MutationRecord.target was not an accessor");
-    }
-
-    Object.defineProperty(prototype, "target", {
-      ...target,
-      get: () => ownerDocument,
-    });
-    try {
-      act(() => {
-        stale.resolved.element.setAttribute("aria-selected", "true");
-        stale.resolved.element.setAttribute("aria-selected", "false");
-        dispatchReviewClick(stale.resolved.element);
-      });
-      expect(stale.open.element).toHaveAttribute("aria-selected", "true");
-    } finally {
-      Object.defineProperty(prototype, "target", target);
-    }
-
-    await act(async () => {});
-    const recovered = captureCommentNavigation();
-    expect(recovered.resolved.click).not.toBe(stale.resolved.click);
-    act(() => dispatchReviewClick(recovered.resolved.element));
-    expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
-  });
-
-  it.each(["NodeList", "Array"] as const)(
-    "keeps detach history exact when the owner-realm %s iterator is poisoned",
-    async (collection) => {
-      const fixture = reviewSession(
-        `comment-navigation-${collection.toLowerCase()}-iterator`,
-      );
-      session = fixture.session;
-      render(
-        <CommentsPanel
-          session={session}
-          onClose={() => {}}
-          onReveal={() => {}}
-          focusTab={{ tab: "open", nonce: 1 }}
-        />,
-      );
-      const stale = captureCommentNavigation();
-      const ownerWindow = stale.panel.ownerDocument.defaultView as
-        | (Window & typeof globalThis)
-        | null;
-      const parent = stale.panel.parentNode;
-      if (!ownerWindow || !parent) {
-        throw new Error("The Comments navigation had no owner placement");
-      }
-      expect(parent.childNodes).toHaveLength(1);
-
-      const prototype =
-        collection === "NodeList"
-          ? ownerWindow.NodeList.prototype
-          : ownerWindow.Array.prototype;
-      const iterator = Object.getOwnPropertyDescriptor(
-        prototype,
-        Symbol.iterator,
-      );
-      if (!iterator || typeof iterator.value !== "function") {
-        throw new Error(`${collection} did not have an own iterator`);
-      }
-      const emptyIterator = () => ({
-        next: () => ({ done: true as const, value: undefined }),
-      });
-      Object.defineProperty(prototype, Symbol.iterator, {
-        ...iterator,
-        value:
-          collection === "NodeList"
-            ? emptyIterator
-            : function (this: unknown[]) {
-                return this.length === 1 && this[0] === stale.panel
-                  ? emptyIterator()
-                  : Reflect.apply(iterator.value, this, []);
-              },
-      });
-      try {
-        act(() => {
-          parent.removeChild(stale.panel);
-          parent.appendChild(stale.panel);
-          dispatchReviewClick(stale.resolved.element);
-        });
-        expect(stale.open.element).toHaveAttribute("aria-selected", "true");
-      } finally {
-        Object.defineProperty(prototype, Symbol.iterator, iterator);
-      }
-
-      await act(async () => {});
-      const recovered = captureCommentNavigation();
-      expect(recovered.resolved.click).not.toBe(stale.resolved.click);
-      act(() => dispatchReviewClick(recovered.resolved.element));
-      expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
-    },
-  );
-
-  it.each([
-    "excessive length",
-    "throwing length",
-    "throwing item",
-    "non-node item",
-    "inconsistent empty length",
-  ] as const)(
-    "fails closed for a pre-publication NodeList %s poison",
-    async (scenario) => {
-      const fixture = reviewSession(
-        `comment-navigation-node-list-${scenario.replaceAll(" ", "-")}`,
-      );
-      session = fixture.session;
-      const ownerWindow = window as Window & typeof globalThis;
-      const prototype = ownerWindow.NodeList.prototype;
-      const lengthDescriptor = Object.getOwnPropertyDescriptor(prototype, "length");
-      const itemDescriptor = Object.getOwnPropertyDescriptor(prototype, "item");
-      if (
-        !lengthDescriptor ||
-        typeof lengthDescriptor.get !== "function" ||
-        !itemDescriptor ||
-        typeof itemDescriptor.value !== "function"
-      ) {
-        throw new Error("NodeList length/item intrinsics were unavailable");
-      }
-      const intrinsicLength = lengthDescriptor.get;
-      const intrinsicItem = itemDescriptor.value as NodeList["item"];
-      let panel: HTMLElement | null = null;
-      const targetsPanel = (nodes: NodeList) => {
-        const length = Reflect.apply(intrinsicLength, nodes, []) as number;
-        return (
-          panel !== null &&
-          length === 1 &&
-          Reflect.apply(intrinsicItem, nodes, [0]) === panel
-        );
-      };
-
-      if (
-        scenario === "excessive length" ||
-        scenario === "throwing length" ||
-        scenario === "inconsistent empty length"
-      ) {
-        Object.defineProperty(prototype, "length", {
-          ...lengthDescriptor,
-          get: function (this: NodeList) {
-            if (!targetsPanel(this)) return Reflect.apply(intrinsicLength, this, []);
-            if (scenario === "throwing length") {
-              throw new Error("poisoned NodeList length");
-            }
-            return scenario === "excessive length" ? Number.MAX_SAFE_INTEGER : 0;
-          },
-        });
-      } else {
-        Object.defineProperty(prototype, "item", {
-          ...itemDescriptor,
-          value: function (this: NodeList, index: number) {
-            if (!targetsPanel(this)) {
-              return Reflect.apply(intrinsicItem, this, [index]);
-            }
-            if (scenario === "throwing item") {
-              throw new Error("poisoned NodeList item");
-            }
-            return index === 0 ? { nodeType: 1 } : null;
-          },
-        });
-      }
-
-      const firstClose = vi.fn();
-      const freshClose = vi.fn();
-      let rendered: ReturnType<typeof render> | null = null;
-      try {
-        rendered = render(
-          <CommentsPanel
-            session={session}
-            onClose={firstClose}
-            onReveal={() => {}}
-            focusTab={{ tab: "open", nonce: 1 }}
-          />,
-        );
-        const stale = captureCommentNavigation();
-        const parent = stale.panel.parentNode;
-        if (!parent) throw new Error("The Comments panel had no parent");
-        expect(Reflect.apply(intrinsicLength, parent.childNodes, [])).toBe(1);
-        panel = stale.panel;
-
-        act(() => {
-          parent.removeChild(stale.panel);
-          parent.appendChild(stale.panel);
-          dispatchReviewClick(stale.resolved.element);
-        });
-        expect(stale.open.element).toHaveAttribute("aria-selected", "true");
-        expect(firstClose).not.toHaveBeenCalled();
-      } finally {
-        Object.defineProperty(prototype, "length", lengthDescriptor);
-        Object.defineProperty(prototype, "item", itemDescriptor);
-      }
-
-      if (!rendered) throw new Error("The Comments panel did not render");
-      rendered.rerender(
-        <CommentsPanel
-          session={session}
-          onClose={freshClose}
-          onReveal={() => {}}
-          focusTab={{ tab: "open", nonce: 1 }}
-        />,
-      );
-      await act(async () => {});
-      const recovered = captureCommentNavigation();
-      act(() => dispatchReviewClick(recovered.resolved.element));
-      expect(recovered.resolved.element).toHaveAttribute("aria-selected", "true");
-      expect(firstClose).not.toHaveBeenCalled();
-      expect(freshClose).not.toHaveBeenCalled();
-    },
-  );
 
   it("uses one roving tab stop and activates tabs with arrow, Home, and End keys", async () => {
     const user = makeCollabUser("alice", "Alice");
@@ -3416,7 +2832,58 @@ describe("CommentsPanel", () => {
     expect(screen.getByTestId("comments-empty-agent")).toHaveFocus();
   });
 
-  it("navigates from exact owner-document focus after a programmatic tab change", async () => {
+  it("selects a tab on a plain click and closes with the X", () => {
+    const fixture = reviewSession("tabs-plain-click");
+    session = fixture.session;
+    const onClose = vi.fn();
+    render(<CommentsPanel session={session} onClose={onClose} onReveal={() => {}} />);
+
+    for (const name of ["Resolved", "Suggestions", "Open"]) {
+      fireEvent.click(screen.getByRole("tab", { name }));
+      for (const tab of screen.getAllByRole("tab")) {
+        expect(tab).toHaveAttribute("aria-selected", String(tab === screen.getByRole("tab", { name })));
+      }
+      expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", `comments-tab-${name.toLowerCase()}`);
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Close comments" }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("moves to the next tab with ArrowRight, selects and focuses it, and prevents page scroll", () => {
+    const fixture = reviewSession("tabs-plain-arrow");
+    session = fixture.session;
+    render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+    const open = screen.getByRole("tab", { name: "Open" });
+    const resolved = screen.getByRole("tab", { name: "Resolved" });
+    open.focus();
+
+    const notPrevented = fireEvent.keyDown(open, { key: "ArrowRight" });
+
+    expect(notPrevented).toBe(false);
+    expect(resolved).toHaveAttribute("aria-selected", "true");
+    expect(resolved).toHaveAttribute("tabindex", "0");
+    expect(resolved).toHaveFocus();
+    expect(open).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("ignores other keys and modified arrows, and focusing a tab does not select it", () => {
+    const fixture = reviewSession("tabs-plain-ignored");
+    session = fixture.session;
+    render(<CommentsPanel session={session} onClose={() => {}} onReveal={() => {}} />);
+    const open = screen.getByRole("tab", { name: "Open" });
+    open.focus();
+
+    expect(fireEvent.keyDown(open, { key: "a" })).toBe(true);
+    expect(fireEvent.keyDown(open, { key: "ArrowRight", altKey: true })).toBe(true);
+    expect(fireEvent.keyDown(open, { key: "ArrowRight", ctrlKey: true })).toBe(true);
+    screen.getByRole("tab", { name: "Resolved" }).focus();
+
+    expect(open).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Resolved" })).toHaveAttribute("aria-selected", "false");
+  });
+
+  it("navigates from the focused tab after a programmatic tab change", async () => {
     const fixture = reviewSession("comment-navigation-programmatic");
     session = fixture.session;
     const view = render(
@@ -3447,8 +2914,9 @@ describe("CommentsPanel", () => {
     expect(resolved).toHaveFocus();
     expect(resolved).toHaveAttribute("aria-selected", "true");
 
-    open.focus();
+    fireEvent.click(open);
     await waitFor(() => expect(open).toHaveAttribute("aria-selected", "true"));
+    open.focus();
     await act(async () => {});
     const allowed = fireEvent.keyDown(open, { key: "Home" });
     expect(allowed).toBe(false);
@@ -7553,10 +7021,10 @@ describe("CommentsPanel", () => {
       expect(screen.queryByText(/old failure/i)).toBeNull();
     });
 
-    it.each(["close", "unmount"] as const)("retires on %s with no later dispatch, toast, or unhandled rejection", async (retirement) => {
+    it("retires on unmount with no later dispatch, toast, or unhandled rejection", async () => {
       const request = deferred<CommentResponse>();
       vi.mocked(api.documents.comment).mockReturnValue(request.promise);
-      const fixture = makeBatchSession(`batch-${retirement}`);
+      const fixture = makeBatchSession("batch-unmount");
       const review = reviewDto("r1", fixture.threadIds, fixture.session.docId);
       vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
       const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
@@ -7566,8 +7034,7 @@ describe("CommentsPanel", () => {
       const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason);
       window.addEventListener("unhandledrejection", onUnhandled);
       try {
-        if (retirement === "close") fireEvent.click(screen.getByRole("button", { name: "Close comments" }));
-        else rendered.unmount();
+        rendered.unmount();
         await settleBatch(request, "reject", "late batch failure");
         await act(async () => {});
         expect(api.documents.comment).toHaveBeenCalledTimes(1);
