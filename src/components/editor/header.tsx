@@ -13646,12 +13646,16 @@ function PublishMenu({ props }: { props: HeaderProps }) {
     onOpenAutoFocus,
   } = presentation;
   const openAutoFocusProps = { onOpenAutoFocus };
-  // Same fix as the More menu's "Open reader view" (#2203): window.open() hands focus to the new
-  // tab before this menu's own close machinery can react, so close it directly first.
-  const onWindowOpenSelect = (url: string) => () => {
+  // #2203: the same stuck-open bug (see the More menu's onMoreMenuPlainSelect comment for the root
+  // cause) applies to every plain item here too - none of them run through a direct-close helper
+  // like the More menu's dom.actions items do, so they all depend on the same broken close paths.
+  const onPlainSelect = (action: () => void) => () => {
     setStoredState(Object.freeze({ visit, open: false }));
-    window.open(url, "_blank", "noopener");
+    action();
   };
+  const onWindowOpenSelect = (url: string) => onPlainSelect(
+    () => window.open(url, "_blank", "noopener"),
+  );
 
   return (
     <Menu open={state.open} onOpenChange={onOpenChange}>
@@ -13695,13 +13699,13 @@ function PublishMenu({ props }: { props: HeaderProps }) {
               {doc.storage === "gist" ? "Gist" : `${doc.repoOwner}/${doc.repoName} · ${doc.repoBranch}`}
               {props.sync && <span className="ml-1 font-normal text-ink-3">· {SYNC_LABELS[props.sync.status]}</span>}
             </MenuLabel>
-            <MenuItem ref={capturePublish} icon={<UploadCloud size={15} />} onSelect={props.onPublishNow} disabled={!canEdit}>
+            <MenuItem ref={capturePublish} icon={<UploadCloud size={15} />} onSelect={onPlainSelect(props.onPublishNow)} disabled={!canEdit}>
               {doc.storage === "gist" ? "Update gist" : "Commit to GitHub…"}
             </MenuItem>
-            <MenuItem ref={capturePull} icon={<RefreshCw size={15} />} onSelect={props.onPull} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
+            <MenuItem ref={capturePull} icon={<RefreshCw size={15} />} onSelect={onPlainSelect(props.onPull)} disabled={!canEdit || props.sync?.status === "remote-unreadable"}>
               Pull latest from GitHub
             </MenuItem>
-            <MenuItem ref={captureSync} icon={<GitMerge size={15} />} onSelect={props.onSync} disabled={!canEdit} data-testid="menu-sync">
+            <MenuItem ref={captureSync} icon={<GitMerge size={15} />} onSelect={onPlainSelect(props.onSync)} disabled={!canEdit} data-testid="menu-sync">
               Sync…
             </MenuItem>
             {doc.githubUrl && (
@@ -13712,7 +13716,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
             {props.isOwner && (
               <>
                 <MenuSeparator />
-                <MenuItem ref={captureChange} icon={<Link2 size={15} />} onSelect={props.onPublish}>
+                <MenuItem ref={captureChange} icon={<Link2 size={15} />} onSelect={onPlainSelect(props.onPublish)}>
                   Change connection…
                 </MenuItem>
               </>
@@ -13724,7 +13728,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
             <MenuItem
               ref={captureConnect}
               icon={<GitHubIcon size={15} />}
-              onSelect={props.onPublish}
+              onSelect={onPlainSelect(props.onPublish)}
               disabled={!props.isOwner || !githubConfigured}
               title={!githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
               data-testid="menu-publish-github"
@@ -13732,10 +13736,10 @@ function PublishMenu({ props }: { props: HeaderProps }) {
               <GitHubEntryLabel configured={githubConfigured}>Gist or repository…</GitHubEntryLabel>
             </MenuItem>
             <MenuSeparator />
-            <MenuItem ref={captureDownload} icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)}>
+            <MenuItem ref={captureDownload} icon={<Download size={15} />} onSelect={onPlainSelect(() => props.onDownload("md", false))}>
               Download Markdown
             </MenuItem>
-            <MenuItem ref={captureShare} icon={<Share2 size={15} />} onSelect={props.onShare}>
+            <MenuItem ref={captureShare} icon={<Share2 size={15} />} onSelect={onPlainSelect(props.onShare)}>
               Share link…
             </MenuItem>
             </>
@@ -16823,14 +16827,23 @@ export const Header = memo(function Header(props: HeaderProps) {
     onOutside: onMoreMenuOutside,
     onCloseAutoFocus: onMoreMenuCloseAutoFocus,
   } = moreMenuPresentation;
-  // window.open() hands focus to the new tab, and the More menu's own close machinery (geared
-  // toward real pointer/keyboard events) doesn't reliably run in that case (#2203: the menu stayed
-  // open afterward and swallowed the next click). Close it ourselves, directly, before opening the
-  // new tab, instead of relying on Radix's automatic close-on-select.
-  const onMoreMenuWindowOpenSelect = (url: string) => () => {
+  // #2203 root cause: every plain MenuItem here relies on Radix's own close-on-select, which this
+  // menu only honors through `onMoreMenuOpenChange` -> `coordinator.consumeDisclosure`, and that
+  // call requires a matching `publishDisclosure` that nothing issues for an item select. The other
+  // native-event path, `genericSelectListener`, also never sees it: `genericClickListener` clears
+  // its one-shot `genericSelection` admission token in a `queueMicrotask` that always resolves
+  // before Radix dispatches its internal "menu.itemSelect" custom event, so `hasAdmission` is always
+  // false there too (confirmed with a timestamped trace: both paths no-op for the same click,
+  // window.open or not - window.open() just makes the stuck-open menu obvious because it swallows
+  // the very next click). Close the menu ourselves, directly, before running the item's action,
+  // instead of depending on either of those paths.
+  const onMoreMenuPlainSelect = (action: () => void) => () => {
     setStoredMoreMenuState(Object.freeze({ visit: moreMenuVisit, open: false }));
-    window.open(url, "_blank", "noopener");
+    action();
   };
+  const onMoreMenuWindowOpenSelect = (url: string) => onMoreMenuPlainSelect(
+    () => window.open(url, "_blank", "noopener"),
+  );
   // Star state and the notifications poll wait for the first sync: the socket handshake and the
   // collab-token call get the server to themselves on open (#118).
   const settled = useOpenSettled(session);
@@ -16932,12 +16945,12 @@ export const Header = memo(function Header(props: HeaderProps) {
           >
             {compact && (
               <>
-                <MenuItem icon={<UserPlus size={15} />} onSelect={props.onShare} data-testid="menu-share">
+                <MenuItem icon={<UserPlus size={15} />} onSelect={onMoreMenuPlainSelect(props.onShare)} data-testid="menu-share">
                   Share…
                 </MenuItem>
                 <MenuItem
                   icon={linked ? <UploadCloud size={15} /> : <GitHubIcon size={15} />}
-                  onSelect={linked ? props.onPublishNow : props.onPublish}
+                  onSelect={onMoreMenuPlainSelect(linked ? props.onPublishNow : props.onPublish)}
                   disabled={props.publishing || (linked ? !canEdit : !props.isOwner || !githubConfigured)}
                   title={!linked && !githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
                   data-testid="menu-publish"
@@ -16952,7 +16965,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             <MenuItem ref={captureHistory} icon={<History size={15} />} onSelect={onHistorySelect} data-testid="menu-history">
               Version history
             </MenuItem>
-            <MenuItem icon={<Activity size={15} />} onSelect={props.onActivity} data-testid="menu-activity">
+            <MenuItem icon={<Activity size={15} />} onSelect={onMoreMenuPlainSelect(props.onActivity)} data-testid="menu-activity">
               Activity
             </MenuItem>
             {canEdit && (
@@ -16961,16 +16974,16 @@ export const Header = memo(function Header(props: HeaderProps) {
               </MenuItem>
             )}
             <MenuSeparator />
-            <MenuItem icon={<Download size={15} />} onSelect={() => props.onDownload("md", false)} data-testid="download-md">
+            <MenuItem icon={<Download size={15} />} onSelect={onMoreMenuPlainSelect(() => props.onDownload("md", false))} data-testid="download-md">
               Download Markdown
             </MenuItem>
-            <MenuItem icon={<FileCode2 size={15} />} onSelect={() => props.onDownload("html", false)} data-testid="download-html">
+            <MenuItem icon={<FileCode2 size={15} />} onSelect={onMoreMenuPlainSelect(() => props.onDownload("html", false))} data-testid="download-html">
               Download HTML
             </MenuItem>
-            <MenuItem icon={<FileText size={15} />} onSelect={() => props.onDownload("pdf", false)} data-testid="download-pdf">
+            <MenuItem icon={<FileText size={15} />} onSelect={onMoreMenuPlainSelect(() => props.onDownload("pdf", false))} data-testid="download-pdf">
               Download PDF
             </MenuItem>
-            <MenuItem icon={<Copy size={15} />} onSelect={props.onCopyMarkdown}>
+            <MenuItem icon={<Copy size={15} />} onSelect={onMoreMenuPlainSelect(props.onCopyMarkdown)}>
               Copy Markdown
             </MenuItem>
             <MenuItem
@@ -16995,7 +17008,7 @@ export const Header = memo(function Header(props: HeaderProps) {
             {props.isOwner && (
               <MenuItem
                 icon={<GitHubIcon size={15} />}
-                onSelect={props.onPublish}
+                onSelect={onMoreMenuPlainSelect(props.onPublish)}
                 disabled={!linked && !githubConfigured}
                 title={!linked && !githubConfigured ? GITHUB_NOT_CONFIGURED : undefined}
                 data-testid="menu-github"
@@ -17004,18 +17017,18 @@ export const Header = memo(function Header(props: HeaderProps) {
               </MenuItem>
             )}
             {props.onCommandPalette && (
-              <MenuItem icon={<Command size={15} />} onSelect={props.onCommandPalette} shortcut={shortcut("Mod-K")} data-testid="menu-command-palette">
+              <MenuItem icon={<Command size={15} />} onSelect={onMoreMenuPlainSelect(props.onCommandPalette)} shortcut={shortcut("Mod-K")} data-testid="menu-command-palette">
                 Search commands
               </MenuItem>
             )}
-            <MenuItem icon={<Keyboard size={15} />} onSelect={props.onShortcuts}>
+            <MenuItem icon={<Keyboard size={15} />} onSelect={onMoreMenuPlainSelect(props.onShortcuts)}>
               Keyboard shortcuts
             </MenuItem>
             <MenuSeparator />
-            <MenuItem icon={<ArrowLeft size={15} />} onSelect={props.onHome}>
+            <MenuItem icon={<ArrowLeft size={15} />} onSelect={onMoreMenuPlainSelect(props.onHome)}>
               All documents
             </MenuItem>
-            <MenuItem icon={<LogOut size={15} />} onSelect={() => void signOutSafely()}>
+            <MenuItem icon={<LogOut size={15} />} onSelect={onMoreMenuPlainSelect(() => void signOutSafely())}>
               Sign out
             </MenuItem>
             {props.isOwner && (

@@ -203,6 +203,40 @@ test.describe("reader view", () => {
     await owner.context.close();
   });
 
+  // #2203: a capture-phase click listener on the document armed a one-shot admission token and
+  // cleared it again on a microtask queued before Radix's own "menu.itemSelect" event arrived, so
+  // the plain-select close path never ran for a keyboard Enter either - only real clicks exercised
+  // the (also broken) path tests had been covering. This proves the keyboard path independently:
+  // focus the item, press Enter, and check the reader opens, the menu is actually gone, and the
+  // very next click (on Share) lands on the first try rather than being swallowed by a stuck menu.
+  test("keyboard Enter on header menu's Open reader view opens the reader, closes the menu, and the next click lands", async ({
+    browser,
+  }) => {
+    const owner = await signIn(browser, "reader-kbd");
+    const { page } = owner;
+    const id = await createDocument(page, CONTENT, "Reader Title");
+    await openDocument(page, id);
+
+    await page.getByTestId("more-menu").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.getByTestId("menu-reader").focus();
+    const popupPromise = page.waitForEvent("popup");
+    await page.keyboard.press("Enter");
+    const reader = await popupPromise;
+    await reader.waitForURL(new RegExp(`/p/${id}$`));
+    await expect(reader.getByTestId("reader-title")).toHaveText("Reader Title");
+    await reader.close();
+
+    await expect(page.getByRole("menu")).toHaveCount(0);
+
+    // The next click must land on the first try - a stuck-open menu would swallow it instead.
+    await page.getByTestId("share-button").click();
+    await expect(page.getByTestId("copy-link")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await owner.context.close();
+  });
+
   test("anonymous reader can dismiss one update and refresh on the next", async ({ browser }) => {
     const owner = await signIn(browser, "reader-owner");
     const id = await createDocument(owner.page, CONTENT, "Reader Title");

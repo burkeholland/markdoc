@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { createDocument, devLogin, ensureCommentsOpen, mintToken, openDocument, richText, uniqueLogin, waitForHydration } from "./helpers";
+import { createDocument, devLogin, ensureCommentsOpen, mintToken, openDocument, richText, signIn, uniqueLogin, waitForHydration } from "./helpers";
 
 /** Text of the code pane as rendered. The dev-only `__markdocSession` hook used by the regular suite is not exposed by a production build. */
 const codeText = (page: Page) => page.locator(".cm-content").innerText();
@@ -67,6 +67,33 @@ test.describe("production build", () => {
     const text = await content.text();
     expect(text).toContain("Typed in the rich pane on the production build.");
     expect(text).toContain("Typed in the code pane on the production build.");
+  });
+
+  // #2203: the More menu's "Open reader view" item stayed open on a real click on this production
+  // build - the exact bug the issue reports - and a stuck-open menu swallowed the very next click.
+  // jsdom coverage alone would not have caught it because the defect depended on a capture-phase
+  // native click listener racing a Radix CustomEvent, something only a real browser reproduces.
+  test("header menu's Open reader view closes the menu with a real click and the next click lands", async ({ browser }) => {
+    const owner = await signIn(browser, "prod-reader-menu");
+    const { page } = owner;
+    const id = await createDocument(page, "# Reader Title\n\nBody text.", "Reader Title");
+    await openDocument(page, id);
+
+    await page.getByTestId("more-menu").click();
+    const popupPromise = page.waitForEvent("popup");
+    await page.getByTestId("menu-reader").click();
+    const reader = await popupPromise;
+    await reader.waitForURL(new RegExp(`/p/${id}$`));
+    await expect(reader.getByTestId("reader-title")).toHaveText("Reader Title");
+    await reader.close();
+
+    await expect(page.getByRole("menu")).toHaveCount(0);
+
+    // The next click must land on the first try - a stuck-open menu would swallow it instead.
+    await page.getByTestId("share-button").click();
+    await expect(page.getByTestId("copy-link")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await owner.context.close();
   });
 
   /**

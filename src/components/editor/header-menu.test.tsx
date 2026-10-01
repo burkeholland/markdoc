@@ -1312,6 +1312,32 @@ describe("editor header More menu authority", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
+  it("closes the Publish menu's own Open on GitHub item before opening the URL (#2203)", async () => {
+    const doc = linkedDocument();
+    const props = headerProps(createSession(doc.id, "viewer"), createActions(), {
+      doc,
+      sync: syncStatus(),
+      isOwner: false,
+    });
+    await renderStrict(header(props));
+    const menuTrigger = publishTrigger();
+    menuTrigger.focus();
+
+    fireEvent(
+      menuTrigger,
+      new PointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        ctrlKey: false,
+        pointerType: "mouse",
+      }),
+    );
+    await screen.findByRole("menu");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open on GitHub" }));
+    expect(window.open).toHaveBeenCalledWith(doc.githubUrl, "_blank", "noopener");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
   it("closes a compact Mode selection that changes the current session mode", async () => {
     const session = createSession();
     const actions = createActions();
