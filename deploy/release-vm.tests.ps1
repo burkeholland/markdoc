@@ -1,5 +1,5 @@
 #requires -Version 7.2
-param([switch]$DigestLookupOnly)
+param([switch]$DigestLookupOnly, [string[]]$DigestLookupCase = @())
 
 $ErrorActionPreference = 'Stop'
 
@@ -38,6 +38,7 @@ $errorText = ''
 switch ($case) {
   'digest-throttled-twice' { $errorText = 'ERROR: HTTP status: 429' }
   'digest-auth' { $errorText = 'ERROR: Status Code: 401' }
+  'digest-auth-exit-124' { $errorText = 'ERROR: Status Code: 401' }
   'digest-unknown' { $errorText = 'ERROR: unrecognized failure' }
   'digest-secret' { $errorText = 'ERROR: secret body without a known category' }
   'digest-configuration' { $errorText = 'ERROR: HTTP status: 400' }
@@ -46,11 +47,13 @@ switch ($case) {
   'digest-ambiguous-status' { $errorText = "ERROR: HTTP status: 503`nHTTP status: 502" }
   'digest-unknown-http' { $errorText = 'ERROR: HTTP status: 409 ReadTimeout' }
   'digest-auth-transient' { $errorText = 'ERROR: HTTP status: 503 Unauthorized ConnectionError' }
+  'digest-configuration-transient' { $errorText = 'ERROR: HTTP status: 503 SSLError: certificate verify failed ConnectionError' }
   default {
     if ($count -eq 1) {
       $errorText = 'ERROR: HTTP status: 503'
       if ($case -eq 'digest-transport-success') { $errorText = 'ERROR: ConnectionError: connection reset' }
       if ($case -eq 'digest-timeout-success') { $errorText = 'ERROR: ReadTimeout: request timed out' }
+      if ($case -eq 'digest-http-timeout-success') { $errorText = 'ERROR: HTTP status: 408' }
       if ($case -eq 'digest-native-timeout') { Start-Sleep -Seconds 30 }
     }
   }
@@ -59,6 +62,7 @@ switch ($case) {
 if ($errorText) {
   [Console]::Out.WriteLine('FAKE_DIGEST_SECRET_2211 response body')
   [Console]::Error.WriteLine($errorText)
+  if ($case -eq 'digest-auth-exit-124') { exit 124 }
   exit 1
 }
 switch ($case) {
@@ -451,6 +455,7 @@ $digestCases = @(
   @{ Name = 'digest-server-success'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Success = $true },
   @{ Name = 'digest-throttled-twice'; Category = 'throttled'; Status = '429'; Calls = 2; Retry = 1 },
   @{ Name = 'digest-auth'; Category = 'auth'; Status = '401'; Calls = 1; Retry = 0 },
+  @{ Name = 'digest-auth-exit-124'; Category = 'auth'; Status = '401'; Calls = 1; Retry = 0; ExitCode = 124 },
   @{ Name = 'digest-unknown'; Category = 'unknown'; Status = 'none'; Calls = 1; Retry = 0 },
   @{ Name = 'digest-secret'; Category = 'unknown'; Status = 'none'; Calls = 1; Retry = 0 },
   @{ Name = 'digest-retry-missing'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Reason = 'absent, ambiguous or malformed digest' },
@@ -459,6 +464,7 @@ $digestCases = @(
   @{ Name = 'digest-not-found'; Category = 'not_found'; Status = '404'; Calls = 1; Retry = 0 },
   @{ Name = 'digest-transport-success'; Category = 'transport'; Status = 'none'; Calls = 2; Retry = 1; Success = $true },
   @{ Name = 'digest-timeout-success'; Category = 'timeout'; Status = 'none'; Calls = 2; Retry = 1; Success = $true },
+  @{ Name = 'digest-http-timeout-success'; Category = 'timeout'; Status = '408'; Calls = 2; Retry = 1; Success = $true },
   @{ Name = 'digest-native-timeout'; Category = 'timeout'; Status = 'none'; Calls = 2; Retry = 1; Success = $true },
   @{ Name = 'digest-retry-malformed'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Reason = 'absent, ambiguous or malformed digest' },
   @{ Name = 'digest-retry-null'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Reason = 'absent, ambiguous or malformed digest' },
@@ -468,8 +474,16 @@ $digestCases = @(
   @{ Name = 'digest-conflicting-status'; Category = 'auth'; Status = 'none'; Calls = 1; Retry = 0 },
   @{ Name = 'digest-ambiguous-status'; Category = 'unknown'; Status = 'none'; Calls = 1; Retry = 0 },
   @{ Name = 'digest-unknown-http'; Category = 'unknown'; Status = '409'; Calls = 1; Retry = 0 },
-  @{ Name = 'digest-auth-transient'; Category = 'auth'; Status = '503'; Calls = 1; Retry = 0 }
+  @{ Name = 'digest-auth-transient'; Category = 'auth'; Status = '503'; Calls = 1; Retry = 0 },
+  @{ Name = 'digest-configuration-transient'; Category = 'configuration'; Status = '503'; Calls = 1; Retry = 0 }
 )
+if ($DigestLookupCase.Count -gt 0) {
+  Assert-True ([bool]$DigestLookupOnly) 'Selecting digest cases requires -DigestLookupOnly.'
+  foreach ($name in $DigestLookupCase) {
+    Assert-True ($name -cin @($digestCases | ForEach-Object { $_.Name })) "Unknown digest test case: $name."
+  }
+  $digestCases = @($digestCases | Where-Object { $_.Name -cin $DigestLookupCase })
+}
 $existingCaseCount = $cases.Count
 if ($DigestLookupOnly) { $cases = @() }
 $cases += @($digestCases | ForEach-Object { $_.Name })
@@ -560,7 +574,9 @@ try {
         Assert-True ($log.IndexOf($diagnostic) -lt $log.IndexOf('Release: guest invocation')) 'Digest diagnostics must precede the guest invocation.'
         Assert-True ($log.IndexOf($retry) -lt $log.IndexOf('Release: guest invocation')) 'Digest retry must precede the guest invocation.'
       } elseif ($case -ne 'digest-deadline' -and -not $digestCase.Reason) {
-        Assert-Equal 1 $code 'Native digest failure exit code must survive.'
+        $expectedExit = 1
+        if ($digestCase.ExitCode) { $expectedExit = $digestCase.ExitCode }
+        Assert-Equal $expectedExit $code 'Native digest failure exit code must survive.'
       }
       Microsoft.PowerShell.Utility\Write-Host "PASS: $case ($($digestCase.Calls) lookup calls, $($digestCase.Retry) retry lines)"
     }

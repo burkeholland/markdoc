@@ -261,7 +261,8 @@ well-formed digest for the full-SHA tag matching that build's output, and makes
 one VM invocation containing the WAL gate and existing deployment script.
 Only the read-only `az acr manifest list-metadata` digest lookup can retry:
 one additional call after a fixed two-second delay, for `transport`, `timeout`,
-`throttled` (HTTP 429) or `server_error` (HTTP 5xx). `auth`, `configuration`,
+`throttled` (HTTP 429) or `server_error` (HTTP 5xx). HTTP 408 is also a
+`timeout`. `auth`, `configuration`,
 `not_found` and `unknown` fail immediately. Conflicting HTTP statuses are not
 treated as transient; recognizable permanent failures take precedence.
 Each call retains the native wrapper's 30-second limit, capped by the remaining

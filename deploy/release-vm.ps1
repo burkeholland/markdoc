@@ -31,7 +31,7 @@ function Get-ReleaseDigestLookupFailure([string]$ErrorText) {
       $ErrorText -match '(?i)\b(?:unauthorized|forbidden|AuthenticationFailed|AuthorizationFailed|InvalidAuthenticationToken|AADSTS[0-9]+)\b|\baz login\b') {
     $category = 'auth'
   } elseif ($statuses -contains '400' -or
-      $ErrorText -match '(?i)\b(?:unrecognized arguments|InvalidArgument|InvalidSubscription|SubscriptionNotFound|BadRequest)\b') {
+      $ErrorText -match '(?i)\b(?:unrecognized arguments|InvalidArgument|InvalidSubscription|SubscriptionNotFound|BadRequest|SSLError|CertificateError|InvalidURL)\b|certificate verify failed') {
     $category = 'configuration'
   } elseif ($statuses -contains '404' -or $ErrorText -match '(?i)\b(?:ManifestUnknown|RepositoryNotFound|ResourceNotFound)\b') {
     $category = 'not_found'
@@ -41,6 +41,8 @@ function Get-ReleaseDigestLookupFailure([string]$ErrorText) {
     $category = 'throttled'
   } elseif ($status -cmatch '^5[0-9]{2}$') {
     $category = 'server_error'
+  } elseif ($status -ceq '408') {
+    $category = 'timeout'
   } elseif ($status -cne 'none') {
     $category = 'unknown'
   } elseif ($ErrorText -match '(?i)\b(?:TimeoutError|ConnectTimeout|ReadTimeout|timed out)\b') {
@@ -101,7 +103,8 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     }
     return $output.Trim()
   } catch [InvalidOperationException] {
-    if ($ClassifyDigestFailure -and $_.Exception.Data['ReleaseExitCode'] -eq 124) {
+    if ($ClassifyDigestFailure -and $_.Exception.Data['ReleaseExitCode'] -eq 124 -and
+        -not $_.Exception.Data.Contains('ReleaseDigestFailureCategory')) {
       $_.Exception.Data['ReleaseDigestFailureCategory'] = 'timeout'
       $_.Exception.Data['ReleaseDigestFailureHttpStatus'] = 'none'
     }
