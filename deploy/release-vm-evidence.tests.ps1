@@ -95,6 +95,56 @@ Assert-True ($failure.Stage -ceq 'archive' -and $failure.Cleanup -ceq 'true') 'B
 Assert-True ($null -eq (Get-ReleaseWalFailure "markdoc-release-wal-failed:$otherOperation`:archive:cleanup=true" $operation)) 'Wrong-operation failure evidence was accepted.'
 Assert-True ($null -eq (Get-ReleaseWalFailure "markdoc-release-wal-failed:$operation`:unknown:cleanup=true" $operation)) 'Unknown failure stage was accepted.'
 
+$spaceFailure = @(
+  "markdoc-release-wal-failed:${operation}:space:cleanup=true"
+  "markdoc-release-wal-space:${operation}:available=436326400:required=2253180108:reserve=2147483648"
+) -join "`n"
+$failure = Get-ReleaseWalFailure $spaceFailure $operation
+Assert-True ($null -ne $failure -and $failure.Stage -ceq 'space') 'Low-space gate failure was not recognized.'
+Assert-True ($failure.Budget -ceq 'Available 436326400 bytes; required 2253180108 bytes, including a 2147483648-byte production reserve.') 'Validated space budget was not surfaced.'
+$failure = Get-ReleaseWalFailure ($spaceFailure.Replace('available=436326400', 'available=private-token')) $operation
+Assert-True ($failure.Budget -ceq 'Scratch disk budget could not be verified.') 'Untrusted space values were exposed.'
+$failure = Get-ReleaseWalFailure ($spaceFailure.Replace('available=436326400', 'available=8589934592')) $operation
+Assert-True ($failure.Budget -ceq 'Scratch disk budget could not be verified.') 'A contradictory space failure was accepted as a measured budget.'
+
+$diagnosticFailure = @(
+  "markdoc-release-wal-failed:${operation}:sql-ready:cleanup=true"
+  "markdoc-release-wal-log:${operation}:PANIC:disk-full"
+  "markdoc-release-wal-log:${operation}:FATAL:recovery-target-unreached"
+  "markdoc-release-wal-log:${operation}:FATAL:message-withheld"
+  "markdoc-release-wal-log:${operation}:FATAL:private-token"
+  "markdoc-release-wal-log:${otherOperation}:PANIC:disk-full"
+) -join "`n"
+$failure = Get-ReleaseWalFailure $diagnosticFailure $operation
+Assert-True ($failure.Diagnostics.Count -eq 3) 'Diagnostics were not filtered to recognized operation-bound records.'
+Assert-True ($failure.Diagnostics[0] -ceq 'Scratch PANIC: No space left on device.') 'Disk-full diagnostic was not surfaced safely.'
+Assert-True (($failure.Diagnostics -join "`n") -notmatch 'private-token') 'Raw diagnostic content escaped the allow-list.'
+$manyDiagnostics = "markdoc-release-wal-failed:${operation}:start:cleanup=true`n" +
+  (("markdoc-release-wal-log:${operation}:FATAL:disk-full`n") * 20)
+$failure = Get-ReleaseWalFailure $manyDiagnostics $operation
+Assert-True ($failure.Diagnostics.Count -eq 10) 'Client diagnostic output was not bounded to ten records.'
+
+$signalFailure = @(
+  "markdoc-release-wal-failed:${operation}:sql-ready:cleanup=true"
+  "markdoc-release-wal-log:${operation}:LOG:killed-by-signal-9"
+  "markdoc-release-wal-log:${operation}:LOG:killed-by-signal-15"
+  "markdoc-release-wal-log:${operation}:LOG:startup-aborted"
+  "markdoc-release-wal-log:${operation}:LOG:killed-by-signal-0"
+  "markdoc-release-wal-log:${operation}:LOG:killed-by-signal-999"
+  "markdoc-release-wal-log:${operation}:LOG:private-token"
+) -join "`n"
+$failure = Get-ReleaseWalFailure $signalFailure $operation
+Assert-True ($failure.Diagnostics.Count -eq 3) 'Signal diagnostics were not restricted to valid signal numbers and fixed startup reasons.'
+Assert-True ($failure.Diagnostics[0] -ceq 'Scratch LOG: A server process was terminated by signal 9.') 'Signal-9 diagnosis was not surfaced.'
+Assert-True ($failure.Diagnostics[2] -ceq 'Scratch LOG: Startup was aborted after a startup process failure.') 'Startup abort diagnosis was not surfaced.'
+
+$imageSpace = "markdoc-vm-image-space-failed:${operation}:pull:available=436326400:required=6442450944:reserve=2147483648"
+Assert-True ((Get-ReleaseImageSpaceFailure $imageSpace $operation) -cmatch 'Insufficient disk space before image pull; application unchanged') 'Pre-pull disk refusal was not surfaced.'
+Assert-True ($null -eq (Get-ReleaseImageSpaceFailure $imageSpace $otherOperation)) 'Wrong-operation image space failure was accepted.'
+Assert-True ($null -eq (Get-ReleaseImageSpaceFailure ($imageSpace.Replace('436326400', 'private-token')) $operation)) 'Raw image-space values were accepted.'
+Assert-True ($null -eq (Get-ReleaseImageSpaceFailure ($imageSpace.Replace('436326400', '8589934592')) $operation)) 'Contradictory image capacity was accepted.'
+Assert-True ((Get-ReleaseImageSpaceFailure "markdoc-vm-image-space-failed:${operation}:activate:reason=unavailable" $operation) -cmatch 'could not be verified before activate; application unchanged') 'Unknown activation capacity was not surfaced safely.'
+
 $releaseSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'release-vm.ps1') -Raw
 $deploySource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'deploy-vm-image.sh')) -Raw
 $gateSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'release-wal-gate.sh')) -Raw
@@ -145,7 +195,8 @@ Assert-True ($gateSource -match '--type=name' -and $gateSource -match '--target=
 Assert-True ($gateSource -notmatch '--lock-timeout' -and
   $gateSource -match 'run_silent "\$restore_timeout" sudo -u postgres pgbackrest' -and
   $gateSource -match 'flock -n 9') 'Release and restore contention must remain bounded without unsupported pgBackRest options.'
-Assert-True ($gateSource -notmatch '(?i)pg_basebackup|checkpoint|systemctl\s+(restart|stop)\s+postgres|archive_command|cp\s+.*pg_wal') 'Gate must not copy WAL or alter/restart the primary.'
+Assert-True ($gateSource -notmatch '(?i)pg_basebackup|systemctl\s+(restart|stop)\s+postgres|archive_command|cp\s+.*pg_wal' -and
+  $gateSource -notmatch '(?i)-c\s+[''"]checkpoint') 'Gate must not copy WAL or alter/restart the primary.'
 Assert-True ($gateSource -notmatch 'markdoc-restore-check\.lock|markdoc-restore-check\.XXXXXX') 'Release cleanup must not claim the long-term restore-check instance.'
 
 Write-Host "release VM evidence tests passed: $script:Passed assertions"
