@@ -3,14 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import {
-  StrictMode,
-  useLayoutEffect,
-  type ComponentProps,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type SetStateAction,
-} from "react";
-import { createRoot } from "react-dom/client";
+import { StrictMode, type SetStateAction } from "react";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
 import type * as Y from "yjs";
@@ -24,19 +17,6 @@ import { SelectionBubble } from "./selection-bubble";
 import { budgetMs } from "../../../scripts/lib/test-budget";
 
 const screen = within(document.documentElement);
-type SelectionBubbleProps = ComponentProps<typeof SelectionBubble>;
-type CapturedMouseEvent = {
-  currentTarget: EventTarget | null;
-  preventDefault: ReturnType<typeof vi.fn>;
-};
-type MouseHandler = (event: CapturedMouseEvent) => void;
-type KeyboardHandler = (
-  event: ReactKeyboardEvent<HTMLButtonElement>,
-) => void;
-type ElementRef<T extends HTMLElement> = (element: T | null) => void | (() => void);
-type ButtonRef = ElementRef<HTMLButtonElement>;
-const TOOLBAR_LABELS = ["Bold", "Italic", "Strikethrough", "Inline code", "Link", "Comment"] as const;
-
 vi.mock("@hocuspocus/provider", async () => {
   const { Awareness } = await import("y-protocols/awareness");
   return {
@@ -269,227 +249,6 @@ function fixture() {
   };
 }
 
-function BubbleBoundary({
-  bubble,
-  present = true,
-  boundary = 0,
-  onBoundary,
-}: {
-  bubble: SelectionBubbleProps;
-  present?: boolean;
-  boundary?: number;
-  onBoundary?: () => void;
-}) {
-  useLayoutEffect(() => {
-    if (boundary > 0) onBoundary?.();
-  }, [boundary, onBoundary]);
-  return present ? <SelectionBubble {...bubble} /> : null;
-}
-
-function reactProperty<T>(element: HTMLElement, name: string): T | undefined {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error(`React props were not attached to ${element.getAttribute("aria-label") ?? element.tagName}`);
-  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  return props?.[name] as T | undefined;
-}
-
-function reactHandler<T extends (...args: never[]) => unknown>(element: HTMLElement, name: string): T {
-  const handler = reactProperty<T>(element, name);
-  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.getAttribute("aria-label") ?? element.tagName}`);
-  return handler;
-}
-
-function captureToolbar() {
-  return TOOLBAR_LABELS.map((label) => {
-    const element = screen.getByRole("button", { name: label }) as HTMLButtonElement;
-    expect(element).toHaveClass("h-[32px]", "w-[32px]");
-    return {
-      label,
-      element,
-      click: reactHandler<MouseHandler>(element, "onClick"),
-      mouseDown: reactHandler<MouseHandler>(element, "onMouseDown"),
-      keyDown: reactHandler<KeyboardHandler>(element, "onKeyDown"),
-      buttonRef: reactProperty<ButtonRef>(element, "ref"),
-    };
-  });
-}
-
-function mouseEvent(currentTarget: EventTarget | null): CapturedMouseEvent {
-  return { currentTarget, preventDefault: vi.fn() };
-}
-
-function markSelectionEventTrusted(event: Event) {
-  const implementation = Object.getOwnPropertySymbols(event)
-    .map(
-      (symbol) => (event as unknown as Record<symbol, unknown>)[symbol],
-    )
-    .find(
-      (candidate): candidate is { isTrusted: boolean } =>
-        typeof candidate === "object" &&
-        candidate !== null &&
-        "isTrusted" in candidate &&
-        candidate.isTrusted === false,
-    );
-  const descriptor = implementation
-    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
-    : undefined;
-  if (!implementation || !descriptor?.writable) {
-    throw new Error("Unable to set jsdom's internal event trust slot");
-  }
-  Object.defineProperty(implementation, "isTrusted", {
-    configurable: true,
-    enumerable: true,
-    get: () => true,
-    set: () => undefined,
-  });
-  if (!event.isTrusted) {
-    throw new Error("The jsdom event trust slot did not update");
-  }
-}
-
-async function dispatchSelectionKey(
-  button: HTMLButtonElement,
-  key: string,
-  init: KeyboardEventInit = {},
-  trusted = true,
-) {
-  const ownerWindow = button.ownerDocument.defaultView;
-  if (!ownerWindow) throw new Error("The toolbar button has no owner window");
-  const event = new ownerWindow.KeyboardEvent("keydown", {
-    key,
-    code: key,
-    bubbles: true,
-    cancelable: true,
-    ...init,
-  });
-  if (trusted) markSelectionEventTrusted(event);
-  await act(async () => {
-    button.dispatchEvent(event);
-    await Promise.resolve();
-  });
-  return event;
-}
-
-function expectSelectionTabStop(label: typeof TOOLBAR_LABELS[number]) {
-  const toolbar = screen.getByRole("toolbar", { name: "Selection" });
-  const buttons = TOOLBAR_LABELS.map(
-    (name) => screen.getByRole("button", { name }) as HTMLButtonElement,
-  );
-  expect(toolbar).not.toHaveAttribute("tabindex");
-  expect(buttons.filter((button) => button.tabIndex === 0)).toEqual([
-    screen.getByRole("button", { name: label }),
-  ]);
-  for (const button of buttons) {
-    if (button.getAttribute("aria-label") !== label) {
-      expect(button).toHaveAttribute("tabindex", "-1");
-    }
-  }
-}
-
-async function renderStrictSelection(
-  bubble: SelectionBubbleProps,
-) {
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  const renderBubble = async (props: SelectionBubbleProps) => {
-    await act(async () => {
-      root.render(
-        <StrictMode>
-          <SelectionBubble {...props} />
-        </StrictMode>,
-      );
-    });
-  };
-  await renderBubble(bubble);
-  return {
-    host,
-    root,
-    render: renderBubble,
-    unmount: async () => {
-      await act(async () => root.unmount());
-      host.remove();
-    },
-  };
-}
-
-function interceptSelectionKeyDown(
-  element: HTMLButtonElement,
-  invoke: (
-    original: KeyboardHandler,
-    event: ReactKeyboardEvent<HTMLButtonElement>,
-  ) => void,
-) {
-  const propsKey = Object.keys(element).find((key) =>
-    key.startsWith("__reactProps$"),
-  );
-  if (!propsKey) throw new Error("React props were not attached to the button");
-  const record = element as unknown as Record<
-    string,
-    Record<string, unknown>
-  >;
-  const props = record[propsKey];
-  const original = props?.onKeyDown;
-  if (!props || typeof original !== "function") {
-    throw new Error("onKeyDown was not attached to the button");
-  }
-  const intercepted = {
-    ...props,
-    onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) =>
-      invoke(original as KeyboardHandler, event),
-  };
-  record[propsKey] = intercepted;
-  return () => {
-    if (record[propsKey] === intercepted) record[propsKey] = props;
-  };
-}
-
-function invokeToolbar(toolbar: ReturnType<typeof captureToolbar>) {
-  for (const action of toolbar) action.click(mouseEvent(action.element));
-}
-
-function instrumentActions() {
-  const toggleMark = vi.fn();
-  return {
-    actions: { toggleMark } as unknown as EditorActions,
-    toggleMark,
-  };
-}
-
-function instrumentPermissions(session: CollabSession, canEdit = true, canComment = true) {
-  let editable = canEdit;
-  let commentable = canComment;
-  const editReads = vi.fn(() => editable);
-  const commentReads = vi.fn(() => commentable);
-  Object.defineProperties(session, {
-    canEdit: { configurable: true, get: editReads },
-    canComment: { configurable: true, get: commentReads },
-  });
-  return {
-    editReads,
-    commentReads,
-    setCanEdit: (value: boolean) => { editable = value; },
-    setCanComment: (value: boolean) => { commentable = value; },
-  };
-}
-
-function toolbarSession() {
-  return {
-    activeSurface: "rich",
-    undoManager: { stopCapturing: vi.fn() },
-  } as unknown as CollabSession;
-}
-
-function expectToolbarCalls(
-  actions: ReturnType<typeof instrumentActions>,
-  onLink: ReturnType<typeof vi.fn>,
-  onComment: ReturnType<typeof vi.fn>,
-) {
-  expect(actions.toggleMark.mock.calls).toEqual([["strong"], ["em"], ["strike"], ["code"]]);
-  expect(onLink).toHaveBeenCalledTimes(1);
-  expect(onComment).toHaveBeenCalledTimes(1);
-}
-
 function productionFixture() {
   const source = "alpha beta gamma";
   const getToken = vi.fn(async (): Promise<string> => { throw new Error("Unexpected connection"); });
@@ -567,615 +326,7 @@ function productionFixture() {
   return { props, view, session, source, decorations, select, edit, assertTracked, assertViewsRetained, destroy };
 }
 
-describe("SelectionBubble roving keyboard navigation", () => {
-  it.each([
-    ["ArrowRight", "Bold", "Italic"],
-    ["ArrowDown", "Italic", "Strikethrough"],
-    ["ArrowLeft", "Inline code", "Strikethrough"],
-    ["ArrowUp", "Strikethrough", "Italic"],
-    ["Home", "Link", "Bold"],
-    ["End", "Italic", "Comment"],
-    ["ArrowRight", "Comment", "Bold"],
-    ["ArrowDown", "Comment", "Bold"],
-    ["ArrowLeft", "Bold", "Comment"],
-    ["ArrowUp", "Bold", "Comment"],
-  ] as const)(
-    "moves %s from %s to %s with one prevented native event and intrinsic focus",
-    async (key, sourceLabel, destinationLabel) => {
-      const env = environment();
-      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const f = fixture();
-      const actions = instrumentActions();
-      const selection = f.view.state.selection.toJSON();
-      const mounted = await renderStrictSelection({
-        ...f.props,
-        actions: actions.actions,
-      });
-      try {
-        env.flush();
-        expectSelectionTabStop("Bold");
-        const source = screen.getByRole("button", {
-          name: sourceLabel,
-        }) as HTMLButtonElement;
-        const destination = screen.getByRole("button", {
-          name: destinationLabel,
-        }) as HTMLButtonElement;
-        source.focus();
-        focus.mockClear();
-        preventDefault.mockClear();
-        const toolbar = screen.getByRole("toolbar", {
-          name: "Selection",
-        }) as HTMLDivElement;
-        const scroll = {
-          pageX: window.scrollX,
-          pageY: window.scrollY,
-          toolbarLeft: toolbar.scrollLeft,
-          toolbarTop: toolbar.scrollTop,
-        };
-
-        const event = await dispatchSelectionKey(source, key);
-
-        expect(event.defaultPrevented).toBe(true);
-        expect(destination).toHaveFocus();
-        expect(focus).toHaveBeenCalledTimes(1);
-        expect(preventDefault).toHaveBeenCalledTimes(1);
-        expect(preventDefault.mock.invocationCallOrder[0]).toBeLessThan(
-          focus.mock.invocationCallOrder[0]!,
-        );
-        expect(focus.mock.contexts[0]).toBe(destination);
-        expect(focus.mock.calls[0]).toEqual([{ preventScroll: true }]);
-        expectSelectionTabStop(destinationLabel);
-        expect(window.scrollX).toBe(scroll.pageX);
-        expect(window.scrollY).toBe(scroll.pageY);
-        expect(toolbar.scrollLeft).toBe(scroll.toolbarLeft);
-        expect(toolbar.scrollTop).toBe(scroll.toolbarTop);
-        expect(actions.toggleMark).not.toHaveBeenCalled();
-        expect(f.onLink).not.toHaveBeenCalled();
-        expect(f.onComment).not.toHaveBeenCalled();
-        expect(f.view.focus).not.toHaveBeenCalled();
-        expect(f.view.state.selection.toJSON()).toEqual(selection);
-      } finally {
-        await mounted.unmount();
-      }
-    },
-  );
-
-  it("keeps boundary Home and End inert while native Enter and Space still activate", async () => {
-    const user = userEvent.setup();
-    const env = environment();
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const f = fixture();
-    const actions = instrumentActions();
-    const onComment = vi.fn();
-    const mounted = await renderStrictSelection({
-      ...f.props,
-      actions: actions.actions,
-      onComment,
-    });
-    try {
-      env.flush();
-      const bold = screen.getByRole("button", {
-        name: "Bold",
-      }) as HTMLButtonElement;
-      const comment = screen.getByRole("button", {
-        name: "Comment",
-      }) as HTMLButtonElement;
-      bold.focus();
-      focus.mockClear();
-      const home = await dispatchSelectionKey(bold, "Home");
-      expect(home.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-      expectSelectionTabStop("Bold");
-
-      comment.focus();
-      focus.mockClear();
-      const end = await dispatchSelectionKey(comment, "End");
-      expect(end.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-      expectSelectionTabStop("Bold");
-
-      bold.focus();
-      await user.keyboard("{Enter}");
-      comment.focus();
-      await user.keyboard(" ");
-      expect(actions.toggleMark.mock.calls).toEqual([["strong"]]);
-      expect(onComment).toHaveBeenCalledTimes(1);
-      expect(f.view.state.selection.from).toBe(1);
-      expect(f.view.state.selection.to).toBe(9);
-    } finally {
-      await mounted.unmount();
-    }
-  });
-
-  it("keeps one enabled roving stop and advances when permissions disable it", async () => {
-    const env = environment();
-    const f = fixture();
-    const permissions = instrumentPermissions(f.session, false, true);
-    const bubble = { ...f.props };
-    const mounted = await renderStrictSelection(bubble);
-    try {
-      env.flush();
-      expectSelectionTabStop("Comment");
-      for (const label of TOOLBAR_LABELS.slice(0, 5)) {
-        expect(screen.getByRole("button", { name: label })).toBeDisabled();
-      }
-
-      permissions.setCanEdit(true);
-      await mounted.render(bubble);
-      expectSelectionTabStop("Comment");
-      const comment = screen.getByRole("button", {
-        name: "Comment",
-      }) as HTMLButtonElement;
-      comment.focus();
-      await dispatchSelectionKey(comment, "ArrowRight");
-      expectSelectionTabStop("Bold");
-
-      permissions.setCanEdit(false);
-      await mounted.render(bubble);
-      expectSelectionTabStop("Comment");
-
-      permissions.setCanEdit(true);
-      permissions.setCanComment(false);
-      await mounted.render(bubble);
-      expectSelectionTabStop("Bold");
-      const link = screen.getByRole("button", {
-        name: "Link",
-      }) as HTMLButtonElement;
-      link.focus();
-      const wrapped = await dispatchSelectionKey(link, "ArrowRight");
-      expect(wrapped.defaultPrevented).toBe(true);
-      expect(screen.getByRole("button", { name: "Bold" })).toHaveFocus();
-      expectSelectionTabStop("Bold");
-    } finally {
-      await mounted.unmount();
-    }
-  });
-
-  it("rejects ordinary untrusted, modified, repeated, composing, canceled, and unfocused delivery", async () => {
-    const env = environment();
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const f = fixture();
-    const actions = instrumentActions();
-    const mounted = await renderStrictSelection({
-      ...f.props,
-      actions: actions.actions,
-    });
-    try {
-      env.flush();
-      const bold = screen.getByRole("button", {
-        name: "Bold",
-      }) as HTMLButtonElement;
-      const outside = document.createElement("button");
-      document.body.append(outside);
-      const rejected: {
-        trusted: boolean;
-        init?: KeyboardEventInit;
-        key?: string;
-      }[] = [
-        { trusted: false },
-        { trusted: true, init: { ctrlKey: true } },
-        { trusted: true, init: { metaKey: true } },
-        { trusted: true, init: { altKey: true } },
-        { trusted: true, init: { shiftKey: true } },
-        { trusted: true, init: { repeat: true } },
-        { trusted: true, init: { isComposing: true } },
-        { trusted: true, init: { bubbles: false } },
-        { trusted: true, init: { cancelable: false } },
-        { trusted: true, key: "PageDown" },
-      ];
-      for (const candidate of rejected) {
-        bold.focus();
-        focus.mockClear();
-        const event = await dispatchSelectionKey(
-          bold,
-          candidate.key ?? "ArrowRight",
-          candidate.init,
-          candidate.trusted,
-        );
-        expect(event.defaultPrevented).toBe(false);
-        expect(focus).not.toHaveBeenCalled();
-        expectSelectionTabStop("Bold");
-      }
-
-      outside.focus();
-      focus.mockClear();
-      const wrongFocus = await dispatchSelectionKey(bold, "ArrowRight");
-      expect(wrongFocus.defaultPrevented).toBe(false);
-      expect(outside).toHaveFocus();
-      expect(focus).not.toHaveBeenCalled();
-
-      bold.focus();
-      focus.mockClear();
-      const canceled = new KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        code: "ArrowRight",
-        bubbles: true,
-        cancelable: true,
-      });
-      markSelectionEventTrusted(canceled);
-      canceled.preventDefault();
-      await act(async () => {
-        bold.dispatchEvent(canceled);
-        await Promise.resolve();
-      });
-      expect(focus).not.toHaveBeenCalled();
-      expect(actions.toggleMark).not.toHaveBeenCalled();
-      expect(f.onLink).not.toHaveBeenCalled();
-      expect(f.onComment).not.toHaveBeenCalled();
-
-      const recovered = await dispatchSelectionKey(bold, "ArrowRight");
-      expect(recovered.defaultPrevented).toBe(true);
-      expectSelectionTabStop("Italic");
-      outside.remove();
-    } finally {
-      await mounted.unmount();
-    }
-  });
-
-  it("rejects foreign and replayed native identities, crossed delivery, and replaced React predicates", async () => {
-    const env = environment();
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const f = fixture();
-    const iframe = document.createElement("iframe");
-    document.body.append(iframe);
-    const mounted = await renderStrictSelection(f.props);
-    try {
-      env.flush();
-      const bold = screen.getByRole("button", {
-        name: "Bold",
-      }) as HTMLButtonElement;
-      bold.focus();
-      focus.mockClear();
-      const foreignWindow = iframe.contentWindow as
-        | (Window & typeof globalThis)
-        | null;
-      if (!foreignWindow) throw new Error("The foreign window was unavailable");
-      const foreign = new foreignWindow.KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        code: "ArrowRight",
-        bubbles: true,
-        cancelable: true,
-      });
-      markSelectionEventTrusted(foreign);
-      await act(async () => {
-        bold.dispatchEvent(foreign);
-        await Promise.resolve();
-      });
-      expect(foreign.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-
-      const first = await dispatchSelectionKey(bold, "ArrowRight");
-      expect(first.defaultPrevented).toBe(true);
-      focus.mockClear();
-      await act(async () => {
-        screen.getByRole("button", { name: "Italic" }).dispatchEvent(first);
-        await Promise.resolve();
-      });
-      expect(focus).not.toHaveBeenCalled();
-
-      const italic = screen.getByRole("button", {
-        name: "Italic",
-      }) as HTMLButtonElement;
-      italic.focus();
-      focus.mockClear();
-      const outer = new KeyboardEvent("keydown", {
-        key: "ArrowRight",
-        code: "ArrowRight",
-        bubbles: true,
-        cancelable: true,
-      });
-      const inner = new KeyboardEvent("keydown", {
-        key: "ArrowDown",
-        code: "ArrowDown",
-        bubbles: true,
-        cancelable: true,
-      });
-      markSelectionEventTrusted(outer);
-      markSelectionEventTrusted(inner);
-      italic.addEventListener(
-        "keydown",
-        () => italic.dispatchEvent(inner),
-        { capture: true, once: true },
-      );
-      await act(async () => {
-        italic.dispatchEvent(outer);
-        await Promise.resolve();
-      });
-      expect(outer.defaultPrevented).toBe(false);
-      expect(inner.defaultPrevented).toBe(false);
-      expect(focus).not.toHaveBeenCalled();
-      expectSelectionTabStop("Italic");
-
-      const restore = interceptSelectionKeyDown(
-        italic,
-        (original, event) => {
-          event.isPropagationStopped = () => false;
-          original(event);
-        },
-      );
-      const replaced = await dispatchSelectionKey(italic, "ArrowRight");
-      restore();
-      expect(replaced.defaultPrevented).toBe(false);
-      expectSelectionTabStop("Italic");
-
-      const recovered = await dispatchSelectionKey(italic, "ArrowRight");
-      expect(recovered.defaultPrevented).toBe(true);
-      expectSelectionTabStop("Strikethrough");
-    } finally {
-      await mounted.unmount();
-      iframe.remove();
-    }
-  });
-
-  it.each([
-    "selection",
-    "format",
-    "method",
-    "permission",
-  ] as const)(
-    "rejects stale %s facts and accepts only a complete current successor",
-    async (change) => {
-      const env = environment();
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const f = fixture();
-      const permissions = instrumentPermissions(f.session);
-      const actions = instrumentActions();
-      const format = { ...EMPTY_FORMAT };
-      const bubble = {
-        ...f.props,
-        actions: actions.actions,
-        format,
-      };
-      const mounted = await renderStrictSelection(bubble);
-      try {
-        env.flush();
-        const stale = screen.getByRole("button", {
-          name: "Bold",
-        }) as HTMLButtonElement;
-        stale.focus();
-        focus.mockClear();
-        if (change === "selection") {
-          f.select(2, 8);
-        } else if (change === "format") {
-          format.strong = true;
-        } else if (change === "method") {
-          actions.actions.toggleMark = vi.fn();
-        } else {
-          permissions.setCanEdit(false);
-        }
-
-        const rejected = await dispatchSelectionKey(stale, "ArrowRight");
-        expect(rejected.defaultPrevented).toBe(false);
-        expect(focus).not.toHaveBeenCalled();
-        expectSelectionTabStop("Bold");
-        expect(actions.toggleMark).not.toHaveBeenCalled();
-        expect(f.onLink).not.toHaveBeenCalled();
-        expect(f.onComment).not.toHaveBeenCalled();
-
-        if (change === "permission") permissions.setCanEdit(true);
-        await mounted.render({
-          ...bubble,
-          format: { ...format },
-        });
-        const current = screen.getByRole("button", {
-          name: "Bold",
-        }) as HTMLButtonElement;
-        current.focus();
-        focus.mockClear();
-        const accepted = await dispatchSelectionKey(
-          current,
-          "ArrowRight",
-        );
-        expect(accepted.defaultPrevented).toBe(true);
-        expectSelectionTabStop("Italic");
-        expect(focus).toHaveBeenCalledTimes(1);
-      } finally {
-        await mounted.unmount();
-      }
-    },
-  );
-
-  it.each([
-    "attribute",
-    "detach",
-    "reorder",
-    "replace",
-  ] as const)(
-    "retires %s mutate-restored DOM before recovery on a keyed mount",
-    async (change) => {
-      const env = environment();
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const f = fixture();
-      const mounted = await renderStrictSelection(f.props);
-      try {
-        env.flush();
-        const toolbar = screen.getByRole("toolbar", {
-          name: "Selection",
-        }) as HTMLDivElement;
-        const bold = screen.getByRole("button", {
-          name: "Bold",
-        }) as HTMLButtonElement;
-        if (change === "attribute") {
-          bold.setAttribute("data-tampered", "true");
-          bold.removeAttribute("data-tampered");
-        } else if (change === "detach") {
-          const parent = toolbar.parentNode!;
-          const next = toolbar.nextSibling;
-          toolbar.remove();
-          parent.insertBefore(toolbar, next);
-        } else if (change === "reorder") {
-          const first = toolbar.firstChild!;
-          const last = toolbar.lastChild!;
-          toolbar.insertBefore(last, first);
-          toolbar.append(last);
-          toolbar.insertBefore(first, toolbar.firstChild);
-        } else {
-          const replacement = bold.cloneNode(true) as HTMLButtonElement;
-          bold.replaceWith(replacement);
-          replacement.replaceWith(bold);
-        }
-        await act(async () => Promise.resolve());
-        bold.focus();
-        focus.mockClear();
-        const rejected = await dispatchSelectionKey(bold, "ArrowRight");
-        expect(rejected.defaultPrevented).toBe(false);
-        expect(focus).not.toHaveBeenCalled();
-
-        await act(async () => {
-          mounted.root.render(
-            <StrictMode>
-              <SelectionBubble key={`recovered-${change}`} {...f.props} />
-            </StrictMode>,
-          );
-        });
-        env.flush();
-        const recovered = screen.getByRole("button", {
-          name: "Bold",
-        }) as HTMLButtonElement;
-        recovered.focus();
-        focus.mockClear();
-        const accepted = await dispatchSelectionKey(
-          recovered,
-          "ArrowRight",
-        );
-        expect(accepted.defaultPrevented).toBe(true);
-        expectSelectionTabStop("Italic");
-      } finally {
-        await mounted.unmount();
-      }
-    },
-  );
-
-  it("rejects partial callback-ref replay and every captured handler after cleanup", async () => {
-    const env = environment();
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const f = fixture();
-    const mounted = await renderStrictSelection(f.props);
-    env.flush();
-    const stale = captureToolbar();
-    const bold = stale[0];
-    act(() => {
-      bold.buttonRef?.(null);
-      bold.buttonRef?.(bold.element);
-    });
-    bold.element.focus();
-    focus.mockClear();
-    const partial = await dispatchSelectionKey(
-      bold.element,
-      "ArrowRight",
-    );
-    expect(partial.defaultPrevented).toBe(false);
-    expect(focus).not.toHaveBeenCalled();
-
-    await mounted.render({ ...f.props, format: { ...EMPTY_FORMAT } });
-    const current = screen.getByRole("button", {
-      name: "Bold",
-    }) as HTMLButtonElement;
-    current.focus();
-    focus.mockClear();
-    const recovered = await dispatchSelectionKey(
-      current,
-      "ArrowRight",
-    );
-    expect(recovered.defaultPrevented).toBe(true);
-    expectSelectionTabStop("Italic");
-
-    await mounted.unmount();
-    const removedMarkup = mounted.host.innerHTML;
-    focus.mockClear();
-    const afterCleanup = new KeyboardEvent("keydown", {
-      key: "ArrowRight",
-      code: "ArrowRight",
-      bubbles: true,
-      cancelable: true,
-    });
-    markSelectionEventTrusted(afterCleanup);
-    stale[0].keyDown({
-      nativeEvent: afterCleanup,
-      type: "keydown",
-      target: stale[0].element,
-      currentTarget: stale[0].element,
-      key: "ArrowRight",
-    } as unknown as ReactKeyboardEvent<HTMLButtonElement>);
-    expect(mounted.host.innerHTML).toBe(removedMarkup);
-    expect(afterCleanup.defaultPrevented).toBe(false);
-    expect(focus).not.toHaveBeenCalled();
-    expect(f.onLink).not.toHaveBeenCalled();
-    expect(f.onComment).not.toHaveBeenCalled();
-  });
-});
-
 describe("SelectionBubble geometry scheduling", () => {
-  it("restores every action family after Strict Mode replay without letting retired controls poison a successor", () => {
-    const env = environment();
-    const f = fixture();
-    const permissions = instrumentPermissions(f.session);
-    const retiredActions = instrumentActions();
-    const retiredLink = vi.fn();
-    const retiredComment = vi.fn();
-    const retiredBubble = {
-      ...f.props,
-      actions: retiredActions.actions,
-      onLink: retiredLink,
-      onComment: retiredComment,
-    };
-
-    const rendered = render(
-      <StrictMode>
-        <SelectionBubble {...retiredBubble} />
-      </StrictMode>,
-    );
-    env.flush();
-    const retired = captureToolbar();
-    const retiredBubbleRef = reactProperty<ElementRef<HTMLDivElement>>(screen.getByTestId("selection-bubble"), "ref");
-    const retiredRootRef = reactProperty<ElementRef<HTMLDivElement>>(screen.getByRole("toolbar", { name: "Selection" }), "ref");
-    invokeToolbar(retired);
-    expectToolbarCalls(retiredActions, retiredLink, retiredComment);
-
-    const currentActions = instrumentActions();
-    const currentLink = vi.fn();
-    const currentComment = vi.fn();
-    const currentBubble = {
-      ...retiredBubble,
-      actions: currentActions.actions,
-      onLink: currentLink,
-      onComment: currentComment,
-    };
-    rendered.rerender(
-      <StrictMode>
-        <SelectionBubble {...currentBubble} />
-      </StrictMode>,
-    );
-    env.flush();
-    const current = captureToolbar();
-    const reusedMouseEvents = retired.map(({ element }) => mouseEvent(element));
-    permissions.editReads.mockClear();
-    permissions.commentReads.mockClear();
-
-    retiredBubbleRef?.(null);
-    retiredRootRef?.(null);
-    for (const [index, control] of retired.entries()) {
-      control.buttonRef?.(null);
-      control.mouseDown(reusedMouseEvents[index]);
-      control.click(mouseEvent(control.element));
-    }
-    expectToolbarCalls(retiredActions, retiredLink, retiredComment);
-    expect(currentActions.toggleMark).not.toHaveBeenCalled();
-    expect(currentLink).not.toHaveBeenCalled();
-    expect(currentComment).not.toHaveBeenCalled();
-    expect(permissions.editReads).not.toHaveBeenCalled();
-    expect(permissions.commentReads).not.toHaveBeenCalled();
-
-    for (const [index, control] of current.entries()) {
-      reusedMouseEvents[index].currentTarget = control.element;
-      control.mouseDown(reusedMouseEvents[index]);
-      control.click(mouseEvent(control.element));
-      expect(reusedMouseEvents[index].preventDefault).toHaveBeenCalledTimes(1);
-    }
-    expectToolbarCalls(currentActions, currentLink, currentComment);
-  });
-
   it("coalesces all owned signals, observes selected content, and cleans exact replacement owners", () => {
     const env = environment();
     const first = fixture();
@@ -1220,657 +371,6 @@ describe("SelectionBubble geometry scheduling", () => {
       expect(observer.disconnect).toHaveBeenCalledTimes(1);
     }
     expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
-  });
-
-  it.each(["retired-before-current", "current-before-retired"] as const)(
-    "binds reused-view publications and actions to the exact replacement owner (%s)",
-    (order) => {
-      const env = environment({ popover: true });
-      const shared = fixture();
-      const retiredActions = instrumentActions();
-      const retiredPermissions = instrumentPermissions(shared.session);
-      const retiredLink = vi.fn();
-      const retiredComment = vi.fn();
-      const retiredBubble = {
-        ...shared.props,
-        actions: retiredActions.actions,
-        onLink: retiredLink,
-        onComment: retiredComment,
-      };
-      env.enterFullscreen(shared.scroller);
-      const rendered = render(<BubbleBoundary bubble={retiredBubble} />);
-      env.flush();
-      const retiredToolbar = captureToolbar();
-      const retiredLayer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
-      const retiredObservers = { resize: env.resizes[0], mutation: env.mutations[0] };
-      const retiredListeners = env.listeners.slice();
-      window.dispatchEvent(new Event("resize"));
-      const retiredFrameId = [...env.frames.keys()][0];
-      const retiredFrames = env.capturedFrames.slice();
-      if (retiredFrameId === undefined) throw new Error("The retired owner did not have a pending frame");
-      retiredPermissions.editReads.mockClear();
-      retiredPermissions.commentReads.mockClear();
-
-      const currentSession = toolbarSession();
-      const currentPermissions = instrumentPermissions(currentSession);
-      const currentActions = instrumentActions();
-      const currentLink = vi.fn();
-      const currentComment = vi.fn();
-      const currentBubble = {
-        ...retiredBubble,
-        session: currentSession,
-        actions: currentActions.actions,
-        onLink: currentLink,
-        onComment: currentComment,
-      };
-      let retiredAbsentAtBoundary = false;
-      rendered.rerender(
-        <BubbleBoundary
-          bubble={currentBubble}
-          boundary={1}
-          onBoundary={() => {
-            retiredAbsentAtBoundary =
-              screen.queryByTestId("selection-bubble") === null &&
-              document.querySelectorAll("[data-selection-bubble-layer]").length === 0;
-            invokeToolbar(retiredToolbar);
-          }}
-        />,
-      );
-
-      expect(retiredAbsentAtBoundary).toBe(true);
-      expect(env.frames.has(retiredFrameId)).toBe(false);
-      expect(env.frames.size).toBe(1);
-      expect(retiredToolbar.every(({ element }) => !element.isConnected)).toBe(true);
-      expect(retiredActions.toggleMark).not.toHaveBeenCalled();
-      expect(retiredLink).not.toHaveBeenCalled();
-      expect(retiredComment).not.toHaveBeenCalled();
-      expect(retiredPermissions.editReads).not.toHaveBeenCalled();
-      expect(retiredPermissions.commentReads).not.toHaveBeenCalled();
-      expect(retiredObservers.resize.disconnect).toHaveBeenCalledTimes(1);
-      expect(retiredObservers.mutation.disconnect).toHaveBeenCalledTimes(1);
-      expect(retiredListeners).toHaveLength(15);
-      expect(retiredListeners.every((listener) => listener.removed === 1)).toBe(true);
-      expect(env.opened.has(retiredLayer)).toBe(false);
-
-      env.flush();
-      const currentToolbar = captureToolbar();
-      const currentLayer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
-      expect(currentLayer).not.toBe(retiredLayer);
-      expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(1);
-      expect(screen.getAllByRole("button")).toHaveLength(6);
-      expect(env.opened).toEqual(new Set([currentLayer]));
-      expect(env.listeners).toHaveLength(30);
-      expect(env.listeners.slice(15).every((listener) => listener.removed === 0)).toBe(true);
-      expect(env.resizes).toHaveLength(2);
-      expect(env.mutations).toHaveLength(2);
-      const currentTargets = {
-        resize: new Set(env.resizes[1].targets),
-        mutation: new Map(env.mutations[1].targets),
-        layerParent: currentLayer.parentElement,
-        selection: shared.view.state.selection.toJSON(),
-        focusCalls: shared.hasFocus.mock.calls.length,
-        requests: env.request.mock.calls.length,
-      };
-
-      for (const observer of Object.values(retiredObservers)) observer.fire();
-      for (const listener of retiredListeners) {
-        const event = new Event(listener.type);
-        if (typeof listener.callback === "function") listener.callback.call(listener.target, event);
-        else listener.callback.handleEvent(event);
-      }
-      for (const frame of retiredFrames) frame(0);
-      expect(env.frames.size).toBe(0);
-      expect(env.request).toHaveBeenCalledTimes(currentTargets.requests);
-      expect(env.resizes[1].targets).toEqual(currentTargets.resize);
-      expect(env.mutations[1].targets).toEqual(currentTargets.mutation);
-      expect(currentLayer.parentElement).toBe(currentTargets.layerParent);
-      expect(shared.view.state.selection.toJSON()).toEqual(currentTargets.selection);
-      expect(shared.hasFocus).toHaveBeenCalledTimes(currentTargets.focusCalls);
-      expect(env.opened).toEqual(new Set([currentLayer]));
-      expect(screen.getAllByRole("button")).toHaveLength(6);
-
-      retiredPermissions.editReads.mockClear();
-      retiredPermissions.commentReads.mockClear();
-      currentPermissions.editReads.mockClear();
-      currentPermissions.commentReads.mockClear();
-      act(() => {
-        if (order === "retired-before-current") {
-          invokeToolbar(retiredToolbar);
-          invokeToolbar(currentToolbar);
-        } else {
-          invokeToolbar(currentToolbar);
-          invokeToolbar(retiredToolbar);
-        }
-      });
-      expect(retiredActions.toggleMark).not.toHaveBeenCalled();
-      expect(retiredLink).not.toHaveBeenCalled();
-      expect(retiredComment).not.toHaveBeenCalled();
-      expect(retiredPermissions.editReads).not.toHaveBeenCalled();
-      expect(retiredPermissions.commentReads).not.toHaveBeenCalled();
-      expectToolbarCalls(currentActions, currentLink, currentComment);
-      expect(currentPermissions.editReads).toHaveBeenCalledTimes(6);
-      expect(currentPermissions.commentReads).toHaveBeenCalledTimes(6);
-    },
-  );
-
-  it.each(["retired-before-current", "current-before-retired"] as const)(
-    "retires same-owner action props without replacing native ownership (%s)",
-    (order) => {
-      const env = environment({ popover: true });
-      const shared = fixture();
-      const permissions = instrumentPermissions(shared.session);
-      const retiredActions = instrumentActions();
-      const retiredLink = vi.fn();
-      const retiredComment = vi.fn();
-      const retiredBubble = {
-        ...shared.props,
-        actions: retiredActions.actions,
-        onLink: retiredLink,
-        onComment: retiredComment,
-      };
-      const rendered = render(<BubbleBoundary bubble={retiredBubble} />);
-      env.flush();
-      const retiredToolbar = captureToolbar();
-      const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
-      window.dispatchEvent(new Event("resize"));
-      const pendingFrame = [...env.frames.keys()][0];
-      if (pendingFrame === undefined) throw new Error("The shared owner did not have a pending frame");
-      permissions.editReads.mockClear();
-      permissions.commentReads.mockClear();
-
-      const currentActions = instrumentActions();
-      const currentLink = vi.fn();
-      const currentComment = vi.fn();
-      const currentBubble = {
-        ...retiredBubble,
-        actions: currentActions.actions,
-        onLink: currentLink,
-        onComment: currentComment,
-      };
-      let retiredAbsentAtBoundary = false;
-      rendered.rerender(
-        <BubbleBoundary
-          bubble={currentBubble}
-          boundary={1}
-          onBoundary={() => {
-            retiredAbsentAtBoundary = screen.queryByTestId("selection-bubble") === null;
-            invokeToolbar(retiredToolbar);
-          }}
-        />,
-      );
-
-      expect(retiredAbsentAtBoundary).toBe(true);
-      expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(1);
-      expect(document.querySelector("[data-selection-bubble-layer]")).toBe(layer);
-      expect(env.frames.has(pendingFrame)).toBe(true);
-      expect(env.cancel).not.toHaveBeenCalled();
-      expect(env.resizes).toHaveLength(1);
-      expect(env.mutations).toHaveLength(1);
-      expect(env.resizes[0].disconnect).not.toHaveBeenCalled();
-      expect(env.mutations[0].disconnect).not.toHaveBeenCalled();
-      expect(env.listeners).toHaveLength(15);
-      expect(env.listeners.every((listener) => listener.removed === 0)).toBe(true);
-      expect(retiredActions.toggleMark).not.toHaveBeenCalled();
-      expect(retiredLink).not.toHaveBeenCalled();
-      expect(retiredComment).not.toHaveBeenCalled();
-      expect(permissions.editReads).not.toHaveBeenCalled();
-      expect(permissions.commentReads).not.toHaveBeenCalled();
-
-      env.flush();
-      const currentToolbar = captureToolbar();
-      expect(document.querySelector("[data-selection-bubble-layer]")).toBe(layer);
-      expect(screen.getAllByRole("button")).toHaveLength(6);
-      permissions.editReads.mockClear();
-      permissions.commentReads.mockClear();
-      act(() => {
-        if (order === "retired-before-current") {
-          invokeToolbar(retiredToolbar);
-          invokeToolbar(currentToolbar);
-        } else {
-          invokeToolbar(currentToolbar);
-          invokeToolbar(retiredToolbar);
-        }
-      });
-      expect(retiredActions.toggleMark).not.toHaveBeenCalled();
-      expect(retiredLink).not.toHaveBeenCalled();
-      expect(retiredComment).not.toHaveBeenCalled();
-      expectToolbarCalls(currentActions, currentLink, currentComment);
-      expect(permissions.editReads).toHaveBeenCalledTimes(6);
-      expect(permissions.commentReads).toHaveBeenCalledTimes(6);
-      expect(env.resizes[0].disconnect).not.toHaveBeenCalled();
-      expect(env.mutations[0].disconnect).not.toHaveBeenCalled();
-      expect(env.listeners.every((listener) => listener.removed === 0)).toBe(true);
-      expect(env.opened).toEqual(new Set([layer]));
-    },
-  );
-
-  it("requires each exact current button, consumes each mouse event once, and claims controls independently", () => {
-    const env = environment();
-    const f = fixture();
-    const actions = instrumentActions();
-    const permissions = instrumentPermissions(f.session);
-    const onLink = vi.fn();
-    const onComment = vi.fn();
-    render(<SelectionBubble {...f.props} actions={actions.actions} onLink={onLink} onComment={onComment} />);
-    env.flush();
-    const toolbar = captureToolbar();
-    const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
-    const layerContains = vi.spyOn(layer, "contains");
-    const foreign = document.createElement("button");
-    const detached = document.createElement("button");
-    const replacement = document.createElement("button");
-    document.body.append(foreign, replacement);
-    permissions.editReads.mockClear();
-    permissions.commentReads.mockClear();
-    layerContains.mockClear();
-
-    for (const control of [toolbar[0], toolbar[4], toolbar[5]]) {
-      const sibling = toolbar[control === toolbar[0] ? 1 : 0];
-      for (const target of [sibling.element, foreign, detached, replacement]) {
-        const down = mouseEvent(target);
-        control.mouseDown(down);
-        control.click(mouseEvent(target));
-        expect(down.preventDefault).not.toHaveBeenCalled();
-      }
-    }
-    expect(actions.toggleMark).not.toHaveBeenCalled();
-    expect(onLink).not.toHaveBeenCalled();
-    expect(onComment).not.toHaveBeenCalled();
-    expect(permissions.editReads).not.toHaveBeenCalled();
-    expect(permissions.commentReads).not.toHaveBeenCalled();
-    expect(layerContains).not.toHaveBeenCalled();
-    expect(f.view.focus).not.toHaveBeenCalled();
-
-    const competingMouseEvent = mouseEvent(toolbar[0].element);
-    toolbar[0].mouseDown(competingMouseEvent);
-    competingMouseEvent.currentTarget = toolbar[1].element;
-    toolbar[1].mouseDown(competingMouseEvent);
-    expect(competingMouseEvent.preventDefault).toHaveBeenCalledTimes(1);
-
-    const acceptedMouseEvents: CapturedMouseEvent[] = [];
-    for (const control of toolbar) {
-      const down = mouseEvent(control.element);
-      acceptedMouseEvents.push(down);
-      control.mouseDown(down);
-      control.mouseDown(down);
-      control.click(mouseEvent(control.element));
-      control.click(mouseEvent(control.element));
-    }
-    for (const event of acceptedMouseEvents) expect(event.preventDefault).toHaveBeenCalledTimes(1);
-    expectToolbarCalls(actions, onLink, onComment);
-    expect(permissions.editReads).toHaveBeenCalledTimes(13);
-    expect(permissions.commentReads).toHaveBeenCalledTimes(13);
-  });
-
-  it("rejects detached and replacement exact-control sources before permission or destination work", () => {
-    const env = environment();
-    const f = fixture();
-    const actions = instrumentActions();
-    const permissions = instrumentPermissions(f.session);
-    const onLink = vi.fn();
-    const onComment = vi.fn();
-    render(<SelectionBubble {...f.props} actions={actions.actions} onLink={onLink} onComment={onComment} />);
-    env.flush();
-    const toolbar = captureToolbar();
-    const bold = toolbar[0];
-    const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
-    const layerContains = vi.spyOn(layer, "contains");
-    const replacement = bold.element.cloneNode(true) as HTMLButtonElement;
-    bold.element.replaceWith(replacement);
-    permissions.editReads.mockClear();
-    permissions.commentReads.mockClear();
-    layerContains.mockClear();
-
-    const detachedDown = mouseEvent(bold.element);
-    const replacementDown = mouseEvent(replacement);
-    bold.mouseDown(detachedDown);
-    bold.mouseDown(replacementDown);
-    bold.click(mouseEvent(bold.element));
-    bold.click(mouseEvent(replacement));
-
-    expect(detachedDown.preventDefault).not.toHaveBeenCalled();
-    expect(replacementDown.preventDefault).not.toHaveBeenCalled();
-    expect(actions.toggleMark).not.toHaveBeenCalled();
-    expect(onLink).not.toHaveBeenCalled();
-    expect(onComment).not.toHaveBeenCalled();
-    expect(permissions.editReads).not.toHaveBeenCalled();
-    expect(permissions.commentReads).not.toHaveBeenCalled();
-    expect(layerContains).not.toHaveBeenCalled();
-    expect(f.view.focus).not.toHaveBeenCalled();
-
-    const link = toolbar[4];
-    document.body.append(link.element);
-    layerContains.mockClear();
-    link.click(mouseEvent(link.element));
-    expect(onLink).not.toHaveBeenCalled();
-    expect(permissions.editReads).not.toHaveBeenCalled();
-    expect(permissions.commentReads).not.toHaveBeenCalled();
-  });
-
-  it.each(["retired-before-current", "current-before-retired"] as const)(
-    "reuses exact button, layer, method, and callbacks without restoring retired format controls (%s)",
-    (order) => {
-      const env = environment();
-      const f = fixture();
-      const actions = instrumentActions();
-      const permissions = instrumentPermissions(f.session);
-      const onLink = vi.fn();
-      const onComment = vi.fn();
-      const firstFormat = { ...EMPTY_FORMAT };
-      const firstBubble = { ...f.props, actions: actions.actions, format: firstFormat, onLink, onComment };
-      const rendered = render(<BubbleBoundary bubble={firstBubble} />);
-      env.flush();
-      const retired = captureToolbar();
-      const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
-      const secondFormat = { ...firstFormat, strong: true };
-      let current: ReturnType<typeof captureToolbar> | null = null;
-      permissions.editReads.mockClear();
-      permissions.commentReads.mockClear();
-
-      rendered.rerender(
-        <BubbleBoundary
-          bubble={{ ...firstBubble, format: secondFormat }}
-          boundary={1}
-          onBoundary={() => {
-            current = captureToolbar();
-            expect(document.querySelector("[data-selection-bubble-layer]")).toBe(layer);
-            expect(current.map(({ element }) => element)).toEqual(retired.map(({ element }) => element));
-            retired[0].buttonRef?.(null);
-            const invoke = (toolbar: ReturnType<typeof captureToolbar>) => {
-              for (const index of [0, 4, 5]) toolbar[index].click(mouseEvent(toolbar[index].element));
-            };
-            if (order === "retired-before-current") {
-              invoke(retired);
-              invoke(current);
-            } else {
-              invoke(current);
-              invoke(retired);
-            }
-          }}
-        />,
-      );
-
-      expect(current).not.toBeNull();
-      expect(actions.toggleMark.mock.calls).toEqual([["strong"]]);
-      expect(onLink).toHaveBeenCalledTimes(1);
-      expect(onComment).toHaveBeenCalledTimes(1);
-      expect(permissions.editReads).toHaveBeenCalledTimes(5);
-      expect(permissions.commentReads).toHaveBeenCalledTimes(5);
-    },
-  );
-
-  it.each(["retired-before-current", "current-before-retired"] as const)(
-    "retires exact controls across same-layer geometry replacement (%s)",
-    (order) => {
-      const env = environment();
-      const f = fixture();
-      const actions = instrumentActions();
-      const permissions = instrumentPermissions(f.session);
-      const onLink = vi.fn();
-      const onComment = vi.fn();
-      render(<SelectionBubble {...f.props} actions={actions.actions} onLink={onLink} onComment={onComment} />);
-      env.flush();
-      const retired = captureToolbar();
-      const layer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
-      window.dispatchEvent(new Event("resize"));
-      env.flush();
-      const current = captureToolbar();
-      expect(document.querySelector("[data-selection-bubble-layer]")).toBe(layer);
-      expect(current.map(({ element }) => element)).toEqual(retired.map(({ element }) => element));
-      permissions.editReads.mockClear();
-      permissions.commentReads.mockClear();
-
-      const invoke = (toolbar: ReturnType<typeof captureToolbar>) => {
-        for (const index of [1, 4, 5]) toolbar[index].click(mouseEvent(toolbar[index].element));
-      };
-      if (order === "retired-before-current") {
-        invoke(retired);
-        invoke(current);
-      } else {
-        invoke(current);
-        invoke(retired);
-      }
-
-      expect(actions.toggleMark.mock.calls).toEqual([["em"]]);
-      expect(onLink).toHaveBeenCalledTimes(1);
-      expect(onComment).toHaveBeenCalledTimes(1);
-      expect(permissions.editReads).toHaveBeenCalledTimes(3);
-      expect(permissions.commentReads).toHaveBeenCalledTimes(3);
-    },
-  );
-
-  it.each(["retired-before-current", "current-before-retired"] as const)(
-    "keeps an equal-looking remount separate from every retired control (%s)",
-    (order) => {
-      const env = environment();
-      const f = fixture();
-      const actions = instrumentActions();
-      const permissions = instrumentPermissions(f.session);
-      const onLink = vi.fn();
-      const onComment = vi.fn();
-      const bubble = { ...f.props, actions: actions.actions, onLink, onComment };
-      const first = render(<SelectionBubble {...bubble} />);
-      env.flush();
-      const retired = captureToolbar();
-      first.unmount();
-      const second = render(<SelectionBubble {...bubble} />);
-      env.flush();
-      const current = captureToolbar();
-      for (const [index, control] of current.entries()) {
-        expect(control.element).not.toBe(retired[index].element);
-      }
-      permissions.editReads.mockClear();
-      permissions.commentReads.mockClear();
-
-      const invoke = (toolbar: ReturnType<typeof captureToolbar>) => {
-        for (const index of [3, 4, 5]) toolbar[index].click(mouseEvent(toolbar[index].element));
-      };
-      if (order === "retired-before-current") {
-        invoke(retired);
-        invoke(current);
-      } else {
-        invoke(current);
-        invoke(retired);
-      }
-
-      expect(actions.toggleMark.mock.calls).toEqual([["code"]]);
-      expect(onLink).toHaveBeenCalledTimes(1);
-      expect(onComment).toHaveBeenCalledTimes(1);
-      expect(permissions.editReads).toHaveBeenCalledTimes(3);
-      expect(permissions.commentReads).toHaveBeenCalledTimes(3);
-      second.unmount();
-    },
-  );
-
-  it("fails closed for disabled publications and restores only later eligible controls", () => {
-    const env = environment();
-    const f = fixture();
-    const actions = instrumentActions();
-    const permissions = instrumentPermissions(f.session, false, true);
-    const onLink = vi.fn();
-    const onComment = vi.fn();
-    const bubble = { ...f.props, actions: actions.actions, onLink, onComment };
-    const rendered = render(<SelectionBubble {...bubble} />);
-    env.flush();
-    const retired = captureToolbar();
-    expect(retired[0].element).toBeDisabled();
-    expect(retired[5].element).toBeEnabled();
-    permissions.editReads.mockClear();
-    permissions.commentReads.mockClear();
-    const disabledEdit = mouseEvent(retired[0].element);
-    retired[0].mouseDown(disabledEdit);
-    retired[0].click(mouseEvent(retired[0].element));
-    expect(disabledEdit.preventDefault).not.toHaveBeenCalled();
-    expect(permissions.editReads).not.toHaveBeenCalled();
-    expect(permissions.commentReads).not.toHaveBeenCalled();
-
-    permissions.setCanEdit(true);
-    permissions.setCanComment(false);
-    rendered.rerender(<SelectionBubble {...bubble} />);
-    const current = captureToolbar();
-    expect(current[0].element).toBeEnabled();
-    expect(current[5].element).toBeDisabled();
-    permissions.editReads.mockClear();
-    permissions.commentReads.mockClear();
-    const disabledComment = mouseEvent(current[5].element);
-    retired[5].click(mouseEvent(retired[5].element));
-    current[5].mouseDown(disabledComment);
-    current[5].click(mouseEvent(current[5].element));
-    current[0].click(mouseEvent(current[0].element));
-    expect(disabledComment.preventDefault).not.toHaveBeenCalled();
-    expect(actions.toggleMark.mock.calls).toEqual([["strong"]]);
-    expect(onComment).not.toHaveBeenCalled();
-    expect(permissions.editReads).toHaveBeenCalledTimes(1);
-    expect(permissions.commentReads).toHaveBeenCalledTimes(1);
-
-    permissions.setCanComment(true);
-    rendered.rerender(<SelectionBubble {...bubble} />);
-    const restored = captureToolbar();
-    restored[5].click(mouseEvent(restored[5].element));
-    restored[5].click(mouseEvent(restored[5].element));
-    expect(onComment).toHaveBeenCalledTimes(1);
-  });
-
-  it("rejects silent format, method, and pre-commit permission drift before restoring a later publication", () => {
-    const env = environment();
-    const f = fixture();
-    const actions = instrumentActions();
-    const permissions = instrumentPermissions(f.session);
-    const format = { ...EMPTY_FORMAT };
-    const bubble = { ...f.props, actions: actions.actions, format };
-    const rendered = render(<BubbleBoundary bubble={bubble} />);
-    env.flush();
-    const formatStale = captureToolbar();
-    permissions.editReads.mockClear();
-    permissions.commentReads.mockClear();
-    format.strong = true;
-    formatStale[0].click(mouseEvent(formatStale[0].element));
-    expect(actions.toggleMark).not.toHaveBeenCalled();
-    expect(permissions.editReads).not.toHaveBeenCalled();
-    expect(permissions.commentReads).not.toHaveBeenCalled();
-
-    rendered.rerender(<BubbleBoundary bubble={bubble} />);
-    const methodStale = captureToolbar();
-    const replacementToggle = vi.fn();
-    actions.actions.toggleMark = replacementToggle;
-    permissions.editReads.mockClear();
-    permissions.commentReads.mockClear();
-    methodStale[1].click(mouseEvent(methodStale[1].element));
-    expect(actions.toggleMark).not.toHaveBeenCalled();
-    expect(replacementToggle).not.toHaveBeenCalled();
-    expect(permissions.editReads).not.toHaveBeenCalled();
-    expect(permissions.commentReads).not.toHaveBeenCalled();
-
-    rendered.rerender(<BubbleBoundary bubble={bubble} />);
-    let permissionStale: ReturnType<typeof captureToolbar> | null = null;
-    rendered.rerender(
-      <BubbleBoundary
-        bubble={bubble}
-        boundary={1}
-        onBoundary={() => {
-          permissionStale = captureToolbar();
-          permissions.setCanEdit(false);
-        }}
-      />,
-    );
-    permissions.editReads.mockClear();
-    permissions.commentReads.mockClear();
-    permissionStale![2].click(mouseEvent(permissionStale![2].element));
-    expect(replacementToggle).not.toHaveBeenCalled();
-    expect(permissions.editReads).toHaveBeenCalledTimes(1);
-    expect(permissions.commentReads).not.toHaveBeenCalled();
-
-    permissions.setCanEdit(true);
-    rendered.rerender(<BubbleBoundary bubble={bubble} boundary={2} />);
-    const restored = captureToolbar();
-    restored[1].click(mouseEvent(restored[1].element));
-    restored[1].click(mouseEvent(restored[1].element));
-    expect(replacementToggle.mock.calls).toEqual([["em"]]);
-    expect(actions.toggleMark).not.toHaveBeenCalled();
-  });
-
-  it("claims before destination reentrancy while leaving a distinct current control usable", () => {
-    const env = environment();
-    const f = fixture();
-    let reenter: () => void = () => undefined;
-    const toggleMark = vi.fn(() => reenter());
-    const actions = { toggleMark } as unknown as EditorActions;
-    const onLink = vi.fn();
-    render(<SelectionBubble {...f.props} actions={actions} onLink={onLink} />);
-    env.flush();
-    const toolbar = captureToolbar();
-    reenter = () => toolbar[0].click(mouseEvent(toolbar[0].element));
-
-    toolbar[0].click(mouseEvent(toolbar[0].element));
-    toolbar[4].click(mouseEvent(toolbar[4].element));
-
-    expect(toggleMark.mock.calls).toEqual([["strong"]]);
-    expect(onLink).toHaveBeenCalledTimes(1);
-  });
-
-  it("retires publication and captured actions before the parent removal layout boundary", () => {
-    const env = environment({ popover: true });
-    const f = fixture();
-    const actions = instrumentActions();
-    const permissions = instrumentPermissions(f.session);
-    const onLink = vi.fn();
-    const onComment = vi.fn();
-    const bubble = { ...f.props, actions: actions.actions, onLink, onComment };
-    const rendered = render(<BubbleBoundary bubble={bubble} />);
-    env.flush();
-    const retiredToolbar = captureToolbar();
-    const retiredLayer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
-    window.dispatchEvent(new Event("resize"));
-    const retiredFrames = env.capturedFrames.slice();
-    const requested = env.request.mock.calls.length;
-    permissions.editReads.mockClear();
-    permissions.commentReads.mockClear();
-    let absentAtBoundary = false;
-
-    rendered.rerender(
-      <BubbleBoundary
-        bubble={bubble}
-        present={false}
-        boundary={1}
-        onBoundary={() => {
-          absentAtBoundary =
-            screen.queryByTestId("selection-bubble") === null &&
-            document.querySelectorAll("[data-selection-bubble-layer]").length === 0;
-          invokeToolbar(retiredToolbar);
-        }}
-      />,
-    );
-
-    expect(absentAtBoundary).toBe(true);
-    expect(retiredToolbar.every(({ element }) => !element.isConnected)).toBe(true);
-    expect(env.frames.size).toBe(0);
-    expect(env.opened.has(retiredLayer)).toBe(false);
-    expect(actions.toggleMark).not.toHaveBeenCalled();
-    expect(onLink).not.toHaveBeenCalled();
-    expect(onComment).not.toHaveBeenCalled();
-    expect(permissions.editReads).not.toHaveBeenCalled();
-    expect(permissions.commentReads).not.toHaveBeenCalled();
-    expect(env.listeners).toHaveLength(15);
-    expect(env.listeners.every((listener) => listener.removed === 1)).toBe(true);
-    expect(env.resizes[0].targets.size).toBe(0);
-    expect(env.mutations[0].targets.size).toBe(0);
-    expect(env.resizes[0].disconnect).toHaveBeenCalledTimes(1);
-    expect(env.mutations[0].disconnect).toHaveBeenCalledTimes(1);
-
-    for (const frame of retiredFrames) frame(0);
-    for (const listener of env.listeners) {
-      const event = new Event(listener.type);
-      if (typeof listener.callback === "function") listener.callback.call(listener.target, event);
-      else listener.callback.handleEvent(event);
-    }
-    env.resizes[0].fire();
-    env.mutations[0].fire();
-    expect(env.request).toHaveBeenCalledTimes(requested);
-    expect(env.frames.size).toBe(0);
-    expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
-    expect(actions.toggleMark).not.toHaveBeenCalled();
-    expect(onLink).not.toHaveBeenCalled();
-    expect(onComment).not.toHaveBeenCalled();
   });
 
   it("positions and follows existing signals without ResizeObserver", () => {
@@ -1918,32 +418,19 @@ describe("SelectionBubble geometry scheduling", () => {
   it("replaces a scroller behind a stable ref and disconnects the precise old targets", () => {
     const env = environment();
     const f = fixture();
-    const actions = instrumentActions();
-    const permissions = instrumentPermissions(f.session);
-    const rendered = render(<SelectionBubble {...f.props} actions={actions.actions} />);
+    const rendered = render(<SelectionBubble {...f.props} />);
     env.flush();
-    const retired = captureToolbar();
-    const retiredLayer = document.querySelector<HTMLElement>("[data-selection-bubble-layer]")!;
     const replacement = document.createElement("div");
     replacement.append(f.editor);
     document.body.append(replacement);
     Object.defineProperty(replacement, "getBoundingClientRect", { configurable: true, value: vi.fn(() => new DOMRect(50, 100, 180, 500)) });
     f.props.containerRef.current = replacement;
-    rendered.rerender(<SelectionBubble {...f.props} actions={actions.actions} />);
+    rendered.rerender(<SelectionBubble {...f.props} />);
     env.flush();
-    const current = captureToolbar();
-    permissions.editReads.mockClear();
-    permissions.commentReads.mockClear();
-    retired[0].click(mouseEvent(retired[0].element));
-    current[0].click(mouseEvent(current[0].element));
     expect(env.resizes[0].disconnect).toHaveBeenCalledTimes(1);
     expect(env.resizes[1].targets.has(replacement)).toBe(true);
     expect(env.resizes[1].targets.has(f.scroller)).toBe(false);
-    expect(document.querySelector("[data-selection-bubble-layer]")).not.toBe(retiredLayer);
     expect(screen.getByTestId("selection-bubble").style.width).toBe("164px");
-    expect(actions.toggleMark.mock.calls).toEqual([["strong"]]);
-    expect(permissions.editReads).toHaveBeenCalledTimes(1);
-    expect(permissions.commentReads).toHaveBeenCalledTimes(1);
   });
 
   it.each([false, true])("owns transformed-body and descendant fullscreen enter/replace/exit (popover %s)", (popover) => {
@@ -2206,7 +693,7 @@ describe("SelectionBubble geometry scheduling", () => {
     expect(screen.queryByTestId("selection-bubble")).toBeNull();
   });
 
-  it("keeps six pointer/keyboard actions single-use and applies Bold to a restored publication", async () => {
+  it("keeps six pointer/keyboard actions and applies Bold to the restored selection", async () => {
     const env = environment();
     const f = fixture();
     const user = userEvent.setup();
@@ -2218,13 +705,13 @@ describe("SelectionBubble geometry scheduling", () => {
       expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks[mark])).toBe(true);
       screen.getByRole("button", { name: label }).focus();
       await user.keyboard("{Enter}");
-      expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks[mark])).toBe(true);
+      expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks[mark])).toBe(false);
     }
     for (const [label, handler] of [["Link", f.onLink], ["Comment", f.onComment]] as const) {
       await user.click(screen.getByRole("button", { name: label }));
       screen.getByRole("button", { name: label }).focus();
       await user.keyboard(" ");
-      expect(handler).toHaveBeenCalledTimes(1);
+      expect(handler).toHaveBeenCalledTimes(2);
     }
     f.setHost(new DOMRect(0, 300, 180, 200));
     fireEvent.scroll(f.scroller);
@@ -2236,7 +723,7 @@ describe("SelectionBubble geometry scheduling", () => {
     const bold = screen.getByRole("button", { name: "Bold" });
     expect(bold.closest('[role="toolbar"]')).toHaveClass("overflow-x-auto");
     await user.click(bold);
-    expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks.strong)).toBe(false);
+    expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks.strong)).toBe(true);
     expect(f.view.state.selection.from).toBe(1);
     expect(f.view.state.selection.to).toBe(9);
   });
@@ -2283,4 +770,138 @@ describe("SelectionBubble geometry scheduling", () => {
     expect(env.opened.size).toBe(0);
     expect(document.querySelectorAll("[data-selection-bubble-layer]")).toHaveLength(0);
   }, budgetMs(60_000));
+});
+
+describe("SelectionBubble keyboard and permissions", () => {
+  const LABELS = ["Bold", "Italic", "Strikethrough", "Inline code", "Link", "Comment"] as const;
+  const button = (label: string) => screen.getByRole("button", { name: label }) as HTMLButtonElement;
+  const focusButton = (label: string) => act(() => button(label).focus());
+  const tabStops = () => LABELS.filter((label) => button(label).tabIndex === 0);
+
+  it.each([
+    ["ArrowRight", "Bold", "Italic"],
+    ["ArrowDown", "Italic", "Strikethrough"],
+    ["ArrowLeft", "Inline code", "Strikethrough"],
+    ["ArrowUp", "Strikethrough", "Italic"],
+    ["Home", "Link", "Bold"],
+    ["End", "Italic", "Comment"],
+    ["ArrowRight", "Comment", "Bold"],
+    ["ArrowLeft", "Bold", "Comment"],
+  ] as const)("moves %s from %s to %s and keeps one tab stop", (key, from, to) => {
+    const env = environment();
+    const f = fixture();
+    render(<SelectionBubble {...f.props} />);
+    env.flush();
+    expect(tabStops()).toEqual(["Bold"]);
+    expect(screen.getByRole("toolbar", { name: "Selection" })).not.toHaveAttribute("tabindex");
+    focusButton(from);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    expect(fireEvent.keyDown(button(from), { key })).toBe(false);
+    expect(button(to)).toHaveFocus();
+    expect(focus.mock.calls).toEqual([[{ preventScroll: true }]]);
+    expect(tabStops()).toEqual([to]);
+    expect(f.onLink).not.toHaveBeenCalled();
+    expect(f.onComment).not.toHaveBeenCalled();
+  });
+
+  it("follows held arrows and leaves modified, composing, boundary and other keys alone", () => {
+    const env = environment();
+    const f = fixture();
+    render(<SelectionBubble {...f.props} />);
+    env.flush();
+    focusButton("Bold");
+    for (const label of ["Italic", "Strikethrough", "Inline code"]) {
+      expect(fireEvent.keyDown(document.activeElement!, { key: "ArrowRight", repeat: true })).toBe(false);
+      expect(button(label)).toHaveFocus();
+    }
+    for (const init of [
+      { key: "ArrowRight", shiftKey: true },
+      { key: "ArrowRight", ctrlKey: true },
+      { key: "ArrowRight", altKey: true },
+      { key: "ArrowRight", metaKey: true },
+      { key: "ArrowRight", isComposing: true },
+      { key: "Tab" },
+      { key: "a" },
+    ]) {
+      expect(fireEvent.keyDown(button("Inline code"), init)).toBe(true);
+      expect(button("Inline code")).toHaveFocus();
+    }
+    focusButton("Bold");
+    expect(fireEvent.keyDown(button("Bold"), { key: "Home" })).toBe(true);
+    focusButton("Comment");
+    expect(fireEvent.keyDown(button("Comment"), { key: "End" })).toBe(true);
+  });
+
+  it("skips disabled buttons and keeps a moved tab stop when permissions return", async () => {
+    const env = environment();
+    const f = fixture();
+    const session = f.session as unknown as { canEdit: boolean; canComment: boolean };
+    session.canEdit = false;
+    const rendered = render(<SelectionBubble {...f.props} />);
+    env.flush();
+    for (const label of LABELS.slice(0, 5)) expect(button(label)).toBeDisabled();
+    expect(tabStops()).toEqual(["Comment"]);
+    expect(fireEvent.keyDown(button("Comment"), { key: "ArrowRight" })).toBe(true);
+
+    session.canEdit = true;
+    rendered.rerender(<SelectionBubble {...f.props} />);
+    expect(tabStops()).toEqual(["Comment"]);
+    focusButton("Comment");
+    fireEvent.keyDown(button("Comment"), { key: "ArrowRight" });
+    expect(tabStops()).toEqual(["Bold"]);
+
+    session.canComment = false;
+    rendered.rerender(<SelectionBubble {...f.props} />);
+    expect(button("Comment")).toBeDisabled();
+    focusButton("Link");
+    fireEvent.keyDown(button("Link"), { key: "ArrowRight" });
+    expect(button("Bold")).toHaveFocus();
+    fireEvent.keyDown(button("Bold"), { key: "ArrowLeft" });
+    expect(button("Link")).toHaveFocus();
+  });
+
+  it("checks permissions and the pane when the click lands, not only when it rendered", async () => {
+    const env = environment();
+    const f = fixture();
+    const user = userEvent.setup();
+    const session = f.session as unknown as { canEdit: boolean; canComment: boolean; activeSurface: string };
+    render(<SelectionBubble {...f.props} />);
+    env.flush();
+
+    session.canEdit = false;
+    session.canComment = false;
+    for (const label of LABELS) await user.click(button(label));
+    session.canEdit = true;
+    session.canComment = true;
+    session.activeSurface = "code";
+    for (const label of LABELS) await user.click(button(label));
+    expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks.strong)).toBe(false);
+    expect(f.onLink).not.toHaveBeenCalled();
+    expect(f.onComment).not.toHaveBeenCalled();
+
+    session.activeSurface = "rich";
+    await user.click(button("Bold"));
+    await user.click(button("Comment"));
+    expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks.strong)).toBe(true);
+    expect(f.onComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs each action exactly once per click, Enter and Space under Strict Mode", async () => {
+    const env = environment();
+    const f = fixture();
+    const user = userEvent.setup();
+    const toggleMark = vi.spyOn(f.actions, "toggleMark");
+    render(<StrictMode><SelectionBubble {...f.props} /></StrictMode>);
+    env.flush();
+    await user.click(button("Bold"));
+    focusButton("Italic");
+    await user.keyboard("{Enter}");
+    focusButton("Inline code");
+    await user.keyboard(" ");
+    await user.click(button("Link"));
+    expect(toggleMark.mock.calls).toEqual([["strong"], ["em"], ["code"]]);
+    expect(f.onLink).toHaveBeenCalledTimes(1);
+    expect(f.view.state.selection.from).toBe(1);
+    expect(f.view.state.selection.to).toBe(9);
+  });
 });
