@@ -42,6 +42,7 @@ docker() {
       ;;
     'image inspect')
       if [[ "$*" == *'{{.Id}}'* ]]; then
+        [ -n "${!#}" ] || return 1
         [ "${TEST_PREVIOUS_INSPECT_FAIL:-0}" = 0 ] || return 1
         printf '%s\n' "${TEST_PREVIOUS_ID:-$previous}"
         return 0
@@ -60,6 +61,9 @@ docker() {
       elif [[ "$*" == *"ancestor=$used"* ]]; then
         printf 'another-container\n'
       fi
+      ;;
+    'ps --filter')
+      [ "${TEST_PREVIOUS_PS_FAIL:-0}" = 0 ] || return 1
       ;;
     rmi*)
       test "${TEST_RMI_FAIL:-0}" = 0
@@ -94,6 +98,26 @@ for unavailable in TEST_PREVIOUS_EMPTY=1 TEST_PREVIOUS_PS_FAIL=1 \
   assert_line "$test_dir/previous-result" 'release-can-continue' \
     'previous-image failure did not preserve release execution'
 done
+
+test_pre_pull_lookup_allows_repair() {
+  sed -n '/^require_image_space pull /,/^rollback_dir=/p' "$source_file" |
+    sed '$d' >"$test_dir/pre-pull-lookup.sh"
+  test -s "$test_dir/pre-pull-lookup.sh" || fail 'pre-pull lookup call site is missing'
+  for scenario in TEST_PREVIOUS_EMPTY=0 TEST_PREVIOUS_EMPTY=1 TEST_PREVIOUS_PS_FAIL=1; do
+    if ! env "$scenario" bash -c '
+      set -euo pipefail
+      source "$test_dir/require_image_space.sh"
+      source "$test_dir/capture_previous_image.sh"
+      source "$test_dir/pre-pull-lookup.sh"
+      printf "release-can-continue\n"
+    ' >"$test_dir/pre-pull-result"; then
+      fail "test_pre_pull_lookup_allows_repair: $scenario blocked a repair release"
+    fi
+    assert_line "$test_dir/pre-pull-result" 'release-can-continue' \
+      'pre-pull lookup did not preserve release execution'
+  done
+}
+test_pre_pull_lookup_allows_repair
 
 : >"$test_dir/events"
 if TEST_FREE_BYTES=436326400 require_image_space pull 6442450944 >"$test_dir/space"; then
