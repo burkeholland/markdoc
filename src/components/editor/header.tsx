@@ -13646,6 +13646,12 @@ function PublishMenu({ props }: { props: HeaderProps }) {
     onOpenAutoFocus,
   } = presentation;
   const openAutoFocusProps = { onOpenAutoFocus };
+  // Same fix as the More menu's "Open reader view" (#2203): window.open() hands focus to the new
+  // tab before this menu's own close machinery can react, so close it directly first.
+  const onWindowOpenSelect = (url: string) => () => {
+    setStoredState(Object.freeze({ visit, open: false }));
+    window.open(url, "_blank", "noopener");
+  };
 
   return (
     <Menu open={state.open} onOpenChange={onOpenChange}>
@@ -13699,7 +13705,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
               Sync…
             </MenuItem>
             {doc.githubUrl && (
-              <MenuItem ref={captureOpen} icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
+              <MenuItem ref={captureOpen} icon={<ExternalLink size={15} />} onSelect={onWindowOpenSelect(doc.githubUrl!)}>
                 Open on GitHub
               </MenuItem>
             )}
@@ -16817,6 +16823,14 @@ export const Header = memo(function Header(props: HeaderProps) {
     onOutside: onMoreMenuOutside,
     onCloseAutoFocus: onMoreMenuCloseAutoFocus,
   } = moreMenuPresentation;
+  // window.open() hands focus to the new tab, and the More menu's own close machinery (geared
+  // toward real pointer/keyboard events) doesn't reliably run in that case (#2203: the menu stayed
+  // open afterward and swallowed the next click). Close it ourselves, directly, before opening the
+  // new tab, instead of relying on Radix's automatic close-on-select.
+  const onMoreMenuWindowOpenSelect = (url: string) => () => {
+    setStoredMoreMenuState(Object.freeze({ visit: moreMenuVisit, open: false }));
+    window.open(url, "_blank", "noopener");
+  };
   // Star state and the notifications poll wait for the first sync: the socket handshake and the
   // collab-token call get the server to themselves on open (#118).
   const settled = useOpenSettled(session);
@@ -16969,12 +16983,12 @@ export const Header = memo(function Header(props: HeaderProps) {
             >
               {props.documentMutation === "duplicate" ? "Making a copy…" : "Make a copy"}
             </MenuItem>
-            <MenuItem icon={<BookOpen size={15} />} onSelect={() => window.open(`/p/${doc.id}`, "_blank", "noopener")} data-testid="menu-reader">
+            <MenuItem icon={<BookOpen size={15} />} onSelect={onMoreMenuWindowOpenSelect(`/p/${doc.id}`)} data-testid="menu-reader">
               Open reader view
             </MenuItem>
             <MenuSeparator />
             {linked && doc.githubUrl && (
-              <MenuItem icon={<ExternalLink size={15} />} onSelect={() => window.open(doc.githubUrl!, "_blank", "noopener")}>
+              <MenuItem icon={<ExternalLink size={15} />} onSelect={onMoreMenuWindowOpenSelect(doc.githubUrl)}>
                 Open on GitHub
               </MenuItem>
             )}

@@ -1277,6 +1277,41 @@ describe("editor header More menu authority", () => {
     await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
   });
 
+  it("closes before opening the reader view in a new tab (#2203)", async () => {
+    const session = createSession();
+    const actions = createActions();
+    await renderStrict(header(headerProps(session, actions)));
+    const menuTrigger = trigger();
+    menuTrigger.focus();
+
+    openMenu();
+    fireEvent.click(screen.getByTestId("menu-reader"));
+    expect(window.open).toHaveBeenCalledWith(`/p/${DOC.id}`, "_blank", "noopener");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
+  it("closes before opening a linked document's GitHub URL in a new tab (#2203)", async () => {
+    const session = createSession();
+    const actions = createActions();
+    const linkedDoc: DocumentDto = {
+      ...DOC,
+      storage: "repo",
+      repoOwner: "o",
+      repoName: "r",
+      repoBranch: "main",
+      repoPath: "doc.md",
+      githubUrl: "https://github.com/o/r/blob/main/doc.md",
+    };
+    await renderStrict(header(headerProps(session, actions, { doc: linkedDoc })));
+    const menuTrigger = trigger();
+    menuTrigger.focus();
+
+    openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open on GitHub" }));
+    expect(window.open).toHaveBeenCalledWith(linkedDoc.githubUrl, "_blank", "noopener");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
   it("closes a compact Mode selection that changes the current session mode", async () => {
     const session = createSession();
     const actions = createActions();
