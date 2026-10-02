@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { StrictMode } from "react";
+import { StrictMode, use, useEffect, useState, type ReactNode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NotificationDto, NotificationsPageDto } from "@/lib/api";
@@ -96,6 +96,7 @@ const rowIds = () => rows().map((row) => row.dataset.notificationId);
 const opens = () => screen.queryAllByTestId("notification-open") as HTMLButtonElement[];
 const dismisses = () => screen.queryAllByTestId("notification-dismiss") as HTMLButtonElement[];
 const readAll = () => screen.getByTestId("notifications-strip-read-all");
+const hrefOf = (notification: NotificationDto) => `/d/${notification.documentId}?thread=${notification.refId}`;
 
 /** A cancelable keydown, as a browser sends it; returns the event so the test can read `defaultPrevented`. */
 function press(element: Element, key: string, init: KeyboardEventInit = {}) {
@@ -238,41 +239,114 @@ describe("notification strip actions", () => {
     expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM.documentId}?thread=${ITEM.refId}`);
   });
 
-  // Double submit: the first click takes the row out of the list, so later clicks have nothing to land on.
-  it.each([false, true])("opens a notification once however often it is clicked (Strict Mode: %s)", async (strict) => {
+  // A real double-click: the first click takes the row away, the next row moves up under the pointer and
+  // gets the rest of the gesture, which the browser counts as click 2 and click 3 (`detail`).
+  it.each([false, true])("a double-click or a triple-click opens only the row under the first click (Strict Mode: %s)", async (strict) => {
     const pending = deferred<{ ok: true }>();
     notificationApi.read.mockReturnValue(pending.promise);
-    await mountStrip([ITEM, ITEM_TWO], { strict });
-    const open = opens()[0]!;
-    const dismiss = dismisses()[0]!;
+    await mountStrip([ITEM, ITEM_TWO, ITEM_THREE], { strict });
 
-    fireEvent.click(open);
-    fireEvent.click(open);
-    fireEvent.doubleClick(open);
-    fireEvent.click(dismiss);
+    fireEvent.click(opens()[0]!, { detail: 1 });
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+    fireEvent.click(opens()[0]!, { detail: 2 });
+    fireEvent.click(opens()[0]!, { detail: 3 });
 
-    expect(open).not.toBeInTheDocument();
     expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM.id);
-    expect(router.push).toHaveBeenCalledOnce();
-    expect(rowIds()).toEqual([ITEM_TWO.id]);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(hrefOf(ITEM));
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
     await act(async () => {
       pending.resolve({ ok: true });
       await pending.promise;
     });
-    expect(rowIds()).toEqual([ITEM_TWO.id]);
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
   });
 
-  it("Mark as read takes only its row away, once, without navigating", async () => {
-    await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
-    const dismiss = dismisses()[1]!;
+  // On a slow network a later click, which the browser counts as a new click, can land before the page
+  // changes. The app router keeps its navigation pending as a transition until the page is ready.
+  it("while a document is opening no other row opens, and rows open again if that navigation ends here", async () => {
+    const page = deferred<void>();
+    const Awaits = ({ promise }: { promise: Promise<void> }) => {
+      use(promise);
+      return null;
+    };
+    function AppRouter({ children }: { children: ReactNode }) {
+      const [destination, setDestination] = useState<Promise<void> | null>(null);
+      useEffect(() => {
+        router.push.mockImplementation(() => setDestination(page.promise));
+      }, []);
+      return (
+        <>
+          {children}
+          {destination && <Awaits promise={destination} />}
+        </>
+      );
+    }
+    notificationApi.list.mockResolvedValue({ items: [ITEM, ITEM_TWO, ITEM_THREE, SHARE], unreadCount: 4 });
+    const { NotificationsStrip } = await import("./notifications-strip");
+    render(<AppRouter><NotificationsStrip /></AppRouter>);
+    await waitFor(() => expect(rows()).toHaveLength(4));
 
-    fireEvent.click(dismiss);
-    fireEvent.click(dismiss);
+    // The navigation suspends, so React wants the act that starts it awaited.
+    await act(async () => {
+      fireEvent.click(opens()[0]!, { detail: 1 });
+    });
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id, SHARE.id]);
+    fireEvent.click(opens()[0]!, { detail: 1 });
+    fireEvent.click(opens()[2]!);
+
+    expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(hrefOf(ITEM));
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id, SHARE.id]);
+
+    // Mark as read is not a navigation, so it still works meanwhile.
+    fireEvent.click(dismisses()[2]!);
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+    expect(router.push).toHaveBeenCalledOnce();
+
+    // The navigation ends and the dashboard is still here (it was cancelled): rows open again.
+    await act(async () => {
+      page.resolve();
+      await page.promise;
+    });
+    fireEvent.click(opens()[0]!, { detail: 1 });
+    expect(notificationApi.read).toHaveBeenLastCalledWith(ITEM_TWO.id);
+    expect(router.push).toHaveBeenCalledTimes(2);
+    expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_TWO));
+    expect(rowIds()).toEqual([ITEM_THREE.id]);
+  });
+
+  it("Mark as read takes only its row away, without navigating", async () => {
+    await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
+
+    fireEvent.click(dismisses()[1]!);
 
     expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM_TWO.id);
     expect(router.push).not.toHaveBeenCalled();
     expect(rowIds()).toEqual([ITEM.id, ITEM_THREE.id]);
     expect(screen.getByRole("heading", { name: /Notifications\s*2/ })).toBeVisible();
+    await act(async () => {
+      await Promise.resolve();
+    });
+  });
+
+  // The next row's "Mark as read" moves up under the pointer, like the row itself.
+  it("a double-click on Mark as read takes one row away, and a separate click takes the next", async () => {
+    await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
+
+    fireEvent.click(dismisses()[0]!, { detail: 1 });
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+    fireEvent.click(dismisses()[0]!, { detail: 2 });
+    fireEvent.click(dismisses()[0]!, { detail: 3 });
+
+    expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+
+    fireEvent.click(dismisses()[0]!, { detail: 1 });
+
+    expect(notificationApi.read).toHaveBeenCalledTimes(2);
+    expect(notificationApi.read).toHaveBeenLastCalledWith(ITEM_TWO.id);
+    expect(rowIds()).toEqual([ITEM_THREE.id]);
+    expect(router.push).not.toHaveBeenCalled();
     await act(async () => {
       await Promise.resolve();
     });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useRef, useTransition, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck, X } from "lucide-react";
 import type { NotificationDto } from "@/lib/api";
@@ -35,24 +35,36 @@ function rowMovement(key: string, index: number, count: number): number | null {
 }
 
 /**
+ * The second or third click of a double or triple click (or tap). A row that is marked read leaves the
+ * list at once and the next row moves up under the pointer, so the rest of the gesture would act on a
+ * row the user never aimed at. A click from the keyboard has `detail` 0.
+ */
+function isRepeatedClick(event: ReactMouseEvent) {
+  return event.detail > 1;
+}
+
+/**
  * Unread notifications of the current user (mentions, replies, resolutions, suggestion decisions,
  * shares), shown at the top of the dashboard. Renders nothing when there is nothing to show.
  * Clicking one marks it read and opens the document on the relevant thread.
  *
- * Marking a notification read takes it out of the store's unread list at once, so its row (or, for
- * "Mark all read", the whole strip) is gone before a second click can land, and the store shares one
- * in-flight request per notification.
+ * One gesture is one action: a repeated click is ignored, and while one row's document is opening no
+ * other row opens. The store shares one in-flight request per notification.
  */
 export function NotificationsStrip() {
   const router = useRouter();
   const { items, unreadCount } = useNotifications();
   const listRef = useRef<HTMLUListElement>(null);
+  // True from the click that opens a row until the navigation is over, which normally takes this page
+  // with it. On a slow network a later click can land before that, on the row that moved up.
+  const [opening, startOpening] = useTransition();
   const unread = items.filter((notification) => !notification.readAt);
   if (unread.length === 0) return null;
 
-  const open = (notification: NotificationDto) => {
+  const open = (notification: NotificationDto, event: ReactMouseEvent) => {
+    if (opening || isRepeatedClick(event)) return;
     void markNotificationRead(notification.id);
-    router.push(notificationHref(notification));
+    startOpening(() => router.push(notificationHref(notification)));
   };
 
   // The row leaves the list. If focus is in it, hand focus to the next row (or the previous one)
@@ -134,7 +146,7 @@ export function NotificationsStrip() {
             <button
               type="button"
               className="min-w-0 flex-1 text-left"
-              onClick={() => open(notification)}
+              onClick={(event) => open(notification, event)}
               onKeyDown={(event) => onOpenKeyDown(notification, event)}
               data-testid="notification-open"
             >
@@ -158,7 +170,9 @@ export function NotificationsStrip() {
               className="icon-btn h-7 w-7 shrink-0"
               aria-label="Mark as read"
               title="Mark as read"
-              onClick={(event) => dismiss(notification, event.currentTarget)}
+              onClick={(event) => {
+                if (!isRepeatedClick(event)) dismiss(notification, event.currentTarget);
+              }}
               onKeyDown={onDismissKeyDown}
               data-testid="notification-dismiss"
             >

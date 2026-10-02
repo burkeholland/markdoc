@@ -1,5 +1,6 @@
+import type { Locator } from "@playwright/test";
 import { expect, test } from "./fixtures";
-import { createDocument, shareWith, signIn, uniqueLogin, waitForHydration, type User } from "./helpers";
+import { createDocument, shareWith, signIn, uniqueLogin, waitForEditor, waitForHydration, type User } from "./helpers";
 
 // The dashboard strip with a real mouse and real keys (#2225): every click and key used to be dropped.
 test.describe("dashboard notification strip with real input", () => {
@@ -28,6 +29,20 @@ test.describe("dashboard notification strip with real input", () => {
     const strip = recipient.page.getByTestId("notifications-strip");
     await expect(strip.getByTestId("notification-item")).toHaveCount(rows);
     return strip;
+  };
+  /** Paths of the mark-read requests the recipient's page sends from now on. */
+  const watchReads = () => {
+    const reads: string[] = [];
+    recipient.page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === "POST" && /^\/api\/notifications\/(read-all|[^/]+\/read)$/.test(path)) reads.push(path);
+    });
+    return reads;
+  };
+  const centre = async (target: Locator) => {
+    const box = await target.boundingBox();
+    if (!box) throw new Error("the target has no box");
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   };
 
   test.beforeEach(async ({ browser }) => {
@@ -107,5 +122,68 @@ test.describe("dashboard notification strip with real input", () => {
     await expect(strip).toHaveCount(0);
     await expect.poll(unreadCount).toBe(0);
     expect(new URL(recipient.page.url()).pathname).toBe("/");
+  });
+
+  // The first click takes the row away and the next row moves up under the pointer, so the rest of the
+  // gesture must not act on that row.
+  test("a double-click or a triple-click on a row opens only that row's document", async () => {
+    const page = recipient.page;
+    const shared = await shareNew(4);
+    const reads = watchReads();
+    const gestures: [string, (x: number, y: number) => Promise<void>][] = [
+      ["a double-click", (x, y) => page.mouse.dblclick(x, y)],
+      [
+        "two clicks 120 ms apart",
+        async (x, y) => {
+          await page.mouse.click(x, y);
+          await page.waitForTimeout(120);
+          await page.mouse.click(x, y);
+        },
+      ],
+      ["a triple-click", (x, y) => page.mouse.click(x, y, { clickCount: 3 })],
+    ];
+
+    for (const [index, [name, gesture]] of gestures.entries()) {
+      const strip = await openDashboard(4 - index);
+      const row = strip.getByTestId("notification-item").first();
+      const id = await row.getAttribute("data-notification-id");
+      const { x, y } = await centre(row.getByTestId("notification-open"));
+      reads.length = 0;
+
+      await gesture(x, y);
+
+      await page.waitForURL(/\/d\//);
+      await waitForEditor(page);
+      expect(reads, name).toEqual([`/api/notifications/${id}/read`]);
+      expect(new URL(page.url()).pathname, name).toBe(`/d/${shared[3 - index]}`);
+      await expect.poll(unreadCount, name).toBe(3 - index);
+    }
+  });
+
+  test("a double-click on Mark as read takes one row away, and two separate clicks take two", async () => {
+    const page = recipient.page;
+    await shareNew(4);
+    const strip = await openDashboard(4);
+    const rows = strip.getByTestId("notification-item");
+    const first = await rows.first().getAttribute("data-notification-id");
+    const { x, y } = await centre(strip.getByTestId("notification-dismiss").first());
+    const reads = watchReads();
+
+    await page.mouse.dblclick(x, y);
+    await expect.poll(unreadCount).toBe(3);
+    await expect(rows).toHaveCount(3);
+    await expect(rows.first()).toContainText("Strip share 3");
+    expect(reads).toEqual([`/api/notifications/${first}/read`]);
+
+    // Two deliberate clicks are two clicks: each takes the row under it.
+    await page.waitForTimeout(700);
+    await page.mouse.click(x, y);
+    await expect(rows).toHaveCount(2);
+    await page.waitForTimeout(700);
+    await page.mouse.click(x, y);
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toContainText("Strip share 1");
+    await expect.poll(unreadCount).toBe(1);
+    expect(new URL(page.url()).pathname).toBe("/");
   });
 });
