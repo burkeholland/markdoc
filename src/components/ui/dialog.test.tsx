@@ -1177,6 +1177,123 @@ describe("DialogContent dismissal", () => {
     expect(onClosed).toHaveBeenCalledTimes(2);
   });
 
+  describe("a close report that arrives late", () => {
+    // Radix reports a close through setTimeout(0) after the body has unmounted, and the browser holds that
+    // timer back while key events keep coming: on a production build the report of the first close
+    // arrived after the dialog had been opened again from another button and closed again.
+    /** Runs `close` and holds back every zero-delay timer it starts; the test fires them when it wants. */
+    function holdReport(close: () => void) {
+      const held: Array<() => void> = [];
+      const realSetTimeout = window.setTimeout;
+      const spy = vi.spyOn(window, "setTimeout").mockImplementation(((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+        if (typeof handler !== "function" || delay) return realSetTimeout(handler, delay, ...args);
+        held.push(() => handler(...args));
+        return 0;
+      }) as typeof window.setTimeout);
+      try {
+        close();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(held.length).toBeGreaterThan(0);
+      return () => act(() => held.splice(0).forEach((run) => run()));
+    }
+
+    /** One dialog with two ways in: a mouse click that leaves focus in the editor, and Enter on a button. */
+    function TwoOpenersHarness({ onClosed }: { onClosed: (visit: number) => void }) {
+      const [visit, setVisit] = useState(0);
+      const [open, setOpen] = useState(false);
+      const show = () => {
+        setVisit((current) => current + 1);
+        setOpen(true);
+      };
+      return (
+        <>
+          <div data-testid="editor" tabIndex={0} />
+          <button type="button" data-testid="toolbar-image" onClick={show}>Image</button>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogContent title="Insert image" onClosed={() => onClosed(visit)}>
+              <input data-testid="image-url" autoFocus />
+            </DialogContent>
+          </Dialog>
+        </>
+      );
+    }
+
+    /** Opens from the editor (focus stays there, as with a mouse click on a toolbar button) and closes at once. */
+    async function firstVisitClosed(onClosed: (visit: number) => void) {
+      renderDirect(<StrictMode><TwoOpenersHarness onClosed={onClosed} /></StrictMode>);
+      const editor = screen.getByTestId("editor");
+      const button = screen.getByTestId("toolbar-image");
+      act(() => editor.focus());
+      fireEvent.click(button);
+      expect(screen.getByTestId("image-url")).toHaveFocus();
+      await flushTasks();
+      const firstReport = holdReport(() => fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape", code: "Escape" }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+      // Opened again from the button with the keyboard, before the first close has been reported.
+      act(() => button.focus());
+      fireEvent.click(button);
+      expect(screen.getByTestId("image-url")).toHaveFocus();
+      await flushTasks();
+      return { editor, button, firstReport };
+    }
+
+    it.each(["the first close's report, then the second's", "the second close's report, then the first's"] as const)(
+      "after the dialog has opened and closed again, %s: focus ends on the second opener and each close runs its own onClosed once",
+      async (order) => {
+        const onClosed = vi.fn();
+        const { editor, button, firstReport } = await firstVisitClosed(onClosed);
+        const secondReport = holdReport(() => fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape", code: "Escape" }));
+        expect(screen.queryByRole("dialog")).toBeNull();
+        expect(document.body).toHaveFocus();
+        expect(onClosed).not.toHaveBeenCalled();
+
+        if (order.startsWith("the first")) {
+          firstReport();
+          expect(editor).not.toHaveFocus();
+          expect(onClosed.mock.calls).toEqual([[1]]);
+          secondReport();
+          expect(button).toHaveFocus();
+          expect(onClosed.mock.calls).toEqual([[1], [2]]);
+        } else {
+          secondReport();
+          expect(button).toHaveFocus();
+          expect(onClosed.mock.calls).toEqual([[2]]);
+          const moved = vi.fn();
+          document.addEventListener("focusin", moved);
+          firstReport();
+          document.removeEventListener("focusin", moved);
+          expect(moved).not.toHaveBeenCalled();
+          expect(button).toHaveFocus();
+          expect(onClosed.mock.calls).toEqual([[2], [1]]);
+        }
+        await flushTasks();
+        expect(button).toHaveFocus();
+        expect(onClosed).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it("while the dialog is open again: focus stays in the open dialog, the first close runs its own onClosed, and the dialog still closes to its own opener", async () => {
+      const onClosed = vi.fn();
+      const { button, firstReport } = await firstVisitClosed(onClosed);
+      const moved = vi.fn();
+      document.addEventListener("focusin", moved);
+      firstReport();
+      document.removeEventListener("focusin", moved);
+      expect(moved).not.toHaveBeenCalled();
+      expect(screen.getByTestId("image-url")).toHaveFocus();
+      expect(screen.getByRole("dialog", { name: "Insert image" })).toBeInTheDocument();
+      expect(onClosed.mock.calls).toEqual([[1]]);
+
+      fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape", code: "Escape" });
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(button).toHaveFocus();
+      expect(onClosed.mock.calls).toEqual([[1], [2]]);
+    });
+  });
+
   it.each([false, true])(
     "hands over to a second dialog from its onClosed: each onClosed runs once and focus ends on the first opener (StrictMode=%s)",
     async (strict) => {

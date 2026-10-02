@@ -217,10 +217,12 @@ export function DialogContent({
     if (node) lastContentRef.current = node;
   }, []);
   const returnRef = React.useRef(NO_RETURN_TARGETS);
-  // What a body that has unmounted leaves for `onCloseAutoFocus`: where focus returns, and whether that
-  // was a close. Taken when it unmounts and kept per body element, because the dialog may be open again
-  // (with its own way back) by the time Radix reports the close one task later.
-  const [gone] = React.useState(() => new WeakMap<EventTarget, { targets: ReturnTargets; closed: boolean }>());
+  // What a body that has unmounted leaves for `onCloseAutoFocus`: where focus returns, and the callback
+  // to run when that was a close. Taken when it unmounts and kept per body element, because Radix reports
+  // the close in a later task, and the dialog may be open again (with its own way back and its own
+  // callback) by then, or even open and closed again: the browser holds that task back while keys
+  // keep coming.
+  const [gone] = React.useState(() => new WeakMap<EventTarget, { targets: ReturnTargets; onClosed: (() => void) | undefined }>());
   const root = React.useContext(DialogRootContext);
   const open = root?.open ?? true;
   // Close runs the callback from the last render while the dialog was open. A caller may hand a new
@@ -236,7 +238,8 @@ export function DialogContent({
   const onGone = React.useCallback(
     (targets: ReturnTargets) => {
       const content = lastContentRef.current;
-      if (content) gone.set(content, { targets, closed: !closeRequested || !openRef.current || closeRequested.current });
+      const closed = !closeRequested || !openRef.current || closeRequested.current;
+      if (content) gone.set(content, { targets, onClosed: closed ? onClosedRef.current : undefined });
     },
     [gone, closeRequested],
   );
@@ -268,8 +271,10 @@ export function DialogContent({
           const body = e.target ? gone.get(e.target) : undefined;
           if (!e.target || !body) return;
           gone.delete(e.target);
-          returnOrder(body.targets).some((target) => restoreFocus(target));
-          if (body.closed) onClosedRef.current?.();
+          // Only the newest body may move focus. The report of an earlier one can arrive after the
+          // dialog has opened and closed again; its way back is out of date then.
+          if (e.target === lastContentRef.current) returnOrder(body.targets).some((target) => restoreFocus(target));
+          body.onClosed?.();
         }}
       >
         <OpeningFocus contentRef={contentRef} returnRef={returnRef} onGone={onGone} />
