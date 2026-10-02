@@ -259,7 +259,41 @@ window for the unique submission tag, so a successful Azure CLI call does not
 depend on returning a run ID. It then waits for ACR success, requires a single
 well-formed digest for the full-SHA tag matching that build's output, and makes
 one VM invocation containing the WAL gate and existing deployment script.
-Only the read-only `az acr manifest list-metadata` digest lookup can retry:
+Only the read-only `list-runs` and `show-run` polls can count a failed call as a
+missed poll. A local per-call timeout, `transport`, `timeout` (including HTTP
+408), `throttled` (HTTP 429) or `server_error` (HTTP 5xx) waits the existing five
+seconds before the next poll. A successful call resets the consecutive-miss
+count, even when its valid evidence still shows no matching run or a running
+build. Three consecutive misses stop at the same release stage with the last
+call's existing failure message and exit code. Authentication, configuration,
+not-found and unknown errors remain immediately fatal, as do malformed or
+ambiguous evidence, invalid identities, unknown or failed statuses and digest
+checks. No build submission or VM command is retried.
+
+Both poll calls retain their 30-second per-call limit, capped by the remaining
+2100-second release deadline. Completion polls are also capped by the remaining
+750-second build-completion budget, measured from release start. Reconciliation
+still makes at most 132 polls, including missed polls. An exhausted time budget
+is terminal, not a missed poll, including when it expires during a failed or
+successful call. A terminal deadline is never caught as a per-call failure.
+
+This new line prints once per permitted missed poll, before
+`Release: guest invocation`, including the third consecutive miss:
+
+```text
+Release: ACR read-only poll missed; category=<category>; HTTP status=<status>; elapsed seconds=<seconds>; consecutive missed polls=<count>/3.
+```
+
+`<category>` is one of the four transient categories above; `<status>` is a
+single recognized three-digit HTTP status or `none` when absent or conflicting.
+`<seconds>` is the failed call's elapsed whole seconds, and `<count>` is the
+consecutive-miss count for the current polling stage, from 1 to 3. This line
+**can appear in a release that succeeds** when a later poll succeeds before
+three consecutive misses or a budget is exhausted. It describes one missed
+read-only observation, not the release outcome. Only the existing
+`Release failed/unverified at ...` line indicates a terminal failure.
+
+The read-only `az acr manifest list-metadata` digest lookup has its separate retry:
 one additional call after a fixed two-second delay, for `transport`, `timeout`,
 `throttled` (HTTP 429) or `server_error` (HTTP 5xx). HTTP 408 is also a
 `timeout`. `auth`, `configuration`,
@@ -301,8 +335,8 @@ do not mean the release failed.
 
 The native wrapper reduces stderr to these allow-listed values in memory.
 It never prints or stores raw stderr, response bodies, URLs, tokens or
-credentials in exception data. Other native commands do not opt into this
-classification.
+credentials in exception data. Only the two read-only polling calls and the digest lookup opt into this shared
+classification. Other native commands do not.
 
 Before image pull, environment
 change, unit rewrite or service start, the gate creates an operation-named
