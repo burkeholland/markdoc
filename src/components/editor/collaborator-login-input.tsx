@@ -20,7 +20,7 @@ export const SUGGEST_MIN_CHARS = 2;
 /** The route answers at most this many; the list never shows more. */
 export const SUGGEST_MAX = 8;
 /** How long the just-closed list's footprint stays a non-interactive click-shield after a pick (see `shielding` below). */
-export const SHIELD_MS = 400;
+export const SHIELD_MS = 600;
 
 function SuggestionAvatar({ login, src }: { login: string; src: string }) {
   const [failed, setFailed] = useState(false);
@@ -86,10 +86,11 @@ export function CollaboratorLoginInput({
   const [lookup, setLookup] = useState<Lookup | null>(null);
   const [noToken, setNoToken] = useState(false);
   const [picked, setPicked] = useState<string | null>(null);
-  // After a pick, the just-closed list's footprint stays covered by a non-interactive shield for a beat: a list
-  // sitting right above the role select and the collaborator rows below it means a fast second click (a
-  // double-click, or a double-tap) that picked an option on its first half would otherwise land on whatever is
-  // now exposed underneath. The shield only ever absorbs a click; it never fills the box or re-picks.
+  // After a pointer pick (click or tap), the just-closed list's footprint stays covered by a non-interactive
+  // shield for a beat: a list sitting right above the role select and the collaborator rows below it means a
+  // fast second click/tap that picked an option on its first half would otherwise land on whatever is now
+  // exposed underneath. The shield only ever absorbs a click; it never fills the box or re-picks. A keyboard
+  // pick (Enter) has no second click to absorb, so it never shows one.
   const [shielding, setShielding] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -187,11 +188,13 @@ export function CollaboratorLoginInput({
   const expanded = open && candidates.length > 0;
   const activeIndex = active >= 0 && active < candidates.length ? active : -1;
 
-  const pick = (login: string) => {
-    setShieldedCandidates(candidates);
-    setShielding(true);
-    if (shieldTimer.current) clearTimeout(shieldTimer.current);
-    shieldTimer.current = setTimeout(() => setShielding(false), SHIELD_MS);
+  const pick = (login: string, options?: { viaPointer?: boolean }) => {
+    if (options?.viaPointer) {
+      setShieldedCandidates(candidates);
+      setShielding(true);
+      if (shieldTimer.current) clearTimeout(shieldTimer.current);
+      shieldTimer.current = setTimeout(() => setShielding(false), SHIELD_MS);
+    }
     onChange(login);
     setPicked(login);
     setOpen(false);
@@ -342,7 +345,7 @@ export function CollaboratorLoginInput({
               className={cn("menu-item py-1.5", index === activeIndex && "bg-surface-3")}
               onMouseDown={(event) => event.preventDefault()}
               onMouseOver={() => setActive(index)}
-              onClick={() => pick(candidate.login)}
+              onClick={() => pick(candidate.login, { viaPointer: true })}
               data-testid="share-login-option"
               data-login={candidate.login}
             >
@@ -368,10 +371,12 @@ export function CollaboratorLoginInput({
         // Not a real listbox: just-picked candidates' footprint, held in place and non-interactive for a beat
         // so a fast second click (a double-click or double-tap finishing after the pick already closed the
         // real list) lands here and does nothing, instead of falling through to the role select or a
-        // collaborator row.
+        // collaborator row. onMouseDown prevents the default too, so this second click never moves focus off
+        // wherever the pick itself already sent it (the role select).
         <ul
           aria-hidden="true"
           className="menu absolute left-0 right-0 top-full mt-1 max-h-80 overflow-y-auto"
+          onMouseDown={(event) => event.preventDefault()}
           onPointerLeave={() => setShielding(false)}
           data-testid="share-login-shield"
         >

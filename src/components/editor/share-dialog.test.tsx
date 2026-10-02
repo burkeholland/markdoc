@@ -204,7 +204,7 @@ describe("ShareDialog", () => {
     expect(screen.getByTestId("share-login")).toHaveValue("  bob  ");
   });
 
-  it("picking a suggestion moves focus to the role select, and a held Enter's auto-repeat landing there does not submit", async () => {
+  it("picking a suggestion moves focus to the role select; only a held Enter's auto-repeat is blocked, a single Enter still submits", async () => {
     vi.mocked(api.github.searchUsers).mockResolvedValue({
       users: [{ login: "octocat", name: null, avatarUrl: "https://avatars.githubusercontent.com/octocat?s=40" }],
       limited: false,
@@ -227,10 +227,14 @@ describe("ShareDialog", () => {
     expect(screen.getByTestId("share-role")).toHaveFocus(); // onPick moved focus here
     expect(api.documents.addCollaborator).not.toHaveBeenCalled();
 
-    // A held Enter's auto-repeat now lands on the role select, not the input.
-    const notSubmitted = fireEvent.keyDown(screen.getByTestId("share-role"), { key: "Enter" });
-    expect(notSubmitted).toBe(false); // preventDefault: the select never implicitly submits the form
+    // A held Enter's auto-repeat now lands on the role select, not the input: it must not submit.
+    fireEvent.keyDown(screen.getByTestId("share-role"), { key: "Enter", repeat: true });
     expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+
+    // Releasing and pressing Enter once more — not a repeat — submits, same as Tab-to-role-then-Enter on main. A
+    // <select> has no native implicit submission, so the handler asks for one explicitly via form.requestSubmit().
+    fireEvent.keyDown(screen.getByTestId("share-role"), { key: "Enter" });
+    await waitFor(() => expect(api.documents.addCollaborator).toHaveBeenCalledWith("doc-1", "octocat", "editor"));
   });
 
   it("shows a note when the added person has not signed in yet", async () => {

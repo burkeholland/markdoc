@@ -381,7 +381,9 @@ describe("CollaboratorLoginInput", () => {
     // The shield shows the same three rows the real list just had, so the click lands on familiar content.
     expect(within(shield).getAllByText(/^@octo/).map((el) => el.textContent)).toEqual(["@octocat", "@octodog", "@octofox"]);
 
-    // The fast second click/tap of the double click, landing on the shield instead of the real list.
+    // The fast second click/tap of the double click, landing on the shield instead of the real list. Its own
+    // mousedown does not move focus either, same as a real option's.
+    expect(fireEvent.mouseDown(within(shield).getByText("@octofox"))).toBe(false);
     fireEvent.click(within(shield).getByText("@octofox"));
     expect(onPick).toHaveBeenCalledTimes(1); // absorbed: nothing picked a second time
     expect(input().value).toBe("octodog"); // the field still holds the first pick, untouched
@@ -392,6 +394,18 @@ describe("CollaboratorLoginInput", () => {
     });
     expect(screen.queryByTestId("share-login-shield")).toBeNull();
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+  });
+
+  it("an Enter pick never shows the click shield - a keyboard pick has no second click to absorb", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    render(<Harness />);
+    type("octo");
+    await settle();
+    fireEvent.keyDown(input(), { key: "ArrowDown" });
+    fireEvent.keyDown(input(), { key: "Enter" });
+    expect(input().value).toBe("octocat");
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    expect(screen.queryByTestId("share-login-shield")).toBeNull();
   });
 
   it("ends the click-shield as soon as the pointer leaves it, instead of waiting the full window", async () => {

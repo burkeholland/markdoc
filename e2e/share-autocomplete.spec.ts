@@ -253,6 +253,58 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     await owner.context.close();
   });
 
+  test("picking with Enter, releasing, then pressing Enter once more adds exactly one person with one POST", async ({ browser }) => {
+    const owner = await signIn(browser, "autocomplete-enter-add-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Enter Add\n", "Enter Add");
+    expect((await page.request.get(`${USERS}?q=octop`, { timeout: 120_000 })).status()).toBe(200);
+    await openDocument(page, id);
+    const { input, options } = await openShare(page);
+
+    await page.keyboard.type("octop"); // exactly three matches: octopus, octopod, octoprint
+    await expect(options).toHaveCount(3, { timeout: budgetMs(600) });
+    await page.keyboard.press("ArrowDown");
+
+    const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
+    await page.keyboard.press("Enter"); // picks: fills the field, moves focus to the role select
+    await expect(input).toHaveValue("octopus");
+    await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+    await expect(page.getByTestId("share-role")).toBeFocused();
+
+    // Not held this time: key fully released, then pressed once more. This single Enter on the role
+    // select must still submit, same as any other control the form's Enter would otherwise reach.
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("collaborator-row")).toHaveCount(1);
+    await expect(page.getByTestId("collaborator-row")).toContainText("@octopus");
+    adds.stop();
+    expect(adds.seen, "POST /collaborators requests").toHaveLength(1);
+    await owner.context.close();
+  });
+
+  test("typing a handle, tabbing to the role, and pressing Enter adds exactly one person (main's flow)", async ({ browser }) => {
+    const owner = await signIn(browser, "autocomplete-tab-enter-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Tab Enter\n", "Tab Enter");
+    await openDocument(page, id);
+    const { input } = await openShare(page);
+
+    await page.keyboard.type("zz-nobody");
+    // Long enough for the debounce and the (empty) answer, so no suggestion is left pending to pick.
+    await page.waitForTimeout(budgetMs(700));
+    await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+
+    const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
+    await page.keyboard.press("Tab");
+    await expect(page.getByTestId("share-role")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("collaborator-row")).toHaveCount(1);
+    await expect(page.getByTestId("collaborator-row")).toContainText("@zz-nobody");
+    await expect(input).toHaveValue(""); // the field resets after a successful add, just like clicking Add
+    adds.stop();
+    expect(adds.seen, "POST /collaborators requests").toHaveLength(1);
+    await owner.context.close();
+  });
+
   test("a fast real double click on a suggestion fills exactly that login and reaches nothing underneath (narrow width)", async ({ browser }) => {
     const owner = await signIn(browser, "autocomplete-dblclick-owner");
     const { page } = owner;
@@ -276,6 +328,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
 
     await expect(input).toHaveValue(login!);
     await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+    await expect(page.getByTestId("share-role")).toBeFocused();
     await page.waitForTimeout(budgetMs(300));
 
     expect(adds.seen, "POST /collaborators requests").toHaveLength(0);
@@ -311,6 +364,74 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
 
     await expect(input).toHaveValue(login!);
     await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+    await expect(page.getByTestId("share-role")).toBeFocused();
+    await page.waitForTimeout(budgetMs(300));
+
+    expect(adds.seen, "POST /collaborators requests").toHaveLength(0);
+    await expect(page.getByTestId("collaborator-row")).toHaveCount(1);
+    await expect(page.getByLabel("Role for preexisting")).toHaveValue("viewer");
+    adds.stop();
+    await context.close();
+  });
+
+  test("a fast real double click on the lone suggestion fills it and reaches nothing underneath (one row, narrow width)", async ({ browser }) => {
+    const owner = await signIn(browser, "autocomplete-dblclick-single-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Double Click Single\n", "Double Click Single");
+    expect((await page.request.get(`${USERS}?q=octoc`, { timeout: 120_000 })).status()).toBe(200);
+    expect((await page.request.post(`/api/documents/${id}/collaborators`, { data: { login: "preexisting", role: "viewer" } })).status()).toBeLessThan(300);
+    await openDocument(page, id);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const { input, options } = await openShare(page);
+
+    await page.keyboard.type("octoc"); // exactly one match: octocat — the list is one row tall
+    await expect(options).toHaveCount(1, { timeout: budgetMs(600) });
+    const only = options.first();
+    const login = await only.getAttribute("data-login");
+    const box = (await only.boundingBox())!;
+
+    const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
+    await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2, { delay: 30 });
+
+    await expect(input).toHaveValue(login!);
+    await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+    await expect(page.getByTestId("share-role")).toBeFocused();
+    await page.waitForTimeout(budgetMs(300));
+
+    expect(adds.seen, "POST /collaborators requests").toHaveLength(0);
+    await expect(page.getByTestId("collaborator-row")).toHaveCount(1);
+    await expect(page.getByLabel("Role for preexisting")).toHaveValue("viewer");
+    adds.stop();
+    await owner.context.close();
+  });
+
+  test("a real touch double tap on the lone suggestion behaves the same as a double click (one row, narrow width)", async ({ browser }) => {
+    const context = await browser.newContext({ hasTouch: true });
+    const page = await context.newPage();
+    await devLogin(page, "autocomplete-dbltap-single-owner");
+    await page.waitForLoadState("networkidle");
+    const id = await createDocument(page, "# Double Tap Single\n", "Double Tap Single");
+    expect((await page.request.get(`${USERS}?q=octoc`, { timeout: 120_000 })).status()).toBe(200);
+    expect((await page.request.post(`/api/documents/${id}/collaborators`, { data: { login: "preexisting", role: "viewer" } })).status()).toBeLessThan(300);
+    await openDocument(page, id);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const { input, options } = await openShare(page);
+
+    await page.keyboard.type("octoc"); // exactly one match: octocat — the list is one row tall
+    await expect(options).toHaveCount(1, { timeout: budgetMs(600) });
+    const only = options.first();
+    const login = await only.getAttribute("data-login");
+    const box = (await only.boundingBox())!;
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+
+    const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
+    await page.touchscreen.tap(x, y);
+    await page.touchscreen.tap(x, y);
+
+    await expect(input).toHaveValue(login!);
+    await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+    await expect(page.getByTestId("share-role")).toBeFocused();
     await page.waitForTimeout(budgetMs(300));
 
     expect(adds.seen, "POST /collaborators requests").toHaveLength(0);
