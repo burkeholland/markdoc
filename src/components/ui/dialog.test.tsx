@@ -459,6 +459,32 @@ describe("DialogContent focus lifecycle", () => {
     expect(more).toHaveFocus();
   });
 
+  it.each(["Escape", "Close"] as const)(
+    "returns to the page element that opened it on %s, not to a menu trigger that took focus while it was open",
+    async (action) => {
+      // Ctrl+/ from the editor while the ⋮ menu, closed a moment ago, still owes its trigger the focus.
+      const content = <p>Command palette - Mod-Shift-P</p>;
+      const { rerender } = render(<Harness open={false} title="Keyboard shortcuts">{content}</Harness>);
+      const editor = document.createElement("div");
+      editor.tabIndex = 0;
+      document.body.append(editor);
+      act(() => editor.focus());
+      rerender(<Harness open title="Keyboard shortcuts">{content}</Harness>);
+      await flushTasks();
+      expect(dialog()).toContainElement(document.activeElement as HTMLElement);
+
+      act(() => screen.getByTestId("more-menu").focus());
+      expect(dialog()).toContainElement(document.activeElement as HTMLElement);
+
+      if (action === "Close") fireEvent.click(closeButton());
+      else fireEvent.keyDown(document.activeElement ?? document, { key: "Escape", code: "Escape" });
+      rerender(<Harness open={false} title="Keyboard shortcuts">{content}</Harness>);
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(editor).toHaveFocus();
+    },
+  );
+
   it("leaves focus in a second dialog that opens outside the first one's tree", async () => {
     function Siblings() {
       const [second, setSecond] = useState(false);

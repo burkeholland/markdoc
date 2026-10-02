@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Dialog as RadixDialog } from "radix-ui";
 import { X } from "lucide-react";
-import { firstTabbable, focusReturnTarget, restoreFocus } from "@/lib/a11y";
+import { firstTabbable, focusedElement, focusReturnTarget, restoreFocus } from "@/lib/a11y";
 import { cn } from "@/lib/utils";
 
 /* ---------------- Dialog ---------------- */
@@ -22,9 +22,14 @@ interface Opener {
   element: HTMLElement | null;
   /** When that element sits in a popover: the popover's trigger. */
   popoverTrigger: HTMLElement | null;
+  /**
+   * The dialog opened from a menu or popover (or from something already gone): that layer closes as the
+   * dialog opens and hands focus back to its own trigger, which is then the better place to return to.
+   */
+  fromLayer: boolean;
 }
 
-const NO_OPENER: Opener = { element: null, popoverTrigger: null };
+const NO_OPENER: Opener = { element: null, popoverTrigger: null, fromLayer: true };
 
 /**
  * A popover that opens a dialog closes as the dialog opens, so the popover's own button is gone when the
@@ -38,7 +43,7 @@ function currentOpener(): Opener {
   const element = focusReturnTarget();
   const popover = element?.closest<HTMLElement>('[role="dialog"][id]');
   const popoverTrigger = popover ? document.querySelector<HTMLElement>(`[aria-controls="${popover.id}"]`) : null;
-  return { element, popoverTrigger };
+  return { element, popoverTrigger, fromLayer: !element || element !== focusedElement() || !!popoverTrigger };
 }
 
 /**
@@ -102,10 +107,19 @@ export const DialogTitle = RadixDialog.Title;
 /** Unstyled Radix content for drawers and sheets; `DialogContent` below is the centred card. */
 export const DialogPrimitiveContent = RadixDialog.Content;
 
-/** Where focus goes when the dialog closes: the first of these that can take it, in this order. */
+/** Where focus goes when the dialog closes: the first of these that can take it (see `returnOrder`). */
 interface ReturnTargets extends Opener {
-  /** Where a menu or popover that closed as the dialog opened handed focus back to: its own trigger. */
+  /** Where focus was handed while the dialog was open: the trigger of the menu or popover that opened it. */
   handedTo: HTMLElement | null;
+}
+
+/**
+ * A dialog opened from a menu or popover returns to where that layer handed focus back, then to the
+ * opener. A dialog opened from the page (the editor, a toolbar button) returns to that opener; focus
+ * that some other closing menu handed around while it was open is only a fallback.
+ */
+function returnOrder({ handedTo, element, popoverTrigger, fromLayer }: ReturnTargets) {
+  return fromLayer ? [handedTo, element, popoverTrigger] : [element, handedTo, popoverTrigger];
 }
 
 const NO_RETURN_TARGETS: ReturnTargets = { handedTo: null, ...NO_OPENER };
@@ -228,9 +242,9 @@ export function DialogContent({
         }}
         onCloseAutoFocus={(e) => {
           e.preventDefault();
-          const { handedTo, element, popoverTrigger } = returnRef.current;
+          const targets = returnOrder(returnRef.current);
           returnRef.current = NO_RETURN_TARGETS;
-          [handedTo, element, popoverTrigger].some((target) => restoreFocus(target));
+          targets.some((target) => restoreFocus(target));
           if (!root || !openRef.current || root.closeRequested.current) onClosedRef.current?.();
         }}
       >
