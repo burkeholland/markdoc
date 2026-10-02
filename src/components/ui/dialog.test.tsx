@@ -1177,6 +1177,61 @@ describe("DialogContent dismissal", () => {
     expect(onClosed).toHaveBeenCalledTimes(2);
   });
 
+  it.each([false, true])(
+    "hands over to a second dialog from its onClosed: each onClosed runs once and focus ends on the first opener (StrictMode=%s)",
+    async (strict) => {
+      // Share closes, then opens "Connect an AI agent" from its onClosed. Each dialog keeps its own record
+      // of the close, and the first dialog's late report must not take focus out of the second.
+      const firstClosed = vi.fn();
+      const secondClosed = vi.fn();
+      function ChainHarness() {
+        const [first, setFirst] = useState(false);
+        const [second, setSecond] = useState(false);
+        return (
+          <>
+            <button type="button" data-testid="share-button" onClick={() => setFirst(true)}>Share</button>
+            <Dialog open={first} onOpenChange={setFirst}>
+              <DialogContent
+                title="Share"
+                onClosed={() => {
+                  firstClosed();
+                  setSecond(true);
+                }}
+              >
+                <button type="button" onClick={() => setFirst(false)}>Connect an AI agent</button>
+              </DialogContent>
+            </Dialog>
+            <Dialog open={second} onOpenChange={setSecond}>
+              <DialogContent title="Connect an AI agent" onClosed={secondClosed}>
+                <input data-testid="agent-input" autoFocus />
+              </DialogContent>
+            </Dialog>
+          </>
+        );
+      }
+      renderDirect(strict ? <StrictMode><ChainHarness /></StrictMode> : <ChainHarness />);
+      const share = screen.getByTestId("share-button");
+      act(() => share.focus());
+      fireEvent.click(share);
+      await flushTasks();
+
+      fireEvent.click(screen.getByRole("button", { name: "Connect an AI agent" }));
+      await flushTasks();
+      await flushTasks();
+      expect(screen.getAllByRole("dialog")).toHaveLength(1);
+      expect(screen.getByTestId("agent-input")).toHaveFocus();
+      expect(firstClosed).toHaveBeenCalledOnce();
+      expect(secondClosed).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(screen.getByTestId("agent-input"), { key: "Escape", code: "Escape" });
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(share).toHaveFocus();
+      expect(firstClosed).toHaveBeenCalledOnce();
+      expect(secondClosed).toHaveBeenCalledOnce();
+    },
+  );
+
   it("runs onClosed when the owner closes it without Radix and keeps it mounted", async () => {
     const onClosed = vi.fn();
     function OwnCloseHarness() {
