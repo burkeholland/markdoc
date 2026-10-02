@@ -27,6 +27,8 @@ const PAGE_LOAD_HOLD_MS = 8_000;
  * double-click or double tap the system counts as one (0.9 s on Windows).
  */
 const EMPTY_HOLD_MS = 1_000;
+/** How long the box waits at most for the end of a press on it, in case that end never arrives. */
+const EMPTY_PRESS_MS = 10_000;
 
 /** A plain key press: no modifier held and no IME composition in progress. */
 function isPlainKey(event: ReactKeyboardEvent) {
@@ -83,12 +85,22 @@ export function NotificationsStrip() {
   const sectionRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
-  // The height of the strip a click or a tap has just emptied. Every press on the box starts the time again.
-  const [emptyBox, setEmptyBox] = useState<{ height: number } | null>(null);
+  // The height of the strip a click or a tap has just emptied. Every press on the box starts the time again,
+  // and while that press is down the box stays: its second starts when the press ends.
+  const [emptyBox, setEmptyBox] = useState<{ height: number; pressed?: boolean } | null>(null);
   useEffect(() => {
     if (!emptyBox) return;
-    const timer = window.setTimeout(() => setEmptyBox(null), EMPTY_HOLD_MS);
-    return () => window.clearTimeout(timer);
+    const timer = window.setTimeout(() => setEmptyBox(null), emptyBox.pressed ? EMPTY_PRESS_MS : EMPTY_HOLD_MS);
+    if (!emptyBox.pressed) return () => window.clearTimeout(timer);
+    // The press can end anywhere: a mouse is released outside the box, a touch becomes a scroll.
+    const pressEnded = () => setEmptyBox({ height: emptyBox.height });
+    window.addEventListener("pointerup", pressEnded, true);
+    window.addEventListener("pointercancel", pressEnded, true);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("pointerup", pressEnded, true);
+      window.removeEventListener("pointercancel", pressEnded, true);
+    };
   }, [emptyBox]);
   // The strip as it was when a row was opened, from that activation until the page changes. The page
   // normally changes, and this component goes with it. This is plain state, not a transition around
@@ -110,15 +122,18 @@ export function NotificationsStrip() {
       timer = window.setTimeout(release, PAGE_LOAD_HOLD_MS);
     };
     window.addEventListener("beforeunload", pageLoadStarted);
-    // Back or Forward ends the navigation here. `pageshow`: this page is shown again after the browser
-    // had kept it for Back.
+    // Back or Forward ends the navigation here. A `pageshow` that is `persisted`: this page is shown
+    // again after the browser had kept it for Back. Every ordinary page load ends with a `pageshow` too.
+    const shownAgain = (event: PageTransitionEvent) => {
+      if (event.persisted) release();
+    };
     window.addEventListener("popstate", release);
-    window.addEventListener("pageshow", release);
+    window.addEventListener("pageshow", shownAgain);
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener("beforeunload", pageLoadStarted);
       window.removeEventListener("popstate", release);
-      window.removeEventListener("pageshow", release);
+      window.removeEventListener("pageshow", shownAgain);
     };
   }, [opening]);
 
@@ -295,7 +310,7 @@ export function NotificationsStrip() {
     <div
       className="mb-8"
       style={{ height: emptyBox.height }}
-      onPointerDown={() => setEmptyBox({ height: emptyBox.height })}
+      onPointerDown={() => setEmptyBox({ height: emptyBox.height, pressed: true })}
       data-testid="notifications-strip-emptied"
     >
       <div inert className="h-full rounded-2xl border border-accent/40 bg-accent-soft/40" />
