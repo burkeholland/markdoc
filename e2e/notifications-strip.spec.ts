@@ -1,4 +1,4 @@
-import type { Browser, Locator, Page } from "@playwright/test";
+import type { Browser, Locator, Page, Route } from "@playwright/test";
 import { expect, test } from "./fixtures";
 import { createDocument, devLogin, reloadHydrated, shareWith, signIn, uniqueLogin, waitForEditor, waitForHydration, type User } from "./helpers";
 
@@ -435,10 +435,16 @@ test.describe("dashboard notification strip with real input", () => {
   });
 
   // The app router falls back to loading the document as a whole page when its own request fails. If the
-  // user stops that load, the dashboard stays and nothing tells it.
+  // user stops that load, the dashboard stays and nothing tells it, so the strip stops waiting by itself.
+  //
+  // The dashboard's prefetches of document pages are made to fail, as if there were none (the dev server
+  // does none). With them, a production build's router navigates nowhere after such a stop, from a
+  // document card as much as from the strip: that is #2249, and not the strip's to fix.
   test("after a page load that a row started is stopped, the other rows open again without a reload", async () => {
     const page = recipient.page;
     const shared = await shareNew(3);
+    const isPrefetch = (route: Route) => Boolean(route.request().headers()["next-router-prefetch"]);
+    await page.route(isDocument, (route) => (isPrefetch(route) ? route.abort("failed") : route.fallback()));
     const strip = await openDashboard(3);
     const rows = strip.getByTestId("notification-item");
     let hanging = true;
@@ -446,12 +452,14 @@ test.describe("dashboard notification strip with real input", () => {
     const pageLoad = new Promise<void>((resolve) => {
       loadStarted = resolve;
     });
-    await page.route(isDocument, async (route) => {
+    const failTheOpen = async (route: Route) => {
+      if (isPrefetch(route)) return route.fallback();
       if (route.request().resourceType() === "fetch") return route.abort("failed");
       loadStarted();
       while (hanging) await sleep(100);
       await route.abort("aborted").catch(() => {});
-    });
+    };
+    await page.route(isDocument, failTheOpen);
     const first = await centre(rows.first().getByTestId("notification-open"));
     // Stop also cancels the requests of the page that is shown, so let the read request finish first.
     const read = page.waitForResponse((response) => /^\/api\/notifications\/[^/]+\/read$/.test(new URL(response.url()).pathname));
@@ -462,7 +470,7 @@ test.describe("dashboard notification strip with real input", () => {
     const cdp = await page.context().newCDPSession(page);
     await cdp.send("Page.stopLoading");
     hanging = false;
-    await page.unroute(isDocument);
+    await page.unroute(isDocument, failTheOpen);
     await cdp.detach();
 
     // The opened row is read. It leaves once the strip stops waiting for the page that never came.

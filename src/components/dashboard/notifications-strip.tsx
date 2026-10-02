@@ -89,10 +89,11 @@ export function NotificationsStrip() {
     if (!emptyBox) return;
     const timer = window.setTimeout(() => setEmptyBox(null), EMPTY_HOLD_MS);
     return () => window.clearTimeout(timer);
-  }, [emptyBox]);  // The strip as it was when a row was opened, from that activation until the page changes. The page
-  // normally changes, and this component goes with it. The navigation is a plain `router.push`: inside
-  // a transition of this component, a full page load that is stopped left the app router unable to
-  // navigate at all.
+  }, [emptyBox]);
+  // The strip as it was when a row was opened, from that activation until the page changes. The page
+  // normally changes, and this component goes with it. This is plain state, not a transition around
+  // `router.push`: the app router keeps a transition pending for ever once it has fallen back to
+  // loading the page as a whole, so "pending" could not say when the wait is over.
   const [opened, setOpened] = useState<{ rows: NotificationDto[]; unreadCount: number } | null>(null);
   const opening = opened !== null;
   useEffect(() => {
