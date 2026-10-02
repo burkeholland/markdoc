@@ -29,7 +29,9 @@ test("notification bell browses trusted keys without scrolling or activating", a
       (url.protocol === "http:" || url.protocol === "https:") &&
       !["localhost", "127.0.0.1", "::1"].includes(url.hostname)
     ) {
-      externalRequests += 1;
+      // The development login gives each user a GitHub avatar URL (src/auth.ts) that the header loads on
+      // every page. The keys did not cause that request, so it is blocked like the rest but not counted.
+      if (url.hostname !== "avatars.githubusercontent.com") externalRequests += 1;
       await route.abort();
       return;
     }
