@@ -97,7 +97,54 @@ const opens = () => screen.queryAllByTestId("notification-open") as HTMLButtonEl
 const dismisses = () => screen.queryAllByTestId("notification-dismiss") as HTMLButtonElement[];
 const readAll = () => screen.getByTestId("notifications-strip-read-all");
 const status = () => screen.queryByTestId("notifications-strip-status");
+const emptiedBox = () => screen.queryByTestId("notifications-strip-emptied");
 const hrefOf = (notification: NotificationDto) => `/d/${notification.documentId}?thread=${notification.refId}`;
+
+/**
+ * Mounts the strip under a stand-in for the app router. A navigation stays pending as a transition, as
+ * the real one does until the page is ready; `endHere` ends the latest one with the dashboard still here.
+ */
+async function mountStripUnderRouter(items: NotificationDto[]) {
+  const pages: { promise: Promise<void>; resolve: () => void }[] = [];
+  const Awaits = ({ promise }: { promise: Promise<void> }) => {
+    use(promise);
+    return null;
+  };
+  function AppRouter({ children }: { children: ReactNode }) {
+    const [destination, setDestination] = useState<Promise<void> | null>(null);
+    useEffect(() => {
+      router.push.mockImplementation(() => {
+        const page = deferred<void>();
+        pages.push(page);
+        setDestination(page.promise);
+      });
+    }, []);
+    return (
+      <>
+        {children}
+        {destination && <Awaits promise={destination} />}
+      </>
+    );
+  }
+  notificationApi.list.mockResolvedValue({ items, unreadCount: items.length });
+  const { NotificationsStrip } = await import("./notifications-strip");
+  const store = await import("@/lib/notifications-store");
+  render(<AppRouter><NotificationsStrip /></AppRouter>);
+  await waitFor(() => expect(rows()).toHaveLength(items.length));
+  const endHere = () =>
+    act(async () => {
+      pages.at(-1)!.resolve();
+      await pages.at(-1)!.promise;
+    });
+  return { store, endHere };
+}
+
+/** A click that starts a navigation. It suspends, so React wants the act that starts it awaited. */
+const clickToOpen = (index: number) =>
+  act(async () => {
+    fireEvent.click(opens()[index]!, { detail: 1 });
+  });
+const elapse = (ms: number) => act(() => vi.advanceTimersByTime(ms));
 
 /** A cancelable keydown, as a browser sends it; returns the event so the test can read `defaultPrevented`. */
 function press(element: Element, key: string, init: KeyboardEventInit = {}) {
@@ -121,6 +168,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -262,58 +310,15 @@ describe("notification strip actions", () => {
     expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
   });
 
-  // On a slow network a later click, which the browser counts as a new click, can land before the page
-  // changes. The app router keeps its navigation pending as a transition until the page is ready.
-  it("while a document is opening no other row opens, and rows open again if that navigation ends here", async () => {
-    const page = deferred<void>();
-    const Awaits = ({ promise }: { promise: Promise<void> }) => {
-      use(promise);
-      return null;
-    };
-    function AppRouter({ children }: { children: ReactNode }) {
-      const [destination, setDestination] = useState<Promise<void> | null>(null);
-      useEffect(() => {
-        router.push.mockImplementation(() => setDestination(page.promise));
-      }, []);
-      return (
-        <>
-          {children}
-          {destination && <Awaits promise={destination} />}
-        </>
-      );
-    }
-    notificationApi.list.mockResolvedValue({ items: [ITEM, ITEM_TWO, ITEM_THREE, SHARE], unreadCount: 4 });
-    const { NotificationsStrip } = await import("./notifications-strip");
-    render(<AppRouter><NotificationsStrip /></AppRouter>);
-    await waitFor(() => expect(rows()).toHaveLength(4));
-
-    // The navigation suspends, so React wants the act that starts it awaited.
-    await act(async () => {
-      fireEvent.click(opens()[0]!, { detail: 1 });
-    });
-    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id, SHARE.id]);
+  // The mocked router finishes a navigation at once, with the dashboard still here.
+  it("opening the only row takes the strip away and leaves no empty box", async () => {
+    await mountStrip([ITEM]);
     fireEvent.click(opens()[0]!, { detail: 1 });
-    fireEvent.click(opens()[2]!);
-
-    expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM.id);
-    expect(router.push).toHaveBeenCalledExactlyOnceWith(hrefOf(ITEM));
-    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id, SHARE.id]);
-
-    // Mark as read is not a navigation, so it still works meanwhile.
-    fireEvent.click(dismisses()[2]!);
-    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
-    expect(router.push).toHaveBeenCalledOnce();
-
-    // The navigation ends and the dashboard is still here (it was cancelled): rows open again.
+    expect(strip()).toBeNull();
+    expect(emptiedBox()).toBeNull();
     await act(async () => {
-      page.resolve();
-      await page.promise;
+      await Promise.resolve();
     });
-    fireEvent.click(opens()[0]!, { detail: 1 });
-    expect(notificationApi.read).toHaveBeenLastCalledWith(ITEM_TWO.id);
-    expect(router.push).toHaveBeenCalledTimes(2);
-    expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_TWO));
-    expect(rowIds()).toEqual([ITEM_THREE.id]);
   });
 
   it("Mark as read takes only its row away, without navigating", async () => {
@@ -849,6 +854,270 @@ describe("notification strip focus when the strip empties", () => {
     expect(status()).toBeNull();
     press(opens()[0]!, "Delete");
     expectStatusFocused();
+    await settle();
+  });
+});
+
+// A row that is opened is marked read at once, and so would leave the list, and the last row would take
+// the strip with it, while the pointer is still there. Until the page changes the strip stays as it was.
+describe("notification strip while a row's document opens", () => {
+  const heading = (count: number) => screen.getByRole("heading", { name: new RegExp(`Notifications\\s*${count}$`) });
+  const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+  it("stays as it was, the opened row included, does nothing, and follows the list again if the navigation ends here", async () => {
+    const all = [ITEM, ITEM_TWO, ITEM_THREE, SHARE];
+    const { store, endHere } = await mountStripUnderRouter(all);
+    act(() => opens()[0]!.focus());
+
+    await clickToOpen(0);
+
+    const held = () => {
+      expect(rowIds()).toEqual(all.map((item) => item.id));
+      expect(heading(4)).toBeVisible();
+      expect(opens()[0]).toHaveFocus();
+      expect(status()).toBeNull();
+      expect(emptiedBox()).toBeNull();
+      expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+      expect(notificationApi.readAll).not.toHaveBeenCalled();
+      expect(router.push).toHaveBeenCalledExactlyOnceWith(hrefOf(ITEM));
+    };
+    held();
+    // The same row again as a new click, another row, both ways to mark as read, and Mark all read.
+    fireEvent.click(opens()[0]!, { detail: 1 });
+    fireEvent.click(opens()[0]!);
+    fireEvent.click(opens()[2]!, { detail: 1 });
+    fireEvent.click(dismisses()[0]!, { detail: 1 });
+    fireEvent.click(dismisses()[2]!);
+    press(opens()[0]!, "Delete");
+    fireEvent.click(readAll(), { detail: 1 });
+    fireEvent.click(readAll());
+    held();
+    // The list changes behind it: the poll comes back without the opened row and with a new one.
+    notificationApi.list.mockResolvedValue({ items: [{ ...ITEM, id: "notification-new" }, ITEM_TWO, ITEM_THREE, SHARE], unreadCount: 9 });
+    await act(() => store.refreshNotifications());
+    held();
+    // The arrow keys are not actions. They still move focus.
+    press(opens()[0]!, "ArrowDown");
+    expect(opens()[1]).toHaveFocus();
+
+    // The navigation ends and the dashboard is still here (it was cancelled): the strip follows the list.
+    await endHere();
+    expect(rowIds()).toEqual(["notification-new", ITEM_TWO.id, ITEM_THREE.id, SHARE.id]);
+    expect(heading(9)).toBeVisible();
+    await clickToOpen(1);
+    expect(notificationApi.read).toHaveBeenLastCalledWith(ITEM_TWO.id);
+    expect(router.push).toHaveBeenCalledTimes(2);
+    expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_TWO));
+  });
+
+  it("keeps the only row, and the strip with it", async () => {
+    const { endHere } = await mountStripUnderRouter([ITEM]);
+
+    await clickToOpen(0);
+    fireEvent.click(opens()[0]!, { detail: 2 });
+    fireEvent.click(opens()[0]!, { detail: 1 });
+
+    expect(rowIds()).toEqual([ITEM.id]);
+    expect(router.push).toHaveBeenCalledOnce();
+    await endHere();
+    expect(strip()).toBeNull();
+    expect(emptiedBox()).toBeNull();
+    expect(status()).toBeNull();
+  });
+
+  it("brings the row back as a live one when marking it read failed and the navigation ended here", async () => {
+    notificationApi.read.mockRejectedValueOnce(new Error("offline"));
+    const { endHere } = await mountStripUnderRouter([ITEM, ITEM_TWO]);
+
+    await clickToOpen(0);
+    await endHere();
+
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id]);
+    await clickToOpen(0);
+    expect(notificationApi.read).toHaveBeenCalledTimes(2);
+    expect(router.push).toHaveBeenCalledTimes(2);
+  });
+
+  // The app router falls back to loading the document as a whole page when its own request fails, and
+  // from then on it reports that navigation as pending for good. The user can stop that load.
+  it("waits without a limit for a navigation in the app, and 8 seconds for a page the browser has started to load", async () => {
+    await mountStripUnderRouter([ITEM, ITEM_TWO, ITEM_THREE]);
+    fakeTimers();
+
+    await clickToOpen(0);
+    elapse(600_000);
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
+
+    fireEvent(window, new Event("beforeunload"));
+    fireEvent(window, new Event("beforeunload"));
+    elapse(7_999);
+    fireEvent.click(opens()[1]!, { detail: 1 });
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
+    expect(router.push).toHaveBeenCalledOnce();
+    elapse(1);
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+
+    // That navigation never ends, so the next open cannot wait for it: its 8 seconds start at the click.
+    await clickToOpen(0);
+    expect(notificationApi.read).toHaveBeenLastCalledWith(ITEM_TWO.id);
+    expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_TWO));
+    elapse(7_999);
+    fireEvent.click(opens()[1]!, { detail: 1 });
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+    expect(router.push).toHaveBeenCalledTimes(2);
+    elapse(1);
+    expect(rowIds()).toEqual([ITEM_THREE.id]);
+    await clickToOpen(0);
+    expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_THREE));
+  });
+
+  it("stops waiting when the page is shown again after the browser had kept it for Back", async () => {
+    await mountStripUnderRouter([ITEM, ITEM_TWO]);
+
+    await clickToOpen(0);
+    fireEvent(window, new Event("pageshow"));
+
+    expect(rowIds()).toEqual([ITEM_TWO.id]);
+    await clickToOpen(0);
+    expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_TWO));
+  });
+
+  it("listens to the window only while a row is opening", async () => {
+    const added = vi.spyOn(window, "addEventListener");
+    const removed = vi.spyOn(window, "removeEventListener");
+    const windowEvents = (spy: typeof added | typeof removed) => spy.mock.calls.map(([type]) => type).filter((type) => type === "beforeunload" || type === "pageshow");
+    const { endHere } = await mountStripUnderRouter([ITEM, ITEM_TWO]);
+    expect(windowEvents(added)).toEqual([]);
+
+    await clickToOpen(0);
+    expect(windowEvents(added)).toEqual(["beforeunload", "pageshow"]);
+    await endHere();
+
+    expect(windowEvents(removed)).toEqual(["beforeunload", "pageshow"]);
+  });
+});
+
+// A click or a tap on "Mark all read", or on "Mark as read" of the only row, empties the strip under the
+// pointer. The dashboard below would move up into the rest of a double-click, so an empty box keeps the
+// strip's place for a moment.
+describe("notification strip when a click empties it", () => {
+  const HEIGHT = 137.5;
+  const measured = () => vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ height: HEIGHT } as DOMRect);
+  const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const settle = () =>
+    act(async () => {
+      await Promise.resolve();
+    });
+
+  it.each([
+    ["Mark all read", [ITEM, ITEM_TWO, SHARE], () => readAll()],
+    ["Mark all read with one row", [ITEM], () => readAll()],
+    ["Mark as read on the only row", [ITEM], () => dismisses()[0]!],
+  ] as const)("%s leaves an empty box of the strip's height for one second", async (_label, items, control) => {
+    await mountStrip([...items]);
+    measured();
+    fakeTimers();
+
+    fireEvent.click(control(), { detail: 1 });
+
+    expect(strip()).toBeNull();
+    const box = emptiedBox()!;
+    expect(box).toHaveStyle({ height: `${HEIGHT}px` });
+    expect(box).toHaveClass("mb-8");
+    expect(box.childElementCount).toBe(1);
+    expect(box.firstElementChild).toBeEmptyDOMElement();
+    expect(box.firstElementChild).toHaveAttribute("inert");
+    expect(box.querySelectorAll("a, button, input, select, textarea, [tabindex], [role], [aria-live]")).toHaveLength(0);
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
+    elapse(999);
+    expect(emptiedBox()).toBe(box);
+    elapse(1);
+    expect(emptiedBox()).toBeNull();
+    expect(strip()).toBeNull();
+    await settle();
+  });
+
+  it("every press on the box starts its second again, and does nothing else", async () => {
+    await mountStrip([ITEM, ITEM_TWO]);
+    measured();
+    fakeTimers();
+    fireEvent.click(readAll(), { detail: 1 });
+    const box = emptiedBox()!;
+
+    elapse(900);
+    fireEvent.pointerDown(box);
+    fireEvent.click(box, { detail: 2 });
+    elapse(900);
+    fireEvent.pointerDown(box);
+    fireEvent.click(box, { detail: 3 });
+    elapse(999);
+
+    expect(emptiedBox()).toBe(box);
+    expect(box).toHaveStyle({ height: `${HEIGHT}px` });
+    expect(notificationApi.readAll).toHaveBeenCalledOnce();
+    expect(notificationApi.read).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
+    elapse(1);
+    expect(emptiedBox()).toBeNull();
+    await settle();
+  });
+
+  it("says it once: the status line takes the focus, the box says nothing", async () => {
+    await mountStrip([ITEM, ITEM_TWO]);
+    measured();
+    act(() => readAll().focus());
+
+    fireEvent.click(readAll(), { detail: 1 });
+
+    expect(screen.getAllByRole("status")).toEqual([status()]);
+    expect(status()).toHaveFocus();
+    expect(status()).toHaveTextContent("No unread notifications");
+    expect(emptiedBox()!.textContent).toBe("");
+    expect(status()!.compareDocumentPosition(emptiedBox()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await settle();
+  });
+
+  it.each([
+    ["Mark all read from the keyboard", [ITEM, ITEM_TWO], () => fireEvent.click(readAll())],
+    ["Mark as read on the only row from the keyboard", [ITEM], () => fireEvent.click(dismisses()[0]!)],
+    ["Delete on the only row", [ITEM], () => press(opens()[0]!, "Delete")],
+  ] as const)("%s leaves no box", async (_label, items, action) => {
+    await mountStrip([...items]);
+    measured();
+
+    action();
+
+    expect(strip()).toBeNull();
+    expect(emptiedBox()).toBeNull();
+    await settle();
+  });
+
+  it("a click on Mark as read that leaves a row behind keeps no box, also when the keyboard then empties the strip", async () => {
+    await mountStrip([ITEM, ITEM_TWO]);
+    measured();
+
+    fireEvent.click(dismisses()[0]!, { detail: 1 });
+    expect(rowIds()).toEqual([ITEM_TWO.id]);
+    expect(emptiedBox()).toBeNull();
+    press(opens()[0]!, "Delete");
+
+    expect(strip()).toBeNull();
+    expect(emptiedBox()).toBeNull();
+    await settle();
+  });
+
+  it("gives its place back to the rows when marking them read failed", async () => {
+    notificationApi.readAll.mockRejectedValueOnce(new Error("offline"));
+    await mountStrip([ITEM, ITEM_TWO]);
+    measured();
+
+    fireEvent.click(readAll(), { detail: 1 });
+    expect(emptiedBox()).not.toBeNull();
+    await waitFor(() => expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id]));
+
+    expect(emptiedBox()).toBeNull();
+    fireEvent.click(opens()[1]!, { detail: 1 });
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(hrefOf(ITEM_TWO));
     await settle();
   });
 });

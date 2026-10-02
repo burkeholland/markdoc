@@ -1,6 +1,12 @@
-import type { Locator } from "@playwright/test";
+import type { Browser, Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
-import { createDocument, shareWith, signIn, uniqueLogin, waitForEditor, waitForHydration, type User } from "./helpers";
+import { createDocument, devLogin, reloadHydrated, shareWith, signIn, uniqueLogin, waitForEditor, waitForHydration, type User } from "./helpers";
+
+const PHONE = { width: 390, height: 844 };
+const TABLET = { width: 1024, height: 768 };
+const DESKTOP = { width: 1440, height: 1000 };
+const isDocument = (url: URL) => url.pathname.startsWith("/d/");
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // The dashboard strip with a real mouse and real keys (#2225): every click and key used to be dropped.
 test.describe("dashboard notification strip with real input", () => {
@@ -23,27 +29,33 @@ test.describe("dashboard notification strip with real input", () => {
     await expect.poll(unreadCount).toBe(count);
     return ids;
   };
-  const openDashboard = async (rows: number) => {
-    await recipient.page.goto("/");
-    await waitForHydration(recipient.page);
-    const strip = recipient.page.getByTestId("notifications-strip");
+  const openDashboard = async (rows: number, page: Page = recipient.page) => {
+    await page.goto("/");
+    await waitForHydration(page);
+    const strip = page.getByTestId("notifications-strip");
     await expect(strip.getByTestId("notification-item")).toHaveCount(rows);
     return strip;
   };
   /** Paths of the mark-read requests the recipient's page sends from now on. */
-  const watchReads = () => {
+  const watchReads = (page: Page = recipient.page) => {
     const reads: string[] = [];
-    recipient.page.on("request", (request) => {
+    page.on("request", (request) => {
       const path = new URL(request.url()).pathname;
       if (request.method() === "POST" && /^\/api\/notifications\/(read-all|[^/]+\/read)$/.test(path)) reads.push(path);
     });
     return reads;
   };
-  const centre = async (target: Locator) => {
+  const boxOf = async (target: Locator) => {
     const box = await target.boundingBox();
     if (!box) throw new Error("the target has no box");
-    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    return box;
   };
+  /** The point at `fraction` of the target's width and half its height. */
+  const pointAt = async (target: Locator, fraction: number) => {
+    const box = await boxOf(target);
+    return { x: box.x + box.width * fraction, y: box.y + box.height / 2 };
+  };
+  const centre = (target: Locator) => pointAt(target, 0.5);
   /** Presses Tab until the target has focus, as a keyboard user would reach it. */
   const tabTo = async (target: Locator) => {
     for (let presses = 0; presses < 20; presses += 1) {
@@ -273,5 +285,248 @@ test.describe("dashboard notification strip with real input", () => {
     await expect(page.getByTestId("notifications-strip")).toHaveCount(0);
     await expect(status).toHaveCount(0);
     await expect(search).toBeFocused();
+  });
+
+  // Nothing may move under the pointer because of the strip. A row that is opened leaves the list, and
+  // the last row takes the strip with it, so the dashboard used to move up at once: the second click of
+  // a double-click, or a second tap, landed on "New document" or on one of the buttons next to it.
+
+  const documentCount = async () => {
+    const response = await recipient.page.request.get("/api/documents");
+    return ((await response.json()) as { documents: unknown[] }).documents.length;
+  };
+  /** What a stray click on the dashboard does. The returned check fails if any of it happened since this call. */
+  const watchStrayClicks = async (page: Page) => {
+    const documents = await documentCount();
+    let choosers = 0;
+    page.on("filechooser", () => {
+      choosers += 1;
+    });
+    return async () => {
+      expect(choosers, "file choosers opened").toBe(0);
+      await expect(page.locator('[role="dialog"], [role="alertdialog"]')).toHaveCount(0);
+      expect(await documentCount(), "documents the recipient has").toBe(documents);
+    };
+  };
+  /** Makes every document page take `delay` ms longer, so the dashboard is still there after a gesture. */
+  const slowDocuments = (page: Page, delay: number) =>
+    page.route(isDocument, async (route) => {
+      await sleep(delay);
+      await route.continue().catch(() => {});
+    });
+  /** A page of the recipient on a touch screen. */
+  const touchPage = async (browser: Browser, viewport: { width: number; height: number }) => {
+    const phone = viewport.width < 500;
+    const context = await browser.newContext({ viewport, hasTouch: true, isMobile: phone, deviceScaleFactor: phone ? 3 : 1 });
+    const page = await context.newPage();
+    await devLogin(page, recipient.login);
+    return page;
+  };
+  const doubleClick = (page: Page) => (x: number, y: number) => page.mouse.dblclick(x, y);
+  const doubleTap = (page: Page) => async (x: number, y: number) => {
+    await page.touchscreen.tap(x, y);
+    await page.touchscreen.tap(x, y);
+  };
+  const clickAgainAfter = (page: Page, pause: number) => async (x: number, y: number) => {
+    await page.mouse.click(x, y);
+    await page.waitForTimeout(pause);
+    await page.mouse.click(x, y);
+  };
+
+  /**
+   * The gesture on the only row, at `fraction` of its width, while its document takes `delay` ms: the
+   * strip and the dashboard under it stay where they were, then that document opens, with one read
+   * request and nothing else done.
+   */
+  const expectOnlyRowOpens = async (page: Page, fraction: number, delay: number, gesture: (x: number, y: number) => Promise<void>) => {
+    const [shared] = await shareNew(1);
+    const strip = await openDashboard(1, page);
+    const row = strip.getByTestId("notification-item");
+    const id = await row.getAttribute("data-notification-id");
+    const below = page.getByTestId("new-document");
+    const before = { strip: await boxOf(strip), below: await boxOf(below) };
+    const { x, y } = await pointAt(row.getByTestId("notification-open"), fraction);
+    const nothingElse = await watchStrayClicks(page);
+    const reads = watchReads(page);
+    await slowDocuments(page, delay);
+
+    await gesture(x, y);
+
+    expect(new URL(page.url()).pathname).toBe("/");
+    expect(await row.count()).toBe(1);
+    expect({ strip: await boxOf(strip), below: await boxOf(below) }).toEqual(before);
+    await page.waitForURL(`**/d/${shared}`, { timeout: 30_000 });
+    await waitForEditor(page);
+    expect(reads).toEqual([`/api/notifications/${id}/read`]);
+    await nothingElse();
+    expect(new URL(page.url()).pathname).toBe(`/d/${shared}`);
+    await expect.poll(unreadCount).toBe(0);
+  };
+
+  for (const viewport of [PHONE, DESKTOP]) {
+    for (const percent of [10, 50]) {
+      test(`a double-click on the only row at ${percent} percent of its width opens its document and nothing else, at ${viewport.width} px`, async () => {
+        await recipient.page.setViewportSize(viewport);
+        await expectOnlyRowOpens(recipient.page, percent / 100, 1_500, doubleClick(recipient.page));
+      });
+    }
+  }
+
+  for (const viewport of [PHONE, TABLET]) {
+    test(`a double tap on the only row opens its document and nothing else, at ${viewport.width} px`, async ({ browser }) => {
+      const page = await touchPage(browser, viewport);
+      await expectOnlyRowOpens(page, 0.2, 1_500, doubleTap(page));
+    });
+  }
+
+  // On a slow network the page changes long after the click. Until it does, a later click is no
+  // different from the second click of a double-click.
+  for (const pause of [600, 2_000]) {
+    test(`a second click ${pause} ms later, while the only row's document is still loading, does nothing`, async () => {
+      await recipient.page.setViewportSize(PHONE);
+      await expectOnlyRowOpens(recipient.page, 0.5, 3_000, clickAgainAfter(recipient.page, pause));
+    });
+  }
+
+  test("a row opened with the keyboard keeps the focus until its document is there", async () => {
+    const page = recipient.page;
+    const [shared] = await shareNew(1);
+    const strip = await openDashboard(1);
+    const open = strip.getByTestId("notification-open");
+    const id = await strip.getByTestId("notification-item").getAttribute("data-notification-id");
+    await tabTo(open);
+    const reads = watchReads();
+    await slowDocuments(page, 2_500);
+
+    await page.keyboard.press("Enter");
+
+    await expect(open).toBeFocused({ timeout: 1_000 });
+    await page.waitForTimeout(1_000);
+    expect(new URL(page.url()).pathname).toBe("/");
+    await expect(open).toBeFocused({ timeout: 1_000 });
+    // A second press while it opens is not a second open.
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**/d/${shared}`);
+    await waitForEditor(page);
+    expect(reads).toEqual([`/api/notifications/${id}/read`]);
+  });
+
+  // The app router falls back to loading the document as a whole page when its own request fails, and
+  // from then on it never reports that navigation as over. If the user stops that load, the page stays.
+  test("after a page load that a row started is stopped, the other rows open again without a reload", async () => {
+    const page = recipient.page;
+    const shared = await shareNew(3);
+    const strip = await openDashboard(3);
+    const rows = strip.getByTestId("notification-item");
+    let hanging = true;
+    let loadStarted = () => {};
+    const pageLoad = new Promise<void>((resolve) => {
+      loadStarted = resolve;
+    });
+    await page.route(isDocument, async (route) => {
+      if (route.request().resourceType() === "fetch") return route.abort("failed");
+      loadStarted();
+      while (hanging) await sleep(100);
+      await route.abort("aborted").catch(() => {});
+    });
+    const first = await centre(rows.first().getByTestId("notification-open"));
+    // Stop also cancels the requests of the page that is shown, so let the read request finish first.
+    const read = page.waitForResponse((response) => /^\/api\/notifications\/[^/]+\/read$/.test(new URL(response.url()).pathname));
+    await page.mouse.click(first.x, first.y);
+    await Promise.all([pageLoad, read]);
+
+    // The browser's Stop button. Script cannot do it: Playwright runs none while a page load is pending.
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Page.stopLoading");
+    hanging = false;
+    await page.unroute(isDocument);
+    await cdp.detach();
+
+    // The opened row is read. It leaves once the strip stops waiting for the page that never came.
+    await expect(rows).toHaveCount(2, { timeout: 10_000 });
+    expect(new URL(page.url()).pathname).toBe("/");
+    const next = await centre(rows.first().getByTestId("notification-open"));
+    await page.mouse.click(next.x, next.y);
+    await page.waitForURL(`**/d/${shared[1]}`, { timeout: 15_000 });
+    await expect.poll(unreadCount).toBe(1);
+  });
+
+  /**
+   * The gesture on a control that empties the strip: the dashboard below stays where it was while the
+   * gesture lasts, nothing on it is pressed, and then it takes the place a dashboard without a strip has.
+   */
+  const expectEmptiesInPlace = async (page: Page, rows: number, target: (strip: Locator) => Locator, edge: number | null, gesture: (x: number, y: number) => Promise<void>) => {
+    await shareNew(rows);
+    const strip = await openDashboard(rows, page);
+    const below = page.getByTestId("new-document");
+    const withStrip = await boxOf(below);
+    const box = await boxOf(target(strip));
+    const point = { x: edge === null ? box.x + box.width / 2 : box.x + edge, y: box.y + box.height / 2 };
+    const nothingElse = await watchStrayClicks(page);
+    const reads = watchReads(page);
+
+    await gesture(point.x, point.y);
+
+    expect(await boxOf(below)).toEqual(withStrip);
+    await expect.poll(async () => (await boxOf(below)).y, { timeout: 5_000 }).toBeLessThan(withStrip.y);
+    const settled = await boxOf(below);
+    expect(reads).toHaveLength(1);
+    await nothingElse();
+    expect(new URL(page.url()).pathname).toBe("/");
+    await expect(strip).toHaveCount(0);
+    await expect.poll(unreadCount).toBe(0);
+    await reloadHydrated(page);
+    expect(await boxOf(below)).toEqual(settled);
+  };
+
+  for (const input of ["double-click", "double tap"] as const) {
+    test(`a ${input} on the first pixels of Mark all read presses nothing on the dashboard below, at 390 px`, async ({ browser }) => {
+      const touch = input === "double tap";
+      const page = touch ? await touchPage(browser, PHONE) : recipient.page;
+      if (!touch) await page.setViewportSize(PHONE);
+      await expectEmptiesInPlace(page, 3, (strip) => strip.getByTestId("notifications-strip-read-all"), 5, touch ? doubleTap(page) : doubleClick(page));
+    });
+  }
+
+  for (const viewport of [PHONE, DESKTOP]) {
+    test(`a double-click on Mark as read of the only row presses nothing on the dashboard below, at ${viewport.width} px`, async () => {
+      await recipient.page.setViewportSize(viewport);
+      await expectEmptiesInPlace(recipient.page, 1, (strip) => strip.getByTestId("notification-dismiss"), null, doubleClick(recipient.page));
+    });
+  }
+
+  test("the place of an emptied strip closes by itself, takes no focus, and from the keyboard closes at once", async () => {
+    const page = recipient.page;
+    const below = page.getByTestId("new-document");
+    const status = page.getByTestId("notifications-strip-status");
+    await shareNew(2);
+    let strip = await openDashboard(2);
+    const withStrip = await boxOf(below);
+    const { x, y } = await centre(strip.getByTestId("notifications-strip-read-all"));
+
+    await page.mouse.click(x, y);
+
+    await expect(status).toBeFocused();
+    await expect(strip).toHaveCount(0);
+    expect(await boxOf(below)).toEqual(withStrip);
+    // The place is still held. Tab goes straight on to what follows the strip.
+    await page.keyboard.press("Tab");
+    await expect(below).toBeFocused();
+    await expect(status).toHaveCount(0);
+    await expect.poll(async () => (await boxOf(below)).y, { timeout: 5_000 }).toBeLessThan(withStrip.y);
+    const settled = await boxOf(below);
+    await expect(below).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(page.getByRole("button", { name: "Account" })).toBeFocused();
+    await reloadHydrated(page);
+    expect(await boxOf(below)).toEqual(settled);
+
+    // The keyboard has no pointer to keep the place for.
+    await shareNew(1);
+    strip = await openDashboard(1);
+    await tabTo(strip.getByTestId("notifications-strip-read-all"));
+    await page.keyboard.press("Enter");
+    await expect(status).toBeFocused();
+    expect(await boxOf(below)).toEqual(settled);
   });
 });

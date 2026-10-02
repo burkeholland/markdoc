@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, useTransition, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useTransition, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck, X } from "lucide-react";
 import type { NotificationDto } from "@/lib/api";
@@ -11,6 +11,18 @@ import { RelativeTime } from "@/components/ui/relative-time";
 
 const OPEN_SELECTOR = '[data-testid="notification-open"]';
 const DISMISS_SELECTOR = '[data-testid="notification-dismiss"]';
+
+/**
+ * How long the strip stays as it was once the browser has started loading the document as a whole new
+ * page. That load can be stopped (the Stop button, Escape) and nothing tells the page, so the hold ends
+ * by itself. A navigation inside the app has no such limit: it holds until it is over.
+ */
+const OPEN_HOLD_CAP_MS = 8_000;
+/**
+ * How long the emptied strip keeps its box, counted from the last press on it. Longer than the slowest
+ * double-click or double tap the system counts as one (0.9 s on Windows).
+ */
+const EMPTY_HOLD_MS = 1_000;
 
 /** A plain key press: no modifier held and no IME composition in progress. */
 function isPlainKey(event: ReactKeyboardEvent) {
@@ -43,14 +55,23 @@ function isRepeatedClick(event: ReactMouseEvent) {
   return event.detail > 1;
 }
 
+/** A click made with a mouse, a finger or a pen. A click from the keyboard has `detail` 0. */
+function isPointerClick(event: ReactMouseEvent) {
+  return event.detail > 0;
+}
+
 /**
  * Unread notifications of the current user (mentions, replies, resolutions, suggestion decisions,
  * shares), shown at the top of the dashboard. Renders nothing when there is nothing to show.
  * Clicking one marks it read and opens the document on the relevant thread.
  *
- * One gesture is one action: a repeated click and the repeats of a held Enter or Space are ignored, and
- * while one row's document is opening no other row opens. The store shares one in-flight request per
- * notification.
+ * One gesture is one action: a repeated click and the repeats of a held Enter or Space are ignored. The
+ * store shares one in-flight request per notification.
+ *
+ * Nothing moves under the pointer because of the strip. While a row's document is opening the strip
+ * stays as it was, the opened row included, and does nothing. When a click or a tap empties the strip,
+ * an empty box keeps its place for a moment, so the rest of a double-click does not land on the
+ * dashboard that would have moved up.
  */
 export function NotificationsStrip() {
   const router = useRouter();
@@ -58,9 +79,39 @@ export function NotificationsStrip() {
   const sectionRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
-  // True from the click that opens a row until the navigation is over, which normally takes this page
-  // with it. On a slow network a later click can land before that, on the row that moved up.
-  const [opening, startOpening] = useTransition();
+  // True from the activation that opens a row until that navigation is over, which normally takes this
+  // page with it.
+  const [navigating, startOpening] = useTransition();
+  // The strip as it was when a row was opened. `capped`: an earlier open never ended, so `navigating`
+  // cannot tell when this one does. The app router keeps a navigation pending for good once it has
+  // fallen back to loading the page as a whole, even if that load is stopped.
+  const [opened, setOpened] = useState<{ rows: NotificationDto[]; unreadCount: number; capped: boolean } | null>(null);
+  const opening = opened !== null && navigating;
+  useEffect(() => {
+    if (!opening) return;
+    let timer: number | undefined;
+    const release = () => setOpened(null);
+    const cap = () => {
+      timer ??= window.setTimeout(release, OPEN_HOLD_CAP_MS);
+    };
+    if (opened?.capped) cap();
+    // The browser starts loading another page. This page stays until that one answers, or for good.
+    window.addEventListener("beforeunload", cap);
+    // This page is shown again after the browser had kept it for Back.
+    window.addEventListener("pageshow", release);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("beforeunload", cap);
+      window.removeEventListener("pageshow", release);
+    };
+  }, [opening, opened]);
+  // The height of the strip a click or a tap has just emptied. Every press on the box starts the time again.
+  const [emptyBox, setEmptyBox] = useState<{ height: number } | null>(null);
+  useEffect(() => {
+    if (!emptyBox) return;
+    const timer = window.setTimeout(() => setEmptyBox(null), EMPTY_HOLD_MS);
+    return () => window.clearTimeout(timer);
+  }, [emptyBox]);
   // The user emptied the strip while focus was in it. The control that had focus is gone, so a status
   // line takes the strip's place and the focus, and stays until focus moves on.
   const [emptied, setEmptied] = useState(false);
@@ -68,27 +119,35 @@ export function NotificationsStrip() {
     if (emptied) statusRef.current?.focus({ preventScroll: true });
   }, [emptied]);
   const unread = items.filter((notification) => !notification.readAt);
-  if (unread.length === 0 && !emptied) return null;
+  const rows = opening ? opened.rows : unread;
+  if (rows.length === 0 && !emptied && !emptyBox) return null;
 
   const open = (notification: NotificationDto, event: ReactMouseEvent) => {
     if (opening || isRepeatedClick(event)) return;
+    setOpened({ rows: unread, unreadCount, capped: navigating });
     void markNotificationRead(notification.id);
     startOpening(() => router.push(notificationHref(notification)));
   };
 
+  const keepBox = () => setEmptyBox({ height: sectionRef.current?.getBoundingClientRect().height ?? 0 });
+
   // The row leaves the list. If focus is in it, hand focus to the next row (or the previous one)
   // instead of letting it fall to <body>, so the keyboard stays in the list; after the last row, to
   // the status line.
-  const dismiss = (notification: NotificationDto, control: HTMLButtonElement) => {
+  const dismiss = (notification: NotificationDto, control: HTMLButtonElement, pointer = false) => {
+    if (opening) return;
     const row = control.closest("li");
     const focused = row?.contains(document.activeElement) ?? false;
     const neighbour = focused ? (row?.nextElementSibling ?? row?.previousElementSibling) : null;
+    if (pointer && rows.length === 1) keepBox();
     void markNotificationRead(notification.id);
     if (neighbour) neighbour.querySelector<HTMLButtonElement>(OPEN_SELECTOR)?.focus({ preventScroll: true });
     else if (focused) setEmptied(true);
   };
 
-  const readAll = () => {
+  const readAll = (event: ReactMouseEvent) => {
+    if (opening) return;
+    if (isPointerClick(event)) keepBox();
     if (sectionRef.current?.contains(document.activeElement)) setEmptied(true);
     void markAllNotificationsRead();
   };
@@ -128,7 +187,7 @@ export function NotificationsStrip() {
     destination.focus({ preventScroll: true });
   };
 
-  const strip = unread.length > 0 && (
+  const strip = rows.length > 0 && (
     <section
       ref={sectionRef}
       className="mb-8 rounded-2xl border border-accent/40 bg-accent-soft/40 p-4"
@@ -139,7 +198,7 @@ export function NotificationsStrip() {
       <div className="mb-2 flex items-center justify-between">
         <h2 className="flex items-center gap-1.5 text-sm font-semibold text-ink">
           <Bell size={15} className="text-accent" /> Notifications
-          <span className="text-ink-4">{unreadCount}</span>
+          <span className="text-ink-4">{opening ? opened.unreadCount : unreadCount}</span>
         </h2>
         <button
           type="button"
@@ -151,7 +210,7 @@ export function NotificationsStrip() {
         </button>
       </div>
       <ul ref={listRef} className="flex flex-col gap-1.5">
-        {unread.map((notification) => (
+        {rows.map((notification) => (
           <li
             key={notification.id}
             className="flex items-center gap-2 rounded-xl bg-surface px-3 py-2 text-[13px] shadow-sm"
@@ -190,7 +249,7 @@ export function NotificationsStrip() {
               aria-label="Mark as read"
               title="Mark as read"
               onClick={(event) => {
-                if (!isRepeatedClick(event)) dismiss(notification, event.currentTarget);
+                if (!isRepeatedClick(event)) dismiss(notification, event.currentTarget, isPointerClick(event));
               }}
               onKeyDown={onDismissKeyDown}
               data-testid="notification-dismiss"
@@ -216,15 +275,28 @@ export function NotificationsStrip() {
       }}
       data-testid="notifications-strip-status"
     >
-      {unread.length === 0 && "No unread notifications"}
+      {rows.length === 0 && "No unread notifications"}
     </p>
+  );
+
+  // The emptied strip's box: nothing to read, nothing to focus, nothing to press. Rows that come back
+  // (a failed request) take its place.
+  const box = emptyBox && (
+    <div
+      className="mb-8"
+      style={{ height: emptyBox.height }}
+      onPointerDown={() => setEmptyBox({ height: emptyBox.height })}
+      data-testid="notifications-strip-emptied"
+    >
+      <div inert className="h-full rounded-2xl border border-accent/40 bg-accent-soft/40" />
+    </div>
   );
 
   // Each keeps its place in the fragment, so the status line keeps its focus when rows come back.
   return (
     <>
       {status}
-      {strip}
+      {strip || box}
     </>
   );
 }
