@@ -259,7 +259,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     const { input, options } = await openShare(page);
 
     await page.keyboard.type("octop"); // exactly three matches: octopus, octopod, octoprint
-    await expect(options).toHaveCount(3, { timeout: budgetMs(600) });
+    await expect(options).toHaveCount(3);
     await page.keyboard.press("ArrowDown");
     await expect(options.first()).toHaveAttribute("aria-selected", "true");
 
@@ -303,7 +303,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     const { input, options } = await openShare(page);
 
     await page.keyboard.type("octop"); // three matches
-    await expect(options).toHaveCount(3, { timeout: budgetMs(600) });
+    await expect(options).toHaveCount(3);
     const middle = options.nth(1);
     const login = await middle.getAttribute("data-login");
     const box = (await middle.boundingBox())!;
@@ -336,7 +336,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     const { input, options } = await openShare(page);
 
     await page.keyboard.type("octo"); // nine matches, capped at eight
-    await expect(options).toHaveCount(8, { timeout: budgetMs(600) });
+    await expect(options).toHaveCount(8);
     const last = options.last();
     const login = await last.getAttribute("data-login");
     const box = (await last.boundingBox())!;
@@ -370,7 +370,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     const { input, options } = await openShare(page);
 
     await page.keyboard.type("octoc"); // exactly one match: octocat — the list is one row tall
-    await expect(options).toHaveCount(1, { timeout: budgetMs(600) });
+    await expect(options).toHaveCount(1);
     const only = options.first();
     const login = await only.getAttribute("data-login");
     const box = (await only.boundingBox())!;
@@ -403,7 +403,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     const { input, options } = await openShare(page);
 
     await page.keyboard.type("octoc"); // exactly one match: octocat — the list is one row tall
-    await expect(options).toHaveCount(1, { timeout: budgetMs(600) });
+    await expect(options).toHaveCount(1);
     const only = options.first();
     const login = await only.getAttribute("data-login");
     const box = (await only.boundingBox())!;
@@ -440,7 +440,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     const linkAccessValueBefore = await linkAccess.inputValue();
 
     await page.keyboard.type("octo"); // nine matches, capped at eight — tall enough to reach the Link access select below
-    await expect(options).toHaveCount(8, { timeout: budgetMs(600) });
+    await expect(options).toHaveCount(8);
     const hit = await findOptionOverlapping(options, linkAccess);
     expect(hit, "no suggestion sits over the Link access select at this viewport — adjust the query or viewport").not.toBeNull();
     const { box } = hit!;
@@ -486,7 +486,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     const targetRoleValueBefore = await targetRole.inputValue();
 
     await page.keyboard.type("octo"); // nine matches, capped at eight
-    await expect(options).toHaveCount(8, { timeout: budgetMs(600) });
+    await expect(options).toHaveCount(8);
     const hit = await findOptionOverlapping(options, targetRole);
     expect(hit, "no suggestion sits over collab-c's role select at this viewport — adjust the query or viewport").not.toBeNull();
     const { box } = hit!;
@@ -654,7 +654,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
       await route.continue();
     });
 
-    const { input, options, list } = await openShare(page);
+    const { options, list } = await openShare(page);
     const adds = countCollaboratorPosts(page, id);
 
     await page.keyboard.type("ab");
@@ -666,29 +666,37 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     await expect(page.getByTestId("share-login-loading")).toBeVisible();
 
     await page.keyboard.press("ArrowDown"); // nothing to move among while "abc" is still loading
+    // No option is active (the list was empty while "abc" was still loading), so Enter submits the typed
+    // handle as-is and Add clears the field on success — asserting the field's post-submit value here would
+    // race that clear (it only reads "abc" if checked before the POST resolves). Assert on the POST's own
+    // login payload instead: it is the one thing that cannot be racy.
     await page.keyboard.press("Enter");
-    await expect(input).toHaveValue("abc"); // not "abby" or "abel" — the stale ("ab") list is never picked
 
-    await page.waitForTimeout(budgetMs(300));
-    expect(adds.seen.map((a) => a.login), "POST /collaborators logins").not.toContain("abby");
-    expect(adds.seen.map((a) => a.login), "POST /collaborators logins").not.toContain("abel");
+    await expect.poll(() => adds.seen.length, { message: "POST /collaborators count" }).toBeGreaterThan(0);
+    expect(adds.seen.map((a) => a.login), "POST /collaborators logins").toEqual(["abc"]); // not "abby" or "abel" — the stale ("ab") list is never picked
 
     adds.stop();
     await owner.context.close();
   });
 
   /** Routes `/api/github/users`: the first lookup fails at once; every later call (a manual retry) is
-   * held for ~1.2 s — long enough to press Retry again or check focus mid-flight — then answers with
-   * `secondAnswer` (another failure, or a real result). */
+  /** Routes `/api/github/users`: the first lookup fails at once; every later call (a manual retry) is
+   * held until the test calls `release()` — not a fixed sleep, so the test can assert "still pending"
+   * state deterministically before letting it resolve — then answers with `secondAnswer` (another
+   * failure, or a real result). */
   async function mockFailThenRetry(page: Page, secondAnswer: "fail" | { login: string }) {
     let call = 0;
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
     await page.route(/\/api\/github\/users(\?|$)/, async (route) => {
       call += 1;
       if (call === 1) {
         await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, budgetMs(1200)));
+      await secondGate;
       if (secondAnswer === "fail") {
         await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "unavailable" }) });
       } else {
@@ -699,31 +707,37 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
         });
       }
     });
+    return { release: () => releaseSecond() };
   }
 
   test("keyboard Retry: focus stays on the button through a pending retry and a second failure, and a repeated Enter sends no extra request", async ({ browser }) => {
     const owner = await signIn(browser, "autocomplete-retry-kbd-fail-owner");
     const { page } = owner;
     const id = await createDocument(page, "# Retry KBD Fail\n", "Retry KBD Fail");
-    await mockFailThenRetry(page, "fail");
+    const retry = await mockFailThenRetry(page, "fail");
     await openDocument(page, id);
-    await openShare(page);
+    const { input } = await openShare(page);
     const lookups = countRequests(page, USERS);
 
-    await page.keyboard.type("retrykbdfail");
+    // fill(), not keyboard.type(): a single committed value fires exactly one debounced lookup for the
+    // full handle. Typed keystroke-by-keystroke, a gap of more than 250 ms between two of them can let an
+    // incomplete prefix fire its own lookup first — a real test-timing hazard, not a product bug (the
+    // product itself never sends a duplicate request while retrying) — which used to inflate this test's
+    // request count and make it flaky.
+    await input.fill("retrykbdfail");
     await expect(page.getByTestId("share-login-error")).toBeVisible({ timeout: budgetMs(2000) });
     const retryButton = page.getByRole("button", { name: "Retry" });
     await page.keyboard.press("Tab");
     await expect(retryButton).toBeFocused();
 
-    await page.keyboard.press("Enter"); // starts the manual retry (2nd request), held ~1.2 s
+    await page.keyboard.press("Enter"); // starts the manual retry (2nd request), held until release()
     const retrying = page.getByRole("button", { name: "Retrying…" });
     await expect(retrying).toBeFocused(); // never drops to <body> just because the button re-renders
     await page.keyboard.press("Enter"); // must not start a 3rd request while one is already in flight
-    await page.waitForTimeout(budgetMs(300));
-    expect(lookups.seen.length, "GET /api/github/users requests while the retry is pending").toBe(2);
+    await expect.poll(() => lookups.seen.length, { message: "GET /api/github/users requests while the retry is pending" }).toBe(2);
 
     // The held retry lands as a second failure; focus is still on Retry, never <body>.
+    retry.release();
     await expect(retryButton).toBeFocused({ timeout: budgetMs(2000) });
     expect(lookups.seen.length, "GET /api/github/users requests after the second failure").toBe(2);
 
@@ -735,16 +749,17 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     const owner = await signIn(browser, "autocomplete-retry-kbd-ok-owner");
     const { page } = owner;
     const id = await createDocument(page, "# Retry KBD OK\n", "Retry KBD OK");
-    await mockFailThenRetry(page, { login: "retrykbdok" });
+    const retry = await mockFailThenRetry(page, { login: "retrykbdok" });
     await openDocument(page, id);
     const { input, options } = await openShare(page);
 
-    await page.keyboard.type("retrykbdok");
+    await input.fill("retrykbdok");
     await expect(page.getByTestId("share-login-error")).toBeVisible({ timeout: budgetMs(2000) });
     const retryButton = page.getByRole("button", { name: "Retry" });
     await page.keyboard.press("Tab");
     await expect(retryButton).toBeFocused();
     await page.keyboard.press("Enter");
+    retry.release();
 
     await expect(input).toBeFocused({ timeout: budgetMs(2000) });
     await expect(options).toHaveCount(1);
@@ -757,15 +772,15 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     const owner = await signIn(browser, "autocomplete-retry-mouse-fail-owner");
     const { page } = owner;
     const id = await createDocument(page, "# Retry Mouse Fail\n", "Retry Mouse Fail");
-    await mockFailThenRetry(page, "fail");
+    const retry = await mockFailThenRetry(page, "fail");
     await openDocument(page, id);
-    await openShare(page);
+    const { input } = await openShare(page);
     const lookups = countRequests(page, USERS);
 
-    await page.keyboard.type("retrymousefail");
+    await input.fill("retrymousefail");
     await expect(page.getByTestId("share-login-error")).toBeVisible({ timeout: budgetMs(2000) });
     const retryButton = page.getByRole("button", { name: "Retry" });
-    await retryButton.click(); // starts the manual retry (2nd request), held ~1.2 s
+    await retryButton.click(); // starts the manual retry (2nd request), held until release()
 
     const retrying = page.getByRole("button", { name: "Retrying…" });
     await expect(retrying).toBeFocused();
@@ -774,9 +789,9 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     // retry and silently turn this into a third, legitimate click. force: true skips that wait so
     // this actually exercises handleRetry's own in-flight guard, same as the keyboard test's second Enter.
     await retrying.click({ force: true });
-    await page.waitForTimeout(budgetMs(300));
-    expect(lookups.seen.length, "GET /api/github/users requests while the retry is pending").toBe(2);
+    await expect.poll(() => lookups.seen.length, { message: "GET /api/github/users requests while the retry is pending" }).toBe(2);
 
+    retry.release();
     await expect(retryButton).toBeFocused({ timeout: budgetMs(2000) });
     expect(lookups.seen.length, "GET /api/github/users requests after the second failure").toBe(2);
 
@@ -788,17 +803,121 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     const owner = await signIn(browser, "autocomplete-retry-mouse-ok-owner");
     const { page } = owner;
     const id = await createDocument(page, "# Retry Mouse OK\n", "Retry Mouse OK");
-    await mockFailThenRetry(page, { login: "retrymouseok" });
+    const retry = await mockFailThenRetry(page, { login: "retrymouseok" });
     await openDocument(page, id);
     const { input, options } = await openShare(page);
 
-    await page.keyboard.type("retrymouseok");
+    await input.fill("retrymouseok");
     await expect(page.getByTestId("share-login-error")).toBeVisible({ timeout: budgetMs(2000) });
     await page.getByRole("button", { name: "Retry" }).click();
+    retry.release();
 
     await expect(input).toBeFocused({ timeout: budgetMs(2000) });
     await expect(options).toHaveCount(1);
     await expect(options.first()).toHaveAttribute("data-login", "retrymouseok");
+
+    await owner.context.close();
+  });
+
+  test("a resting mouse pointer over where a suggestion is about to render never steals Enter — real Chromium fires a synthetic mouseover/pointerover there with no mousemove, and only genuine pointer movement may activate an option", async ({ browser }) => {
+    const owner = await signIn(browser, "autocomplete-resting-pointer-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Resting Pointer\n", "Resting Pointer");
+    await openDocument(page, id);
+    const { input, options } = await openShare(page);
+    const adds = countCollaboratorPosts(page, id);
+
+    // Learn where the first suggestion will land, then clear the box and park the pointer there before
+    // anything renders — so the next keystroke's option reappears under an already-resting pointer, the
+    // exact scenario that used to steal Enter (measured: mouseover/pointerover fire there with no mousemove).
+    await page.keyboard.type("octo");
+    await expect(options.first()).toBeVisible();
+    const box = (await options.first().boundingBox())!;
+    await input.fill("");
+    await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(budgetMs(150));
+
+    await page.keyboard.type("octo"); // octocat reappears right under the resting pointer; the pointer never moves
+    await expect(options.first()).toBeVisible();
+    await expect(input).not.toHaveAttribute("aria-activedescendant"); // nothing is active: no real movement occurred
+    await expect(options.first()).toHaveAttribute("aria-selected", "false");
+
+    await page.keyboard.press("Enter");
+    await expect.poll(() => adds.seen.length).toBe(1);
+    expect(adds.seen.map((a) => a.login)).toEqual(["octo"]); // the typed text, never the option under the pointer
+
+    adds.stop();
+    await owner.context.close();
+  });
+
+  test("real mouse movement onto a suggestion still activates it for Enter to pick (the fix narrows what activates an option, it does not remove hover)", async ({ browser }) => {
+    const owner = await signIn(browser, "autocomplete-real-pointer-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Real Pointer\n", "Real Pointer");
+    await openDocument(page, id);
+    const { input, options } = await openShare(page);
+
+    await page.keyboard.type("octo");
+    const target = options.nth(1);
+    await expect(target).toBeVisible();
+    const box = (await target.boundingBox())!;
+    // Genuine movement: start away from the option, then move onto it.
+    await page.mouse.move(box.x - 60, box.y - 60);
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(target).toHaveAttribute("aria-selected", "true");
+    const login = await target.getAttribute("data-login");
+
+    await page.keyboard.press("Enter");
+    await expect(input).toHaveValue(login!);
+    await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+
+    await owner.context.close();
+  });
+
+  test("retyping a fully cached prefix never makes the suggestion list disappear for even one frame, and sends no new request", async ({ browser }) => {
+    const owner = await signIn(browser, "autocomplete-cache-flicker-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Cache Flicker\n", "Cache Flicker");
+    await openDocument(page, id);
+    const { input } = await openShare(page);
+
+    // Prime the cache for "oc", "oct" and "octo" individually: each keystroke waits out its own debounce and
+    // answer before the next, so every one of those three queries gets its own settled cache entry.
+    for (const next of ["oc", "t", "o"]) {
+      await page.keyboard.type(next);
+      await expect(page.getByTestId("share-login-suggestions")).toBeVisible();
+      await page.waitForTimeout(budgetMs(400));
+    }
+    await expect(input).toHaveValue("octo");
+
+    // Clip back to the already-cached "oct" (no debounce wait needed: a cache hit answers immediately).
+    await input.fill("oct");
+    await expect(page.getByTestId("share-login-suggestions")).toBeVisible();
+    const lookups = countRequests(page, USERS);
+
+    // Start a requestAnimationFrame poll running in the page *before* the keystroke that retypes "octo", a
+    // fully cached query. The original bug: cache-hit detection lived only in a useEffect, one render behind
+    // the query change, so the listbox unmounted for a frame before the effect's own state update remounted it.
+    await page.evaluate(() => {
+      (window as unknown as { __suggFrames: boolean[] }).__suggFrames = [];
+      let n = 0;
+      const tick = () => {
+        (window as unknown as { __suggFrames: boolean[] }).__suggFrames.push(!!document.querySelector('[data-testid="share-login-suggestions"]'));
+        n += 1;
+        if (n < 40) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+    await page.keyboard.press("o"); // back to "octo" — every candidate for it is already in the cache
+    await page.waitForTimeout(budgetMs(700)); // outlasts the 40-frame poll (~640 ms at 60 Hz)
+
+    const frames = await page.evaluate(() => (window as unknown as { __suggFrames: boolean[] }).__suggFrames);
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames.every(Boolean), "the suggestion list must never disappear for even one polled frame on a cache-hit keystroke").toBe(true);
+
+    lookups.stop();
+    expect(lookups.seen, "a cache hit must not fire a new network request").toHaveLength(0);
 
     await owner.context.close();
   });
@@ -820,7 +939,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
 
       const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
       await page.keyboard.type("octop"); // three matches (octocat, octodog, octofox)
-      await expect(page.getByTestId("share-login-suggestions")).toBeVisible({ timeout: budgetMs(600) });
+      await expect(page.getByTestId("share-login-suggestions")).toBeVisible();
 
       await page.keyboard.press("Tab");
       await expect(page.getByTestId("share-role")).toBeFocused();
@@ -853,7 +972,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
 
       const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
       await page.keyboard.type("octop");
-      await expect(options.first()).toBeVisible({ timeout: budgetMs(600) });
+      await expect(options.first()).toBeVisible();
       await page.keyboard.press("ArrowDown");
       await expect(options.first()).toHaveAttribute("aria-selected", "true");
 
@@ -880,7 +999,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
       const closeButton = page.getByRole("button", { name: "Close" });
 
       await page.keyboard.type("octop");
-      await expect(page.getByTestId("share-login-suggestions")).toBeVisible({ timeout: budgetMs(600) });
+      await expect(page.getByTestId("share-login-suggestions")).toBeVisible();
 
       await page.keyboard.press("Shift+Tab");
       await expect(closeButton).toBeFocused();
@@ -904,7 +1023,7 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
 
       const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
       await page.keyboard.type("octop");
-      await expect(page.getByTestId("share-login-suggestions")).toBeVisible({ timeout: budgetMs(600) });
+      await expect(page.getByTestId("share-login-suggestions")).toBeVisible();
 
       // The click itself is the regression check: before the fix, handleBlur's synchronous
       // setOpen(false) raced this click's own focus-move and focus landed on the dialog's

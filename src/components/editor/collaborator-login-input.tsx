@@ -100,7 +100,11 @@ export function CollaboratorLoginInput({
 
   const inputRef = useRef<HTMLInputElement>(null);
   const retryButtonRef = useRef<HTMLButtonElement>(null);
-  const cacheRef = useRef(new Map<string, readonly GitHubUserDto[]>());
+  // State, not a ref: `candidates` below reads it during render (for the cache-hit render-time fallback,
+  // see there) and ESLint's react-hooks/refs rule rightly refuses a ref read in render — a ref's mutations
+  // are invisible to React and reading one in render can show stale data. A plain object keyed by lowercase
+  // login is enough (no Map identity to preserve) and is replaced immutably on every successful fetch.
+  const [cache, setCache] = useState<Readonly<Record<string, readonly GitHubUserDto[]>>>({});
   const pendingRef = useRef<PendingRequest | null>(null);
   const nextRequestId = useRef(0);
   const [shieldedCandidates, setShieldedCandidates] = useState<readonly GitHubUserDto[]>([]);
@@ -109,6 +113,13 @@ export function CollaboratorLoginInput({
   // Tracks real focus (set by the input's own focus/blur handlers) rather than reading
   // `document.activeElement`, which test harnesses can simulate without ever moving focus.
   const focusedRef = useRef(false);
+  // Last real pointer position seen anywhere over the list (see the options' onMouseMove below): an option
+  // that renders — or re-renders — under an already-resting pointer gets Chromium's synthetic `mouseover`
+  // the instant it appears, with no `mousemove`/`pointermove` alongside it. The list is rebuilt on every
+  // keystroke, so a pointer the user never moved would otherwise "hover" (and so activate, and so capture
+  // Enter) whatever new option happens to land under it. Comparing against the last *moved-to* coordinates
+  // is what tells a genuine hover (the pointer arriving somewhere new) apart from a resting one.
+  const lastPointerPosRef = useRef<{ x: number; y: number } | null>(null);
 
   // Fetches one query, racing nothing but itself: a stale answer (superseded or aborted) is simply dropped.
   // `manualRetry` is set only by the Retry button below: a successful manual retry moves focus back to the
@@ -139,7 +150,7 @@ export function CollaboratorLoginInput({
           return;
         }
         const users = Object.freeze(result.users.slice());
-        cacheRef.current.set(q.toLowerCase(), users);
+        setCache((prev) => ({ ...prev, [q.toLowerCase()]: users }));
         setResult({ query: q, options: users });
         setLookup(null);
         if (manualRetry) {
@@ -189,7 +200,7 @@ export function CollaboratorLoginInput({
       return;
     }
 
-    const cached = cacheRef.current.get(query.toLowerCase());
+    const cached = cache[query.toLowerCase()];
     if (cached) {
       setResult({ query, options: cached });
       setLookup(null);
@@ -202,7 +213,7 @@ export function CollaboratorLoginInput({
     setLookup({ status: "loading" });
     const timer = setTimeout(() => startLookup(query), SUGGEST_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [query, noToken, picked, startLookup]);
+  }, [query, noToken, picked, cache, startLookup]);
 
   // Belt and suspenders: whatever is in flight is abandoned the instant the box itself goes away.
   useEffect(() => () => pendingRef.current?.controller.abort(), []);
@@ -216,10 +227,19 @@ export function CollaboratorLoginInput({
   // suggestion fetched for text the user has since changed (the effect above that would otherwise clear a
   // stale `result` runs asynchronously, after the render that changed `value`/`query` - this check does not
   // depend on that effect having run yet, since it recomputes on every render from the two state values).
-  const candidates =
-    result && result.query === query
-      ? result.options.filter((candidate) => !excludedSet.has(candidate.login.toLowerCase())).slice(0, SUGGEST_MAX)
-      : [];
+  //
+  // `result` itself lags one render behind `query` on a cache hit too: the effect above is what actually
+  // copies the cache's answer into `result`, so the very render where a keystroke lands on an already-cached
+  // prefix still has `result.query` pointing at the *previous* query. Reading `cache` here as a fallback —
+  // synchronously, in render, not only once the effect has run — is what keeps the list from ever going
+  // empty for a single frame on that keystroke. It never races `result`: a `result` that already matches
+  // `query` (including one deliberately set to an empty answer, e.g. the rate-limited path) always wins over
+  // the cache, so this only fills in the gap before the effect has caught up.
+  const candidates = (() => {
+    if (!query || noToken || query === picked) return [];
+    const matching = result && result.query === query ? result.options : cache[query.toLowerCase()];
+    return matching ? matching.filter((candidate) => !excludedSet.has(candidate.login.toLowerCase())).slice(0, SUGGEST_MAX) : [];
+  })();
   const expanded = open && candidates.length > 0;
   const activeIndex = active >= 0 && active < candidates.length ? active : -1;
 
@@ -398,7 +418,15 @@ export function CollaboratorLoginInput({
               aria-selected={index === activeIndex}
               className={cn("menu-item py-1.5", index === activeIndex && "bg-surface-3")}
               onMouseDown={(event) => event.preventDefault()}
-              onMouseOver={() => setActive(index)}
+              onMouseMove={(event) => {
+                // A resting pointer never fires `mousemove` on its own — only a genuine move does — but
+                // compare coordinates too, defensively, in case some future browser quirk dispatches one
+                // without real movement (measured on Chromium: it does not, as of this fix).
+                const last = lastPointerPosRef.current;
+                if (last && last.x === event.clientX && last.y === event.clientY) return;
+                lastPointerPosRef.current = { x: event.clientX, y: event.clientY };
+                setActive(index);
+              }}
               onClick={() => pick(candidate.login, { viaPointer: true })}
               data-testid="share-login-option"
               data-login={candidate.login}

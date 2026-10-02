@@ -417,6 +417,46 @@ describe("CollaboratorLoginInput", () => {
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
   });
 
+  it("a bare mouseover with no real pointer movement never activates the option under it, so a resting pointer cannot steal Enter (measured on real Chromium: an option appearing under an already-resting pointer gets a synthetic mouseover/pointerover, never a mousemove/pointermove)", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    render(<Harness />);
+    type("octo");
+    await settle();
+    const cat = listOptions()[0]!;
+    fireEvent.mouseOver(cat); // the synthetic hover a resting pointer gets when a new option renders under it
+    expect(cat).toHaveAttribute("aria-selected", "false");
+    expect(input()).not.toHaveAttribute("aria-activedescendant");
+    fireEvent.keyDown(input(), { key: "Enter" });
+    expect(input().value).toBe("octo"); // the typed text — nothing was ever active to pick
+  });
+
+  it("a real mousemove onto an option still highlights it, so genuine pointer movement can still be picked with Enter (the fix narrows what activates an option, it does not remove hover)", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    render(<Harness />);
+    type("octo");
+    await settle();
+    const dog = listOptions()[1]!;
+    fireEvent.mouseMove(dog, { clientX: 40, clientY: 90 });
+    expect(dog).toHaveAttribute("aria-selected", "true");
+    expect(input()).toHaveAttribute("aria-activedescendant", dog.id);
+    fireEvent.keyDown(input(), { key: "Enter" });
+    expect(input().value).toBe("octodog");
+  });
+
+  it("a repeated mousemove at the exact same coordinates (e.g. a re-render under a pointer that never actually moved) does not re-activate an option that something else made active since", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    render(<Harness />);
+    type("octo");
+    await settle();
+    const [cat, dog] = listOptions();
+    fireEvent.mouseMove(cat!, { clientX: 10, clientY: 20 }); // real movement onto the first option
+    expect(cat).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input(), { key: "ArrowDown" }); // moves the active option to the second, away from the pointer
+    expect(dog).toHaveAttribute("aria-selected", "true");
+    fireEvent.mouseMove(cat!, { clientX: 10, clientY: 20 }); // same coordinates the pointer already sat at
+    expect(dog).toHaveAttribute("aria-selected", "true"); // unchanged: no real movement happened here
+  });
+
   it("covers a just-picked option's footprint with a non-interactive shield, so a fast second click (a double-click or double-tap landing after the list already closed) does nothing instead of falling through to whatever is underneath", async () => {
     searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
     const onPick = vi.fn();
@@ -590,6 +630,36 @@ describe("CollaboratorLoginInput", () => {
     // not reopen over whatever they're doing now.
     expect(roleSelect).toHaveFocus();
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+  });
+
+  it("a successful retry opens the list if the user has already moved focus back onto the handle field themselves, not just when focus never left Retry", async () => {
+    const retried = deferred<SearchAnswer>();
+    searchUsers.mockResolvedValueOnce({ users: [], limited: true }).mockReturnValueOnce(retried.promise);
+    render(<Harness />);
+
+    type("octo");
+    await settle();
+    const retry = screen.getByRole("button", { name: "Retry" });
+    retry.focus();
+    fireEvent.click(retry);
+    expect(searchUsers).toHaveBeenCalledTimes(2);
+
+    // The user doesn't wait on the (now-disabled-looking) Retry button - they click straight back into the
+    // field themselves while the retry is still in flight.
+    input().focus();
+    expect(input()).toHaveFocus();
+
+    await act(async () => {
+      retried.resolve({ users: [user("octocat"), user("octodog")], limited: false });
+    });
+    // Focus was already right where the user put it; the list should still open with the answer instead of
+    // silently discarding it just because focus isn't on the (now-unmounted) Retry button anymore. There is no
+    // dedicated branch for this: a successful lookup's cache write re-runs the query-debounce effect (which
+    // depends on `cache`), and that effect's own cache-hit path calls `setOpen(focusedRef.current)` - this test
+    // guards that interaction, not a specific line (proved by temporarily dropping `cache` from that effect's
+    // dependency array, which reliably fails this exact test).
+    expect(input()).toHaveFocus();
+    expect(options()).toEqual(["octocat", "octodog"]);
   });
 
   it("after the route answers reason=no-github-token it asks no more while mounted: no hint, the box still types", async () => {
