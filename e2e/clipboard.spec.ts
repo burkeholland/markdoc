@@ -41,14 +41,14 @@ async function contextWithout(browser: Browser, ...scripts: (() => void)[]): Pro
   return context;
 }
 
-/** Share → "Connect an AI agent" → "Create access key": the dialog is open on the setup command, with the new key in it. */
+/** Share → "Connect an AI agent" → "Create access key": the dialog is open on the setup snippet, with the new key in it. */
 async function openAgentSnippet(page: Page) {
   await page.getByTestId("share-button").click();
   await page.getByTestId("share-connect-agent").click();
   const dialog = page.getByTestId("agent-dialog");
   await expect(dialog).toBeVisible();
   await dialog.getByTestId("agent-create-key").click();
-  await expect(dialog.getByTestId("agent-setup-snippet")).toContainText("copilot mcp add");
+  await expect(dialog.getByTestId("agent-setup-snippet")).toContainText("mcpServers");
   return dialog;
 }
 
@@ -59,7 +59,7 @@ async function openSettingsSnippet(page: Page) {
   await page.getByTestId("agent-setup-toggle").click();
   const setup = page.getByTestId("agent-setup");
   await setup.getByTestId("agent-create-key").click();
-  await expect(setup.getByTestId("agent-setup-snippet")).toContainText("copilot mcp add");
+  await expect(setup.getByTestId("agent-setup-snippet")).toContainText("mcpServers");
   return setup;
 }
 
@@ -150,15 +150,15 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
 
     const dialog = await openAgentSnippet(page);
     const snippet = dialog.getByTestId("agent-setup-snippet");
-    // A long command wraps instead of being clipped: the block is no wider than its card.
+    // A long config wraps instead of being clipped: the block is no wider than its card.
     const widths = await snippet.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
     expect(widths.scroll).toBeLessThanOrEqual(widths.client);
     await dialog.getByTestId("agent-setup-copy").click();
     await expect(dialog.getByTestId("agent-setup-copy")).toHaveText("Copied");
-    const command = await readClipboard();
-    expect(command === (await snippet.innerText()).trim()).toBe(true);
-    expect(command).toContain(`${origin}/api/mcp`);
-    expect(command).toMatch(/mdk_/);
+    const config = await readClipboard();
+    expect(config === (await snippet.innerText()).trim()).toBe(true);
+    expect(config).toContain(`${origin}/api/mcp`);
+    expect(config).toMatch(/mdk_/);
 
     await dialog.getByTestId("agent-invite-copy").click();
     await expect(dialog.getByTestId("agent-invite-copy")).toHaveText("Copied");
