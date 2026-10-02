@@ -98,12 +98,14 @@ test.describe("collaboration between two users", () => {
 
     await focusRichEnd(bob.page);
     await bob.page.keyboard.type(" Suggested text.");
-    // Alice's pane renders Bob's live cursor widget inline inside his suggestion mark, which can
-    // transiently split one logical `.md-suggest-insert` span into two DOM spans around it - so
-    // read the whole suggestion (every span's text joined), not just the first span.
-    const insertedText = (page: typeof bob.page) => page.locator(".md-rich .md-suggest-insert").allTextContents().then((texts) => texts.join(""));
-    await expect.poll(() => insertedText(bob.page)).toContain("Suggested text.");
-    await expect.poll(() => insertedText(alice.page)).toContain("Suggested text.");
+    // Alice's pane renders Bob's live cursor widget inline inside his suggestion mark, which splits
+    // one logical suggestion into two `.md-suggest-insert` DOM spans around it - a real product bug
+    // (the collaborator's caret widget trails one character behind on every keystroke until they
+    // move it, tracked as #2239, not fixed here). Read the rendered document text with remote-caret
+    // labels stripped (as `richText` does) rather than joining `.md-suggest-insert` spans, so two
+    // unrelated suggestions elsewhere in the document can never add up to the expected text.
+    await expect.poll(() => richText(bob.page)).toContain("Suggested text.");
+    await expect.poll(() => richText(alice.page)).toContain("Suggested text.");
     await expect(alice.page.locator(".cm-content .md-suggest-insert").first()).toBeVisible();
 
     // Bob deletes a word in the code pane while suggesting: text stays, struck through.
@@ -220,8 +222,7 @@ test.describe("collaboration on a Burke-scale document", () => {
   test("both users are present and see each other's edits on both surfaces", async () => {
     await expect(alice.page.getByTestId("presence").locator(".avatar")).toHaveCount(2);
     await expect(bob.page.getByTestId("presence").locator(".avatar")).toHaveCount(2);
-    // Bob's pane may still be streaming the long fixture in over the WebSocket; poll until it catches up.
-    await expect.poll(() => codeText(bob.page)).toBe(LONG_DOC);
+    expect(await codeText(bob.page)).toBe(LONG_DOC);
 
     // Alice types at the end of the rich pane; Bob sees it in both panes.
     await focusRichEnd(alice.page);

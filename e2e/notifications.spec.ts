@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, focusRichEnd, uniqueLogin, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, focusRichEnd, richText, uniqueLogin, type User } from "./helpers";
 
 test.use({ screenshot: "off", trace: "off", video: "off" });
 
@@ -155,12 +155,13 @@ test.describe("notifications", () => {
     await expect(alice.page.getByTestId("mode-switcher")).toContainText("Suggesting");
     await focusRichEnd(alice.page);
     await alice.page.keyboard.type(" Suggested text.");
-    // Bob's pane renders Alice's live cursor widget inline inside her suggestion mark, which can
-    // transiently split one logical `.md-suggest-insert` span into two DOM spans around it - so
-    // read the whole suggestion (every span's text joined), not just the first span.
-    await expect
-      .poll(() => bob.page.locator(".md-rich .md-suggest-insert").allTextContents().then((texts) => texts.join("")))
-      .toContain("Suggested text.");
+    // Bob's pane renders Alice's live cursor widget inline inside her suggestion mark, which splits
+    // one logical suggestion into two `.md-suggest-insert` DOM spans around it - a real product bug
+    // (the collaborator's caret widget trails one character behind on every keystroke until they
+    // move it, tracked as #2239, not fixed here). Read the rendered document text with remote-caret
+    // labels stripped (as `richText` does) rather than joining `.md-suggest-insert` spans, so two
+    // unrelated suggestions elsewhere in the document can never add up to the expected text.
+    await expect.poll(() => richText(bob.page)).toContain("Suggested text.");
 
     await bob.page.getByTestId("comments-tab-suggestions").click();
     await expect(bob.page.getByTestId("suggestion-card")).toHaveCount(1);

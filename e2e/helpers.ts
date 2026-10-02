@@ -243,7 +243,11 @@ const pmCaretAtDocEnd = (page: Page) =>
       const remainder = document.createRange();
       remainder.selectNodeContents(lastBlock);
       remainder.setStart(selection.anchorNode, selection.anchorOffset);
-      return remainder.toString() === "" && !remainder.cloneContents().querySelector("img, br:not(.ProseMirror-trailingBreak)")
+      // A collaborator's caret label (.md-remote-caret) can render as a sibling right after our own caret;
+      // strip it from a clone before checking for leftover content, the same way `richText` strips it.
+      const fragment = remainder.cloneContents();
+      fragment.querySelectorAll(".md-remote-caret").forEach((n) => n.remove());
+      return (fragment.textContent ?? "") === "" && !fragment.querySelector("img, br:not(.ProseMirror-trailingBreak)")
         ? true
         : "content follows the caret";
     }
@@ -259,24 +263,26 @@ export async function focusCodeEnd(page: Page) {
   await page.keyboard.press("Control+End");
 }
 
-export async function selectTextInRich(page: Page, text: string) {
+export async function selectTextInRich(page: Page, text: string, { scrollIntoView = false }: { scrollIntoView?: boolean } = {}) {
   const rich = page.locator(".md-rich");
   // "Saved" can precede the deferred rich-pane rebuild, while the server-rendered stand-in is visible.
   await expect(rich).toBeVisible();
   await expect(rich).toContainText(text);
   const prod = Boolean(process.env.PROD_BASE_URL);
   await rich.evaluate(
-    (root, [needle, waitForSelectionChange]) =>
+    (root, [needle, waitForSelectionChange, scroll]) =>
       new Promise<void>((resolve, reject) => {
         const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
         let node: Node | null;
         while ((node = walker.nextNode())) {
           const idx = node.textContent!.indexOf(needle);
           if (idx >= 0) {
-            // A real click/dblclick auto-scrolls its target into view; this synthetic Range selection
-            // does not, so a target scrolled off-screen (e.g. below a table from an earlier step)
-            // lands outside the selection bubble's visible-bounds check and the bubble never shows.
-            node.parentElement?.scrollIntoView({ block: "center" });
+            // A real click/dblclick auto-scrolls its target into view; this synthetic Range selection does
+            // not. Opt in with `scrollIntoView` when a target may be scrolled off-screen (e.g. below a table
+            // from an earlier step), landing outside the selection bubble's visible-bounds check so it never
+            // shows. Leave this off by default: scrollIntoView() also moves every scrollable ancestor, which
+            // breaks callers that scroll the rich pane on purpose and then expect the selection to stay put.
+            if (scroll) node.parentElement?.scrollIntoView({ block: "center" });
             const range = document.createRange();
             range.setStart(node, idx);
             range.setEnd(node, idx + needle.length);
@@ -291,11 +297,12 @@ export async function selectTextInRich(page: Page, text: string) {
         }
         reject(new Error(`text not found: ${needle}`));
       }),
-    [text, prod] as const,
+    [text, prod, scrollIntoView] as const,
   );
   // Let ProseMirror pick up the DOM selection (it reads it on `selectionchange`, a later task). A production
   // build waits for that event plus one frame above (there is no `__markdocRichView` hook there to poll
-  // directly), then this exact-text DOM check confirms the selection really landed, in both dev and production.
+  // directly), then polls `pmSelectionSynced`: on a production build that is this exact-text DOM check; on
+  // dev the `text` argument is ignored there and it instead compares ProseMirror's state against the DOM.
   await expect.poll(() => pmSelectionSynced(page, text), { message: `ProseMirror should read the selection of "${text}"` }).toBe(true);
 }
 

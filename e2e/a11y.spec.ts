@@ -669,8 +669,10 @@ test.describe("axe: editor", () => {
     await clickCell(page, 1, 0);
     await scan(page, "editor + table menu");
 
-    // Selection bubble.
-    await selectTextInRich(page, "Closing words");
+    // Selection bubble. The slash-menu step above (focusRichEnd, then Escape+Backspace) can leave "Closing words"
+    // scrolled off-screen, so this is the one caller that opts into scrollIntoView (every other caller leaves
+    // scroll position alone).
+    await selectTextInRich(page, "Closing words", { scrollIntoView: true });
     await expect(page.getByTestId("selection-bubble")).toBeVisible();
     await scan(page, "editor + selection bubble");
     await page.keyboard.press("End");

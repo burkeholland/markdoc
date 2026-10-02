@@ -284,8 +284,8 @@ export const ShareDialog = memo(function ShareDialog({
                 </li>
               )}
               {list.status === "error" && (
-                <li className="bg-red-50 px-3 py-3 text-sm text-danger dark:bg-red-950/40" role="alert" data-testid="collaborator-list-error">
-                  <div className="wrap-anywhere">{list.message}</div>
+                <li className="bg-red-50 px-3 py-3 text-sm text-danger dark:bg-red-950/40" data-testid="collaborator-list-error">
+                  <div className="wrap-anywhere" role="alert">{list.message}</div>
                   <button type="button" className="btn btn-outline btn-sm mt-2" onClick={() => setRetry((n) => n + 1)} data-testid="collaborator-list-retry">
                     Retry
                   </button>

@@ -542,6 +542,20 @@ test.describe("document comments, the empty state and the connect row (#1025)", 
     await expect(dialog.getByText("Create a key for your agent. Markdoc then shows the MCP config to paste.")).toBeVisible();
     await expect(dialog.getByTestId("agent-create-key")).toBeVisible();
     await expect(dialog.getByTestId("agent-setup-snippet")).toHaveCount(0);
+
+    // Step 1 ("Add Markdoc to your agent") and step 2 ("Ask your agent to join...") are both on screen already.
+    await expect(dialog.getByRole("heading", { name: "Add Markdoc to your agent" })).toBeVisible();
+    await expect(dialog.getByRole("heading", { name: /^Ask your agent to join/ })).toBeVisible();
+
+    // Making a key advances to step 1's "waiting" content: the secret now shows, and step 2 switches
+    // from "once connected..." filler text to the real invite body. The third and final step (the
+    // connected banner, once an agent actually uses the key) is covered at the unit level in
+    // src/components/agents/agent-setup.test.tsx, since reaching it here would need a real MCP client.
+    await dialog.getByTestId("agent-create-key").click();
+    await expect(dialog.getByTestId("agent-setup")).toHaveAttribute("data-state", "waiting");
+    await expect(dialog.getByTestId("agent-setup-snippet")).toBeVisible();
+    await expect(dialog.getByTestId("agent-connection")).toHaveAttribute("data-state", "waiting");
+
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
     expect(new URL(page.url()).pathname).toBe(`/d/${docId}`);

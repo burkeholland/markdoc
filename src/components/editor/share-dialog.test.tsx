@@ -159,6 +159,20 @@ describe("ShareDialog", () => {
     expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the error row a real list item so the people list stays a valid list for axe", async () => {
+    vi.mocked(api.documents.collaborators).mockRejectedValueOnce(apiMessage(500, "People could not load"));
+
+    renderShare();
+
+    const errorRow = await screen.findByTestId("collaborator-list-error");
+    // role="alert" must live on an inner element, not the <li> itself: overriding the <li>'s
+    // implicit listitem role breaks axe's "list" rule for the "People with access" <ul>.
+    expect(errorRow.tagName).toBe("LI");
+    expect(errorRow).not.toHaveAttribute("role");
+    expect(within(errorRow).getByRole("alert")).toHaveTextContent("People could not load");
+    expect(screen.getByRole("list", { name: "People with access" })).toContainElement(errorRow);
+  });
+
   it("lets an owner add a person with a trimmed login and selected role", async () => {
     vi.mocked(api.documents.collaborators)
       .mockResolvedValueOnce(people([]))
