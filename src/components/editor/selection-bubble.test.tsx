@@ -820,12 +820,19 @@ describe("SelectionBubble keyboard and permissions", () => {
       { key: "ArrowRight", altKey: true },
       { key: "ArrowRight", metaKey: true },
       { key: "ArrowRight", isComposing: true },
-      { key: "Tab" },
+      { key: " " },
       { key: "a" },
     ]) {
       expect(fireEvent.keyDown(button("Inline code"), init)).toBe(true);
       expect(button("Inline code")).toHaveFocus();
     }
+    // Tab and Shift+Tab hand focus back to the editor instead of leaving the page.
+    const focusEditor = vi.spyOn(f.actions, "focus");
+    expect(fireEvent.keyDown(button("Inline code"), { key: "Tab" })).toBe(false);
+    expect(fireEvent.keyDown(button("Inline code"), { key: "Tab", shiftKey: true })).toBe(false);
+    expect(focusEditor).toHaveBeenCalledTimes(2);
+    expect(fireEvent.keyDown(button("Inline code"), { key: "Tab", ctrlKey: true })).toBe(true);
+    expect(focusEditor).toHaveBeenCalledTimes(2);
     focusButton("Bold");
     expect(fireEvent.keyDown(button("Bold"), { key: "Home" })).toBe(true);
     focusButton("Comment");
@@ -884,6 +891,69 @@ describe("SelectionBubble keyboard and permissions", () => {
     await user.click(button("Comment"));
     expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks.strong)).toBe(true);
     expect(f.onComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("Enter acts once, on release, however long it is held; Ctrl, Alt and Meta+Enter do nothing", () => {
+    const env = environment();
+    const f = fixture();
+    const toggleMark = vi.spyOn(f.actions, "toggleMark");
+    render(<SelectionBubble {...f.props} />);
+    env.flush();
+    focusButton("Bold");
+    expect(fireEvent.keyDown(button("Bold"), { key: "Enter" })).toBe(false);
+    for (let i = 0; i < 5; i++) expect(fireEvent.keyDown(button("Bold"), { key: "Enter", repeat: true })).toBe(false);
+    expect(toggleMark).not.toHaveBeenCalled();
+    fireEvent.keyUp(button("Bold"), { key: "Enter" });
+    expect(toggleMark.mock.calls).toEqual([["strong"]]);
+
+    for (const modifier of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }]) {
+      fireEvent.keyDown(button("Bold"), { key: "Enter", ...modifier });
+      fireEvent.keyUp(button("Bold"), { key: "Enter", ...modifier });
+    }
+    // Enter that went down on another button.
+    fireEvent.keyDown(button("Bold"), { key: "Enter" });
+    focusButton("Italic");
+    fireEvent.keyUp(button("Italic"), { key: "Enter" });
+    expect(toggleMark).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the bubble's place after a pointer click hid it, and not after a keyboard click", async () => {
+    const env = environment();
+    const f = fixture();
+    const user = userEvent.setup();
+    const rendered = render(<SelectionBubble {...f.props} />);
+    env.flush();
+    const hideBubble = () => {
+      f.select(1, 1);
+      rendered.rerender(<SelectionBubble {...f.props} format={{ ...EMPTY_FORMAT }} />);
+      env.flush();
+      expect(screen.queryByTestId("selection-bubble")).toBeNull();
+    };
+    const showBubble = () => {
+      f.select(1, 9);
+      rendered.rerender(<SelectionBubble {...f.props} format={{ ...EMPTY_FORMAT }} />);
+      env.flush();
+      expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
+    };
+
+    await user.click(button("Comment"));
+    expect(f.onComment).toHaveBeenCalledTimes(1);
+    hideBubble();
+    const box = screen.getByTestId("place-hold");
+    expect(box).toBeEmptyDOMElement();
+    expect(box).toHaveAttribute("aria-hidden", "true");
+    expect(fireEvent.mouseDown(box)).toBe(false);
+    fireEvent.click(box, { detail: 2 });
+    expect(f.onComment).toHaveBeenCalledTimes(1);
+
+    // The bubble comes back: the box goes. A keyboard click that hides the bubble leaves no box.
+    showBubble();
+    expect(screen.queryByTestId("place-hold")).toBeNull();
+    focusButton("Comment");
+    await user.keyboard("{Enter}");
+    expect(f.onComment).toHaveBeenCalledTimes(2);
+    hideBubble();
+    expect(screen.queryByTestId("place-hold")).toBeNull();
   });
 
   it("runs each action exactly once per click, Enter and Space under Strict Mode", async () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useLayoutEffect, useRef, useState, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough } from "lucide-react";
@@ -19,6 +19,7 @@ import {
   type SelectionBubblePosition,
   type VisualViewportBox,
 } from "./selection-bubble-geometry";
+import { useEnterOnRelease, usePlaceHold } from "./press-once";
 
 const cssPixels = (style: CSSStyleDeclaration, property: string): number => {
   const value = Number.parseFloat(style.getPropertyValue(property));
@@ -69,7 +70,7 @@ function BubbleButton({
 }: {
   label: string;
   active?: boolean;
-  onClick: () => void;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
   disabled?: boolean;
   tabStop: boolean;
@@ -140,6 +141,11 @@ export function SelectionBubble({
   const [geometry, setGeometry] = useState<BubbleGeometry | null>(null);
   const [requestedRovingIndex, setRovingIndex] = useState(-1);
   const ownerRef = useRef<BubbleOwner | null>(null);
+  const shown = Boolean(geometry && geometry.view === view);
+  // Comment and Link take the selection or the focus away and the bubble hides under the pointer: its
+  // place is kept for the rest of the gesture.
+  const placeHold = usePlaceHold(!shown);
+  const enterOnRelease = useEnterOnRelease();
 
   // Resolve ref.current on every commit: the pane can be replaced without replacing its ref.
   useLayoutEffect(() => {
@@ -400,7 +406,7 @@ export function SelectionBubble({
   // Format changes carry every editor selection update into the shared geometry scheduler.
   useLayoutEffect(() => ownerRef.current?.schedule(), [format]);
 
-  if (!geometry || geometry.view !== view) return null;
+  if (!geometry || !shown) return placeHold.shield;
   const { position: pos, placement, layer } = geometry;
   const canEdit = session.canEdit;
   const canComment = session.canComment;
@@ -418,6 +424,14 @@ export function SelectionBubble({
     if (index >= 0 && index !== requestedRovingIndex) setRovingIndex(index);
   };
   const onRootKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    enterOnRelease.onKeyDown(e);
+    // The bubble's layer is the last thing in the page: Tab from it would leave the page, and leave focus
+    // on nothing once the bubble hides. Tab and Shift+Tab go back to the selection.
+    if (e.key === "Tab" && !(e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      actions.focus();
+      return;
+    }
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.nativeEvent.isComposing) return;
     const buttons = Array.from(e.currentTarget.querySelectorAll("button"));
     const current = buttons.indexOf(e.target as HTMLButtonElement);
@@ -430,10 +444,13 @@ export function SelectionBubble({
 
   // Permissions and the pane are read at click time, so a click that lands between a change and the
   // re-render that hides or disables the bubble does nothing.
-  const editAction = (action: () => void) => () => {
+  const hold = (e: ReactMouseEvent<HTMLButtonElement>) => placeHold.arm(e, e.currentTarget.closest("[data-testid=selection-bubble]"));
+  const editAction = (action: () => void) => (e: ReactMouseEvent<HTMLButtonElement>) => {
+    hold(e);
     if (session.canEdit && session.activeSurface === "rich") action();
   };
-  const commentAction = () => {
+  const commentAction = (e: ReactMouseEvent<HTMLButtonElement>) => {
+    hold(e);
     if (session.canComment && session.activeSurface === "rich") onComment();
   };
 
@@ -450,7 +467,9 @@ export function SelectionBubble({
         aria-label="Selection"
         aria-orientation="horizontal"
         onFocus={onRootFocus}
+        onBlur={enterOnRelease.onBlur}
         onKeyDown={onRootKeyDown}
+        onKeyUp={enterOnRelease.onKeyUp}
       >
         <BubbleButton label="Bold" active={format.strong} disabled={!canEdit} tabStop={rovingIndex === 0} onClick={editAction(() => actions.toggleMark("strong"))}>
           <Bold size={16} strokeWidth={2.6} />

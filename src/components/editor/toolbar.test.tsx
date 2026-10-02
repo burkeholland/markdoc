@@ -143,14 +143,69 @@ describe("Toolbar actions", () => {
   it("updates disabled state when permissions change", () => {
     const t = setup();
     expect(button("Undo")).toBeEnabled();
+    expect(button("Undo")).not.toHaveAttribute("aria-disabled");
     t.session.publish({ canUndo: false, canRedo: false });
-    expect(button("Undo")).toBeDisabled();
-    expect(button("Redo")).toBeDisabled();
+    // Nothing to undo or redo: off, but still real buttons (see the next test).
+    expect(button("Undo")).toHaveAttribute("aria-disabled", "true");
+    expect(button("Redo")).toHaveAttribute("aria-disabled", "true");
+    expect(button("Undo")).toBeEnabled();
     t.session.publish({ canEdit: false });
     expect(button("Bold")).toBeDisabled();
+    expect(button("Undo")).toBeDisabled();
+    expect(button("Undo")).not.toHaveAttribute("aria-disabled");
     t.session.publish({ canEdit: true, canUndo: true });
     expect(button("Bold")).toBeEnabled();
     expect(button("Undo")).toBeEnabled();
+    expect(button("Undo")).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("an Undo with nothing to undo keeps the editor's focus on a click and does nothing on a click or a key", async () => {
+    const session = new FakeSession();
+    Object.assign(session, { canUndo: false, canRedo: false });
+    const t = setup({ session });
+    for (const name of ["Undo", "Redo"]) {
+      expect(fireEvent.mouseDown(button(name)), "mousedown is still cancelled").toBe(false);
+      await userEvent.click(button(name));
+      act(() => button(name).focus());
+      await userEvent.keyboard("{Enter}");
+      await userEvent.keyboard(" ");
+    }
+    expect(t.actions.undo).not.toHaveBeenCalled();
+    expect(t.actions.redo).not.toHaveBeenCalled();
+  });
+
+  it("gives the caret back to the editor when the focused button is disabled", () => {
+    const t = setup();
+    act(() => button("Bold").focus());
+    t.session.publish({ canUndo: false });
+    expect(t.actions.focus).not.toHaveBeenCalled();
+    t.session.publish({ canEdit: false });
+    expect(t.actions.focus).toHaveBeenCalledOnce();
+  });
+
+  it("Enter acts once, on release, however long it is held; Ctrl, Alt and Meta+Enter do nothing", () => {
+    for (const strict of [false, true]) {
+      const t = setup({ strict });
+      const bold = button("Bold");
+      act(() => bold.focus());
+      expect(fireEvent.keyDown(bold, { key: "Enter" })).toBe(false);
+      for (let i = 0; i < 5; i++) expect(fireEvent.keyDown(bold, { key: "Enter", repeat: true })).toBe(false);
+      expect(t.actions.toggleMark).not.toHaveBeenCalled();
+      fireEvent.keyUp(bold, { key: "Enter" });
+      expect(t.actions.toggleMark).toHaveBeenCalledExactlyOnceWith("strong");
+
+      for (const modifier of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }]) {
+        fireEvent.keyDown(bold, { key: "Enter", ...modifier });
+        fireEvent.keyUp(bold, { key: "Enter", ...modifier });
+      }
+      // Enter that went down on another button, and a release after focus left.
+      fireEvent.keyDown(bold, { key: "Enter" });
+      act(() => button("Italic").focus());
+      fireEvent.keyUp(button("Italic"), { key: "Enter" });
+      expect(t.actions.toggleMark).toHaveBeenCalledOnce();
+      cleanup();
+      vi.clearAllMocks();
+    }
   });
 
   it.each([
@@ -220,6 +275,26 @@ describe("Toolbar roving focus", () => {
     t.session.publish({ canUndo: false });
     expect(button("Undo").tabIndex).toBe(-1);
     expect(heading().tabIndex).toBe(0);
+  });
+
+  it("keeps focus on an Undo that switches off under it, and the arrows move on from its place", async () => {
+    const t = setup();
+    act(() => button("Undo").focus());
+    t.session.publish({ canUndo: false });
+    expect(button("Undo")).toHaveFocus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(button("Redo")).toHaveFocus();
+    act(() => button("Undo").focus());
+    await userEvent.keyboard("{ArrowLeft}");
+    expect(button("Horizontal rule")).toHaveFocus();
+
+    t.session.publish({ canRedo: false });
+    act(() => button("Redo").focus());
+    await userEvent.keyboard("{ArrowRight}");
+    expect(screen.getByTestId("tb-comment")).toHaveFocus();
+    act(() => button("Redo").focus());
+    await userEvent.keyboard("{Home}");
+    expect(heading()).toHaveFocus();
   });
 
   it.each([
@@ -321,8 +396,92 @@ describe("Toolbar Text style menu", () => {
     expect(t.actions.setHeading).not.toHaveBeenCalled();
   });
 
-  it("shows the current heading level", () => {
+  it("shows the current heading level in a place that is always there", () => {
+    const level = () => heading().querySelector("span");
+    const plain = setup();
+    expect(level()).toBeEmptyDOMElement();
+    const className = level()!.className;
+    plain.unmount();
     setup({ format: { ...EMPTY_FORMAT, heading: 3 } });
     expect(heading()).toHaveTextContent("3");
+    expect(level()!.className).toBe(className);
+  });
+
+  it("a held Enter, Space or arrow opens the menu once and picks nothing", async () => {
+    for (const key of ["Enter", " ", "ArrowDown"]) {
+      const t = setup();
+      act(() => heading().focus());
+      fireEvent.keyDown(heading(), { key });
+      await waitFor(() => expect(radio("Paragraph")).toHaveFocus());
+      // The repeats that still reach the trigger do not close the menu again.
+      for (let i = 0; i < 3; i++) expect(fireEvent.keyDown(heading(), { key, repeat: true })).toBe(false);
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      if (key !== "ArrowDown") {
+        // The ones that reach the first item, and the release there, pick nothing.
+        for (let i = 0; i < 3; i++) fireEvent.keyDown(radio("Paragraph"), { key, repeat: true });
+        fireEvent.keyUp(radio("Paragraph"), { key });
+        expect(screen.getByRole("menu")).toBeInTheDocument();
+      }
+      expect(t.actions.setHeading).not.toHaveBeenCalled();
+      cleanup();
+      vi.clearAllMocks();
+    }
+  });
+
+  it.each(["Enter", " "])("picks an item once when %o is released, however long it is held", async (key) => {
+    const t = setup();
+    await userEvent.click(heading());
+    const item = await screen.findByRole("menuitemradio", { name: "Heading 2" });
+    act(() => item.focus());
+    fireEvent.keyDown(item, { key });
+    for (let i = 0; i < 5; i++) fireEvent.keyDown(item, { key, repeat: true });
+    expect(t.actions.setHeading).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    fireEvent.keyUp(item, { key });
+    expect(t.actions.setHeading).toHaveBeenCalledExactlyOnceWith(2);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  });
+
+  it("still finds an item by its typed name, space included, without picking it", async () => {
+    const t = setup();
+    act(() => heading().focus());
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(radio("Paragraph")).toHaveFocus());
+    await userEvent.keyboard("heading 3");
+    await waitFor(() => expect(radio("Heading 3")).toHaveFocus());
+    expect(t.actions.setHeading).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
+  it("picks an item on a click that comes with no key or pointer, as a screen reader sends", async () => {
+    const t = setup();
+    await userEvent.click(heading());
+    act(() => screen.getByRole("menuitemradio", { name: "Heading 4" }).click());
+    expect(t.actions.setHeading).toHaveBeenCalledExactlyOnceWith(4);
+  });
+
+  it("keeps the menu's place after a pointer pick, and not after a keyboard pick", async () => {
+    const t = setup();
+    await userEvent.click(heading());
+    const menu = await screen.findByRole("menu");
+    vi.spyOn(menu, "getBoundingClientRect").mockReturnValue(new DOMRect(12, 60, 224, 280));
+    await userEvent.click(screen.getByRole("menuitemradio", { name: "Heading 2" }));
+    expect(t.actions.setHeading).toHaveBeenCalledExactlyOnceWith(2);
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    const box = screen.getByTestId("place-hold");
+    expect(box).toHaveStyle({ left: "12px", top: "60px", width: "224px", height: "280px" });
+    expect(fireEvent.mouseDown(box)).toBe(false);
+    fireEvent.click(box, { detail: 2 });
+    expect(t.actions.setHeading).toHaveBeenCalledOnce();
+
+    // Opening the menu again takes the box away; a keyboard pick leaves none.
+    act(() => heading().focus());
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(radio("Paragraph")).toHaveFocus());
+    expect(screen.queryByTestId("place-hold")).toBeNull();
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(t.actions.setHeading).toHaveBeenLastCalledWith(1);
+    expect(screen.queryByTestId("place-hold")).toBeNull();
   });
 });

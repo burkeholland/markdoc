@@ -100,6 +100,8 @@ interface Fixture {
   session: CollabSession;
   actions: EditorActions;
   format: FormatState;
+  /** What the editor reports when a click lands; the rendered `format` unless a test replaces it. */
+  live: { format: FormatState };
   containerRef: RefObject<HTMLElement | null>;
   container: HTMLElement;
   editor: HTMLElement;
@@ -167,9 +169,11 @@ function fixture({
   } as unknown as CollabSession;
   const tableAction = vi.fn<(command: TableCommand) => void>();
   const alignAction = vi.fn<(value: "left" | "center" | "right" | null) => void>();
+  const live = {} as { format: FormatState };
   const actions = {
     table: tableAction,
     setColumnAlign: alignAction,
+    formatState: () => live.format,
   } as unknown as EditorActions;
   const format: FormatState = {
     strong: false,
@@ -187,11 +191,13 @@ function fixture({
     tablePos: 7,
     tableAlign: align,
   };
+  live.format = format;
   return {
     view,
     session,
     actions,
     format,
+    live,
     containerRef: { current: container },
     container,
     editor,
@@ -545,7 +551,7 @@ describe("TableMenu keyboard and click checks", () => {
         { key: "ArrowRight", altKey: true },
         { key: "ArrowRight", metaKey: true },
         { key: "ArrowRight", isComposing: true },
-        { key: "Enter" },
+        { key: " " },
         { key: "Tab" },
       ]) {
         expect(fireEvent.keyDown(button(ORDER[3]), init)).toBe(true);
@@ -592,6 +598,110 @@ describe("TableMenu keyboard and click checks", () => {
       setup.hidden.mockReturnValue(false);
       unmount();
     }
+  });
+
+  it("acts on the editor's selection when the click lands, not on the last render's", () => {
+    const { current, unmount } = mount();
+    try {
+      // Rendered for an unaligned column; the caret has since moved to a centred one.
+      current.live.format = { ...current.format, tableAlign: "center" };
+      fireEvent.click(button("table-align-center"));
+      fireEvent.click(button("table-align-left"));
+      expect(current.alignAction.mock.calls).toEqual([[null], ["left"]]);
+
+      // The caret has left the table, and the menu is still on screen.
+      current.live.format = { ...current.format, tablePos: -1 };
+      for (const testId of ORDER) fireEvent.click(button(testId));
+      expect(current.tableAction).not.toHaveBeenCalled();
+      expect(current.alignAction).toHaveBeenCalledTimes(2);
+    } finally {
+      unmount();
+    }
+  });
+
+  it("Enter runs a command once, on release, however long it is held; Ctrl, Alt and Meta+Enter do nothing", () => {
+    const { current, unmount } = mount();
+    try {
+      focusButton("table-delete-row");
+      expect(fireEvent.keyDown(button("table-delete-row"), { key: "Enter" })).toBe(false);
+      for (let i = 0; i < 4; i++) fireEvent.keyDown(button("table-delete-row"), { key: "Enter", repeat: true });
+      expect(current.tableAction).not.toHaveBeenCalled();
+      fireEvent.keyUp(button("table-delete-row"), { key: "Enter" });
+      expect(current.tableAction.mock.calls).toEqual([["deleteRow"]]);
+
+      for (const modifier of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }]) {
+        fireEvent.keyDown(button("table-delete-row"), { key: "Enter", ...modifier });
+        fireEvent.keyUp(button("table-delete-row"), { key: "Enter", ...modifier });
+      }
+      // Released on another button, and released after focus left and came back.
+      fireEvent.keyDown(button("table-delete-row"), { key: "Enter" });
+      focusButton("table-row-after");
+      fireEvent.keyUp(button("table-row-after"), { key: "Enter" });
+      fireEvent.keyUp(button("table-row-after"), { key: "Enter" });
+      expect(current.tableAction.mock.calls).toEqual([["deleteRow"]]);
+    } finally {
+      unmount();
+    }
+  });
+
+  it("a double-click deletes one row or column; other buttons act on every click", () => {
+    const { current, unmount } = mount();
+    try {
+      for (const testId of ["table-delete-row", "table-delete-col", "table-row-after"]) {
+        for (const detail of [1, 2, 3]) fireEvent.click(button(testId), { detail });
+      }
+      // Two separate clicks are two deletes.
+      fireEvent.click(button("table-delete-row"), { detail: 1 });
+      expect(current.tableAction.mock.calls).toEqual([
+        ["deleteRow"], ["deleteColumn"], ["rowAfter"], ["rowAfter"], ["rowAfter"], ["deleteRow"],
+      ]);
+    } finally {
+      unmount();
+    }
+  });
+
+  it("keeps the menu's place after a pointer click removed it, and not after a keyboard click", () => {
+    const browser = controlledBrowser();
+    const current = fixture({ host: new DOMRect(50, 120, 800, 600), tableBox: new DOMRect(400, 360, 500, 300) });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const removeTable = () => {
+      current.format = { ...current.format, tablePos: -1 };
+      current.live.format = current.format;
+      act(() => root.render(<Boundary current={current} />));
+      browser.flush();
+    };
+    const restoreTable = () => {
+      current.format = { ...current.format, tablePos: 7 };
+      current.live.format = current.format;
+      act(() => root.render(<Boundary current={current} />));
+      browser.flush();
+    };
+    try {
+      act(() => root.render(<Boundary current={current} />));
+      browser.flush();
+      vi.spyOn(screen.getByTestId("table-menu"), "getBoundingClientRect").mockReturnValue(new DOMRect(350, 212, 372, 40));
+      fireEvent.click(button("table-delete"), { detail: 1 });
+      expect(current.tableAction.mock.calls).toEqual([["deleteTable"]]);
+      removeTable();
+      expect(screen.queryByTestId("table-menu")).toBeNull();
+      const box = screen.getByTestId("place-hold");
+      expect(box).toHaveStyle({ left: "350px", top: "212px", width: "372px", height: "40px" });
+      expect(fireEvent.mouseDown(box)).toBe(false);
+      fireEvent.click(box, { detail: 2 });
+      expect(current.tableAction).toHaveBeenCalledTimes(1);
+
+      // The menu comes back: the box goes. A keyboard click that removes the menu leaves no box.
+      restoreTable();
+      expect(screen.queryByTestId("place-hold")).toBeNull();
+      fireEvent.click(button("table-delete"), { detail: 0 });
+      removeTable();
+      expect(screen.queryByTestId("place-hold")).toBeNull();
+    } finally {
+      act(() => root.unmount());
+    }
+    expect(screen.queryByTestId("place-hold")).toBeNull();
   });
 
   it("runs each command exactly once per click under Strict Mode", () => {

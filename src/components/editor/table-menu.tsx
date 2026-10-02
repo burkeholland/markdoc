@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, type MouseEvent } from "react";
 import type { EditorView } from "prosemirror-view";
 import {
   ArrowUpToLine,
@@ -22,6 +22,7 @@ import { Tip } from "@/components/ui/primitives";
 import { cn, shortcut } from "@/lib/utils";
 import { clampToViewport } from "@/lib/viewport";
 import { useSessionValue } from "./use-session";
+import { useEnterOnRelease, usePlaceHold } from "./press-once";
 
 const MENU_WIDTH = 372;
 const MENU_HEIGHT = 40;
@@ -60,7 +61,7 @@ function MenuButton({
   label: string;
   keys?: string;
   active?: boolean;
-  onClick: () => void;
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
   testId?: string;
 }) {
@@ -115,6 +116,10 @@ export function TableMenu({
   const authorityRef = useRef<TableMenuAuthority | null>(null);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
+  const shown = Boolean(geometry && geometry.authority.view === view && geometry.authority.session === session);
+  // Delete table removes the menu under the pointer: its place is kept for the rest of the gesture.
+  const placeHold = usePlaceHold(!shown);
+  const enterOnRelease = useEnterOnRelease();
 
   // Resolve ref.current on every commit: the pane can be replaced without replacing its ref.
   useLayoutEffect(() => {
@@ -233,32 +238,34 @@ export function TableMenu({
     authorityRef.current = null;
   }, []);
 
-  if (!geometry || geometry.authority.view !== view || geometry.authority.session !== session) {
-    return null;
-  }
+  if (!geometry || !shown) return placeHold.shield;
   const { left, top, width } = geometry;
 
-  // Read live state at click time: a click that lands between a change (read-only, code pane, caret
-  // left the table, Esc) and the re-render that hides the menu does nothing.
-  const run = (action: () => void) => () => {
+  // Read the live state at click time, the editor's own selection included: a click that lands between a
+  // change (read-only, code pane, caret left the table or moved to another column, Esc) and the re-render
+  // that follows acts on what is there now, or does nothing.
+  const run = (action: (now: FormatState) => void) => (e: MouseEvent<HTMLButtonElement>) => {
+    placeHold.arm(e, e.currentTarget.closest("[data-testid=table-menu]"));
     const live = authorityRef.current;
-    if (
-      !live ||
-      live !== geometry.authority ||
-      live.view.isDestroyed ||
-      !session.canEdit ||
-      session.activeSurface !== "rich" ||
-      live.format.tablePos < 0 ||
-      isTableMenuHidden(live.view.state)
-    ) {
+    if (!live || live !== geometry.authority || live.view.isDestroyed || !session.canEdit || session.activeSurface !== "rich" || isTableMenuHidden(live.view.state)) {
       return;
     }
-    action();
+    const now = actions.formatState();
+    if (now.tablePos >= 0) action(now);
   };
   const table = (command: Parameters<EditorActions["table"]>[0]) => run(() => actions.table(command));
-  const align = (value: TableAlign) => run(() => actions.setColumnAlign(format.tableAlign === value ? null : value));
+  // The row or column under a second Delete is not the one the pointer was aimed at: a double-click
+  // (or a double tap) deletes one. Two separate clicks delete two.
+  const remove = (command: "deleteRow" | "deleteColumn") => {
+    const click = table(command);
+    return (e: MouseEvent<HTMLButtonElement>) => {
+      if (e.detail <= 1) click(e);
+    };
+  };
+  const align = (value: TableAlign) => run((now) => actions.setColumnAlign(now.tableAlign === value ? null : value));
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    enterOnRelease.onKeyDown(e);
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.nativeEvent.isComposing) return;
     const buttons = Array.from(e.currentTarget.querySelectorAll("button"));
     const destination = tableMenuDestination(buttons.length, buttons.indexOf(e.target as HTMLButtonElement), e.key);
@@ -275,7 +282,9 @@ export function TableMenu({
       role="toolbar"
       aria-label="Table"
       aria-orientation="horizontal"
+      onBlur={enterOnRelease.onBlur}
       onKeyDown={onKeyDown}
+      onKeyUp={enterOnRelease.onKeyUp}
     >
       <MenuButton label="Row above" keys="Mod-Alt-↑" onClick={table("rowBefore")} testId="table-row-before">
         <ArrowUpToLine size={16} />
@@ -290,10 +299,10 @@ export function TableMenu({
         <ArrowRightToLine size={16} />
       </MenuButton>
       <span className="mx-0.5 h-5 w-px bg-white/20" />
-      <MenuButton label="Delete row" keys="Mod-Alt-⌫" onClick={table("deleteRow")} testId="table-delete-row">
+      <MenuButton label="Delete row" keys="Mod-Alt-⌫" onClick={remove("deleteRow")} testId="table-delete-row">
         <TableRowsSplit size={16} />
       </MenuButton>
-      <MenuButton label="Delete column" keys="Mod-Alt-Shift-⌫" onClick={table("deleteColumn")} testId="table-delete-col">
+      <MenuButton label="Delete column" keys="Mod-Alt-Shift-⌫" onClick={remove("deleteColumn")} testId="table-delete-col">
         <TableColumnsSplit size={16} />
       </MenuButton>
       <span className="mx-0.5 h-5 w-px bg-white/20" />
