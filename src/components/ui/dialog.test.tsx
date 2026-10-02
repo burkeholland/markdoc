@@ -3,17 +3,14 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import {
   StrictMode,
-  useEffect,
-  useLayoutEffect,
-  useRef,
+  Suspense,
+  lazy,
   useState,
   type FormEvent,
-  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefCallback,
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { flushSync } from "react-dom";
 import { renderToString } from "react-dom/server";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -37,8 +34,6 @@ interface DirectView {
   readonly root: Root;
 }
 
-type CloseClick = (event: ReactMouseEvent<HTMLButtonElement>) => void;
-
 const directViews: DirectView[] = [];
 
 function renderDirect(node: ReactNode) {
@@ -52,61 +47,6 @@ function renderDirect(node: ReactNode) {
 
 function flushTasks() {
   return act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
-}
-
-function reactProperty<T>(element: Element, name: string): T | undefined {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error("React props were not attached to the dialog element");
-  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  return props?.[name] as T | undefined;
-}
-
-function captureClick(element: HTMLButtonElement): CloseClick {
-  const click = reactProperty<CloseClick>(element, "onClick");
-  if (typeof click !== "function") throw new Error("The dialog Close did not have an onClick handler");
-  return click;
-}
-
-function captureRef<T extends Element>(element: T): RefCallback<T> {
-  const ref = reactProperty<RefCallback<T>>(element, "ref");
-  if (typeof ref !== "function") throw new Error("The dialog element did not have a callback ref");
-  return ref;
-}
-
-function fabricatedClick(currentTarget: HTMLButtonElement) {
-  const nativeEvent = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
-  Object.defineProperty(nativeEvent, "target", { configurable: true, value: currentTarget });
-  return {
-    type: "click",
-    button: 0,
-    bubbles: true,
-    defaultPrevented: false,
-    currentTarget,
-    target: currentTarget,
-    nativeEvent,
-    preventDefault: vi.fn(),
-    stopPropagation: vi.fn(),
-    isDefaultPrevented: () => false,
-    isPropagationStopped: () => false,
-    persist: vi.fn(),
-  } as unknown as ReactMouseEvent<HTMLButtonElement>;
-}
-
-function invokeFromCurrentNativePath(handler: CloseClick, currentTarget: HTMLButtonElement) {
-  const listener = (nativeEvent: MouseEvent) => {
-    nativeEvent.stopPropagation();
-    handler({
-      type: "click",
-      button: 0,
-      bubbles: true,
-      defaultPrevented: false,
-      currentTarget,
-      target: currentTarget,
-      nativeEvent,
-    } as unknown as ReactMouseEvent<HTMLButtonElement>);
-  };
-  currentTarget.addEventListener("click", listener, { once: true });
-  fireEvent.click(currentTarget);
 }
 
 function dialog() {
@@ -144,61 +84,6 @@ function ControlledDialog({
       </DialogContent>
     </Dialog>
   );
-}
-
-function LayoutCapture({ capture }: { capture: () => void }) {
-  useLayoutEffect(capture, [capture]);
-  return null;
-}
-
-function RemoveLeadingGuardOnRefReplay() {
-  const removed = useRef(false);
-  return (
-    <span
-      ref={() => () => {
-        if (removed.current) return;
-        removed.current = true;
-        document.querySelector<HTMLElement>("[data-radix-focus-guard]")?.remove();
-      }}
-    />
-  );
-}
-
-function MutateBothGuardsOnRefReplay({ action }: { action: "remove" | "adopt" }) {
-  const mutated = useRef(false);
-  return (
-    <span
-      ref={(element) => {
-        if (!element) return;
-        return () => {
-          if (mutated.current) return;
-          mutated.current = true;
-          const guards = [...document.querySelectorAll<HTMLElement>("[data-radix-focus-guard]")];
-          if (action === "adopt") element.append(...guards);
-          else guards.forEach((guard) => guard.remove());
-        };
-      }}
-    />
-  );
-}
-
-function MutateDescendantOnPassiveReplayCleanup() {
-  const element = useRef<HTMLSpanElement>(null);
-  useEffect(() => () => {
-    element.current?.setAttribute("data-passive-cleanup", "complete");
-  }, []);
-  return <span ref={element} />;
-}
-
-function createFocusGuard() {
-  const guard = document.createElement("span");
-  guard.setAttribute("data-radix-focus-guard", "");
-  guard.tabIndex = 0;
-  guard.style.outline = "none";
-  guard.style.opacity = "0";
-  guard.style.position = "fixed";
-  guard.style.pointerEvents = "none";
-  return guard;
 }
 
 beforeEach(() => {
@@ -318,6 +203,89 @@ describe("DialogContent focus lifecycle", () => {
     expect(screen.getByTestId("more-menu")).toHaveFocus();
   });
 
+  it.each(["after", "before"] as const)(
+    "closes a lazy dialog opened from a closing menu on the first Escape, loaded %s the menu returns focus (#2223)",
+    async (load) => {
+      const onClosed = vi.fn();
+      let finishLoading!: () => void;
+      const loaded = new Promise<void>((resolve) => { finishLoading = resolve; });
+      function Shortcuts({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+        return (
+          <Dialog open={open} onOpenChange={onOpenChange}>
+            <DialogContent title="Keyboard shortcuts" onClosed={onClosed}>
+              <p>Command palette - Mod-Shift-P</p>
+            </DialogContent>
+          </Dialog>
+        );
+      }
+      const LazyShortcuts = lazy(() => loaded.then(() => ({ default: Shortcuts })));
+      function Shell() {
+        const [menuOpen, setMenuOpen] = useState(true);
+        const [open, setOpen] = useState(false);
+        const [everOpened, setEverOpened] = useState(false);
+        return (
+          <>
+            <button type="button" id="more-trigger" data-testid="more-menu" aria-controls={menuOpen ? "more-list" : undefined}>
+              More
+            </button>
+            {menuOpen && (
+              <div role="menu" id="more-list" aria-labelledby="more-trigger">
+                <div
+                  role="menuitem"
+                  tabIndex={-1}
+                  data-testid="shortcuts-item"
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") return;
+                    // The closing menu hands focus back to its trigger in a later task (Radix FocusScope).
+                    const menuTrigger = document.getElementById("more-trigger");
+                    setTimeout(() => menuTrigger?.focus(), 0);
+                    setMenuOpen(false);
+                    setOpen(true);
+                    setEverOpened(true);
+                  }}
+                >
+                  Keyboard shortcuts
+                </div>
+              </div>
+            )}
+            {everOpened && (
+              <Suspense fallback={null}>
+                <LazyShortcuts open={open} onOpenChange={setOpen} />
+              </Suspense>
+            )}
+          </>
+        );
+      }
+      render(<StrictMode><Shell /></StrictMode>);
+      const trigger = screen.getByTestId("more-menu");
+      const item = screen.getByTestId("shortcuts-item");
+      act(() => item.focus());
+      fireEvent.keyDown(item, { key: "Enter", code: "Enter" });
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      if (load === "after") {
+        await flushTasks();
+        expect(trigger).toHaveFocus();
+      }
+      await act(async () => {
+        finishLoading();
+        await loaded;
+      });
+      // Synchronous lookup: `findByRole` waits a task, which would run the menu's queued focus first.
+      const shortcuts = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
+      if (load === "before") expect(trigger).not.toHaveFocus();
+      await flushTasks();
+      expect(shortcuts).toContainElement(document.activeElement as HTMLElement);
+
+      fireEvent.keyDown(document.activeElement ?? document, { key: "Escape", code: "Escape" });
+      await flushTasks();
+
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(trigger).toHaveFocus();
+      expect(onClosed).toHaveBeenCalledOnce();
+    },
+  );
+
   it("does not disturb focus already moved to another body control", async () => {
     render(
       <Harness open>
@@ -329,11 +297,222 @@ describe("DialogContent focus lifecycle", () => {
     await flushTasks();
     expect(screen.getByTestId("second")).toHaveFocus();
   });
+
+  // The people popover: its "Connect an AI agent" button has focus when the dialog opens, and the popover
+  // closes in the same commit, so that button is gone when the dialog closes. The popover's trigger is
+  // where focus belongs after the dialog. Radix hands focus back to it one task later (`handBackDelay`),
+  // but not when focus moved into the dialog while the popover was still on the page (`null`); then the
+  // trigger is found through the `aria-controls` Radix puts on it (`wired`).
+  function PopoverShell({ handBackDelay = 0, wired = false }: { handBackDelay?: number | null; wired?: boolean }) {
+    const [popoverOpen, setPopoverOpen] = useState(false);
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <button
+          type="button"
+          data-testid="people"
+          aria-controls={wired && popoverOpen ? "people-popover" : undefined}
+          onClick={() => setPopoverOpen(true)}
+        >
+          People
+        </button>
+        {popoverOpen && (
+          <div data-testid="popover" {...(wired ? { role: "dialog", id: "people-popover", "aria-label": "People" } : {})}>
+            <button
+              type="button"
+              data-testid="connect"
+              onClick={() => {
+                const trigger = screen.getByTestId("people");
+                if (handBackDelay !== null) setTimeout(() => trigger.focus(), handBackDelay);
+                setPopoverOpen(false);
+                setOpen(true);
+              }}
+            >
+              Connect an AI agent
+            </button>
+          </div>
+        )}
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent title="Connect an AI agent">
+            <input data-testid="agent-input" autoFocus />
+          </DialogContent>
+        </Dialog>
+      </>
+    );
+  }
+
+  async function openFromPopover(wait: () => Promise<void> = flushTasks) {
+    const people = screen.getByTestId("people");
+    act(() => people.focus());
+    fireEvent.click(people);
+    const connect = screen.getByTestId("connect");
+    act(() => connect.focus());
+    fireEvent.click(connect);
+    expect(screen.queryByTestId("popover")).toBeNull();
+    expect(screen.getByTestId("agent-input")).toHaveFocus();
+    await wait();
+    return people;
+  }
+
+  it.each([
+    { handBack: "hands focus back", strict: false },
+    { handBack: "hands focus back", strict: true },
+    { handBack: "does not hand focus back", strict: false },
+    { handBack: "does not hand focus back", strict: true },
+  ])(
+    "returns focus to the popover's trigger every time when the button that opened the dialog is gone and the popover $handBack (StrictMode=$strict)",
+    async ({ handBack, strict }) => {
+      const shell = handBack === "hands focus back" ? <PopoverShell /> : <PopoverShell handBackDelay={null} wired />;
+      render(strict ? <StrictMode>{shell}</StrictMode> : shell);
+      for (const action of ["Escape", "Close", "Escape"] as const) {
+        const people = await openFromPopover();
+        // A hand-back took focus to the trigger; an open modal dialog takes it straight back.
+        expect(screen.getByTestId("agent-input")).toHaveFocus();
+
+        if (action === "Close") fireEvent.click(closeButton());
+        else fireEvent.keyDown(screen.getByTestId("agent-input"), { key: "Escape", code: "Escape" });
+        await flushTasks();
+
+        expect(screen.queryByRole("dialog")).toBeNull();
+        expect(people).toHaveFocus();
+      }
+    },
+  );
+
+  it("takes focus back from a hand-back that arrives long after the dialog opened, and closes on the first Escape", async () => {
+    // The ⋮ menu hands focus back to its trigger on a later render, not in the next task.
+    render(<PopoverShell handBackDelay={30} />);
+    const people = await openFromPopover(() => act(() => new Promise<void>((resolve) => setTimeout(resolve, 60))));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-input")).toHaveFocus();
+
+    fireEvent.keyDown(document.activeElement ?? document, { key: "Escape", code: "Escape" });
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(people).toHaveFocus();
+  });
+
+  it("returns focus to the button a shared menu handed it back to, not to the first button wired to that menu", async () => {
+    // Publish and its arrow share one menu; only the menu knows which of them opened it.
+    function SplitButtonShell() {
+      const [menuOpen, setMenuOpen] = useState(true);
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" data-testid="publish" aria-controls={menuOpen ? "publish-menu" : undefined}>Publish</button>
+          <button type="button" data-testid="publish-arrow" aria-controls={menuOpen ? "publish-menu" : undefined}>More publish options</button>
+          {menuOpen && (
+            <div role="menu" id="publish-menu">
+              <div
+                role="menuitem"
+                tabIndex={-1}
+                data-testid="connect-item"
+                onClick={() => {
+                  const arrow = screen.getByTestId("publish-arrow");
+                  setTimeout(() => arrow.focus(), 0);
+                  setMenuOpen(false);
+                  setOpen(true);
+                }}
+              >
+                Connect to GitHub
+              </div>
+            </div>
+          )}
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogContent title="Connect to GitHub">
+              <button type="button">Sign in with GitHub</button>
+            </DialogContent>
+          </Dialog>
+        </>
+      );
+    }
+    render(<SplitButtonShell />);
+    const item = screen.getByTestId("connect-item");
+    act(() => item.focus());
+    fireEvent.click(item);
+    await flushTasks();
+    expect(screen.getByRole("button", { name: "Sign in with GitHub" })).toHaveFocus();
+
+    fireEvent.keyDown(document.activeElement ?? document, { key: "Escape", code: "Escape" });
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByTestId("publish-arrow")).toHaveFocus();
+  });
+
+  it("falls back to the opener when the element focus was handed to is gone at close", async () => {
+    const content = <input data-testid="version-name" autoFocus />;
+    const { rerender } = render(<Harness open={false}>{content}</Harness>);
+    const more = screen.getByTestId("more-menu");
+    act(() => more.focus());
+    rerender(<Harness open>{content}</Harness>);
+    expect(screen.getByTestId("version-name")).toHaveFocus();
+    const passing = document.createElement("button");
+    document.body.append(passing);
+    act(() => passing.focus());
+    expect(screen.getByTestId("version-name")).toHaveFocus();
+    passing.remove();
+
+    rerender(<Harness open={false}>{content}</Harness>);
+    await flushTasks();
+    expect(more).toHaveFocus();
+  });
+
+  it.each(["Escape", "Close"] as const)(
+    "returns to the page element that opened it on %s, not to a menu trigger that took focus while it was open",
+    async (action) => {
+      // Ctrl+/ from the editor while the ⋮ menu, closed a moment ago, still owes its trigger the focus.
+      const content = <p>Command palette - Mod-Shift-P</p>;
+      const { rerender } = render(<Harness open={false} title="Keyboard shortcuts">{content}</Harness>);
+      const editor = document.createElement("div");
+      editor.tabIndex = 0;
+      document.body.append(editor);
+      act(() => editor.focus());
+      rerender(<Harness open title="Keyboard shortcuts">{content}</Harness>);
+      await flushTasks();
+      expect(dialog()).toContainElement(document.activeElement as HTMLElement);
+
+      act(() => screen.getByTestId("more-menu").focus());
+      expect(dialog()).toContainElement(document.activeElement as HTMLElement);
+
+      if (action === "Close") fireEvent.click(closeButton());
+      else fireEvent.keyDown(document.activeElement ?? document, { key: "Escape", code: "Escape" });
+      rerender(<Harness open={false} title="Keyboard shortcuts">{content}</Harness>);
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(editor).toHaveFocus();
+    },
+  );
+
+  it("leaves focus in a second dialog that opens outside the first one's tree", async () => {
+    function Siblings() {
+      const [second, setSecond] = useState(false);
+      return (
+        <>
+          <Dialog open>
+            <DialogContent title="First">
+              <button type="button" onClick={() => setSecond(true)}>Open second</button>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={second} onOpenChange={setSecond}>
+            <DialogContent title="Second">
+              <input data-testid="second-input" />
+            </DialogContent>
+          </Dialog>
+        </>
+      );
+    }
+    render(<Siblings />);
+    fireEvent.click(screen.getByRole("button", { name: "Open second" }));
+    await flushTasks();
+    expect(screen.getByTestId("second-input")).toHaveFocus();
+  });
 });
 
-describe("DialogContent exact Strict Mode publication", () => {
+describe("DialogContent dismissal", () => {
   it.each(["Close", "Escape"] as const)(
-    "closes once through the exact %s action and restores the opener once",
+    "closes once through %s and restores the opener once",
     async (action) => {
       const opener = document.createElement("button");
       document.body.append(opener);
@@ -360,7 +539,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     },
   );
 
-  it("finishes an authenticated close after the controlled root removes itself", async () => {
+  it("finishes closing after the controlled root removes itself", async () => {
     const opener = document.createElement("button");
     document.body.append(opener);
     opener.focus();
@@ -387,55 +566,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
   });
 
-  it("bridges only the current Radix Close chain to its parent authority", () => {
-    const staleParent = vi.fn();
-    const currentParent = vi.fn();
-    const acceptedCurrent = vi.fn();
-    let authorizedClose: HTMLButtonElement | null = null;
-    const tree = (visit: "A" | "B") => (
-      <StrictMode>
-        <Dialog
-          key={visit}
-          open
-          onOpenChange={visit === "A"
-            ? staleParent
-            : (open) => {
-                currentParent(open);
-                if (authorizedClose === closeButton()) acceptedCurrent(open);
-              }}
-        >
-          <DialogContent title={`Close ${visit}`}>
-            <input autoFocus />
-          </DialogContent>
-        </Dialog>
-      </StrictMode>
-    );
-    const view = renderDirect(tree("A"));
-    const staleElement = closeButton();
-    const staleClose = captureClick(staleElement);
-
-    act(() => view.root.render(tree("B")));
-    const currentElement = closeButton();
-    const currentClose = captureClick(currentElement);
-    const capturedEvent = (currentTarget: HTMLButtonElement) => ({
-      currentTarget,
-      defaultPrevented: false,
-    }) as unknown as ReactMouseEvent<HTMLButtonElement>;
-
-    act(() => {
-      staleClose(capturedEvent(currentElement));
-      currentClose(capturedEvent(staleElement));
-    });
-    expect(staleParent).not.toHaveBeenCalled();
-    expect(acceptedCurrent).not.toHaveBeenCalled();
-
-    authorizedClose = currentElement;
-    act(() => currentClose(capturedEvent(currentElement)));
-    expect(currentParent).toHaveBeenCalledOnce();
-    expect(acceptedCurrent).toHaveBeenCalledExactlyOnceWith(false);
-  });
-
-  it("completes an uncontrolled current Radix Close bridge", async () => {
+  it("closes an uncontrolled root through Close", async () => {
     const onClosed = vi.fn();
     renderDirect(
       <StrictMode>
@@ -446,19 +577,14 @@ describe("DialogContent exact Strict Mode publication", () => {
         </Dialog>
       </StrictMode>,
     );
-    const currentClose = closeButton();
-
-    act(() => captureClick(currentClose)({
-      currentTarget: currentClose,
-      defaultPrevented: false,
-    } as unknown as ReactMouseEvent<HTMLButtonElement>));
+    fireEvent.click(closeButton());
     await flushTasks();
 
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("lets an expanded combobox consume the first Escape before the exact second Escape closes", async () => {
+  it("lets an expanded combobox consume the first Escape before the second Escape closes", async () => {
     const opener = document.createElement("button");
     document.body.append(opener);
     opener.focus();
@@ -489,7 +615,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("authenticates an owner-document Escape through current focus custody", async () => {
+  it("closes on an Escape dispatched to the document", async () => {
     const onClosed = vi.fn();
     renderDirect(
       <StrictMode>
@@ -507,36 +633,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("rejects a foreign-document Escape without poisoning the current publication", async () => {
-    const onClosed = vi.fn();
-    const foreignFrame = document.createElement("iframe");
-    document.body.append(foreignFrame);
-    renderDirect(
-      <StrictMode>
-        <ControlledDialog onClosed={onClosed}>
-          <input data-testid="foreign-escape-input" autoFocus />
-        </ControlledDialog>
-      </StrictMode>,
-    );
-    const foreignDocument = foreignFrame.contentDocument;
-    const foreignWindow = foreignFrame.contentWindow;
-    if (!foreignDocument || !foreignWindow) throw new Error("The foreign document was not created");
-
-    const foreignEscape = foreignDocument.createEvent("KeyboardEvent");
-    foreignEscape.initEvent("keydown", true, true);
-    Object.defineProperty(foreignEscape, "key", { value: "Escape" });
-    document.dispatchEvent(foreignEscape);
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(onClosed).not.toHaveBeenCalled();
-
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(onClosed).toHaveBeenCalledOnce();
-  });
-
-  it("publishes an initially empty explicit description and closes with exact focus custody", async () => {
+  it("renders an empty explicit description and restores the opener on close", async () => {
     const opener = document.createElement("button");
     document.body.append(opener);
     opener.focus();
@@ -558,7 +655,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("publishes a nonempty-to-empty description successor for exact Escape close", async () => {
+  it("closes on Escape after the description changes to empty", async () => {
     const opener = document.createElement("button");
     document.body.append(opener);
     opener.focus();
@@ -590,7 +687,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("uses real Radix outside-event timing without letting delayed replay autofocus steal focus", async () => {
+  it("closes on an outside pointer and restores the opener", async () => {
     const opener = document.createElement("button");
     const outside = document.createElement("button");
     document.body.append(opener, outside);
@@ -612,752 +709,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("publishes a distinct exact successor after direct Strict Mode ref and layout replay", async () => {
-    let retiredClick: CloseClick | undefined;
-    let retiredHeaderRef: RefCallback<HTMLDivElement> | undefined;
-    const capture = () => {
-      if (retiredClick) return;
-      retiredClick = captureClick(closeButton());
-      retiredHeaderRef = captureRef(header());
-    };
-    const onClosed = vi.fn();
-    renderDirect(
-      <StrictMode>
-        <ControlledDialog onClosed={onClosed}>
-          <LayoutCapture capture={capture} />
-          <input data-testid="current-input" autoFocus />
-        </ControlledDialog>
-      </StrictMode>,
-    );
-    const currentClose = closeButton();
-    const currentHeader = header();
-    const currentClick = captureClick(currentClose);
-    expect(retiredClick).toBeDefined();
-    expect(currentClick).not.toBe(retiredClick);
-
-    act(() => {
-      retiredClick?.(fabricatedClick(currentClose));
-      retiredHeaderRef?.(currentHeader);
-      retiredHeaderRef?.(null);
-    });
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(onClosed).not.toHaveBeenCalled();
-
-    fireEvent.click(currentClose);
-    await flushTasks();
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(onClosed).toHaveBeenCalledOnce();
-  });
-
-  it("keeps replacement custody exact and neutralizes stale timers, callbacks, and partial refs", async () => {
-    vi.useFakeTimers();
-    const opener = document.createElement("button");
-    document.body.append(opener);
-    opener.focus();
-    const closedA = vi.fn();
-    const closedB = vi.fn();
-
-    function ReplacementHarness() {
-      const [visit, setVisit] = useState<"A" | "B">("A");
-      const [open, setOpen] = useState(true);
-      return (
-        <>
-          <button type="button" data-testid="replace" onClick={() => setVisit("B")}>Replace</button>
-          <Dialog open={open} onOpenChange={setOpen}>
-            <DialogContent
-              key={visit}
-              title={`Dialog ${visit}`}
-              onClosed={visit === "A" ? closedA : closedB}
-            >
-              <input data-testid={`input-${visit}`} autoFocus />
-            </DialogContent>
-          </Dialog>
-        </>
-      );
-    }
-
-    renderDirect(<StrictMode><ReplacementHarness /></StrictMode>);
-    act(() => vi.runOnlyPendingTimers());
-    const staleCloseElement = closeButton();
-    const staleClick = captureClick(staleCloseElement);
-    const staleHeaderRef = captureRef(header());
-    expect(screen.getByTestId("input-A")).toHaveFocus();
-
-    fireEvent.click(screen.getByTestId("replace"));
-    const inputB = screen.getByTestId("input-B");
-    const currentClose = closeButton();
-    expect(inputB).toHaveFocus();
-    act(() => {
-      staleClick(fabricatedClick(currentClose));
-      staleHeaderRef(header());
-      staleHeaderRef(null);
-      vi.runOnlyPendingTimers();
-    });
-
-    expect(inputB).toHaveFocus();
-    expect(screen.getByRole("dialog")).toHaveAccessibleName("Dialog B");
-    expect(closedA).not.toHaveBeenCalled();
-    expect(closedB).not.toHaveBeenCalled();
-
-    fireEvent.click(currentClose);
-    act(() => vi.runOnlyPendingTimers());
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(opener).toHaveFocus();
-    expect(closedA).not.toHaveBeenCalled();
-    expect(closedB).toHaveBeenCalledOnce();
-  });
-
-  it("clears the exact opening-recovery timer at the synchronous replacement boundary", () => {
-    vi.useFakeTimers();
-    const timeout = vi.spyOn(window, "setTimeout");
-    const clearTimeout = vi.spyOn(window, "clearTimeout");
-    const onOpenChange = vi.fn();
-    const tree = (visit: "A" | "B") => (
-      <StrictMode>
-        <Dialog open onOpenChange={onOpenChange}>
-          <DialogContent key={visit} title={`Recovery ${visit}`}>
-            <input data-testid={`recovery-${visit}`} autoFocus />
-          </DialogContent>
-        </Dialog>
-      </StrictMode>
-    );
-    const outside = document.createElement("button");
-    document.body.append(outside);
-    const view = renderDirect(tree("A"));
-    const callsBeforeFocusOut = timeout.mock.calls.length;
-
-    fireEvent.focusOut(screen.getByTestId("recovery-A"), { relatedTarget: outside });
-    const timerIndex = timeout.mock.calls.findIndex(
-      (call, index) => index >= callsBeforeFocusOut && call[1] === 0,
-    );
-    expect(timerIndex).toBeGreaterThanOrEqual(callsBeforeFocusOut);
-    const timer = timeout.mock.results[timerIndex]!.value;
-    const staleCallback = timeout.mock.calls[timerIndex]![0] as () => void;
-
-    act(() => view.root.render(tree("B")));
-    expect(clearTimeout).toHaveBeenCalledWith(timer);
-    expect(screen.getByTestId("recovery-B")).toHaveFocus();
-
-    act(staleCallback);
-    expect(screen.getByTestId("recovery-B")).toHaveFocus();
-  });
-
-  it.each(["subtree", "immediate placement", "higher ancestor"] as const)(
-    "permanently rejects %s mutation and restore, then admits a fresh keyed successor",
-    async (kind) => {
-      const onClosed = vi.fn();
-      function MutationHarness() {
-        const [visit, setVisit] = useState<"A" | "B">("A");
-        const [open, setOpen] = useState(true);
-        return (
-          <>
-            <button type="button" data-testid="replace" onClick={() => setVisit("B")}>Replace</button>
-            <Dialog open={open} onOpenChange={setOpen}>
-              <DialogContent key={visit} title={`Dialog ${visit}`} onClosed={onClosed}>
-                <input data-testid={`input-${visit}`} autoFocus />
-              </DialogContent>
-            </Dialog>
-          </>
-        );
-      }
-      renderDirect(<StrictMode><MutationHarness /></StrictMode>);
-      const staleDialog = dialog();
-      const staleClose = closeButton();
-
-      if (kind === "subtree") {
-        staleClose.setAttribute("aria-label", "Changed");
-        staleClose.setAttribute("aria-label", "Close");
-      } else if (kind === "immediate placement") {
-        const parent = staleDialog.parentNode!;
-        const next = staleDialog.nextSibling;
-        staleDialog.remove();
-        parent.insertBefore(staleDialog, next);
-      } else {
-        const html = document.documentElement;
-        const currentBody = document.body;
-        currentBody.remove();
-        html.append(currentBody);
-      }
-
-      fireEvent.click(staleClose);
-      await flushTasks();
-      expect(screen.getByRole("dialog")).toBeInTheDocument();
-      expect(onClosed).not.toHaveBeenCalled();
-
-      fireEvent.click(screen.getByTestId("replace"));
-      expect(screen.getByRole("dialog")).toHaveAccessibleName("Dialog B");
-      fireEvent.click(closeButton());
-      await flushTasks();
-      expect(screen.queryByRole("dialog")).toBeNull();
-      expect(onClosed).toHaveBeenCalledOnce();
-    },
-  );
-
-  it("rejects crossed title/body/callback drift while the current replacement remains usable", async () => {
-    const closedA = vi.fn();
-    const closedB = vi.fn();
-    function DriftHarness() {
-      const [visit, setVisit] = useState<"A" | "B">("A");
-      const [open, setOpen] = useState(true);
-      return (
-        <>
-          <button type="button" data-testid="replace" onClick={() => setVisit("B")}>Replace</button>
-          <Dialog open={open} onOpenChange={setOpen}>
-            <DialogContent
-              title={`Title ${visit}`}
-              description={`Description ${visit}`}
-              className={`visit-${visit}`}
-              onClosed={visit === "A" ? closedA : closedB}
-            >
-              <input key={visit} data-testid={`drift-${visit}`} autoFocus />
-            </DialogContent>
-          </Dialog>
-        </>
-      );
-    }
-    renderDirect(<StrictMode><DriftHarness /></StrictMode>);
-    const staleClose = closeButton();
-    const staleClick = captureClick(staleClose);
-    const staleHeaderRef = captureRef(staleClose.parentElement as HTMLDivElement);
-
-    fireEvent.click(screen.getByTestId("replace"));
-    const currentClose = closeButton();
-    expect(dialog()).toHaveAccessibleName("Title B");
-    expect(dialog()).toHaveAccessibleDescription("Description B");
-    expect(dialog()).toHaveClass("visit-B");
-    act(() => {
-      staleClick(fabricatedClick(currentClose));
-      staleHeaderRef(currentClose.parentElement as HTMLDivElement);
-      staleHeaderRef(null);
-    });
-    expect(screen.getByTestId("drift-B")).toHaveFocus();
-    expect(closedA).not.toHaveBeenCalled();
-    expect(closedB).not.toHaveBeenCalled();
-
-    fireEvent.click(currentClose);
-    await flushTasks();
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(closedA).not.toHaveBeenCalled();
-    expect(closedB).toHaveBeenCalledOnce();
-  });
-
-  it("transfers nested custody without letting the outer publication focus through the inner one", async () => {
-    const outerClosed = vi.fn();
-    const innerClosed = vi.fn();
-    function NestedHarness() {
-      const [outerOpen, setOuterOpen] = useState(true);
-      const [innerOpen, setInnerOpen] = useState(false);
-      return (
-        <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
-          <DialogContent title="Outer" onClosed={outerClosed}>
-            <button type="button" data-testid="open-inner" onClick={() => setInnerOpen(true)}>
-              Open inner
-            </button>
-            <Dialog open={innerOpen} onOpenChange={setInnerOpen}>
-              <DialogContent title="Inner" onClosed={innerClosed}>
-                <input data-testid="inner-input" autoFocus />
-              </DialogContent>
-            </Dialog>
-          </DialogContent>
-        </Dialog>
-      );
-    }
-    renderDirect(<StrictMode><NestedHarness /></StrictMode>);
-    const innerOpener = screen.getByTestId("open-inner");
-    fireEvent.click(innerOpener);
-    expect(screen.getByTestId("inner-input")).toHaveFocus();
-
-    fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Inner" })));
-    await flushTasks();
-
-    expect(screen.getAllByRole("dialog")).toHaveLength(1);
-    expect(innerOpener).toHaveFocus();
-    expect(innerClosed).toHaveBeenCalledOnce();
-    expect(outerClosed).not.toHaveBeenCalled();
-  });
-
-  it("forgets repeated nested roots and rejects off-state focus-guard removal", async () => {
-    const outerClosed = vi.fn();
-    const innerClosed = vi.fn();
-    function RepeatedNestedHarness() {
-      const [outerOpen, setOuterOpen] = useState(true);
-      const [innerOpen, setInnerOpen] = useState(false);
-      return (
-        <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
-          <DialogContent title="Outer retained roots" onClosed={outerClosed}>
-            <button type="button" onClick={() => setInnerOpen(true)}>Open repeated inner</button>
-            <Dialog open={innerOpen} onOpenChange={setInnerOpen}>
-              <DialogContent title="Repeated inner" onClosed={innerClosed}>
-                <input autoFocus />
-              </DialogContent>
-            </Dialog>
-          </DialogContent>
-        </Dialog>
-      );
-    }
-    renderDirect(<StrictMode><RepeatedNestedHarness /></StrictMode>);
-    const innerOpener = screen.getByRole("button", { name: "Open repeated inner" });
-
-    for (let visit = 0; visit < 4; visit++) {
-      fireEvent.click(innerOpener);
-      const inner = screen.getByRole("dialog", { name: "Repeated inner" });
-      fireEvent.click(closeButton(inner));
-      await flushTasks();
-      expect(screen.queryByRole("dialog", { name: "Repeated inner" })).toBeNull();
-    }
-    expect(innerClosed).toHaveBeenCalledTimes(4);
-
-    const focusGuard = document.querySelector<HTMLElement>("[data-radix-focus-guard]");
-    expect(focusGuard).not.toBeNull();
-    focusGuard!.remove();
-    await act(() => Promise.resolve());
-    fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Outer retained roots" })));
-    await flushTasks();
-
-    expect(screen.getByRole("dialog", { name: "Outer retained roots" })).toBeInTheDocument();
-    expect(outerClosed).not.toHaveBeenCalled();
-  });
-
-  it.each(["replacement", "swap"] as const)(
-    "rejects repeated focus-guard %s while a nested dialog is open",
-    async (mutation) => {
-      const outerClosed = vi.fn();
-      function NestedGuardHarness() {
-        const [outerOpen, setOuterOpen] = useState(true);
-        const [innerOpen, setInnerOpen] = useState(false);
-        return (
-          <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
-            <DialogContent title="Outer guard owner" onClosed={outerClosed}>
-              <button type="button" onClick={() => setInnerOpen(true)}>Open guard nested</button>
-              <button type="button" onClick={() => setInnerOpen(false)}>Dismiss nested state</button>
-              <Dialog open={innerOpen} onOpenChange={setInnerOpen}>
-                <DialogContent title="Guard nested">
-                  <input autoFocus />
-                </DialogContent>
-              </Dialog>
-            </DialogContent>
-          </Dialog>
-        );
-      }
-      renderDirect(<StrictMode><NestedGuardHarness /></StrictMode>);
-      fireEvent.click(screen.getByRole("button", { name: "Open guard nested" }));
-      const original = [...document.querySelectorAll<HTMLElement>("[data-radix-focus-guard]")];
-      const firstReplacement = [createFocusGuard(), createFocusGuard()];
-      const secondReplacement = [createFocusGuard(), createFocusGuard()];
-
-      act(() => {
-        if (mutation === "replacement") {
-          original.forEach((guard) => guard.remove());
-          document.body.prepend(firstReplacement[0]);
-          document.body.append(firstReplacement[1]);
-          firstReplacement.forEach((guard) => guard.remove());
-          document.body.prepend(secondReplacement[0]);
-          document.body.append(secondReplacement[1]);
-        } else {
-          original.forEach((guard) => guard.remove());
-          document.body.prepend(original[1]);
-          document.body.append(original[0]);
-          original.forEach((guard) => guard.remove());
-          document.body.prepend(original[0]);
-          document.body.append(original[1]);
-        }
-      });
-      fireEvent.click(screen.getByRole("button", { name: "Dismiss nested state", hidden: true }));
-      await flushTasks();
-      expect(screen.queryByRole("dialog", { name: "Guard nested" })).toBeNull();
-
-      fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Outer guard owner" })));
-      await flushTasks();
-
-      expect(screen.getByRole("dialog", { name: "Outer guard owner" })).toBeInTheDocument();
-      expect(outerClosed).not.toHaveBeenCalled();
-      if (mutation === "replacement") secondReplacement.forEach((guard) => guard.remove());
-    },
-  );
-
-  it("removes both exact guards after a clean nested close", async () => {
-    function CleanNestedHarness() {
-      const [outerOpen, setOuterOpen] = useState(true);
-      const [innerOpen, setInnerOpen] = useState(false);
-      return (
-        <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
-          <DialogContent title="Clean outer">
-            <button type="button" onClick={() => setInnerOpen(true)}>Open clean inner</button>
-            <Dialog open={innerOpen} onOpenChange={setInnerOpen}>
-              <DialogContent title="Clean inner"><input autoFocus /></DialogContent>
-            </Dialog>
-          </DialogContent>
-        </Dialog>
-      );
-    }
-    renderDirect(<StrictMode><CleanNestedHarness /></StrictMode>);
-    fireEvent.click(screen.getByRole("button", { name: "Open clean inner" }));
-    fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Clean inner" })));
-    await flushTasks();
-    fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Clean outer" })));
-    await flushTasks();
-
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
-  });
-
-  it("drains off-state focus-guard removal before synchronous replay and recovers cleanly", async () => {
-    const taintedClosed = vi.fn();
-    const cleanClosed = vi.fn();
-    const body = <input data-testid="guard-replay" autoFocus />;
-    const tree = (rootKey: string, onClosed: () => void) => (
-      <StrictMode>
-        <ControlledDialog
-          key={rootKey}
-          title="Guard replay"
-          onClosed={onClosed}
-        >
-          {body}
-        </ControlledDialog>
-      </StrictMode>
-    );
-    const view = renderDirect(tree("tainted", taintedClosed));
-    const focusGuard = document.querySelector<HTMLElement>("[data-radix-focus-guard]");
-    expect(focusGuard).not.toBeNull();
-
-    act(() => {
-      focusGuard!.remove();
-      view.root.render(tree("tainted", taintedClosed));
-    });
-    expect(screen.getByRole("dialog")).toHaveAccessibleName("Guard replay");
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.getByRole("dialog")).toHaveAccessibleName("Guard replay");
-    expect(taintedClosed).not.toHaveBeenCalled();
-
-    act(() => view.root.render(tree("clean", cleanClosed)));
-    expect(screen.getByTestId("guard-replay")).toHaveFocus();
-    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(cleanClosed).toHaveBeenCalledOnce();
-  });
-
-  it("rejects a focus guard removed by child ref cleanup after replay preparation", async () => {
-    const taintedClosed = vi.fn();
-    const cleanClosed = vi.fn();
-    const tree = (rootKey: string, tainted: boolean, onClosed: () => void) => (
-      <StrictMode>
-        <ControlledDialog key={rootKey} title="Child cleanup" onClosed={onClosed}>
-          {tainted && <RemoveLeadingGuardOnRefReplay />}
-          <input data-testid="child-cleanup-input" autoFocus />
-        </ControlledDialog>
-      </StrictMode>
-    );
-    const view = renderDirect(tree("tainted", true, taintedClosed));
-
-    fireEvent.click(closeButton());
-    fireEvent.keyDown(screen.getByTestId("child-cleanup-input"), {
-      key: "Escape",
-      code: "Escape",
-    });
-    await flushTasks();
-
-    expect(screen.getByRole("dialog")).toHaveAccessibleName("Child cleanup");
-    expect(taintedClosed).not.toHaveBeenCalled();
-
-    act(() => view.root.render(tree("clean", false, cleanClosed)));
-    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(cleanClosed).toHaveBeenCalledOnce();
-  });
-
-  it.each(["remove", "adopt"] as const)(
-    "rejects child ref cleanup that tries to %s both guards after replay preparation",
-    async (action) => {
-      const taintedClosed = vi.fn();
-      const cleanClosed = vi.fn();
-      const tree = (rootKey: string, tainted: boolean, onClosed: () => void) => (
-        <StrictMode>
-          <ControlledDialog key={rootKey} title={`Both guards ${action}`} onClosed={onClosed}>
-            {tainted && <MutateBothGuardsOnRefReplay action={action} />}
-            <input data-testid={`both-guards-${action}`} autoFocus />
-          </ControlledDialog>
-        </StrictMode>
-      );
-      const view = renderDirect(tree("tainted", true, taintedClosed));
-
-      fireEvent.click(closeButton());
-      await flushTasks();
-
-      expect(screen.getByRole("dialog")).toHaveAccessibleName(`Both guards ${action}`);
-      expect(taintedClosed).not.toHaveBeenCalled();
-
-      act(() => view.root.render(tree("clean", false, cleanClosed)));
-      expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
-      fireEvent.click(closeButton());
-      await flushTasks();
-
-      expect(screen.queryByRole("dialog")).toBeNull();
-      expect(cleanClosed).toHaveBeenCalledOnce();
-    },
-  );
-
-  it.each(["body", "existing subtree"] as const)(
-    "permanently rejects a nested third guard added and removed through an unrelated %s wrapper",
-    async (location) => {
-      const unrelated = document.createElement("div");
-      if (location === "existing subtree") document.body.append(unrelated);
-      const onClosed = vi.fn();
-      renderDirect(
-        <StrictMode>
-          <ControlledDialog title={`Nested guard ${location}`} onClosed={onClosed} />
-        </StrictMode>,
-      );
-      const wrapper = document.createElement("div");
-      const nested = document.createElement("div");
-      nested.append(createFocusGuard());
-      wrapper.append(nested);
-      const parent = location === "body" ? document.body : unrelated;
-
-      act(() => {
-        parent.append(wrapper);
-        wrapper.remove();
-      });
-      await act(() => Promise.resolve());
-      fireEvent.click(closeButton());
-      await flushTasks();
-
-      expect(screen.getByRole("dialog")).toHaveAccessibleName(`Nested guard ${location}`);
-      expect(onClosed).not.toHaveBeenCalled();
-      unrelated.remove();
-    },
-  );
-
-  it.each(["an owned body descendant", "a nested root"] as const)(
-    "permanently rejects a third guard inserted and removed inside %s subtree",
-    async (location) => {
-      const taintedClosed = vi.fn();
-      const cleanClosed = vi.fn();
-      const tree = (rootKey: string, onClosed: () => void) => (
-        <StrictMode>
-          <ControlledDialog key={rootKey} title={`Guard restoration ${location}`} onClosed={onClosed}>
-            <div data-testid="owned-guard-host" />
-          </ControlledDialog>
-        </StrictMode>
-      );
-      const view = renderDirect(tree("tainted", taintedClosed));
-      const guard = createFocusGuard();
-      const nestedRoot = document.createElement("div");
-      nestedRoot.setAttribute("role", "dialog");
-      nestedRoot.setAttribute("data-state", "open");
-
-      act(() => {
-        if (location === "an owned body descendant") {
-          screen.getByTestId("owned-guard-host").append(guard);
-          guard.remove();
-        } else {
-          nestedRoot.append(guard);
-          document.body.append(nestedRoot);
-          nestedRoot.remove();
-        }
-      });
-      await act(() => Promise.resolve());
-      fireEvent.click(closeButton());
-      await flushTasks();
-
-      expect(screen.getByRole("dialog")).toHaveAccessibleName(`Guard restoration ${location}`);
-      expect(taintedClosed).not.toHaveBeenCalled();
-
-      act(() => view.root.render(tree("clean", cleanClosed)));
-      fireEvent.click(closeButton());
-      await flushTasks();
-
-      expect(screen.queryByRole("dialog")).toBeNull();
-      expect(cleanClosed).toHaveBeenCalledOnce();
-      expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
-    },
-  );
-
-  it("permanently rejects an owned span that becomes a guard before its topology is restored", async () => {
-    const taintedClosed = vi.fn();
-    const cleanClosed = vi.fn();
-    const tree = (rootKey: string, onClosed: () => void) => (
-      <StrictMode>
-        <ControlledDialog key={rootKey} title="Guard attribute restoration" onClosed={onClosed}>
-          <span data-testid="guard-attribute-host" />
-        </ControlledDialog>
-      </StrictMode>
-    );
-    const view = renderDirect(tree("tainted", taintedClosed));
-    const candidate = screen.getByTestId("guard-attribute-host");
-
-    act(() => {
-      candidate.setAttribute("data-radix-focus-guard", "");
-      candidate.tabIndex = 0;
-      candidate.style.outline = "none";
-      candidate.style.opacity = "0";
-      candidate.style.position = "fixed";
-      candidate.style.pointerEvents = "none";
-      candidate.removeAttribute("data-radix-focus-guard");
-      candidate.remove();
-    });
-    await act(() => Promise.resolve());
-    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.getByRole("dialog")).toHaveAccessibleName("Guard attribute restoration");
-    expect(taintedClosed).not.toHaveBeenCalled();
-
-    act(() => view.root.render(tree("clean", cleanClosed)));
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(cleanClosed).toHaveBeenCalledOnce();
-    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
-  });
-
-  it("accepts exact replay guard teardown before a later allowed passive cleanup mutation", async () => {
-    const onClosed = vi.fn();
-    renderDirect(
-      <StrictMode>
-        <ControlledDialog title="Passive cleanup replay" onClosed={onClosed}>
-          <MutateDescendantOnPassiveReplayCleanup />
-          <input autoFocus />
-        </ControlledDialog>
-      </StrictMode>,
-    );
-
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(onClosed).toHaveBeenCalledOnce();
-  });
-
-  it.each(["leading", "trailing"] as const)(
-    "rejects moving the %s focus guard to the opposite body edge",
-    async (edge) => {
-      const onClosed = vi.fn();
-      renderDirect(
-        <StrictMode>
-          <ControlledDialog title={`${edge} guard swap`} onClosed={onClosed} />
-        </StrictMode>,
-      );
-      const guards = document.querySelectorAll<HTMLElement>("[data-radix-focus-guard]");
-      const guard = edge === "leading" ? guards[0] : guards[guards.length - 1];
-
-      act(() => {
-        guard.remove();
-        if (edge === "leading") document.body.append(guard);
-        else document.body.prepend(guard);
-      });
-      fireEvent.click(closeButton());
-      await flushTasks();
-
-      expect(screen.getByRole("dialog")).toHaveAccessibleName(`${edge} guard swap`);
-      expect(onClosed).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each(["marker", "tabindex", "style"] as const)(
-    "rejects tracked focus-guard %s mutation",
-    async (attribute) => {
-      const onClosed = vi.fn();
-      renderDirect(
-        <StrictMode>
-          <ControlledDialog title={`${attribute} guard mutation`} onClosed={onClosed} />
-        </StrictMode>,
-      );
-      const guard = document.querySelector<HTMLElement>("[data-radix-focus-guard]");
-      expect(guard).not.toBeNull();
-
-      act(() => {
-        if (attribute === "marker") guard!.setAttribute("data-radix-focus-guard", "changed");
-        else if (attribute === "tabindex") guard!.tabIndex = -1;
-        else guard!.style.opacity = "1";
-      });
-      fireEvent.click(closeButton());
-      await flushTasks();
-
-      expect(screen.getByRole("dialog")).toHaveAccessibleName(`${attribute} guard mutation`);
-      expect(onClosed).not.toHaveBeenCalled();
-    },
-  );
-
-  it("rejects an unrelated body-edge span becoming a third focus guard", async () => {
-    const onClosed = vi.fn();
-    renderDirect(
-      <StrictMode>
-        <ControlledDialog title="Third guard" onClosed={onClosed} />
-      </StrictMode>,
-    );
-    const third = document.createElement("span");
-
-    act(() => {
-      document.body.append(third);
-      third.setAttribute("data-radix-focus-guard", "");
-      third.tabIndex = 0;
-      third.style.outline = "none";
-      third.style.opacity = "0";
-      third.style.position = "fixed";
-      third.style.pointerEvents = "none";
-    });
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.getByRole("dialog")).toHaveAccessibleName("Third guard");
-    expect(onClosed).not.toHaveBeenCalled();
-    third.remove();
-  });
-
-  it("requires exactly two body-edge focus guards before publication", async () => {
-    const extra = createFocusGuard();
-    document.body.append(extra);
-    const onClosed = vi.fn();
-    renderDirect(
-      <StrictMode>
-        <ControlledDialog title="Pre-existing third guard" onClosed={onClosed} />
-      </StrictMode>,
-    );
-
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.getByRole("dialog")).toHaveAccessibleName("Pre-existing third guard");
-    expect(onClosed).not.toHaveBeenCalled();
-    extra.remove();
-  });
-
-  it.each(["leading", "trailing"] as const)(
-    "preserves %s focus-guard repositioning at its original body edge",
-    async (edge) => {
-      const onClosed = vi.fn();
-      renderDirect(
-        <StrictMode>
-          <ControlledDialog title={`${edge} guard reposition`} onClosed={onClosed} />
-        </StrictMode>,
-      );
-      const guards = document.querySelectorAll<HTMLElement>("[data-radix-focus-guard]");
-      const guard = edge === "leading" ? guards[0] : guards[guards.length - 1];
-
-      act(() => {
-        guard.remove();
-        if (edge === "leading") document.body.prepend(guard);
-        else document.body.append(guard);
-      });
-      fireEvent.click(closeButton());
-      await flushTasks();
-
-      expect(screen.queryByRole("dialog")).toBeNull();
-      expect(onClosed).toHaveBeenCalledOnce();
-    },
-  );
-
-  it("finishes an authenticated close through fresh controlled callback identities", async () => {
+  it("closes through inline callbacks recreated every render", async () => {
     const onClosed = vi.fn();
     function InlineCallbacksHarness() {
       const [open, setOpen] = useState(true);
@@ -1378,29 +730,29 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("keeps the current publication usable across an application theme change", async () => {
-    const previousTheme = document.documentElement.getAttribute("data-theme");
-    const onClosed = vi.fn();
-    renderDirect(
-      <StrictMode>
-        <ControlledDialog onClosed={onClosed}>
-          <input data-testid="theme-input" autoFocus />
-        </ControlledDialog>
-      </StrictMode>,
-    );
-    document.documentElement.setAttribute("data-theme", previousTheme === "dark" ? "light" : "dark");
-    await act(() => Promise.resolve());
+  it("runs the onClosed of the last open render, not the closing render's", async () => {
+    const calls: string[] = [];
+    function TokenHarness() {
+      const [open, setOpen] = useState(true);
+      const token = open ? "open" : "closed";
+      return (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent title="Close token" onClosed={() => calls.push(token)}>
+            <input data-testid="token-input" />
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><TokenHarness /></StrictMode>);
 
     fireEvent.click(closeButton());
     await flushTasks();
 
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(onClosed).toHaveBeenCalledOnce();
-    if (previousTheme === null) document.documentElement.removeAttribute("data-theme");
-    else document.documentElement.setAttribute("data-theme", previousTheme);
+    expect(calls).toEqual(["open"]);
   });
 
-  it("publishes again after a controlled owner vetoes an authenticated close", async () => {
+  it("stays open and keeps Close working when the controlled owner keeps it open", async () => {
     const onOpenChange = vi.fn();
     function VetoHarness() {
       return (
@@ -1420,171 +772,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onOpenChange).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps a vetoed root tainted when its controlled callback briefly creates a focus guard", async () => {
-    const taintedClosed = vi.fn();
-    const cleanClosed = vi.fn();
-    function GuardVetoDialog({ tainted, onClosed }: { tainted: boolean; onClosed: () => void }) {
-      const [open, setOpen] = useState(true);
-      const attempts = useRef(0);
-      return (
-        <Dialog
-          open={open}
-          onOpenChange={(next) => {
-            attempts.current += 1;
-            if (tainted && attempts.current === 1) {
-              const candidate = screen.getByTestId("veto-guard-candidate");
-              candidate.setAttribute("data-radix-focus-guard", "");
-              candidate.tabIndex = 0;
-              candidate.style.outline = "none";
-              candidate.style.opacity = "0";
-              candidate.style.position = "fixed";
-              candidate.style.pointerEvents = "none";
-              candidate.removeAttribute("data-radix-focus-guard");
-              candidate.removeAttribute("tabindex");
-              candidate.removeAttribute("style");
-              return;
-            }
-            setOpen(next);
-          }}
-        >
-          <DialogContent title="Veto guard mutation" onClosed={onClosed}>
-            <span data-testid="veto-guard-candidate" />
-          </DialogContent>
-        </Dialog>
-      );
-    }
-    const tree = (rootKey: string, tainted: boolean, onClosed: () => void) => (
-      <StrictMode>
-        <GuardVetoDialog key={rootKey} tainted={tainted} onClosed={onClosed} />
-      </StrictMode>
-    );
-    const view = renderDirect(tree("tainted", true, taintedClosed));
-
-    fireEvent.click(closeButton());
-    await flushTasks();
-    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.getByRole("dialog")).toHaveAccessibleName("Veto guard mutation");
-    expect(taintedClosed).not.toHaveBeenCalled();
-
-    act(() => view.root.render(tree("clean", false, cleanClosed)));
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(cleanClosed).toHaveBeenCalledOnce();
-    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
-  });
-
-  it("keeps a vetoed root tainted when detached guard lineage is stripped before records drain", async () => {
-    const taintedClosed = vi.fn();
-    const cleanClosed = vi.fn();
-    function DetachedGuardVetoDialog({ tainted, onClosed }: { tainted: boolean; onClosed: () => void }) {
-      const [open, setOpen] = useState(true);
-      const attempts = useRef(0);
-      return (
-        <Dialog
-          open={open}
-          onOpenChange={(next) => {
-            attempts.current += 1;
-            if (tainted && attempts.current === 1) {
-              const wrapper = document.createElement("div");
-              const guard = createFocusGuard();
-              wrapper.append(guard);
-              screen.getByTestId("detached-guard-host").append(wrapper);
-              wrapper.remove();
-              guard.removeAttribute("data-radix-focus-guard");
-              guard.removeAttribute("tabindex");
-              guard.removeAttribute("style");
-              return;
-            }
-            setOpen(next);
-          }}
-        >
-          <DialogContent title="Detached guard veto" onClosed={onClosed}>
-            <div data-testid="detached-guard-host" />
-          </DialogContent>
-        </Dialog>
-      );
-    }
-    const tree = (rootKey: string, tainted: boolean, onClosed: () => void) => (
-      <StrictMode>
-        <DetachedGuardVetoDialog key={rootKey} tainted={tainted} onClosed={onClosed} />
-      </StrictMode>
-    );
-    const view = renderDirect(tree("tainted", true, taintedClosed));
-
-    fireEvent.click(closeButton());
-    await flushTasks();
-    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(2);
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.getByRole("dialog")).toHaveAccessibleName("Detached guard veto");
-    expect(taintedClosed).not.toHaveBeenCalled();
-
-    act(() => view.root.render(tree("clean", false, cleanClosed)));
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(cleanClosed).toHaveBeenCalledOnce();
-    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
-  });
-
-  it("rejects callback mutation before a synchronous controlled close commit", async () => {
-    const taintedClosed = vi.fn();
-    const cleanClosed = vi.fn();
-    function SynchronousCloseDialog({ tainted, onClosed }: { tainted: boolean; onClosed: () => void }) {
-      const [open, setOpen] = useState(true);
-      return (
-        <Dialog
-          open={open}
-          onOpenChange={(next) => {
-            if (tainted) {
-              const wrapper = document.createElement("div");
-              const guard = createFocusGuard();
-              wrapper.append(guard);
-              screen.getByTestId("synchronous-close-host").append(wrapper);
-              wrapper.remove();
-              guard.removeAttribute("data-radix-focus-guard");
-              guard.removeAttribute("tabindex");
-              guard.removeAttribute("style");
-            }
-            flushSync(() => setOpen(next));
-          }}
-        >
-          <DialogContent title="Synchronous controlled close" onClosed={onClosed}>
-            <div data-testid="synchronous-close-host" />
-          </DialogContent>
-        </Dialog>
-      );
-    }
-    const tree = (rootKey: string, tainted: boolean, onClosed: () => void) => (
-      <StrictMode>
-        <SynchronousCloseDialog key={rootKey} tainted={tainted} onClosed={onClosed} />
-      </StrictMode>
-    );
-    const view = renderDirect(tree("tainted", true, taintedClosed));
-
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(taintedClosed).not.toHaveBeenCalled();
-
-    act(() => view.root.render(tree("clean", false, cleanClosed)));
-    fireEvent.click(closeButton());
-    await flushTasks();
-
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(cleanClosed).toHaveBeenCalledOnce();
-    expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
-  });
-
-  it("preserves direct body roots and authenticates exported DialogClose controls", async () => {
+  it("keeps body children direct and closes through an exported DialogClose", async () => {
     const onClosed = vi.fn();
     function OwnedCloseHarness() {
       const [open, setOpen] = useState(true);
@@ -1706,42 +894,6 @@ describe("DialogContent exact Strict Mode publication", () => {
     },
   );
 
-  it.each(["trigger", "close"] as const)(
-    "rejects a stale exported Dialog%s token on the current replacement path",
-    (kind) => {
-      const staleOpenChange = vi.fn();
-      const currentOpenChange = vi.fn();
-      const tree = (visit: "A" | "B") => (
-        <StrictMode>
-          <Dialog open onOpenChange={visit === "A" ? staleOpenChange : currentOpenChange}>
-            <DialogTrigger>Toggle {visit}</DialogTrigger>
-            <DialogContent title={`Owned ${visit}`}>
-              <DialogClose>Body close {visit}</DialogClose>
-            </DialogContent>
-          </Dialog>
-        </StrictMode>
-      );
-      const view = renderDirect(tree("A"));
-      const staleElement = screen.getByText(
-        kind === "trigger" ? /Toggle\s+A/ : /Body close\s+A/,
-      ) as HTMLButtonElement;
-      const staleHandler = captureClick(staleElement);
-
-      act(() => view.root.render(tree("B")));
-      const currentElement = screen.getByText(
-        kind === "trigger" ? /Toggle\s+B/ : /Body close\s+B/,
-      ) as HTMLButtonElement;
-      invokeFromCurrentNativePath(staleHandler, currentElement);
-
-      expect(staleOpenChange).not.toHaveBeenCalled();
-      expect(currentOpenChange).not.toHaveBeenCalled();
-      expect(screen.getByRole("dialog", { name: "Owned B" })).toBeInTheDocument();
-
-      fireEvent.click(currentElement);
-      expect(currentOpenChange).toHaveBeenCalledExactlyOnceWith(false);
-    },
-  );
-
   it("preserves React 19 cleanup returns from exported control refs", () => {
     const triggerCleanup = vi.fn();
     const closeCleanup = vi.fn();
@@ -1766,7 +918,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(closeCleanup).toHaveBeenCalledTimes(closeBeforeUnmount + 1);
   });
 
-  it("owns autofocus and close completion without a modal overlay", async () => {
+  it("focuses the body and completes close without a modal overlay", async () => {
     const onClosed = vi.fn();
     function NonModalHarness() {
       const [open, setOpen] = useState(true);
@@ -1788,7 +940,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("authenticates a current uncontrolled non-modal DialogTrigger close", async () => {
+  it("closes an uncontrolled non-modal root through DialogTrigger", async () => {
     const onClosed = vi.fn();
     renderDirect(
       <StrictMode>
@@ -1808,7 +960,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("authenticates non-modal focus-outside dismissal", async () => {
+  it("closes a non-modal root when focus moves outside", async () => {
     const onClosed = vi.fn();
     function NonModalFocusHarness() {
       const [open, setOpen] = useState(true);
@@ -1832,7 +984,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("preserves the page opener through a nested non-modal focus visit", async () => {
+  it("restores each opener through a nested non-modal dialog", async () => {
     const pageOpener = document.createElement("button");
     document.body.append(pageOpener);
     pageOpener.focus();
@@ -1870,7 +1022,355 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(outerClosed).toHaveBeenCalledOnce();
   });
 
-  it("restores the exact pre-existing body pointer style", async () => {
+  it.each(["Escape", "Close"] as const)(
+    "closes a nested modal dialog alone through %s and returns focus to the control that opened it",
+    async (action) => {
+      const pageOpener = document.createElement("button");
+      document.body.append(pageOpener);
+      pageOpener.focus();
+      const outerClosed = vi.fn();
+      const innerClosed = vi.fn();
+      function NestedModalHarness() {
+        const [outerOpen, setOuterOpen] = useState(true);
+        const [innerOpen, setInnerOpen] = useState(false);
+        return (
+          <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
+            <DialogContent title="Outer modal" onClosed={outerClosed}>
+              <input data-testid="outer-input" autoFocus />
+              <button type="button" onClick={() => setInnerOpen(true)}>Open nested</button>
+              <Dialog open={innerOpen} onOpenChange={setInnerOpen}>
+                <DialogContent title="Inner modal" onClosed={innerClosed}>
+                  <input data-testid="inner-input" autoFocus />
+                </DialogContent>
+              </Dialog>
+            </DialogContent>
+          </Dialog>
+        );
+      }
+      renderDirect(<StrictMode><NestedModalHarness /></StrictMode>);
+      const innerOpener = screen.getByRole("button", { name: "Open nested" });
+      act(() => innerOpener.focus());
+      fireEvent.click(innerOpener);
+      const innerInput = screen.getByTestId("inner-input");
+      expect(innerInput).toHaveFocus();
+      await flushTasks();
+      expect(innerInput).toHaveFocus();
+
+      if (action === "Close") fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Inner modal" })));
+      else fireEvent.keyDown(innerInput, { key: "Escape", code: "Escape" });
+      await flushTasks();
+
+      expect(screen.queryByRole("dialog", { name: "Inner modal" })).toBeNull();
+      expect(screen.getByRole("dialog", { name: "Outer modal" })).toBeInTheDocument();
+      expect(innerOpener).toHaveFocus();
+      expect(innerClosed).toHaveBeenCalledOnce();
+      expect(outerClosed).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(innerOpener, { key: "Escape", code: "Escape" });
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(pageOpener).toHaveFocus();
+      expect(outerClosed).toHaveBeenCalledOnce();
+      expect(innerClosed).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([false, true])(
+    "unmounted while open: focus goes to the opener, the page is unlocked and onClosed does not run (StrictMode=%s)",
+    async (strict) => {
+      const opener = document.createElement("button");
+      document.body.append(opener);
+      opener.focus();
+      const onClosed = vi.fn();
+      const tree = <ControlledDialog onClosed={onClosed} />;
+      const view = renderDirect(strict ? <StrictMode>{tree}</StrictMode> : tree);
+      expect(screen.getByTestId("dialog-input")).toHaveFocus();
+      await flushTasks();
+      expect(document.body.style.pointerEvents).toBe("none");
+      expect(opener).toHaveAttribute("aria-hidden", "true");
+
+      act(() => view.root.render(null));
+      await flushTasks();
+
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(opener).toHaveFocus();
+      expect(document.body.style.pointerEvents).toBe("");
+      expect(document.body).not.toHaveAttribute("data-scroll-locked");
+      expect(document.body.style.overflow).toBe("");
+      expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
+      expect(document.querySelectorAll("[aria-hidden], [inert]")).toHaveLength(0);
+      expect(onClosed).not.toHaveBeenCalled();
+    },
+  );
+
+  it("replaced through its key while open: the new body takes focus, no onClosed runs, and it still closes to the opener", async () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const onClosed = vi.fn();
+    function KeyedHarness() {
+      const [open, setOpen] = useState(true);
+      const [step, setStep] = useState(1);
+      return (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent key={step} title={`Step ${step}`} onClosed={() => onClosed(step)}>
+            <input data-testid={`step-${step}-input`} autoFocus />
+            <button type="button" onClick={() => setStep(2)}>Next</button>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><KeyedHarness /></StrictMode>);
+    expect(screen.getByTestId("step-1-input")).toHaveFocus();
+    await flushTasks();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await flushTasks();
+    expect(screen.getByRole("dialog", { name: "Step 2" })).toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByTestId("step-2-input")).toHaveFocus();
+    expect(onClosed).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(screen.getByTestId("step-2-input"), { key: "Escape", code: "Escape" });
+    await flushTasks();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(onClosed.mock.calls).toEqual([[2]]);
+  });
+
+  it("closed and opened again before the first close has settled: both closes run onClosed and focus returns to the opener", async () => {
+    // Radix reports a close one task after the dialog has unmounted. A dialog reopened inside that task
+    // must not lose its own way back to the first close's late report.
+    const onClosed = vi.fn();
+    function ReopenHarness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" data-testid="toolbar-image" onClick={() => setOpen(true)}>Image</button>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogContent title="Insert image" onClosed={onClosed}>
+              <input data-testid="image-url" autoFocus />
+            </DialogContent>
+          </Dialog>
+        </>
+      );
+    }
+    renderDirect(<StrictMode><ReopenHarness /></StrictMode>);
+    const opener = screen.getByTestId("toolbar-image");
+    act(() => opener.focus());
+    fireEvent.click(opener);
+    expect(screen.getByTestId("image-url")).toHaveFocus();
+
+    fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape", code: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    act(() => opener.focus());
+    fireEvent.click(opener);
+    expect(screen.getByTestId("image-url")).toHaveFocus();
+    await flushTasks();
+    expect(onClosed).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("image-url")).toHaveFocus();
+
+    fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape", code: "Escape" });
+    await flushTasks();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(onClosed).toHaveBeenCalledTimes(2);
+  });
+
+  describe("a close report that arrives late", () => {
+    // Radix reports a close through setTimeout(0) after the body has unmounted, and the browser holds that
+    // timer back while key events keep coming: on a production build the report of the first close
+    // arrived after the dialog had been opened again from another button and closed again.
+    /** Runs `close` and holds back every zero-delay timer it starts; the test fires them when it wants. */
+    function holdReport(close: () => void) {
+      const held: Array<() => void> = [];
+      const realSetTimeout = window.setTimeout;
+      const spy = vi.spyOn(window, "setTimeout").mockImplementation(((handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+        if (typeof handler !== "function" || delay) return realSetTimeout(handler, delay, ...args);
+        held.push(() => handler(...args));
+        return 0;
+      }) as typeof window.setTimeout);
+      try {
+        close();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(held.length).toBeGreaterThan(0);
+      return () => act(() => held.splice(0).forEach((run) => run()));
+    }
+
+    /** One dialog with two ways in: a mouse click that leaves focus in the editor, and Enter on a button. */
+    function TwoOpenersHarness({ onClosed }: { onClosed: (visit: number) => void }) {
+      const [visit, setVisit] = useState(0);
+      const [open, setOpen] = useState(false);
+      const show = () => {
+        setVisit((current) => current + 1);
+        setOpen(true);
+      };
+      return (
+        <>
+          <div data-testid="editor" tabIndex={0} />
+          <button type="button" data-testid="toolbar-image" onClick={show}>Image</button>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogContent title="Insert image" onClosed={() => onClosed(visit)}>
+              <input data-testid="image-url" autoFocus />
+            </DialogContent>
+          </Dialog>
+        </>
+      );
+    }
+
+    /** Opens from the editor (focus stays there, as with a mouse click on a toolbar button) and closes at once. */
+    async function firstVisitClosed(onClosed: (visit: number) => void) {
+      renderDirect(<StrictMode><TwoOpenersHarness onClosed={onClosed} /></StrictMode>);
+      const editor = screen.getByTestId("editor");
+      const button = screen.getByTestId("toolbar-image");
+      act(() => editor.focus());
+      fireEvent.click(button);
+      expect(screen.getByTestId("image-url")).toHaveFocus();
+      await flushTasks();
+      const firstReport = holdReport(() => fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape", code: "Escape" }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+      // Opened again from the button with the keyboard, before the first close has been reported.
+      act(() => button.focus());
+      fireEvent.click(button);
+      expect(screen.getByTestId("image-url")).toHaveFocus();
+      await flushTasks();
+      return { editor, button, firstReport };
+    }
+
+    it.each(["the first close's report, then the second's", "the second close's report, then the first's"] as const)(
+      "after the dialog has opened and closed again, %s: focus ends on the second opener and each close runs its own onClosed once",
+      async (order) => {
+        const onClosed = vi.fn();
+        const { editor, button, firstReport } = await firstVisitClosed(onClosed);
+        const secondReport = holdReport(() => fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape", code: "Escape" }));
+        expect(screen.queryByRole("dialog")).toBeNull();
+        expect(document.body).toHaveFocus();
+        expect(onClosed).not.toHaveBeenCalled();
+
+        if (order.startsWith("the first")) {
+          firstReport();
+          expect(editor).not.toHaveFocus();
+          expect(onClosed.mock.calls).toEqual([[1]]);
+          secondReport();
+          expect(button).toHaveFocus();
+          expect(onClosed.mock.calls).toEqual([[1], [2]]);
+        } else {
+          secondReport();
+          expect(button).toHaveFocus();
+          expect(onClosed.mock.calls).toEqual([[2]]);
+          const moved = vi.fn();
+          document.addEventListener("focusin", moved);
+          firstReport();
+          document.removeEventListener("focusin", moved);
+          expect(moved).not.toHaveBeenCalled();
+          expect(button).toHaveFocus();
+          expect(onClosed.mock.calls).toEqual([[2], [1]]);
+        }
+        await flushTasks();
+        expect(button).toHaveFocus();
+        expect(onClosed).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it("while the dialog is open again: focus stays in the open dialog, the first close runs its own onClosed, and the dialog still closes to its own opener", async () => {
+      const onClosed = vi.fn();
+      const { button, firstReport } = await firstVisitClosed(onClosed);
+      const moved = vi.fn();
+      document.addEventListener("focusin", moved);
+      firstReport();
+      document.removeEventListener("focusin", moved);
+      expect(moved).not.toHaveBeenCalled();
+      expect(screen.getByTestId("image-url")).toHaveFocus();
+      expect(screen.getByRole("dialog", { name: "Insert image" })).toBeInTheDocument();
+      expect(onClosed.mock.calls).toEqual([[1]]);
+
+      fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape", code: "Escape" });
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(button).toHaveFocus();
+      expect(onClosed.mock.calls).toEqual([[1], [2]]);
+    });
+  });
+
+  it.each([false, true])(
+    "hands over to a second dialog from its onClosed: each onClosed runs once and focus ends on the first opener (StrictMode=%s)",
+    async (strict) => {
+      // Share closes, then opens "Connect an AI agent" from its onClosed. Each dialog keeps its own record
+      // of the close, and the first dialog's late report must not take focus out of the second.
+      const firstClosed = vi.fn();
+      const secondClosed = vi.fn();
+      function ChainHarness() {
+        const [first, setFirst] = useState(false);
+        const [second, setSecond] = useState(false);
+        return (
+          <>
+            <button type="button" data-testid="share-button" onClick={() => setFirst(true)}>Share</button>
+            <Dialog open={first} onOpenChange={setFirst}>
+              <DialogContent
+                title="Share"
+                onClosed={() => {
+                  firstClosed();
+                  setSecond(true);
+                }}
+              >
+                <button type="button" onClick={() => setFirst(false)}>Connect an AI agent</button>
+              </DialogContent>
+            </Dialog>
+            <Dialog open={second} onOpenChange={setSecond}>
+              <DialogContent title="Connect an AI agent" onClosed={secondClosed}>
+                <input data-testid="agent-input" autoFocus />
+              </DialogContent>
+            </Dialog>
+          </>
+        );
+      }
+      renderDirect(strict ? <StrictMode><ChainHarness /></StrictMode> : <ChainHarness />);
+      const share = screen.getByTestId("share-button");
+      act(() => share.focus());
+      fireEvent.click(share);
+      await flushTasks();
+
+      fireEvent.click(screen.getByRole("button", { name: "Connect an AI agent" }));
+      await flushTasks();
+      await flushTasks();
+      expect(screen.getAllByRole("dialog")).toHaveLength(1);
+      expect(screen.getByTestId("agent-input")).toHaveFocus();
+      expect(firstClosed).toHaveBeenCalledOnce();
+      expect(secondClosed).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(screen.getByTestId("agent-input"), { key: "Escape", code: "Escape" });
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(share).toHaveFocus();
+      expect(firstClosed).toHaveBeenCalledOnce();
+      expect(secondClosed).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("runs onClosed when the owner closes it without Radix and keeps it mounted", async () => {
+    const onClosed = vi.fn();
+    function OwnCloseHarness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent title="Own close" onClosed={onClosed}>
+            <button type="button" onClick={() => setOpen(false)}>Insert</button>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><OwnCloseHarness /></StrictMode>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
+  });
+
+  it("restores the pre-existing body pointer style", async () => {
     const previousPointerEvents = document.body.style.pointerEvents;
     document.body.style.pointerEvents = "auto";
     try {
@@ -1890,7 +1390,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     }
   });
 
-  it("keeps an authenticated transition through a deferred controlled close", () => {
+  it("completes a deferred controlled close", () => {
     vi.useFakeTimers();
     const onClosed = vi.fn();
     function DeferredCloseHarness() {
@@ -1914,80 +1414,6 @@ describe("DialogContent exact Strict Mode publication", () => {
     expect(onClosed).toHaveBeenCalledOnce();
   });
 
-  it("disconnects every document observer when an open root finally unmounts", async () => {
-    const documentObservers = new Set<MutationObserver>();
-    const disconnected = new Set<MutationObserver>();
-    const nativeObserve = MutationObserver.prototype.observe;
-    const nativeDisconnect = MutationObserver.prototype.disconnect;
-    vi.spyOn(MutationObserver.prototype, "observe").mockImplementation(function (
-      this: MutationObserver,
-      target,
-      options,
-    ) {
-      if (target === document) documentObservers.add(this);
-      return nativeObserve.call(this, target, options);
-    });
-    vi.spyOn(MutationObserver.prototype, "disconnect").mockImplementation(function (
-      this: MutationObserver,
-    ) {
-      disconnected.add(this);
-      return nativeDisconnect.call(this);
-    });
-    const view = renderDirect(
-      <StrictMode>
-        <ControlledDialog><input autoFocus /></ControlledDialog>
-      </StrictMode>,
-    );
-
-    act(() => view.root.unmount());
-    view.host.remove();
-    directViews.splice(directViews.indexOf(view), 1);
-    await act(() => Promise.resolve());
-
-    expect(documentObservers.size).toBeGreaterThan(0);
-    expect([...documentObservers].every((observer) => disconnected.has(observer))).toBe(true);
-  });
-
-  it("processes bounded mutation batches and disconnects on terminal invalidation", async () => {
-    const documentObservers = new Set<MutationObserver>();
-    const disconnected = new Set<MutationObserver>();
-    const nativeObserve = MutationObserver.prototype.observe;
-    const nativeDisconnect = MutationObserver.prototype.disconnect;
-    vi.spyOn(MutationObserver.prototype, "observe").mockImplementation(function (
-      this: MutationObserver,
-      target,
-      options,
-    ) {
-      if (target === document) documentObservers.add(this);
-      return nativeObserve.call(this, target, options);
-    });
-    vi.spyOn(MutationObserver.prototype, "disconnect").mockImplementation(function (
-      this: MutationObserver,
-    ) {
-      disconnected.add(this);
-      return nativeDisconnect.call(this);
-    });
-    renderDirect(
-      <StrictMode>
-        <ControlledDialog><input data-testid="journal-input" autoFocus /></ControlledDialog>
-      </StrictMode>,
-    );
-    const activeObserver = [...documentObservers].find((observer) => !disconnected.has(observer));
-    expect(activeObserver).toBeDefined();
-    const input = screen.getByTestId("journal-input");
-    for (let batch = 0; batch < 20; batch++) {
-      input.setAttribute("data-batch", String(batch));
-      await act(() => Promise.resolve());
-    }
-    expect(disconnected.has(activeObserver!)).toBe(false);
-
-    closeButton().setAttribute("aria-label", "Invalid");
-    await act(() => Promise.resolve());
-
-    expect(disconnected.has(activeObserver!)).toBe(true);
-    expect(activeObserver!.takeRecords()).toHaveLength(0);
-  });
-
   it("renders a closed dialog tree without a browser document", () => {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, "document");
     if (!descriptor) throw new Error("The test environment did not provide document");
@@ -2003,7 +1429,7 @@ describe("DialogContent exact Strict Mode publication", () => {
     }
   });
 
-  it("preserves the exact Close label, classes, body focus order, and conditional description", () => {
+  it("keeps the Close label, classes, body focus order and fallback description", () => {
     renderDirect(
       <StrictMode>
         <ControlledDialog title="Exact title">
@@ -2113,7 +1539,7 @@ describe("DialogContent header wrapping", () => {
   });
 
   it.each(variants)(
-    "keeps names, Radix references and current dismissal through replacement and reopen in $size dialogs",
+    "keeps names and Radix references through text replacement and reopen in $size dialogs",
     async ({ wide }) => {
       const onClosed = vi.fn();
       const onOpenChange = vi.fn();
@@ -2132,7 +1558,6 @@ describe("DialogContent header wrapping", () => {
       const initial = expectHeader(textCases[0].title, textCases[0].description, wide);
       const titleId = initial.heading.id;
       const descriptionId = initial.description.id;
-      const initialClick = captureClick(initial.close);
 
       for (const text of [
         textCases[2], textCases[1],
@@ -2145,15 +1570,12 @@ describe("DialogContent header wrapping", () => {
         expect(current.content).toBe(initial.content);
         expect(current.heading.id).toBe(titleId);
         expect(current.description.id).toBe(descriptionId);
-        invokeFromCurrentNativePath(initialClick, current.close);
         expect(onClosed).not.toHaveBeenCalled();
         expect(onOpenChange.mock.calls).toEqual([[true]]);
         expect(screen.getByTestId("wrapping-input")).toHaveFocus();
       }
 
-      const retiredClose = closeButton();
-      const retiredClick = captureClick(retiredClose);
-      fireEvent.click(retiredClose);
+      fireEvent.click(closeButton());
       await flushTasks();
       expect(screen.queryByRole("dialog")).toBeNull();
       expect(onClosed).toHaveBeenCalledOnce();
@@ -2165,8 +1587,6 @@ describe("DialogContent header wrapping", () => {
       expect(reopened.content).not.toBe(initial.content);
       expect(reopened.heading.id).toBe(titleId);
       expect(reopened.description.id).toBe(descriptionId);
-      invokeFromCurrentNativePath(retiredClick, reopened.close);
-      act(() => retiredClick(fabricatedClick(retiredClose)));
       expect(onClosed).toHaveBeenCalledOnce();
       expect(onOpenChange.mock.calls).toEqual([[true], [false], [true]]);
       expect(screen.getByTestId("wrapping-input")).toHaveFocus();
