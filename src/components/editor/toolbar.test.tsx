@@ -72,7 +72,8 @@ function setup({
 
 const button = (name: string) => screen.getByRole("button", { name });
 const heading = () => screen.getByTestId("heading-menu");
-const radio = (name: string) => screen.getByRole("menuitemradio", { name });
+// The checked item's name starts with its check mark.
+const radio = (name: string) => screen.getByRole("menuitemradio", { name: new RegExp(`${name}$`) });
 
 afterEach(() => {
   cleanup();
@@ -288,7 +289,8 @@ describe("Toolbar Text style menu", () => {
     await waitFor(() => expect(radio("Paragraph")).toHaveFocus());
     await userEvent.keyboard("{ArrowRight}{End}");
     expect(radio("Heading 6")).toHaveFocus();
-    expect(button("Bold")).not.toHaveFocus();
+    // The open modal menu hides the rest of the page from the accessibility tree.
+    expect(screen.getByRole("button", { name: "Bold", hidden: true })).not.toHaveFocus();
   });
 
   it("closes on Escape and the first toolbar action after it runs", async () => {

@@ -180,7 +180,6 @@ export const Toolbar = memo(function Toolbar({
 
   // Text style menu: Radix opens it on Enter, Space and ↓ (first item). ↑ opens it on the last item.
   const [headingOpen, setHeadingOpen] = useState(false);
-  const headingContentRef = useRef<HTMLDivElement>(null);
   const focusLastHeading = useRef(false);
   const onHeadingKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
     if (e.key !== "ArrowUp" || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || e.nativeEvent.isComposing) return;
@@ -193,14 +192,12 @@ export const Toolbar = memo(function Toolbar({
     if (!open) focusLastHeading.current = false;
     setHeadingOpen(open && session.canEdit);
   };
-  const onHeadingOpenAutoFocus = (e: Event) => {
-    if (!focusLastHeading.current) return;
+  // Radix enters a menu opened from the keyboard on its first item. After ↑, move on to the last one.
+  const onHeadingContentFocus = (e: FocusEvent<HTMLDivElement>) => {
+    if (!focusLastHeading.current || (e.target as HTMLElement).getAttribute("role") !== "menuitemradio") return;
     focusLastHeading.current = false;
-    const items = headingContentRef.current?.querySelectorAll<HTMLElement>("[role=menuitemradio]:not([data-disabled])");
-    const last = items?.[items.length - 1];
-    if (!last) return;
-    e.preventDefault();
-    last.focus({ preventScroll: true });
+    const items = e.currentTarget.querySelectorAll<HTMLElement>("[role=menuitemradio]:not([data-disabled])");
+    items[items.length - 1]?.focus({ preventScroll: true });
   };
 
   return (
@@ -231,10 +228,9 @@ export const Toolbar = memo(function Toolbar({
             </button>
           </MenuTrigger>
           <MenuContent
-            ref={headingContentRef}
             align="start"
             className="w-56"
-            onOpenAutoFocus={onHeadingOpenAutoFocus}
+            onFocus={onHeadingContentFocus}
             // Radix hands focus back to the trigger when the menu closes; the caret belongs in the editor
             // the moment a style is picked (task #437: Ctrl+Z and typing went to the toolbar button).
             onCloseAutoFocus={(e) => {
