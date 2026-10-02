@@ -1588,7 +1588,13 @@ test.describe("dialog focus return (#161)", () => {
   const arrowToItem = async (page: Page, name: string) => {
     await expect(page.getByRole("menu")).toBeVisible();
     for (let i = 0; i < 30; i++) {
-      const text = await page.evaluate(() => (document.activeElement?.getAttribute("role") === "menuitem" ? document.activeElement.textContent : null));
+      // Radix moves menu focus in a setTimeout after ArrowDown; wait one task so we read where it landed.
+      const text = await page.evaluate(
+        () =>
+          new Promise<string | null>((resolve) =>
+            setTimeout(() => resolve(document.activeElement?.getAttribute("role") === "menuitem" ? document.activeElement.textContent : null)),
+          ),
+      );
       if (text?.includes(name)) return;
       await page.keyboard.press("ArrowDown");
     }
