@@ -65,6 +65,16 @@ function isPlainKey(event: ReactKeyboardEvent) {
   );
 }
 
+/**
+ * One press is one action. A held Enter repeats its keydown, and the browser presses whichever button
+ * has focus by then: a row closes the popover, focus returns to the bell, the next repeat opens the
+ * bell again and the one after opens its first row. Cancelling the repeats stops those presses; the
+ * first keydown, and Space, which presses on release, are left to the button.
+ */
+export function cancelHeldPress(event: ReactKeyboardEvent) {
+  if (event.repeat && (event.key === "Enter" || event.key === " ")) event.preventDefault();
+}
+
 /** The row a list key moves focus to, or null when the key does not move focus. */
 function rowMovement(key: string, index: number, count: number): number | null {
   if (index < 0 || index >= count) return null;
@@ -168,6 +178,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
   };
 
   const onBellKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    cancelHeldPress(event);
     if (open || !isPlainKey(event) || (event.key !== "ArrowDown" && event.key !== "ArrowUp")) return;
     event.preventDefault();
     focusOnOpen.current = event.key === "ArrowDown" ? "first" : "last";
@@ -213,6 +224,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
         collisionPadding={8}
         className="w-[min(380px,calc(100vw-16px))] p-0"
         data-testid="notifications-popover"
+        onKeyDown={cancelHeldPress}
         onFocus={(event) => {
           lastFocused.current = event.target;
         }}

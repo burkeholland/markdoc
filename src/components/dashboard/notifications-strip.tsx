@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Bell, CheckCheck, X } from "lucide-react";
 import type { NotificationDto } from "@/lib/api";
 import { markAllNotificationsRead, markNotificationRead, sentence, useNotifications } from "@/lib/notifications-store";
-import { KindIcon, actorLabel } from "@/components/notifications/notifications-bell";
+import { KindIcon, actorLabel, cancelHeldPress } from "@/components/notifications/notifications-bell";
 import { notificationHref } from "@/components/notifications/open";
 import { RelativeTime } from "@/components/ui/relative-time";
 
@@ -48,8 +48,9 @@ function isRepeatedClick(event: ReactMouseEvent) {
  * shares), shown at the top of the dashboard. Renders nothing when there is nothing to show.
  * Clicking one marks it read and opens the document on the relevant thread.
  *
- * One gesture is one action: a repeated click is ignored, and while one row's document is opening no
- * other row opens. The store shares one in-flight request per notification.
+ * One gesture is one action: a repeated click and the repeats of a held Enter or Space are ignored, and
+ * while one row's document is opening no other row opens. The store shares one in-flight request per
+ * notification.
  */
 export function NotificationsStrip() {
   const router = useRouter();
@@ -133,6 +134,7 @@ export function NotificationsStrip() {
       className="mb-8 rounded-2xl border border-accent/40 bg-accent-soft/40 p-4"
       aria-label="Notifications"
       data-testid="notifications-strip"
+      onKeyDown={cancelHeldPress}
     >
       <div className="mb-2 flex items-center justify-between">
         <h2 className="flex items-center gap-1.5 text-sm font-semibold text-ink">

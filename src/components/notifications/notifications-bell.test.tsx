@@ -771,6 +771,80 @@ describe("notification bell loading", () => {
   });
 });
 
+// A held key repeats its keydown, and a browser presses the focused button on every Enter keydown that
+// is not cancelled. jsdom does not, so these tests send the click the browser would.
+describe("a held Enter or Space", () => {
+  function pressLikeABrowser(key: "Enter" | " ", init: KeyboardEventInit = {}) {
+    const target = document.activeElement!;
+    const event = press(target, key, init);
+    if (key === "Enter" && !event.defaultPrevented && target instanceof HTMLButtonElement && !target.disabled) fireEvent.click(target);
+    return event;
+  }
+
+  it.each(["Enter", " "] as const)("cancels the repeats of a held %j on the bell, and not the first keydown", (key) => {
+    renderBell(THREE);
+    act(() => trigger().focus());
+
+    expect(press(trigger(), key, { repeat: true }).defaultPrevented).toBe(true);
+    expect(press(trigger(), key).defaultPrevented).toBe(false);
+    expect(popover()).toBeNull();
+  });
+
+  it.each(["Enter", " "] as const)("cancels the repeats of a held %j on every button in the popover, and not the first keydown", (key) => {
+    const onOpen = vi.fn();
+    openBell({ ...THREE, readError: READ_FAILURE }, { onOpen });
+
+    for (const button of [rows()[0]!, rows()[2]!, screen.getByTestId("notifications-read-retry"), screen.getByTestId("notifications-read-all")]) {
+      act(() => button.focus());
+      expect(press(button, key, { repeat: true }).defaultPrevented).toBe(true);
+      expect(press(button, key).defaultPrevented).toBe(false);
+    }
+    expectNothingDone(onOpen);
+    expect(popover()).toBeVisible();
+  });
+
+  // The row closes the popover and focus returns to the bell, where the repeats of the same press
+  // used to open the bell again and then its first row.
+  it("opens only the row it was held on, and leaves the bell closed", async () => {
+    const onOpen = vi.fn();
+    openBell(THREE, { onOpen });
+    await settle();
+    act(() => rows()[1]!.focus());
+
+    pressLikeABrowser("Enter");
+    expect(popover()).toBeNull();
+    for (let repeats = 0; repeats < 5; repeats += 1) {
+      await settle();
+      expect(trigger()).toHaveFocus();
+      pressLikeABrowser("Enter", { repeat: true });
+    }
+
+    expect(popover()).toBeNull();
+    expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM_TWO.id);
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM_TWO);
+  });
+
+  it("opens the bell once when held on it, without opening a row, and the next press opens the focused row", async () => {
+    const onOpen = vi.fn();
+    renderBell(THREE, { onOpen });
+    act(() => trigger().focus());
+
+    pressLikeABrowser("Enter");
+    for (let repeats = 0; repeats < 5; repeats += 1) {
+      await settle();
+      expect(rows()[0]).toHaveFocus();
+      pressLikeABrowser("Enter", { repeat: true });
+    }
+
+    expect(popover()).toBeVisible();
+    expectNothingDone(onOpen);
+
+    pressLikeABrowser("Enter");
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
+    expect(popover()).toBeNull();
+  });
+});
+
 describe("browsing rows with the keyboard", () => {
   it.each([
     ["ArrowDown", 0, 1],

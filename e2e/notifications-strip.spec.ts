@@ -195,6 +195,32 @@ test.describe("dashboard notification strip with real input", () => {
     expect(new URL(page.url()).pathname).toBe("/");
   });
 
+  // A held key repeats its keydown. Mark as read moves focus to the next row, so the repeats used to
+  // open that row.
+  test("a held Enter on Mark as read takes one row away and opens nothing", async () => {
+    const page = recipient.page;
+    await shareNew(3);
+    const strip = await openDashboard(3);
+    const rows = strip.getByTestId("notification-item");
+    const first = await rows.first().getAttribute("data-notification-id");
+    await tabTo(strip.getByTestId("notification-open").first());
+    await page.keyboard.press("ArrowRight");
+    await expect(strip.getByTestId("notification-dismiss").first()).toBeFocused();
+    const reads = watchReads();
+
+    for (let repeats = 0; repeats < 10; repeats += 1) {
+      await page.keyboard.down("Enter");
+      await page.waitForTimeout(35);
+    }
+    await page.keyboard.up("Enter");
+
+    await expect.poll(unreadCount).toBe(2);
+    await expect(rows).toHaveCount(2);
+    await expect(strip.getByTestId("notification-open").first()).toBeFocused();
+    expect(reads).toEqual([`/api/notifications/${first}/read`]);
+    expect(new URL(page.url()).pathname).toBe("/");
+  });
+
   // Emptying the strip removes the control that had focus. Focus goes to a status line in the strip's
   // place, never to <body>, and the next Tab carries on from where the strip was.
   test("when the last row leaves, focus moves to a status line and Tab carries on from there", async () => {

@@ -269,4 +269,56 @@ test.describe("notification bell with real input (#2225)", () => {
     await page.keyboard.press("Enter");
     await page.waitForURL(`**/d/${shared}`);
   });
+
+  // A held key repeats its keydown. A row closes the popover and focus returns to the bell, so the
+  // repeats used to open the bell again and then its first row.
+  test("a held Enter is one press: the bell opens without opening a row, and a row opens alone", async () => {
+    const page = recipient.page;
+    const bell = page.getByTestId("notifications-bell");
+    const popover = page.getByTestId("notifications-popover");
+    const rows = popover.getByTestId("notification-item");
+    const holdEnter = async () => {
+      for (let repeats = 0; repeats < 10; repeats += 1) {
+        await page.keyboard.down("Enter");
+        await page.waitForTimeout(35);
+      }
+      await page.keyboard.up("Enter");
+    };
+
+    // Three replies in the open document, one thread each, so opening one leaves the others unread.
+    const words = ["Alpha", "Bravo", "Charlie"];
+    const docId = await createDocument(page, `# Held keys\n\n${words.map((word) => `${word} paragraph.`).join("\n\n")}\n`, "Held keys");
+    await shareWith(page, docId, sender.login, "editor");
+    for (const word of words) {
+      const added = await page.request.post(`/api/documents/${docId}/comments`, { data: { action: "add", quote: `${word} paragraph`, body: `Thread on ${word}` } });
+      expect(added.ok()).toBeTruthy();
+      const thread = (await added.json()) as { id?: string; threadId?: string };
+      const replied = await sender.page.request.post(`/api/documents/${docId}/comments`, { data: { action: "reply", threadId: thread.threadId ?? thread.id, body: `Reply on ${word}` } });
+      expect(replied.ok()).toBeTruthy();
+    }
+    await expect.poll(unreadCount).toBe(3);
+    await openDocument(page, docId);
+    await expect(bell).toHaveAttribute("data-unread", "3");
+    const reads: string[] = [];
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === "POST" && /^\/api\/notifications\/(read-all|[^/]+\/read)$/.test(path)) reads.push(path);
+    });
+
+    await bell.focus();
+    await holdEnter();
+    await expect(popover).toBeVisible();
+    await expect(rows.first()).toBeFocused();
+    expect(reads).toEqual([]);
+
+    await page.keyboard.press("ArrowDown");
+    await expect(rows.nth(1)).toBeFocused();
+    const held = await rows.nth(1).getAttribute("data-notification-id");
+    await holdEnter();
+    await expect(popover).toHaveCount(0);
+    await expect.poll(unreadCount).toBe(2);
+    expect(reads).toEqual([`/api/notifications/${held}/read`]);
+    expect(new URL(page.url()).pathname).toBe(`/d/${docId}`);
+    await expect(popover).toHaveCount(0);
+  });
 });

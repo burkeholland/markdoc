@@ -594,6 +594,47 @@ describe("notification strip keyboard", () => {
     expectNothingDone();
     expect(rows()).toHaveLength(2);
   });
+
+  // A browser presses a button on each Enter keydown unless the keydown is cancelled, and on Space keyup.
+  // jsdom does neither, so this sends the click the browser would.
+  function pressLikeABrowser(key: "Enter" | " ", init: KeyboardEventInit = {}) {
+    const target = document.activeElement!;
+    const event = press(target, key, init);
+    if (key === "Enter" && !event.defaultPrevented && target instanceof HTMLButtonElement) fireEvent.click(target);
+    return event;
+  }
+
+  it.each(["Enter", " "] as const)("cancels the repeats of a held %j on every button, and not the first keydown", async (key) => {
+    await mountStrip([ITEM, ITEM_TWO]);
+
+    for (const button of [opens()[0]!, dismisses()[0]!, readAll()]) {
+      expect(press(button, key).defaultPrevented).toBe(false);
+      expect(press(button, key, { repeat: true }).defaultPrevented).toBe(true);
+    }
+    expectNothingDone();
+  });
+
+  // Mark as read moves focus to the next row, where the repeats of the same press would open it.
+  it("a held Enter on Mark as read takes one row away and opens nothing", async () => {
+    await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
+    act(() => dismisses()[0]!.focus());
+
+    pressLikeABrowser("Enter");
+    expect(opens()[0]).toHaveFocus();
+    for (let repeats = 0; repeats < 5; repeats += 1) pressLikeABrowser("Enter", { repeat: true });
+
+    expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(router.push).not.toHaveBeenCalled();
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+    expect(opens()[0]).toHaveFocus();
+
+    // The key is released and pressed again: that is a new press.
+    pressLikeABrowser("Enter");
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(hrefOf(ITEM_TWO));
+    await act(async () => {
+      await Promise.resolve();
+    });
+  });
 });
 
 describe("notification strip focus when a row leaves", () => {
