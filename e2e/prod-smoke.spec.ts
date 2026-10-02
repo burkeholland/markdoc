@@ -96,6 +96,50 @@ test.describe("production build", () => {
     await owner.context.close();
   });
 
+  // #2244: the old `CollaboratorLoginInput` (a ~3,700-line hand-rolled event gate) crashed with "Maximum
+  // update depth exceeded" or dropped characters while typing, both only ever seen with real key presses
+  // on a real browser. This dev-login user has no GitHub token, so `GET /api/github/users` answers
+  // `reason: "no-github-token"` and no suggestion list renders here (that path - the list actually
+  // showing candidates - is exercised with the GitHub mock on the dev server, e2e/share-autocomplete.spec.ts,
+  // because GITHUB_MOCK is refused outside development; see src/server/github/mock.ts). The debounced
+  // fetch, its abort-on-unmount and the state update on its answer still run on every keystroke here,
+  // which is the exact code path the crash came from, so this still proves the fix on a production bundle.
+  test("Share dialog: typing a full handle key by key never crashes and adds exactly what was typed (#2244)", async ({ browser }) => {
+    const owner = await signIn(browser, "prod-share-typing");
+    const { page } = owner;
+    const errors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    page.on("pageerror", (error) => errors.push(error.message));
+
+    const id = await createDocument(page, "# Share typing\n\nProduction smoke.\n", "Share typing");
+    await openDocument(page, id);
+
+    await page.getByTestId("share-button").click();
+    const dialog = page.getByRole("dialog", { name: /share/i });
+    await expect(dialog).toBeVisible();
+    const input = page.getByTestId("share-login");
+    await expect(input).toBeFocused();
+
+    const typed = "zz-nobody";
+    await page.keyboard.type(typed, { delay: 50 });
+    // No dropped characters: the box holds exactly what was typed, not a truncated prefix.
+    await expect(input).toHaveValue(typed);
+
+    // The debounced lookup settles (empty answer: no token here) with no list and no error banner.
+    await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+    await expect(page.getByTestId("share-login-error")).toHaveCount(0);
+
+    await page.getByTestId("share-add").click();
+    await expect(page.getByTestId("collaborator-row")).toContainText(`@${typed}`);
+    await expect(input).toHaveValue("");
+
+    const loopErrors = errors.filter((text) => text.includes("Maximum update depth exceeded"));
+    expect(loopErrors, errors.join("\n")).toEqual([]);
+    await owner.context.close();
+  });
+
   // #2207: on 1f423812 a real mouse click on these items closed the More menu (that part was already
   // fixed) but left focus on <body> instead of handing it back to the More trigger, the same way Enter
   // already did. Only Keyboard shortcuts and compact Share are exercised here; Connect to GitHub, compact

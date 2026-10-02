@@ -204,6 +204,39 @@ describe("ShareDialog", () => {
     expect(screen.getByTestId("share-login")).toHaveValue("  bob  ");
   });
 
+  it("picking a suggestion moves focus to the role select; Enter there never adds, held or released - same as main", async () => {
+    vi.mocked(api.github.searchUsers).mockResolvedValue({
+      users: [{ login: "octocat", name: null, avatarUrl: "https://avatars.githubusercontent.com/octocat?s=40" }],
+      limited: false,
+    });
+
+    renderShare();
+    await loadedRows();
+
+    const loginBox = screen.getByTestId("share-login");
+    loginBox.focus();
+    await fillLogin("octo");
+    const list = await screen.findByTestId("share-login-suggestions");
+    expect(within(list).getAllByTestId("share-login-option")).toHaveLength(1);
+
+    fireEvent.keyDown(loginBox, { key: "ArrowDown" });
+    fireEvent.keyDown(loginBox, { key: "Enter" }); // picks: fills the field, does not add
+
+    expect(loginBox).toHaveValue("octocat");
+    expect(screen.queryByTestId("share-login-suggestions")).not.toBeInTheDocument();
+    expect(screen.getByTestId("share-role")).toHaveFocus(); // onPick moved focus here
+    expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+
+    // A held Enter's auto-repeat must not add - the original review bug (#2248 round 1) and must stay fixed.
+    fireEvent.keyDown(screen.getByTestId("share-role"), { key: "Enter", repeat: true });
+    expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+
+    // The role select has no onKeyDown at all - same as main - so a released, non-repeat Enter here does not
+    // add either; only the Add button submits.
+    fireEvent.keyDown(screen.getByTestId("share-role"), { key: "Enter" });
+    expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+  });
+
   it("shows a note when the added person has not signed in yet", async () => {
     vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([])).mockResolvedValueOnce(people([]));
     vi.mocked(api.documents.addCollaborator).mockResolvedValueOnce({ ok: true, login: "newbie", role: "viewer", pending: true });

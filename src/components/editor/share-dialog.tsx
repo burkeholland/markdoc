@@ -7,7 +7,7 @@ import type { Role } from "@/server/db/schema";
 import { api, apiErrorText, type CollaboratorDto } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
-import { CollaboratorLoginInput } from "@/components/editor/collaborator-login-input";
+import { CollaboratorLoginInput, isValidLogin } from "@/components/editor/collaborator-login-input";
 import { cn } from "@/lib/utils";
 
 type CollaboratorRole = Exclude<Role, "owner">;
@@ -143,7 +143,7 @@ export const ShareDialog = memo(function ShareDialog({
   const add = async (event: FormEvent) => {
     event.preventDefault();
     const handle = login.trim();
-    if (!handle || adder.current) return;
+    if (!isValidLogin(handle) || adder.current) return;
     adder.current = true;
     const documentId = doc.id;
     setAdding(true);
@@ -254,7 +254,7 @@ export const ShareDialog = memo(function ShareDialog({
                     </option>
                   ))}
                 </select>
-                <button type="submit" className="btn btn-primary" disabled={adding || !login.trim()} data-testid="share-add">
+                <button type="submit" className="btn btn-primary" disabled={adding || !isValidLogin(login)} data-testid="share-add">
                   {adding ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : "Add"}
                 </button>
               </form>
