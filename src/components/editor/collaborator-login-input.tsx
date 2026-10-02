@@ -80,7 +80,12 @@ export function CollaboratorLoginInput({
   const feedbackId = `${listId}-feedback`;
   const query = suggestQuery(value);
 
-  const [options, setOptions] = useState<readonly GitHubUserDto[]>([]);
+  // Paired with the query it answers, not just the options themselves: a render computes `candidates`
+  // from this only when `result.query` still matches the *current* (value-derived) `query` below, so a
+  // keydown that lands before the effect for a newer query has run never reads an answer for an older one
+  // (`handleKeyDown`'s Enter branch, in particular, never picks a suggestion fetched for text the user has
+  // since changed - see `candidates` below).
+  const [result, setResult] = useState<{ query: string; options: readonly GitHubUserDto[] } | null>(null);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
   const [lookup, setLookup] = useState<Lookup | null>(null);
@@ -104,7 +109,11 @@ export function CollaboratorLoginInput({
   const focusedRef = useRef(false);
 
   // Fetches one query, racing nothing but itself: a stale answer (superseded or aborted) is simply dropped.
-  const startLookup = useCallback((q: string) => {
+  // `manualRetry` is set only by the Retry button below: a successful manual retry moves focus back to the
+  // handle field so the list reopens with the fresh answer, instead of leaving focus sitting on Retry
+  // (which a debounced, typing-driven lookup must never do — the user is still typing, not retrying).
+  const startLookup = useCallback((q: string, options?: { manualRetry?: boolean }) => {
+    const manualRetry = options?.manualRetry ?? false;
     pendingRef.current?.controller.abort();
     const controller = new AbortController();
     const id = ++nextRequestId.current;
@@ -122,23 +131,30 @@ export function CollaboratorLoginInput({
           return;
         }
         if (result.limited) {
-          setOptions([]);
+          setResult({ query: q, options: [] });
           setOpen(false);
           setLookup({ status: "error", message: `GitHub suggestions for @${q} are temporarily unavailable.`, retrying: false });
           return;
         }
         const users = Object.freeze(result.users.slice());
         cacheRef.current.set(q.toLowerCase(), users);
-        setOptions(users);
+        setResult({ query: q, options: users });
         setLookup(null);
-        setOpen(focusedRef.current);
+        if (manualRetry) {
+          // Focusing here runs the input's own onFocus synchronously, which is what actually opens the
+          // list (see handleFocus) — focusedRef may still read stale (false) if focus was on Retry.
+          inputRef.current?.focus();
+          setOpen(true);
+        } else {
+          setOpen(focusedRef.current);
+        }
       })
       .catch((error: unknown) => {
         if (pendingRef.current?.id !== id) return;
         pendingRef.current = null;
         if (controller.signal.aborted) return;
         const reason = apiErrorText(error, "");
-        setOptions([]);
+        setResult({ query: q, options: [] });
         setOpen(false);
         setLookup({
           status: "error",
@@ -156,7 +172,10 @@ export function CollaboratorLoginInput({
     setActive(-1);
 
     if (!query || noToken || query === picked) {
-      setOptions([]);
+      // Deliberately `null`, not left as whatever answered the previous query: the just-picked login can equal
+      // a prior fetch's query (pick from a list fetched for "octocat" leaves `value` as "octocat" too), so only
+      // clearing the pairing - not just relying on a query mismatch - keeps the list closed right after a pick.
+      setResult(null);
       setOpen(false);
       setLookup(null);
       return;
@@ -164,7 +183,7 @@ export function CollaboratorLoginInput({
 
     const cached = cacheRef.current.get(query.toLowerCase());
     if (cached) {
-      setOptions(cached);
+      setResult({ query, options: cached });
       setLookup(null);
       setOpen(focusedRef.current);
       return;
@@ -184,7 +203,14 @@ export function CollaboratorLoginInput({
   }, []);
 
   const excludedSet = new Set(exclude.map((login) => login.trim().replace(/^@/, "").toLowerCase()).filter(Boolean));
-  const candidates = options.filter((candidate) => !excludedSet.has(candidate.login.toLowerCase())).slice(0, SUGGEST_MAX);
+  // Only an answer fetched for the *current* query counts: this is what stops a keydown from ever picking a
+  // suggestion fetched for text the user has since changed (the effect above that would otherwise clear a
+  // stale `result` runs asynchronously, after the render that changed `value`/`query` - this check does not
+  // depend on that effect having run yet, since it recomputes on every render from the two state values).
+  const candidates =
+    result && result.query === query
+      ? result.options.filter((candidate) => !excludedSet.has(candidate.login.toLowerCase())).slice(0, SUGGEST_MAX)
+      : [];
   const expanded = open && candidates.length > 0;
   const activeIndex = active >= 0 && active < candidates.length ? active : -1;
 
@@ -262,13 +288,13 @@ export function CollaboratorLoginInput({
   // without asking the route a second time for the same query.
   const handleFocus = () => {
     focusedRef.current = true;
-    if (options.length > 0) setOpen(true);
+    if (candidates.length > 0) setOpen(true);
   };
 
   const handleRetry = () => {
-    if (!query) return;
-    setLookup((current) => (current?.status === "error" ? { ...current, retrying: true } : current));
-    startLookup(query);
+    if (!query || lookup?.status !== "error" || lookup.retrying) return; // ignore a press while already retrying
+    setLookup({ ...lookup, retrying: true });
+    startLookup(query, { manualRetry: true });
   };
 
   return (
@@ -321,7 +347,11 @@ export function CollaboratorLoginInput({
             className="btn btn-outline btn-sm h-6 shrink-0 px-2"
             onClick={handleRetry}
             onBlur={handleBlur}
-            disabled={lookup.retrying}
+            // aria-disabled, not disabled: disabling the focused button while the request is in flight would
+            // drop focus to <body> (same issue as the link-preview switch elsewhere in share-dialog.tsx), and
+            // after a failed retry it would stay there with nothing focused. handleRetry already ignores a
+            // press while retrying, so the button can safely stay focusable and in the DOM throughout.
+            aria-disabled={lookup.retrying || undefined}
             aria-busy={lookup.retrying || undefined}
           >
             {lookup.retrying ? "Retrying…" : "Retry"}
@@ -377,7 +407,13 @@ export function CollaboratorLoginInput({
           aria-hidden="true"
           className="menu absolute left-0 right-0 top-full mt-1 max-h-80 overflow-y-auto"
           onMouseDown={(event) => event.preventDefault()}
-          onPointerLeave={() => setShielding(false)}
+          onPointerLeave={(event) => {
+            // A touch's own pointerup fires pointerleave moments later (observed 13-30ms), which would end the
+            // shield while a fast triple-tap's third tap is still in flight — well inside SHIELD_MS. Mouse pointers
+            // don't have that quirk (the pointer only leaves once the user actually moves it away), so only a
+            // mouse pointer ends the shield early; touch and pen rely on the SHIELD_MS timer alone.
+            if (event.pointerType === "mouse") setShielding(false);
+          }}
           data-testid="share-login-shield"
         >
           {shieldedCandidates.map((candidate) => (

@@ -293,6 +293,40 @@ describe("CollaboratorLoginInput", () => {
     expect(searchUsers).toHaveBeenCalledTimes(1);
   });
 
+  it("a keystroke that changes the query and an immediate Enter land in the same tick: the stale option is never picked", async () => {
+    // The effect that would (asynchronously) clear the active option and the fetched list for the old query
+    // has not run yet when Enter fires here - both events are dispatched inside one `act()`, so React defers
+    // that passive effect until after both have already been processed, the same way a real browser can
+    // deliver a keydown before React's next effect-flush task runs. What must stop the stale pick is the
+    // render-time `candidates` derivation (gated on the fetched answer's query still matching what's typed
+    // now), not the effect - this is exactly the "type past a highlighted suggestion" race from #2244's review.
+    searchUsers.mockImplementation((q) => (q === "octop" ? answer("octopus", "octopi", "octoprint") : answer()));
+    const onPick = vi.fn();
+    const onSubmit = vi.fn();
+    render(<Harness onPick={onPick} onSubmit={onSubmit} />);
+    type("octop");
+    await settle();
+    expect(options()).toEqual(["octopus", "octopi", "octoprint"]);
+
+    fireEvent.keyDown(input(), { key: "ArrowDown" });
+    expect(input().getAttribute("aria-activedescendant")).toMatch(/-option-0$/);
+
+    act(() => {
+      fireEvent.change(input(), { target: { value: "octopx" } });
+      fireEvent.keyDown(input(), { key: "Enter" });
+    });
+
+    // The typed text stands, nothing was picked, and the stale activedescendant is gone immediately -
+    // all in the very render that processed the new value, before any effect for "octopx" has run.
+    expect(input().value).toBe("octopx");
+    expect(input()).not.toHaveAttribute("aria-activedescendant");
+    expect(onPick).not.toHaveBeenCalled();
+
+    fireEvent.submit(input().closest("form")!);
+    expect(onSubmit).toHaveBeenCalledWith("octopx");
+    expect(onSubmit).not.toHaveBeenCalledWith("octopus");
+  });
+
   it("a held/repeated Enter after picking does not pick a second time: the next Enter submits the typed handle instead", async () => {
     searchUsers.mockImplementation(() => answer("octocat", "octodog"));
     const onPick = vi.fn();
@@ -346,6 +380,24 @@ describe("CollaboratorLoginInput", () => {
     expect(submitted).toBe(true);
     fireEvent.submit(input().closest("form")!);
     expect(onSubmit).toHaveBeenCalledWith("octopus");
+  });
+
+  it("Enter with the list OPEN and no active option submits the typed handle (not just once the list is closed)", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    const onPick = vi.fn();
+    const onSubmit = vi.fn();
+    render(<Harness onPick={onPick} onSubmit={onSubmit} />);
+    type("octo");
+    await settle();
+    // The list is still open and nothing is active - no arrow key was pressed.
+    expect(options()).toEqual(["octocat", "octodog"]);
+    expect(listOptions().filter((o) => o.getAttribute("aria-selected") === "true")).toHaveLength(0);
+
+    const submitted = fireEvent.keyDown(input(), { key: "Enter" });
+    expect(submitted).toBe(true); // not claimed by the list: the dialog's form submits the typed handle
+    expect(onPick).not.toHaveBeenCalled();
+    fireEvent.submit(input().closest("form")!);
+    expect(onSubmit).toHaveBeenCalledWith("octo");
   });
 
   it("a click picks the option without stealing focus from the box first", async () => {
@@ -408,14 +460,32 @@ describe("CollaboratorLoginInput", () => {
     expect(screen.queryByTestId("share-login-shield")).toBeNull();
   });
 
-  it("ends the click-shield as soon as the pointer leaves it, instead of waiting the full window", async () => {
+  it("ends the click-shield as soon as a mouse pointer leaves it, instead of waiting the full window", async () => {
     searchUsers.mockImplementation(() => answer("octocat"));
     render(<Harness />);
     type("octo");
     await settle();
     fireEvent.click(listOptions()[0]!);
     const shield = screen.getByTestId("share-login-shield");
-    fireEvent.pointerLeave(shield);
+    fireEvent.pointerLeave(shield, { pointerType: "mouse" });
+    expect(screen.queryByTestId("share-login-shield")).toBeNull();
+  });
+
+  it("a touch pointerleave does not end the click-shield early - only the SHIELD_MS window does", async () => {
+    // A touch's own pointerup fires a pointerleave moments later (observed 13-30ms in real browsers), which would
+    // otherwise end the shield while a fast triple-tap's third tap is still in flight, well inside SHIELD_MS.
+    searchUsers.mockImplementation(() => answer("octocat"));
+    render(<Harness />);
+    type("octo");
+    await settle();
+    fireEvent.click(listOptions()[0]!);
+    const shield = screen.getByTestId("share-login-shield");
+    fireEvent.pointerLeave(shield, { pointerType: "touch" });
+    expect(screen.queryByTestId("share-login-shield")).not.toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SHIELD_MS);
+    });
     expect(screen.queryByTestId("share-login-shield")).toBeNull();
   });
 
@@ -431,7 +501,7 @@ describe("CollaboratorLoginInput", () => {
     expect(within(row).getByText("OC")).toBeInTheDocument();
   });
 
-  it("shows the API reason after rejection, keeps exact-handle submission available, and guards one Retry to a real empty result", async () => {
+  it("shows the API reason after rejection, keeps exact-handle submission available, and guards one Retry (aria-disabled, not disabled, so it never loses focus) to a real empty result", async () => {
     const retried = deferred<SearchAnswer>();
     searchUsers.mockRejectedValueOnce(new ApiError(503, "GitHub account search is unavailable")).mockReturnValueOnce(retried.promise);
     const onSubmit = vi.fn();
@@ -443,14 +513,22 @@ describe("CollaboratorLoginInput", () => {
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent("GitHub suggestions for @octo: GitHub account search is unavailable");
     const retry = within(alert).getByRole("button", { name: "Retry" });
-    expect(retry).not.toBeDisabled();
+    expect(retry).not.toHaveAttribute("aria-disabled");
     expect(fireEvent.keyDown(input(), { key: "Enter" })).toBe(true);
     fireEvent.submit(input().closest("form")!);
     expect(onSubmit).toHaveBeenCalledWith("octo");
 
     fireEvent.click(retry);
     expect(searchUsers).toHaveBeenCalledTimes(2);
-    expect(within(screen.getByRole("alert")).getByRole("button", { name: "Retrying…" })).toBeDisabled();
+    const retrying = within(screen.getByRole("alert")).getByRole("button", { name: "Retrying…" });
+    // Not the native `disabled` attribute: disabling the focused button would drop focus to <body>.
+    expect(retrying).not.toBeDisabled();
+    expect(retrying).toHaveAttribute("aria-disabled", "true");
+    expect(retrying).toHaveAttribute("aria-busy", "true");
+
+    // A second click while the first retry is still in flight is ignored - one request, not two.
+    fireEvent.click(retrying);
+    expect(searchUsers).toHaveBeenCalledTimes(2);
 
     await act(async () => {
       retried.resolve({ users: [], limited: false });
@@ -460,7 +538,7 @@ describe("CollaboratorLoginInput", () => {
     expect(input().value).toBe("octo");
   });
 
-  it("turns a limited response into truthful feedback and one Retry that restores populated suggestions", async () => {
+  it("turns a limited response into truthful feedback and one Retry that restores populated suggestions, moving focus back to the handle field", async () => {
     const retried = deferred<SearchAnswer>();
     searchUsers.mockResolvedValueOnce({ users: [], limited: true }).mockReturnValueOnce(retried.promise);
     render(<Harness />);
@@ -477,6 +555,8 @@ describe("CollaboratorLoginInput", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     expect(options()).toEqual(["octocat", "octodog"]);
     expect(input()).toHaveAttribute("aria-expanded", "true");
+    // A successful manual retry hands focus back to the handle field, not leaving it on the (now gone) button.
+    expect(input()).toHaveFocus();
   });
 
   it("after the route answers reason=no-github-token it asks no more while mounted: no hint, the box still types", async () => {

@@ -245,17 +245,6 @@ export const ShareDialog = memo(function ShareDialog({
                   className="select"
                   value={role}
                   onChange={(e) => setRole(e.target.value as CollaboratorRole)}
-                  onKeyDown={(e) => {
-                    // Picking a suggestion moves focus here so Tab naturally reaches the role next. The auto-repeat
-                    // from a still-held Enter that just picked must be blocked (picking fills the field without
-                    // adding). A later, non-repeat Enter here should submit, same as typing a handle and Tab-ing to
-                    // the role then pressing Enter — but a <select> does not implicitly submit its form on Enter
-                    // the way a text field does, so that single press is asked for explicitly.
-                    if (e.key !== "Enter") return;
-                    e.preventDefault();
-                    if (e.repeat) return;
-                    e.currentTarget.form?.requestSubmit();
-                  }}
                   aria-label="Role for new collaborator"
                   data-testid="share-role"
                 >
