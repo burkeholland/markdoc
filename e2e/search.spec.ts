@@ -1,5 +1,6 @@
 import { test, expect } from "./fixtures";
-import { signIn, createDocument, uniqueLogin, type User } from "./helpers";
+import type { Page } from "@playwright/test";
+import { signIn, createDocument, uniqueLogin, waitForHydration, type User } from "./helpers";
 
 test.describe("dashboard search", () => {
   let searcher: User;
@@ -96,5 +97,92 @@ test.describe("dashboard search", () => {
     await page.getByRole("button", { name: "Owned by me" }).click();
     await expect(page.getByTestId("search-result")).toHaveCount(1);
     await page.getByRole("button", { name: "All" }).click();
+  });
+});
+
+// #2226: every way a person can put text in the box must filter the list, starting from a freshly
+// loaded dashboard (the first input after mount is the one an event gate is most likely to drop).
+test.describe("dashboard search: real input", () => {
+  let searcher: User;
+
+  test.beforeAll(async ({ browser }) => {
+    searcher = await signIn(browser, uniqueLogin("search-input"));
+    await createDocument(searcher.page, "# Grocery list\n\nAlso remember the quokka treats.\n", "Grocery list");
+    await createDocument(searcher.page, "# Travel plans\n\nFly to Lisbon in May.\n", "Travel plans");
+  });
+
+  test.afterAll(async () => {
+    await searcher.context.close();
+  });
+
+  async function freshDashboard(): Promise<Page> {
+    const page = searcher.page;
+    await page.goto("/");
+    await waitForHydration(page);
+    await expect(page.getByTestId("document-card")).toHaveCount(2);
+    await expect(page.getByTestId("search")).toHaveValue("");
+    return page;
+  }
+
+  async function expectOneQuokkaResult(page: Page) {
+    await expect(page.getByTestId("search")).toHaveValue("quokka");
+    await expect(page.getByTestId("search-result")).toHaveCount(1);
+    await expect(page.getByTestId("search-result").getByRole("heading")).toHaveText("Grocery list");
+  }
+
+  test("typing key by key filters the list", async () => {
+    const page = await freshDashboard();
+    const search = page.getByTestId("search");
+    await search.click();
+    await search.pressSequentially("quokka", { delay: 40 });
+    await expectOneQuokkaResult(page);
+  });
+
+  test("Ctrl+V paste filters the list", async () => {
+    const page = await freshDashboard();
+    await searcher.context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(page.url()).origin });
+    await page.evaluate(() => navigator.clipboard.writeText("quokka"));
+    const search = page.getByTestId("search");
+    await search.click();
+    await page.keyboard.press("ControlOrMeta+V");
+    await expectOneQuokkaResult(page);
+  });
+
+  test("an IME composition commit filters the list", async () => {
+    const page = await freshDashboard();
+    const search = page.getByTestId("search");
+    await search.click();
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      await cdp.send("Input.imeSetComposition", { text: "quo", selectionStart: 3, selectionEnd: 3 });
+      await cdp.send("Input.imeSetComposition", { text: "quokka", selectionStart: 6, selectionEnd: 6 });
+      await cdp.send("Input.insertText", { text: "quokka" });
+    } finally {
+      await cdp.detach();
+    }
+    await expectOneQuokkaResult(page);
+  });
+
+  test("fill() filters the list, a no-match query shows the empty state, and clearing restores the list", async () => {
+    const page = await freshDashboard();
+    const search = page.getByTestId("search");
+    await search.fill("quokka");
+    await expectOneQuokkaResult(page);
+
+    await search.fill("zxqvbnmplk");
+    await expect(page.getByTestId("empty-state")).toContainText('No matches for "zxqvbnmplk"');
+    await expect(page.getByTestId("search-result")).toHaveCount(0);
+
+    await search.press("ControlOrMeta+A");
+    await search.press("Backspace");
+    await expect(search).toHaveValue("");
+    await expect(page.getByTestId("document-card")).toHaveCount(2);
+  });
+
+  test("a no-match query typed into a fresh dashboard shows the empty state", async () => {
+    const page = await freshDashboard();
+    await page.getByTestId("search").fill("zxqvbnmplk");
+    await expect(page.getByTestId("empty-state")).toContainText('No matches for "zxqvbnmplk"');
+    await expect(page.getByTestId("search-result")).toHaveCount(0);
   });
 });
