@@ -87,7 +87,15 @@ export function CollaboratorLoginInput({
   // since changed - see `candidates` below).
   const [result, setResult] = useState<{ query: string; options: readonly GitHubUserDto[] } | null>(null);
   const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(-1);
+  // Paired with the query it was set for, not just a raw index: `activeIndex` below only honors it when its
+  // `query` still matches the *current* (value-derived) `query`. Without that pairing, shrinking back to an
+  // already-cached query (type "octop", ArrowDown onto its first option, then Backspace back to "octo") would
+  // still read as a valid index into the *new* list: `candidates` already renders "octo"'s cached answer on
+  // this very render (see the cache-hit fallback below), but the effect that would otherwise reset this to -1
+  // for a new query has not run yet — an Enter landing in that gap would pick an option of "octo"'s list the
+  // user never actually highlighted there, instead of submitting the typed text (same race `result`/`candidates`
+  // above are paired against `query` to avoid, just one render later in the sequence).
+  const [active, setActiveState] = useState<{ query: string | null; index: number }>({ query: null, index: -1 });
   const [lookup, setLookup] = useState<Lookup | null>(null);
   const [noToken, setNoToken] = useState(false);
   const [picked, setPicked] = useState<string | null>(null);
@@ -188,7 +196,10 @@ export function CollaboratorLoginInput({
   useEffect(() => {
     pendingRef.current?.controller.abort();
     pendingRef.current = null;
-    setActive(-1);
+    // setActiveState directly, not the `setActive(index)` wrapper below (which closes over `query` and would
+    // need to be in this effect's own deps, re-running it on every render instead of only on these five): the
+    // dispatch function itself is what react-hooks/exhaustive-deps already treats as exempt from the list.
+    setActiveState({ query, index: -1 });
 
     if (!query || noToken || query === picked) {
       // Deliberately `null`, not left as whatever answered the previous query: the just-picked login can equal
@@ -241,7 +252,10 @@ export function CollaboratorLoginInput({
     return matching ? matching.filter((candidate) => !excludedSet.has(candidate.login.toLowerCase())).slice(0, SUGGEST_MAX) : [];
   })();
   const expanded = open && candidates.length > 0;
-  const activeIndex = active >= 0 && active < candidates.length ? active : -1;
+  // `active.query === query`, not just a bounds check: see the comment on `active`'s declaration above.
+  const activeIndex = active.query === query && active.index >= 0 && active.index < candidates.length ? active.index : -1;
+  /** Sets the active option, paired with the query it belongs to (see `active` above). */
+  const setActive = (index: number) => setActiveState({ query, index });
 
   const pick = (login: string, options?: { viaPointer?: boolean }) => {
     if (options?.viaPointer) {
@@ -274,11 +288,17 @@ export function CollaboratorLoginInput({
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
-        setActive((index) => (index + 1 >= candidates.length ? 0 : index + 1));
+        setActiveState((prev) => {
+          const current = prev.query === query ? prev.index : -1;
+          return { query, index: current + 1 >= candidates.length ? 0 : current + 1 };
+        });
         return;
       case "ArrowUp":
         event.preventDefault();
-        setActive((index) => (index <= 0 ? candidates.length - 1 : index - 1));
+        setActiveState((prev) => {
+          const current = prev.query === query ? prev.index : -1;
+          return { query, index: current <= 0 ? candidates.length - 1 : current - 1 };
+        });
         return;
       case "Home":
         event.preventDefault();

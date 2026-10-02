@@ -330,6 +330,42 @@ describe("CollaboratorLoginInput", () => {
     expect(onSubmit).not.toHaveBeenCalledWith("octopus");
   });
 
+  it("shrinking back to an already-cached query with an option active elsewhere: Enter submits the typed text, not a stale pick (#2244 review)", async () => {
+    // "octo" is fetched and cached first, then "octop" is fetched and cached too, and an option of "octop"'s
+    // list is made active. Backspacing to "octo" renders "octo"'s cached list on this very render (the cache
+    // fallback in `candidates`), before the effect that would reset the active index for a new query has run -
+    // the same one-render gap as the test above, just by shrinking back to a *different*, already-answered
+    // query instead of typing further into a new one. The stale index (valid for "octop"'s list) must not be
+    // read as still active just because it also happens to be in bounds for "octo"'s list.
+    searchUsers.mockImplementation((q) => (q === "octop" ? answer("octopus", "octopod", "octoprint") : answer("octocat", "octodog", "octofox")));
+    const onPick = vi.fn();
+    const onSubmit = vi.fn();
+    render(<Harness onPick={onPick} onSubmit={onSubmit} />);
+    type("octo");
+    await settle();
+    expect(options()).toEqual(["octocat", "octodog", "octofox"]);
+
+    type("octop");
+    await settle();
+    expect(options()).toEqual(["octopus", "octopod", "octoprint"]);
+
+    fireEvent.keyDown(input(), { key: "ArrowDown" });
+    expect(input().getAttribute("aria-activedescendant")).toMatch(/-option-0$/);
+
+    act(() => {
+      fireEvent.change(input(), { target: { value: "octo" } });
+      fireEvent.keyDown(input(), { key: "Enter" });
+    });
+
+    expect(input().value).toBe("octo");
+    expect(input()).not.toHaveAttribute("aria-activedescendant");
+    expect(onPick).not.toHaveBeenCalled();
+
+    fireEvent.submit(input().closest("form")!);
+    expect(onSubmit).toHaveBeenCalledWith("octo");
+    expect(onSubmit).not.toHaveBeenCalledWith("octocat");
+  });
+
   it("a held/repeated Enter after picking does not pick a second time: the next Enter submits the typed handle instead", async () => {
     searchUsers.mockImplementation(() => answer("octocat", "octodog"));
     const onPick = vi.fn();

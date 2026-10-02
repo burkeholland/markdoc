@@ -1042,4 +1042,104 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
       await owner.context.close();
     });
   });
+
+  test("scenario A - shrinking back to an already-cached shorter query with an option active elsewhere: Enter adds exactly the typed handle, never a stale option (#2244 review)", async ({ browser }) => {
+    // "octo" (8 matches) and "octop" (octopus, octopod, octoprint) are both fetched and cached by typing and
+    // waiting for each in turn. ArrowDown then highlights "octop"'s first option ("octopus"). Backspace back to
+    // "octo" and Enter land in the same tick (Promise.all, no round trip between them): "octo" is already
+    // cached, so the list for "octo" renders on this very keystroke's render, before the effect that would
+    // otherwise clear the stale active index for the new query has run. Pre-fix, that stale index (0, still
+    // in-bounds for "octo"'s own list) reads as if it were set for "octo" and Enter picks "octocat" instead of
+    // submitting "octo". Post-fix, nothing is active for "octo" and Enter falls through to the form's default
+    // submit, adding "octo" directly.
+    const owner = await signIn(browser, "autocomplete-shrink-cached-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Shrink Cached\n", "Shrink Cached");
+    // Next dev compiles the route on its first request: take that hit before timing anything (same warm-up
+    // used by the other race tests in this file).
+    expect((await page.request.get(`${USERS}?q=octo`, { timeout: 120_000 })).status()).toBe(200);
+    await openDocument(page, id);
+    const { input, options } = await openShare(page);
+    const adds = countCollaboratorPosts(page, id);
+
+    await page.keyboard.type("octo");
+    await expect(options.first()).toBeVisible({ timeout: budgetMs(2000) });
+    await page.keyboard.type("p");
+    await expect(options.first()).toBeVisible({ timeout: budgetMs(2000) });
+    await page.keyboard.press("ArrowDown"); // highlights "octopus", index 0 of "octop"'s list
+
+    await Promise.all([page.keyboard.press("Backspace"), page.keyboard.press("Enter")]);
+
+    await expect.poll(() => adds.seen.length, { timeout: budgetMs(3000) }).toBe(1);
+    expect(adds.seen[0]!.login, "POST /collaborators login").toBe("octo");
+    expect(adds.seen.map((a) => a.login)).not.toContain("octocat");
+    await expect(input).toHaveValue(""); // the field resets after a successful add
+    adds.stop();
+    await owner.context.close();
+  });
+
+  test("scenario B - growing back into an already-cached longer query with an option active on the shorter query's list: Enter adds exactly the typed handle, never a stale option (#2244 review)", async ({ browser }) => {
+    // Mirror of scenario A: "octo" and "octop" are both cached (type, wait; type, wait), then Backspace back to
+    // "octo", ArrowDown highlights "octo"'s first option ("octocat"), then typing "p" and Enter land in the same
+    // tick, growing the query back to "octop" (already cached). Pre-fix, the stale index (0, still in-bounds
+    // for "octop"'s own 3-item list too) reads as valid for "octop" and Enter picks "octopus" instead of
+    // submitting "octop".
+    const owner = await signIn(browser, "autocomplete-grow-cached-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Grow Cached\n", "Grow Cached");
+    expect((await page.request.get(`${USERS}?q=octo`, { timeout: 120_000 })).status()).toBe(200);
+    await openDocument(page, id);
+    const { input, options } = await openShare(page);
+    const adds = countCollaboratorPosts(page, id);
+
+    await page.keyboard.type("octo");
+    await expect(options.first()).toBeVisible({ timeout: budgetMs(2000) });
+    await page.keyboard.type("p");
+    await expect(options.first()).toBeVisible({ timeout: budgetMs(2000) });
+    await page.keyboard.press("Backspace");
+    await expect(input).toHaveValue("octo");
+    await page.keyboard.press("ArrowDown"); // highlights "octocat", index 0 of "octo"'s list
+
+    await Promise.all([page.keyboard.press("p"), page.keyboard.press("Enter")]);
+
+    await expect.poll(() => adds.seen.length, { timeout: budgetMs(3000) }).toBe(1);
+    expect(adds.seen[0]!.login, "POST /collaborators login").toBe("octop");
+    expect(adds.seen.map((a) => a.login)).not.toContain("octopus");
+    await expect(input).toHaveValue("");
+    adds.stop();
+    await owner.context.close();
+  });
+
+  test("scenario C - same as scenario B with a later option active, not just the first: Enter still adds exactly the typed handle (#2244 review)", async ({ browser }) => {
+    // Same shape as scenario B, but ArrowDown three times highlights "octo"'s third option ("octofox", index 2)
+    // before growing back to "octop". Pre-fix, index 2 is also in-bounds for "octop"'s 3-item list, so Enter
+    // picks "octop"'s third option ("octoprint") instead of submitting "octop" - proving the bug is not specific
+    // to index 0 lining up by coincidence.
+    const owner = await signIn(browser, "autocomplete-grow-cached-index2-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Grow Cached Index Two\n", "Grow Cached Index Two");
+    expect((await page.request.get(`${USERS}?q=octo`, { timeout: 120_000 })).status()).toBe(200);
+    await openDocument(page, id);
+    const { input, options } = await openShare(page);
+    const adds = countCollaboratorPosts(page, id);
+
+    await page.keyboard.type("octo");
+    await expect(options.first()).toBeVisible({ timeout: budgetMs(2000) });
+    await page.keyboard.type("p");
+    await expect(options.first()).toBeVisible({ timeout: budgetMs(2000) });
+    await page.keyboard.press("Backspace");
+    await expect(input).toHaveValue("octo");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown"); // highlights "octo"'s third option (index 2, "octofox")
+
+    await Promise.all([page.keyboard.press("p"), page.keyboard.press("Enter")]);
+
+    await expect.poll(() => adds.seen.length, { timeout: budgetMs(3000) }).toBe(1);
+    expect(adds.seen[0]!.login, "POST /collaborators login").toBe("octop");
+    expect(adds.seen.map((a) => a.login)).not.toContain("octoprint");
+    await expect(input).toHaveValue("");
+    adds.stop();
+    await owner.context.close();
+  });
 });
