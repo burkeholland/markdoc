@@ -1532,12 +1532,10 @@ test.describe("dialog focus return (#161)", () => {
     await expect.poll(active).toBe("rich");
 
     // 3–5. Dialogs opened from the ⋮ menu with the keyboard: the menu item is unmounted by the time the
-    //      dialog closes, so focus goes to the menu's trigger. The menu opened by Enter is ready once it
-    //      has put focus on one of its items; the item we want is picked once it really has focus.
+    //      dialog closes, so focus goes to the menu's trigger. The item we want is picked once it really
+    //      has focus.
     const fromMenu = async (item: string) => {
-      await page.getByTestId("more-menu").focus();
-      await page.keyboard.press("Enter");
-      await expect(page.locator('[role="menuitem"]:focus')).toHaveCount(1);
+      await openMoreByKeyboard(page);
       const menuItem = page.getByRole("menuitem", { name: item });
       await menuItem.focus();
       await expect(menuItem).toBeFocused();
@@ -1556,6 +1554,7 @@ test.describe("dialog focus return (#161)", () => {
     await closedWith("Name this version", "Escape");
     await expect.poll(active).toBe("more-menu");
     // The shortcut form of the same dialog (Ctrl+/) from the editor returns to the editor.
+    await moreMenuGone(page);
     await focusRichEnd(page);
     await page.keyboard.press("Control+/");
     await closedWith("Keyboard shortcuts", "Escape");
@@ -1589,6 +1588,19 @@ test.describe("dialog focus return (#161)", () => {
       if (!el || el === document.body) return "body";
       return el.getAttribute("data-testid") ?? (el.closest(".md-rich") ? "rich" : el.closest(".cm-content") ? "code" : el.tagName.toLowerCase());
     });
+  // The ⋮ menu stays mounted, closed, until its 120 ms fade-in has ended (up to about 170 ms after it
+  // opened) when one of its items is picked sooner than that. Until it is gone, Enter on the ⋮ button
+  // is dropped by the menu's own gate in header.tsx (#2222, inventory row 34), and it still answers
+  // Escape in place of a dialog that has just opened. A person cannot press a key 10 ms after a dialog
+  // closes, so the next step waits until the earlier menu is gone.
+  const moreMenuGone = (page: Page) => expect(page.getByRole("menu")).toHaveCount(0);
+  // The menu opened by Enter is ready once it has put focus on one of its items.
+  const openMoreByKeyboard = async (page: Page) => {
+    await moreMenuGone(page);
+    await page.getByTestId("more-menu").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator('[role="menuitem"]:focus')).toHaveCount(1);
+  };
   const arrowToItem = async (page: Page, name: string) => {
     await expect(page.getByRole("menu")).toBeVisible();
     for (let i = 0; i < 30; i++) {
@@ -1622,8 +1634,7 @@ test.describe("dialog focus return (#161)", () => {
     await expect(page.getByTestId("link-url")).toBeFocused();
     await escapeCloses(page, /link/i);
 
-    await page.getByTestId("more-menu").focus();
-    await page.keyboard.press("Enter");
+    await openMoreByKeyboard(page);
     await arrowToItem(page, "Keyboard shortcuts");
     await page.keyboard.press("Enter");
     await escapeCloses(page, "Keyboard shortcuts");
@@ -1642,8 +1653,7 @@ test.describe("dialog focus return (#161)", () => {
           await page.getByTestId("more-menu").click();
           await page.getByRole("menuitem", { name: item }).click();
         } else {
-          await page.getByTestId("more-menu").focus();
-          await page.keyboard.press("Enter");
+          await openMoreByKeyboard(page);
           await arrowToItem(page, item);
           await page.keyboard.press("Enter");
         }
