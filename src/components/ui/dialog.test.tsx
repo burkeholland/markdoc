@@ -1138,6 +1138,45 @@ describe("DialogContent dismissal", () => {
     expect(onClosed.mock.calls).toEqual([[2]]);
   });
 
+  it("closed and opened again before the first close has settled: both closes run onClosed and focus returns to the opener", async () => {
+    // Radix reports a close one task after the dialog has unmounted. A dialog reopened inside that task
+    // must not lose its own way back to the first close's late report.
+    const onClosed = vi.fn();
+    function ReopenHarness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" data-testid="toolbar-image" onClick={() => setOpen(true)}>Image</button>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogContent title="Insert image" onClosed={onClosed}>
+              <input data-testid="image-url" autoFocus />
+            </DialogContent>
+          </Dialog>
+        </>
+      );
+    }
+    renderDirect(<StrictMode><ReopenHarness /></StrictMode>);
+    const opener = screen.getByTestId("toolbar-image");
+    act(() => opener.focus());
+    fireEvent.click(opener);
+    expect(screen.getByTestId("image-url")).toHaveFocus();
+
+    fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape", code: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    act(() => opener.focus());
+    fireEvent.click(opener);
+    expect(screen.getByTestId("image-url")).toHaveFocus();
+    await flushTasks();
+    expect(onClosed).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("image-url")).toHaveFocus();
+
+    fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape", code: "Escape" });
+    await flushTasks();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(onClosed).toHaveBeenCalledTimes(2);
+  });
+
   it("runs onClosed when the owner closes it without Radix and keeps it mounted", async () => {
     const onClosed = vi.fn();
     function OwnCloseHarness() {

@@ -132,7 +132,8 @@ const FLOATING_LAYER = '[role="dialog"], [role="menu"], [role="listbox"], [data-
  * `DialogContent` used without one) whatever has focus now.
  *
  * A menu or popover that closed as the dialog opened hands focus back to its trigger after the dialog has
- * it: Radix one task later, the ⋮ menu on its next render. While a modal dialog is open that trigger is
+ * it: Radix one task later, the ⋮ menu once it has finished closing, up to about 170 ms after it opened.
+ * While a modal dialog is open that trigger is
  * remembered (it is the place to return to when the opener is gone by close time, as the people popover's
  * own button is, or when two buttons share the menu, as Publish and its arrow do) and focus stays in the
  * dialog. Radix's focus trap keeps it there only once it has seen focus move inside the dialog, and it
@@ -144,16 +145,20 @@ const FLOATING_LAYER = '[role="dialog"], [role="menu"], [role="listbox"], [data-
 function OpeningFocus({
   contentRef,
   returnRef,
+  onGone,
 }: {
   contentRef: React.RefObject<HTMLDivElement | null>;
   returnRef: React.RefObject<ReturnTargets>;
+  /** The body has unmounted; Radix reports that (`onCloseAutoFocus`) one task later. */
+  onGone: (targets: ReturnTargets) => void;
 }) {
   const root = React.useContext(DialogRootContext);
   const modal = root?.modal ?? true;
   const [opener] = React.useState(() => (root?.opener.element ? root.opener : currentOpener()));
   React.useLayoutEffect(() => {
     returnRef.current = { handedTo: null, ...opener };
-  }, [opener, returnRef]);
+    return () => onGone(returnRef.current);
+  }, [opener, returnRef, onGone]);
   React.useEffect(() => {
     const content = contentRef.current;
     if (!content) return;
@@ -205,7 +210,17 @@ export function DialogContent({
   onClosed?: () => void;
 }) {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
+  // The body element last on the page; still known while it unmounts, when `contentRef` is already empty.
+  const lastContentRef = React.useRef<HTMLDivElement | null>(null);
+  const setContent = React.useCallback((node: HTMLDivElement | null) => {
+    contentRef.current = node;
+    if (node) lastContentRef.current = node;
+  }, []);
   const returnRef = React.useRef(NO_RETURN_TARGETS);
+  // What a body that has unmounted leaves for `onCloseAutoFocus`: where focus returns, and whether that
+  // was a close. Taken when it unmounts and kept per body element, because the dialog may be open again
+  // (with its own way back) by the time Radix reports the close one task later.
+  const [gone] = React.useState(() => new WeakMap<EventTarget, { targets: ReturnTargets; closed: boolean }>());
   const root = React.useContext(DialogRootContext);
   const open = root?.open ?? true;
   // Close runs the callback from the last render while the dialog was open. A caller may hand a new
@@ -217,11 +232,19 @@ export function DialogContent({
     openRef.current = open;
     if (open) onClosedRef.current = onClosed;
   }, [open, onClosed]);
+  const closeRequested = root?.closeRequested;
+  const onGone = React.useCallback(
+    (targets: ReturnTargets) => {
+      const content = lastContentRef.current;
+      if (content) gone.set(content, { targets, closed: !closeRequested || !openRef.current || closeRequested.current });
+    },
+    [gone, closeRequested],
+  );
   return (
     <RadixDialog.Portal>
       <RadixDialog.Overlay className={OVERLAY_CLASS_NAME} />
       <RadixDialog.Content
-        ref={contentRef}
+        ref={setContent}
         className={cn("dialog animate-fade-in", wide && "w-[min(94vw,760px)]", className)}
         onOpenAutoFocus={(e) => {
           // Radix would focus the first tabbable control, the Close button in the header. Start on the
@@ -242,13 +265,14 @@ export function DialogContent({
         }}
         onCloseAutoFocus={(e) => {
           e.preventDefault();
-          const targets = returnOrder(returnRef.current);
-          returnRef.current = NO_RETURN_TARGETS;
-          targets.some((target) => restoreFocus(target));
-          if (!root || !openRef.current || root.closeRequested.current) onClosedRef.current?.();
+          const body = e.target ? gone.get(e.target) : undefined;
+          if (!e.target || !body) return;
+          gone.delete(e.target);
+          returnOrder(body.targets).some((target) => restoreFocus(target));
+          if (body.closed) onClosedRef.current?.();
         }}
       >
-        <OpeningFocus contentRef={contentRef} returnRef={returnRef} />
+        <OpeningFocus contentRef={contentRef} returnRef={returnRef} onGone={onGone} />
         <div className={HEADER_CLASS_NAME} data-focus-skip>
           <div className={TITLE_GROUP_CLASS_NAME}>
             <RadixDialog.Title className={TITLE_CLASS_NAME}>{title}</RadixDialog.Title>
