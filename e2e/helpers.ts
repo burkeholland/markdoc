@@ -267,9 +267,12 @@ const pmCaretAtDocEnd = (page: Page) =>
       remainder.setStart(selection.anchorNode, selection.anchorOffset);
       // A collaborator's caret label (.md-remote-caret) can render as a sibling right after our own caret;
       // strip it from a clone before checking for leftover content, the same way `richText` strips it.
+      // ProseMirror also adds an img.ProseMirror-separator next to a widget at the end of a block; it is
+      // not content, so a real image after the caret must still count as content but that one must not.
       const fragment = remainder.cloneContents();
       fragment.querySelectorAll(".md-remote-caret").forEach((n) => n.remove());
-      return (fragment.textContent ?? "") === "" && !fragment.querySelector("img, br:not(.ProseMirror-trailingBreak)")
+      return (fragment.textContent ?? "") === "" &&
+        !fragment.querySelector("img:not(.ProseMirror-separator), br:not(.ProseMirror-trailingBreak)")
         ? true
         : "content follows the caret";
     }
