@@ -411,6 +411,105 @@ test.describe("dashboard notification strip with real input", () => {
     expect(await page.evaluate(() => [performance.timeOrigin, (window as Marked).pageLoadStarted ?? false])).toEqual([shown, false]);
   });
 
+  // Every test above clicks after the dashboard's `load` event. A person need not wait for it: the header
+  // has an avatar image from another host, and until that image has answered, `load` has not fired. The
+  // browser ends every page load with a `pageshow`, and that event used to end the strip's wait while
+  // the document was still opening: the row left, and the next click hit whatever had moved there.
+  type Shown = Window & { pageShown?: "after a load" | "kept for Back" };
+  /**
+   * Opens the dashboard with its `load` event held back by the avatar image. `finishLoading` lets the
+   * image answer and waits for the `pageshow` that ends the page load.
+   */
+  const openDashboardBeforeLoad = async (page: Page, rows: number) => {
+    let answerAvatar = () => {};
+    const avatarHeld = new Promise<void>((resolve) => {
+      answerAvatar = resolve;
+    });
+    await page.route(/avatars\.githubusercontent\.com/, async (route) => {
+      await avatarHeld;
+      await route.fulfill({ status: 404, body: "" }).catch(() => {});
+    });
+    // Not the default `load`: that event must still be pending.
+    await page.goto("/", { waitUntil: "commit" });
+    await waitForHydration(page);
+    const strip = page.getByTestId("notifications-strip");
+    await expect(strip.getByTestId("notification-item")).toHaveCount(rows, { timeout: 30_000 });
+    const readyState = await page.evaluate(() => {
+      window.addEventListener("pageshow", (event) => {
+        (window as Shown).pageShown = event.persisted ? "kept for Back" : "after a load";
+      });
+      return document.readyState;
+    });
+    expect(readyState, "the page is still loading").toBe("interactive");
+    const finishLoading = async () => {
+      answerAvatar();
+      await page.waitForFunction(() => (window as Shown).pageShown === "after a load");
+    };
+    return { strip, finishLoading };
+  };
+
+  // The page finishes loading 300 ms after the click, and the document takes 4 s.
+  for (const [rows, pause] of [
+    [1, 2_000],
+    [3, 600],
+    [3, 2_000],
+  ] as const) {
+    test(`the first of ${rows} clicked before the page has finished loading, and the same spot again ${pause} ms later, opens that row's document and nothing else`, async () => {
+      const page = recipient.page;
+      await page.setViewportSize(PHONE);
+      const shared = await shareNew(rows);
+      const nothingElse = await watchStrayClicks(page);
+      const reads = watchReads(page);
+      await slowDocuments(page, 4_000);
+      const { strip, finishLoading } = await openDashboardBeforeLoad(page, rows);
+      const row = strip.getByTestId("notification-item").first();
+      const id = await row.getAttribute("data-notification-id");
+      const { x, y } = await centre(row.getByTestId("notification-open"));
+
+      await page.mouse.click(x, y);
+      const clicked = Date.now();
+      await page.waitForTimeout(300);
+      await finishLoading();
+      await page.waitForTimeout(Math.max(0, pause - (Date.now() - clicked)));
+      expect(new URL(page.url()).pathname).toBe("/");
+      await page.mouse.click(x, y);
+
+      await page.waitForURL(isDocument, { timeout: 30_000 });
+      await waitForEditor(page);
+      expect(reads).toEqual([`/api/notifications/${id}/read`]);
+      await nothingElse();
+      expect(new URL(page.url()).pathname).toBe(`/d/${shared[rows - 1]}`);
+      await expect.poll(unreadCount).toBe(rows - 1);
+    });
+  }
+
+  test("a row opened with Enter before the page has finished loading keeps the focus while its document opens", async () => {
+    const page = recipient.page;
+    await page.setViewportSize(PHONE);
+    const shared = await shareNew(3);
+    const reads = watchReads(page);
+    await slowDocuments(page, 4_000);
+    const { strip, finishLoading } = await openDashboardBeforeLoad(page, 3);
+    const rows = strip.getByTestId("notification-item");
+    const id = await rows.first().getAttribute("data-notification-id");
+    const open = strip.locator(`[data-notification-id="${id}"]`).getByTestId("notification-open");
+    await tabTo(open);
+
+    await page.keyboard.press("Enter");
+    const pressed = Date.now();
+    await page.waitForTimeout(300);
+    await finishLoading();
+    await page.waitForTimeout(Math.max(0, 700 - (Date.now() - pressed)));
+
+    expect(new URL(page.url()).pathname).toBe("/");
+    await expect(open).toBeFocused({ timeout: 1_000 });
+    expect(await rows.count()).toBe(3);
+    await page.waitForURL(`**/d/${shared[2]}`, { timeout: 30_000 });
+    await waitForEditor(page);
+    expect(reads).toEqual([`/api/notifications/${id}/read`]);
+    await expect.poll(unreadCount).toBe(2);
+  });
+
   test("a row opened with the keyboard keeps the focus until its document is there", async () => {
     const page = recipient.page;
     const [shared] = await shareNew(1);
@@ -559,5 +658,93 @@ test.describe("dashboard notification strip with real input", () => {
     await page.keyboard.press("Enter");
     await expect(status).toBeFocused();
     expect(await boxOf(below)).toEqual(settled);
+  });
+
+  // The place of an emptied strip is kept for one second. A press that is still down when that second is
+  // over used to lose the box under it: the dashboard moved up, and lifting the finger was a tap on
+  // "New document".
+  type Pressed = Window & { releases?: string[] };
+  /**
+   * "Mark all read" empties a strip of 3 rows, the same spot is pressed again 250 ms later and held for
+   * 1.6 s: the box stays under the press and the release lands on it, nothing on the dashboard is
+   * pressed, and after the release the dashboard takes the place a dashboard without a strip has.
+   */
+  const expectHeldPressKeepsThePlace = async (
+    page: Page,
+    input: { press: (x: number, y: number) => Promise<unknown>; down: (x: number, y: number) => Promise<unknown>; up: () => Promise<unknown> },
+  ) => {
+    await shareNew(3);
+    const strip = await openDashboard(3, page);
+    const below = page.getByTestId("new-document");
+    const place = page.getByTestId("notifications-strip-emptied");
+    const withStrip = await boxOf(below);
+    const control = await boxOf(strip.getByTestId("notifications-strip-read-all"));
+    const x = Math.round(control.x + 5);
+    const y = Math.round(control.y + control.height / 2);
+    const nothingElse = await watchStrayClicks(page);
+    const reads = watchReads(page);
+    // Where every release and every click lands, by the nearest test id.
+    await page.evaluate(() => {
+      const releases: string[] = [];
+      (window as Pressed).releases = releases;
+      for (const type of ["pointerup", "click"]) {
+        document.addEventListener(
+          type,
+          (event) => {
+            const target = event.target instanceof Element ? event.target.closest("[data-testid]") : null;
+            releases.push(`${type} on ${target?.getAttribute("data-testid") ?? "the page"}`);
+          },
+          true,
+        );
+      }
+    });
+    const under = () => page.evaluate(([px, py]) => document.elementFromPoint(px, py)?.closest("[data-testid]")?.getAttribute("data-testid") ?? null, [x, y] as const);
+
+    await input.press(x, y);
+    await page.waitForTimeout(250);
+    await input.down(x, y);
+    await page.waitForTimeout(1_600);
+
+    // The checks around the press are soft, so that a failure also says what the release then did.
+    expect.soft(await under(), "under the press after 1.6 s").toBe("notifications-strip-emptied");
+    expect.soft(await boxOf(below), "the dashboard below while the press is held").toEqual(withStrip);
+    await input.up();
+    expect.soft(await place.count(), "the box right after the release").toBe(1);
+
+    await expect(place).toHaveCount(0, { timeout: 5_000 });
+    const releases = await page.evaluate(() => (window as Pressed).releases ?? []);
+    expect.soft(releases.slice(0, 3)).toEqual(["pointerup on notifications-strip-read-all", "click on notifications-strip-read-all", "pointerup on notifications-strip-emptied"]);
+    expect.soft(releases.slice(2).filter((release) => !release.endsWith(" on notifications-strip-emptied")), "releases and clicks outside the box").toEqual([]);
+    await nothingElse();
+    expect(new URL(page.url()).pathname).toBe("/");
+    expect(reads).toEqual(["/api/notifications/read-all"]);
+    await expect.poll(async () => (await boxOf(below)).y, { timeout: 5_000 }).toBeLessThan(withStrip.y);
+    const settled = await boxOf(below);
+    await expect(strip).toHaveCount(0);
+    await expect.poll(unreadCount).toBe(0);
+    await reloadHydrated(page);
+    expect(await boxOf(below)).toEqual(settled);
+    // Whatever a stray press had started is finished by now.
+    await nothingElse();
+  };
+
+  test("a finger held on the place of an emptied strip keeps it there, and lifting it presses nothing, at 390 px", async ({ browser }) => {
+    const page = await touchPage(browser, PHONE);
+    // A finger that stays down: `page.touchscreen` can only tap.
+    const cdp = await page.context().newCDPSession(page);
+    await expectHeldPressKeepsThePlace(page, {
+      press: (x, y) => page.touchscreen.tap(x, y),
+      down: (x, y) => cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] }),
+      up: () => cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }),
+    });
+  });
+
+  test("a mouse button held on the place of an emptied strip keeps it there, and releasing it does nothing", async () => {
+    const page = recipient.page;
+    await expectHeldPressKeepsThePlace(page, {
+      press: (x, y) => page.mouse.click(x, y),
+      down: () => page.mouse.down(),
+      up: () => page.mouse.up(),
+    });
   });
 });

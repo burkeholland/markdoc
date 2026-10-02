@@ -824,6 +824,8 @@ describe("notification strip while a row's document opens", () => {
   const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const open = (index: number) => fireEvent.click(opens()[index]!, { detail: 1 });
   const windowEvent = (type: string) => fireEvent(window, new Event(type));
+  /** `persisted` true: the browser had kept the page for Back and shows it again. False: a page load has just ended. */
+  const pageShown = (persisted: boolean) => fireEvent(window, new PageTransitionEvent("pageshow", { persisted }));
   const settle = () =>
     act(async () => {
       await Promise.resolve();
@@ -869,9 +871,9 @@ describe("notification strip while a row's document opens", () => {
   });
 
   it.each([
-    ["Back or Forward", "popstate"],
-    ["the page shown again after the browser had kept it", "pageshow"],
-  ] as const)("%s ends the wait at once: the strip follows the list in one step and rows open again", async (_label, type) => {
+    ["Back or Forward", () => windowEvent("popstate")],
+    ["the page shown again after the browser had kept it", () => pageShown(true)],
+  ] as const)("%s ends the wait at once: the strip follows the list in one step and rows open again", async (_label, end) => {
     const { store } = await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
     open(0);
     await settle();
@@ -879,7 +881,7 @@ describe("notification strip while a row's document opens", () => {
     await act(() => store.refreshNotifications());
     expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
 
-    windowEvent(type);
+    end();
 
     expect(rowIds()).toEqual(["notification-new", ITEM_TWO.id, ITEM_THREE.id]);
     expect(heading(7)).toBeVisible();
@@ -888,6 +890,64 @@ describe("notification strip while a row's document opens", () => {
     expect(router.push).toHaveBeenCalledTimes(2);
     expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_TWO));
     await settle();
+  });
+
+  // Every page load ends with a `pageshow`, right after `load`. A row can be opened before that: one slow
+  // image is enough to hold `load` back. That `pageshow` says nothing about the document that is opening.
+  it.each([
+    ["with persisted false", () => pageShown(false)],
+    ["without persisted", () => windowEvent("pageshow")],
+  ] as const)("the pageshow that ends an ordinary page load, %s, does not end the wait", async (_label, loaded) => {
+    const { store } = await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
+    act(() => opens()[0]!.focus());
+    open(0);
+    await settle();
+    notificationApi.list.mockResolvedValue({ items: [ITEM_TWO, ITEM_THREE], unreadCount: 2 });
+    await act(() => store.refreshNotifications());
+
+    loaded();
+
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
+    expect(heading(3)).toBeVisible();
+    expect(opens()[0]).toHaveFocus();
+    // The rows still do nothing: a second click on the same spot, another row, Mark as read, Mark all read.
+    open(0);
+    open(1);
+    fireEvent.click(dismisses()[1]!, { detail: 1 });
+    fireEvent.click(readAll(), { detail: 1 });
+    expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(notificationApi.readAll).not.toHaveBeenCalled();
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(hrefOf(ITEM));
+
+    // The same event for a page the browser had kept still ends it.
+    pageShown(true);
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+    open(0);
+    expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_TWO));
+    await settle();
+  });
+
+  it("the pageshow that ends an ordinary page load leaves the limits running: 30 seconds, or 8 from a page load", async () => {
+    await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
+    fakeTimers();
+
+    open(0);
+    await settle();
+    elapse(300);
+    pageShown(false);
+    elapse(29_699);
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
+    elapse(1);
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+
+    open(0);
+    await settle();
+    windowEvent("beforeunload");
+    pageShown(false);
+    elapse(7_999);
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+    elapse(1);
+    expect(rowIds()).toEqual([ITEM_THREE.id]);
   });
 
   it("waits 30 seconds at most, and every open waits anew", async () => {
@@ -948,7 +1008,7 @@ describe("notification strip while a row's document opens", () => {
   it.each([
     ["30 seconds", () => elapse(30_000)],
     ["Back", () => windowEvent("popstate")],
-    ["a page shown again", () => windowEvent("pageshow")],
+    ["a page shown again after the browser had kept it", () => pageShown(true)],
     ["8 seconds of a page load", () => {
       windowEvent("beforeunload");
       elapse(8_000);
@@ -1069,9 +1129,11 @@ describe("notification strip when a click empties it", () => {
 
     elapse(900);
     fireEvent.pointerDown(box);
+    fireEvent.pointerUp(box);
     fireEvent.click(box, { detail: 2 });
     elapse(900);
     fireEvent.pointerDown(box);
+    fireEvent.pointerUp(box);
     fireEvent.click(box, { detail: 3 });
     elapse(999);
 
@@ -1082,7 +1144,125 @@ describe("notification strip when a click empties it", () => {
     expect(router.push).not.toHaveBeenCalled();
     elapse(1);
     expect(emptiedBox()).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
     await settle();
+  });
+
+  // A press that is held: the box under it must not go away, or the release lands on the dashboard below.
+  // The press can end anywhere, so its end is heard on the window.
+  it.each([
+    ["the pointer is released on the box", () => fireEvent.pointerUp(emptiedBox()!)],
+    ["the pointer is released outside the box", () => fireEvent.pointerUp(document.body)],
+    ["a pointerup reaches the window only", () => fireEvent(window, new Event("pointerup"))],
+    ["the press is cancelled, as when a touch becomes a scroll", () => fireEvent.pointerCancel(document.body)],
+    ["a pointercancel reaches the window only", () => fireEvent(window, new Event("pointercancel"))],
+  ] as const)("a press held on the box keeps it, and its second starts when %s", async (_label, endPress) => {
+    await mountStrip([ITEM, ITEM_TWO]);
+    measured();
+    fakeTimers();
+    fireEvent.click(readAll(), { detail: 1 });
+    const box = emptiedBox()!;
+
+    elapse(900);
+    fireEvent.pointerDown(box);
+    elapse(5_000);
+
+    expect(emptiedBox()).toBe(box);
+    expect(box).toHaveStyle({ height: `${HEIGHT}px` });
+    expect(strip()).toBeNull();
+    endPress();
+    elapse(999);
+    expect(emptiedBox()).toBe(box);
+    elapse(1);
+    expect(emptiedBox()).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(notificationApi.readAll).toHaveBeenCalledOnce();
+    expect(router.push).not.toHaveBeenCalled();
+    await settle();
+  });
+
+  it("a press on the box after a held one is held the same way", async () => {
+    await mountStrip([ITEM, ITEM_TWO]);
+    fakeTimers();
+    fireEvent.click(readAll(), { detail: 1 });
+    const box = emptiedBox()!;
+
+    fireEvent.pointerDown(box);
+    elapse(3_000);
+    fireEvent.pointerUp(box);
+    elapse(900);
+    fireEvent.pointerDown(box);
+    elapse(3_000);
+    expect(emptiedBox()).toBe(box);
+    fireEvent.pointerUp(box);
+    elapse(999);
+    expect(emptiedBox()).toBe(box);
+    elapse(1);
+
+    expect(emptiedBox()).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    await settle();
+  });
+
+  it("a press whose end never arrives is given up after 10 seconds", async () => {
+    await mountStrip([ITEM, ITEM_TWO]);
+    fakeTimers();
+    fireEvent.click(readAll(), { detail: 1 });
+    const box = emptiedBox()!;
+
+    elapse(900);
+    fireEvent.pointerDown(box);
+    elapse(9_999);
+
+    expect(emptiedBox()).toBe(box);
+    elapse(1);
+    expect(emptiedBox()).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    await settle();
+  });
+
+  // The end of a press somewhere else is not the box's business: it listens only while it is pressed.
+  it("the end of a press that did not start on the box does not start its second again", async () => {
+    const added = vi.spyOn(window, "addEventListener");
+    await mountStrip([ITEM, ITEM_TWO]);
+    fakeTimers();
+    fireEvent.click(readAll(), { detail: 1 });
+    const box = emptiedBox()!;
+
+    elapse(900);
+    fireEvent.pointerUp(document.body);
+    fireEvent.pointerCancel(document.body);
+    elapse(99);
+
+    expect(emptiedBox()).toBe(box);
+    elapse(1);
+    expect(emptiedBox()).toBeNull();
+    expect(added.mock.calls.filter(([type]) => type === "pointerup" || type === "pointercancel")).toEqual([]);
+    await settle();
+  });
+
+  it.each([
+    ["while a press is held on the box", () => {}],
+    ["in the box's second after a held press", () => fireEvent.pointerUp(emptiedBox()!)],
+  ] as const)("leaves no timer and no listener behind when the page changes %s", async (_label, before) => {
+    const added = vi.spyOn(window, "addEventListener");
+    const removed = vi.spyOn(window, "removeEventListener");
+    const listened = (spy: typeof added | typeof removed) =>
+      spy.mock.calls.filter(([type]) => type === "pointerup" || type === "pointercancel").map(([type, listener, options]) => [type, listener, options]);
+    const { unmount } = await mountStrip([ITEM, ITEM_TWO]);
+    fakeTimers();
+    fireEvent.click(readAll(), { detail: 1 });
+    expect(listened(added)).toEqual([]);
+
+    fireEvent.pointerDown(emptiedBox()!);
+    expect(listened(added).map(([type]) => type)).toEqual(["pointerup", "pointercancel"]);
+    expect(vi.getTimerCount()).toBe(1);
+    before();
+    expect(vi.getTimerCount()).toBe(1);
+    unmount();
+
+    expect(listened(removed)).toEqual(listened(added));
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("says it once: the status line takes the focus, the box says nothing", async () => {
