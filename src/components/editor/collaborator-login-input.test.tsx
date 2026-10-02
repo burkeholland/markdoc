@@ -549,7 +549,11 @@ describe("CollaboratorLoginInput", () => {
     type("octo");
     await settle();
     expect(screen.getByRole("alert")).toHaveTextContent("GitHub suggestions for @octo are temporarily unavailable.");
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    const retry = screen.getByRole("button", { name: "Retry" });
+    // A real click focuses the button first (native default action); fireEvent.click alone doesn't move
+    // jsdom's document.activeElement the way a real browser click does, so this mirrors it explicitly.
+    retry.focus();
+    fireEvent.click(retry);
     expect(searchUsers).toHaveBeenCalledTimes(2);
 
     await act(async () => {
@@ -560,6 +564,32 @@ describe("CollaboratorLoginInput", () => {
     expect(input()).toHaveAttribute("aria-expanded", "true");
     // A successful manual retry hands focus back to the handle field, not leaving it on the (now gone) button.
     expect(input()).toHaveFocus();
+  });
+
+  it("a successful retry does not steal focus (or reopen the list) if the user moved on while it was in flight", async () => {
+    const retried = deferred<SearchAnswer>();
+    searchUsers.mockResolvedValueOnce({ users: [], limited: true }).mockReturnValueOnce(retried.promise);
+    render(<Harness />);
+
+    type("octo");
+    await settle();
+    const retry = screen.getByRole("button", { name: "Retry" });
+    retry.focus();
+    fireEvent.click(retry);
+    expect(searchUsers).toHaveBeenCalledTimes(2);
+
+    // The user doesn't wait around: they move on to the role select while the retry is still in flight.
+    const roleSelect = screen.getByTestId("role");
+    roleSelect.focus();
+    expect(roleSelect).toHaveFocus();
+
+    await act(async () => {
+      retried.resolve({ users: [user("octocat"), user("octodog")], limited: false });
+    });
+    // Focus must stay exactly where the user left it - not yanked back to the field - and the list must
+    // not reopen over whatever they're doing now.
+    expect(roleSelect).toHaveFocus();
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
   });
 
   it("after the route answers reason=no-github-token it asks no more while mounted: no hint, the box still types", async () => {

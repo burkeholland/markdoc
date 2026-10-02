@@ -99,6 +99,7 @@ export function CollaboratorLoginInput({
   const [shielding, setShielding] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const retryButtonRef = useRef<HTMLButtonElement>(null);
   const cacheRef = useRef(new Map<string, readonly GitHubUserDto[]>());
   const pendingRef = useRef<PendingRequest | null>(null);
   const nextRequestId = useRef(0);
@@ -142,10 +143,16 @@ export function CollaboratorLoginInput({
         setResult({ query: q, options: users });
         setLookup(null);
         if (manualRetry) {
-          // Focusing here runs the input's own onFocus synchronously, which is what actually opens the
-          // list (see handleFocus) — focusedRef may still read stale (false) if focus was on Retry.
-          inputRef.current?.focus();
-          setOpen(true);
+          // Only steal focus (and reopen the list) if the user is still sitting on Retry when the
+          // response lands. If they moved on while it was in flight — tabbed to the role select or Add,
+          // or clicked elsewhere — pulling focus back here would yank them out from under whatever
+          // they're doing now, and reopening the list over it would be worse.
+          if (retryButtonRef.current && document.activeElement === retryButtonRef.current) {
+            // Focusing here runs the input's own onFocus synchronously, which is what actually opens the
+            // list (see handleFocus) — focusedRef may still read stale (false) if focus was on Retry.
+            inputRef.current?.focus();
+            setOpen(true);
+          }
         } else {
           setOpen(focusedRef.current);
         }
@@ -359,6 +366,7 @@ export function CollaboratorLoginInput({
         >
           <span className="min-w-0 flex-1">{lookup.message}</span>
           <button
+            ref={retryButtonRef}
             type="button"
             className="btn btn-outline btn-sm h-6 shrink-0 px-2"
             onClick={handleRetry}
