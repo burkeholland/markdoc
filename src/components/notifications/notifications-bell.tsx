@@ -263,7 +263,8 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
               </div>
             </li>
           )}
-          {!loaded && !loadError && loading && (
+          {/* Not loaded and no error: still loading, or the page is not ready and nothing was asked for yet. */}
+          {!loaded && !loadError && (
             <li className="px-3 py-8 text-center text-sm text-ink-4">Loading notifications…</li>
           )}
           {!loaded && loadError && (

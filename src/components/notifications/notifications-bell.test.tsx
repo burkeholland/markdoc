@@ -769,6 +769,29 @@ describe("notification bell loading", () => {
     renderBell(EMPTY);
     expect(store.useNotifications).toHaveBeenLastCalledWith(true);
   });
+
+  // Before the page is ready the store hands out its empty snapshot: nothing loaded, nothing loading,
+  // no error. The bell can already be opened then, and it must not look empty or finished.
+  it("shows the loading state when it is opened before the list is ready, then the rows", async () => {
+    const view = openBell(EMPTY, { ready: false });
+    await settle();
+
+    expect(screen.getByText("Loading notifications…")).toBeVisible();
+    expect(rows()).toHaveLength(0);
+    expect(screen.queryByText("You're all caught up.")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("list", { name: "Notifications" }).children).toHaveLength(1);
+    expect(screen.getByTestId("notifications-read-all")).toBeDisabled();
+    expect(popover()).toHaveFocus();
+
+    view.update({ ...EMPTY, loading: true }, { ready: true });
+    expect(screen.getByText("Loading notifications…")).toBeVisible();
+
+    view.update(THREE, { ready: true });
+    expect(screen.queryByText("Loading notifications…")).toBeNull();
+    expect(rows()).toHaveLength(3);
+    expect(popover()).toBeVisible();
+  });
 });
 
 // A held key repeats its keydown, and a browser presses the focused button on every Enter keydown that
