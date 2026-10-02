@@ -1522,7 +1522,7 @@ test.describe("dialog focus return (#161)", () => {
     expect(await page.evaluate(() => String(window.getSelection()).trim())).toBe("charlie");
 
     // 2. Insert link with Ctrl+K on a selection (a shortcut): back to the rich pane, selection intact.
-    await selectTextInRich(page, "bravo");
+    await selectAfterFocusReturn(page, "bravo");
     await page.keyboard.press("Control+k");
     await expect(page.getByTestId("link-url")).toBeFocused();
     await closedWith(/link/i, "Escape");
@@ -1591,6 +1591,16 @@ test.describe("dialog focus return (#161)", () => {
       if (!el || el === document.body) return "body";
       return el.getAttribute("data-testid") ?? (el.closest(".md-rich") ? "rich" : el.closest(".cm-content") ? "code" : el.tagName.toLowerCase());
     });
+  // ProseMirror writes its own selection back to the page once, about 20 ms after the editor regains
+  // focus (its focus handler), so a selection made by script in that window is undone: on a production
+  // build 14 of 15 at 20 ms after a dialog gave focus back to the editor, none of 15 at 5 ms and at
+  // 80 ms. A person cannot select text that fast. So the selection is made again until the selection on
+  // the page is the wanted text.
+  const selectAfterFocusReturn = (page: Page, text: string) =>
+    expect(async () => {
+      await selectTextInRich(page, text);
+      expect(await page.evaluate(() => String(window.getSelection()))).toBe(text);
+    }, `the selection on the page should be "${text}" once a dialog has given focus back to the editor`).toPass({ timeout: 45_000 });
   // The ⋮ menu stays mounted, closed, until its 120 ms fade-in has ended (up to about 170 ms after it
   // opened) when one of its items is picked sooner than that. Until it is gone, Enter on the ⋮ button
   // is dropped by the menu's own gate in header.tsx (#2222, inventory row 34), and it still answers
@@ -1678,7 +1688,7 @@ test.describe("dialog focus return (#161)", () => {
       await escapeCloses(page, "Insert image");
       await expect.poll(() => focusedId(page)).toBe(toolbarOpener("tb-image"));
 
-      await selectTextInRich(page, "bravo");
+      await selectAfterFocusReturn(page, "bravo");
       await fromToolbar("tb-link");
       await expect(page.getByTestId("link-url")).toBeFocused();
       await escapeCloses(page, /link/i);
