@@ -75,6 +75,20 @@ export function cancelHeldPress(event: ReactKeyboardEvent) {
   if (event.repeat && (event.key === "Enter" || event.key === " ")) event.preventDefault();
 }
 
+/**
+ * Focuses a row without letting the browser scroll anything, then scrolls the list, and only the
+ * list, just far enough to show the row. The page and the popover stay where they are.
+ */
+function focusRow(row: HTMLElement | undefined) {
+  const list = row?.closest("ul");
+  if (!row || !list) return;
+  row.focus({ preventScroll: true });
+  const view = list.getBoundingClientRect();
+  const box = row.getBoundingClientRect();
+  if (box.top < view.top) list.scrollTop -= view.top - box.top;
+  else if (box.bottom > view.bottom) list.scrollTop += box.bottom - view.bottom;
+}
+
 /** The row a list key moves focus to, or null when the key does not move focus. */
 function rowMovement(key: string, index: number, count: number): number | null {
   if (index < 0 || index >= count) return null;
@@ -191,7 +205,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
     const next = rowMovement(event.key, list.indexOf(event.target as HTMLButtonElement), list.length);
     if (next === null) return;
     event.preventDefault();
-    list[next]?.focus({ preventScroll: true });
+    focusRow(list[next]);
   };
 
   return (
@@ -235,7 +249,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
           // Opened with an arrow key: focus the first or last row, or stay on the bell when there is none.
           event.preventDefault();
           const list = rows();
-          (edge === "first" ? list[0] : list[list.length - 1])?.focus({ preventScroll: true });
+          focusRow(edge === "first" ? list[0] : list[list.length - 1]);
         }}
       >
         <div className="flex h-10 items-center justify-between border-b border-line px-3">

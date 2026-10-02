@@ -900,6 +900,55 @@ describe("browsing rows with the keyboard", () => {
     expect(popover()).toBeVisible();
   });
 
+  // jsdom lays nothing out, so the list and its rows get boxes here: fourteen 40 px rows in a 100 px list.
+  it("scrolls the list, and nothing else, just far enough to show the row that takes focus", () => {
+    openBell(PAGE);
+    const list = screen.getByRole("list", { name: "Notifications" });
+    const all = rows();
+    const box = (top: number) => ({ top, bottom: top + 40, height: 40, left: 0, right: 0, width: 0, x: 0, y: top, toJSON: () => ({}) });
+    vi.spyOn(list, "getBoundingClientRect").mockImplementation(() => ({ ...box(200), bottom: 300, height: 100 }));
+    all.forEach((row, index) => vi.spyOn(row, "getBoundingClientRect").mockImplementation(() => box(200 + index * 40 - list.scrollTop)));
+    const scrolled = vi.fn();
+    window.addEventListener("scroll", scrolled, true);
+    act(() => all[0]!.focus());
+
+    for (const [from, key, to, scrollTop] of [
+      [0, "ArrowDown", 1, 0],
+      [1, "End", 13, 460],
+      [13, "ArrowUp", 12, 460],
+      [12, "PageUp", 2, 80],
+      [2, "ArrowDown", 3, 80],
+      [3, "Home", 0, 0],
+      [0, "ArrowUp", 13, 460],
+    ] as const) {
+      press(all[from]!, key);
+      expect(all[to]).toHaveFocus();
+      expect(list.scrollTop).toBe(scrollTop);
+    }
+    window.removeEventListener("scroll", scrolled, true);
+    expect(scrolled).not.toHaveBeenCalled();
+    expect(popover()!.scrollTop).toBe(0);
+    expect(document.documentElement.scrollTop).toBe(0);
+  });
+
+  it("shows the last row when ArrowUp on the bell opens the list on it", () => {
+    renderBell(PAGE);
+    act(() => trigger().focus());
+    const rect = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.tagName === "UL") return { ...rect.call(this), top: 200, bottom: 300 };
+      const index = rows().indexOf(this);
+      if (index < 0) return rect.call(this);
+      const top = 200 + index * 40 - this.closest("ul")!.scrollTop;
+      return { ...rect.call(this), top, bottom: top + 40 };
+    });
+
+    press(trigger(), "ArrowUp");
+
+    expect(rows()[13]).toHaveFocus();
+    expect(screen.getByRole("list", { name: "Notifications" }).scrollTop).toBe(460);
+  });
+
   it.each([
     ["PageUp", 0],
     ["PageDown", 13],

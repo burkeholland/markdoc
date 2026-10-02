@@ -85,10 +85,39 @@ test("notification bell browses trusted keys without scrolling or activating", a
 
     const bell = recipient.getByTestId("notifications-bell");
     await expect(bell).toHaveAttribute("data-unread", String(documentIds.length));
-    await bell.click();
     const popover = recipient.getByTestId("notifications-popover");
     const list = popover.getByRole("list", { name: "Notifications" });
     const rows = popover.getByTestId("notification-item");
+    /** Is the row fully inside the list's own box (1 px of rounding allowed)? */
+    const inView = (index: number) =>
+      rows.nth(index).evaluate((row) => {
+        const view = row.closest("ul")!.getBoundingClientRect();
+        const box = row.getBoundingClientRect();
+        return box.top >= view.top - 1 && box.bottom <= view.bottom + 1;
+      });
+    const pageOffsets = () =>
+      recipient.evaluate(() => ({
+        documentTop: document.documentElement.scrollTop,
+        documentLeft: document.documentElement.scrollLeft,
+        bodyTop: document.body.scrollTop,
+        bodyLeft: document.body.scrollLeft,
+        windowX: window.scrollX,
+        windowY: window.scrollY,
+      }));
+    const initialOffsets = await pageOffsets();
+
+    // ArrowUp on the closed bell opens it on the last row, which is below the fold of the list.
+    await bell.focus();
+    await recipient.keyboard.press("ArrowUp");
+    await expect(rows).toHaveCount(documentIds.length);
+    await expect(rows.last()).toBeFocused();
+    expect(await list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    await expect.poll(() => inView(documentIds.length - 1)).toBe(true);
+    expect(await pageOffsets()).toEqual(initialOffsets);
+    await recipient.keyboard.press("Escape");
+    await expect(popover).toHaveCount(0);
+
+    await bell.click();
     await expect(rows).toHaveCount(documentIds.length);
     await rows.first().focus();
     await list.evaluate((element) => {
@@ -96,41 +125,24 @@ test("notification bell browses trusted keys without scrolling or activating", a
       element.scrollLeft = 0;
     });
     const initialUrl = recipient.url();
-    const initialOffsets = await list.evaluate((element) => ({
-      listTop: element.scrollTop,
-      listLeft: element.scrollLeft,
-      documentTop: document.documentElement.scrollTop,
-      documentLeft: document.documentElement.scrollLeft,
-      bodyTop: document.body.scrollTop,
-      bodyLeft: document.body.scrollLeft,
-      windowX: window.scrollX,
-      windowY: window.scrollY,
-    }));
 
-    for (const [key, index] of [
-      ["ArrowDown", 1],
-      ["ArrowUp", 0],
-      ["ArrowUp", 7],
-      ["ArrowDown", 0],
-      ["End", 7],
-      ["Home", 0],
+    // Focus moves without the browser scrolling anything. Only the list scrolls, and only as far as
+    // it takes to show the focused row.
+    for (const [key, index, listScrolls] of [
+      ["ArrowDown", 1, false],
+      ["ArrowUp", 0, false],
+      ["ArrowUp", 7, true],
+      ["ArrowDown", 0, true],
+      ["End", 7, true],
+      ["Home", 0, true],
     ] as const) {
+      const listTop = await list.evaluate((element) => element.scrollTop);
       await recipient.keyboard.press(key);
       await expect(rows.nth(index)).toBeFocused();
-      await expect
-        .poll(() =>
-          list.evaluate((element) => ({
-            listTop: element.scrollTop,
-            listLeft: element.scrollLeft,
-            documentTop: document.documentElement.scrollTop,
-            documentLeft: document.documentElement.scrollLeft,
-            bodyTop: document.body.scrollTop,
-            bodyLeft: document.body.scrollLeft,
-            windowX: window.scrollX,
-            windowY: window.scrollY,
-          })),
-        )
-        .toEqual(initialOffsets);
+      await expect.poll(() => inView(index)).toBe(true);
+      expect((await list.evaluate((element) => element.scrollTop)) !== listTop).toBe(listScrolls);
+      expect(await list.evaluate((element) => element.scrollLeft)).toBe(0);
+      expect(await pageOffsets()).toEqual(initialOffsets);
     }
 
     await expect(popover).toBeVisible();
