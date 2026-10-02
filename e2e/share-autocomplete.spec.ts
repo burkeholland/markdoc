@@ -802,4 +802,125 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
 
     await owner.context.close();
   });
+
+  // Blurring the handle field used to close the suggestion list synchronously (setOpen(false) unmounting the
+  // <ul> in the very same tick). Whatever caused the blur — Tab's native focus-move, or a click somewhere
+  // else that's still resolving — can read "where does focus go next" from the DOM as it stood an instant
+  // earlier; unmounting the listbox before that move finishes sent focus to the dialog's own focus-trap
+  // container instead of the role select, Add, or whatever was actually clicked. handleBlur now defers the
+  // close by a macrotask so focus settles first (see its comment in collaborator-login-input.tsx).
+  test.describe("the suggestion list closing never steals focus to the dialog container", () => {
+    test("Tab with the list open and no option highlighted moves focus through role select, then Add, and Shift+Tab moves back — the list closes, nothing is picked, the typed text stays", async ({ browser }) => {
+      const owner = await signIn(browser, "autocomplete-tab-nolist-owner");
+      const { page } = owner;
+      const id = await createDocument(page, "# Tab No Active\n", "Tab No Active");
+      expect((await page.request.get(`${USERS}?q=octop`, { timeout: 120_000 })).status()).toBe(200);
+      await openDocument(page, id);
+      const { input } = await openShare(page);
+
+      const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
+      await page.keyboard.type("octop"); // three matches (octocat, octodog, octofox)
+      await expect(page.getByTestId("share-login-suggestions")).toBeVisible({ timeout: budgetMs(600) });
+
+      await page.keyboard.press("Tab");
+      await expect(page.getByTestId("share-role")).toBeFocused();
+      await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+      await expect(input).toHaveValue("octop");
+
+      await page.keyboard.press("Tab");
+      await expect(page.getByTestId("share-add")).toBeFocused();
+
+      await page.keyboard.press("Shift+Tab");
+      await expect(page.getByTestId("share-role")).toBeFocused();
+
+      await page.keyboard.press("Shift+Tab");
+      await expect(input).toBeFocused();
+
+      expect(adds.seen, "POST /collaborators requests").toHaveLength(0);
+      await expect(page.getByTestId("collaborator-row")).toHaveCount(0);
+      await owner.context.close();
+    });
+
+    test("Tab with an option highlighted by ArrowDown picks nothing — the typed text stays, not the highlighted login", async ({
+      browser,
+    }) => {
+      const owner = await signIn(browser, "autocomplete-tab-active-owner");
+      const { page } = owner;
+      const id = await createDocument(page, "# Tab Active Option\n", "Tab Active Option");
+      expect((await page.request.get(`${USERS}?q=octop`, { timeout: 120_000 })).status()).toBe(200);
+      await openDocument(page, id);
+      const { input, options } = await openShare(page);
+
+      const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
+      await page.keyboard.type("octop");
+      await expect(options.first()).toBeVisible({ timeout: budgetMs(600) });
+      await page.keyboard.press("ArrowDown");
+      await expect(options.first()).toHaveAttribute("aria-selected", "true");
+
+      await page.keyboard.press("Tab");
+      await expect(page.getByTestId("share-role")).toBeFocused();
+      await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+      // Tab must not act like Enter: the active option is never picked just because it was highlighted.
+      await expect(input).toHaveValue("octop");
+
+      expect(adds.seen, "POST /collaborators requests").toHaveLength(0);
+      await expect(page.getByTestId("collaborator-row")).toHaveCount(0);
+      await owner.context.close();
+    });
+
+    test("Shift+Tab from the field with the list open reaches the same place Shift+Tab reaches with the list closed (the dialog's Close button), not the dialog container", async ({
+      browser,
+    }) => {
+      const owner = await signIn(browser, "autocomplete-shifttab-owner");
+      const { page } = owner;
+      const id = await createDocument(page, "# Shift Tab\n", "Shift Tab");
+      expect((await page.request.get(`${USERS}?q=octop`, { timeout: 120_000 })).status()).toBe(200);
+      await openDocument(page, id);
+      const { input } = await openShare(page);
+      const closeButton = page.getByRole("button", { name: "Close" });
+
+      await page.keyboard.type("octop");
+      await expect(page.getByTestId("share-login-suggestions")).toBeVisible({ timeout: budgetMs(600) });
+
+      await page.keyboard.press("Shift+Tab");
+      await expect(closeButton).toBeFocused();
+      await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+      await expect(input).toHaveValue("octop");
+      await expect(page.getByTestId("collaborator-row")).toHaveCount(0);
+      await owner.context.close();
+    });
+
+    test("a mouse click on the role select while the list is open lands focus on the role select, not the dialog container, and changing the role adds nobody", async ({
+      browser,
+    }) => {
+      const owner = await signIn(browser, "autocomplete-click-role-owner");
+      const { page } = owner;
+      const id = await createDocument(page, "# Click Role\n", "Click Role");
+      expect((await page.request.get(`${USERS}?q=octop`, { timeout: 120_000 })).status()).toBe(200);
+      await openDocument(page, id);
+      const { input } = await openShare(page);
+      const roleSelect = page.getByTestId("share-role");
+      const roleBefore = await roleSelect.inputValue();
+
+      const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
+      await page.keyboard.type("octop");
+      await expect(page.getByTestId("share-login-suggestions")).toBeVisible({ timeout: budgetMs(600) });
+
+      // The click itself is the regression check: before the fix, handleBlur's synchronous
+      // setOpen(false) raced this click's own focus-move and focus landed on the dialog's
+      // focus-trap container instead of the select.
+      await roleSelect.click();
+      await expect(roleSelect).toBeFocused();
+      await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+      await roleSelect.selectOption("commenter");
+      await expect(roleSelect).toBeFocused();
+      await expect(roleSelect).toHaveValue("commenter");
+      expect(roleBefore).not.toBe("commenter");
+      await expect(input).toHaveValue("octop");
+
+      expect(adds.seen, "POST /collaborators requests").toHaveLength(0);
+      await expect(page.getByTestId("collaborator-row")).toHaveCount(0);
+      await owner.context.close();
+    });
+  });
 });

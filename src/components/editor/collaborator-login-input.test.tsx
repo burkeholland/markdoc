@@ -231,7 +231,10 @@ describe("CollaboratorLoginInput", () => {
     expect(searchUsers).toHaveBeenCalledTimes(2);
     expect(options()).toEqual(["octocat"]);
 
+    // The close is deferred a macrotask past blur (see handleBlur) so a Tab/click's own focus-move finishes
+    // first; `settle(0)` flushes that timer here, same as a real blur followed by a beat with nothing refocused.
     fireEvent.blur(input());
+    await settle(0);
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
     fireEvent.focus(input());
     expect(options()).toEqual(["octocat"]);
@@ -603,7 +606,9 @@ describe("CollaboratorLoginInput", () => {
     type("octo");
     await settle();
 
+    // Deferred close (see handleBlur): settle(0) flushes the post-blur macrotask with nothing refocused.
     fireEvent.blur(input());
+    await settle(0);
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
     await act(async () => {
       pending.resolve({ users: [user("octocat")], limited: false });
@@ -612,6 +617,31 @@ describe("CollaboratorLoginInput", () => {
     // Refocusing shows what the (now-settled) answer actually contained.
     fireEvent.focus(input());
     expect(options()).toEqual(["octocat"]);
+  });
+
+  it("keeps the listbox mounted through the instant of blur, and a quick refocus (e.g. Shift+Tab back in) cancels the deferred close (issue: Tab moved focus to the dialog container instead of the next control while the list was open)", async () => {
+    searchUsers.mockImplementation(() => answer("octocat"));
+    render(<Harness />);
+    type("octo");
+    await settle();
+    expect(options()).toEqual(["octocat"]);
+
+    // Blur alone must not synchronously unmount the listbox: a real Tab/click's own native focus-move is
+    // still in flight at this instant, and unmounting here is what raced it and sent focus to the dialog's
+    // own container instead of the next control (see handleBlur's comment).
+    fireEvent.blur(input());
+    expect(screen.queryByTestId("share-login-suggestions")).not.toBeNull();
+
+    // A refocus before the deferred close's timer fires (Shift+Tab straight back in) must cancel it outright,
+    // not just briefly reopen something that was already closing.
+    fireEvent.focus(input());
+    await settle(0);
+    expect(options()).toEqual(["octocat"]);
+
+    // With nothing refocused, the deferred close still actually happens once its macrotask runs.
+    fireEvent.blur(input());
+    await settle(0);
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
   });
 
   describe("typing a full handle key by key (issue #2244)", () => {

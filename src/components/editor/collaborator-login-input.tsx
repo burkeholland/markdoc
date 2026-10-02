@@ -104,6 +104,7 @@ export function CollaboratorLoginInput({
   const nextRequestId = useRef(0);
   const [shieldedCandidates, setShieldedCandidates] = useState<readonly GitHubUserDto[]>([]);
   const shieldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Tracks real focus (set by the input's own focus/blur handlers) rather than reading
   // `document.activeElement`, which test harnesses can simulate without ever moving focus.
   const focusedRef = useRef(false);
@@ -200,6 +201,7 @@ export function CollaboratorLoginInput({
   useEffect(() => () => pendingRef.current?.controller.abort(), []);
   useEffect(() => () => {
     if (shieldTimer.current) clearTimeout(shieldTimer.current);
+    if (blurTimer.current) clearTimeout(blurTimer.current);
   }, []);
 
   const excludedSet = new Set(exclude.map((login) => login.trim().replace(/^@/, "").toLowerCase()).filter(Boolean));
@@ -280,8 +282,22 @@ export function CollaboratorLoginInput({
 
   const handleBlur = () => {
     focusedRef.current = false;
-    setOpen(false);
-    setActive(-1);
+    // Deferred, not synchronous: unmounting the listbox (setOpen(false) below) in the very same tick as blur
+    // races the browser's own default action for whatever caused the blur — Tab's native focus-move, or a
+    // mousedown on another control that's still resolving its own click. The browser can compute "where focus
+    // goes next" from the DOM as it stood at blur time, but if that DOM changes (the listbox disappears)
+    // before the move actually completes, focus lands on the nearest focusable ancestor instead — here, the
+    // dialog's own focus-trap container — rather than the role select, Add button, or whatever was clicked.
+    // A macrotask lets the browser finish moving focus first; the `focusedRef` check cancels the close if the
+    // box was refocused before the timer fires (e.g. Shift+Tab straight back in), so it is never force-closed
+    // out from under a user who is still in it.
+    if (blurTimer.current) clearTimeout(blurTimer.current);
+    blurTimer.current = setTimeout(() => {
+      blurTimer.current = null;
+      if (focusedRef.current) return;
+      setOpen(false);
+      setActive(-1);
+    }, 0);
   };
 
   // Refocusing the box (tab back in, or dismiss-and-return) shows the already-fetched candidates again
