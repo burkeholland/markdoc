@@ -198,6 +198,7 @@ test.describe("notifications", () => {
     await expect(popover.getByTestId("notification-unread-dot")).toHaveCount(0);
     await expect.poll(() => unreadCount(carol.page)).toBe(0);
     await carol.page.keyboard.press("Escape");
+    await expect(popover).toHaveCount(0);
 
     // Opening the shared item from the popover of another document navigates there.
     await shareWith(alice.page, docId, carol.login, "viewer");

@@ -4,7 +4,9 @@ import {
   devLogin,
   openDocument,
   shareWith,
+  signIn,
   uniqueLogin,
+  type User,
 } from "./helpers";
 import type { Route } from "@playwright/test";
 
@@ -157,4 +159,112 @@ test("notification bell browses trusted keys without scrolling or activating", a
   } finally {
     await Promise.all([recipientContext.close(), senderContext.close()]);
   }
+});
+
+test.describe("notification bell with real input (#2225)", () => {
+  let sender: User;
+  let recipient: User;
+
+  const unreadCount = async () => {
+    const response = await recipient.page.request.get("/api/notifications?unread=1");
+    return ((await response.json()) as { unreadCount: number }).unreadCount;
+  };
+  /** Shares a new document with the recipient and waits until their bell shows it. */
+  const shareNew = async (title: string, unread: number) => {
+    const id = await createDocument(sender.page, `# ${title}\n`, title);
+    await shareWith(sender.page, id, recipient.login, "viewer");
+    await expect.poll(unreadCount).toBe(unread);
+    await recipient.page.evaluate(() =>
+      (window as unknown as { __markdocNotificationsRefresh?: () => Promise<void> }).__markdocNotificationsRefresh?.(),
+    );
+    await expect(recipient.page.getByTestId("notifications-bell")).toHaveAttribute("data-unread", String(unread));
+    return id;
+  };
+  /** Where focus is, read two frames later so a browser that drops focus from a disabled button has done so. */
+  const focusPlace = () =>
+    recipient.page.evaluate(
+      () =>
+        new Promise<string>((resolve) =>
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              const active = document.activeElement;
+              const popover = document.querySelector('[data-testid="notifications-popover"]');
+              resolve(active === document.body ? "body" : popover?.contains(active) ? "popover" : "elsewhere");
+            }),
+          ),
+        ),
+    );
+
+  test.beforeEach(async ({ browser }) => {
+    sender = await signIn(browser, uniqueLogin("bell-input-sender"));
+    recipient = await signIn(browser, uniqueLogin("bell-input-recipient"));
+    const own = await createDocument(recipient.page, "# My notes\n", "My notes");
+    await openDocument(recipient.page, own);
+  });
+
+  test.afterEach(async () => {
+    await Promise.all([sender.context.close(), recipient.context.close()]);
+  });
+
+  test("a share notification opens from the bell with the keyboard and is marked read", async () => {
+    const page = recipient.page;
+    const older = await shareNew("Keyboard share one", 1);
+    const newer = await shareNew("Keyboard share two", 2);
+    const bell = page.getByTestId("notifications-bell");
+    const rows = page.getByTestId("notifications-popover").getByTestId("notification-item");
+
+    // Real keys only: ArrowDown on the bell opens it on the first row, ArrowDown moves on, Enter opens that row.
+    await bell.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(rows.first()).toBeFocused();
+    await expect(rows.first()).toHaveAttribute("data-document-id", newer);
+    await page.keyboard.press("ArrowDown");
+    await expect(rows.nth(1)).toBeFocused();
+    await expect(rows.nth(1)).toHaveAttribute("data-document-id", older);
+    await page.keyboard.press("Enter");
+
+    await page.waitForURL(`**/d/${older}`);
+    await expect.poll(unreadCount).toBe(1);
+  });
+
+  test("Mark all read keeps focus in the popover, so Escape closes it and the bell opens again", async () => {
+    const page = recipient.page;
+    const bell = page.getByTestId("notifications-bell");
+    const popover = page.getByTestId("notifications-popover");
+    const readAll = popover.getByTestId("notifications-read-all");
+
+    // With the mouse: the clicked button disables itself while it has focus.
+    await shareNew("Focus share one", 1);
+    await bell.click();
+    await readAll.click();
+    await expect(readAll).toBeDisabled();
+    await expect.poll(unreadCount).toBe(0);
+    expect(await focusPlace()).toBe("popover");
+    await page.keyboard.press("Escape");
+    await expect(popover).toHaveCount(0);
+    await expect(bell).toBeFocused();
+
+    // With the keyboard: Enter opens the bell on the first row, End and Tab reach Mark all read, Enter presses it.
+    const shared = await shareNew("Focus share two", 1);
+    await page.keyboard.press("Enter");
+    await expect(popover.getByTestId("notification-item").first()).toBeFocused();
+    await page.keyboard.press("End");
+    await page.keyboard.press("Tab");
+    await expect(readAll).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(readAll).toBeDisabled();
+    await expect.poll(unreadCount).toBe(0);
+    expect(await focusPlace()).toBe("popover");
+    await page.keyboard.press("Escape");
+    await expect(popover).toHaveCount(0);
+    await expect(bell).toBeFocused();
+
+    // The bell was really closed: one more press opens it, and the row still opens its document.
+    await page.keyboard.press("Enter");
+    const first = popover.getByTestId("notification-item").first();
+    await expect(first).toBeFocused();
+    await expect(first).toHaveAttribute("data-document-id", shared);
+    await page.keyboard.press("Enter");
+    await page.waitForURL(`**/d/${shared}`);
+  });
 });
