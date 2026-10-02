@@ -277,13 +277,15 @@ export const ShareDialog = memo(function ShareDialog({
             </h3>
             <ul className="flex flex-col divide-y divide-line rounded-xl border border-line" aria-label="People with access">
               {list.status === "loading" && (
-                <li className="flex items-center justify-center gap-2 px-3 py-4 text-sm text-ink-3" role="status" data-testid="collaborator-list-loading">
-                  <Loader2 size={15} className="animate-spin" aria-hidden="true" /> Loading…
+                <li className="flex items-center justify-center gap-2 px-3 py-4 text-sm text-ink-3" data-testid="collaborator-list-loading">
+                  <span role="status" className="flex items-center gap-2">
+                    <Loader2 size={15} className="animate-spin" aria-hidden="true" /> Loading…
+                  </span>
                 </li>
               )}
               {list.status === "error" && (
-                <li className="bg-red-50 px-3 py-3 text-sm text-danger dark:bg-red-950/40" role="alert" data-testid="collaborator-list-error">
-                  <div className="wrap-anywhere">{list.message}</div>
+                <li className="bg-red-50 px-3 py-3 text-sm text-danger dark:bg-red-950/40" data-testid="collaborator-list-error">
+                  <div className="wrap-anywhere" role="alert">{list.message}</div>
                   <button type="button" className="btn btn-outline btn-sm mt-2" onClick={() => setRetry((n) => n + 1)} data-testid="collaborator-list-retry">
                     Retry
                   </button>

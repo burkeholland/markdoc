@@ -669,8 +669,10 @@ test.describe("axe: editor", () => {
     await clickCell(page, 1, 0);
     await scan(page, "editor + table menu");
 
-    // Selection bubble.
-    await selectTextInRich(page, "Closing words");
+    // Selection bubble. The slash-menu step above (focusRichEnd, then Escape+Backspace) can leave "Closing words"
+    // scrolled off-screen, so this is the one caller that opts into scrollIntoView (every other caller leaves
+    // scroll position alone).
+    await selectTextInRich(page, "Closing words", { scrollIntoView: true });
     await expect(page.getByTestId("selection-bubble")).toBeVisible();
     await scan(page, "editor + selection bubble");
     await page.keyboard.press("End");
@@ -1249,7 +1251,8 @@ test.describe("axe: phone (iPhone 13)", () => {
       { width: 768, height: 1024 },
     ]) {
       await page.setViewportSize(viewport);
-      const download = page.getByRole("button", { name: "Download Markdown", exact: true });
+      // "Download Markdown" is a native `<a href>` link on purpose (pre-hydration downloads work without JS).
+      const download = page.getByRole("link", { name: "Download Markdown", exact: true });
       await expect(download).toHaveAttribute("data-testid", "reader-download");
       await expect(page.getByRole("button", { name: "Download as…", exact: true })).toHaveAttribute("data-testid", "reader-download-menu");
       await expect(download.locator("span")).toBeVisible({ visible: viewport.width >= 640 });

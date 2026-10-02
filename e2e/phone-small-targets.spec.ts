@@ -7,7 +7,6 @@ const VIEWPORTS = [
   { width: 360, height: 780 },
   { width: 393, height: 851 },
 ] as const;
-const COPILOT_APP_DOCS = "https://github.com/burkeholland/markdoc/blob/main/docs/agents.md#inside-the-copilot-app";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
 // The Copilot app step shows a one-time key; keep failure snapshots (which print the page) out of the artifacts too.
@@ -254,13 +253,6 @@ for (const viewport of VIEWPORTS) {
       await expectTarget(setupToggle, "Set up button", { height: 24 });
       await setupToggle.click();
       await expect(setupToggle).toHaveAttribute("aria-expanded", "true");
-      const agentPicker = page.getByRole("radiogroup", { name: "Agent" });
-      const tiles = agentPicker.locator("label");
-      await expect(tiles).toHaveCount(6);
-      const tileHeights: number[] = [];
-      for (let index = 0; index < 6; index++) {
-        tileHeights.push((await expectTarget(tiles.nth(index), `agent tile ${index + 1}`, { height: 32 })).height);
-      }
       await expectTarget(page.getByTestId("agent-create-key"), "Create access key button", { height: 32 });
       const change = page.getByTestId("agent-options-toggle");
       await expectTarget(change, "Change options button", { height: 24 });
@@ -274,16 +266,18 @@ for (const viewport of VIEWPORTS) {
       const agentDocsBox = await expectTarget(agentDocs, "agent setup documentation link", { height: 24 });
       await expectLinkClick(page, agentDocs, AGENT_DOCS_URL);
 
-      // The Copilot app is the one client with its own docs link and an install step.
-      await agentPicker.getByText("Copilot app", { exact: true }).click();
+      // One MCP config for every client: Create access key shows it, with a touch-sized copy
+      // button, and the form-based fields (URL, Authorization header) folded behind a summary.
       await page.getByTestId("agent-create-key").click();
-      await expect(page.getByTestId("agent-setup-snippet")).toContainText("MARKDOC_TOKEN=mdk_");
-      const appDocs = page.getByTestId("agent-client-docs-link");
-      const appDocsBox = await expectTarget(appDocs, "Copilot app documentation link", { height: 24 });
-      await expectLinkClick(page, appDocs, COPILOT_APP_DOCS);
-      const installSummary = page.getByTestId("agent-setup").locator("summary");
-      await expect(installSummary).toHaveCount(1);
-      const installSummaryBox = await expectTarget(installSummary, "install step summary", { height: 24 });
+      await expect(page.getByTestId("agent-setup-snippet")).toContainText("mcpServers");
+      const copyConfigBox = await expectTarget(page.getByTestId("agent-setup-copy"), "copy MCP config button", { height: 32 });
+      const formSummary = page.getByTestId("agent-setup").locator("summary");
+      await expect(formSummary).toHaveCount(1);
+      const formSummaryBox = await expectTarget(formSummary, "form fields summary", { height: 24 });
+      await formSummary.click();
+      await expect(page.getByTestId("agent-setup-fields")).toBeVisible();
+      const copyUrlBox = await expectTarget(page.getByRole("button", { name: "Copy server URL" }), "copy server URL button", { height: 32 });
+      const copyHeaderBox = await expectTarget(page.getByRole("button", { name: "Copy Authorization header" }), "copy Authorization header button", { height: 32 });
 
       // Webhooks sit behind Advanced.
       const advanced = page.getByTestId("advanced-toggle");
@@ -328,7 +322,6 @@ for (const viewport of VIEWPORTS) {
       await page.getByTestId("palette-item-doc:connect-agent").click();
       const dialog = page.getByTestId("agent-dialog");
       await expect(dialog).toBeVisible();
-      await expect(dialog.getByRole("radiogroup", { name: "Agent" }).locator("label")).toHaveCount(6);
       const dialogDocs = dialog.getByTestId("agent-docs-link");
       const dialogDocsBox = await expectTarget(dialogDocs, "connect dialog documentation link", { height: 24 });
       await expectLinkClick(page, dialogDocs, AGENT_DOCS_URL);
@@ -337,15 +330,15 @@ for (const viewport of VIEWPORTS) {
         `[2814] control geometry ${viewport.width}x${viewport.height} ${JSON.stringify({
           switch: { unchecked, disabledChecked, persistedChecked, disabledUnchecked, rollbackChecked },
           targets: {
-            agentTiles: tileHeights,
             accessRows: optionHeights,
-            installSummary: installSummaryBox.height,
+            formSummary: formSummaryBox.height,
+            copyButtons: [copyConfigBox.height, copyUrlBox.height, copyHeaderBox.height],
             webhookHeights,
-            documentationHeights: [agentDocsBox.height, appDocsBox.height, dialogDocsBox.height],
+            documentationHeights: [agentDocsBox.height, dialogDocsBox.height],
             language: { width: languageBox.width, height: languageBox.height },
           },
           overflow: { settings: settingsOverflow, editor: editorOverflow },
-          actions: { togglePersisted: true, failedToggleRolledBack: true, webhookLabels: 7, documentationLinks: 3, languageCommitted: true },
+          actions: { togglePersisted: true, failedToggleRolledBack: true, webhookLabels: 7, documentationLinks: 2, languageCommitted: true },
         })}`,
       );
     } finally {
