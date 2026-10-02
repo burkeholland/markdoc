@@ -245,6 +245,12 @@ export const ShareDialog = memo(function ShareDialog({
                   className="select"
                   value={role}
                   onChange={(e) => setRole(e.target.value as CollaboratorRole)}
+                  onKeyDown={(e) => {
+                    // Picking a suggestion moves focus here so Tab naturally reaches the role next; it must never
+                    // let Enter submit on its own (including the auto-repeat from a still-held Enter that just
+                    // picked), since picking a suggestion fills the field without adding.
+                    if (e.key === "Enter") e.preventDefault();
+                  }}
                   aria-label="Role for new collaborator"
                   data-testid="share-role"
                 >

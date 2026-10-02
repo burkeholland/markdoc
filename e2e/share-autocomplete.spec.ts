@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, createDocument, openDocument, budgetMs, mintToken } from "./helpers";
+import { signIn, createDocument, openDocument, budgetMs, mintToken, devLogin } from "./helpers";
 
 /**
  * Share dialog · GitHub handle autocomplete (task #920). GitHub is the in-memory fake (GITHUB_MOCK=1),
@@ -12,7 +12,15 @@ import { signIn, createDocument, openDocument, budgetMs, mintToken } from "./hel
 const USERS = "/api/github/users";
 
 async function openShare(page: Page) {
-  await page.getByTestId("share-button").click();
+  // Below the `md` breakpoint the header hides the direct Share button (header.tsx: `max-md:hidden`)
+  // and folds it into the overflow menu instead (see e2e/phone-overlays.spec.ts).
+  const button = page.getByTestId("share-button");
+  if (await button.isVisible()) {
+    await button.click();
+  } else {
+    await page.getByTestId("more-menu").click();
+    await page.getByTestId("menu-share").click();
+  }
   const dialog = page.getByRole("dialog", { name: /share/i });
   await expect(dialog).toBeVisible();
   const input = page.getByTestId("share-login");
@@ -211,6 +219,142 @@ test.describe("share dialog · GitHub handle autocomplete", () => {
     await expect(page.getByRole("dialog", { name: /share/i }).locator(".text-danger")).toHaveCount(0);
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("collaborator-row")).toContainText("@zz-nobody");
+    await owner.context.close();
+  });
+
+  test("a held Enter after picking a suggestion does not add the collaborator a second time", async ({ browser }) => {
+    const owner = await signIn(browser, "autocomplete-held-enter-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Held Enter\n", "Held Enter");
+    expect((await page.request.get(`${USERS}?q=octop`, { timeout: 120_000 })).status()).toBe(200);
+    await openDocument(page, id);
+    const { input, options } = await openShare(page);
+
+    await page.keyboard.type("octop"); // exactly three matches: octopus, octopod, octoprint
+    await expect(options).toHaveCount(3, { timeout: budgetMs(600) });
+    await page.keyboard.press("ArrowDown");
+    await expect(options.first()).toHaveAttribute("aria-selected", "true");
+
+    const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
+    // A real held key: one keydown picks, and — without ever releasing the key — a second keydown
+    // follows, just like a physical key's auto-repeat. The pick moves focus to the role select, so
+    // this second keydown is the one that would implicitly submit if the select did not block it.
+    await page.keyboard.down("Enter");
+    await expect(input).toHaveValue("octopus");
+    await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+    await expect(page.getByTestId("share-role")).toBeFocused();
+    await page.keyboard.down("Enter");
+    await page.keyboard.up("Enter");
+    await page.waitForTimeout(budgetMs(300));
+
+    expect(adds.seen, "POST /collaborators requests").toHaveLength(0);
+    await expect(page.getByTestId("collaborator-row")).toHaveCount(0);
+    adds.stop();
+    await owner.context.close();
+  });
+
+  test("a fast real double click on a suggestion fills exactly that login and reaches nothing underneath (narrow width)", async ({ browser }) => {
+    const owner = await signIn(browser, "autocomplete-dblclick-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Double Click\n", "Double Click");
+    expect((await page.request.get(`${USERS}?q=octop`, { timeout: 120_000 })).status()).toBe(200);
+    // A collaborator already on the document, so a click-through has somewhere real to land: the
+    // role select or Add right below the list, or this row's own role select and Remove further down.
+    expect((await page.request.post(`/api/documents/${id}/collaborators`, { data: { login: "preexisting", role: "viewer" } })).status()).toBeLessThan(300);
+    await openDocument(page, id);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const { input, options } = await openShare(page);
+
+    await page.keyboard.type("octop"); // three matches
+    await expect(options).toHaveCount(3, { timeout: budgetMs(600) });
+    const middle = options.nth(1);
+    const login = await middle.getAttribute("data-login");
+    const box = (await middle.boundingBox())!;
+
+    const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
+    await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2, { delay: 30 });
+
+    await expect(input).toHaveValue(login!);
+    await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+    await page.waitForTimeout(budgetMs(300));
+
+    expect(adds.seen, "POST /collaborators requests").toHaveLength(0);
+    await expect(page.getByTestId("collaborator-row")).toHaveCount(1);
+    await expect(page.getByLabel("Role for preexisting")).toHaveValue("viewer");
+    adds.stop();
+    await owner.context.close();
+  });
+
+  test("a real touch double tap on a suggestion behaves the same as a double click (wide width, eight suggestions, last option)", async ({ browser }) => {
+    const context = await browser.newContext({ hasTouch: true });
+    const page = await context.newPage();
+    await devLogin(page, "autocomplete-dbltap-owner");
+    await page.waitForLoadState("networkidle");
+    const id = await createDocument(page, "# Double Tap\n", "Double Tap");
+    expect((await page.request.get(`${USERS}?q=octo`, { timeout: 120_000 })).status()).toBe(200);
+    expect((await page.request.post(`/api/documents/${id}/collaborators`, { data: { login: "preexisting", role: "viewer" } })).status()).toBeLessThan(300);
+    await openDocument(page, id);
+    await page.setViewportSize({ width: 1280, height: 900 });
+    const { input, options } = await openShare(page);
+
+    await page.keyboard.type("octo"); // nine matches, capped at eight
+    await expect(options).toHaveCount(8, { timeout: budgetMs(600) });
+    const last = options.last();
+    const login = await last.getAttribute("data-login");
+    const box = (await last.boundingBox())!;
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+
+    const adds = countRequests(page, `/api/documents/${id}/collaborators`, "POST");
+    await page.touchscreen.tap(x, y);
+    await page.touchscreen.tap(x, y);
+
+    await expect(input).toHaveValue(login!);
+    await expect(page.getByTestId("share-login-suggestions")).toHaveCount(0);
+    await page.waitForTimeout(budgetMs(300));
+
+    expect(adds.seen, "POST /collaborators requests").toHaveLength(0);
+    await expect(page.getByTestId("collaborator-row")).toHaveCount(1);
+    await expect(page.getByLabel("Role for preexisting")).toHaveValue("viewer");
+    adds.stop();
+    await context.close();
+  });
+
+  test("Add accepts exactly what the server accepts: a 1-character login, a leading @, a trailing hyphen; rejects 40 characters and embedded spaces", async ({ browser }) => {
+    const owner = await signIn(browser, "autocomplete-validate-owner");
+    const { page } = owner;
+    const id = await createDocument(page, "# Validate\n", "Validate");
+    await openDocument(page, id);
+    const { input } = await openShare(page);
+    const add = page.getByTestId("share-add");
+
+    // 1 character: too short to search suggestions for (SUGGEST_MIN_CHARS is 2), but the server's own
+    // minimum is 1 — a real, addable GitHub login shape.
+    await page.keyboard.type("x");
+    await expect(add).toBeEnabled();
+    await add.click();
+    await expect(page.getByTestId("collaborator-row").filter({ hasText: "@x" })).toHaveCount(1);
+
+    await input.fill("");
+    await page.keyboard.type("@y"); // leading @
+    await expect(add).toBeEnabled();
+    await add.click();
+    await expect(page.getByTestId("collaborator-row").filter({ hasText: "@y" })).toHaveCount(1);
+
+    await input.fill("");
+    await page.keyboard.type("octo-"); // trailing hyphen: the server's regex allows it
+    await expect(add).toBeEnabled();
+    await add.click();
+    await expect(page.getByTestId("collaborator-row").filter({ hasText: "@octo-" })).toHaveCount(1);
+
+    await input.fill("");
+    await page.keyboard.type("a".repeat(40)); // over the server's 39-character max
+    await expect(add).toBeDisabled();
+
+    await input.fill("");
+    await page.keyboard.type("bad name"); // embedded space: not a login shape
+    await expect(add).toBeDisabled();
+
     await owner.context.close();
   });
 });

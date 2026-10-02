@@ -19,6 +19,8 @@ export const SUGGEST_DEBOUNCE_MS = 250;
 export const SUGGEST_MIN_CHARS = 2;
 /** The route answers at most this many; the list never shows more. */
 export const SUGGEST_MAX = 8;
+/** How long the just-closed list's footprint stays a non-interactive click-shield after a pick (see `shielding` below). */
+export const SHIELD_MS = 400;
 
 function SuggestionAvatar({ login, src }: { login: string; src: string }) {
   const [failed, setFailed] = useState(false);
@@ -46,10 +48,15 @@ export function suggestQuery(value: string): string | null {
   return q.length >= SUGGEST_MIN_CHARS && q.length <= 39 && /^[a-zA-Z0-9-]+$/.test(q) ? q : null;
 }
 
-/** Whether a typed handle is a syntactically valid GitHub login (trimmed, `@` optional) — used to gate the Add button. */
+/**
+ * Whether a typed handle is a syntactically valid GitHub login (trimmed, `@` optional) — used to gate the
+ * Add button. Matches exactly what POST /api/documents/[id]/collaborators accepts (1-39 chars, letters,
+ * digits and hyphens, `@` optional) so Add is never stricter than the server — a login this short or shaped
+ * can still be a real GitHub user even though it is too short to search suggestions for (see SUGGEST_MIN_CHARS).
+ */
 export function isValidLogin(value: string): boolean {
   const q = value.trim().replace(/^@/, "");
-  return q.length >= SUGGEST_MIN_CHARS && q.length <= 39 && /^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(q);
+  return q.length >= 1 && q.length <= 39 && /^[a-zA-Z0-9-]+$/.test(q);
 }
 
 type Lookup = Readonly<{ status: "loading" } | { status: "error"; message: string; retrying: boolean }>;
@@ -79,11 +86,18 @@ export function CollaboratorLoginInput({
   const [lookup, setLookup] = useState<Lookup | null>(null);
   const [noToken, setNoToken] = useState(false);
   const [picked, setPicked] = useState<string | null>(null);
+  // After a pick, the just-closed list's footprint stays covered by a non-interactive shield for a beat: a list
+  // sitting right above the role select and the collaborator rows below it means a fast second click (a
+  // double-click, or a double-tap) that picked an option on its first half would otherwise land on whatever is
+  // now exposed underneath. The shield only ever absorbs a click; it never fills the box or re-picks.
+  const [shielding, setShielding] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const cacheRef = useRef(new Map<string, readonly GitHubUserDto[]>());
   const pendingRef = useRef<PendingRequest | null>(null);
   const nextRequestId = useRef(0);
+  const [shieldedCandidates, setShieldedCandidates] = useState<readonly GitHubUserDto[]>([]);
+  const shieldTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Tracks real focus (set by the input's own focus/blur handlers) rather than reading
   // `document.activeElement`, which test harnesses can simulate without ever moving focus.
   const focusedRef = useRef(false);
@@ -164,6 +178,9 @@ export function CollaboratorLoginInput({
 
   // Belt and suspenders: whatever is in flight is abandoned the instant the box itself goes away.
   useEffect(() => () => pendingRef.current?.controller.abort(), []);
+  useEffect(() => () => {
+    if (shieldTimer.current) clearTimeout(shieldTimer.current);
+  }, []);
 
   const excludedSet = new Set(exclude.map((login) => login.trim().replace(/^@/, "").toLowerCase()).filter(Boolean));
   const candidates = options.filter((candidate) => !excludedSet.has(candidate.login.toLowerCase())).slice(0, SUGGEST_MAX);
@@ -171,6 +188,10 @@ export function CollaboratorLoginInput({
   const activeIndex = active >= 0 && active < candidates.length ? active : -1;
 
   const pick = (login: string) => {
+    setShieldedCandidates(candidates);
+    setShielding(true);
+    if (shieldTimer.current) clearTimeout(shieldTimer.current);
+    shieldTimer.current = setTimeout(() => setShielding(false), SHIELD_MS);
     onChange(login);
     setPicked(login);
     setOpen(false);
@@ -337,6 +358,30 @@ export function CollaboratorLoginInput({
                 title={`@${candidate.login}`}
                 className={cn("min-w-0 truncate", candidate.name ? "text-xs text-ink-3" : "text-[13px] text-ink")}
               >
+                @{candidate.login}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {!expanded && shielding && shieldedCandidates.length > 0 && (
+        // Not a real listbox: just-picked candidates' footprint, held in place and non-interactive for a beat
+        // so a fast second click (a double-click or double-tap finishing after the pick already closed the
+        // real list) lands here and does nothing, instead of falling through to the role select or a
+        // collaborator row.
+        <ul
+          aria-hidden="true"
+          className="menu absolute left-0 right-0 top-full mt-1 max-h-80 overflow-y-auto"
+          onPointerLeave={() => setShielding(false)}
+          data-testid="share-login-shield"
+        >
+          {shieldedCandidates.map((candidate) => (
+            <li key={candidate.login} className="menu-item py-1.5">
+              <span>
+                <SuggestionAvatar login={candidate.login} src={candidate.avatarUrl} />
+              </span>
+              {candidate.name && <span className="min-w-0 truncate text-[13px] text-ink">{candidate.name}</span>}
+              <span className={cn("min-w-0 truncate", candidate.name ? "text-xs text-ink-3" : "text-[13px] text-ink")}>
                 @{candidate.login}
               </span>
             </li>

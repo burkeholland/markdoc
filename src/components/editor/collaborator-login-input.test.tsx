@@ -25,7 +25,7 @@ vi.mock("@/lib/api", async () => {
 });
 
 import { ApiError } from "@/lib/api";
-import { CollaboratorLoginInput, SUGGEST_DEBOUNCE_MS, isValidLogin, suggestQuery } from "./collaborator-login-input";
+import { CollaboratorLoginInput, SHIELD_MS, SUGGEST_DEBOUNCE_MS, isValidLogin, suggestQuery } from "./collaborator-login-input";
 
 const user = (login: string) => ({ login, name: null, avatarUrl: `https://avatars.githubusercontent.com/${login}?s=40` });
 const answer = (...logins: string[]) => Promise.resolve({ users: logins.map(user), limited: false });
@@ -115,14 +115,24 @@ describe("isValidLogin()", () => {
     expect(isValidLogin("a1-b2")).toBe(true);
   });
 
-  it("rejects what is too short, too long, or not a login shape", () => {
+  it("rejects only what the server would reject: empty, too long, spaces, or bad characters", () => {
     expect(isValidLogin("")).toBe(false);
-    expect(isValidLogin("a")).toBe(false);
-    expect(isValidLogin("-abc")).toBe(false);
-    expect(isValidLogin("abc-")).toBe(false);
+    expect(isValidLogin("   ")).toBe(false);
     expect(isValidLogin("bad name")).toBe(false);
     expect(isValidLogin("bad!")).toBe(false);
     expect(isValidLogin("a".repeat(40))).toBe(false);
+  });
+
+  // Matches exactly what POST /api/documents/[id]/collaborators accepts (min 1, max 39, letters/digits/hyphens,
+  // leading @ optional) so Add is never stricter than the server, even for shapes SUGGEST_MIN_CHARS would not
+  // search for (a 1-character login is too short to suggest but is still a submittable, real GitHub login).
+  it("is never stricter than the server's own collaborators-route validation", () => {
+    expect(isValidLogin("a")).toBe(true); // 1 character: too short to *suggest*, but a valid login to *add*
+    expect(isValidLogin("@a")).toBe(true); // leading @
+    expect(isValidLogin("abc-")).toBe(true); // trailing hyphen: the server's regex allows it
+    expect(isValidLogin("-abc")).toBe(true); // leading hyphen: the server's regex allows it
+    expect(isValidLogin("a".repeat(39))).toBe(true); // exactly 39 characters: the server's max
+    expect(isValidLogin("a".repeat(40))).toBe(false); // 40 characters: over the server's max
   });
 });
 
@@ -350,6 +360,49 @@ describe("CollaboratorLoginInput", () => {
     expect(input().value).toBe("octodog");
     expect(onPick).toHaveBeenCalledWith("octodog");
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+  });
+
+  it("covers a just-picked option's footprint with a non-interactive shield, so a fast second click (a double-click or double-tap landing after the list already closed) does nothing instead of falling through to whatever is underneath", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog", "octofox"));
+    const onPick = vi.fn();
+    render(<Harness onPick={onPick} />);
+    type("octo");
+    await settle();
+    expect(options()).toEqual(["octocat", "octodog", "octofox"]);
+
+    fireEvent.click(listOptions()[1]!); // middle option
+    expect(onPick).toHaveBeenCalledTimes(1);
+    expect(onPick).toHaveBeenCalledWith("octodog");
+    expect(input().value).toBe("octodog");
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+
+    const shield = screen.getByTestId("share-login-shield");
+    expect(shield).toHaveAttribute("aria-hidden", "true");
+    // The shield shows the same three rows the real list just had, so the click lands on familiar content.
+    expect(within(shield).getAllByText(/^@octo/).map((el) => el.textContent)).toEqual(["@octocat", "@octodog", "@octofox"]);
+
+    // The fast second click/tap of the double click, landing on the shield instead of the real list.
+    fireEvent.click(within(shield).getByText("@octofox"));
+    expect(onPick).toHaveBeenCalledTimes(1); // absorbed: nothing picked a second time
+    expect(input().value).toBe("octodog"); // the field still holds the first pick, untouched
+
+    // After the shield window elapses on its own, it is gone and the real list stays closed.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SHIELD_MS);
+    });
+    expect(screen.queryByTestId("share-login-shield")).toBeNull();
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+  });
+
+  it("ends the click-shield as soon as the pointer leaves it, instead of waiting the full window", async () => {
+    searchUsers.mockImplementation(() => answer("octocat"));
+    render(<Harness />);
+    type("octo");
+    await settle();
+    fireEvent.click(listOptions()[0]!);
+    const shield = screen.getByTestId("share-login-shield");
+    fireEvent.pointerLeave(shield);
+    expect(screen.queryByTestId("share-login-shield")).toBeNull();
   });
 
   it("falls back to initials when a suggestion's avatar fails to load", async () => {
