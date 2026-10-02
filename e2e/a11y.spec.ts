@@ -669,8 +669,10 @@ test.describe("axe: editor", () => {
     await clickCell(page, 1, 0);
     await scan(page, "editor + table menu");
 
-    // Selection bubble.
-    await selectTextInRich(page, "Closing words");
+    // Selection bubble. The slash-menu step above (focusRichEnd, then Escape+Backspace) can leave "Closing words"
+    // scrolled off-screen, so this is the one caller that opts into scrollIntoView (every other caller leaves
+    // scroll position alone).
+    await selectTextInRich(page, "Closing words", { scrollIntoView: true });
     await expect(page.getByTestId("selection-bubble")).toBeVisible();
     await scan(page, "editor + selection bubble");
     await page.keyboard.press("End");
@@ -1249,7 +1251,8 @@ test.describe("axe: phone (iPhone 13)", () => {
       { width: 768, height: 1024 },
     ]) {
       await page.setViewportSize(viewport);
-      const download = page.getByRole("button", { name: "Download Markdown", exact: true });
+      // "Download Markdown" is a native `<a href>` link on purpose (pre-hydration downloads work without JS).
+      const download = page.getByRole("link", { name: "Download Markdown", exact: true });
       await expect(download).toHaveAttribute("data-testid", "reader-download");
       await expect(page.getByRole("button", { name: "Download as…", exact: true })).toHaveAttribute("data-testid", "reader-download-menu");
       await expect(download.locator("span")).toBeVisible({ visible: viewport.width >= 640 });
@@ -1519,7 +1522,7 @@ test.describe("dialog focus return (#161)", () => {
     expect(await page.evaluate(() => String(window.getSelection()).trim())).toBe("charlie");
 
     // 2. Insert link with Ctrl+K on a selection (a shortcut): back to the rich pane, selection intact.
-    await selectTextInRich(page, "bravo");
+    await selectAfterFocusReturn(page, "bravo");
     await page.keyboard.press("Control+k");
     await expect(page.getByTestId("link-url")).toBeFocused();
     await closedWith(/link/i, "Escape");
@@ -1532,11 +1535,13 @@ test.describe("dialog focus return (#161)", () => {
     await expect.poll(active).toBe("rich");
 
     // 3–5. Dialogs opened from the ⋮ menu with the keyboard: the menu item is unmounted by the time the
-    //      dialog closes, so focus goes to the menu's trigger.
+    //      dialog closes, so focus goes to the menu's trigger. The item we want is picked once it really
+    //      has focus.
     const fromMenu = async (item: string) => {
-      await page.getByTestId("more-menu").focus();
-      await page.keyboard.press("Enter");
-      await page.getByRole("menuitem", { name: item }).focus();
+      await openMoreByKeyboard(page);
+      const menuItem = page.getByRole("menuitem", { name: item });
+      await menuItem.focus();
+      await expect(menuItem).toBeFocused();
       await page.keyboard.press("Enter");
     };
     await fromMenu("Keyboard shortcuts");
@@ -1552,6 +1557,7 @@ test.describe("dialog focus return (#161)", () => {
     await closedWith("Name this version", "Escape");
     await expect.poll(active).toBe("more-menu");
     // The shortcut form of the same dialog (Ctrl+/) from the editor returns to the editor.
+    await moreMenuGone(page);
     await focusRichEnd(page);
     await page.keyboard.press("Control+/");
     await closedWith("Keyboard shortcuts", "Escape");
@@ -1574,6 +1580,181 @@ test.describe("dialog focus return (#161)", () => {
     await expect.poll(() => codeText(page)).toContain("[Alpha](https://example.com)");
     await context.close();
   });
+
+  // #2223: on main the shared dialog closed on Escape only once a hand-rolled coordinator had "published"
+  // it. After any other dialog had opened and closed on the page, a dialog opened from the ⋮ menu was
+  // never published, so Escape did nothing. These tests use a dialog first, then open each dialog the way
+  // a person does (real keys walking the menu, or real mouse clicks) and press Escape as soon as it shows.
+  const focusedId = (page: Page) =>
+    page.evaluate(() => {
+      const el = document.activeElement;
+      if (!el || el === document.body) return "body";
+      return el.getAttribute("data-testid") ?? (el.closest(".md-rich") ? "rich" : el.closest(".cm-content") ? "code" : el.tagName.toLowerCase());
+    });
+  // ProseMirror writes its own selection back to the page once, about 20 ms after the editor regains
+  // focus (its focus handler), so a selection made by script in that window is undone: on a production
+  // build 14 of 15 at 20 ms after a dialog gave focus back to the editor, none of 15 at 5 ms and at
+  // 80 ms. A person cannot select text that fast. So the selection is made again until the selection on
+  // the page is the wanted text.
+  const selectAfterFocusReturn = (page: Page, text: string) =>
+    expect(async () => {
+      await selectTextInRich(page, text);
+      expect(await page.evaluate(() => String(window.getSelection()))).toBe(text);
+    }, `the selection on the page should be "${text}" once a dialog has given focus back to the editor`).toPass({ timeout: 45_000 });
+  // The ⋮ menu stays mounted, closed, until its 120 ms fade-in has ended (up to about 170 ms after it
+  // opened) when one of its items is picked sooner than that. Until it is gone, Enter on the ⋮ button
+  // is dropped by the menu's own gate in header.tsx (#2222, inventory row 34), and it still answers
+  // Escape in place of a dialog that has just opened. A person cannot press a key 10 ms after a dialog
+  // closes, so the next step waits until the earlier menu is gone.
+  const moreMenuGone = (page: Page) => expect(page.getByRole("menu")).toHaveCount(0);
+  // The menu opened by Enter is ready once it has put focus on one of its items.
+  const openMoreByKeyboard = async (page: Page) => {
+    await moreMenuGone(page);
+    await page.getByTestId("more-menu").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator('[role="menuitem"]:focus')).toHaveCount(1);
+  };
+  const arrowToItem = async (page: Page, name: string) => {
+    await expect(page.getByRole("menu")).toBeVisible();
+    for (let i = 0; i < 30; i++) {
+      // Radix moves menu focus in a setTimeout after ArrowDown; wait one task so we read where it landed.
+      const text = await page.evaluate(
+        () =>
+          new Promise<string | null>((resolve) =>
+            setTimeout(() => resolve(document.activeElement?.getAttribute("role") === "menuitem" ? document.activeElement.textContent : null)),
+          ),
+      );
+      if (text?.includes(name)) return;
+      await page.keyboard.press("ArrowDown");
+    }
+    throw new Error(`ArrowDown never reached the "${name}" menu item`);
+  };
+  const escapeCloses = async (page: Page, name: RegExp | string) => {
+    const dialog = page.getByRole("dialog", { name });
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+  };
+
+  test("Keyboard shortcuts opened from More with the real keyboard closes on the first Escape and focus returns to More (#2223)", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "a11y-esc-kbd");
+    const id = await createDocument(page, "# Escape\n\nAlpha bravo charlie.\n", "Escape fixture");
+    await openDocument(page, id);
+
+    // Use another dialog first (Ctrl+K, then Escape): on main this is what left later dialogs unclosable.
+    await selectTextInRich(page, "bravo");
+    await page.keyboard.press("Control+k");
+    await expect(page.getByTestId("link-url")).toBeFocused();
+    await escapeCloses(page, /link/i);
+
+    await openMoreByKeyboard(page);
+    await arrowToItem(page, "Keyboard shortcuts");
+    await page.keyboard.press("Enter");
+    await escapeCloses(page, "Keyboard shortcuts");
+    await expect.poll(() => focusedId(page)).toBe("more-menu");
+    await context.close();
+  });
+
+  for (const via of ["mouse", "keyboard"] as const) {
+    test(`Image, Link, Shortcuts, GitHub and Name version opened by ${via} close on the first Escape and focus returns to the opener (#2223)`, async ({ browser }) => {
+      const { page, context } = await signIn(browser, `a11y-esc-${via}`);
+      const id = await createDocument(page, "# Escape\n\nAlpha bravo charlie.\n", "Escape fixture");
+      await openDocument(page, id);
+
+      const fromMore = async (item: string) => {
+        if (via === "mouse") {
+          await page.getByTestId("more-menu").click();
+          await page.getByRole("menuitem", { name: item }).click();
+        } else {
+          await openMoreByKeyboard(page);
+          await arrowToItem(page, item);
+          await page.keyboard.press("Enter");
+        }
+      };
+      const fromToolbar = async (testId: string) => {
+        if (via === "mouse") await page.getByTestId(testId).click();
+        else {
+          await page.getByTestId(testId).focus();
+          await page.keyboard.press("Enter");
+        }
+      };
+
+      // A mouse click on a toolbar button keeps the caret in the editor, so the editor is the opener;
+      // Enter on a focused button makes the button the opener.
+      const toolbarOpener = (testId: string) => (via === "mouse" ? "rich" : testId);
+      await selectTextInRich(page, "charlie");
+      await fromToolbar("tb-image");
+      await expect(page.getByTestId("image-url")).toBeFocused();
+      await escapeCloses(page, "Insert image");
+      await expect.poll(() => focusedId(page)).toBe(toolbarOpener("tb-image"));
+
+      await selectAfterFocusReturn(page, "bravo");
+      await fromToolbar("tb-link");
+      await expect(page.getByTestId("link-url")).toBeFocused();
+      await escapeCloses(page, /link/i);
+      await expect.poll(() => focusedId(page)).toBe(toolbarOpener("tb-link"));
+
+      await fromMore("Keyboard shortcuts");
+      await escapeCloses(page, "Keyboard shortcuts");
+      await expect.poll(() => focusedId(page)).toBe("more-menu");
+
+      await fromMore("Connect to GitHub");
+      await escapeCloses(page, "Connect to GitHub");
+      await expect.poll(() => focusedId(page)).toBe("more-menu");
+
+      await fromMore("Name current version");
+      await expect(page.getByTestId("version-name")).toBeFocused();
+      await escapeCloses(page, "Name this version");
+      await expect.poll(() => focusedId(page)).toBe("more-menu");
+      await context.close();
+    });
+
+    // The people popover closes in the commit that opens "Connect an AI agent", so the popover button that
+    // opened the dialog is gone when the dialog closes: focus belongs on the people button, the popover's
+    // trigger. The first open on a page also loads the dialog's chunk, which hid the bug (focus on <body>
+    // from the second time on), so every way of closing runs after an earlier round.
+    test(`Connect an AI agent opened from the people popover by ${via} returns focus to the people button every time`, async ({ browser }) => {
+      const { page, context } = await signIn(browser, `a11y-people-${via}`);
+      const id = await createDocument(page, "# People\n\nAlpha bravo charlie.\n", "People fixture");
+      await openDocument(page, id);
+
+      const people = page.getByTestId("presence");
+      const popover = page.getByTestId("presence-popover");
+      const connect = popover.getByTestId("connect-agent");
+      const dialog = page.getByRole("dialog", { name: "Connect an AI agent" });
+      const close = dialog.getByRole("button", { name: "Close" });
+      const tabTo = async (target: Locator, key: "Tab" | "Shift+Tab") => {
+        for (let i = 0; i < 20 && !(await target.evaluate((el) => el === document.activeElement)); i++) await page.keyboard.press(key);
+        await expect(target).toBeFocused();
+      };
+
+      for (const how of ["Escape", "Close", "Escape", "Close"] as const) {
+        if (via === "mouse") {
+          await people.click();
+          await connect.click();
+        } else {
+          await people.focus();
+          await page.keyboard.press("Enter");
+          await expect(popover).toBeVisible();
+          await tabTo(connect, "Tab");
+          await page.keyboard.press("Enter");
+        }
+        await expect(dialog).toBeVisible();
+        await expect(popover).toHaveCount(0);
+        await expect.poll(() => dialog.evaluate((el) => el.contains(document.activeElement))).toBe(true);
+
+        if (how === "Escape") await page.keyboard.press("Escape");
+        else if (via === "mouse") await close.click();
+        else {
+          await tabTo(close, "Shift+Tab");
+          await page.keyboard.press("Enter");
+        }
+        await expect(dialog).toHaveCount(0);
+        await expect(people).toBeFocused();
+      }
+      await context.close();
+    });
+  }
 
   // #2207: the keyboard case above (`fromMenu` + Enter) already passed on main - Radix drives Enter by
   // calling the item's `.click()` from script, so the whole chain runs synchronously ahead of the

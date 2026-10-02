@@ -1400,7 +1400,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
   );
 
   it.each(["close", "cancel", "escape", "outside"] as const)(
-    "claims one current %s dismissal after replay",
+    "delivers every %s dismissal to the owner, also after the owner kept the dialog open",
     async (kind) => {
       const onOpenChange = vi.fn();
       await renderStrictRoot(
@@ -1448,8 +1448,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         });
       }
 
-      expect(onOpenChange).toHaveBeenCalledOnce();
-      expect(onOpenChange).toHaveBeenCalledWith(false);
+      expect(onOpenChange.mock.calls).toEqual([[false], [false]]);
     },
   );
 
@@ -1462,7 +1461,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     "bridge-ancestor",
     "portal-ancestor",
   ] as const)(
-    "retires restored %s history and accepts a fresh successor",
+    "closes on Cancel after restored %s history, and again for a fresh owner",
     async (transition) => {
       const staleClose = vi.fn();
       const currentClose = vi.fn();
@@ -1521,7 +1520,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       }
 
       fireEvent.click(cancel);
-      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleClose).toHaveBeenCalledExactlyOnceWith(false);
 
       await view.render(
         <ImageDialog
@@ -1532,8 +1531,8 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         />,
       );
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(staleClose).not.toHaveBeenCalled();
-      expect(currentClose).toHaveBeenCalledOnce();
+      expect(staleClose).toHaveBeenCalledOnce();
+      expect(currentClose).toHaveBeenCalledExactlyOnceWith(false);
     },
   );
 
@@ -1586,7 +1585,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
   });
 
   it.each(["radix", "controlled"] as const)(
-    "retires a restored %s reconciliation shape after settlement",
+    "closes on Cancel after a restored %s reconciliation shape, and again for a fresh owner",
     async (kind) => {
       const staleClose = vi.fn();
       const currentClose = vi.fn();
@@ -1616,7 +1615,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         input.removeAttribute("name");
       }
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(staleClose).not.toHaveBeenCalled();
+      expect(staleClose).toHaveBeenCalledExactlyOnceWith(false);
 
       await view.render(
         <ImageDialog
@@ -1627,99 +1626,12 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         />,
       );
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(staleClose).not.toHaveBeenCalled();
-      expect(currentClose).toHaveBeenCalledOnce();
+      expect(staleClose).toHaveBeenCalledOnce();
+      expect(currentClose).toHaveBeenCalledExactlyOnceWith(false);
     },
   );
 
-  it("invalidates an Escape proof when another native event intervenes", async () => {
-    const onOpenChange = vi.fn();
-    const listeners: Array<{
-      type: string;
-      listener: EventListenerOrEventListenerObject;
-    }> = [];
-    const nativeAdd = document.addEventListener.bind(document);
-    vi.spyOn(document, "addEventListener").mockImplementation(
-      (type, listener, options) => {
-        listeners.push({ type, listener });
-        nativeAdd(type, listener, options);
-      },
-    );
-    await renderStrictRoot(
-      <ImageDialog
-        open
-        onOpenChange={onOpenChange}
-        onSubmit={vi.fn()}
-        onUpload={vi.fn()}
-      />,
-    );
-    const content = dialogContent();
-    const componentListener = listeners.find(
-      (record) =>
-        record.type === "keydown" &&
-        listeners.some(
-          (candidate) =>
-            candidate.type === "pointerdown" &&
-            candidate.listener === record.listener,
-        ) &&
-        listeners.some(
-          (candidate) =>
-            candidate.type === "click" &&
-            candidate.listener === record.listener,
-        ),
-    )?.listener;
-    if (!componentListener) {
-      throw new Error("Image dismissal listener was not registered");
-    }
-    const invoke = (key: string) => {
-      const event = new KeyboardEvent("keydown", {
-        bubbles: true,
-        cancelable: true,
-        key,
-      });
-      Object.defineProperties(event, {
-        target: { configurable: true, value: content },
-        eventPhase: {
-          configurable: true,
-          value: Event.CAPTURING_PHASE,
-        },
-        composedPath: {
-          configurable: true,
-          value: () => [
-            content,
-            document.body,
-            document.documentElement,
-            document,
-            window,
-          ],
-        },
-      });
-      if (typeof componentListener === "function") {
-        componentListener.call(document, event);
-      } else {
-        componentListener.handleEvent(event);
-      }
-    };
-    invoke("Escape");
-    invoke("Enter");
-    const radixOpenChange = reactAncestorHandlers<
-      (open: boolean) => void
-    >(content, "onOpenChange").find(
-      (handler) => handler !== onOpenChange,
-    );
-    if (!radixOpenChange) {
-      throw new Error("Radix open-change handler was not published");
-    }
-
-    act(() => radixOpenChange(false));
-    expect(onOpenChange).not.toHaveBeenCalled();
-
-    fireEvent.keyDown(content, { key: "Escape" });
-    expect(onOpenChange).toHaveBeenCalledOnce();
-    expect(onOpenChange).toHaveBeenCalledWith(false);
-  });
-
-  it("keeps Escape ahead of Radix after a draft successor publishes", async () => {
+  it("closes on Escape after a draft successor publishes", async () => {
     const onOpenChange = vi.fn();
     await renderStrictRoot(
       <ImageDialog
@@ -1847,7 +1759,6 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         expect(screen.getByRole("button", { name: "Cancel" })).toBe(
           committedCancel,
         );
-        dismiss();
         dismiss();
         expect(committedClose).toHaveBeenCalledOnce();
         expect(committedClose).toHaveBeenCalledWith(false);
@@ -2184,7 +2095,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     }
   });
 
-  it("keeps staged partial replay mutation history live until publication", async () => {
+  it("closes on Cancel while staged partial replay mutation history is live, and again for a fresh owner", async () => {
     const staleClose = vi.fn();
     const currentClose = vi.fn();
     const onUpload = vi.fn();
@@ -2209,7 +2120,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     await act(async () => {});
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleClose).toHaveBeenCalledExactlyOnceWith(false);
 
     await view.render(
       <ImageDialog
@@ -2220,8 +2131,8 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(staleClose).not.toHaveBeenCalled();
-    expect(currentClose).toHaveBeenCalledOnce();
+    expect(staleClose).toHaveBeenCalledOnce();
+    expect(currentClose).toHaveBeenCalledExactlyOnceWith(false);
   });
 
   it("rejects the source authority when dirty history aborts partial recovery", async () => {
@@ -2241,7 +2152,6 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     await act(async () => {});
     const input = screen.getByTestId("image-url") as HTMLInputElement;
     const inputRef = reactProp<RefCallback<HTMLInputElement>>(input, "ref");
-    const originalCancel = screen.getByRole("button", { name: "Cancel" });
 
     inputRef(null);
     inputRef(input);
@@ -2295,7 +2205,6 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     expect(dispatched).toBe(false);
     Reflect.deleteProperty(submit, "defaultPrevented");
     expect(submit.defaultPrevented).toBe(true);
-    fireEvent.click(originalCancel);
     expect(staleClose).not.toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
 
@@ -3115,7 +3024,6 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       });
       await act(async () => {});
       const form = imageForm();
-      const cancel = screen.getByRole("button", { name: "Cancel" });
       const deceptiveValue =
         relation === "parentElement"
           ? form.parentElement
@@ -3151,7 +3059,6 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         act(() => {
           dispatched = form.dispatchEvent(stagedSubmit);
         });
-        fireEvent.click(cancel);
       } finally {
         Reflect.deleteProperty(form, relation);
       }
@@ -3204,7 +3111,6 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       });
       await act(async () => {});
       const form = imageForm();
-      const cancel = screen.getByRole("button", { name: "Cancel" });
       const nativePrototype = Object.getPrototypeOf(form) as object;
       const derivedPrototype = Object.create(nativePrototype) as object;
       const deceptiveValue = relation === "ownerDocument"
@@ -3238,7 +3144,6 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         act(() => {
           dispatched = form.dispatchEvent(stagedSubmit);
         });
-        fireEvent.click(cancel);
       } finally {
         Object.setPrototypeOf(form, nativePrototype);
       }
@@ -3711,7 +3616,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     );
   });
 
-  it("makes a released unstaged guard permanently ineligible for delayed replay", async () => {
+  it("closes on Cancel after a released unstaged guard, and again for a fresh owner", async () => {
     const staleClose = vi.fn();
     const currentClose = vi.fn();
     const onUpload = vi.fn();
@@ -3736,7 +3641,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     await act(async () => {});
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(staleClose).not.toHaveBeenCalled();
+    expect(staleClose).toHaveBeenCalledExactlyOnceWith(false);
 
     await view.render(
       <ImageDialog
@@ -3747,8 +3652,8 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(staleClose).not.toHaveBeenCalled();
-    expect(currentClose).toHaveBeenCalledOnce();
+    expect(staleClose).toHaveBeenCalledOnce();
+    expect(currentClose).toHaveBeenCalledExactlyOnceWith(false);
   });
 
   it.each([
@@ -3868,9 +3773,6 @@ describe("ImageDialog exact Strict Mode ownership", () => {
     "upload",
     "file",
     "preview",
-    "cancel",
-    "close",
-    "escape",
   ] as const)(
     "rejects a current %s event whose native provenance mutates restored DOM",
     async (kind) => {
@@ -3933,27 +3835,12 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         }
         target = preview;
         event = new Event("error");
-      } else if (kind === "escape") {
-        target = content;
-        event = new KeyboardEvent("keydown", {
-          bubbles: true,
-          cancelable: true,
-          key: "Escape",
-        });
       } else {
-        target = screen.getByRole("button", {
-          name:
-            kind === "close"
-                ? "Close"
-                : "Cancel",
-        });
-        if (kind === "upload") {
-          target = screen.getByTestId("image-upload");
-          uploadClick = vi.spyOn(
-            screen.getByTestId("image-file") as HTMLInputElement,
-            "click",
-          );
-        }
+        target = screen.getByTestId("image-upload");
+        uploadClick = vi.spyOn(
+          screen.getByTestId("image-file") as HTMLInputElement,
+          "click",
+        );
         event = new MouseEvent("click", {
           bubbles: true,
           cancelable: true,
@@ -4133,7 +4020,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
   );
 
   it.each(["ancestor", "files"] as const)(
-    "keeps dirty ancestor replay retired but recovers restored file mutation while reading successor %s",
+    "closes on Cancel after a restored mutation while reading successor %s, and again for a fresh owner",
     async (kind) => {
       const staleClose = vi.fn();
       const currentClose = vi.fn();
@@ -4202,7 +4089,7 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       }
       expect(dirty).toHaveBeenCalledOnce();
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(staleClose).toHaveBeenCalledTimes(kind === "files" ? 1 : 0);
+      expect(staleClose).toHaveBeenCalledExactlyOnceWith(false);
 
       await view.render(
         <ImageDialog
@@ -4213,8 +4100,8 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         />,
       );
       fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(staleClose).toHaveBeenCalledTimes(kind === "files" ? 1 : 0);
-      expect(currentClose).toHaveBeenCalledOnce();
+      expect(staleClose).toHaveBeenCalledOnce();
+      expect(currentClose).toHaveBeenCalledExactlyOnceWith(false);
     },
   );
 
@@ -4636,58 +4523,136 @@ describe("ImageDialog exact Strict Mode ownership", () => {
       "/api/assets/retry",
     );
   });
+});
 
-  it("retires an action when a ref connectivity getter restores DOM after the prior drain", async () => {
-    const staleClose = vi.fn();
-    const currentClose = vi.fn();
-    const onUpload = vi.fn();
-    const view = await renderStrictRoot(
-      <ImageDialog
-        open
-        onOpenChange={staleClose}
-        onSubmit={vi.fn()}
-        onUpload={onUpload}
-      />,
-    );
-    const cancel = screen.getByRole("button", {
-      name: "Cancel",
-    }) as HTMLButtonElement;
-    const connected = Object.getOwnPropertyDescriptor(
-      Node.prototype,
-      "isConnected",
-    );
-    if (!connected?.get) {
-      throw new Error("Node.isConnected getter is unavailable");
+describe("ImageDialog dismissal (#2223)", () => {
+  const dismissals = ["escape", "close", "cancel", "outside"] as const;
+
+  // Focusing the toolbar's Image button with the keyboard shows its tooltip, portaled to <body>, and
+  // the tooltip is removed a moment after the dialog opens. The dialog's controls watch their place in
+  // <body> and retire when it changes; a dismissal used to be dropped until the next render.
+  async function openBesideTooltip(node: ReactNode) {
+    await renderStrictRoot(node);
+    const tooltip = document.createElement("div");
+    tooltip.setAttribute("data-radix-popper-content-wrapper", "");
+    document.body.append(tooltip);
+    fireEvent.click(screen.getByRole("button", { name: "Open image dialog" }));
+    await act(async () => {});
+    expect(tooltip.nextElementSibling).not.toBeNull();
+    return tooltip;
+  }
+
+  function dismissBy(kind: (typeof dismissals)[number]) {
+    if (kind === "escape") {
+      fireEvent.keyDown(screen.getByTestId("image-url"), { key: "Escape" });
+    } else if (kind === "outside") {
+      const overlay = document.querySelector(".dialog-overlay");
+      if (!(overlay instanceof HTMLDivElement)) throw new Error("Image overlay was not rendered");
+      act(() => {
+        for (const type of ["pointerdown", "click"]) {
+          overlay.dispatchEvent(new ControlledPointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId: 3 }));
+        }
+      });
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: kind === "close" ? "Close" : "Cancel" }));
     }
-    const dirty = vi.fn(() => {
-      const content = dialogContent();
-      const className = content.className;
-      content.className = "mutated-during-connectivity-read";
-      content.className = className;
-    });
-    Object.defineProperty(cancel, "isConnected", {
-      configurable: true,
-      get() {
-        Reflect.deleteProperty(cancel, "isConnected");
-        dirty();
-        return connected.get?.call(cancel);
-      },
-    });
+  }
 
-    fireEvent.click(cancel);
-    expect(dirty).toHaveBeenCalledOnce();
-    expect(staleClose).not.toHaveBeenCalled();
+  async function closed() {
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // The shared dialog runs onClosed one task after it unmounts.
+    await act(async () => new Promise<void>((resolve) => window.setTimeout(resolve, 0)));
+  }
 
-    await view.render(
-      <ImageDialog
-        open
-        onOpenChange={currentClose}
-        onSubmit={vi.fn()}
-        onUpload={onUpload}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(staleClose).not.toHaveBeenCalled();
-    expect(currentClose).toHaveBeenCalledOnce();
-  });
+  it.each(dismissals)(
+    "closes on %s right after a sibling of the dialog leaves <body>, inserts nothing and reopens empty",
+    async (kind) => {
+      const onSubmit = vi.fn();
+      const tooltip = await openBesideTooltip(<Harness initiallyOpen={false} onUpload={vi.fn()} onSubmit={onSubmit} />);
+      fireEvent.change(screen.getByTestId("image-url"), { target: { value: "https://example.com/typed.png" } });
+      fireEvent.change(screen.getByTestId("image-alt"), { target: { value: "Typed alt" } });
+      await act(async () => {});
+
+      tooltip.remove();
+      dismissBy(kind);
+      await closed();
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Open image dialog" }));
+      expect(screen.getByTestId("image-url")).toHaveValue("");
+      expect(screen.getByTestId("image-alt")).toHaveValue("");
+
+      // One Insert still adds exactly one image.
+      fireEvent.change(screen.getByTestId("image-url"), { target: { value: "https://example.com/inserted.png" } });
+      await act(async () => {});
+      expect(imageForm().dispatchEvent(submitEvent())).toBe(false);
+      await closed();
+      expect(onSubmit).toHaveBeenCalledExactlyOnceWith("https://example.com/inserted.png", "");
+    },
+  );
+
+  // Not "outside": Radix starts listening for outside pointers one task after the dialog mounts.
+  it.each(["escape", "close", "cancel"] as const)(
+    "closes on %s the moment the dialog has opened, before its controls have settled",
+    async (kind) => {
+      const onSubmit = vi.fn();
+      await renderStrictRoot(<Harness initiallyOpen={false} onUpload={vi.fn()} onSubmit={onSubmit} />);
+      fireEvent.click(screen.getByRole("button", { name: "Open image dialog" }));
+
+      dismissBy(kind);
+      await closed();
+      expect(onSubmit).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(dismissals.flatMap((kind) => (["success", "failure"] as const).map((settlement) => ({ kind, settlement }))))(
+    "closes on $kind during an upload right after a sibling leaves <body>; its late $settlement is dropped and a reopened dialog starts clean",
+    async ({ kind, settlement }) => {
+      const pending = deferred<UploadResult>();
+      const retry = deferred<UploadResult>();
+      const onUpload = vi.fn().mockReturnValueOnce(pending.promise).mockReturnValueOnce(retry.promise);
+      const onSubmit = vi.fn();
+      const tooltip = await openBesideTooltip(<Harness initiallyOpen={false} onUpload={onUpload} onSubmit={onSubmit} />);
+      choose(new File(["selected"], "selected.png", { type: "image/png" }));
+      expect(onUpload).toHaveBeenCalledOnce();
+      expect(screen.getByTestId("image-upload")).toHaveTextContent("Uploading…");
+
+      tooltip.remove();
+      dismissBy(kind);
+      await closed();
+
+      const readUrl = vi.fn(() => "/api/assets/stale");
+      const staleResult = {} as UploadResult;
+      Object.defineProperty(staleResult, "url", { get: readUrl });
+      const readMessage = vi.fn(() => "Stale upload failed");
+      const staleError = new Error();
+      Object.defineProperty(staleError, "message", { get: readMessage });
+      await act(async () => {
+        if (settlement === "success") pending.resolve(staleResult);
+        else pending.reject(staleError);
+        await pending.promise.catch(() => undefined);
+      });
+      expect(readUrl).not.toHaveBeenCalled();
+      expect(readMessage).not.toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Open image dialog" }));
+      expect(screen.getByTestId("image-url")).toHaveValue("");
+      expect(screen.getByTestId("image-alt")).toHaveValue("");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByTestId("image-upload")).toHaveTextContent("Upload…");
+      expect(screen.getByTestId("image-upload")).toBeEnabled();
+
+      const currentFile = new File(["current"], "current.png", { type: "image/png" });
+      choose(currentFile);
+      expect(onUpload).toHaveBeenCalledTimes(2);
+      expect(onUpload).toHaveBeenLastCalledWith(currentFile);
+      await act(async () => {
+        retry.resolve({ url: "/api/assets/current" });
+        await retry.promise;
+      });
+      expect(screen.getByTestId("image-url")).toHaveValue("/api/assets/current");
+      expect(onSubmit).not.toHaveBeenCalled();
+    },
+  );
 });

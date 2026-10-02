@@ -1,5 +1,11 @@
 #requires -Version 7.2
-param([switch]$DigestLookupOnly, [string[]]$DigestLookupCase = @())
+# Poll scenarios require node on PATH. Slow-call timers start after the fixture records its call,
+# so pwsh/node startup under load cannot consume the test-only eight-second native timeout.
+param(
+  [switch]$DigestLookupOnly, [string[]]$DigestLookupCase = @(),
+  [switch]$AcrPollOnly, [string[]]$AcrPollCase = @(),
+  [string]$ReleaseScriptPath = (Join-Path $PSScriptRoot 'release-vm.ps1')
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -7,7 +13,8 @@ $ErrorActionPreference = 'Stop'
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) "markdoc-digest-tests-$([guid]::NewGuid().ToString('N'))"
 $priorEnvironment = @{}
-foreach ($name in @('PATH', 'AZURE_CONFIG_DIR', 'MARKDOC_DIGEST_CASE', 'MARKDOC_DIGEST_COUNT', 'MARKDOC_DIGEST_VALUE', 'MARKDOC_DIGEST_ERROR')) {
+foreach ($name in @('PATH', 'AZURE_CONFIG_DIR', 'MARKDOC_DIGEST_CASE', 'MARKDOC_DIGEST_COUNT', 'MARKDOC_DIGEST_VALUE', 'MARKDOC_DIGEST_ERROR',
+    'MARKDOC_POLL_CASE', 'MARKDOC_POLL_COUNT', 'MARKDOC_POLL_LOG', 'MARKDOC_POLL_READY', 'MARKDOC_POLL_TAG', 'MARKDOC_POLL_SHA', 'MARKDOC_POLL_DIGEST')) {
   $priorEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
 try {
@@ -16,7 +23,81 @@ try {
 $env:AZURE_CONFIG_DIR = Join-Path $testRoot 'azure'
 $env:PATH = "$testRoot;$env:PATH"
 $env:MARKDOC_DIGEST_COUNT = Join-Path $testRoot 'count'
-[IO.File]::WriteAllText((Join-Path $testRoot 'az.cmd'), "@echo off`r`n`"$PSHOME\pwsh.exe`" -NoProfile -NonInteractive -File `"%~dp0fake-az.ps1`" %*`r`nexit /b %errorlevel%`r`n")
+$env:MARKDOC_POLL_COUNT = Join-Path $testRoot 'poll-count'
+$env:MARKDOC_POLL_LOG = Join-Path $testRoot 'poll-calls'
+$env:MARKDOC_POLL_READY = Join-Path $testRoot 'poll-ready'
+$env:MARKDOC_POLL_CASE = ''
+$node = ''
+if (-not $DigestLookupOnly) {
+  $node = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+}
+[IO.File]::WriteAllText((Join-Path $testRoot 'az.cmd'), "@echo off`r`nif defined MARKDOC_POLL_CASE goto poll`r`n`"$PSHOME\pwsh.exe`" -NoProfile -NonInteractive -File `"%~dp0fake-az.ps1`" %*`r`nexit /b %errorlevel%`r`n:poll`r`n`"$node`" `"%~dp0fake-poll-az.cjs`" %*`r`nexit /b %errorlevel%`r`n")
+[IO.File]::WriteAllText((Join-Path $testRoot 'fake-poll-az.cjs'), @'
+const fs = require('node:fs');
+const env = process.env;
+const args = process.argv.slice(2);
+const command = args.slice(0, 3).join(' ');
+async function main() {
+  if (!['acr build --registry', 'acr task list-runs', 'acr task show-run'].includes(command) ||
+      !['--only-show-errors', '--subscription', '--resource-group'].every(arg => args.includes(arg)) ||
+      args.includes('--debug') || args.includes('--verbose') ||
+      env.AZURE_EXTENSION_USE_DYNAMIC_INSTALL !== 'no' || env.AZURE_CORE_COLLECT_TELEMETRY !== 'no' ||
+      env.AZURE_LOGGING_ENABLE_LOG_FILE !== 'no' || fs.readdirSync(env.AZURE_CONFIG_DIR).length !== 0) {
+    throw new Error('Fake az permits only isolated offline build submission and run polls.');
+  }
+  fs.appendFileSync(env.MARKDOC_POLL_LOG, command + '\n');
+  if (command === 'acr build --registry') { console.log('{}'); return; }
+  const counts = fs.existsSync(env.MARKDOC_POLL_COUNT) ?
+    JSON.parse(fs.readFileSync(env.MARKDOC_POLL_COUNT, 'utf8')) : { 'acr task list-runs': 0, 'acr task show-run': 0 };
+  const count = ++counts[command];
+  fs.writeFileSync(env.MARKDOC_POLL_COUNT, JSON.stringify(counts));
+  // Publish only after the writer closes, so Windows readers cannot race an open write.
+  fs.writeFileSync(env.MARKDOC_POLL_READY + '.tmp', command);
+  fs.renameSync(env.MARKDOC_POLL_READY + '.tmp', env.MARKDOC_POLL_READY);
+  const name = env.MARKDOC_POLL_CASE;
+  const target = name.startsWith('poll-show-') ? 'acr task show-run' : 'acr task list-runs';
+  const mode = name.replace(/^poll-(list|show)-/, '');
+  let error = '';
+  if (command === target || mode === 'stage-reset') {
+    const miss = mode === 'reset' ? [1, 2, 4].includes(count) :
+      ['three-misses', 'three-slow-misses'].includes(mode) ? count <= 3 : count === 1;
+    if (miss) {
+      if (['slow', 'three-slow-misses'].includes(mode)) { await new Promise(resolve => setTimeout(resolve, 20000)); }
+      else if (mode === '429') { error = 'ERROR: HTTP status: 429 FAKE_POLL_SECRET_2221'; }
+      else if (mode === '408') { error = 'ERROR: HTTP status: 408 FAKE_POLL_SECRET_2221'; }
+      else if (mode === 'transport') { error = 'ERROR: ConnectionError: connection reset FAKE_POLL_SECRET_2221'; }
+      else if (['auth', 'auth-exit-124'].includes(mode)) { error = 'ERROR: HTTP status: 401 ReadTimeout FAKE_POLL_SECRET_2221'; }
+      else if (mode === 'configuration') { error = 'ERROR: HTTP status: 400 ConnectionError FAKE_POLL_SECRET_2221'; }
+      else if (mode === 'unknown') { error = 'ERROR: HTTP status: 409 ReadTimeout FAKE_POLL_SECRET_2221'; }
+      else if (!['malformed', 'ambiguous', 'unknown-status', 'wrong-identity', 'foreign-exception',
+          'terminal-exception', 'deadline-before', 'success-at-budget'].includes(mode)) { error = 'ERROR: HTTP status: 503 FAKE_POLL_SECRET_2221'; }
+    }
+  }
+  console.error('FAKE_POLL_SECRET_2221 https://private.example.test/?credential=FAKE_POLL_SECRET_2221');
+  if (error) {
+    console.log('FAKE_POLL_SECRET_2221 response body');
+    console.error(error);
+    process.exitCode = mode === 'auth-exit-124' ? 124 : 1;
+    return;
+  }
+  if (command === target && mode === 'malformed') { console.log('{bad json}'); return; }
+  if (command === 'acr task list-runs') {
+    if (name === 'poll-list-bound' || (mode === 'reset' && count === 3)) { console.log('[]'); return; }
+    const run = { runId: 'build123', runType: 'QuickRun', status: 'Queued', outputImages: [{ tag: env.MARKDOC_POLL_TAG }] };
+    console.log(JSON.stringify(mode === 'ambiguous' ? [run, run] : [run]));
+  } else {
+    let status = name === 'poll-show-reset' && count === 3 ? 'Running' : 'Succeeded';
+    if (mode === 'unknown-status') { status = 'Unexpected'; }
+    if (mode === 'failed-after-miss') { status = 'Failed'; }
+    console.log(JSON.stringify({
+      runId: mode === 'wrong-identity' ? 'other' : 'build123', status,
+      outputImages: [{ registry: 'markdocacrmnd542unepl56.azurecr.io', repository: 'markdoc', tag: env.MARKDOC_POLL_SHA,
+        digest: mode === 'wrong-digest-after-miss' ? 'sha256:' + 'b'.repeat(64) : env.MARKDOC_POLL_DIGEST }]
+    }));
+  }
+}
+main().catch(() => { console.error('Offline poll fixture failed.'); process.exitCode = 1; });
+'@)
 [IO.File]::WriteAllText((Join-Path $testRoot 'fake-az.ps1'), @'
 $ErrorActionPreference = 'Stop'
 $commandKey = ($args | Select-Object -First 3) -join ' '
@@ -92,13 +173,51 @@ function Assert-Equal($Expected, $Actual, [string]$Message) {
 }
 
 function New-TestReleaseClock {
-  if ($script:scenario -in @('digest-deadline-two-seconds', 'digest-deadline-three-seconds')) {
+  if ($script:scenario.StartsWith('poll-') -or $script:scenario -in @('digest-deadline-two-seconds', 'digest-deadline-three-seconds')) {
     return [pscustomobject]@{ Elapsed = [pscustomobject]@{ TotalSeconds = 0 } }
   }
   return [Diagnostics.Stopwatch]::StartNew()
 }
 
-$path = Join-Path $PSScriptRoot 'release-vm.ps1'
+function Get-TestPollLimit([string[]]$Arguments) {
+  if ((($Arguments | Select-Object -First 3) -join ' ') -ceq $pollCase.Command -and
+      $script:scenario -cmatch '^poll-(list|show)-(slow|three-slow-misses)$') {
+    $counts = @{ 'acr task list-runs' = 0; 'acr task show-run' = 0 }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $env:MARKDOC_POLL_COUNT) {
+      $counts = [IO.File]::ReadAllText($env:MARKDOC_POLL_COUNT) | ConvertFrom-Json -AsHashtable
+    }
+    $slowCalls = 1
+    if ($script:scenario -ceq 'poll-list-three-slow-misses') { $slowCalls = 3 }
+    if ($counts[$pollCase.Command] -lt $slowCalls) { return 8 }
+  }
+  return 30
+}
+
+function Wait-TestPollReady([Diagnostics.Process]$Process, [Diagnostics.Stopwatch]$Clock, [int]$Limit) {
+  if ($Limit -ne 8 -or $script:scenario -cnotmatch '^poll-(list|show)-(slow|three-slow-misses)$') { return }
+  $ready = $false
+  try {
+    while ($true) {
+      if ([IO.File]::Exists($env:MARKDOC_POLL_READY) -and
+          [IO.File]::ReadAllText($env:MARKDOC_POLL_READY) -ceq $pollCase.Command) {
+        $Clock.Restart()
+        $script:slowPollClock = $Clock
+        $ready = $true
+        return
+      }
+      if ($Process.HasExited) { throw 'Slow poll fixture exited before recording its call.' }
+      if ($Clock.Elapsed.TotalSeconds -ge 30) { throw 'Slow poll fixture did not record its call within the 30-second startup bound.' }
+      [Threading.Thread]::Sleep(50)
+    }
+  } finally {
+    if (-not $ready -and -not $Process.HasExited) {
+      $Process.Kill($true)
+      $Process.WaitForExit()
+    }
+  }
+}
+
+$path = $ReleaseScriptPath
 $tokens = $null
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
@@ -111,13 +230,23 @@ foreach ($statement in $ast.EndBlock.Statements) {
     if ($statement.Name -ceq 'Invoke-MarkdocVmRelease') {
       $definition = $definition.Replace('[Diagnostics.Stopwatch]::StartNew()', '(New-TestReleaseClock)')
     }
+    if ($statement.Name -ceq 'Invoke-ReleaseAcrPoll') {
+      # Only extracted test code gets a short per-call limit. Production has no test override.
+      $updated = $definition.Replace('[int]$Limit = 30', '[int]$Limit = (Get-TestPollLimit $Arguments)')
+      Assert-True ($updated -cne $definition) 'Test-only poll limit replacement must match the production default.'
+      $definition = $updated
+    }
     . ([scriptblock]::Create($definition))
   }
 }
 
 # Exercise the real native boundary with harmless local children, never Azure.
 $native = ${function:Invoke-ReleaseNative}
-if (-not $DigestLookupOnly) {
+$pollNativeSource = $native.ToString()
+$pollWait = '    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {'
+Assert-True ($pollNativeSource.Contains($pollWait)) 'Test-only readiness handshake must match the native wait.'
+$pollNative = [scriptblock]::Create($pollNativeSource.Replace($pollWait, "    Wait-TestPollReady `$process `$clock `$TimeoutSeconds`n$pollWait"))
+if (-not $DigestLookupOnly -and -not $AcrPollOnly) {
 $output = & $native 'pwsh' @('-NoProfile', '-NonInteractive', '-Command', '[Console]::Out.Write("native output"); [Console]::Error.Write("withheld stderr"); exit 0') $PSScriptRoot 10
 Assert-Equal 'native output' $output 'Native output must exclude stderr.'
 $output = & $native 'pwsh' @('-NoProfile', '-NonInteractive', '-Command', '[Console]::Error.Write(("x" * 131072)); [Console]::Out.Write("drained")') $PSScriptRoot 10
@@ -226,8 +355,11 @@ function Test-Path { param($LiteralPath) return $true }
 function Start-Sleep {
   param($Seconds)
   $script:sleeps.Add($Seconds)
-  if ($script:scenario -in @('digest-deadline-two-seconds', 'digest-deadline-three-seconds')) {
+  if ($script:scenario.StartsWith('poll-') -or $script:scenario -in @('digest-deadline-two-seconds', 'digest-deadline-three-seconds')) {
     $releaseClock.Elapsed.TotalSeconds += $Seconds
+  }
+  if ($pollCase.AfterMiss -and $script:messages.Count -gt 0 -and $script:messages[-1] -match '^Release: ACR read-only poll missed;') {
+    $releaseClock.Elapsed.TotalSeconds = $pollCase.AfterMiss
   }
 }
 function Write-Host {
@@ -249,7 +381,53 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
   Assert-True ($TimeoutSeconds -gt 0 -and $TimeoutSeconds -le $script:ReleaseDeadlineSeconds) 'Every native call must be bounded.'
   Assert-True (-not $KeepFailureOutput) 'Only the dependency preflight may keep native failure output.'
   $isDigestLookup = $Command -ceq 'az' -and (($Arguments | Select-Object -First 3) -join ' ' -ceq 'acr manifest list-metadata')
-  Assert-True (-not $ClassifyDigestFailure -or $isDigestLookup) 'Only the digest lookup may classify native failure output.'
+  $commandKey = ($Arguments | Select-Object -First 3) -join ' '
+  $isPoll = $Command -ceq 'az' -and $commandKey -cin @('acr task list-runs', 'acr task show-run')
+  Assert-True (-not $ClassifyDigestFailure -or $isDigestLookup -or $isPoll) 'Only read-only ACR polls and digest lookup may classify native failure output.'
+  if ($isPoll -and $script:scenario.StartsWith('poll-')) {
+    Assert-Equal (Join-Path $testRoot 'az.cmd') (Get-Command az -CommandType Application | Select-Object -First 1).Source 'Fake az must be first on PATH.'
+    $isTarget = $commandKey -ceq $pollCase.Command
+    if ($isTarget -and $pollCase.StartAt) {
+      Assert-True ($TimeoutSeconds -le [math]::Floor($pollCase.Budget - $pollCase.StartAt)) 'Poll timeout must be capped by the remaining stage budget.'
+    }
+    $script:slowPollClock = $null
+    if ([IO.File]::Exists($env:MARKDOC_POLL_READY)) {
+      Microsoft.PowerShell.Management\Remove-Item -LiteralPath $env:MARKDOC_POLL_READY -Force
+    }
+    try {
+      # Synthetic budget clocks check the caller's exact bound above, without making process startup a one-second race.
+      $nativeLimit = [math]::Min((Get-TestPollLimit $Arguments), $TimeoutSeconds)
+      if ($pollCase.Budget) { $nativeLimit = 30 }
+      $result = & $pollNative $Command $Arguments $Directory $nativeLimit -ClassifyDigestFailure:$ClassifyDigestFailure
+    } catch [InvalidOperationException] {
+      Assert-True (($_.Exception.Message + ($_.Exception.Data.Values -join ' ')) -notmatch 'FAKE_POLL_SECRET_2221|private\.example\.test|response body') 'Poll exceptions must not retain raw output.'
+      if ($nativeLimit -eq 8 -and $_.Exception.Data['ReleaseExitCode'] -eq 124) {
+        Assert-True ($null -ne $script:slowPollClock -and $script:slowPollClock.Elapsed.TotalSeconds -ge 8) 'Slow fixture must run for eight wall-clock seconds after recording its call before the native timeout.'
+      }
+      if ($isTarget -and $pollCase.EndAt) { $releaseClock.Elapsed.TotalSeconds = $pollCase.EndAt }
+      throw
+    }
+    if ($isTarget -and $pollCase.EndAt) { $releaseClock.Elapsed.TotalSeconds = $pollCase.EndAt }
+    if ($commandKey -ceq 'acr task list-runs' -and $pollCase.Command -ceq 'acr task show-run' -and $pollCase.StartAt) {
+      $releaseClock.Elapsed.TotalSeconds = $pollCase.StartAt
+    }
+    if ($isTarget -and $script:scenario -cin @('poll-list-foreign-exception', 'poll-list-terminal-exception')) {
+      $counts = [IO.File]::ReadAllText($env:MARKDOC_POLL_COUNT) | ConvertFrom-Json -AsHashtable
+      if ($counts[$commandKey] -eq 1) {
+        $failure = [IO.IOException]::new('Unexpected poll boundary failure.')
+        if ($script:scenario -ceq 'poll-list-terminal-exception') {
+          $failure = [InvalidOperationException]::new('Terminal poll failure.')
+          $failure.Data['ReleaseExitCode'] = 124
+        } else {
+          $failure.Data['ReleaseNativeCallFailure'] = $true
+        }
+        $failure.Data['ReleaseDigestFailureCategory'] = 'transport'
+        $failure.Data['ReleaseDigestFailureHttpStatus'] = 'none'
+        throw $failure
+      }
+    }
+    return $result
+  }
   if ($isDigestLookup -and $script:scenario.StartsWith('digest-')) {
     Assert-Equal (Join-Path $testRoot 'az.cmd') (Get-Command az -CommandType Application | Select-Object -First 1).Source 'Fake az must be first on PATH.'
     # Exact-second boundary tests mock native execution, not the deadline/retry code.
@@ -359,6 +537,11 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     $script:submissionTag = @($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' })[0].Substring(8)
     $dockerfile = $Arguments[[array]::IndexOf($Arguments, '--file') + 1]
     Assert-True ($dockerfile -match 'markdoc-release-[0-9a-f]+\\Dockerfile$') 'Build must use only the isolated exact archive.'
+    if ($script:scenario.StartsWith('poll-')) {
+      $env:MARKDOC_POLL_TAG = $script:submissionTag
+      if ($pollCase.StartAt -and $pollCase.Command -ceq 'acr task list-runs') { $releaseClock.Elapsed.TotalSeconds = $pollCase.StartAt }
+      return & $native $Command $Arguments $Directory $TimeoutSeconds
+    }
     if ($script:scenario -eq 'build-submit-failed') { Stop-VmRelease 'Build submission failed.' 32 }
     if ($script:scenario -eq 'build-submit-timeout') { Stop-VmRelease 'Submission acceptance unknown.' 124 }
     if ($script:scenario -eq 'missing-run') { return '{}' }
@@ -491,6 +674,54 @@ $cases = @(
   'wrong-public-version', 'public-ok-false', 'public-db-false', 'public-collab-false', 'public-health-string', 'public-array',
   'public-request-failed', 'malformed-public-json', 'success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning'
 )
+$pollCases = @()
+foreach ($stage in @('list', 'show')) {
+  $command = "acr task $(if ($stage -ceq 'list') { 'list-runs' } else { 'show-run' })"
+  $releaseStage = "ACR build $(if ($stage -ceq 'list') { 'reconciliation' } else { 'completion' })"
+  foreach ($mode in @('slow', '503', '429', '408', 'transport', 'three-misses', 'reset', 'auth', 'auth-exit-124', 'configuration', 'unknown', 'malformed')) {
+    $success = $mode -cin @('slow', '503', '429', '408', 'transport', 'reset')
+    $misses = @()
+    $pollCalls = 1
+    $category = 'server_error'
+    $status = '503'
+    $exitCode = 1
+    $reason = 'Native command failed (exit 1); raw output withheld.'
+    if ($success) { $misses = @(1); $pollCalls = 2 }
+    switch ($mode) {
+      'slow' { $category = 'timeout'; $status = 'none' }
+      '429' { $category = 'throttled'; $status = '429' }
+      '408' { $category = 'timeout'; $status = '408' }
+      'transport' { $category = 'transport'; $status = 'none' }
+      'three-misses' { $misses = @(1, 2, 3); $pollCalls = 3 }
+      'reset' { $misses = @(1, 2, 1); $pollCalls = 5 }
+      'auth-exit-124' { $exitCode = 124; $reason = 'Native command failed (exit 124); raw output withheld.' }
+      'malformed' { $reason = 'Malformed JSON response; raw output withheld.' }
+    }
+    $pollCases += @{
+      Name = "poll-$stage-$mode"; Command = $command; Stage = $releaseStage; Success = $success
+      Misses = $misses; Calls = $pollCalls; Category = $category; Status = $status; ExitCode = $exitCode; Reason = $reason
+    }
+  }
+}
+$pollCases += @(
+  @{ Name = 'poll-list-three-slow-misses'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 3; Misses = @(1, 2, 3); Category = 'timeout'; Status = 'none'; ExitCode = 124; Reason = 'Local command deadline exceeded; remote work may still be running. Do not retry the release.' },
+  @{ Name = 'poll-list-stage-reset'; Command = 'acr task list-runs'; Success = $true; Calls = 2; Misses = @(1, 1); Category = 'server_error'; Status = '503' },
+  @{ Name = 'poll-list-bound'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 132; Misses = @(1); Category = 'server_error'; Status = '503'; ExitCode = 1; Reason = 'ACR submission acceptance is unknown after unique-tag reconciliation. Do not retry.' },
+  @{ Name = 'poll-list-ambiguous'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'The unique ACR submission tag matched more than one build run.' },
+  @{ Name = 'poll-show-unknown-status'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'ACR build failed or returned an unknown status.' },
+  @{ Name = 'poll-show-wrong-identity'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'ACR returned a different run identity.' },
+  @{ Name = 'poll-show-failed-after-miss'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 2; Misses = @(1); Category = 'server_error'; Status = '503'; ExitCode = 1; Reason = 'ACR build failed or returned an unknown status.' },
+  @{ Name = 'poll-show-wrong-digest-after-miss'; Command = 'acr task show-run'; Stage = 'immutable image identity'; Calls = 2; Misses = @(1); Category = 'server_error'; Status = '503'; ExitCode = 1; Reason = 'The exact tag digest does not match this successful build run.' },
+  @{ Name = 'poll-list-foreign-exception'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'Unexpected IOException; raw output withheld.' },
+  @{ Name = 'poll-list-terminal-exception'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 124; Reason = 'Terminal poll failure.' },
+  @{ Name = 'poll-list-deadline-before'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 0; Misses = @(); StartAt = 2100; Budget = 2100; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
+  @{ Name = 'poll-list-deadline-during'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 2098; EndAt = 2100; Budget = 2100; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
+  @{ Name = 'poll-list-deadline-after-miss'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(1); StartAt = 2094; AfterMiss = 2100; Budget = 2100; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
+  @{ Name = 'poll-show-budget-during'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 748; EndAt = 750; Budget = 750; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-show-budget-after-miss'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(1); StartAt = 744; AfterMiss = 750; Budget = 750; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-show-success-at-budget'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 740; EndAt = 750; Budget = 750; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-list-success-at-budget'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 2090; EndAt = 2100; Budget = 2100; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' }
+)
 $digestCases = @(
   @{ Name = 'digest-server-success'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Success = $true },
   @{ Name = 'digest-throttled-twice'; Category = 'throttled'; Status = '429'; Calls = 2; Retry = 1 },
@@ -582,10 +813,22 @@ if ($DigestLookupCase.Count -gt 0) {
   }
   $digestCases = @($digestCases | Where-Object { $_.Name -cin $DigestLookupCase })
 }
+Assert-True (-not ($DigestLookupOnly -and $AcrPollOnly)) 'Select only one focused test mode.'
+if ($AcrPollCase.Count -gt 0) {
+  Assert-True ([bool]$AcrPollOnly) 'Selecting poll cases requires -AcrPollOnly.'
+  foreach ($name in $AcrPollCase) {
+    Assert-True ($name -cin @($pollCases | ForEach-Object { $_.Name })) "Unknown ACR poll test case: $name."
+  }
+  $pollCases = @($pollCases | Where-Object { $_.Name -cin $AcrPollCase })
+}
 $existingCaseCount = $cases.Count
-if ($DigestLookupOnly) { $cases = @() }
+if ($DigestLookupOnly -or $AcrPollOnly) { $cases = @() }
+if ($DigestLookupOnly) { $pollCases = @() }
+if ($AcrPollOnly) { $digestCases = @() }
 $cases += @($digestCases | ForEach-Object { $_.Name })
+$cases += @($pollCases | ForEach-Object { $_.Name })
 $digestFailures = [Collections.Generic.List[string]]::new()
+$pollFailures = [Collections.Generic.List[string]]::new()
 $priorReleaseSha = $env:RELEASE_SHA
 try {
   foreach ($case in $cases) {
@@ -600,8 +843,17 @@ try {
     $script:sleeps.Clear()
     $script:ReleaseDeadlineSeconds = 2100
     $digestCase = @($digestCases | Where-Object { $_.Name -ceq $case }) | Select-Object -First 1
+    $pollCase = @($pollCases | Where-Object { $_.Name -ceq $case }) | Select-Object -First 1
     $env:MARKDOC_DIGEST_CASE = $case
     $env:MARKDOC_DIGEST_ERROR = $digestCase.ErrorText
+    $env:MARKDOC_POLL_CASE = if ($pollCase) { $case } else { '' }
+    $env:MARKDOC_POLL_SHA = $script:sha
+    $env:MARKDOC_POLL_DIGEST = $script:digest
+    foreach ($file in @($env:MARKDOC_POLL_COUNT, $env:MARKDOC_POLL_LOG, $env:MARKDOC_POLL_READY)) {
+      if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $file) {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $file -Force
+      }
+    }
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $env:MARKDOC_DIGEST_COUNT) {
       Microsoft.PowerShell.Management\Remove-Item -LiteralPath $env:MARKDOC_DIGEST_COUNT -Force
     }
@@ -622,10 +874,11 @@ try {
       }
     } *>&1)
     $streamText = ($capturedStreams | ForEach-Object { $_.ToString() }) -join "`n"
-    $success = $case -in @('success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning') -or ($digestCase -and $digestCase.Success -eq $true)
+    $success = $case -in @('success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning') -or
+      ($digestCase -and $digestCase.Success -eq $true) -or ($pollCase -and $pollCase.Success -eq $true)
     $log = $script:messages -join "`n"
     try {
-    Assert-True ($streamText -notmatch 'FAKE_DIGEST_SECRET_2211|private\.example\.test|credential=|response body') "Fake secret escaped through a captured stream for $case."
+    Assert-True ($streamText -notmatch 'FAKE_(DIGEST_SECRET_2211|POLL_SECRET_2221)|private\.example\.test|credential=|response body') "Fake secret escaped through a captured stream for $case."
     Assert-Equal $success ($code -eq 0) "Unexpected exit outcome for $case. Log: $log"
     $log = $script:messages -join "`n"
     Assert-Equal ($success -and -not $digestCase.Remaining) ($log -match 'Release complete:') "Completion reporting mismatch for $case."
@@ -687,9 +940,35 @@ try {
       }
       Microsoft.PowerShell.Utility\Write-Host "PASS: $case ($($digestCase.Calls) lookup calls, $($digestCase.Retry) retry lines)"
     }
+    if ($pollCase) {
+      $fakeCalls = @([IO.File]::ReadAllLines($env:MARKDOC_POLL_LOG))
+      Assert-Equal 1 @($fakeCalls | Where-Object { $_ -ceq 'acr build --registry' }).Count "Fake az must record exactly one build for $case."
+      Assert-Equal 1 $builds.Count "Orchestrator must submit exactly one build for $case."
+      Assert-Equal $pollCase.Calls @($fakeCalls | Where-Object { $_ -ceq $pollCase.Command }).Count "Fake poll call count mismatch for $case."
+      Assert-Equal ([int]$success) $invocations.Count "Only successful polls may reach one mocked VM invocation for $case."
+      $missedLines = @($script:messages | Where-Object { $_ -match '^Release: ACR read-only poll missed;' })
+      Assert-Equal $pollCase.Misses.Count $missedLines.Count "Missed-poll line count mismatch for $case."
+      for ($index = 0; $index -lt $missedLines.Count; $index++) {
+        $pattern = '^Release: ACR read-only poll missed; category=' + $pollCase.Category +
+          '; HTTP status=' + $pollCase.Status + '; elapsed seconds=[0-9]+; consecutive missed polls=' + $pollCase.Misses[$index] + '/3\.$'
+        Assert-True ($missedLines[$index] -cmatch $pattern) "Exact safe missed-poll line mismatch for $case."
+        if ($case -match 'slow') {
+          $seconds = [int]([regex]::Match($missedLines[$index], 'elapsed seconds=([0-9]+)').Groups[1].Value)
+          Assert-True ($seconds -ge 8) 'Slow poll diagnostics must include the real eight-second wait, plus any fixture startup time.'
+        }
+        if ($success) {
+          Assert-True ($log.IndexOf($missedLines[$index]) -lt $log.IndexOf('Release: guest invocation')) "Poll diagnostics must precede the guest for $case."
+        }
+      }
+      if (-not $success) {
+        Assert-Equal $pollCase.ExitCode $code "Terminal poll exit code mismatch for $case."
+        Assert-True ($log.Contains("Release failed/unverified at $($pollCase.Stage): $($pollCase.Reason)")) "Exact terminal stage/reason mismatch for $case. Log: $log"
+      }
+      Microsoft.PowerShell.Utility\Write-Host "PASS: $case ($($pollCase.Calls) target polls, $($pollCase.Misses.Count) missed-poll lines, one fake acr build)"
+    }
     } catch {
-      if (-not $digestCase) { throw }
-      $digestFailures.Add($case)
+      if (-not $digestCase -and -not $pollCase) { throw }
+      if ($digestCase) { $digestFailures.Add($case) } else { $pollFailures.Add($case) }
       Microsoft.PowerShell.Utility\Write-Host "FAIL: $case - $($_.Exception.Message)"
     }
   }
@@ -697,10 +976,13 @@ try {
   $env:RELEASE_SHA = $priorReleaseSha
 }
 if ($digestFailures.Count -gt 0) { throw "Digest lookup tests: $($digestFailures.Count)/$($digestCases.Count) failed: $($digestFailures -join ', ')." }
+if ($pollFailures.Count -gt 0) { throw "ACR poll tests: $($pollFailures.Count)/$($pollCases.Count) failed: $($pollFailures -join ', ')." }
 if ($DigestLookupOnly) {
   Microsoft.PowerShell.Utility\Write-Host "Digest lookup tests: ok ($($digestCases.Count) offline fake-az scenarios)."
+} elseif ($AcrPollOnly) {
+  Microsoft.PowerShell.Utility\Write-Host "ACR poll tests: ok ($($pollCases.Count) offline fake-az scenarios)."
 } else {
-  Microsoft.PowerShell.Utility\Write-Host "VM release tests: ok ($existingCaseCount existing + $($digestCases.Count) new = $($cases.Count) offline scenarios plus native/guest cleanup boundaries)."
+  Microsoft.PowerShell.Utility\Write-Host "VM release tests: ok ($existingCaseCount existing + $($digestCases.Count) digest + $($pollCases.Count) poll = $($cases.Count) offline scenarios plus native/guest cleanup boundaries)."
 }
 } finally {
   foreach ($name in $priorEnvironment.Keys) {

@@ -71,7 +71,7 @@ test.describe("connect an AI agent", () => {
     await expect(page.getByRole("dialog", { name: "Connect an AI agent" })).toBeVisible();
     const setup = dialog.getByTestId("agent-setup");
     await expect(setup).toHaveAttribute("data-state", "new");
-    await expect(setup.getByRole("heading", { level: 3 })).toHaveText(["Choose your agent", "Add Markdoc to Copilot CLI", `Ask your agent to join “${title}”`]);
+    await expect(setup.getByRole("heading", { level: 3 })).toHaveText(["Add Markdoc to your agent", `Ask your agent to join “${title}”`]);
     const docsLink = setup.getByTestId("agent-docs-link");
     await expect(docsLink).toBeVisible();
     await expect(docsLink).toHaveAttribute("href", AGENT_DOCS_URL);
@@ -118,7 +118,7 @@ test.describe("connect an AI agent", () => {
     const returning = dialog.getByTestId("agent-connected");
     await expect(returning).toBeVisible();
     await expect(dialog.getByTestId("agent-setup")).toHaveCount(0);
-    await expect(returning.getByTestId("agent-connected-banner")).toContainText("Copilot CLI is connected");
+    await expect(returning.getByTestId("agent-connected-banner")).toContainText("AI agent is connected");
     await expect(returning.getByTestId("agent-invite")).toContainText(`Ask your agent to join “${title}”`);
     const text = (await returning.getByTestId("agent-invite-prompt").innerText()).trim();
     expect(text.match(PROMPT_RE)?.[2]).toBe(docId);

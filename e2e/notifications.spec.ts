@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, focusRichEnd, uniqueLogin, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, focusRichEnd, suggestionInsertTexts, uniqueLogin, type User } from "./helpers";
 
 test.use({ screenshot: "off", trace: "off", video: "off" });
 
@@ -155,7 +155,13 @@ test.describe("notifications", () => {
     await expect(alice.page.getByTestId("mode-switcher")).toContainText("Suggesting");
     await focusRichEnd(alice.page);
     await alice.page.keyboard.type(" Suggested text.");
-    await expect(bob.page.locator(".md-rich .md-suggest-insert").first()).toContainText("Suggested text.");
+    // Bob's pane renders Alice's live cursor widget inline inside her suggestion mark, which splits
+    // one logical suggestion into two `.md-suggest-insert` DOM spans around it - a real product bug
+    // (the collaborator's caret widget trails one character behind on every keystroke until they
+    // move it, tracked as #2239, not fixed here). Read each suggestion's own spans, grouped by their
+    // shared `data-highlight-id`, so the assertion still proves the text landed in ONE suggestion
+    // (not a plain edit) instead of just appearing anywhere in the document.
+    await expect.poll(async () => (await suggestionInsertTexts(bob.page)).some((t) => t.includes("Suggested text."))).toBe(true);
 
     await bob.page.getByTestId("comments-tab-suggestions").click();
     await expect(bob.page.getByTestId("suggestion-card")).toHaveCount(1);
@@ -198,6 +204,7 @@ test.describe("notifications", () => {
     await expect(popover.getByTestId("notification-unread-dot")).toHaveCount(0);
     await expect.poll(() => unreadCount(carol.page)).toBe(0);
     await carol.page.keyboard.press("Escape");
+    await expect(popover).toHaveCount(0);
 
     // Opening the shared item from the popover of another document navigates there.
     await shareWith(alice.page, docId, carol.login, "viewer");
