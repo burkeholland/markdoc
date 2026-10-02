@@ -257,6 +257,54 @@ describe("opening and closing the popover", () => {
     expect(popover()).toBeVisible();
     expect(rows().map((row) => row.dataset.notificationId)).toEqual([ITEM_THREE.id, ITEM.id]);
   });
+
+  it("shows its tooltip on focus and drops it when the popover opens", () => {
+    renderBell(THREE);
+
+    fireEvent.focus(trigger());
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Notifications");
+    expect(trigger()).toHaveAttribute("aria-describedby", screen.getByRole("tooltip").id);
+
+    clickBell();
+    expect(popover()).toBeVisible();
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    expect(trigger()).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("handles each input once in Strict Mode", async () => {
+    const onOpen = vi.fn();
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    try {
+      openBell({ ...EMPTY, items: [ITEM], unreadCount: 1, loadError: true, readError: READ_FAILURE }, { onOpen }, true);
+      expect(screen.getAllByTestId("notifications-popover")).toHaveLength(1);
+
+      fireEvent.click(screen.getByTestId("notifications-read-retry"));
+      expect(store.retryNotificationRead).toHaveBeenCalledExactlyOnceWith(READ_FAILURE);
+      fireEvent.click(screen.getByTestId("notifications-load-retry"));
+      expect(store.refreshNotifications).toHaveBeenCalledOnce();
+      fireEvent.click(screen.getByTestId("notifications-read-all"));
+      expect(store.markAllNotificationsRead).toHaveBeenCalledOnce();
+
+      fireEvent.keyDown(rows()[0]!, { key: "Escape" });
+      expect(popover()).toBeNull();
+
+      clickBell();
+      await settle();
+      fireEvent.pointerDown(outside);
+      fireEvent.click(outside);
+      await settle();
+      expect(popover()).toBeNull();
+
+      clickBell();
+      fireEvent.click(rows()[0]!);
+      expect(store.markNotificationRead).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+      expect(onOpen).toHaveBeenCalledExactlyOnceWith(ITEM);
+      expect(popover()).toBeNull();
+    } finally {
+      outside.remove();
+    }
+  });
 });
 
 describe("opening a notification", () => {
@@ -769,6 +817,19 @@ describe("browsing rows with the keyboard", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(list[index]).toHaveFocus();
     expect(focus).not.toHaveBeenCalled();
+  });
+
+  it.each(["ArrowDown", "ArrowUp", "Home", "End"] as const)("%s on the only row keeps focus there without scrolling", (key) => {
+    openBell({ ...EMPTY, items: [ITEM], unreadCount: 1, loaded: true });
+    const row = rows()[0]!;
+    act(() => row.focus());
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+
+    const event = press(row, key);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(row).toHaveFocus();
+    expect(focus.mock.calls).toEqual([[{ preventScroll: true }]]);
   });
 
   it.each([

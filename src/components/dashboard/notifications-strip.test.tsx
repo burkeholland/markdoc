@@ -128,6 +128,14 @@ describe("notification strip presentation", () => {
     expect(strip()).toBeNull();
   });
 
+  it("renders nothing while the first load is pending", async () => {
+    notificationApi.list.mockReturnValue(new Promise(() => {}));
+    const { NotificationsStrip } = await import("./notifications-strip");
+    render(<NotificationsStrip />);
+    await waitFor(() => expect(notificationApi.list).toHaveBeenCalled());
+    expect(strip()).toBeNull();
+  });
+
   it("lists only unread notifications, with the unread count and one Mark all read", async () => {
     await mountStrip([ITEM, READ, ITEM_TWO, SHARE], { unreadCount: 7 });
 
@@ -290,6 +298,22 @@ describe("notification strip actions", () => {
     expect(strip()).toBeNull();
   });
 
+  it("after the list reorders, each row opens its own notification", async () => {
+    const { store } = await mountStrip([ITEM, ITEM_TWO, SHARE]);
+
+    notificationApi.list.mockResolvedValue({ items: [SHARE, ITEM_TWO, ITEM], unreadCount: 3 });
+    await act(() => store.refreshNotifications());
+    expect(rowIds()).toEqual([SHARE.id, ITEM_TWO.id, ITEM.id]);
+    fireEvent.click(opens()[0]!);
+
+    expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(SHARE.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${SHARE.documentId}`);
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM.id]);
+    await act(async () => {
+      await Promise.resolve();
+    });
+  });
+
   it("brings a row back when marking it read fails, and it can be opened again", async () => {
     notificationApi.read.mockRejectedValueOnce(new Error("offline"));
     await mountStrip([ITEM, ITEM_TWO]);
@@ -334,6 +358,32 @@ describe("notification strip keyboard", () => {
     expect(focus.mock.contexts[0]).toBe(controls[to]);
     expectNothingDone();
     expect(rows()).toHaveLength(3);
+  });
+
+  it("moves through the list key after key, also from the numeric keypad, then opens the focused row", async () => {
+    await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
+    const controls = opens();
+    act(() => controls[0]!.focus());
+
+    press(document.activeElement!, "ArrowDown");
+    expect(controls[1]).toHaveFocus();
+    press(document.activeElement!, "End", { code: "Numpad1", location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD });
+    expect(controls[2]).toHaveFocus();
+    press(document.activeElement!, "ArrowDown", { code: "Numpad2", location: KeyboardEvent.DOM_KEY_LOCATION_NUMPAD });
+    expect(controls[0]).toHaveFocus();
+    press(document.activeElement!, "ArrowUp", { repeat: true });
+    expect(controls[2]).toHaveFocus();
+    expectNothingDone();
+
+    // jsdom does not run a button's activation behavior for Enter, so send the click the browser would.
+    expect(press(document.activeElement!, "Enter").defaultPrevented).toBe(false);
+    fireEvent.click(document.activeElement!);
+
+    expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM_THREE.id);
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM_THREE.documentId}?thread=${ITEM_THREE.refId}`);
+    await act(async () => {
+      await Promise.resolve();
+    });
   });
 
   it.each([
