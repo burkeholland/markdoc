@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, useTransition, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck, X } from "lucide-react";
 import type { NotificationDto } from "@/lib/api";
@@ -13,11 +13,15 @@ const OPEN_SELECTOR = '[data-testid="notification-open"]';
 const DISMISS_SELECTOR = '[data-testid="notification-dismiss"]';
 
 /**
- * How long the strip stays as it was once the browser has started loading the document as a whole new
- * page. That load can be stopped (the Stop button, Escape) and nothing tells the page, so the hold ends
- * by itself. A navigation inside the app has no such limit: it holds until it is over.
+ * How long the strip waits at most for an opened document. Normally the page changes long before, and
+ * the strip goes with it. The limit is for a navigation that ends on the dashboard itself.
  */
-const OPEN_HOLD_CAP_MS = 8_000;
+const OPEN_HOLD_MS = 30_000;
+/**
+ * The same, once the browser has started loading the document as a whole new page. That load can be
+ * stopped (the Stop button, Escape) and nothing tells the page.
+ */
+const PAGE_LOAD_HOLD_MS = 8_000;
 /**
  * How long the emptied strip keeps its box, counted from the last press on it. Longer than the slowest
  * double-click or double tap the system counts as one (0.9 s on Windows).
@@ -79,39 +83,44 @@ export function NotificationsStrip() {
   const sectionRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
-  // True from the activation that opens a row until that navigation is over, which normally takes this
-  // page with it.
-  const [navigating, startOpening] = useTransition();
-  // The strip as it was when a row was opened. `capped`: an earlier open never ended, so `navigating`
-  // cannot tell when this one does. The app router keeps a navigation pending for good once it has
-  // fallen back to loading the page as a whole, even if that load is stopped.
-  const [opened, setOpened] = useState<{ rows: NotificationDto[]; unreadCount: number; capped: boolean } | null>(null);
-  const opening = opened !== null && navigating;
-  useEffect(() => {
-    if (!opening) return;
-    let timer: number | undefined;
-    const release = () => setOpened(null);
-    const cap = () => {
-      timer ??= window.setTimeout(release, OPEN_HOLD_CAP_MS);
-    };
-    if (opened?.capped) cap();
-    // The browser starts loading another page. This page stays until that one answers, or for good.
-    window.addEventListener("beforeunload", cap);
-    // This page is shown again after the browser had kept it for Back.
-    window.addEventListener("pageshow", release);
-    return () => {
-      window.clearTimeout(timer);
-      window.removeEventListener("beforeunload", cap);
-      window.removeEventListener("pageshow", release);
-    };
-  }, [opening, opened]);
   // The height of the strip a click or a tap has just emptied. Every press on the box starts the time again.
   const [emptyBox, setEmptyBox] = useState<{ height: number } | null>(null);
   useEffect(() => {
     if (!emptyBox) return;
     const timer = window.setTimeout(() => setEmptyBox(null), EMPTY_HOLD_MS);
     return () => window.clearTimeout(timer);
-  }, [emptyBox]);
+  }, [emptyBox]);  // The strip as it was when a row was opened, from that activation until the page changes. The page
+  // normally changes, and this component goes with it. The navigation is a plain `router.push`: inside
+  // a transition of this component, a full page load that is stopped left the app router unable to
+  // navigate at all.
+  const [opened, setOpened] = useState<{ rows: NotificationDto[]; unreadCount: number } | null>(null);
+  const opening = opened !== null;
+  useEffect(() => {
+    if (!opening) return;
+    // The strip follows the list again. If that empties it, its box stays for a moment, as after a click.
+    const release = () => {
+      setEmptyBox({ height: sectionRef.current?.getBoundingClientRect().height ?? 0 });
+      setOpened(null);
+    };
+    let timer = window.setTimeout(release, OPEN_HOLD_MS);
+    // The browser starts loading another page. This page stays until that one answers, or for good.
+    const pageLoadStarted = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(release, PAGE_LOAD_HOLD_MS);
+    };
+    window.addEventListener("beforeunload", pageLoadStarted);
+    // Back or Forward ends the navigation here. `pageshow`: this page is shown again after the browser
+    // had kept it for Back.
+    window.addEventListener("popstate", release);
+    window.addEventListener("pageshow", release);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("beforeunload", pageLoadStarted);
+      window.removeEventListener("popstate", release);
+      window.removeEventListener("pageshow", release);
+    };
+  }, [opening]);
+
   // The user emptied the strip while focus was in it. The control that had focus is gone, so a status
   // line takes the strip's place and the focus, and stays until focus moves on.
   const [emptied, setEmptied] = useState(false);
@@ -124,9 +133,9 @@ export function NotificationsStrip() {
 
   const open = (notification: NotificationDto, event: ReactMouseEvent) => {
     if (opening || isRepeatedClick(event)) return;
-    setOpened({ rows: unread, unreadCount, capped: navigating });
+    setOpened({ rows: unread, unreadCount });
     void markNotificationRead(notification.id);
-    startOpening(() => router.push(notificationHref(notification)));
+    router.push(notificationHref(notification));
   };
 
   const keepBox = () => setEmptyBox({ height: sectionRef.current?.getBoundingClientRect().height ?? 0 });

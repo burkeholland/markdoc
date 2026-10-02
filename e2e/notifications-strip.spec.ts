@@ -388,6 +388,29 @@ test.describe("dashboard notification strip with real input", () => {
     });
   }
 
+  // An ordinary slow open is a navigation inside the app: the browser loads no page, so nothing but the
+  // new page itself ends the wait in the first 30 seconds.
+  test("a document that takes 10 seconds holds the strip all that time, and a click after 9 seconds does nothing", async () => {
+    test.setTimeout(150_000);
+    const page = recipient.page;
+    await page.setViewportSize(PHONE);
+    type Marked = Window & { pageLoadStarted?: boolean };
+    let shown = 0;
+
+    await expectOnlyRowOpens(page, 0.5, 10_000, async (x, y) => {
+      shown = await page.evaluate(() => {
+        window.addEventListener("beforeunload", () => {
+          (window as Marked).pageLoadStarted = true;
+        });
+        return performance.timeOrigin;
+      });
+      await clickAgainAfter(page, 9_000)(x, y);
+    });
+
+    // Still the same window, and the browser never started to load a page.
+    expect(await page.evaluate(() => [performance.timeOrigin, (window as Marked).pageLoadStarted ?? false])).toEqual([shown, false]);
+  });
+
   test("a row opened with the keyboard keeps the focus until its document is there", async () => {
     const page = recipient.page;
     const [shared] = await shareNew(1);
@@ -411,8 +434,8 @@ test.describe("dashboard notification strip with real input", () => {
     expect(reads).toEqual([`/api/notifications/${id}/read`]);
   });
 
-  // The app router falls back to loading the document as a whole page when its own request fails, and
-  // from then on it never reports that navigation as over. If the user stops that load, the page stays.
+  // The app router falls back to loading the document as a whole page when its own request fails. If the
+  // user stops that load, the dashboard stays and nothing tells it.
   test("after a page load that a row started is stopped, the other rows open again without a reload", async () => {
     const page = recipient.page;
     const shared = await shareNew(3);

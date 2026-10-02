@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { StrictMode, use, useEffect, useState, type ReactNode } from "react";
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NotificationDto, NotificationsPageDto } from "@/lib/api";
@@ -100,50 +100,6 @@ const status = () => screen.queryByTestId("notifications-strip-status");
 const emptiedBox = () => screen.queryByTestId("notifications-strip-emptied");
 const hrefOf = (notification: NotificationDto) => `/d/${notification.documentId}?thread=${notification.refId}`;
 
-/**
- * Mounts the strip under a stand-in for the app router. A navigation stays pending as a transition, as
- * the real one does until the page is ready; `endHere` ends the latest one with the dashboard still here.
- */
-async function mountStripUnderRouter(items: NotificationDto[]) {
-  const pages: { promise: Promise<void>; resolve: () => void }[] = [];
-  const Awaits = ({ promise }: { promise: Promise<void> }) => {
-    use(promise);
-    return null;
-  };
-  function AppRouter({ children }: { children: ReactNode }) {
-    const [destination, setDestination] = useState<Promise<void> | null>(null);
-    useEffect(() => {
-      router.push.mockImplementation(() => {
-        const page = deferred<void>();
-        pages.push(page);
-        setDestination(page.promise);
-      });
-    }, []);
-    return (
-      <>
-        {children}
-        {destination && <Awaits promise={destination} />}
-      </>
-    );
-  }
-  notificationApi.list.mockResolvedValue({ items, unreadCount: items.length });
-  const { NotificationsStrip } = await import("./notifications-strip");
-  const store = await import("@/lib/notifications-store");
-  render(<AppRouter><NotificationsStrip /></AppRouter>);
-  await waitFor(() => expect(rows()).toHaveLength(items.length));
-  const endHere = () =>
-    act(async () => {
-      pages.at(-1)!.resolve();
-      await pages.at(-1)!.promise;
-    });
-  return { store, endHere };
-}
-
-/** A click that starts a navigation. It suspends, so React wants the act that starts it awaited. */
-const clickToOpen = (index: number) =>
-  act(async () => {
-    fireEvent.click(opens()[index]!, { detail: 1 });
-  });
 const elapse = (ms: number) => act(() => vi.advanceTimersByTime(ms));
 
 /** A cancelable keydown, as a browser sends it; returns the event so the test can read `defaultPrevented`. */
@@ -273,7 +229,8 @@ describe("notification strip actions", () => {
 
     expect(order).toEqual([`read:${notification.id}`, `push:${href}`]);
     expect(notificationApi.readAll).not.toHaveBeenCalled();
-    expect(rowIds()).toEqual([ITEM_TWO.id]);
+    // The row stays until the page changes.
+    expect(rowIds()).toEqual([ITEM_TWO.id, notification.id]);
     await act(async () => {
       await Promise.resolve();
     });
@@ -288,37 +245,36 @@ describe("notification strip actions", () => {
     expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${ITEM.documentId}?thread=${ITEM.refId}`);
   });
 
-  // A real double-click: the first click takes the row away, the next row moves up under the pointer and
-  // gets the rest of the gesture, which the browser counts as click 2 and click 3 (`detail`).
+  // The browser counts the clicks of a double or triple click (`detail`). The strip does not move while
+  // the row opens, so the rest of the gesture lands on the same row.
   it.each([false, true])("a double-click or a triple-click opens only the row under the first click (Strict Mode: %s)", async (strict) => {
     const pending = deferred<{ ok: true }>();
     notificationApi.read.mockReturnValue(pending.promise);
     await mountStrip([ITEM, ITEM_TWO, ITEM_THREE], { strict });
 
     fireEvent.click(opens()[0]!, { detail: 1 });
-    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
     fireEvent.click(opens()[0]!, { detail: 2 });
     fireEvent.click(opens()[0]!, { detail: 3 });
 
     expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM.id);
     expect(router.push).toHaveBeenCalledExactlyOnceWith(hrefOf(ITEM));
-    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
     await act(async () => {
       pending.resolve({ ok: true });
       await pending.promise;
     });
-    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
   });
 
-  // The mocked router finishes a navigation at once, with the dashboard still here.
-  it("opening the only row takes the strip away and leaves no empty box", async () => {
-    await mountStrip([ITEM]);
-    fireEvent.click(opens()[0]!, { detail: 1 });
-    expect(strip()).toBeNull();
-    expect(emptiedBox()).toBeNull();
-    await act(async () => {
-      await Promise.resolve();
-    });
+  // The first click of the gesture was on something else, which moved this row under the pointer.
+  it("the second click of a double-click that lands on a row opens nothing", async () => {
+    await mountStrip([ITEM, ITEM_TWO]);
+
+    fireEvent.click(opens()[0]!, { detail: 2 });
+    fireEvent.click(opens()[1]!, { detail: 3 });
+
+    expectNothingDone();
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id]);
   });
 
   it("Mark as read takes only its row away, without navigating", async () => {
@@ -388,7 +344,7 @@ describe("notification strip actions", () => {
 
     expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(SHARE.id);
     expect(router.push).toHaveBeenCalledExactlyOnceWith(`/d/${SHARE.documentId}`);
-    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM.id]);
+    expect(rowIds()).toEqual([SHARE.id, ITEM_TWO.id, ITEM.id]);
     await act(async () => {
       await Promise.resolve();
     });
@@ -860,16 +816,25 @@ describe("notification strip focus when the strip empties", () => {
 
 // A row that is opened is marked read at once, and so would leave the list, and the last row would take
 // the strip with it, while the pointer is still there. Until the page changes the strip stays as it was.
+// The router is a mock here: the page never changes, as when a navigation ends on the dashboard itself.
 describe("notification strip while a row's document opens", () => {
+  const HEIGHT = 96.5;
+  const measured = () => vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ height: HEIGHT } as DOMRect);
   const heading = (count: number) => screen.getByRole("heading", { name: new RegExp(`Notifications\\s*${count}$`) });
   const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const open = (index: number) => fireEvent.click(opens()[index]!, { detail: 1 });
+  const windowEvent = (type: string) => fireEvent(window, new Event(type));
+  const settle = () =>
+    act(async () => {
+      await Promise.resolve();
+    });
 
-  it("stays as it was, the opened row included, does nothing, and follows the list again if the navigation ends here", async () => {
+  it("stays as it was, the opened row included, and does nothing", async () => {
     const all = [ITEM, ITEM_TWO, ITEM_THREE, SHARE];
-    const { store, endHere } = await mountStripUnderRouter(all);
+    const { store } = await mountStrip(all);
     act(() => opens()[0]!.focus());
 
-    await clickToOpen(0);
+    open(0);
 
     const held = () => {
       expect(rowIds()).toEqual(all.map((item) => item.id));
@@ -882,15 +847,17 @@ describe("notification strip while a row's document opens", () => {
       expect(router.push).toHaveBeenCalledExactlyOnceWith(hrefOf(ITEM));
     };
     held();
-    // The same row again as a new click, another row, both ways to mark as read, and Mark all read.
-    fireEvent.click(opens()[0]!, { detail: 1 });
+    // The same row again as a new click and from the keyboard, another row, both ways to mark as read,
+    // and Mark all read.
+    open(0);
     fireEvent.click(opens()[0]!);
-    fireEvent.click(opens()[2]!, { detail: 1 });
+    open(2);
     fireEvent.click(dismisses()[0]!, { detail: 1 });
     fireEvent.click(dismisses()[2]!);
     press(opens()[0]!, "Delete");
     fireEvent.click(readAll(), { detail: 1 });
     fireEvent.click(readAll());
+    await settle();
     held();
     // The list changes behind it: the poll comes back without the opened row and with a new one.
     notificationApi.list.mockResolvedValue({ items: [{ ...ITEM, id: "notification-new" }, ITEM_TWO, ITEM_THREE, SHARE], unreadCount: 9 });
@@ -899,101 +866,157 @@ describe("notification strip while a row's document opens", () => {
     // The arrow keys are not actions. They still move focus.
     press(opens()[0]!, "ArrowDown");
     expect(opens()[1]).toHaveFocus();
+  });
 
-    // The navigation ends and the dashboard is still here (it was cancelled): the strip follows the list.
-    await endHere();
-    expect(rowIds()).toEqual(["notification-new", ITEM_TWO.id, ITEM_THREE.id, SHARE.id]);
-    expect(heading(9)).toBeVisible();
-    await clickToOpen(1);
+  it.each([
+    ["Back or Forward", "popstate"],
+    ["the page shown again after the browser had kept it", "pageshow"],
+  ] as const)("%s ends the wait at once: the strip follows the list in one step and rows open again", async (_label, type) => {
+    const { store } = await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
+    open(0);
+    await settle();
+    notificationApi.list.mockResolvedValue({ items: [{ ...ITEM, id: "notification-new" }, ITEM_TWO, ITEM_THREE], unreadCount: 7 });
+    await act(() => store.refreshNotifications());
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
+
+    windowEvent(type);
+
+    expect(rowIds()).toEqual(["notification-new", ITEM_TWO.id, ITEM_THREE.id]);
+    expect(heading(7)).toBeVisible();
+    open(1);
     expect(notificationApi.read).toHaveBeenLastCalledWith(ITEM_TWO.id);
     expect(router.push).toHaveBeenCalledTimes(2);
     expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_TWO));
+    await settle();
   });
 
-  it("keeps the only row, and the strip with it", async () => {
-    const { endHere } = await mountStripUnderRouter([ITEM]);
-
-    await clickToOpen(0);
-    fireEvent.click(opens()[0]!, { detail: 2 });
-    fireEvent.click(opens()[0]!, { detail: 1 });
-
-    expect(rowIds()).toEqual([ITEM.id]);
-    expect(router.push).toHaveBeenCalledOnce();
-    await endHere();
-    expect(strip()).toBeNull();
-    expect(emptiedBox()).toBeNull();
-    expect(status()).toBeNull();
-  });
-
-  it("brings the row back as a live one when marking it read failed and the navigation ended here", async () => {
-    notificationApi.read.mockRejectedValueOnce(new Error("offline"));
-    const { endHere } = await mountStripUnderRouter([ITEM, ITEM_TWO]);
-
-    await clickToOpen(0);
-    await endHere();
-
-    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id]);
-    await clickToOpen(0);
-    expect(notificationApi.read).toHaveBeenCalledTimes(2);
-    expect(router.push).toHaveBeenCalledTimes(2);
-  });
-
-  // The app router falls back to loading the document as a whole page when its own request fails, and
-  // from then on it reports that navigation as pending for good. The user can stop that load.
-  it("waits without a limit for a navigation in the app, and 8 seconds for a page the browser has started to load", async () => {
-    await mountStripUnderRouter([ITEM, ITEM_TWO, ITEM_THREE]);
+  it("waits 30 seconds at most, and every open waits anew", async () => {
+    await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
     fakeTimers();
 
-    await clickToOpen(0);
-    elapse(600_000);
-    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
-
-    fireEvent(window, new Event("beforeunload"));
-    fireEvent(window, new Event("beforeunload"));
-    elapse(7_999);
-    fireEvent.click(opens()[1]!, { detail: 1 });
+    open(0);
+    await settle();
+    elapse(29_999);
+    open(1);
     expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
     expect(router.push).toHaveBeenCalledOnce();
     elapse(1);
     expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
 
-    // That navigation never ends, so the next open cannot wait for it: its 8 seconds start at the click.
-    await clickToOpen(0);
-    expect(notificationApi.read).toHaveBeenLastCalledWith(ITEM_TWO.id);
+    open(0);
+    await settle();
     expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_TWO));
-    elapse(7_999);
-    fireEvent.click(opens()[1]!, { detail: 1 });
+    elapse(29_999);
+    open(1);
     expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
     expect(router.push).toHaveBeenCalledTimes(2);
     elapse(1);
     expect(rowIds()).toEqual([ITEM_THREE.id]);
-    await clickToOpen(0);
+  });
+
+  // The app router falls back to loading the document as a whole page when its own request fails. The
+  // user can stop that load, and nothing tells the page.
+  it("waits 8 seconds once the browser has started to load a page, counted from then", async () => {
+    await mountStrip([ITEM, ITEM_TWO, ITEM_THREE]);
+    fakeTimers();
+
+    open(0);
+    await settle();
+    elapse(1_000);
+    windowEvent("beforeunload");
+    elapse(7_999);
+    open(1);
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id, ITEM_THREE.id]);
+    expect(router.push).toHaveBeenCalledOnce();
+    elapse(1);
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+
+    // The next open waits anew: 30 seconds, or 8 from its own page load.
+    open(0);
+    await settle();
+    elapse(25_000);
+    windowEvent("beforeunload");
+    elapse(7_999);
+    expect(rowIds()).toEqual([ITEM_TWO.id, ITEM_THREE.id]);
+    elapse(1);
+    expect(rowIds()).toEqual([ITEM_THREE.id]);
+    open(0);
     expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_THREE));
+    await settle();
   });
 
-  it("stops waiting when the page is shown again after the browser had kept it for Back", async () => {
-    await mountStripUnderRouter([ITEM, ITEM_TWO]);
+  it.each([
+    ["30 seconds", () => elapse(30_000)],
+    ["Back", () => windowEvent("popstate")],
+    ["a page shown again", () => windowEvent("pageshow")],
+    ["8 seconds of a page load", () => {
+      windowEvent("beforeunload");
+      elapse(8_000);
+    }],
+  ] as const)("when the only row was opened and the wait ends after %s, the strip's box stays for one second", async (_label, end) => {
+    await mountStrip([ITEM]);
+    measured();
+    fakeTimers();
+    open(0);
+    fireEvent.click(opens()[0]!, { detail: 2 });
+    await settle();
+    expect(rowIds()).toEqual([ITEM.id]);
 
-    await clickToOpen(0);
-    fireEvent(window, new Event("pageshow"));
+    end();
 
-    expect(rowIds()).toEqual([ITEM_TWO.id]);
-    await clickToOpen(0);
-    expect(router.push).toHaveBeenLastCalledWith(hrefOf(ITEM_TWO));
+    expect(strip()).toBeNull();
+    expect(status()).toBeNull();
+    expect(emptiedBox()).toHaveStyle({ height: `${HEIGHT}px` });
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
+    elapse(999);
+    expect(emptiedBox()).not.toBeNull();
+    elapse(1);
+    expect(emptiedBox()).toBeNull();
+    expect(router.push).toHaveBeenCalledOnce();
   });
 
-  it("listens to the window only while a row is opening", async () => {
+  it("brings the row back as a live one when marking it read failed", async () => {
+    notificationApi.read.mockRejectedValueOnce(new Error("offline"));
+    await mountStrip([ITEM, ITEM_TWO]);
+    measured();
+
+    open(0);
+    await settle();
+    await settle();
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id]);
+    windowEvent("popstate");
+
+    expect(rowIds()).toEqual([ITEM.id, ITEM_TWO.id]);
+    expect(emptiedBox()).toBeNull();
+    open(0);
+    expect(notificationApi.read).toHaveBeenCalledTimes(2);
+    expect(router.push).toHaveBeenCalledTimes(2);
+    await settle();
+  });
+
+  it.each([
+    ["while it waits", () => {}],
+    ["while it waits for a page load", () => windowEvent("beforeunload")],
+    ["during the box's second", () => elapse(30_000)],
+  ] as const)("leaves no timer and no listener behind when the page changes %s", async (_label, before) => {
     const added = vi.spyOn(window, "addEventListener");
     const removed = vi.spyOn(window, "removeEventListener");
-    const windowEvents = (spy: typeof added | typeof removed) => spy.mock.calls.map(([type]) => type).filter((type) => type === "beforeunload" || type === "pageshow");
-    const { endHere } = await mountStripUnderRouter([ITEM, ITEM_TWO]);
-    expect(windowEvents(added)).toEqual([]);
+    const listened = (spy: typeof added | typeof removed) =>
+      spy.mock.calls.filter(([type]) => type === "beforeunload" || type === "popstate" || type === "pageshow").map(([type, listener]) => [type, listener]);
+    const { unmount } = await mountStrip([ITEM]);
+    expect(listened(added)).toEqual([]);
+    fakeTimers();
 
-    await clickToOpen(0);
-    expect(windowEvents(added)).toEqual(["beforeunload", "pageshow"]);
-    await endHere();
+    open(0);
+    await settle();
+    expect(listened(added).map(([type]) => type)).toEqual(["beforeunload", "popstate", "pageshow"]);
+    expect(vi.getTimerCount()).toBe(1);
+    before();
+    expect(vi.getTimerCount()).toBe(1);
+    unmount();
 
-    expect(windowEvents(removed)).toEqual(["beforeunload", "pageshow"]);
+    expect(listened(removed)).toEqual(listened(added));
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
