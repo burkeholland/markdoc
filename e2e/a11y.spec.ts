@@ -1532,11 +1532,15 @@ test.describe("dialog focus return (#161)", () => {
     await expect.poll(active).toBe("rich");
 
     // 3–5. Dialogs opened from the ⋮ menu with the keyboard: the menu item is unmounted by the time the
-    //      dialog closes, so focus goes to the menu's trigger.
+    //      dialog closes, so focus goes to the menu's trigger. The menu opened by Enter is ready once it
+    //      has put focus on one of its items; the item we want is picked once it really has focus.
     const fromMenu = async (item: string) => {
       await page.getByTestId("more-menu").focus();
       await page.keyboard.press("Enter");
-      await page.getByRole("menuitem", { name: item }).focus();
+      await expect(page.locator('[role="menuitem"]:focus')).toHaveCount(1);
+      const menuItem = page.getByRole("menuitem", { name: item });
+      await menuItem.focus();
+      await expect(menuItem).toBeFocused();
       await page.keyboard.press("Enter");
     };
     await fromMenu("Keyboard shortcuts");
@@ -1679,6 +1683,52 @@ test.describe("dialog focus return (#161)", () => {
       await expect(page.getByTestId("version-name")).toBeFocused();
       await escapeCloses(page, "Name this version");
       await expect.poll(() => focusedId(page)).toBe("more-menu");
+      await context.close();
+    });
+
+    // The people popover closes in the commit that opens "Connect an AI agent", so the popover button that
+    // opened the dialog is gone when the dialog closes: focus belongs on the people button, the popover's
+    // trigger. The first open on a page also loads the dialog's chunk, which hid the bug (focus on <body>
+    // from the second time on), so every way of closing runs after an earlier round.
+    test(`Connect an AI agent opened from the people popover by ${via} returns focus to the people button every time`, async ({ browser }) => {
+      const { page, context } = await signIn(browser, `a11y-people-${via}`);
+      const id = await createDocument(page, "# People\n\nAlpha bravo charlie.\n", "People fixture");
+      await openDocument(page, id);
+
+      const people = page.getByTestId("presence");
+      const popover = page.getByTestId("presence-popover");
+      const connect = popover.getByTestId("connect-agent");
+      const dialog = page.getByRole("dialog", { name: "Connect an AI agent" });
+      const close = dialog.getByRole("button", { name: "Close" });
+      const tabTo = async (target: Locator, key: "Tab" | "Shift+Tab") => {
+        for (let i = 0; i < 20 && !(await target.evaluate((el) => el === document.activeElement)); i++) await page.keyboard.press(key);
+        await expect(target).toBeFocused();
+      };
+
+      for (const how of ["Escape", "Close", "Escape", "Close"] as const) {
+        if (via === "mouse") {
+          await people.click();
+          await connect.click();
+        } else {
+          await people.focus();
+          await page.keyboard.press("Enter");
+          await expect(popover).toBeVisible();
+          await tabTo(connect, "Tab");
+          await page.keyboard.press("Enter");
+        }
+        await expect(dialog).toBeVisible();
+        await expect(popover).toHaveCount(0);
+        await expect.poll(() => dialog.evaluate((el) => el.contains(document.activeElement))).toBe(true);
+
+        if (how === "Escape") await page.keyboard.press("Escape");
+        else if (via === "mouse") await close.click();
+        else {
+          await tabTo(close, "Shift+Tab");
+          await page.keyboard.press("Enter");
+        }
+        await expect(dialog).toHaveCount(0);
+        await expect(people).toBeFocused();
+      }
       await context.close();
     });
   }
