@@ -202,6 +202,28 @@ export const richText = (page: Page) =>
   });
 
 /**
+ * Each suggestion's own joined insert text, read from `.md-rich .md-suggest-insert` spans and grouped by
+ * the `data-highlight-id` attribute the rich-pane decorations carry (see highlights.ts: the id is the
+ * suggestion's `groupId ?? id`). A collaborator's live cursor widget can render inline inside the mark
+ * and split one suggestion into two sibling spans sharing the same id (#2239); joining by id proves the
+ * text still belongs to ONE suggestion, unlike reading the whole document, while a remote-caret label
+ * inside a span is stripped from a clone first so it never pollutes the joined text.
+ */
+export const suggestionInsertTexts = (page: Page) =>
+  page.evaluate(() => {
+    const root = document.querySelector(".md-rich");
+    if (!root) return [];
+    const byId = new Map<string, string>();
+    root.querySelectorAll(".md-suggest-insert").forEach((span) => {
+      const id = span.getAttribute("data-highlight-id") ?? "";
+      const clone = span.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll(".md-remote-caret").forEach((n) => n.remove());
+      byId.set(id, (byId.get(id) ?? "") + (clone.textContent ?? ""));
+    });
+    return Array.from(byId.values());
+  });
+
+/**
  * Place the caret at the end of the rich editor's document. Clicks near the top-left of the first text
  * block, not the pane centre: on a fixture whose vertical middle is an image the centre click selects the
  * image node, `Control+End` stays on it and the caret never reaches text (a11y dark slash-menu flake).

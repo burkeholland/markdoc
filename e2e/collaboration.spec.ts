@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures";
-import { signIn, createDocument, openDocument, shareWith, codeText, richText, focusRichEnd, focusCodeEnd, selectTextInRich, ensureCommentsOpen, budgetMs, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, codeText, richText, suggestionInsertTexts, focusRichEnd, focusCodeEnd, selectTextInRich, ensureCommentsOpen, budgetMs, type User } from "./helpers";
 import { LONG_DOC, h2Texts } from "./fixtures/burke-scale";
 
 test.describe("collaboration between two users", () => {
@@ -101,11 +101,11 @@ test.describe("collaboration between two users", () => {
     // Alice's pane renders Bob's live cursor widget inline inside his suggestion mark, which splits
     // one logical suggestion into two `.md-suggest-insert` DOM spans around it - a real product bug
     // (the collaborator's caret widget trails one character behind on every keystroke until they
-    // move it, tracked as #2239, not fixed here). Read the rendered document text with remote-caret
-    // labels stripped (as `richText` does) rather than joining `.md-suggest-insert` spans, so two
-    // unrelated suggestions elsewhere in the document can never add up to the expected text.
-    await expect.poll(() => richText(bob.page)).toContain("Suggested text.");
-    await expect.poll(() => richText(alice.page)).toContain("Suggested text.");
+    // move it, tracked as #2239, not fixed here). Read each suggestion's own spans, grouped by their
+    // shared `data-highlight-id`, so the assertion still proves the text landed in ONE suggestion
+    // (not a plain edit) instead of just appearing anywhere in the document.
+    await expect.poll(async () => (await suggestionInsertTexts(bob.page)).some((t) => t.includes("Suggested text."))).toBe(true);
+    await expect.poll(async () => (await suggestionInsertTexts(alice.page)).some((t) => t.includes("Suggested text."))).toBe(true);
     await expect(alice.page.locator(".cm-content .md-suggest-insert").first()).toBeVisible();
 
     // Bob deletes a word in the code pane while suggesting: text stays, struck through.
