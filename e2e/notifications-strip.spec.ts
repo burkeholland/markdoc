@@ -44,6 +44,14 @@ test.describe("dashboard notification strip with real input", () => {
     if (!box) throw new Error("the target has no box");
     return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   };
+  /** Presses Tab until the target has focus, as a keyboard user would reach it. */
+  const tabTo = async (target: Locator) => {
+    for (let presses = 0; presses < 20; presses += 1) {
+      await recipient.page.keyboard.press("Tab");
+      if (await target.evaluate((element) => element === document.activeElement)) return;
+    }
+    throw new Error("Tab never reached the target");
+  };
 
   test.beforeEach(async ({ browser }) => {
     sender = await signIn(browser, uniqueLogin("strip-sender"));
@@ -185,5 +193,59 @@ test.describe("dashboard notification strip with real input", () => {
     await expect(rows.first()).toContainText("Strip share 1");
     await expect.poll(unreadCount).toBe(1);
     expect(new URL(page.url()).pathname).toBe("/");
+  });
+
+  // Emptying the strip removes the control that had focus. Focus goes to a status line in the strip's
+  // place, never to <body>, and the next Tab carries on from where the strip was.
+  test("when the last row leaves, focus moves to a status line and Tab carries on from there", async () => {
+    const page = recipient.page;
+    const status = page.getByTestId("notifications-strip-status");
+    const handedOff = async (next: "Tab" | "Shift+Tab") => {
+      await expect(page.getByTestId("notifications-strip")).toHaveCount(0);
+      await expect(status).toBeFocused();
+      await expect(status).toHaveText("No unread notifications");
+      await expect(status).toHaveAttribute("role", "status");
+      await page.keyboard.press(next);
+      await expect(next === "Tab" ? page.getByTestId("new-document") : page.getByRole("button", { name: "Account" })).toBeFocused();
+      await expect(status).toHaveCount(0);
+    };
+
+    await shareNew(1);
+    let strip = await openDashboard(1);
+    await tabTo(strip.getByTestId("notification-open"));
+    await page.keyboard.press("Delete");
+    await handedOff("Tab");
+
+    await shareNew(1);
+    strip = await openDashboard(1);
+    await tabTo(strip.getByTestId("notification-open"));
+    await page.keyboard.press("ArrowRight");
+    await expect(strip.getByTestId("notification-dismiss")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await handedOff("Shift+Tab");
+
+    await shareNew(2);
+    strip = await openDashboard(2);
+    await tabTo(strip.getByTestId("notifications-strip-read-all"));
+    await page.keyboard.press("Enter");
+    await handedOff("Tab");
+
+    await shareNew(1);
+    strip = await openDashboard(1);
+    const { x, y } = await centre(strip.getByTestId("notification-dismiss"));
+    await page.mouse.click(x, y);
+    await handedOff("Shift+Tab");
+    await expect.poll(unreadCount).toBe(0);
+
+    // The strip empties in the background while focus is elsewhere: focus stays where the user put it.
+    await shareNew(1);
+    await openDashboard(1);
+    const search = page.getByTestId("search");
+    await search.click();
+    await page.request.post("/api/notifications/read-all");
+    await page.evaluate(() => (window as unknown as { __markdocNotificationsRefresh?: () => Promise<void> }).__markdocNotificationsRefresh?.());
+    await expect(page.getByTestId("notifications-strip")).toHaveCount(0);
+    await expect(status).toHaveCount(0);
+    await expect(search).toBeFocused();
   });
 });

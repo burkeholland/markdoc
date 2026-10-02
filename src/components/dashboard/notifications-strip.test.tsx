@@ -96,6 +96,7 @@ const rowIds = () => rows().map((row) => row.dataset.notificationId);
 const opens = () => screen.queryAllByTestId("notification-open") as HTMLButtonElement[];
 const dismisses = () => screen.queryAllByTestId("notification-dismiss") as HTMLButtonElement[];
 const readAll = () => screen.getByTestId("notifications-strip-read-all");
+const status = () => screen.queryByTestId("notifications-strip-status");
 const hrefOf = (notification: NotificationDto) => `/d/${notification.documentId}?thread=${notification.refId}`;
 
 /** A cancelable keydown, as a browser sends it; returns the event so the test can read `defaultPrevented`. */
@@ -627,6 +628,7 @@ describe("notification strip focus when a row leaves", () => {
     press(document.activeElement!, "Delete");
 
     expect(strip()).toBeNull();
+    expect(status()).toHaveFocus();
     expect(notificationApi.read.mock.calls).toEqual([[ITEM.id], [ITEM_TWO.id], [ITEM_THREE.id]]);
     await act(async () => {
       await Promise.resolve();
@@ -662,5 +664,150 @@ describe("notification strip focus when a row leaves", () => {
     await act(async () => {
       await Promise.resolve();
     });
+  });
+});
+
+// The last row leaves and the strip with it. The control that had focus is gone, so a status line that
+// only assistive technology sees takes its place and its focus, and goes away once focus moves on.
+describe("notification strip focus when the strip empties", () => {
+  const expectStatusFocused = () => {
+    expect(strip()).toBeNull();
+    expect(status()).toHaveFocus();
+    expect(status()).toHaveTextContent("No unread notifications");
+    expect(status()).toHaveAttribute("role", "status");
+    expect(status()).toHaveAttribute("tabindex", "-1");
+    expect(status()).toHaveClass("sr-only");
+  };
+  const settle = () =>
+    act(async () => {
+      await Promise.resolve();
+    });
+
+  it.each([
+    ["Delete on the only row", () => press(opens()[0]!, "Delete"), () => opens()[0]!],
+    ["Mark as read on the only row", () => fireEvent.click(dismisses()[0]!), () => dismisses()[0]!],
+    ["Mark as read on the only row, clicked with focus on the row", () => fireEvent.click(dismisses()[0]!), () => opens()[0]!],
+  ] as const)("%s moves focus to the status line", async (_label, action, focused) => {
+    await mountStrip([ITEM]);
+    act(() => focused().focus());
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+
+    action();
+
+    expectStatusFocused();
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect(notificationApi.read).toHaveBeenCalledExactlyOnceWith(ITEM.id);
+    expect(router.push).not.toHaveBeenCalled();
+    await settle();
+    expectStatusFocused();
+  });
+
+  it.each([
+    ["Mark all read", () => readAll()],
+    ["a row", () => opens()[1]!],
+  ] as const)("Mark all read with focus on %s moves focus to the status line", async (_label, focused) => {
+    await mountStrip([ITEM, ITEM_TWO, SHARE], { strict: true });
+    act(() => focused().focus());
+
+    fireEvent.click(readAll());
+
+    expectStatusFocused();
+    expect(notificationApi.readAll).toHaveBeenCalledOnce();
+    await settle();
+    expectStatusFocused();
+  });
+
+  it("removes the status line once focus leaves it", async () => {
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    try {
+      await mountStrip([ITEM]);
+      act(() => opens()[0]!.focus());
+      press(opens()[0]!, "Delete");
+      expectStatusFocused();
+
+      // The window loses focus (another app, another tab): the line is still the active element and stays.
+      fireEvent.blur(status()!);
+      expectStatusFocused();
+
+      act(() => outside.focus());
+
+      expect(status()).toBeNull();
+      expect(strip()).toBeNull();
+      expect(outside).toHaveFocus();
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("shows no status line and moves no focus when focus was outside the strip", async () => {
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    try {
+      await mountStrip([ITEM, ITEM_TWO]);
+      act(() => outside.focus());
+      const moved = vi.fn();
+      document.addEventListener("focusin", moved);
+
+      fireEvent.click(dismisses()[1]!);
+      fireEvent.click(readAll());
+
+      document.removeEventListener("focusin", moved);
+      expect(strip()).toBeNull();
+      expect(status()).toBeNull();
+      expect(outside).toHaveFocus();
+      expect(moved).not.toHaveBeenCalled();
+      await settle();
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("does not take focus when a background refresh empties the strip", async () => {
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    try {
+      const { store } = await mountStrip([ITEM, ITEM_TWO]);
+      // An earlier action in the strip, with focus in it, that left a row behind.
+      act(() => opens()[0]!.focus());
+      press(opens()[0]!, "Delete");
+      expect(opens()[0]).toHaveFocus();
+      await settle();
+      act(() => outside.focus());
+      const moved = vi.fn();
+      document.addEventListener("focusin", moved);
+
+      notificationApi.list.mockResolvedValue({ items: [], unreadCount: 0 });
+      await act(() => store.refreshNotifications());
+
+      document.removeEventListener("focusin", moved);
+      expect(strip()).toBeNull();
+      expect(status()).toBeNull();
+      expect(outside).toHaveFocus();
+      expect(moved).not.toHaveBeenCalled();
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("keeps focus on the status line, now silent, when the row comes back because marking it read failed", async () => {
+    notificationApi.read.mockRejectedValueOnce(new Error("offline"));
+    await mountStrip([ITEM]);
+    act(() => dismisses()[0]!.focus());
+
+    fireEvent.click(dismisses()[0]!);
+    expectStatusFocused();
+    await waitFor(() => expect(rowIds()).toEqual([ITEM.id]));
+
+    expect(status()).toHaveFocus();
+    expect(status()).toBeEmptyDOMElement();
+    expect(strip()!.compareDocumentPosition(status()!) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+
+    // Clearing the strip again from the row says so again.
+    act(() => opens()[0]!.focus());
+    expect(status()).toBeNull();
+    press(opens()[0]!, "Delete");
+    expectStatusFocused();
+    await settle();
   });
 });

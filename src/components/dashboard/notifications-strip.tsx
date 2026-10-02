@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useTransition, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useLayoutEffect, useRef, useState, useTransition, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Bell, CheckCheck, X } from "lucide-react";
 import type { NotificationDto } from "@/lib/api";
@@ -54,12 +54,20 @@ function isRepeatedClick(event: ReactMouseEvent) {
 export function NotificationsStrip() {
   const router = useRouter();
   const { items, unreadCount } = useNotifications();
+  const sectionRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
+  const statusRef = useRef<HTMLParagraphElement>(null);
   // True from the click that opens a row until the navigation is over, which normally takes this page
   // with it. On a slow network a later click can land before that, on the row that moved up.
   const [opening, startOpening] = useTransition();
+  // The user emptied the strip while focus was in it. The control that had focus is gone, so a status
+  // line takes the strip's place and the focus, and stays until focus moves on.
+  const [emptied, setEmptied] = useState(false);
+  useLayoutEffect(() => {
+    if (emptied) statusRef.current?.focus({ preventScroll: true });
+  }, [emptied]);
   const unread = items.filter((notification) => !notification.readAt);
-  if (unread.length === 0) return null;
+  if (unread.length === 0 && !emptied) return null;
 
   const open = (notification: NotificationDto, event: ReactMouseEvent) => {
     if (opening || isRepeatedClick(event)) return;
@@ -68,12 +76,20 @@ export function NotificationsStrip() {
   };
 
   // The row leaves the list. If focus is in it, hand focus to the next row (or the previous one)
-  // instead of letting it fall to <body>, so the keyboard stays in the list.
+  // instead of letting it fall to <body>, so the keyboard stays in the list; after the last row, to
+  // the status line.
   const dismiss = (notification: NotificationDto, control: HTMLButtonElement) => {
     const row = control.closest("li");
-    const neighbour = row?.contains(document.activeElement) ? (row.nextElementSibling ?? row.previousElementSibling) : null;
+    const focused = row?.contains(document.activeElement) ?? false;
+    const neighbour = focused ? (row?.nextElementSibling ?? row?.previousElementSibling) : null;
     void markNotificationRead(notification.id);
-    neighbour?.querySelector<HTMLButtonElement>(OPEN_SELECTOR)?.focus({ preventScroll: true });
+    if (neighbour) neighbour.querySelector<HTMLButtonElement>(OPEN_SELECTOR)?.focus({ preventScroll: true });
+    else if (focused) setEmptied(true);
+  };
+
+  const readAll = () => {
+    if (sectionRef.current?.contains(document.activeElement)) setEmptied(true);
+    void markAllNotificationsRead();
   };
 
   // On a row: the arrows, Home and End move between rows, ArrowRight reaches its "Mark as read"
@@ -111,8 +127,9 @@ export function NotificationsStrip() {
     destination.focus({ preventScroll: true });
   };
 
-  return (
+  const strip = unread.length > 0 && (
     <section
+      ref={sectionRef}
       className="mb-8 rounded-2xl border border-accent/40 bg-accent-soft/40 p-4"
       aria-label="Notifications"
       data-testid="notifications-strip"
@@ -125,7 +142,7 @@ export function NotificationsStrip() {
         <button
           type="button"
           className="btn btn-ghost h-7 gap-1.5 px-2 text-xs"
-          onClick={() => void markAllNotificationsRead()}
+          onClick={readAll}
           data-testid="notifications-strip-read-all"
         >
           <CheckCheck size={14} /> Mark all read
@@ -182,5 +199,30 @@ export function NotificationsStrip() {
         ))}
       </ul>
     </section>
+  );
+
+  // Visible to assistive technology only. It says nothing if rows come back under it (a failed request).
+  const status = emptied && (
+    <p
+      ref={statusRef}
+      tabIndex={-1}
+      role="status"
+      className="sr-only"
+      // The window losing focus blurs it too, but it stays the active element then.
+      onBlur={(event) => {
+        if (document.activeElement !== event.currentTarget) setEmptied(false);
+      }}
+      data-testid="notifications-strip-status"
+    >
+      {unread.length === 0 && "No unread notifications"}
+    </p>
+  );
+
+  // Each keeps its place in the fragment, so the status line keeps its focus when rows come back.
+  return (
+    <>
+      {status}
+      {strip}
+    </>
   );
 }
