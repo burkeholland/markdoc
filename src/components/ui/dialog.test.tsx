@@ -297,6 +297,191 @@ describe("DialogContent focus lifecycle", () => {
     await flushTasks();
     expect(screen.getByTestId("second")).toHaveFocus();
   });
+
+  // The people popover: its "Connect an AI agent" button has focus when the dialog opens, and the popover
+  // closes in the same commit, so that button is gone when the dialog closes. The popover's trigger is
+  // where focus belongs after the dialog. Radix hands focus back to it one task later (`handBackDelay`),
+  // but not when focus moved into the dialog while the popover was still on the page (`null`); then the
+  // trigger is found through the `aria-controls` Radix puts on it (`wired`).
+  function PopoverShell({ handBackDelay = 0, wired = false }: { handBackDelay?: number | null; wired?: boolean }) {
+    const [popoverOpen, setPopoverOpen] = useState(false);
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <button
+          type="button"
+          data-testid="people"
+          aria-controls={wired && popoverOpen ? "people-popover" : undefined}
+          onClick={() => setPopoverOpen(true)}
+        >
+          People
+        </button>
+        {popoverOpen && (
+          <div data-testid="popover" {...(wired ? { role: "dialog", id: "people-popover", "aria-label": "People" } : {})}>
+            <button
+              type="button"
+              data-testid="connect"
+              onClick={() => {
+                const trigger = screen.getByTestId("people");
+                if (handBackDelay !== null) setTimeout(() => trigger.focus(), handBackDelay);
+                setPopoverOpen(false);
+                setOpen(true);
+              }}
+            >
+              Connect an AI agent
+            </button>
+          </div>
+        )}
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent title="Connect an AI agent">
+            <input data-testid="agent-input" autoFocus />
+          </DialogContent>
+        </Dialog>
+      </>
+    );
+  }
+
+  async function openFromPopover(wait: () => Promise<void> = flushTasks) {
+    const people = screen.getByTestId("people");
+    act(() => people.focus());
+    fireEvent.click(people);
+    const connect = screen.getByTestId("connect");
+    act(() => connect.focus());
+    fireEvent.click(connect);
+    expect(screen.queryByTestId("popover")).toBeNull();
+    expect(screen.getByTestId("agent-input")).toHaveFocus();
+    await wait();
+    return people;
+  }
+
+  it.each([
+    { handBack: "hands focus back", strict: false },
+    { handBack: "hands focus back", strict: true },
+    { handBack: "does not hand focus back", strict: false },
+    { handBack: "does not hand focus back", strict: true },
+  ])(
+    "returns focus to the popover's trigger every time when the button that opened the dialog is gone and the popover $handBack (StrictMode=$strict)",
+    async ({ handBack, strict }) => {
+      const shell = handBack === "hands focus back" ? <PopoverShell /> : <PopoverShell handBackDelay={null} wired />;
+      render(strict ? <StrictMode>{shell}</StrictMode> : shell);
+      for (const action of ["Escape", "Close", "Escape"] as const) {
+        const people = await openFromPopover();
+        // A hand-back took focus to the trigger; an open modal dialog takes it straight back.
+        expect(screen.getByTestId("agent-input")).toHaveFocus();
+
+        if (action === "Close") fireEvent.click(closeButton());
+        else fireEvent.keyDown(screen.getByTestId("agent-input"), { key: "Escape", code: "Escape" });
+        await flushTasks();
+
+        expect(screen.queryByRole("dialog")).toBeNull();
+        expect(people).toHaveFocus();
+      }
+    },
+  );
+
+  it("takes focus back from a hand-back that arrives long after the dialog opened, and closes on the first Escape", async () => {
+    // The ⋮ menu hands focus back to its trigger on a later render, not in the next task.
+    render(<PopoverShell handBackDelay={30} />);
+    const people = await openFromPopover(() => act(() => new Promise<void>((resolve) => setTimeout(resolve, 60))));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-input")).toHaveFocus();
+
+    fireEvent.keyDown(document.activeElement ?? document, { key: "Escape", code: "Escape" });
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(people).toHaveFocus();
+  });
+
+  it("returns focus to the button a shared menu handed it back to, not to the first button wired to that menu", async () => {
+    // Publish and its arrow share one menu; only the menu knows which of them opened it.
+    function SplitButtonShell() {
+      const [menuOpen, setMenuOpen] = useState(true);
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" data-testid="publish" aria-controls={menuOpen ? "publish-menu" : undefined}>Publish</button>
+          <button type="button" data-testid="publish-arrow" aria-controls={menuOpen ? "publish-menu" : undefined}>More publish options</button>
+          {menuOpen && (
+            <div role="menu" id="publish-menu">
+              <div
+                role="menuitem"
+                tabIndex={-1}
+                data-testid="connect-item"
+                onClick={() => {
+                  const arrow = screen.getByTestId("publish-arrow");
+                  setTimeout(() => arrow.focus(), 0);
+                  setMenuOpen(false);
+                  setOpen(true);
+                }}
+              >
+                Connect to GitHub
+              </div>
+            </div>
+          )}
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogContent title="Connect to GitHub">
+              <button type="button">Sign in with GitHub</button>
+            </DialogContent>
+          </Dialog>
+        </>
+      );
+    }
+    render(<SplitButtonShell />);
+    const item = screen.getByTestId("connect-item");
+    act(() => item.focus());
+    fireEvent.click(item);
+    await flushTasks();
+    expect(screen.getByRole("button", { name: "Sign in with GitHub" })).toHaveFocus();
+
+    fireEvent.keyDown(document.activeElement ?? document, { key: "Escape", code: "Escape" });
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByTestId("publish-arrow")).toHaveFocus();
+  });
+
+  it("falls back to the opener when the element focus was handed to is gone at close", async () => {
+    const content = <input data-testid="version-name" autoFocus />;
+    const { rerender } = render(<Harness open={false}>{content}</Harness>);
+    const more = screen.getByTestId("more-menu");
+    act(() => more.focus());
+    rerender(<Harness open>{content}</Harness>);
+    expect(screen.getByTestId("version-name")).toHaveFocus();
+    const passing = document.createElement("button");
+    document.body.append(passing);
+    act(() => passing.focus());
+    expect(screen.getByTestId("version-name")).toHaveFocus();
+    passing.remove();
+
+    rerender(<Harness open={false}>{content}</Harness>);
+    await flushTasks();
+    expect(more).toHaveFocus();
+  });
+
+  it("leaves focus in a second dialog that opens outside the first one's tree", async () => {
+    function Siblings() {
+      const [second, setSecond] = useState(false);
+      return (
+        <>
+          <Dialog open>
+            <DialogContent title="First">
+              <button type="button" onClick={() => setSecond(true)}>Open second</button>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={second} onOpenChange={setSecond}>
+            <DialogContent title="Second">
+              <input data-testid="second-input" />
+            </DialogContent>
+          </Dialog>
+        </>
+      );
+    }
+    render(<Siblings />);
+    fireEvent.click(screen.getByRole("button", { name: "Open second" }));
+    await flushTasks();
+    expect(screen.getByTestId("second-input")).toHaveFocus();
+  });
 });
 
 describe("DialogContent dismissal", () => {
@@ -809,6 +994,143 @@ describe("DialogContent dismissal", () => {
     await flushTasks();
     expect(pageOpener).toHaveFocus();
     expect(outerClosed).toHaveBeenCalledOnce();
+  });
+
+  it.each(["Escape", "Close"] as const)(
+    "closes a nested modal dialog alone through %s and returns focus to the control that opened it",
+    async (action) => {
+      const pageOpener = document.createElement("button");
+      document.body.append(pageOpener);
+      pageOpener.focus();
+      const outerClosed = vi.fn();
+      const innerClosed = vi.fn();
+      function NestedModalHarness() {
+        const [outerOpen, setOuterOpen] = useState(true);
+        const [innerOpen, setInnerOpen] = useState(false);
+        return (
+          <Dialog open={outerOpen} onOpenChange={setOuterOpen}>
+            <DialogContent title="Outer modal" onClosed={outerClosed}>
+              <input data-testid="outer-input" autoFocus />
+              <button type="button" onClick={() => setInnerOpen(true)}>Open nested</button>
+              <Dialog open={innerOpen} onOpenChange={setInnerOpen}>
+                <DialogContent title="Inner modal" onClosed={innerClosed}>
+                  <input data-testid="inner-input" autoFocus />
+                </DialogContent>
+              </Dialog>
+            </DialogContent>
+          </Dialog>
+        );
+      }
+      renderDirect(<StrictMode><NestedModalHarness /></StrictMode>);
+      const innerOpener = screen.getByRole("button", { name: "Open nested" });
+      act(() => innerOpener.focus());
+      fireEvent.click(innerOpener);
+      const innerInput = screen.getByTestId("inner-input");
+      expect(innerInput).toHaveFocus();
+      await flushTasks();
+      expect(innerInput).toHaveFocus();
+
+      if (action === "Close") fireEvent.click(closeButton(screen.getByRole("dialog", { name: "Inner modal" })));
+      else fireEvent.keyDown(innerInput, { key: "Escape", code: "Escape" });
+      await flushTasks();
+
+      expect(screen.queryByRole("dialog", { name: "Inner modal" })).toBeNull();
+      expect(screen.getByRole("dialog", { name: "Outer modal" })).toBeInTheDocument();
+      expect(innerOpener).toHaveFocus();
+      expect(innerClosed).toHaveBeenCalledOnce();
+      expect(outerClosed).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(innerOpener, { key: "Escape", code: "Escape" });
+      await flushTasks();
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(pageOpener).toHaveFocus();
+      expect(outerClosed).toHaveBeenCalledOnce();
+      expect(innerClosed).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([false, true])(
+    "unmounted while open: focus goes to the opener, the page is unlocked and onClosed does not run (StrictMode=%s)",
+    async (strict) => {
+      const opener = document.createElement("button");
+      document.body.append(opener);
+      opener.focus();
+      const onClosed = vi.fn();
+      const tree = <ControlledDialog onClosed={onClosed} />;
+      const view = renderDirect(strict ? <StrictMode>{tree}</StrictMode> : tree);
+      expect(screen.getByTestId("dialog-input")).toHaveFocus();
+      await flushTasks();
+      expect(document.body.style.pointerEvents).toBe("none");
+      expect(opener).toHaveAttribute("aria-hidden", "true");
+
+      act(() => view.root.render(null));
+      await flushTasks();
+
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(opener).toHaveFocus();
+      expect(document.body.style.pointerEvents).toBe("");
+      expect(document.body).not.toHaveAttribute("data-scroll-locked");
+      expect(document.body.style.overflow).toBe("");
+      expect(document.querySelectorAll("[data-radix-focus-guard]")).toHaveLength(0);
+      expect(document.querySelectorAll("[aria-hidden], [inert]")).toHaveLength(0);
+      expect(onClosed).not.toHaveBeenCalled();
+    },
+  );
+
+  it("replaced through its key while open: the new body takes focus, no onClosed runs, and it still closes to the opener", async () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const onClosed = vi.fn();
+    function KeyedHarness() {
+      const [open, setOpen] = useState(true);
+      const [step, setStep] = useState(1);
+      return (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent key={step} title={`Step ${step}`} onClosed={() => onClosed(step)}>
+            <input data-testid={`step-${step}-input`} autoFocus />
+            <button type="button" onClick={() => setStep(2)}>Next</button>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><KeyedHarness /></StrictMode>);
+    expect(screen.getByTestId("step-1-input")).toHaveFocus();
+    await flushTasks();
+
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    await flushTasks();
+    expect(screen.getByRole("dialog", { name: "Step 2" })).toBeInTheDocument();
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByTestId("step-2-input")).toHaveFocus();
+    expect(onClosed).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(screen.getByTestId("step-2-input"), { key: "Escape", code: "Escape" });
+    await flushTasks();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(opener).toHaveFocus();
+    expect(onClosed.mock.calls).toEqual([[2]]);
+  });
+
+  it("runs onClosed when the owner closes it without Radix and keeps it mounted", async () => {
+    const onClosed = vi.fn();
+    function OwnCloseHarness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent title="Own close" onClosed={onClosed}>
+            <button type="button" onClick={() => setOpen(false)}>Insert</button>
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    renderDirect(<StrictMode><OwnCloseHarness /></StrictMode>);
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    await flushTasks();
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onClosed).toHaveBeenCalledOnce();
   });
 
   it("restores the pre-existing body pointer style", async () => {

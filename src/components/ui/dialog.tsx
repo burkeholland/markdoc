@@ -16,12 +16,38 @@ const DESCRIPTION_CLASS_NAME = "mt-1 text-sm text-ink-3 wrap-anywhere";
 const HIDDEN_DESCRIPTION_CLASS_NAME = "sr-only";
 const CLOSE_CLASS_NAME = "icon-btn -mr-2 -mt-1 h-8 w-8 shrink-0";
 
-function currentFocusReturnTarget() {
-  return typeof document === "undefined" ? null : focusReturnTarget();
+/** What had focus when a dialog opened. */
+interface Opener {
+  /** The focused element; a menu item resolves to its menu's trigger. */
+  element: HTMLElement | null;
+  /** When that element sits in a popover: the popover's trigger. */
+  popoverTrigger: HTMLElement | null;
 }
 
-/** The enclosing `Dialog`'s open state and the element that had focus when it opened; undefined outside a `Dialog`. */
-const DialogOpenerContext = React.createContext<{ open: boolean; opener: HTMLElement | null } | undefined>(undefined);
+const NO_OPENER: Opener = { element: null, popoverTrigger: null };
+
+/**
+ * A popover that opens a dialog closes as the dialog opens, so the popover's own button is gone when the
+ * dialog closes, and Radix does not always hand focus back to the popover's trigger (it does not when
+ * focus moved to the dialog while the popover was still on the page). Radix wires that trigger to the
+ * popover with `aria-controls` while it is open, so it can be found now. Like `focusReturnTarget`, this
+ * must run before the commit that closes the popover.
+ */
+function currentOpener(): Opener {
+  if (typeof document === "undefined") return NO_OPENER;
+  const element = focusReturnTarget();
+  const popover = element?.closest<HTMLElement>('[role="dialog"][id]');
+  const popoverTrigger = popover ? document.querySelector<HTMLElement>(`[aria-controls="${popover.id}"]`) : null;
+  return { element, popoverTrigger };
+}
+
+/**
+ * The enclosing `Dialog`: whether it is open and modal, what had focus when it opened, and whether Radix
+ * has asked it to close (Escape, Close, an outside click). Undefined outside a `Dialog`.
+ */
+const DialogRootContext = React.createContext<
+  { open: boolean; modal: boolean; opener: Opener; closeRequested: React.RefObject<boolean> } | undefined
+>(undefined);
 
 /**
  * Radix's Root, plus the element that opened it. Dialogs here mostly open from state (no Radix Trigger),
@@ -34,6 +60,7 @@ export function Dialog({
   open,
   defaultOpen,
   onOpenChange,
+  modal = true,
   children,
   ...props
 }: React.ComponentProps<typeof RadixDialog.Root>) {
@@ -41,21 +68,29 @@ export function Dialog({
   const actualOpen = open ?? uncontrolledOpen;
   const [opening, setOpening] = React.useState(() => ({
     open: actualOpen,
-    opener: actualOpen ? currentFocusReturnTarget() : null,
+    opener: actualOpen ? currentOpener() : NO_OPENER,
   }));
   if (opening.open !== actualOpen) {
-    setOpening({ open: actualOpen, opener: actualOpen ? currentFocusReturnTarget() : opening.opener });
+    setOpening({ open: actualOpen, opener: actualOpen ? currentOpener() : opening.opener });
   }
+  // A close Radix asked for (Escape, Close, an outside click). The owner may answer by removing the whole
+  // dialog instead of passing `open={false}`; `DialogContent` reads this to tell that from a teardown.
+  const closeRequested = React.useRef(false);
+  React.useLayoutEffect(() => {
+    if (actualOpen) closeRequested.current = false;
+  }, [actualOpen]);
   const handleOpenChange = (next: boolean) => {
+    closeRequested.current = !next;
     if (open === undefined) setUncontrolledOpen(next);
     onOpenChange?.(next);
   };
+  const root = React.useMemo(() => ({ ...opening, modal, closeRequested }), [opening, modal]);
   return (
-    <DialogOpenerContext.Provider value={opening}>
-      <RadixDialog.Root {...props} open={actualOpen} onOpenChange={handleOpenChange}>
+    <DialogRootContext.Provider value={root}>
+      <RadixDialog.Root {...props} modal={modal} open={actualOpen} onOpenChange={handleOpenChange}>
         {children}
       </RadixDialog.Root>
-    </DialogOpenerContext.Provider>
+    </DialogRootContext.Provider>
   );
 }
 
@@ -67,40 +102,57 @@ export const DialogTitle = RadixDialog.Title;
 /** Unstyled Radix content for drawers and sheets; `DialogContent` below is the centred card. */
 export const DialogPrimitiveContent = RadixDialog.Content;
 
+/** Where focus goes when the dialog closes: the first of these that can take it, in this order. */
+interface ReturnTargets extends Opener {
+  /** Where a menu or popover that closed as the dialog opened handed focus back to: its own trigger. */
+  handedTo: HTMLElement | null;
+}
+
+const NO_RETURN_TARGETS: ReturnTargets = { handedTo: null, ...NO_OPENER };
+
+/** Another dialog, or a menu, list or popover floating above the page: focus going there is not a hand-back. */
+const FLOATING_LAYER = '[role="dialog"], [role="menu"], [role="listbox"], [data-radix-popper-content-wrapper]';
+
 /**
- * Mounted with the dialog body. Records where focus should go back to on close: the opener the `Dialog`
- * root saw, or (for a `DialogContent` used without one) whatever has focus now.
+ * Mounted with the dialog body. Records the opener: the one the `Dialog` root saw, or (for a
+ * `DialogContent` used without one) whatever has focus now.
  *
- * Then, for one task: a closing ⋮ menu hands focus back to its trigger in a `setTimeout(0)` queued when it
- * unmounted (Radix FocusScope). A dialog whose content mounts before that timer runs (one whose chunk was
- * still loading) already has focus on its first control, and the trigger would win, so typing went to the
- * ⋮ button (#1349). If focus is taken, note where it went (the opener the root could not see, since the
- * menu was already gone) and, if focus is still outside the open dialog, bring it back to the first control.
+ * A menu or popover that closed as the dialog opened hands focus back to its trigger after the dialog has
+ * it: Radix one task later, the ⋮ menu on its next render. While a modal dialog is open that trigger is
+ * remembered (it is the place to return to when the opener is gone by close time, as the people popover's
+ * own button is, or when two buttons share the menu, as Publish and its arrow do) and focus stays in the
+ * dialog. Radix's focus trap keeps it there only once it has seen focus move inside the dialog, and it
+ * has not when the first control took focus through `autoFocus`, so typing and Escape went to the
+ * trigger behind the dialog (#1349).
+ *
+ * One task after opening, focus that ended up on <body> is brought back to the first control.
  */
 function OpeningFocus({
   contentRef,
   returnRef,
 }: {
   contentRef: React.RefObject<HTMLDivElement | null>;
-  returnRef: React.RefObject<HTMLElement | null>;
+  returnRef: React.RefObject<ReturnTargets>;
 }) {
-  const root = React.useContext(DialogOpenerContext);
-  const [opener] = React.useState(() => root?.opener ?? currentFocusReturnTarget());
+  const root = React.useContext(DialogRootContext);
+  const modal = root?.modal ?? true;
+  const [opener] = React.useState(() => (root?.opener.element ? root.opener : currentOpener()));
   React.useLayoutEffect(() => {
-    returnRef.current = opener;
+    returnRef.current = { handedTo: null, ...opener };
   }, [opener, returnRef]);
   React.useEffect(() => {
     const content = contentRef.current;
     if (!content) return;
     const onFocusOut = (e: FocusEvent) => {
+      const from = e.target;
       const to = e.relatedTarget;
-      if (to instanceof HTMLElement && !content.contains(to) && !to.closest('[role="dialog"]')) {
-        returnRef.current ??= to;
-      }
+      if (!(to instanceof HTMLElement) || content.contains(to) || to.closest(FLOATING_LAYER)) return;
+      if (!returnRef.current.handedTo) returnRef.current = { ...returnRef.current, handedTo: to };
+      // Taking focus back while it is leaving stops the move, the way Radix's own trap does.
+      if (from instanceof HTMLElement) from.focus({ preventScroll: true });
     };
-    content.addEventListener("focusout", onFocusOut);
+    if (modal) content.addEventListener("focusout", onFocusOut);
     const timer = setTimeout(() => {
-      content.removeEventListener("focusout", onFocusOut);
       if (!content.isConnected || content.contains(document.activeElement)) return;
       (firstTabbable(content) ?? content).focus({ preventScroll: true });
     }, 0);
@@ -108,7 +160,7 @@ function OpeningFocus({
       clearTimeout(timer);
       content.removeEventListener("focusout", onFocusOut);
     };
-  }, [contentRef, returnRef]);
+  }, [contentRef, returnRef, modal]);
   return null;
 }
 
@@ -130,17 +182,25 @@ export function DialogContent({
    * (insert a table, apply a link) belongs here rather than in the button's onClick: while the modal
    * is still mounted its focus trap pulls focus straight back into the dialog, and on unmount focus
    * goes to the opener - the toolbar button, so the next keystroke went to the button (task #437).
+   *
+   * Runs only after a close: `open` turned false, or Escape, Close or an outside click asked for it and
+   * the owner removed the dialog. It does not run when the dialog goes away while still open (the page
+   * unmounts, or this `DialogContent` is replaced through its `key`), so a staged action never fires
+   * during teardown or under a dialog that is still showing. Focus goes back to the opener either way.
    */
   onClosed?: () => void;
 }) {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
-  const returnRef = React.useRef<HTMLElement | null>(null);
+  const returnRef = React.useRef(NO_RETURN_TARGETS);
+  const root = React.useContext(DialogRootContext);
+  const open = root?.open ?? true;
   // Close runs the callback from the last render while the dialog was open. A caller may hand a new
   // callback to its closing render (the Image dialog's carries a per-render close token, and only the
   // open one may insert the image).
-  const open = React.useContext(DialogOpenerContext)?.open ?? true;
   const onClosedRef = React.useRef(onClosed);
+  const openRef = React.useRef(open);
   React.useLayoutEffect(() => {
+    openRef.current = open;
     if (open) onClosedRef.current = onClosed;
   }, [open, onClosed]);
   return (
@@ -168,10 +228,10 @@ export function DialogContent({
         }}
         onCloseAutoFocus={(e) => {
           e.preventDefault();
-          const returnTarget = returnRef.current;
-          returnRef.current = null;
-          restoreFocus(returnTarget);
-          onClosedRef.current?.();
+          const { handedTo, element, popoverTrigger } = returnRef.current;
+          returnRef.current = NO_RETURN_TARGETS;
+          [handedTo, element, popoverTrigger].some((target) => restoreFocus(target));
+          if (!root || !openRef.current || root.closeRequested.current) onClosedRef.current?.();
         }}
       >
         <OpeningFocus contentRef={contentRef} returnRef={returnRef} />
