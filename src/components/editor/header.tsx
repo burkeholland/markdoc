@@ -8085,10 +8085,18 @@ function PublishMenuTriggerButton({
   );
 }
 
+// The arrow shares Radix's trigger ref with the Publish button beside it. When the status chip takes that
+// button's place its unmount clears the shared ref, and the menu can no longer hand focus back to the arrow on
+// close. A ref whose identity follows the swap makes the arrow register again in the same commit (#2215).
+const ARROW_BESIDE_PUBLISH = () => undefined;
+const ARROW_BESIDE_STATUS = () => undefined;
+
 function PublishMenu({ props }: { props: HeaderProps }) {
   const { doc, session, githubConfigured } = props;
   const linked = doc.storage !== "local";
   const canEdit = session.role === "owner" || session.role === "editor";
+  // The sync status the chip shows; null while the plain Publish button stands in its place.
+  const chipSync = linked && canEdit ? props.sync : null;
   const [mount] = useState(() => Symbol("publish menu"));
   const [, setPublicationRevision] = useState(0);
   const [coordinator] = useState(
@@ -8159,8 +8167,8 @@ function PublishMenu({ props }: { props: HeaderProps }) {
   return (
     <Menu open={state.open} onOpenChange={onOpenChange}>
       <div className="flex items-stretch max-md:hidden" data-sync-status={linked ? (props.sync?.status ?? "unknown") : undefined}>
-        {linked && canEdit && props.sync ? (
-          <PublishStatusButton sync={props.sync} publishing={props.publishing} onPublishNow={props.onPublishNow} onPull={props.onPull} onSync={props.onSync} />
+        {chipSync ? (
+          <PublishStatusButton sync={chipSync} publishing={props.publishing} onPublishNow={props.onPublishNow} onPull={props.onPull} onSync={props.onSync} />
         ) : (
           <MenuTrigger asChild>
             <button type="button" className="btn btn-primary gap-1.5 rounded-r-none pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
@@ -8169,7 +8177,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
             </button>
           </MenuTrigger>
         )}
-        <MenuTrigger asChild onKeyDownCapture={onBoundaryKeyDownCapture}>
+        <MenuTrigger asChild ref={chipSync ? ARROW_BESIDE_STATUS : ARROW_BESIDE_PUBLISH} onKeyDownCapture={onBoundaryKeyDownCapture}>
           <PublishMenuTriggerButton
             ref={captureTrigger}
             type="button"
