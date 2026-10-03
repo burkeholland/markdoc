@@ -19,7 +19,7 @@ import {
   type SelectionBubblePosition,
   type VisualViewportBox,
 } from "./selection-bubble-geometry";
-import { useEnterOnRelease, usePlaceHold } from "./toolbar";
+import { useEnterOnRelease, usePlaceHold } from "./press-once";
 
 const cssPixels = (style: CSSStyleDeclaration, property: string): number => {
   const value = Number.parseFloat(style.getPropertyValue(property));

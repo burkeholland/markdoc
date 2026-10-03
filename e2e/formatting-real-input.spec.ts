@@ -113,7 +113,7 @@ const headingMenu = (page: Page) => page.getByTestId("heading-menu");
 /** A Text style item. The current one carries a check mark in its name, so the name is matched at its end. */
 const menuItem = (page: Page, name: string) => page.getByRole("menuitemradio", { name: new RegExp(`${name}$`) });
 const composer = (page: Page) => page.getByTestId("pending-comment").getByTestId("comment-composer");
-/** The box that keeps the place of a control a click has just removed (usePlaceHold in toolbar.tsx). */
+/** The box that keeps the place of a control a click has just removed (press-once.tsx). */
 const placeHold = (page: Page) => page.getByTestId("place-hold");
 const selectedText = (page: Page) => page.evaluate(() => window.getSelection()?.toString() ?? "");
 const targetBlock = (page: Page) => page.locator(".md-rich").locator("p, h1, h2, h3, h4, h5, h6", { hasText: "paragraph." }).first();
