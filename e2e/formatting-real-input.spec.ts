@@ -634,6 +634,7 @@ test.describe("formatting toolbar: real input", () => {
   });
 
   test("with the menu opened by the pointer, a space typed after a letter stays in the menu's search", async ({ browser }) => {
+    test.skip(Boolean(process.env.PROD_BASE_URL), "production builds drop Radix's typeahead buffer, see issue 2257");
     const id = await newDocument(browser);
     const { page, context } = await openAs(browser, "owner", id, "split");
     const menu = page.getByRole("menu");
