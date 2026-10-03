@@ -39,6 +39,10 @@ import type { SyncActions } from "./sync-dialog";
 import type { NameVersionSaveOwner, NameVersionVisit } from "./dialogs";
 import { useEverTrue } from "@/lib/hooks";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
+// Not on demand: the bar must be mounted and focused inside the Mod-F keydown, or the keys typed while
+// its chunk loads go into the document.
+import { FindBar } from "./find-bar";
+import { usePlaceHold } from "./press-once";
 import { emptySync, useSyncPolling } from "./use-sync-polling";
 import { CODE_COLUMN_BOX, CODE_COLUMN_SPLIT, MAIN_BOX, PANE_LABEL_ROW_BOX, PANES_BOX, RICH_COLUMN_BOX, RICH_COLUMN_SPLIT, RICH_PLACEHOLDER_BOX, RICH_SCROLLER_BOX, SHELL_BOX } from "./chrome-classes";
 
@@ -65,7 +69,7 @@ function SidePanelPlaceholder({ title }: { title: string }) {
 // imports `@codemirror/*` as a value.
 const CodePane = dynamic(() => import("./code-pane").then((m) => m.CodePane), { ssr: false, loading: () => <CodePanePlaceholder /> });
 
-// Also on demand (#1150): the side panels, the dialogs, the command palette, the find bar and the file-drop
+// Also on demand (#1150): the side panels, the dialogs, the command palette and the file-drop
 // dialog are UI nobody sees on a cold load, so each module is a `next/dynamic` boundary fetched on first use
 // (`lazyOnFirstUse` adds the one re-render that keeps React's 300 ms fallback throttle out of the first open).
 // Everything that takes an `open` prop sits behind a mount-once gate (`useEverTrue`): after the first open it
@@ -87,7 +91,6 @@ const loadGitHubDialog = () => import("./github-dialog");
 const loadSyncDialog = () => import("./sync-dialog");
 const loadDialogs = () => import("./dialogs");
 const loadFileDropDialog = () => import("./file-drop-dialog");
-const loadFindBar = () => import("./find-bar");
 const loadCommandPalette = () => import("./command-palette");
 const CommentsPanel = lazyOnFirstUse(loadCommentsPanel, (m) => m.CommentsPanel, () => <SidePanelPlaceholder title="Comments" />);
 const VersionsPanel = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionsPanel, () => <SidePanelPlaceholder title="Version history" />);
@@ -107,7 +110,6 @@ const TableDialog = lazyOnFirstUse(loadDialogs, (m) => m.TableDialog);
 const NameVersionDialog = lazyOnFirstUse(loadDialogs, (m) => m.NameVersionDialog);
 const ShortcutsDialog = lazyOnFirstUse(loadDialogs, (m) => m.ShortcutsDialog);
 const FileDropDialog = lazyOnFirstUse(loadFileDropDialog, (m) => m.FileDropDialog);
-const FindBar = lazyOnFirstUse(loadFindBar, (m) => m.FindBar);
 const CommandPalette = lazyOnFirstUse(loadCommandPalette, (m) => m.CommandPalette);
 
 import { SelectionBubble } from "./selection-bubble";
@@ -2978,6 +2980,8 @@ export function EditorShell({
   const paletteCommands = useCallback(() => buildCommands(paletteCtxRef.current), []);
 
   const findOpen = useSessionValue(session, (s) => s.find !== null);
+  // The rest of a double-click on the bar's close button must not land on what moves up into its place.
+  const findCloseHold = usePlaceHold(!findOpen);
 
   // The title lives in the shared document so everyone sees renames immediately.
   const sharedTitle = useSessionValue(session, (s) => s.title);
@@ -3227,9 +3231,13 @@ export function EditorShell({
             onReplaceVisible={setFindReplaceVisible}
             focusNonce={findUi?.nonce ?? 0}
             onReveal={revealMatch}
-            onClose={closeFind}
+            onClose={(click) => {
+              if (click) findCloseHold.arm(click, click.currentTarget);
+              closeFind();
+            }}
           />
         )}
+        {findCloseHold.shield}
         <FollowBanner session={session} />
         {authError && (
           <div className="flex items-center justify-center gap-3 bg-red-50 px-4 py-2 text-sm text-danger dark:bg-red-950/40" role="alert">
