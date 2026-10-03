@@ -4,6 +4,10 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runMain } from "../dependency-policy-preflight.mjs";
 import {
+  ACCEPTED_ADVISORIES,
+  ACCEPTED_ADVISORY_ID_PATTERN,
+  ACCEPTED_EXPIRY_PATTERN,
+  ACCEPTED_PACKAGE_PATTERN,
   AUDIT_ARGUMENTS,
   BLOCKED_DEPENDENCIES,
   FAILURE_REASON_PATTERN,
@@ -29,8 +33,8 @@ afterEach(async () => {
     fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
 
-function packageLock(packages: Array<{ name: string; version: string }> = []): string {
-  const entries = Object.fromEntries(packages.map(({ name, version }) => [`node_modules/${name}`, { version }]));
+function packageLock(packages: Array<{ name: string; version: string; flags?: Record<string, unknown> }> = []): string {
+  const entries = Object.fromEntries(packages.map(({ name, version, flags }) => [`node_modules/${name}`, { version, ...flags }]));
   return JSON.stringify({
     name: "dependency-policy-fixture",
     version: "1.0.0",
@@ -552,6 +556,455 @@ describe("npm advisories with missing optional fields (#2195)", () => {
 
   it("keeps the exact three-key pass report for a clean audit", () => {
     expect(formatDependencyPolicyReport(evaluate(packageLock(), auditJson(), 0))).toBe(PASS_OUTPUT);
+  });
+});
+
+type AuditVia = string | Record<string, unknown>;
+
+interface AuditFixtureEntry {
+  name: string;
+  severity: string;
+  isDirect: boolean;
+  via: AuditVia[];
+  effects: string[];
+  range: string;
+  nodes: string[];
+  fixAvailable: unknown;
+}
+
+interface AuditFixture {
+  auditReportVersion: number;
+  vulnerabilities: Record<string, AuditFixtureEntry>;
+  metadata: { vulnerabilities: Record<string, number>; dependencies: Record<string, number> };
+}
+
+interface LockFixturePackage {
+  name: string;
+  version: string;
+  flags?: Record<string, unknown>;
+}
+
+// The five lock nodes npm reported for GHSA-vfj7-8cjw-p6xm on 2026-10-03 (#2260). All are "dev": true in the lock.
+const BRACES_CHAIN: LockFixturePackage[] = [
+  { name: "@next/eslint-plugin-next", version: "16.3.6", flags: { dev: true } },
+  { name: "braces", version: "3.0.3", flags: { dev: true } },
+  { name: "eslint-config-next", version: "16.3.6", flags: { dev: true } },
+  { name: "fast-glob", version: "3.3.1", flags: { dev: true } },
+  { name: "micromatch", version: "4.0.8", flags: { dev: true } },
+];
+
+const BRACES_ADVISORY: Record<string, unknown> = {
+  source: 1240992,
+  name: "braces",
+  dependency: "braces",
+  title: "braces vulnerable to stack-exhaustion denial of service through deeply nested patterns",
+  url: "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+  severity: "high",
+  cwe: ["CWE-674"],
+  cvss: { score: 7.5, vectorString: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H" },
+  range: "<=3.0.3",
+};
+
+// Copied from npm 11's `npm audit --package-lock-only --json` for main's lock on 2026-10-03 (#2260).
+function bracesAudit(): AuditFixture {
+  const fixAvailable = { name: "eslint-config-next", version: "14.2.35", isSemVerMajor: true };
+  const dependent = (name: string, via: string, effects: string[], range: string, isDirect = false): AuditFixtureEntry => ({
+    name,
+    severity: "high",
+    isDirect,
+    via: [via],
+    effects,
+    range,
+    nodes: [`node_modules/${name}`],
+    fixAvailable: { ...fixAvailable },
+  });
+  return {
+    auditReportVersion: 2,
+    vulnerabilities: {
+      "@next/eslint-plugin-next": dependent("@next/eslint-plugin-next", "fast-glob", ["eslint-config-next"], ">=14.3.0-canary.0"),
+      braces: {
+        name: "braces",
+        severity: "high",
+        isDirect: false,
+        via: [{ ...BRACES_ADVISORY }],
+        effects: ["micromatch"],
+        range: "*",
+        nodes: ["node_modules/braces"],
+        fixAvailable: { ...fixAvailable },
+      },
+      "eslint-config-next": dependent("eslint-config-next", "@next/eslint-plugin-next", [], ">=14.3.0-canary.0", true),
+      "fast-glob": dependent("fast-glob", "micromatch", ["@next/eslint-plugin-next"], "*"),
+      micromatch: dependent("micromatch", "braces", ["fast-glob"], ">=0.2.0"),
+    },
+    metadata: {
+      vulnerabilities: { info: 0, low: 0, moderate: 0, high: 5, critical: 0, total: 5 },
+      dependencies: { prod: 438, dev: 560, optional: 176, peer: 9, peerOptional: 0, total: 1037 },
+    },
+  };
+}
+
+// A second advisory that is in no list, shaped like the real one.
+function unlistedAdvisory(name: string): Record<string, unknown> {
+  return { ...BRACES_ADVISORY, source: 1, name, dependency: name, url: "https://github.com/advisories/GHSA-2222-3333-4444" };
+}
+
+function addHighEntry(audit: AuditFixture, entry: AuditFixtureEntry): void {
+  audit.vulnerabilities[entry.name] = entry;
+  audit.metadata.vulnerabilities.high += 1;
+  audit.metadata.vulnerabilities.total += 1;
+}
+
+// Clocks around the end of the listed expiry date, 2026-10-17, in UTC.
+const BEFORE_EXPIRY = Date.UTC(2026, 9, 3, 13, 20);
+const LAST_ACCEPTED_MOMENT = Date.UTC(2026, 9, 17, 23, 59, 59, 999);
+const FIRST_REJECTED_MOMENT = Date.UTC(2026, 9, 18);
+
+interface BracesCase {
+  packages: LockFixturePackage[];
+  audit: AuditFixture;
+  now: number;
+}
+
+function bracesCase(): BracesCase {
+  return {
+    packages: BRACES_CHAIN.map((item) => ({ ...item, flags: { ...item.flags } })),
+    audit: bracesAudit(),
+    now: BEFORE_EXPIRY,
+  };
+}
+
+function lockNode(fixture: BracesCase, name: string): LockFixturePackage {
+  const node = fixture.packages.find((item) => item.name === name);
+  if (!node) throw new Error(`no lock fixture for ${name}`);
+  return node;
+}
+
+function evaluateBraces(fixture: BracesCase, execution: Partial<AuditExecutionResult> = {}) {
+  const lock = packageLock(fixture.packages);
+  return evaluateDependencyPolicy({
+    expectedLockSha256: packageLockSha256(lock),
+    packageLockText: lock,
+    // npm exits 1 when it reports findings.
+    execution: { exitCode: 1, stdout: JSON.stringify(fixture.audit), ...execution },
+    now: fixture.now,
+  });
+}
+
+const ACCEPTED_EXCEPTION = { advisory: "GHSA-vfj7-8cjw-p6xm", package: "braces", version: "3.0.3", expires: "2026-10-17" };
+
+// The exact bytes of the accepted report for today's audit. deploy/release-vm.ps1 accepts only this shape or
+// PASS_OUTPUT.
+const ACCEPTED_OUTPUT =
+  '{"status":"accepted","counts":{"blocked":0,"info":0,"low":0,"moderate":0,"high":5,"critical":0,"vulnerabilities":5,"reported":5,"omitted":0},'
+  + '"packages":[{"name":"@next/eslint-plugin-next","version":"16.3.6","status":"dependent"},{"name":"braces","version":"3.0.3","status":"accepted"},'
+  + '{"name":"eslint-config-next","version":"16.3.6","status":"dependent"},{"name":"fast-glob","version":"3.3.1","status":"dependent"},'
+  + '{"name":"micromatch","version":"4.0.8","status":"dependent"}],'
+  + '"exceptions":[{"advisory":"GHSA-vfj7-8cjw-p6xm","package":"braces","version":"3.0.3","expires":"2026-10-17"}]}';
+
+// What the policy printed for the same audit before the exception list existed, and still prints when a rule fails.
+const BRACES_REJECTED = {
+  status: "rejected",
+  counts: { ...ZERO_REPORT_COUNTS, high: 5, vulnerabilities: 5, reported: 5 },
+  packages: BRACES_CHAIN.map(({ name, version }) => ({ name, version, status: "vulnerable" })),
+};
+
+function expectRejected(report: ReturnType<typeof evaluateBraces>): void {
+  expect(report.status).toBe("rejected");
+  expect(Object.keys(report)).toEqual(["status", "counts", "packages"]);
+  expect(report.packages.length).toBeGreaterThan(0);
+  expect(report.packages.every((item) => item.status === "vulnerable" || item.status === "blocked")).toBe(true);
+}
+
+describe("accepted advisories (#2260)", () => {
+  it("lists exactly the one braces advisory, in the format the release script checks", () => {
+    expect(ACCEPTED_ADVISORIES).toEqual([{
+      ...ACCEPTED_EXCEPTION,
+      reason: "Only the linter uses it, every published braces is affected, and the runtime image omits dev packages.",
+    }]);
+    for (const item of ACCEPTED_ADVISORIES) {
+      expect(item.advisory).toMatch(ACCEPTED_ADVISORY_ID_PATTERN);
+      expect(item.package).toMatch(ACCEPTED_PACKAGE_PATTERN);
+      expect(item.expires).toMatch(ACCEPTED_EXPIRY_PATTERN);
+      expect(new Date(`${item.expires}T00:00:00.000Z`).toISOString().slice(0, 10)).toBe(item.expires);
+    }
+  });
+
+  it.each([0, 1])("accepts today's real audit and reports the exception (npm exit %i)", (exitCode) => {
+    const report = evaluateBraces(bracesCase(), { exitCode });
+    expect(report).toEqual({
+      status: "accepted",
+      counts: { ...ZERO_REPORT_COUNTS, high: 5, vulnerabilities: 5, reported: 5 },
+      packages: BRACES_CHAIN.map(({ name, version }) => ({ name, version, status: name === "braces" ? "accepted" : "dependent" })),
+      exceptions: [ACCEPTED_EXCEPTION],
+    });
+    expect(Object.keys(report)).toEqual(["status", "counts", "packages", "exceptions"]);
+    expect(formatDependencyPolicyReport(report)).toBe(ACCEPTED_OUTPUT);
+    expect(Buffer.byteLength(ACCEPTED_OUTPUT, "utf8")).toBeLessThanOrEqual(8192);
+  });
+
+  it("puts nothing from the advisory text or the list's reason in the accepted report", () => {
+    const output = formatDependencyPolicyReport(evaluateBraces(bracesCase()));
+    expect(output).not.toContain("stack-exhaustion");
+    expect(output).not.toContain("github.com");
+    expect(output).not.toContain("CVSS");
+    expect(output).not.toContain("reason");
+    expect(output).not.toContain("linter");
+  });
+
+  it("accepts up to the last millisecond of the expiry date in UTC and rejects from the next day on", () => {
+    expect(formatDependencyPolicyReport(evaluateBraces({ ...bracesCase(), now: LAST_ACCEPTED_MOMENT }))).toBe(ACCEPTED_OUTPUT);
+    expect(evaluateBraces({ ...bracesCase(), now: FIRST_REJECTED_MOMENT })).toEqual(BRACES_REJECTED);
+    expect(evaluateBraces({ ...bracesCase(), now: Date.UTC(2027, 0, 1) })).toEqual(BRACES_REJECTED);
+  });
+
+  it("rejects when the clock is not a number", () => {
+    expect(evaluateBraces({ ...bracesCase(), now: Number.NaN })).toEqual(BRACES_REJECTED);
+  });
+
+  it.each<[string, (fixture: BracesCase) => void]>([
+    ["the braces node has no dev flag", (fixture) => { lockNode(fixture, "braces").flags = {}; }],
+    ["a dependent node has no dev flag", (fixture) => { lockNode(fixture, "micromatch").flags = {}; }],
+    ["the direct dependency has no dev flag", (fixture) => { lockNode(fixture, "eslint-config-next").flags = {}; }],
+    ["the braces node is only devOptional", (fixture) => { lockNode(fixture, "braces").flags = { devOptional: true }; }],
+    ["the braces dev flag is false", (fixture) => { lockNode(fixture, "braces").flags = { dev: false }; }],
+    ["the braces dev flag is the text \"true\"", (fixture) => { lockNode(fixture, "braces").flags = { dev: "true" }; }],
+  ])("rejects, exactly as before, when %s", (_case, change) => {
+    const fixture = bracesCase();
+    change(fixture);
+    expect(evaluateBraces(fixture)).toEqual(BRACES_REJECTED);
+  });
+
+  it.each<[string, (fixture: BracesCase) => void]>([
+    ["braces has a second advisory that is not listed", ({ audit }) => {
+      audit.vulnerabilities.braces.via.push(unlistedAdvisory("braces"));
+    }],
+    ["the only advisory on braces is not listed", ({ audit }) => {
+      audit.vulnerabilities.braces.via = [unlistedAdvisory("braces")];
+    }],
+    ["another package has an advisory that is not listed", ({ packages, audit }) => {
+      packages.push({ name: "unsafe-package", version: "1.2.3", flags: { dev: true } });
+      addHighEntry(audit, {
+        name: "unsafe-package",
+        severity: "high",
+        isDirect: false,
+        via: [unlistedAdvisory("unsafe-package")],
+        effects: [],
+        range: "<99.0.0",
+        nodes: ["node_modules/unsafe-package"],
+        fixAvailable: false,
+      });
+    }],
+    ["another package carries the listed advisory URL", ({ packages, audit }) => {
+      packages.push({ name: "unsafe-package", version: "3.0.3", flags: { dev: true } });
+      addHighEntry(audit, {
+        name: "unsafe-package",
+        severity: "high",
+        isDirect: false,
+        via: [{ ...BRACES_ADVISORY, name: "unsafe-package", dependency: "unsafe-package" }],
+        effects: [],
+        range: "<99.0.0",
+        nodes: ["node_modules/unsafe-package"],
+        fixAvailable: false,
+      });
+    }],
+    ["a dependent also has its own advisory", ({ audit }) => {
+      audit.vulnerabilities.micromatch.via.push(unlistedAdvisory("micromatch"));
+    }],
+    ["a dependent carries a copy of the listed advisory", ({ audit }) => {
+      audit.vulnerabilities.micromatch.via.push({ ...BRACES_ADVISORY });
+    }],
+    ["the listed advisory names another package", ({ audit }) => {
+      audit.vulnerabilities.braces.via = [{ ...BRACES_ADVISORY, name: "micromatch" }];
+    }],
+    ["the lock has a different braces version", (fixture) => { lockNode(fixture, "braces").version = "3.0.2"; }],
+    ["one of two reported braces nodes has a different version", ({ packages, audit }) => {
+      packages.push({ name: "micromatch/node_modules/braces", version: "3.0.2", flags: { dev: true } });
+      audit.vulnerabilities.braces.nodes.push("node_modules/micromatch/node_modules/braces");
+    }],
+    ["a dependent names a package that is not in the audit", ({ audit }) => {
+      audit.vulnerabilities.micromatch.via = ["picomatch"];
+    }],
+    ["a dependent names a package that is not in the audit next to an accepted one", ({ audit }) => {
+      audit.vulnerabilities.micromatch.via = ["braces", "picomatch"];
+    }],
+    ["a dependent names only itself", ({ audit }) => {
+      audit.vulnerabilities.micromatch.via = ["micromatch"];
+    }],
+    ["two dependents name only each other", ({ audit }) => {
+      audit.vulnerabilities.micromatch.via = ["fast-glob"];
+    }],
+    ["the advisory URL uses http", ({ audit }) => {
+      audit.vulnerabilities.braces.via = [{ ...BRACES_ADVISORY, url: "http://github.com/advisories/GHSA-vfj7-8cjw-p6xm" }];
+    }],
+    ["the advisory URL has text after the id", ({ audit }) => {
+      audit.vulnerabilities.braces.via = [{ ...BRACES_ADVISORY, url: "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm/" }];
+    }],
+    ["the advisory URL has the id in upper case", ({ audit }) => {
+      audit.vulnerabilities.braces.via = [{ ...BRACES_ADVISORY, url: "https://github.com/advisories/GHSA-VFJ7-8CJW-P6XM" }];
+    }],
+    ["the advisory URL is on another host", ({ audit }) => {
+      audit.vulnerabilities.braces.via = [{ ...BRACES_ADVISORY, url: "https://registry.invalid/advisories/GHSA-vfj7-8cjw-p6xm" }];
+    }],
+    ["the advisory URL is null", ({ audit }) => {
+      audit.vulnerabilities.braces.via = [{ ...BRACES_ADVISORY, url: null }];
+    }],
+    ["the advisory URL is missing", ({ audit }) => {
+      audit.vulnerabilities.braces.via = [withoutKey(BRACES_ADVISORY, "url")];
+    }],
+    ["braces is reported as critical", ({ audit }) => {
+      audit.vulnerabilities.braces.severity = "critical";
+      audit.vulnerabilities.braces.via = [{ ...BRACES_ADVISORY, severity: "critical" }];
+      audit.metadata.vulnerabilities.high = 4;
+      audit.metadata.vulnerabilities.critical = 1;
+    }],
+    ["only the advisory object says critical", ({ audit }) => {
+      audit.vulnerabilities.braces.via = [{ ...BRACES_ADVISORY, severity: "critical" }];
+    }],
+    ["a dependent is reported as critical", ({ audit }) => {
+      audit.vulnerabilities.micromatch.severity = "critical";
+      audit.metadata.vulnerabilities.high = 4;
+      audit.metadata.vulnerabilities.critical = 1;
+    }],
+    ["a blocked dependency is in the lock", ({ packages }) => {
+      packages.push({ name: BLOCKED_DEPENDENCIES[0].name, version: BLOCKED_DEPENDENCIES[0].version, flags: { dev: true } });
+    }],
+  ])("rejects when %s", (_case, change) => {
+    const fixture = bracesCase();
+    change(fixture);
+    const report = evaluateBraces(fixture);
+    expectRejected(report);
+    expect(formatDependencyPolicyReport(report)).not.toContain("exceptions");
+  });
+
+  it("reports a blocked dependency next to the chain as blocked, with the chain as vulnerable", () => {
+    const fixture = bracesCase();
+    fixture.packages.push({ name: "qs", version: "6.15.3" });
+    const report = evaluateBraces(fixture);
+    expect(report.status).toBe("rejected");
+    expect(report.counts).toEqual({ ...ZERO_REPORT_COUNTS, blocked: 1, high: 5, vulnerabilities: 5, reported: 6 });
+    expect(report.packages).toContainEqual({ name: "qs", version: "6.15.3", status: "blocked" });
+  });
+
+  it("rejects a chain with more nodes than the report can list", () => {
+    const fixture = bracesCase();
+    for (let index = 0; index < MAX_REPORTED_PACKAGES - BRACES_CHAIN.length + 1; index += 1) {
+      const name = `dependent-${String(index).padStart(2, "0")}`;
+      fixture.packages.push({ name, version: "1.0.0", flags: { dev: true } });
+      addHighEntry(fixture.audit, {
+        name,
+        severity: "high",
+        isDirect: false,
+        via: ["braces"],
+        effects: [],
+        range: "*",
+        nodes: [`node_modules/${name}`],
+        fixAvailable: false,
+      });
+    }
+    const report = evaluateBraces(fixture);
+    expectRejected(report);
+    expect(report.counts).toMatchObject({ vulnerabilities: MAX_REPORTED_PACKAGES + 1, reported: MAX_REPORTED_PACKAGES, omitted: 1 });
+  });
+
+  it("accepts a chain that fills the report exactly", () => {
+    const fixture = bracesCase();
+    for (let index = 0; index < MAX_REPORTED_PACKAGES - BRACES_CHAIN.length; index += 1) {
+      const name = `dependent-${String(index).padStart(2, "0")}`;
+      fixture.packages.push({ name, version: "1.0.0", flags: { dev: true } });
+      addHighEntry(fixture.audit, {
+        name,
+        severity: "high",
+        isDirect: false,
+        via: ["braces", "micromatch"],
+        effects: [],
+        range: "*",
+        nodes: [`node_modules/${name}`],
+        fixAvailable: false,
+      });
+    }
+    const report = evaluateBraces(fixture);
+    expect(report.status).toBe("accepted");
+    expect(report.counts).toEqual({ ...ZERO_REPORT_COUNTS, high: MAX_REPORTED_PACKAGES, vulnerabilities: MAX_REPORTED_PACKAGES, reported: MAX_REPORTED_PACKAGES });
+    expect(report.exceptions).toEqual([ACCEPTED_EXCEPTION]);
+  });
+
+  it("never accepts a report from an attempt that timed out", () => {
+    expect(evaluateBraces(bracesCase(), { exitCode: null, stopped: "timeout" }).status).toBe("malformed_audit");
+    expect(evaluateBraces({ ...bracesCase(), now: FIRST_REJECTED_MOMENT }, { exitCode: null, stopped: "timeout" }))
+      .toEqual(BRACES_REJECTED);
+  });
+
+  it("keeps the plain pass report byte for byte, whatever the clock and the lock's dev flags", () => {
+    const lock = packageLock(BRACES_CHAIN);
+    for (const now of [BEFORE_EXPIRY, FIRST_REJECTED_MOMENT]) {
+      const report = evaluateDependencyPolicy({
+        expectedLockSha256: packageLockSha256(lock),
+        packageLockText: lock,
+        execution: { exitCode: 0, stdout: auditJson() },
+        now,
+      });
+      expect(formatDependencyPolicyReport(report)).toBe(PASS_OUTPUT);
+    }
+  });
+
+  async function runBracesCli(now: number, extraArguments: string[] = []) {
+    const fixture = await fixtureDirectory(packageLock(BRACES_CHAIN));
+    const messages: string[] = [];
+    const warnings: string[] = [];
+    const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 1, stdout: JSON.stringify(bracesAudit()), stderr: "" });
+    const exitCode = await runMain(["--lock-sha256", fixture.identity, "--run-audit", ...extraArguments], {
+      cwd: fixture.directory,
+      executor,
+      now,
+      retryDelayMs: 0,
+      output: { log: (message) => messages.push(message), warn: (message) => warnings.push(message) },
+    });
+    return { exitCode, messages, warnings, executor };
+  }
+
+  it("makes the CLI print exactly the accepted report and exit 0", async () => {
+    const result = await runBracesCli(BEFORE_EXPIRY);
+    expect(result.exitCode).toBe(0);
+    expect(result.messages).toEqual([ACCEPTED_OUTPUT]);
+    expect(result.warnings).toEqual([]);
+    expect(result.executor).toHaveBeenCalledOnce();
+  });
+
+  it("makes the CLI print the rejected report and exit 1 after the expiry date", async () => {
+    const result = await runBracesCli(FIRST_REJECTED_MOMENT);
+    expect(result.exitCode).toBe(1);
+    expect(result.messages.map((message) => JSON.parse(message))).toEqual([BRACES_REJECTED]);
+    expect(result.executor).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["--now", String(BEFORE_EXPIRY)],
+    ["--accept", "GHSA-2222-3333-4444"],
+    ["--expires", "2099-01-01"],
+    ["--omit", "dev"],
+  ])("gives the command line no option to set the clock or widen the list (%s)", async (...extraArguments) => {
+    const result = await runBracesCli(FIRST_REJECTED_MOMENT, extraArguments);
+    expect(result.exitCode).toBe(1);
+    expect(result.messages.map((message) => JSON.parse(message))).toEqual([
+      { status: "invalid_request", counts: ZERO_REPORT_COUNTS, packages: [] },
+    ]);
+    expect(result.executor).not.toHaveBeenCalled();
+  });
+
+  it("applies the same rule to a caller-supplied audit file", async () => {
+    const fixture = await fixtureDirectory(packageLock(BRACES_CHAIN));
+    const auditPath = path.join(fixture.directory, "audit.json");
+    await fs.writeFile(auditPath, JSON.stringify(bracesAudit()));
+    for (const [now, expected] of [[BEFORE_EXPIRY, "accepted"], [FIRST_REJECTED_MOMENT, "rejected"]] as const) {
+      // The file must look fresh to the same clock that decides the expiry.
+      await fs.utimes(auditPath, new Date(now), new Date(now));
+      await expect(evaluateTemporaryAuditFile({
+        auditPath,
+        lockPath: fixture.lockPath,
+        expectedLockSha256: fixture.identity,
+        now,
+      })).resolves.toMatchObject({ status: expected });
+    }
   });
 });
 

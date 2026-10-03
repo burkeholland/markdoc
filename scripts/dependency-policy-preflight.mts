@@ -26,7 +26,8 @@ interface RunMainDependencies {
 
 function printReport(output: CliOutput, report: DependencyPolicyReport): number {
   output.log(formatDependencyPolicyReport(report));
-  return report.status === "pass" ? 0 : 1;
+  // "accepted" also exits 0: the release script continues on it after printing each accepted advisory.
+  return report.status === "pass" || report.status === "accepted" ? 0 : 1;
 }
 
 export async function runMain(argv: string[], dependencies: RunMainDependencies = {}): Promise<number> {
@@ -72,6 +73,7 @@ export async function runMain(argv: string[], dependencies: RunMainDependencies 
         expectedLockSha256,
         executor: dependencies.executor ?? createNpmAuditExecutor(),
         retryDelayMs: dependencies.retryDelayMs,
+        now: dependencies.now,
         // stderr only, so stdout stays a single JSON report for the release script.
         onRetry: (reason) => output.warn?.(`Dependency preflight audit failed (${reason}); retrying once.`),
       });
