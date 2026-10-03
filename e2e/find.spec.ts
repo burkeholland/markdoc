@@ -723,7 +723,7 @@ const editorPlace = (layout: Layout) => (layout === "split" ? "markdown" : "prev
 
 /** Put the caret at the start of the document in the pane on screen and open the bar with a real key. */
 async function openBar(page: Page, layout: Layout, key = "Control+f") {
-  if (layout === "split") await page.locator(".cm-content").click();
+  if (layout === "split") await page.locator(".cm-content .cm-line").first().click();
   else await page.locator(".md-rich p").first().click();
   await page.keyboard.press("Control+Home");
   await page.keyboard.press(key);
@@ -1131,7 +1131,8 @@ test.describe("find & replace: real input", () => {
     });
 
     test(`Next and Previous stay under the pointer when the counter gains or loses digits (${size.name})`, async ({ browser }) => {
-      const { page, context } = await openSized(browser, "find-many", [Array.from({ length: 1200 }, () => "ab").join(" ")], size);
+      // The first paragraph has no match and takes the opening click, so the search starts at the first match.
+      const { page, context } = await openSized(browser, "find-many", ["start", Array.from({ length: 1200 }, () => "ab").join(" ")], size);
       const count = page.getByTestId("find-count");
       const toggle = page.getByTestId("find-toggle-replace");
 
