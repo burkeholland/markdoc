@@ -7,6 +7,7 @@ import {
   evaluateTemporaryAuditFile,
   formatDependencyPolicyReport,
   runDependencyAudit,
+  type AcceptanceOptions,
   type AuditExecutor,
   type DependencyPolicyReport,
 } from "./lib/dependency-policy.ts";
@@ -16,10 +17,11 @@ interface CliOutput {
   warn?(message: string): void;
 }
 
-interface RunMainDependencies {
+// Test seams only. The command at the bottom of this file calls runMain with the arguments alone, so a release always
+// uses the real clock, the real npm and ACCEPTED_ADVISORIES.
+interface RunMainDependencies extends AcceptanceOptions {
   cwd?: string;
   executor?: AuditExecutor;
-  now?: number;
   output?: CliOutput;
   retryDelayMs?: number;
 }
@@ -66,6 +68,7 @@ export async function runMain(argv: string[], dependencies: RunMainDependencies 
         lockPath,
         expectedLockSha256,
         now: dependencies.now,
+        acceptedAdvisories: dependencies.acceptedAdvisories,
       })
     : await runDependencyAudit({
         cwd,
@@ -74,6 +77,7 @@ export async function runMain(argv: string[], dependencies: RunMainDependencies 
         executor: dependencies.executor ?? createNpmAuditExecutor(),
         retryDelayMs: dependencies.retryDelayMs,
         now: dependencies.now,
+        acceptedAdvisories: dependencies.acceptedAdvisories,
         // stderr only, so stdout stays a single JSON report for the release script.
         onRetry: (reason) => output.warn?.(`Dependency preflight audit failed (${reason}); retrying once.`),
       });

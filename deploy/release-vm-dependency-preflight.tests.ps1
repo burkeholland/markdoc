@@ -248,6 +248,7 @@ foreach ($name in @(
   'Assert-ReleaseWorkingLock',
   'Get-ReleaseCommittedLockIdentity',
   'Test-ReleaseExactKeys',
+  'Get-ReleaseAcceptedDependencyAdvisories',
   'Assert-ReleaseDependencyReport',
   'Get-ReleaseDependencyFailureDetail',
   'Assert-ReleaseDependencyPreflight'
@@ -311,6 +312,31 @@ $passReport = [ordered]@{
   status = 'pass'
   counts = $zeroCounts
   packages = @()
+}
+
+# Accepted advisories (#2260). Every date is built from the current UTC day, so this suite does not change when a
+# real list entry expires or is deleted.
+$utcToday = [DateTime]::UtcNow.Date
+function Format-TestDay([datetime]$Day) {
+  return $Day.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+}
+$today = Format-TestDay $utcToday
+$tomorrow = Format-TestDay $utcToday.AddDays(1)
+$yesterday = Format-TestDay $utcToday.AddDays(-1)
+# The exact bytes scripts/lib/dependency-policy.test.ts pins as ACCEPTED_OUTPUT, with only the date replaced.
+$acceptedTemplate = '{"status":"accepted","counts":{"blocked":0,"info":0,"low":0,"moderate":0,"high":5,"critical":0,"vulnerabilities":5,"reported":5,"omitted":0},' +
+  '"packages":[{"name":"@next/eslint-plugin-next","version":"16.3.6","status":"dependent"},{"name":"braces","version":"3.0.3","status":"accepted"},' +
+  '{"name":"eslint-config-next","version":"16.3.6","status":"dependent"},{"name":"fast-glob","version":"3.3.1","status":"dependent"},' +
+  '{"name":"micromatch","version":"4.0.8","status":"dependent"}],' +
+  '"exceptions":[{"advisory":"GHSA-vfj7-8cjw-p6xm","package":"braces","version":"3.0.3","expires":"EXPIRES"}]}'
+function New-AcceptedOutput([string]$Expires = $tomorrow) {
+  return $acceptedTemplate.Replace('EXPIRES', $Expires)
+}
+function New-AcceptedReport([string]$Expires = $tomorrow) {
+  return ConvertFrom-Json -InputObject (New-AcceptedOutput $Expires) -AsHashtable -NoEnumerate
+}
+function Get-AcceptedWarning([string]$Advisory, [string]$Package, [string]$Expires) {
+  return "Release warning: dependency advisory accepted; advisory=$Advisory; package=$Package; expires=$Expires."
 }
 $script:AuditOutput = $passReport | ConvertTo-Json -Compress -Depth 4
 $script:AuditThrows = $false
@@ -505,6 +531,11 @@ $detailCases.Add(@{
   Message = $withheld
 })
 $detailCases.Add(@{
+  Why = 'An accepted status on a nonzero exit must not be shown or continue.'
+  Output = New-AcceptedOutput
+  Message = $withheld
+})
+$detailCases.Add(@{
   Why = 'An unknown status must be withheld.'
   Output = ConvertTo-TestReport ([ordered]@{ status = $sensitiveMarker; counts = $zeroCounts; packages = @() })
   Message = $withheld
@@ -552,5 +583,259 @@ foreach ($case in $detailCases) {
   Assert-True (-not $failure.Data.Contains('ReleaseFailureOutput')) "$($case.Why) The raw report must not leave the preflight."
 }
 $script:AuditFailureOutput = $null
+
+# Accepted advisories (#2260): the release continues only on an accepted report that holds together, and prints one
+# fixed line per accepted advisory. Write-Host is replaced here so every line the preflight prints is seen.
+$script:HostLines = [Collections.Generic.List[string]]::new()
+function Write-Host { $script:HostLines.Add(($args -join ' ')) }
+
+function Invoke-AcceptedPreflight([string]$Output) {
+  $script:Events.Clear()
+  $script:HostLines.Clear()
+  $script:AuditOutput = $Output
+  Assert-ReleaseDependencyPreflight $commit
+  $script:Events.Add('azure')
+}
+
+$acceptedLine = Get-AcceptedWarning 'GHSA-vfj7-8cjw-p6xm' 'braces' $tomorrow
+Invoke-AcceptedPreflight (New-AcceptedOutput)
+Assert-Equal 'identity,audit,lock,azure' ($script:Events -join ',') 'A valid accepted report must continue to the first provider operation.'
+Assert-Equal 1 $script:HostLines.Count 'An accepted report with one advisory must print exactly one line.'
+Assert-Equal $acceptedLine $script:HostLines[0] 'The accepted advisory line must have the fixed format.'
+Assert-True ($acceptedLine -cmatch '\ARelease warning: dependency advisory accepted; advisory=GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}; package=[a-z0-9@/._-]+; expires=[0-9]{4}-[0-9]{2}-[0-9]{2}\.\z') `
+  'The accepted advisory line must fit its documented grammar.'
+
+# An expiry of today in UTC is still accepted by the release's own clock. The case repeats only if the UTC day changed
+# while it ran.
+do {
+  $dayBefore = [DateTime]::UtcNow.Date
+  $todayFailure = $null
+  try { Invoke-AcceptedPreflight (New-AcceptedOutput (Format-TestDay $dayBefore)) } catch { $todayFailure = $_ }
+} while ([DateTime]::UtcNow.Date -ne $dayBefore)
+if ($todayFailure) { throw $todayFailure }
+Assert-Equal 'identity,audit,lock,azure' ($script:Events -join ',') 'An expiry of today in UTC must continue.'
+Assert-Equal (Get-AcceptedWarning 'GHSA-vfj7-8cjw-p6xm' 'braces' (Format-TestDay $dayBefore)) ($script:HostLines -join "`n") `
+  'An expiry of today in UTC must print its one line.'
+
+Invoke-AcceptedPreflight (ConvertTo-TestReport $passReport)
+Assert-Equal 'identity,audit,lock,azure' ($script:Events -join ',') 'A plain pass must still continue.'
+Assert-Equal 0 $script:HostLines.Count 'A plain pass must print nothing.'
+
+$dayAfterTomorrow = Format-TestDay $utcToday.AddDays(2)
+$twoAdvisories = New-AcceptedReport
+$twoAdvisories['exceptions'] = @(
+  $twoAdvisories['exceptions'][0],
+  [ordered]@{ advisory = 'GHSA-2222-3333-4444'; package = 'braces'; version = '3.0.3'; expires = $dayAfterTomorrow }
+)
+Invoke-AcceptedPreflight (ConvertTo-TestReport $twoAdvisories)
+Assert-Equal 'identity,audit,lock,azure' ($script:Events -join ',') 'Two accepted advisories on one package must continue.'
+Assert-Equal ($acceptedLine + "`n" + (Get-AcceptedWarning 'GHSA-2222-3333-4444' 'braces' $dayAfterTomorrow)) ($script:HostLines -join "`n") `
+  'Each accepted advisory must print its own line, in report order, and nothing else.'
+
+$twoNodes = New-AcceptedReport
+$twoNodes['packages'] += [ordered]@{ name = 'braces'; version = '3.0.3'; status = 'accepted' }
+$twoNodes['counts']['reported'] = 6
+Invoke-AcceptedPreflight (ConvertTo-TestReport $twoNodes)
+Assert-Equal 'identity,audit,lock,azure' ($script:Events -join ',') 'Two lock nodes of the accepted package must continue.'
+Assert-Equal $acceptedLine ($script:HostLines -join "`n") 'Two lock nodes of the accepted package must print one line for the one advisory.'
+
+$script:FinalLockFails = $true
+[void](Assert-Rejected {
+  Invoke-AcceptedPreflight (New-AcceptedOutput)
+} 'A lock mutation after an accepted audit must stop the release.' 'Dependency preflight failed; raw output withheld.')
+Assert-Equal 'identity,audit,lock' ($script:Events -join ',') 'A post-audit lock mutation must stop an accepted release before any provider operation.'
+Assert-Equal 0 $script:HostLines.Count 'A release that stops must not print an accepted advisory.'
+$script:FinalLockFails = $false
+
+function Add-TestDependents($Report, [int]$Count) {
+  foreach ($index in 1..$Count) {
+    $Report['packages'] += [ordered]@{ name = "dependent-$index"; version = '1.0.0'; status = 'dependent' }
+  }
+  $Report['counts']['reported'] = $Report['packages'].Count
+}
+$nextYear = $utcToday.Year + 1
+$arabicIndicTomorrow = -join ($tomorrow.ToCharArray() | ForEach-Object {
+  if ($_ -ge [char]'0' -and $_ -le [char]'9') { [char](0x0660 + [int]$_ - 48) } else { $_ }
+})
+$malformedAccepted = @(
+  @{ Why = 'An extra top-level key'; Change = { param($r) $r['detail'] = $sensitiveMarker } },
+  @{ Why = 'A missing exceptions key'; Change = { param($r) $r.Remove('exceptions') } },
+  @{ Why = 'A pass status that carries exceptions'; Change = { param($r) $r['status'] = 'pass' } },
+  @{ Why = 'A status in another letter case'; Change = { param($r) $r['status'] = 'Accepted' } },
+  @{ Why = 'An extra count'; Change = { param($r) $r['counts']['unknown'] = 0 } },
+  @{ Why = 'A missing count'; Change = { param($r) $r['counts'].Remove('omitted') } },
+  @{ Why = 'A count that is text'; Change = { param($r) $r['counts']['high'] = '5' } },
+  @{ Why = 'A count that is not a whole number'; Change = { param($r) $r['counts']['high'] = 5.5 } },
+  @{ Why = 'A negative count'; Change = { param($r) $r['counts']['info'] = -1; $r['counts']['high'] = 6 } },
+  @{ Why = 'A blocked count above 0'; Change = { param($r) $r['counts']['blocked'] = 1 } },
+  @{ Why = 'A critical count above 0'; Change = { param($r) $r['counts']['critical'] = 1 } },
+  @{ Why = 'A critical count above 0 that the total includes'; Change = { param($r) $r['counts']['critical'] = 1; $r['counts']['high'] = 4 } },
+  @{ Why = 'An omitted count above 0'; Change = { param($r) $r['counts']['omitted'] = 1 } },
+  @{ Why = 'Severity counts below the total'; Change = { param($r) $r['counts']['high'] = 4 } },
+  @{ Why = 'Severity counts above the total'; Change = { param($r) $r['counts']['low'] = 1 } },
+  @{ Why = 'A total of 0'; Change = { param($r) $r['counts']['high'] = 0; $r['counts']['vulnerabilities'] = 0 } },
+  @{ Why = 'A total above the reported packages'; Change = { param($r) $r['counts']['high'] = 6; $r['counts']['vulnerabilities'] = 6 } },
+  @{ Why = 'A reported count below the package list'; Change = { param($r) $r['counts']['reported'] = 4 } },
+  @{ Why = 'A reported count above the package list'; Change = { param($r) $r['counts']['reported'] = 6 } },
+  @{ Why = 'An empty package list'; Change = { param($r) $r['packages'] = @(); $r['counts']['reported'] = 0 } },
+  @{ Why = 'A package list that is an object'; Change = { param($r) $r['packages'] = $r['packages'][1] } },
+  @{ Why = 'More packages than the report may list'; Change = { param($r) Add-TestDependents $r 21 } },
+  @{ Why = 'A package with an extra key'; Change = { param($r) $r['packages'][0]['detail'] = $sensitiveMarker } },
+  @{ Why = 'A package without a version'; Change = { param($r) $r['packages'][0].Remove('version') } },
+  @{ Why = 'A package that is null'; Change = { param($r) $r['packages'][0] = $null } },
+  @{ Why = 'A package status from a rejected report'; Change = { param($r) $r['packages'][0]['status'] = 'vulnerable' } },
+  @{ Why = 'A package status in another letter case'; Change = { param($r) $r['packages'][0]['status'] = 'Dependent' } },
+  @{ Why = 'A status with a character that culture rules ignore'; Change = { param($r) $r['status'] = "acc$([char]0x00AD)epted" } },
+  @{ Why = 'A package status with a character that culture rules ignore'; Change = { param($r) $r['packages'][1]['status'] = "accepted$([char]0x200B)" } },
+  @{ Why = 'A package name with a space'; Change = { param($r) $r['packages'][0]['name'] = "fast glob $sensitiveMarker" } },
+  @{ Why = 'A package name that is not text'; Change = { param($r) $r['packages'][0]['name'] = 7 } },
+  @{ Why = 'A package version with a space'; Change = { param($r) $r['packages'][0]['version'] = "16.3.6 $sensitiveMarker" } },
+  @{ Why = 'An empty exception list'; Change = { param($r) $r['exceptions'] = @() } },
+  @{ Why = 'An exception list that is an object'; Change = { param($r) $r['exceptions'] = $r['exceptions'][0] } },
+  @{ Why = 'An exception that is null'; Change = { param($r) $r['exceptions'] = @($null) } },
+  @{ Why = 'An exception with an extra key'; Change = { param($r) $r['exceptions'][0]['reason'] = $sensitiveMarker } },
+  @{ Why = 'An exception without a version'; Change = { param($r) $r['exceptions'][0].Remove('version') } },
+  @{ Why = 'An advisory id in upper case'; Change = { param($r) $r['exceptions'][0]['advisory'] = 'GHSA-VFJ7-8CJW-P6XM' } },
+  @{ Why = 'An advisory id that is too short'; Change = { param($r) $r['exceptions'][0]['advisory'] = 'GHSA-vfj7-8cjw-p6x' } },
+  @{ Why = 'An advisory id with a letter outside its alphabet'; Change = { param($r) $r['exceptions'][0]['advisory'] = 'GHSA-vfj7-8cjw-p6xa' } },
+  @{ Why = 'A CVE id in place of the advisory id'; Change = { param($r) $r['exceptions'][0]['advisory'] = 'CVE-2026-93687' } },
+  @{ Why = 'An advisory id with a trailing line feed'; Change = { param($r) $r['exceptions'][0]['advisory'] = "GHSA-vfj7-8cjw-p6xm`n" } },
+  @{ Why = 'An advisory id followed by other text'; Change = { param($r) $r['exceptions'][0]['advisory'] = "GHSA-vfj7-8cjw-p6xm; $sensitiveMarker" } },
+  @{ Why = 'An advisory id that is not text'; Change = { param($r) $r['exceptions'][0]['advisory'] = @('GHSA-vfj7-8cjw-p6xm') } },
+  @{ Why = 'An exception package in upper case'; Change = { param($r) $r['exceptions'][0]['package'] = 'Braces'; $r['packages'][1]['name'] = 'Braces' } },
+  @{ Why = 'An exception package followed by other text'; Change = {
+    param($r)
+    $r['exceptions'][0]['package'] = "braces; $sensitiveMarker"
+    $r['packages'][1]['name'] = "braces; $sensitiveMarker"
+  } },
+  @{ Why = 'An exception package with a line feed'; Change = { param($r) $r['exceptions'][0]['package'] = "braces`n" } },
+  @{ Why = 'An empty exception package'; Change = { param($r) $r['exceptions'][0]['package'] = '' } },
+  @{ Why = 'An exception version with other text'; Change = { param($r) $r['exceptions'][0]['version'] = "3.0.3 $sensitiveMarker" } },
+  @{ Why = 'An expiry date of yesterday in UTC'; Change = { param($r) $r['exceptions'][0]['expires'] = $yesterday } },
+  @{ Why = 'An expiry date a year ago'; Change = { param($r) $r['exceptions'][0]['expires'] = Format-TestDay $utcToday.AddYears(-1) } },
+  @{ Why = 'A month that does not exist'; Change = { param($r) $r['exceptions'][0]['expires'] = "$nextYear-13-01" } },
+  @{ Why = 'A day that does not exist'; Change = { param($r) $r['exceptions'][0]['expires'] = "$nextYear-02-30" } },
+  @{ Why = 'A date with a time'; Change = { param($r) $r['exceptions'][0]['expires'] = "${tomorrow}T00:00:00Z" } },
+  @{ Why = 'A date in another order'; Change = {
+    param($r)
+    $r['exceptions'][0]['expires'] = $utcToday.AddDays(1).ToString('dd-MM-yyyy', [Globalization.CultureInfo]::InvariantCulture)
+  } },
+  @{ Why = 'A date with slashes'; Change = { param($r) $r['exceptions'][0]['expires'] = $tomorrow.Replace('-', '/') } },
+  @{ Why = 'A date with digits outside ASCII'; Change = { param($r) $r['exceptions'][0]['expires'] = $arabicIndicTomorrow } },
+  @{ Why = 'A date with a trailing line feed'; Change = { param($r) $r['exceptions'][0]['expires'] = "$tomorrow`n" } },
+  @{ Why = 'A date followed by other text'; Change = { param($r) $r['exceptions'][0]['expires'] = "$tomorrow $sensitiveMarker" } },
+  @{ Why = 'A date that is a number'; Change = { param($r) $r['exceptions'][0]['expires'] = 29991231 } },
+  @{ Why = 'The same advisory twice'; Change = { param($r) $r['exceptions'] = @($r['exceptions'][0], $r['exceptions'][0]) } },
+  @{ Why = 'An exception whose package is only a dependent'; Change = { param($r) $r['packages'][1]['status'] = 'dependent' } },
+  @{ Why = 'An exception whose version is not the accepted package version'; Change = { param($r) $r['exceptions'][0]['version'] = '3.0.2' } },
+  @{ Why = 'An exception for a package that is not in the list'; Change = { param($r) $r['exceptions'][0]['package'] = 'picomatch' } },
+  @{ Why = 'An accepted package that no exception names'; Change = { param($r) $r['packages'][4]['status'] = 'accepted' } },
+  @{ Why = 'An accepted package at another version than its exception'; Change = {
+    param($r)
+    $r['packages'] += [ordered]@{ name = 'braces'; version = '3.0.2'; status = 'accepted' }
+    $r['counts']['reported'] = 6
+  } },
+  @{ Why = 'A second exception without an accepted package'; Change = {
+    param($r)
+    $r['exceptions'] += [ordered]@{ advisory = 'GHSA-2222-3333-4444'; package = 'micromatch'; version = '4.0.8'; expires = $tomorrow }
+  } }
+)
+foreach ($case in $malformedAccepted) {
+  $report = New-AcceptedReport
+  & $case.Change $report
+  $output = ConvertTo-TestReport $report
+  # Ordinal, because PowerShell's -cne compares by culture rules and treats some different characters as equal.
+  Assert-True (-not [string]::Equals($output, (New-AcceptedOutput), [StringComparison]::Ordinal)) `n    "$($case.Why): the fixture must differ from the valid accepted report."
+  $failure = Assert-Rejected {
+    Invoke-AcceptedPreflight $output
+  } "$($case.Why) in an accepted report must stop the release." 'Dependency preflight failed; raw output withheld.'
+  Assert-Equal 1 @($script:Events | Where-Object { $_ -ceq 'audit' }).Count "$($case.Why): the audit must run exactly once."
+  Assert-True (-not $script:Events.Contains('azure')) "$($case.Why): the release must stop before the first provider operation."
+  Assert-Equal 0 $script:HostLines.Count "$($case.Why): nothing may be printed."
+  Assert-True (-not $failure.Message.Contains($sensitiveMarker)) "$($case.Why): raw output must stay withheld."
+}
+
+foreach ($invalidOutput in @(
+  ((New-AcceptedOutput) + "`n" + $sensitiveMarker),
+  ('[' + (New-AcceptedOutput) + ']'),
+  (New-AcceptedOutput).Replace('"status":"accepted"', '"status":"accepted","status":"pass"')
+)) {
+  [void](Assert-Rejected {
+    Invoke-AcceptedPreflight $invalidOutput
+  } 'Output that is not exactly one accepted report must stop the release.' 'Dependency preflight failed; raw output withheld.')
+  Assert-True (-not $script:Events.Contains('azure')) 'Output that is not exactly one accepted report must stop before the first provider operation.'
+  Assert-Equal 0 $script:HostLines.Count 'Output that is not exactly one accepted report must print nothing.'
+}
+
+# A valid accepted report above the 8192-byte release bound stops before it is read.
+$oversized = New-AcceptedReport
+$oversized['packages'] = @($oversized['packages'][1]) + @(1..24 | ForEach-Object {
+  [ordered]@{ name = ('d' * 200) + "-$_"; version = ('1' * 120); status = 'dependent' }
+})
+$oversized['counts']['reported'] = 25
+$oversizedOutput = ConvertTo-TestReport $oversized
+Assert-True ([Text.Encoding]::UTF8.GetByteCount($oversizedOutput) -gt 8192) 'The oversized fixture must exceed the release bound.'
+Assert-Equal 1 @(Get-ReleaseAcceptedDependencyAdvisories $oversized -UtcToday $utcToday).Count 'The oversized fixture must be valid apart from its size.'
+[void](Assert-Rejected {
+  Invoke-AcceptedPreflight $oversizedOutput
+} 'An accepted report above the release bound must stop the release.' 'Dependency preflight failed; raw output withheld.')
+Assert-Equal 0 $script:HostLines.Count 'An oversized accepted report must print nothing.'
+
+# The expiry comparison with the day supplied as a parameter. An expiry of "today" holds for the whole UTC day and
+# stops at the next UTC midnight, whatever the local time zone or culture of the machine.
+$reportMessage = 'Dependency preflight did not return the required pass report.'
+$expiresToday = New-AcceptedReport $today
+Assert-Equal 1 @(Get-ReleaseAcceptedDependencyAdvisories $expiresToday -UtcToday $utcToday).Count 'An expiry of today must be accepted at the first moment of the UTC day.'
+Assert-Equal 1 @(Get-ReleaseAcceptedDependencyAdvisories $expiresToday -UtcToday $utcToday.AddDays(1).AddTicks(-1)).Count `
+  'An expiry of today must be accepted at the last moment of the UTC day.'
+[void](Assert-Rejected {
+  Get-ReleaseAcceptedDependencyAdvisories $expiresToday -UtcToday $utcToday.AddDays(1)
+} 'An expiry of today must be rejected from the next UTC midnight.' $reportMessage)
+[void](Assert-Rejected {
+  Get-ReleaseAcceptedDependencyAdvisories (New-AcceptedReport $yesterday) -UtcToday $utcToday
+} 'An expiry of yesterday must be rejected.' $reportMessage)
+Assert-Equal 'GHSA-vfj7-8cjw-p6xm' @(Get-ReleaseAcceptedDependencyAdvisories (New-AcceptedReport $tomorrow) -UtcToday $utcToday)[0]['advisory'] `
+  'The validated exception must be returned for printing.'
+[void](Assert-Rejected {
+  Assert-ReleaseDependencyReport (New-AcceptedReport $yesterday)
+} 'The report check must reject a past expiry with the same message as a bad pass report.' $reportMessage)
+[void](Assert-Rejected {
+  Assert-ReleaseDependencyReport ([ordered]@{ status = 'pass'; counts = $nonzeroCounts; packages = @() })
+} 'A bad pass report must keep its message.' $reportMessage)
+Assert-Equal 0 @(Assert-ReleaseDependencyReport (ConvertFrom-Json -InputObject (ConvertTo-TestReport $passReport) -AsHashtable -NoEnumerate)).Count `
+  'A plain pass report must return no accepted advisory.'
+
+# th-TH uses the Buddhist calendar and ar-SA the Umm al-Qura calendar: a parse that followed the culture would read
+# another year.
+$savedCulture = [Threading.Thread]::CurrentThread.CurrentCulture
+try {
+  foreach ($cultureName in @('th-TH', 'ar-SA', 'tr-TR')) {
+    [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($cultureName)
+    Assert-Equal 1 @(Get-ReleaseAcceptedDependencyAdvisories (New-AcceptedReport $today) -UtcToday $utcToday).Count `
+      "An expiry of today must be accepted under the $cultureName culture."
+    [void](Assert-Rejected {
+      Get-ReleaseAcceptedDependencyAdvisories (New-AcceptedReport $yesterday) -UtcToday $utcToday
+    } "An expiry of yesterday must be rejected under the $cultureName culture." $reportMessage)
+  }
+} finally {
+  [Threading.Thread]::CurrentThread.CurrentCulture = $savedCulture
+}
+
+# The release's own clock is the UTC day, and nothing on the release path passes another one.
+$acceptedAst = Get-ReleaseFunctionAst 'Get-ReleaseAcceptedDependencyAdvisories'
+$clockParameter = @($acceptedAst.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'UtcToday' })
+Assert-Equal 1 $clockParameter.Count 'The accepted report check must take its clock as one parameter.'
+Assert-Equal '[DateTime]::UtcNow.Date' $clockParameter[0].DefaultValue.Extent.Text 'The expiry clock must default to the current UTC day.'
+Assert-True ($acceptedAst.Extent.Text -notmatch '(?i)Get-Date|::Now\b|::Today\b|ToLocalTime|\$env:') `
+  'The accepted report check must not read local time or the environment.'
+Assert-Equal 0 ([regex]::Matches($releaseAst.Extent.Text, '-UtcToday')).Count 'The release must never pass its own expiry clock.'
+Assert-Equal 1 ([regex]::Matches($releaseAst.Extent.Text, 'Get-ReleaseAcceptedDependencyAdvisories \$Report')).Count `
+  'The accepted report check must be called from one place, with the report alone.'
+Assert-Equal 1 ([regex]::Matches($releaseAst.Extent.Text, 'Release warning: dependency advisory accepted')).Count `
+  'The accepted advisory line must be printed from one place.'
+$detailSource = (Get-ReleaseFunctionAst 'Get-ReleaseDependencyFailureDetail').Extent.Text
+Assert-True (-not $detailSource.Contains('accepted')) 'An accepted status must never be shown as a failure detail.'
+
+Remove-Item -LiteralPath Function:\Write-Host
 
 Write-Host "release VM dependency preflight tests passed: $script:Passed assertions"

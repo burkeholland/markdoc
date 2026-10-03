@@ -24,6 +24,7 @@ import {
   type AuditExecutionResult,
   type AuditExecutor,
   type DependencyPolicyStatus,
+  type ListedAdvisory,
 } from "./dependency-policy";
 
 const temporaryDirectories: string[] = [];
@@ -654,7 +655,17 @@ function addHighEntry(audit: AuditFixture, entry: AuditFixtureEntry): void {
   audit.metadata.vulnerabilities.total += 1;
 }
 
-// Clocks around the end of the listed expiry date, 2026-10-17, in UTC.
+// The tests bring their own list and their own clock, so they do not change when the real list changes or when a
+// real entry expires. This one has the values of the first real entry (#2260).
+const TEST_ADVISORY: ListedAdvisory = {
+  advisory: "GHSA-vfj7-8cjw-p6xm",
+  package: "braces",
+  version: "3.0.3",
+  expires: "2026-10-17",
+  reason: "test list entry",
+};
+
+// Clocks around the end of the test entry's expiry date, 2026-10-17, in UTC.
 const BEFORE_EXPIRY = Date.UTC(2026, 9, 3, 13, 20);
 const LAST_ACCEPTED_MOMENT = Date.UTC(2026, 9, 17, 23, 59, 59, 999);
 const FIRST_REJECTED_MOMENT = Date.UTC(2026, 9, 18);
@@ -663,6 +674,7 @@ interface BracesCase {
   packages: LockFixturePackage[];
   audit: AuditFixture;
   now: number;
+  advisories: ListedAdvisory[];
 }
 
 function bracesCase(): BracesCase {
@@ -670,6 +682,7 @@ function bracesCase(): BracesCase {
     packages: BRACES_CHAIN.map((item) => ({ ...item, flags: { ...item.flags } })),
     audit: bracesAudit(),
     now: BEFORE_EXPIRY,
+    advisories: [{ ...TEST_ADVISORY }],
   };
 }
 
@@ -687,12 +700,13 @@ function evaluateBraces(fixture: BracesCase, execution: Partial<AuditExecutionRe
     // npm exits 1 when it reports findings.
     execution: { exitCode: 1, stdout: JSON.stringify(fixture.audit), ...execution },
     now: fixture.now,
+    acceptedAdvisories: fixture.advisories,
   });
 }
 
 const ACCEPTED_EXCEPTION = { advisory: "GHSA-vfj7-8cjw-p6xm", package: "braces", version: "3.0.3", expires: "2026-10-17" };
 
-// The exact bytes of the accepted report for today's audit. deploy/release-vm.ps1 accepts only this shape or
+// The exact bytes of the accepted report for the audit of 2026-10-03. deploy/release-vm.ps1 accepts only this shape or
 // PASS_OUTPUT.
 const ACCEPTED_OUTPUT =
   '{"status":"accepted","counts":{"blocked":0,"info":0,"low":0,"moderate":0,"high":5,"critical":0,"vulnerabilities":5,"reported":5,"omitted":0},'
@@ -716,17 +730,100 @@ function expectRejected(report: ReturnType<typeof evaluateBraces>): void {
 }
 
 describe("accepted advisories (#2260)", () => {
-  it("lists exactly the one braces advisory, in the format the release script checks", () => {
-    expect(ACCEPTED_ADVISORIES).toEqual([{
-      ...ACCEPTED_EXCEPTION,
-      reason: "Only the linter uses it, every published braces is affected, and the runtime image omits dev packages.",
-    }]);
+  // The only test that reads the real list. It checks the format of each entry, never which entries exist, so it
+  // stays green when an entry is added, expires or is deleted.
+  it("keeps every entry of the real list in the format the release script checks", () => {
     for (const item of ACCEPTED_ADVISORIES) {
+      expect(Object.keys(item).sort()).toEqual(["advisory", "expires", "package", "reason", "version"]);
       expect(item.advisory).toMatch(ACCEPTED_ADVISORY_ID_PATTERN);
       expect(item.package).toMatch(ACCEPTED_PACKAGE_PATTERN);
+      expect(item.version).toMatch(/^[0-9a-z][0-9a-z.+_-]{0,127}$/i);
       expect(item.expires).toMatch(ACCEPTED_EXPIRY_PATTERN);
       expect(new Date(`${item.expires}T00:00:00.000Z`).toISOString().slice(0, 10)).toBe(item.expires);
+      expect(item.reason.length).toBeGreaterThan(0);
+      expect(item.reason).not.toContain("\n");
     }
+    expect(new Set(ACCEPTED_ADVISORIES.map((item) => item.advisory)).size).toBe(ACCEPTED_ADVISORIES.length);
+  });
+
+  // Built from whatever the real list holds, with the clock set from each entry, so it proves the real list is the
+  // default without depending on its content. With an empty list it checks nothing.
+  it("uses the real list when the caller passes none", () => {
+    for (const item of ACCEPTED_ADVISORIES) {
+      const lock = packageLock([{ name: item.package, version: item.version, flags: { dev: true } }]);
+      const audit = JSON.stringify({
+        auditReportVersion: 2,
+        vulnerabilities: {
+          [item.package]: {
+            name: item.package,
+            severity: "high",
+            isDirect: false,
+            via: [{ ...BRACES_ADVISORY, name: item.package, dependency: item.package, url: `https://github.com/advisories/${item.advisory}` }],
+            effects: [],
+            range: "*",
+            nodes: [`node_modules/${item.package}`],
+            fixAvailable: false,
+          },
+        },
+        metadata: {
+          vulnerabilities: { info: 0, low: 0, moderate: 0, high: 1, critical: 0, total: 1 },
+          dependencies: { prod: 0, dev: 1, optional: 0, peer: 0, peerOptional: 0, total: 1 },
+        },
+      });
+      const expiryStart = Date.parse(`${item.expires}T00:00:00.000Z`);
+      const at = (now: number) => evaluateDependencyPolicy({
+        expectedLockSha256: packageLockSha256(lock),
+        packageLockText: lock,
+        execution: { exitCode: 1, stdout: audit },
+        now,
+      });
+      expect(at(expiryStart)).toMatchObject({
+        status: "accepted",
+        exceptions: [{ advisory: item.advisory, package: item.package, version: item.version, expires: item.expires }],
+      });
+      expect(at(expiryStart + 24 * 60 * 60 * 1000).status).toBe("rejected");
+    }
+  });
+
+  it("rejects the same audit, exactly as before, once the list is empty", () => {
+    expect(evaluateBraces({ ...bracesCase(), advisories: [] })).toEqual(BRACES_REJECTED);
+  });
+
+  it.each<[string, Partial<ListedAdvisory>]>([
+    ["another advisory", { advisory: "GHSA-2222-3333-4444" }],
+    ["another package", { package: "micromatch" }],
+    ["another version", { version: "3.0.2" }],
+    ["a day that does not exist", { expires: "2026-02-30" }],
+    ["a month that does not exist", { expires: "2026-13-01" }],
+    ["a date with a time", { expires: "2026-10-17T23:59:59Z" }],
+    ["a date in another order", { expires: "17-10-2026" }],
+    ["an empty date", { expires: "" }],
+    ["an advisory id in upper case", { advisory: "GHSA-VFJ7-8CJW-P6XM" }],
+  ])("rejects, exactly as before, when the list entry has %s", (_case, change) => {
+    expect(evaluateBraces({ ...bracesCase(), advisories: [{ ...TEST_ADVISORY, ...change }] })).toEqual(BRACES_REJECTED);
+  });
+
+  it("rejects an advisory id that does not fit the pattern even when the audit carries the same text", () => {
+    const fixture = bracesCase();
+    fixture.advisories = [{ ...TEST_ADVISORY, advisory: "GHSA-vfj7-8cjw-p6xm; package=other" }];
+    fixture.audit.vulnerabilities.braces.via = [{ ...BRACES_ADVISORY, url: "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm; package=other" }];
+    expect(evaluateBraces(fixture)).toEqual(BRACES_REJECTED);
+  });
+
+  it("reports two listed advisories on one package in list order, and only the entries the audit matched", () => {
+    const fixture = bracesCase();
+    const second = { ...TEST_ADVISORY, advisory: "GHSA-2222-3333-4444", expires: "2026-10-20" };
+    const unused = { ...TEST_ADVISORY, advisory: "GHSA-5555-6666-7777", package: "picomatch" };
+    fixture.advisories = [second, unused, { ...TEST_ADVISORY }];
+    fixture.audit.vulnerabilities.braces.via.push(unlistedAdvisory("braces"));
+    const report = evaluateBraces(fixture);
+    expect(report.status).toBe("accepted");
+    expect(report.exceptions).toEqual([
+      { advisory: "GHSA-2222-3333-4444", package: "braces", version: "3.0.3", expires: "2026-10-20" },
+      ACCEPTED_EXCEPTION,
+    ]);
+    // The earlier of the two expiry dates decides.
+    expect(evaluateBraces({ ...fixture, now: FIRST_REJECTED_MOMENT })).toEqual(BRACES_REJECTED);
   });
 
   it.each([0, 1])("accepts today's real audit and reports the exception (npm exit %i)", (exitCode) => {
@@ -956,6 +1053,7 @@ describe("accepted advisories (#2260)", () => {
       cwd: fixture.directory,
       executor,
       now,
+      acceptedAdvisories: [{ ...TEST_ADVISORY }],
       retryDelayMs: 0,
       output: { log: (message) => messages.push(message), warn: (message) => warnings.push(message) },
     });
@@ -1003,7 +1101,78 @@ describe("accepted advisories (#2260)", () => {
         lockPath: fixture.lockPath,
         expectedLockSha256: fixture.identity,
         now,
+        acceptedAdvisories: [{ ...TEST_ADVISORY }],
       })).resolves.toMatchObject({ status: expected });
+    }
+  });
+
+  it("exits 1 for every status other than pass and accepted", async () => {
+    const clean = { exitCode: 0, stdout: auditJson(), stderr: "" };
+    const seen = new Map<string, number>();
+    const run = async (options: {
+      lock?: string;
+      execution?: AuditExecutionResult;
+      argumentsFor?: (identity: string, directory: string) => string[] | Promise<string[]>;
+    }) => {
+      const fixture = await fixtureDirectory(options.lock ?? packageLock(BRACES_CHAIN));
+      const messages: string[] = [];
+      const argv = await (options.argumentsFor ?? ((identity) => ["--lock-sha256", identity, "--run-audit"]))(fixture.identity, fixture.directory);
+      const exitCode = await runMain(argv, {
+        cwd: fixture.directory,
+        executor: vi.fn<AuditExecutor>().mockResolvedValue(options.execution ?? clean),
+        now: BEFORE_EXPIRY,
+        acceptedAdvisories: [{ ...TEST_ADVISORY }],
+        retryDelayMs: 0,
+        output: { log: (message) => messages.push(message) },
+      });
+      expect(messages).toHaveLength(1);
+      seen.set(JSON.parse(messages[0]).status, exitCode);
+    };
+
+    await run({});
+    await run({ execution: { exitCode: 1, stdout: JSON.stringify(bracesAudit()), stderr: "" } });
+    await run({
+      lock: packageLock([{ name: "unsafe-package", version: "1.2.3" }]),
+      execution: { exitCode: 1, stdout: auditJson([{ name: "unsafe-package", severity: "high" }]), stderr: "" },
+    });
+    await run({ argumentsFor: (identity) => ["--lock-sha256", identity] });
+    await run({ lock: "{}", argumentsFor: () => ["--lock-sha256", "0".repeat(64), "--run-audit"] });
+    await run({ argumentsFor: () => ["--lock-sha256", "0".repeat(64), "--run-audit"] });
+    await run({ execution: { exitCode: 0, stdout: "{", stderr: "" } });
+    await run({ execution: { exitCode: 17, stdout: "", stderr: "" } });
+    await run({
+      argumentsFor: async (identity, directory) => {
+        const auditPath = path.join(directory, "audit.json");
+        await fs.writeFile(auditPath, auditJson());
+        const old = new Date(BEFORE_EXPIRY - MAX_AUDIT_AGE_MS - 1_000);
+        await fs.utimes(auditPath, old, old);
+        return ["--lock-sha256", identity, "--audit-json", auditPath];
+      },
+    });
+
+    const everyStatus: Record<DependencyPolicyStatus, number> = {
+      pass: 0,
+      accepted: 0,
+      rejected: 1,
+      invalid_request: 1,
+      invalid_lock: 1,
+      lock_mismatch: 1,
+      malformed_audit: 1,
+      command_failed: 1,
+      stale_audit: 1,
+    };
+    expect(Object.fromEntries(seen)).toEqual(everyStatus);
+  });
+
+  it("starts the CLI with the command line alone, so a release cannot set the clock or the list", async () => {
+    const source = await fs.readFile(path.resolve("scripts/dependency-policy-preflight.mts"), "utf8");
+    expect(source.match(/runMain\(/g)).toHaveLength(2);
+    expect(source).toContain("export async function runMain(argv: string[], dependencies: RunMainDependencies = {})");
+    expect(source).toContain("process.exitCode = await runMain(process.argv.slice(2));");
+    for (const file of ["scripts/dependency-policy-preflight.mts", "scripts/lib/dependency-policy.ts"]) {
+      const text = await fs.readFile(path.resolve(file), "utf8");
+      // The only environment reads are the ones that start npm and taskkill.
+      expect(text.match(/process\.env\b/g) ?? []).toHaveLength(file.endsWith(".mts") ? 0 : 3);
     }
   });
 });
