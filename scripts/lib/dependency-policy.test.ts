@@ -794,6 +794,7 @@ describe("accepted advisories (#2260)", () => {
     ["another package", { package: "micromatch" }],
     ["another version", { version: "3.0.2" }],
     ["a day that does not exist", { expires: "2026-02-30" }],
+    ["a day that does not exist and would fall after the clock", { expires: "2027-02-30" }],
     ["a month that does not exist", { expires: "2026-13-01" }],
     ["a date with a time", { expires: "2026-10-17T23:59:59Z" }],
     ["a date in another order", { expires: "17-10-2026" }],
@@ -917,6 +918,13 @@ describe("accepted advisories (#2260)", () => {
     ["one of two reported braces nodes has a different version", ({ packages, audit }) => {
       packages.push({ name: "micromatch/node_modules/braces", version: "3.0.2", flags: { dev: true } });
       audit.vulnerabilities.braces.nodes.push("node_modules/micromatch/node_modules/braces");
+    }],
+    // The lock is checked directly: a braces node that npm left out of its report still counts.
+    ["the lock has another braces node without a dev flag that npm does not report", ({ packages }) => {
+      packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.3" });
+    }],
+    ["the lock has another braces node at a different version that npm does not report", ({ packages }) => {
+      packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.2", flags: { dev: true } });
     }],
     ["a dependent names a package that is not in the audit", ({ audit }) => {
       audit.vulnerabilities.micromatch.via = ["picomatch"];

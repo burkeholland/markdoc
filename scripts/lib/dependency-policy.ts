@@ -483,13 +483,14 @@ function expiryEndMs(expires: string): number {
 
 // Decides whether an audit with findings is covered by the list of accepted advisories. Every check must hold; anything
 // unexpected returns null and the caller reports "rejected" as before.
-//   a. Every advisory object is a listed one: the exact advisory URL, on the listed package, and every lock node
-//      npm reports for that package has the listed version.
+//   a. Every advisory object is a listed one: the exact advisory URL, on the listed package, and every lock node of
+//      that package, whether npm reports it or not, has the listed version and is marked "dev": true.
 //   b. Every other entry is reported only because it depends, directly or through such entries, on an accepted one.
 //   c. Every lock node of every entry is marked "dev": true in package-lock.json.
 //   d. The current time is before the end of the listed expiry date in UTC.
 //   e. Nothing is critical. The caller has already ruled out blocked dependencies.
 function acceptedAudit(
+  lock: PackageLockSnapshot,
   audit: ParsedAudit,
   { now, advisories }: Acceptance,
 ): { packages: DependencyPackageResult[]; exceptions: AcceptedAdvisory[] } | null {
@@ -508,7 +509,8 @@ function acceptedAudit(
         || !ACCEPTED_ADVISORY_ID_PATTERN.test(listed.advisory)
         || !ACCEPTED_PACKAGE_PATTERN.test(listed.package)
         || !validPackageVersion(listed.version)
-        || !entry.nodes.every((node) => node.version === listed.version)
+        // Read from the lock itself, so a node of the package that npm left out of its report is checked too.
+        || !lock.packages.every((node) => node.name !== listed.package || (node.dev && node.version === listed.version))
         // Written so that an expiry date or a clock that is not a number is rejected too.
         || !(now < expiryEndMs(listed.expires))
       ) {
@@ -551,7 +553,7 @@ function acceptedAudit(
 function policyReport(lock: PackageLockSnapshot, audit: ParsedAudit, acceptance: Acceptance): DependencyPolicyReport {
   const blocked = lock.packages.filter((item) =>
     BLOCKED_DEPENDENCIES.some((blockedNode) => blockedNode.name === item.name && blockedNode.version === item.version));
-  const accepted = blocked.length === 0 ? acceptedAudit(audit, acceptance) : null;
+  const accepted = blocked.length === 0 ? acceptedAudit(lock, audit, acceptance) : null;
   if (accepted) {
     return {
       status: "accepted",

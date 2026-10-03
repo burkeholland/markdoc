@@ -686,11 +686,19 @@ $malformedAccepted = @(
   @{ Why = 'A package status from a rejected report'; Change = { param($r) $r['packages'][0]['status'] = 'vulnerable' } },
   @{ Why = 'A package status in another letter case'; Change = { param($r) $r['packages'][0]['status'] = 'Dependent' } },
   @{ Why = 'A status with a character that culture rules ignore'; Change = { param($r) $r['status'] = "acc$([char]0x00AD)epted" } },
+  @{ Why = 'A status followed by a character that culture rules ignore'; Change = { param($r) $r['status'] = "accepted$([char]0x00AD)" } },
+  @{ Why = 'A complete pass report that carries exceptions'; Change = {
+    param($r)
+    $r['status'] = 'pass'
+    $r['packages'] = @()
+    foreach ($field in @($r['counts'].Keys)) { $r['counts'][$field] = 0 }
+  } },
   @{ Why = 'A package status with a character that culture rules ignore'; Change = { param($r) $r['packages'][1]['status'] = "accepted$([char]0x200B)" } },
   @{ Why = 'A package name with a space'; Change = { param($r) $r['packages'][0]['name'] = "fast glob $sensitiveMarker" } },
   @{ Why = 'A package name that is not text'; Change = { param($r) $r['packages'][0]['name'] = 7 } },
   @{ Why = 'A package version with a space'; Change = { param($r) $r['packages'][0]['version'] = "16.3.6 $sensitiveMarker" } },
   @{ Why = 'An empty exception list'; Change = { param($r) $r['exceptions'] = @() } },
+  @{ Why = 'An empty exception list with no accepted package'; Change = { param($r) $r['exceptions'] = @(); $r['packages'][1]['status'] = 'dependent' } },
   @{ Why = 'An exception list that is an object'; Change = { param($r) $r['exceptions'] = $r['exceptions'][0] } },
   @{ Why = 'An exception that is null'; Change = { param($r) $r['exceptions'] = @($null) } },
   @{ Why = 'An exception with an extra key'; Change = { param($r) $r['exceptions'][0]['reason'] = $sensitiveMarker } },
@@ -738,6 +746,10 @@ $malformedAccepted = @(
   @{ Why = 'A second exception without an accepted package'; Change = {
     param($r)
     $r['exceptions'] += [ordered]@{ advisory = 'GHSA-2222-3333-4444'; package = 'micromatch'; version = '4.0.8'; expires = $tomorrow }
+  } },
+  @{ Why = 'A second exception at a version that no accepted package has'; Change = {
+    param($r)
+    $r['exceptions'] += [ordered]@{ advisory = 'GHSA-2222-3333-4444'; package = 'braces'; version = '3.0.2'; expires = $tomorrow }
   } }
 )
 foreach ($case in $malformedAccepted) {
@@ -745,7 +757,8 @@ foreach ($case in $malformedAccepted) {
   & $case.Change $report
   $output = ConvertTo-TestReport $report
   # Ordinal, because PowerShell's -cne compares by culture rules and treats some different characters as equal.
-  Assert-True (-not [string]::Equals($output, (New-AcceptedOutput), [StringComparison]::Ordinal)) `n    "$($case.Why): the fixture must differ from the valid accepted report."
+  Assert-True (-not [string]::Equals($output, (New-AcceptedOutput), [StringComparison]::Ordinal)) `
+    "$($case.Why): the fixture must differ from the valid accepted report."
   $failure = Assert-Rejected {
     Invoke-AcceptedPreflight $output
   } "$($case.Why) in an accepted report must stop the release." 'Dependency preflight failed; raw output withheld.'

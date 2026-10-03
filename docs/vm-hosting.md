@@ -241,8 +241,8 @@ is `rejected`, exactly as if the list did not exist:
 
 1. Every advisory object in the audit is a listed one: its `url` is exactly
    `https://github.com/advisories/<listed id>`, it is reported on the listed
-   package, and every lock node npm reports for that package has the listed
-   version.
+   package, and every lock node of that package in `package-lock.json`,
+   whether npm reports it or not, has the listed version and `"dev": true`.
 2. Every other reported package is there only because it depends, directly or
    through other such packages, on an accepted one. A package with any advisory
    of its own that is not listed, or that names a package the audit does not
