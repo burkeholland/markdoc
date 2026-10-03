@@ -1030,22 +1030,27 @@ test.describe("one press is one action: the rest of a double-click", () => {
 });
 
 test.describe("selection bubble: real input", () => {
-  test("click, Enter, Space, held arrows, Home/End, Link and Escape", async ({ browser }) => {
-    test.setTimeout(180_000);
+  test("a click on Bold formats the selection and keeps it; a second click undoes it", async ({ browser }) => {
     const id = await newDocument(browser);
     const { page, context } = await openAs(browser, "owner", id, "split");
 
-    // Click, right after the selection appeared; the selection survives, so a second click undoes it.
+    // Right after the selection appeared.
     await dragSelect(page, "Target");
     await bubbleButton(page, "Bold").click();
     await expectTarget(page, "split", "strong", "bubble Bold click");
     expect(await selectedText(page), "the selection is kept after a bubble click").toBe("Target");
+    await expectFocus(page, "preview", "focus after a bubble click");
     await bubbleButton(page, "Bold").click();
     await expectTarget(page, "split", "plain", "bubble Bold click again");
+    await context.close();
+  });
 
-    // Keyboard: held arrows, Home/End and wrapping, then Enter and Space. The bubble layer sits at the
-    // end of the page and hides when the editor loses focus, so Tab from the editor does not reach it;
-    // this case starts on a focused button (the same on main).
+  test("held arrows, Home, End and wrapping move focus; Enter and Space act once and hand focus back", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+
+    // The bubble's layer sits at the end of the page and hides when the editor loses focus, so Tab from
+    // the editor does not reach it; this case starts on a focused button (the same on main).
     await dragSelect(page, "Target");
     await bubbleButton(page, "Bold").focus();
     await expect(bubbleButton(page, "Bold")).toBeFocused();
@@ -1066,19 +1071,25 @@ test.describe("selection bubble: real input", () => {
     await pressOn(page, bubbleButton(page, "Italic"), " ");
     await expectTarget(page, "split", "both", "Space on bubble Italic");
     await expectFocus(page, "preview", "focus after Space on bubble Italic");
+    await context.close();
+  });
 
-    // Link.
+  test("Link opens the dialog; Escape hides the bubble and the next selection's first click works", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+
     await dragSelect(page, "After");
     await bubbleButton(page, "Link").click();
     await page.getByTestId("link-url").fill("example.com/docs");
     await page.getByTestId("link-submit").click();
     await expect(page.locator(".md-rich a", { hasText: "After" })).toHaveAttribute("href", "https://example.com/docs");
 
-    // Escape collapses the selection and hides the bubble; the next selection's first click works.
+    // Escape collapses the selection and hides the bubble.
     await dragSelect(page, "Intro");
     await page.keyboard.press("Escape");
     await expect(bubble(page)).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => window.getSelection()?.isCollapsed ?? null)).toBe(true);
+    await expectFocus(page, "preview", "focus after Escape");
     await dragSelect(page, "Intro");
     await bubbleButton(page, "Strikethrough").click();
     await expect(page.locator(".md-rich p", { hasText: "Intro" }).locator("s, del")).toHaveText("Intro");
@@ -1105,13 +1116,14 @@ test.describe("selection bubble: real input", () => {
 });
 
 test.describe("table menu: real input", () => {
-  test("row, column and alignment clicks, keys, Escape and the first click after it hides", async ({ browser }) => {
-    test.setTimeout(180_000);
+  /** The delimiter row of the table: it carries the column alignment. */
+  const delimiter = async (page: Page) => (await codeText(page)).split("\n").find((line) => /^\|\s*:?-+/.test(line)) ?? "";
+
+  test("every row and column action by click, on the table the caret is in; Delete table", async ({ browser }) => {
     const id = await newDocument(browser);
     const { page, context } = await openAs(browser, "owner", id, "split");
     await expectTableShape(page, 2, 2);
 
-    // Every structural action, by click, on the table the caret is in.
     const steps: [string, number, number][] = [
       ["table-row-after", 3, 2],
       ["table-col-after", 3, 3],
@@ -1127,30 +1139,54 @@ test.describe("table menu: real input", () => {
       await expectFocus(page, "preview", `focus after ${testId}`);
     }
 
-    // Alignment, twice in a row on the same column (the second click lands on the first one's re-render).
-    const delimiter = async () => (await codeText(page)).split("\n").find((line) => /^\|\s*:?-+/.test(line)) ?? "";
+    await clickCell(page, 1, 0);
+    await page.getByTestId("table-delete").click();
+    await expect(page.locator(".md-rich table")).toHaveCount(0);
+    await expectFocus(page, "preview", "focus after Delete table");
+    await context.close();
+  });
+
+  test("alignment: three clicks in a row on the same column", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+
+    // Each click lands on the re-render the one before it caused.
     await clickCell(page, 1, 1);
     await page.getByTestId("table-align-center").click();
-    await expect.poll(delimiter, { message: "center" }).toMatch(/^\|[^|]*\|\s*:-+:\s*\|/);
+    await expect.poll(() => delimiter(page), { message: "center" }).toMatch(/^\|[^|]*\|\s*:-+:\s*\|/);
     await expect(page.getByTestId("table-align-center")).toHaveAttribute("aria-pressed", "true");
     await page.getByTestId("table-align-right").click();
-    await expect.poll(delimiter, { message: "right" }).toMatch(/^\|[^|]*\|\s*-+:\s*\|/);
+    await expect.poll(() => delimiter(page), { message: "right" }).toMatch(/^\|[^|]*\|\s*-+:\s*\|/);
     await page.getByTestId("table-align-right").click();
-    await expect.poll(delimiter, { message: "right again clears it" }).toMatch(/^\|[^|]*\|\s*-+\s*\|/);
+    await expect.poll(() => delimiter(page), { message: "right again clears it" }).toMatch(/^\|[^|]*\|\s*-+\s*\|/);
+    await expectFocus(page, "preview", "focus after the alignment clicks");
+    await context.close();
+  });
 
-    // The caret moves to another column with a key, and the click follows at once: the button acts on
-    // the column the caret is in now. Column 1 is not aligned, column 2 is centred.
+  test("alignment acts on the column the caret is in when the click lands", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+
+    await clickCell(page, 1, 1);
     await page.getByTestId("table-align-center").click();
-    await expect.poll(delimiter).toMatch(/^\|[^|]*\|\s*:-+:\s*\|/);
+    await expect.poll(() => delimiter(page)).toMatch(/^\|\s*-+\s*\|\s*:-+:\s*\|/);
+    // The caret moves from the first column, which is not aligned, to the centred one with a key, and
+    // the click follows at once: Align center clears the centred column.
     await clickCell(page, 1, 0);
     await page.keyboard.press("Tab");
     await page.getByTestId("table-align-center").click();
-    await expect.poll(delimiter, { message: "Align center on the centred column clears it" }).toMatch(/^\|\s*-+\s*\|\s*-+\s*\|/);
+    await expect.poll(() => delimiter(page), { message: "Align center on the centred column clears it" }).toMatch(/^\|\s*-+\s*\|\s*-+\s*\|/);
+    await context.close();
+  });
 
-    // Keyboard: a keyboard user reaches the menu with Shift+Tab from the first cell (from any other cell
-    // Shift+Tab moves to the previous cell). The menu sits just before the editor, so focus lands on its
-    // last button. Then held arrows, Home/End and wrapping, Enter and Space; each action hands focus back
-    // to the editor.
+  test("Shift+Tab from the first cell reaches the menu; held arrows, Home, End and wrapping; Enter and Space", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+    await expectTableShape(page, 2, 2);
+
+    // A keyboard user reaches the menu with Shift+Tab from the first cell (from any other cell Shift+Tab
+    // moves to the previous cell). The menu sits just before the editor, so focus lands on its last
+    // button. Each action hands focus back to the editor.
     const menu = page.getByTestId("table-menu");
     await clickCell(page, 0, 0);
     await tabInto(page, menu, "Shift+Tab", 3);
@@ -1169,7 +1205,7 @@ test.describe("table menu: real input", () => {
     await page.keyboard.press("ArrowRight");
     await expect(page.getByTestId("table-row-after")).toBeFocused();
     await page.keyboard.press("Enter");
-    await expectTableShape(page, 4, 3);
+    await expectTableShape(page, 3, 2);
     await expectFocus(page, "preview", "focus after Enter on Row below");
     await clickCell(page, 0, 0);
     await tabInto(page, menu, "Shift+Tab", 3);
@@ -1177,32 +1213,42 @@ test.describe("table menu: real input", () => {
     for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
     await expect(page.getByTestId("table-col-after")).toBeFocused();
     await page.keyboard.press(" ");
-    await expectTableShape(page, 4, 4);
+    await expectTableShape(page, 3, 3);
     await expectFocus(page, "preview", "focus after Space on Column right");
+    await context.close();
+  });
 
-    // Tab from the menu goes on to the table and runs nothing.
+  test("Tab and Shift+Tab in the menu move focus and run nothing", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+    await expectTableShape(page, 2, 2);
+
     await clickCell(page, 0, 0);
-    await tabInto(page, menu, "Shift+Tab", 3);
+    await tabInto(page, page.getByTestId("table-menu"), "Shift+Tab", 3);
+    await expect(page.getByTestId("table-delete")).toBeFocused();
     await page.keyboard.press("Shift+Tab");
     await expect(page.getByTestId("table-align-right"), "Shift+Tab moves to the button before").toBeFocused();
     await page.keyboard.press("Tab");
+    await expect(page.getByTestId("table-delete"), "Tab moves to the button after").toBeFocused();
     await page.keyboard.press("Tab");
     await expectFocus(page, "preview", "Tab from the last button goes on to the editor");
-    await expectTableShape(page, 4, 4);
+    await expectTableShape(page, 2, 2);
+    expect(await codeText(page), "nothing ran").toBe(DOC);
+    await context.close();
+  });
 
-    // Escape hides the menu; the first click after it comes back acts on the current table.
+  test("Escape hides the menu; the first click after it comes back acts on the current table", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+    await expectTableShape(page, 2, 2);
+
     await clickCell(page, 1, 0);
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("table-menu")).toHaveCount(0);
+    await expectFocus(page, "preview", "focus after Escape");
     await clickCell(page, 1, 1);
     await page.getByTestId("table-row-after").click();
-    await expectTableShape(page, 5, 4);
-
-    // Delete table.
-    await clickCell(page, 1, 0);
-    await page.getByTestId("table-delete").click();
-    await expect(page.locator(".md-rich table")).toHaveCount(0);
-    await expectFocus(page, "preview", "focus after Delete table");
+    await expectTableShape(page, 3, 2);
     await context.close();
   });
 });
