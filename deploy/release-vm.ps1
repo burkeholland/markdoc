@@ -283,7 +283,84 @@ function Test-ReleaseExactKeys($Value, [string[]]$Expected) {
   return $true
 }
 
+# Validates the only report other than the plain pass that a release continues on: status "accepted", which the policy
+# prints when every finding is covered by ACCEPTED_ADVISORIES in scripts/lib/dependency-policy.ts. The policy script is
+# not trusted here: every key, count, pattern and date is checked again, and only values that passed a fixed pattern
+# are returned for printing. The clock is a parameter so the offline tests can set it; the release never passes it.
+function Get-ReleaseAcceptedDependencyAdvisories($Report, [datetime]$UtcToday = [DateTime]::UtcNow.Date) {
+  # The same message as a bad pass report, so a bad accepted report tells a reader of the log nothing more.
+  $invalid = 'Dependency preflight did not return the required pass report.'
+  $countFields = @('blocked', 'info', 'low', 'moderate', 'high', 'critical', 'vulnerabilities', 'reported', 'omitted')
+  $versionPattern = '\A[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}\z'
+  if (-not (Test-ReleaseExactKeys $Report @('status', 'counts', 'packages', 'exceptions')) -or
+      $Report['status'] -isnot [string] -or $Report['status'] -cnotmatch '\Aaccepted\z' -or
+      -not (Test-ReleaseExactKeys $Report['counts'] $countFields) -or
+      $Report['packages'] -isnot [array] -or $Report['exceptions'] -isnot [array]) {
+    Stop-VmRelease $invalid
+  }
+  $counts = $Report['counts']
+  $packages = $Report['packages']
+  $exceptions = $Report['exceptions']
+  foreach ($field in $countFields) {
+    $count = $counts[$field]
+    if (($count -isnot [int] -and $count -isnot [long]) -or $count -lt 0) { Stop-VmRelease $invalid }
+  }
+  # Nothing blocked, critical or left out, and the counts agree with each other and with the package list.
+  if ($counts['blocked'] -ne 0 -or $counts['critical'] -ne 0 -or $counts['omitted'] -ne 0 -or
+      $packages.Count -lt 1 -or $packages.Count -gt 25 -or $counts['reported'] -ne $packages.Count -or
+      $counts['vulnerabilities'] -lt 1 -or $counts['vulnerabilities'] -gt $counts['reported'] -or
+      ($counts['info'] + $counts['low'] + $counts['moderate'] + $counts['high']) -ne $counts['vulnerabilities'] -or
+      $exceptions.Count -lt 1) {
+    Stop-VmRelease $invalid
+  }
+  foreach ($package in $packages) {
+    if (-not (Test-ReleaseExactKeys $package @('name', 'version', 'status')) -or
+        $package['name'] -isnot [string] -or $package['name'].Length -gt 214 -or
+        $package['name'] -cnotmatch '\A(?:@[0-9A-Za-z][0-9A-Za-z._-]*/)?[0-9A-Za-z][0-9A-Za-z._-]*\z' -or
+        $package['version'] -isnot [string] -or $package['version'] -cnotmatch $versionPattern -or
+        $package['status'] -isnot [string] -or $package['status'] -cnotmatch '\A(?:accepted|dependent)\z') {
+      Stop-VmRelease $invalid
+    }
+  }
+  $advisories = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach ($exception in $exceptions) {
+    if (-not (Test-ReleaseExactKeys $exception @('advisory', 'package', 'version', 'expires')) -or
+        $exception['advisory'] -isnot [string] -or
+        $exception['advisory'] -cnotmatch '\AGHSA(?:-[23456789cfghjmpqrvwx]{4}){3}\z' -or
+        $exception['package'] -isnot [string] -or $exception['package'].Length -gt 214 -or
+        $exception['package'] -cnotmatch '\A(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*\z' -or
+        $exception['version'] -isnot [string] -or $exception['version'] -cnotmatch $versionPattern -or
+        $exception['expires'] -isnot [string] -or $exception['expires'] -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z') {
+      Stop-VmRelease $invalid
+    }
+    # The date must be a real calendar day that is today or later in UTC, and each advisory may appear once.
+    $expires = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($exception['expires'], 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture,
+          [Globalization.DateTimeStyles]::None, [ref]$expires) -or
+        $expires -lt $UtcToday.Date -or -not $advisories.Add($exception['advisory'])) {
+      Stop-VmRelease $invalid
+    }
+    $covered = @($packages | Where-Object {
+      $_['status'] -ceq 'accepted' -and $_['name'] -ceq $exception['package'] -and $_['version'] -ceq $exception['version']
+    })
+    if ($covered.Count -lt 1) { Stop-VmRelease $invalid }
+  }
+  # Every package marked accepted must be the exact package and version of one of the exceptions.
+  foreach ($package in $packages) {
+    if ($package['status'] -cne 'accepted') { continue }
+    $covering = @($exceptions | Where-Object {
+      $_['package'] -ceq $package['name'] -and $_['version'] -ceq $package['version']
+    })
+    if ($covering.Count -lt 1) { Stop-VmRelease $invalid }
+  }
+  return $exceptions
+}
+
+# Returns nothing for the plain pass report and the accepted advisories for an accepted report. Any other report stops.
 function Assert-ReleaseDependencyReport($Report) {
+  if ($Report -is [System.Collections.IDictionary] -and $Report['status'] -is [string] -and $Report['status'] -ceq 'accepted') {
+    return Get-ReleaseAcceptedDependencyAdvisories $Report
+  }
   $countFields = @('blocked', 'info', 'low', 'moderate', 'high', 'critical', 'vulnerabilities', 'reported', 'omitted')
   if (-not (Test-ReleaseExactKeys $Report @('status', 'counts', 'packages')) -or
       $Report['status'] -isnot [string] -or $Report['status'] -cne 'pass' -or
@@ -334,8 +411,12 @@ function Assert-ReleaseDependencyPreflight([string]$Commit) {
     if ([Text.Encoding]::UTF8.GetByteCount($output) -gt 8192) {
       Stop-VmRelease 'Dependency preflight output exceeded its release bound.'
     }
-    Assert-ReleaseDependencyReport (ConvertFrom-ReleaseJson $output)
+    $accepted = @(Assert-ReleaseDependencyReport (ConvertFrom-ReleaseJson $output))
     Assert-ReleaseWorkingLock $lockIdentity
+    # Each value was matched against a fixed pattern above. Nothing else from the audit is printed.
+    foreach ($advisory in $accepted) {
+      Write-Host "Release warning: dependency advisory accepted; advisory=$($advisory['advisory']); package=$($advisory['package']); expires=$($advisory['expires'])."
+    }
   } catch {
     $code = 1
     if ($_.Exception.Data.Contains('ReleaseExitCode')) { $code = $_.Exception.Data['ReleaseExitCode'] }

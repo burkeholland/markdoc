@@ -35,8 +35,57 @@ export const BLOCKED_DEPENDENCIES = [
   { name: "qs", version: "6.15.3" },
 ] as const;
 
+export interface AcceptedAdvisory {
+  advisory: string;
+  package: string;
+  version: string;
+  expires: string;
+}
+
+export interface ListedAdvisory extends AcceptedAdvisory {
+  reason: string;
+}
+
+// Advisories that do not stop a release, for a limited time, because no patched version exists. The whole rule is
+// in acceptedAudit below and in docs/vm-hosting.md. This list is code: a change goes through a pull request, and no
+// environment variable, flag or option can add to it. Delete an entry as soon as the lock has a patched version.
+export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [
+  {
+    advisory: "GHSA-vfj7-8cjw-p6xm",
+    package: "braces",
+    version: "3.0.3",
+    expires: "2026-10-17",
+    reason: "Only the linter uses it, every published braces is affected, and the runtime image omits dev packages.",
+  },
+];
+
+// What tests may set about the accepted-advisory rule: the clock that decides expiry and the list itself. These are
+// function parameters only. The command line and the release never pass them, so they use the real clock and
+// ACCEPTED_ADVISORIES, and no environment variable, flag or option reaches either one.
+export interface AcceptanceOptions {
+  now?: number;
+  acceptedAdvisories?: readonly ListedAdvisory[];
+}
+
+interface Acceptance {
+  now: number;
+  advisories: readonly ListedAdvisory[];
+}
+
+function acceptanceFrom(options: AcceptanceOptions): Acceptance {
+  return { now: options.now ?? Date.now(), advisories: options.acceptedAdvisories ?? ACCEPTED_ADVISORIES };
+}
+
+// deploy/release-vm.ps1 checks the same three patterns before it prints an accepted advisory.
+export const ACCEPTED_ADVISORY_ID_PATTERN = /^GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}$/;
+export const ACCEPTED_PACKAGE_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+export const ACCEPTED_EXPIRY_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
+const ADVISORY_URL_PREFIX = "https://github.com/advisories/";
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 export type DependencyPolicyStatus =
   | "pass"
+  | "accepted"
   | "rejected"
   | "invalid_request"
   | "invalid_lock"
@@ -45,7 +94,9 @@ export type DependencyPolicyStatus =
   | "command_failed"
   | "stale_audit";
 
-export type DependencyPackageStatus = "blocked" | "vulnerable";
+// "accepted" and "dependent" appear only in an accepted report: a node of a package with a listed advisory, and a
+// node that npm reports only because it depends on such a package.
+export type DependencyPackageStatus = "blocked" | "vulnerable" | "accepted" | "dependent";
 
 export interface DependencyPolicyCounts {
   blocked: number;
@@ -70,14 +121,18 @@ export interface DependencyPolicyReport {
   counts: DependencyPolicyCounts;
   packages: DependencyPackageResult[];
   // Only command_failed reports carry this, and it always matches FAILURE_REASON_PATTERN. Every other report keeps
-  // exactly three keys.
+  // exactly three keys, except an accepted report, which adds exceptions.
   reason?: string;
+  // Only accepted reports carry this: the entries of ACCEPTED_ADVISORIES that the audit matched, without the reason.
+  exceptions?: AcceptedAdvisory[];
 }
 
 interface LockedPackage {
   path: string;
   name: string;
   version: string;
+  // True only when the lock marks the node "dev": true, so it is not in the tree `npm ci --omit=dev` installs.
+  dev: boolean;
 }
 
 export interface PackageLockSnapshot {
@@ -109,9 +164,19 @@ interface AuditCounts {
   total: number;
 }
 
+interface AuditEntry {
+  name: string;
+  // The advisory objects in the entry's `via`: the advisories against this package itself.
+  advisories: Array<{ name: unknown; url: unknown; severity: unknown }>;
+  // The package names in the entry's `via`: the vulnerable packages this one depends on.
+  dependsOn: string[];
+  nodes: LockedPackage[];
+}
+
 interface ParsedAudit {
   counts: AuditCounts;
   packages: LockedPackage[];
+  entries: AuditEntry[];
 }
 
 const ZERO_COUNTS: DependencyPolicyCounts = {
@@ -177,7 +242,7 @@ export function parsePackageLock(packageLockText: string): PackageLockSnapshot |
     if (entry.link === true) continue;
     const name = packageNameFromLockPath(lockPath);
     if (!name || !validPackageVersion(entry.version)) return null;
-    packages.push({ path: lockPath, name, version: entry.version });
+    packages.push({ path: lockPath, name, version: entry.version, dev: entry.dev === true });
   }
   return { sha256: packageLockSha256(packageLockText), packages };
 }
@@ -272,6 +337,7 @@ function parseAuditJson(auditJson: string, lock: PackageLockSnapshot): ParsedAud
 
   const lockPackagesByPath = new Map(lock.packages.map((item) => [item.path, item]));
   const vulnerablePackages: LockedPackage[] = [];
+  const entries: AuditEntry[] = [];
   const entryCounts = Object.fromEntries(VULNERABILITY_SEVERITIES.map((severity) => [severity, 0])) as Record<(typeof VULNERABILITY_SEVERITIES)[number], number>;
   for (const [name, entry] of Object.entries(value.vulnerabilities)) {
     if (
@@ -296,11 +362,20 @@ function parseAuditJson(auditJson: string, lock: PackageLockSnapshot): ParsedAud
       return null;
     }
     entryCounts[entry.severity] += 1;
+    const nodes: LockedPackage[] = [];
     for (const node of entry.nodes) {
       const lockedPackage = lockPackagesByPath.get(node);
       if (!lockedPackage || lockedPackage.name !== name) return null;
-      vulnerablePackages.push(lockedPackage);
+      nodes.push(lockedPackage);
     }
+    vulnerablePackages.push(...nodes);
+    const via: unknown[] = entry.via;
+    entries.push({
+      name,
+      advisories: via.filter(isRecord).map(({ name: advisoryName, url, severity }) => ({ name: advisoryName, url, severity })),
+      dependsOn: via.filter((item): item is string => typeof item === "string"),
+      nodes,
+    });
   }
 
   for (const severity of VULNERABILITY_SEVERITIES) {
@@ -318,11 +393,12 @@ function parseAuditJson(auditJson: string, lock: PackageLockSnapshot): ParsedAud
       total: counts.total,
     },
     packages: vulnerablePackages,
+    entries,
   };
 }
 
 export function dependencyPolicyFailure(
-  status: Exclude<DependencyPolicyStatus, "pass" | "rejected" | "command_failed">,
+  status: Exclude<DependencyPolicyStatus, "pass" | "accepted" | "rejected" | "command_failed">,
 ): DependencyPolicyReport {
   return { status, counts: { ...ZERO_COUNTS }, packages: [] };
 }
@@ -397,9 +473,105 @@ function comparePackageResults(left: DependencyPackageResult, right: DependencyP
     || compare(left.status, right.status);
 }
 
-function policyReport(lock: PackageLockSnapshot, audit: ParsedAudit): DependencyPolicyReport {
+// The first millisecond after the expiry date in UTC, or NaN when the text is not a real calendar day.
+function expiryEndMs(expires: string): number {
+  if (!ACCEPTED_EXPIRY_PATTERN.test(expires)) return Number.NaN;
+  const start = Date.parse(`${expires}T00:00:00.000Z`);
+  if (Number.isNaN(start) || new Date(start).toISOString().slice(0, 10) !== expires) return Number.NaN;
+  return start + DAY_MS;
+}
+
+// Decides whether an audit with findings is covered by the list of accepted advisories. Every check must hold; anything
+// unexpected returns null and the caller reports "rejected" as before.
+//   a. Every advisory object is a listed one: the exact advisory URL, on the listed package, and every lock node of
+//      that package, whether npm reports it or not, has the listed version and is marked "dev": true.
+//   b. Every other entry is reported only because it depends, directly or through such entries, on an accepted one.
+//   c. Every lock node of every entry is marked "dev": true in package-lock.json.
+//   d. The current time is before the end of the listed expiry date in UTC.
+//   e. Nothing is critical. The caller has already ruled out blocked dependencies.
+function acceptedAudit(
+  lock: PackageLockSnapshot,
+  audit: ParsedAudit,
+  { now, advisories }: Acceptance,
+): { packages: DependencyPackageResult[]; exceptions: AcceptedAdvisory[] } | null {
+  if (audit.entries.length === 0 || audit.counts.critical > 0) return null;
+  const matched = new Set<ListedAdvisory>();
+  for (const entry of audit.entries) {
+    if (!entry.nodes.every((node) => node.dev)) return null;
+    for (const advisory of entry.advisories) {
+      const listed = advisories.find((item) =>
+        advisory.url === ADVISORY_URL_PREFIX + item.advisory
+        && advisory.name === item.package
+        && entry.name === item.package);
+      if (
+        !listed
+        || advisory.severity === "critical"
+        || !ACCEPTED_ADVISORY_ID_PATTERN.test(listed.advisory)
+        || !ACCEPTED_PACKAGE_PATTERN.test(listed.package)
+        || !validPackageVersion(listed.version)
+        // Read from the lock itself, so a node of the package that npm left out of its report is checked too.
+        || !lock.packages.every((node) => node.name !== listed.package || (node.dev && node.version === listed.version))
+        // Written so that an expiry date or a clock that is not a number is rejected too.
+        || !(now < expiryEndMs(listed.expires))
+      ) {
+        return null;
+      }
+      matched.add(listed);
+    }
+  }
+
+  // An entry stands once everything it depends on stands. One with only advisory objects stands at once, because
+  // the loop above already matched all of them. An entry that never stands leaves the audit rejected: it names a
+  // package the audit does not report, or itself, or it is part of a cycle.
+  const standing = new Set<string>();
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const entry of audit.entries) {
+      if (!standing.has(entry.name) && entry.dependsOn.every((name) => standing.has(name))) {
+        standing.add(entry.name);
+        grew = true;
+      }
+    }
+  }
+  if (standing.size !== audit.entries.length) return null;
+
+  const packages = audit.entries
+    .flatMap((entry) => entry.nodes.map(({ name, version }) => ({
+      name,
+      version,
+      status: entry.advisories.length > 0 ? "accepted" as const : "dependent" as const,
+    })))
+    .sort(comparePackageResults);
+  // An accepted report never omits a package, so the release script can check all of them.
+  if (packages.length > MAX_REPORTED_PACKAGES) return null;
+  const exceptions = advisories
+    .filter((item) => matched.has(item))
+    .map(({ advisory, package: name, version, expires }) => ({ advisory, package: name, version, expires }));
+  return { packages, exceptions };
+}
+
+function policyReport(lock: PackageLockSnapshot, audit: ParsedAudit, acceptance: Acceptance): DependencyPolicyReport {
   const blocked = lock.packages.filter((item) =>
     BLOCKED_DEPENDENCIES.some((blockedNode) => blockedNode.name === item.name && blockedNode.version === item.version));
+  const accepted = blocked.length === 0 ? acceptedAudit(lock, audit, acceptance) : null;
+  if (accepted) {
+    return {
+      status: "accepted",
+      counts: {
+        blocked: 0,
+        info: audit.counts.info,
+        low: audit.counts.low,
+        moderate: audit.counts.moderate,
+        high: audit.counts.high,
+        critical: audit.counts.critical,
+        vulnerabilities: audit.counts.total,
+        reported: accepted.packages.length,
+        omitted: 0,
+      },
+      packages: accepted.packages,
+      exceptions: accepted.exceptions,
+    };
+  }
   const results = [
     ...blocked.map(({ name, version }) => ({ name, version, status: "blocked" as const })),
     ...audit.packages.map(({ name, version }) => ({ name, version, status: "vulnerable" as const })),
@@ -432,7 +604,12 @@ const AUDIT_REPORT_MARKER = /"(?:auditReportVersion|vulnerabilities)"\s*:/;
 
 // Only empty stdout or npm's exact string-only error object means no report. Reports, malformed reports and
 // all other printed output are never retried, and a timed-out attempt can never pass.
-function assessAuditExecution(lock: PackageLockSnapshot, execution: AuditExecutionResult, attempt: number): AuditAssessment {
+function assessAuditExecution(
+  lock: PackageLockSnapshot,
+  execution: AuditExecutionResult,
+  attempt: number,
+  acceptance: Acceptance,
+): AuditAssessment {
   const commandFailed = (retryable: boolean): AuditAssessment => ({
     report: commandFailedReport(commandFailureReason({ execution }, attempt)),
     retryable,
@@ -444,17 +621,17 @@ function assessAuditExecution(lock: PackageLockSnapshot, execution: AuditExecuti
   const audit = parseAuditJson(execution.stdout, lock);
   if (execution.stopped === "timeout") {
     // A report printed before the time limit still counts when it rejects. Anything else is incomplete.
-    const report = audit ? policyReport(lock, audit) : undefined;
+    const report = audit ? policyReport(lock, audit, acceptance) : undefined;
     return report?.status === "rejected" ? { report, retryable: false } : malformed;
   }
   if (audit) {
     const expectedExit = execution.exitCode === 0 || (execution.exitCode === 1 && audit.counts.total > 0);
-    return expectedExit ? { report: policyReport(lock, audit), retryable: false } : commandFailed(false);
+    return expectedExit ? { report: policyReport(lock, audit, acceptance), retryable: false } : commandFailed(false);
   }
   return execution.exitCode === 0 || AUDIT_REPORT_MARKER.test(execution.stdout) ? malformed : commandFailed(false);
 }
 
-export function evaluateDependencyPolicy(options: {
+export function evaluateDependencyPolicy(options: AcceptanceOptions & {
   expectedLockSha256: string;
   packageLockText: string;
   execution: AuditExecutionResult;
@@ -464,7 +641,7 @@ export function evaluateDependencyPolicy(options: {
   const lock = parsePackageLock(options.packageLockText);
   if (!lock) return dependencyPolicyFailure("invalid_lock");
   if (lock.sha256 !== expected) return dependencyPolicyFailure("lock_mismatch");
-  return assessAuditExecution(lock, options.execution, 1).report;
+  return assessAuditExecution(lock, options.execution, 1, acceptanceFrom(options)).report;
 }
 
 async function readLock(lockPath: string): Promise<{ text: string; snapshot: PackageLockSnapshot } | null> {
@@ -477,7 +654,7 @@ async function readLock(lockPath: string): Promise<{ text: string; snapshot: Pac
   }
 }
 
-export async function runDependencyAudit(options: {
+export async function runDependencyAudit(options: AcceptanceOptions & {
   cwd: string;
   lockPath: string;
   expectedLockSha256: string;
@@ -504,7 +681,7 @@ export async function runDependencyAudit(options: {
     const after = await readLock(options.lockPath);
     if (!after || after.snapshot.sha256 !== expected) return dependencyPolicyFailure("lock_mismatch");
     const assessment: AuditAssessment = execution
-      ? assessAuditExecution(after.snapshot, execution, attempt)
+      ? assessAuditExecution(after.snapshot, execution, attempt, acceptanceFrom(options))
       : { report: commandFailedReport(commandFailureReason({ startError }, attempt)), retryable: true };
     if (!assessment.retryable || attempt >= MAX_AUDIT_ATTEMPTS) return assessment.report;
     options.onRetry?.(assessment.report.reason ?? "");
@@ -519,11 +696,10 @@ function isWithinDirectory(parent: string, child: string): boolean {
   return relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
 }
 
-export async function evaluateTemporaryAuditFile(options: {
+export async function evaluateTemporaryAuditFile(options: AcceptanceOptions & {
   auditPath: string;
   lockPath: string;
   expectedLockSha256: string;
-  now?: number;
 }): Promise<DependencyPolicyReport> {
   const now = options.now ?? Date.now();
   let auditPath: string;
@@ -556,6 +732,8 @@ export async function evaluateTemporaryAuditFile(options: {
     expectedLockSha256: options.expectedLockSha256,
     packageLockText: lock.text,
     execution: { exitCode: 0, stdout: auditJson },
+    now,
+    acceptedAdvisories: options.acceptedAdvisories,
   });
 }
 
