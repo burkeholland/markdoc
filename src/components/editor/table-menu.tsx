@@ -263,9 +263,10 @@ export function TableMenu({
       actions.table(command);
       if (removes && actions.formatState().tablePos >= 0) placeHold.disarm();
     });
-  // The row or column under a second Delete is not the one the pointer was aimed at: a double-click
-  // (or a double tap) deletes one. Two clicks 500 ms or more apart delete two.
-  const remove = (command: "deleteRow" | "deleteColumn") => {
+  // What is under a second Delete is not what the pointer was aimed at: the next row or column, or the
+  // table next to this one when the delete took this one away and the menu moved to that one. A
+  // double-click (or a double tap) deletes one. Two clicks 500 ms or more apart delete two.
+  const remove = (command: "deleteRow" | "deleteColumn" | "deleteTable") => {
     const click = table(command);
     return (e: MouseEvent<HTMLButtonElement>) => {
       if (e.detail <= 1) click(e);
@@ -325,7 +326,7 @@ export function TableMenu({
         <TextAlignEnd size={16} />
       </MenuButton>
       <span className="mx-0.5 h-5 w-px bg-white/20" />
-      <MenuButton label="Delete table" onClick={table("deleteTable")} testId="table-delete">
+      <MenuButton label="Delete table" onClick={remove("deleteTable")} testId="table-delete">
         <Trash2 size={16} />
       </MenuButton>
     </div>

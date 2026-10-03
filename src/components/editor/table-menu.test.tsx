@@ -644,16 +644,16 @@ describe("TableMenu keyboard and click checks", () => {
     }
   });
 
-  it("a double-click deletes one row or column; other buttons act on every click", () => {
+  it("a double-click deletes one row, column or table; other buttons act on every click", () => {
     const { current, unmount } = mount();
     try {
-      for (const testId of ["table-delete-row", "table-delete-col", "table-row-after"]) {
+      for (const testId of ["table-delete-row", "table-delete-col", "table-delete", "table-row-after"]) {
         for (const detail of [1, 2, 3]) fireEvent.click(button(testId), { detail });
       }
       // Two separate clicks are two deletes.
       fireEvent.click(button("table-delete-row"), { detail: 1 });
       expect(current.tableAction.mock.calls).toEqual([
-        ["deleteRow"], ["deleteColumn"], ["rowAfter"], ["rowAfter"], ["rowAfter"], ["deleteRow"],
+        ["deleteRow"], ["deleteColumn"], ["deleteTable"], ["rowAfter"], ["rowAfter"], ["rowAfter"], ["deleteRow"],
       ]);
     } finally {
       unmount();

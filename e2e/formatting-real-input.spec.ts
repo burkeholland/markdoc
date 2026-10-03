@@ -9,13 +9,16 @@ import { clickCell, codeText, createDocument, expectTableShape, shareWith, signI
  * taps. No React props, no handler calls and no dev-only hooks (`__markdocRichView`, `selectTextInRich`,
  * `clickEdgeOf`), so the file runs unchanged against a production build (`PROD_BASE_URL`).
  *
- * Two kinds of case:
+ * Three kinds of case:
  * - Input the old event-check gates dropped: a second click on the same table button, a held arrow in the
  *   bubble, Home after a held arrow, a touch tap, a click with a remote edit between its press and release.
  * - One press is one action, and nothing else gets the rest of it: a held Enter or Space, and the second
  *   click of a double-click on a control that the first click closed, hid or moved.
+ * - The box that keeps a removed control's place is there for that and for nothing else: what a click lands
+ *   on shortly after a button that leaves its control in place, and 600 ms after one that removes it.
  *
- * The only fixed waits are the gaps between two clicks, where the gap is what is being tested.
+ * The only fixed waits are gaps that are the subject of the test: between two clicks or taps, and the
+ * second after which the Text style menu forgets a typed letter.
  */
 
 type Layout = "split" | "rich" | "code";
@@ -51,6 +54,17 @@ const TABLE_DOC = [
   "| 9 | 10 | 11 | 12 |",
   "",
 ].join("\n");
+
+/**
+ * The line above the table when the test is about what a stray click under the table menu would hit. At
+ * 1440 px it is one line that runs under every button of the menu, so a click that got through would put
+ * the caret in the middle of it; the delete itself leaves the caret at its end.
+ */
+const UNDER_MENU = "After text that runs on under every button of the table menu.";
+
+/** Rows of text down the pane, so one of them has its bubble over a given spot of the Link dialog. */
+const LINK_ROWS = Array.from({ length: 22 }, (_, i) => `Row ${String(i + 1).padStart(2, "0")} of the link test.`);
+const LINK_DOC = ["Intro text.", "", "Target paragraph.", "", ...LINK_ROWS.flatMap((row) => [row, ""])].join("\n");
 
 /** The two widths every pointer case runs at. A phone shows one pane, so it gets the preview. */
 const SIZES: { name: string; layout: Layout; options: BrowserContextOptions }[] = [
@@ -277,6 +291,33 @@ const DOUBLE_TAP: Gesture = {
     await page.touchscreen.tap(x, y);
   },
 };
+/** `count` taps on one spot, `gap` ms apart (0: as fast as they can be sent). */
+const taps = (count: 2 | 3, gap: number): Gesture => ({
+  name: `${count === 2 ? "a double" : "a triple"} tap${gap ? `, ${gap} ms apart` : " with no gap"}`,
+  counted: 1,
+  async run(page, x, y) {
+    for (let i = 0; i < count; i++) {
+      // The gap is the subject.
+      if (i && gap) await page.waitForTimeout(gap);
+      await page.touchscreen.tap(x, y);
+    }
+  },
+});
+/**
+ * A click and a second one `gap` ms later that the browser counts as the second of a double-click
+ * (`detail` 2), as a real mouse does for two clicks on one spot within 500 ms.
+ */
+const doubleClick = (gap: number): Gesture => ({
+  name: gap ? `a double-click with ${gap} ms between its clicks` : "a double-click with no gap",
+  counted: 1,
+  async run(page, x, y) {
+    await page.mouse.click(x, y);
+    // The gap is the subject.
+    if (gap) await page.waitForTimeout(gap);
+    await page.mouse.down({ clickCount: 2 });
+    await page.mouse.up({ clickCount: 2 });
+  },
+});
 
 type Marks = "plain" | "strong" | "em" | "both";
 const CODE_TARGET: Record<Marks, RegExp> = {
@@ -309,6 +350,65 @@ const expectDocument = (page: Page, line: string, step: string) =>
 /** The text of every block in the preview, in order: what a stray key or click would change. */
 const blockTexts = (page: Page) =>
   page.locator(".md-rich").evaluate((root) => Array.from(root.children, (block) => `${block.tagName}:${block.textContent}`));
+
+/** Where the caret is: the block it is in and its offset, or where focus went instead. */
+const caretPlace = (page: Page) =>
+  page.evaluate(() => {
+    const selection = window.getSelection();
+    const node = selection?.anchorNode ?? null;
+    const block = (node instanceof Element ? node : node?.parentElement)?.closest(".md-rich > *");
+    if (!document.activeElement?.closest(".md-rich") || !selection || !block) return `focus on ${document.activeElement?.tagName}`;
+    return `${block.textContent} @${selection.anchorOffset} ${selection.isCollapsed ? "caret" : "range"}`;
+  });
+
+/** One pointer press: when it came (ms, the page's clock) and what it landed on. */
+interface Press {
+  at: number;
+  on: string;
+}
+
+/**
+ * Start a fresh record of what every pointer press lands on. The page gets one listener that only looks:
+ * it sends no input and changes nothing. "box" is the place-holding box of press-once.tsx.
+ */
+async function watchPresses(page: Page) {
+  await page.evaluate(() => {
+    const state = window as unknown as { __presses?: { at: number; on: string }[] };
+    if (state.__presses) {
+      state.__presses.length = 0;
+      return;
+    }
+    const seen: { at: number; on: string }[] = (state.__presses = []);
+    const places = [
+      ["[data-testid=place-hold]", "box"],
+      ["[data-testid=selection-bubble]", "bubble"],
+      ["[data-testid=table-menu]", "table menu"],
+      ["[role=menu]", "menu"],
+      ["[role=dialog]", "dialog"],
+      [".md-rich", "preview"],
+    ];
+    window.addEventListener(
+      "pointerdown",
+      (event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        const place = places.find(([selector]) => target?.closest(selector));
+        seen.push({ at: event.timeStamp, on: place ? place[1] : (target?.getAttribute("data-testid") ?? target?.tagName.toLowerCase() ?? "nothing") });
+      },
+      true,
+    );
+  });
+}
+const presses = (page: Page): Promise<Press[]> =>
+  page.evaluate(() => (window as unknown as { __presses: { at: number; on: string }[] }).__presses.map((press) => ({ ...press })));
+
+/** The part two boxes share, or null when it is under 12 px either way: too little to aim a click at. */
+function overlap(a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }) {
+  const left = Math.max(a.x, b.x);
+  const right = Math.min(a.x + a.width, b.x + b.width);
+  const top = Math.max(a.y, b.y);
+  const bottom = Math.min(a.y + a.height, b.y + b.height);
+  return right - left >= 12 && bottom - top >= 12 ? { x: (left + right) / 2, y: (top + bottom) / 2 } : null;
+}
 
 test.describe("formatting toolbar: real input", () => {
   for (const layout of ["split", "rich", "code"] as const) {
@@ -530,6 +630,30 @@ test.describe("formatting toolbar: real input", () => {
     await page.keyboard.press("Enter");
     await expect(menu).toHaveCount(0);
     await expect(page.locator(".md-rich h1", { hasText: "paragraph." }), "the keyboard's item is picked").toHaveCount(1);
+    await context.close();
+  });
+
+  test("with the menu opened by the pointer, a space typed after a letter stays in the menu's search", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+    const menu = page.getByRole("menu");
+
+    // The pointer opens the menu with focus on the menu, not on an item: the letter is typed there.
+    await dragSelect(page, "Target");
+    await headingMenu(page).click();
+    await expect(menu).toBeVisible();
+    await page.keyboard.press("h");
+    await expect(menuItem(page, "Heading 1"), "the letter finds the first match").toBeFocused();
+    await page.keyboard.press(" ");
+    await frames(page);
+    await expect(menu, "the space is part of the name being typed").toBeVisible();
+    await expectDocument(page, "Target paragraph.", "the space picks nothing");
+
+    // The search forgets what was typed after a second: the gap is the subject. Space then picks.
+    await page.waitForTimeout(1_100);
+    await page.keyboard.press(" ");
+    await expect(menu).toHaveCount(0);
+    await expectDocument(page, "# Target paragraph.", "Space, a second after the last letter");
     await context.close();
   });
 
@@ -817,17 +941,8 @@ test.describe("one press is one action: the rest of a double-click", () => {
 
     test(`${size.name}: Delete table removes the table once and the click after it does not move the caret`, async ({ browser }) => {
       test.setTimeout(240_000);
-      const id = await newDocument(browser, {}, TABLE_DOC);
+      const id = await newDocument(browser, {}, TABLE_DOC.replace("After text.", UNDER_MENU));
       const { page, context } = await openAs(browser, "owner", id, size.layout, size.options);
-      /** Where the caret is: the block it is in and its offset, or where focus went instead. */
-      const caret = () =>
-        page.evaluate(() => {
-          const selection = window.getSelection();
-          const node = selection?.anchorNode ?? null;
-          const block = (node instanceof Element ? node : node?.parentElement)?.closest(".md-rich > *");
-          if (!document.activeElement?.closest(".md-rich") || !selection || !block) return `focus on ${document.activeElement?.tagName}`;
-          return `${block.textContent} @${selection.anchorOffset} ${selection.isCollapsed ? "caret" : "range"}`;
-        });
       const restore = async () => {
         await page.keyboard.press("Control+z");
         await expect(page.locator(".md-rich table")).toHaveCount(1);
@@ -838,7 +953,7 @@ test.describe("one press is one action: the rest of a double-click", () => {
       await page.getByTestId("table-delete").click();
       await expect(page.locator(".md-rich table")).toHaveCount(0);
       await expect(placeHold(page)).toHaveCount(0);
-      const expected = await caret();
+      const expected = await caretPlace(page);
       expect(expected, "a delete leaves a caret in the preview").toMatch(/caret$/);
       await restore();
 
@@ -847,11 +962,15 @@ test.describe("one press is one action: the rest of a double-click", () => {
           const step = `${gesture.name} at ${spot * 100}% of Delete table`;
           await clickCell(page, 1, 0);
           const point = await pointOn(page.getByTestId("table-delete"), spot);
+          await watchPresses(page);
           await gesture.run(page, point.x, point.y);
           await expect(page.locator(".md-rich table"), step).toHaveCount(0);
           await expect(placeHold(page), `${step}: the place is given back`).toHaveCount(0);
-          expect(await caret(), `${step}: the caret is where the delete left it`).toBe(expected);
-          expect(await blockTexts(page), `${step}: nothing else changed`).toEqual(["P:Intro text.", "P:Target paragraph.", "P:After text."]);
+          // The menu is there for one more frame after its table; then the box has its place.
+          const stray = (await presses(page)).map((press) => press.on).filter((on) => on !== "table menu" && on !== "box");
+          expect(stray, `${step}: every press lands on the menu or on the box that keeps its place`).toEqual([]);
+          expect(await caretPlace(page), `${step}: the caret is where the delete left it`).toBe(expected);
+          expect(await blockTexts(page), `${step}: nothing else changed`).toEqual(["P:Intro text.", "P:Target paragraph.", `P:${UNDER_MENU}`]);
           await restore();
         }
       }
@@ -884,38 +1003,53 @@ test.describe("one press is one action: the rest of a double-click", () => {
     await context.close();
   });
 
-  for (const size of SIZES) {
-    test(`${size.name}: Delete row and Delete column delete one per double-click, and one per separate click`, async ({ browser }) => {
-      test.setTimeout(240_000);
-      const id = await newDocument(browser, {}, TABLE_DOC);
-      const { page, context } = await openAs(browser, "owner", id, size.layout, size.options);
-      // Read from the preview: at 390 px there is no Markdown pane to count lines in.
-      const shape = () =>
-        page.locator(".md-rich table tr").evaluateAll((rows) => `${rows.length}x${rows[0]?.querySelectorAll("td,th").length ?? 0}`);
-      await expect.poll(shape).toBe("4x4");
+  /** Delete row and Delete column under each gesture: how many it deletes, that the menu stays, and where focus is. */
+  async function deleteUnder(browser: Browser, size: (typeof SIZES)[number], gestures: Gesture[], spots: number[]) {
+    const id = await newDocument(browser, {}, TABLE_DOC);
+    const { page, context } = await openAs(browser, "owner", id, size.layout, size.options);
+    // Read from the preview: at 390 px there is no Markdown pane to count lines in.
+    const shape = () =>
+      page.locator(".md-rich table tr").evaluateAll((rows) => `${rows.length}x${rows[0]?.querySelectorAll("td,th").length ?? 0}`);
+    await expect.poll(shape).toBe("4x4");
 
-      for (const [testId, removes] of [
-        ["table-delete-row", "row"],
-        ["table-delete-col", "column"],
-      ] as const) {
-        for (const spot of SPOTS) {
-          for (const gesture of MOUSE_GESTURES) {
-            const step = `${gesture.name} at ${spot * 100}% of Delete ${removes}`;
-            await clickCell(page, 1, 0);
-            const button = page.getByTestId(testId);
-            await button.scrollIntoViewIfNeeded();
-            const point = await pointOn(button, spot);
-            await gesture.run(page, point.x, point.y);
-            const left = 4 - gesture.counted;
-            await expect.poll(shape, { message: step }).toBe(removes === "row" ? `${left}x4` : `4x${left}`);
-            await expect(page.getByTestId("table-menu"), `${step}: the menu stays`).toBeVisible();
-            await expectFocus(page, "preview", `${step}: focus stays in the editor`);
-            for (let i = 0; i < gesture.counted; i++) await page.keyboard.press("Control+z");
-            await expect.poll(shape, { message: `${step}: undone` }).toBe("4x4");
-          }
+    for (const [testId, removes] of [
+      ["table-delete-row", "row"],
+      ["table-delete-col", "column"],
+    ] as const) {
+      for (const spot of spots) {
+        for (const gesture of gestures) {
+          const step = `${gesture.name} at ${spot * 100}% of Delete ${removes}`;
+          await clickCell(page, 1, 0);
+          const button = page.getByTestId(testId);
+          await button.scrollIntoViewIfNeeded();
+          const point = await pointOn(button, spot);
+          await gesture.run(page, point.x, point.y);
+          const left = 4 - gesture.counted;
+          await expect.poll(shape, { message: step }).toBe(removes === "row" ? `${left}x4` : `4x${left}`);
+          await expect(page.getByTestId("table-menu"), `${step}: the menu stays`).toBeVisible();
+          await expect(placeHold(page), `${step}: the table is still there, so nothing keeps the menu's place`).toHaveCount(0);
+          await expectFocus(page, "preview", `${step}: focus stays in the editor`);
+          for (let i = 0; i < gesture.counted; i++) await page.keyboard.press("Control+z");
+          await expect.poll(shape, { message: `${step}: undone` }).toBe("4x4");
         }
       }
-      await context.close();
+    }
+    await context.close();
+  }
+
+  for (const size of SIZES) {
+    // The gestures of MOUSE_GESTURES named "two clicks" report click count 1 for each click, whatever the
+    // gap: they pin the rule itself (only a click the browser counts as part of a multi-click is ignored).
+    test(`${size.name}: Delete row and Delete column delete one per double-click, and one per separate click`, async ({ browser }) => {
+      test.setTimeout(240_000);
+      await deleteUnder(browser, size, MOUSE_GESTURES, SPOTS);
+    });
+
+    // What a real mouse sends: within 500 ms on one spot the second click carries click count 2, later it
+    // is a new first click.
+    test(`${size.name}: Delete row and Delete column with the click counts a mouse sends: one deleted up to 400 ms apart, two from 550 ms`, async ({ browser }) => {
+      test.setTimeout(240_000);
+      await deleteUnder(browser, size, [doubleClick(0), doubleClick(120), doubleClick(400), twoClicks(550), twoClicks(700)], [0.5]);
     });
   }
 
@@ -992,17 +1126,9 @@ test.describe("one press is one action: the rest of a double-click", () => {
 
   test("Delete column on the last column removes the table once and the click after it does not move the caret", async ({ browser }) => {
     test.setTimeout(180_000);
-    const oneColumn = ["Intro text.", "", "Target paragraph.", "", "After text.", "", "| a |", "| --- |", "| 1 |", ""].join("\n");
+    const oneColumn = ["Intro text.", "", "Target paragraph.", "", UNDER_MENU, "", "| a |", "| --- |", "| 1 |", ""].join("\n");
     const id = await newDocument(browser, {}, oneColumn);
     const { page, context } = await openAs(browser, "owner", id, "split");
-    const caret = () =>
-      page.evaluate(() => {
-        const selection = window.getSelection();
-        const node = selection?.anchorNode ?? null;
-        const block = (node instanceof Element ? node : node?.parentElement)?.closest(".md-rich > *");
-        if (!document.activeElement?.closest(".md-rich") || !selection || !block) return `focus on ${document.activeElement?.tagName}`;
-        return `${block.textContent} @${selection.anchorOffset} ${selection.isCollapsed ? "caret" : "range"}`;
-      });
     const restore = async () => {
       await page.keyboard.press("Control+z");
       await expect(page.locator(".md-rich table")).toHaveCount(1);
@@ -1013,7 +1139,7 @@ test.describe("one press is one action: the rest of a double-click", () => {
     await page.getByTestId("table-delete-col").click();
     await expect(page.locator(".md-rich table")).toHaveCount(0);
     await expect(placeHold(page)).toHaveCount(0);
-    const expected = await caret();
+    const expected = await caretPlace(page);
     expect(expected, "the delete leaves a caret in the preview").toMatch(/caret$/);
     await restore();
 
@@ -1022,16 +1148,75 @@ test.describe("one press is one action: the rest of a double-click", () => {
         const step = `${gesture.name} at ${spot * 100}% of Delete column`;
         await clickCell(page, 1, 0);
         const point = await pointOn(page.getByTestId("table-delete-col"), spot);
+        await watchPresses(page);
         await gesture.run(page, point.x, point.y);
         await expect(page.locator(".md-rich table"), step).toHaveCount(0);
         await expect(placeHold(page), `${step}: the place is given back`).toHaveCount(0);
-        expect(await caret(), `${step}: the caret is where the delete left it`).toBe(expected);
-        expect(await blockTexts(page), `${step}: nothing else changed`).toEqual(["P:Intro text.", "P:Target paragraph.", "P:After text."]);
+        const stray = (await presses(page)).map((press) => press.on).filter((on) => on !== "table menu" && on !== "box");
+        expect(stray, `${step}: every press lands on the menu or on the box that keeps its place`).toEqual([]);
+        expect(await caretPlace(page), `${step}: the caret is where the delete left it`).toBe(expected);
+        expect(await blockTexts(page), `${step}: nothing else changed`).toEqual(["P:Intro text.", "P:Target paragraph.", `P:${UNDER_MENU}`]);
         await restore();
       }
     }
     await context.close();
   });
+
+  for (const size of SIZES) {
+    // After the delete the caret is in the neighbouring table, so the menu does not go away: it moves to
+    // that table. When that is the table after, it has moved up to where the deleted one was, and the
+    // same button is under the pointer again. When it is the table before, the menu has moved up to it,
+    // and what is under the pointer is a cell of that table: the rest of the gesture can put the caret
+    // there, and that is all it can do.
+    test(`${size.name}: with another table next to it, a double-click or a double tap on a delete that removes the table removes one table`, async ({ browser }) => {
+      test.setTimeout(300_000);
+      const table = (head: string, cell: string) => [head, head.replace(/[^|\s]+/g, "---"), cell, ""];
+      const two = [...table("| a | b |", "| 1 | 2 |"), ...table("| c | d |", "| 3 | 4 |")];
+      const cases = [
+        { name: "Delete table, the first of two tables", doc: two, caretIn: 0, testId: "table-delete", left: "c", menuStays: true },
+        { name: "Delete table, the last of two tables", doc: two, caretIn: 1, testId: "table-delete", left: "a", menuStays: false },
+        { name: "Delete column, a one-column table before another table", doc: [...table("| a |", "| 1 |"), ...table("| c | d |", "| 3 | 4 |")], caretIn: 0, testId: "table-delete-col", left: "c", menuStays: true },
+      ];
+      const gestures = [doubleClick(0), doubleClick(120), doubleClick(400), taps(2, 0)];
+
+      for (const { name, doc, caretIn, testId, left, menuStays } of cases) {
+        const id = await newDocument(browser, {}, ["Intro text.", "", "Target paragraph.", "", "After text.", "", ...doc].join("\n"));
+        const { page, context } = await openAs(browser, "owner", id, size.layout, { ...size.options, hasTouch: true });
+        const tables = page.locator(".md-rich table");
+        await expect(tables).toHaveCount(2);
+        // Without the mark the editor draws for a caret between two blocks: a press beside a table puts one there.
+        const blocks = async () => (await blockTexts(page)).filter((block) => block !== "DIV:");
+        const before = await blocks();
+
+        for (const spot of SPOTS) {
+          for (const gesture of gestures) {
+            const step = `${name}: ${gesture.name} at ${spot * 100}%`;
+            await tables.nth(caretIn).locator("td").first().click();
+            const button = page.getByTestId(testId);
+            await expect(button).toBeVisible();
+            await button.scrollIntoViewIfNeeded();
+            const point = await pointOn(button, spot);
+            await watchPresses(page);
+            await gesture.run(page, point.x, point.y);
+
+            await expect(tables, step).not.toHaveCount(2);
+            await frames(page);
+            await expect(tables, `${step}: one table is left`).toHaveCount(1);
+            await expect(tables.locator("th").first(), `${step}: the other table`).toHaveText(left);
+            const stray = (await presses(page)).map((press) => press.on).filter((on) => on !== "table menu" && on !== "box");
+            if (menuStays) expect(stray, `${step}: every press lands on the menu`).toEqual([]);
+            await expectFocus(page, "preview", `${step}: focus stays in the editor`);
+            expect(await blocks(), `${step}: nothing but the one table has changed`).toEqual(before.filter((_, index) => index !== 3 + caretIn));
+
+            await page.keyboard.press("Control+z");
+            await expect(tables, `${step}: undone`).toHaveCount(2);
+            expect(await blocks(), `${step}: undone`).toEqual(before);
+          }
+        }
+        await context.close();
+      }
+    });
+  }
 
   test("Undo and Redo keep their place when the heading level comes and goes; a double-click on Undo undoes twice", async ({ browser }) => {
     const id = await newDocument(browser);
@@ -1086,6 +1271,242 @@ test.describe("one press is one action: the rest of a double-click", () => {
     await undo.click({ force: true });
     await page.getByTestId("tb-redo").click();
     await expectTarget(page, "split", "strong", "Redo after the last Undo");
+    await context.close();
+  });
+});
+
+/**
+ * The box is for the rest of the gesture that removed a control, and for nothing else: only a click
+ * whose own action takes the control away puts it up, and it is gone 600 ms after that click.
+ */
+test.describe("the box that keeps a removed control's place", () => {
+  test("the bubble's Comment with the Comments panel closed: the rest of a double tap, a triple tap or a double-click lands on nothing", async ({ browser }) => {
+    test.setTimeout(300_000);
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split", { hasTouch: true });
+    const panel = page.getByTestId("comments-panel");
+    const gestures: { gesture: Gesture; count: number }[] = [
+      { gesture: taps(2, 0), count: 2 },
+      { gesture: taps(3, 0), count: 3 },
+      { gesture: taps(2, 120), count: 2 },
+      { gesture: taps(2, 250), count: 2 },
+      { gesture: doubleClick(0), count: 2 },
+      { gesture: doubleClick(120), count: 2 },
+      { gesture: doubleClick(250), count: 2 },
+    ];
+
+    for (const spot of SPOTS) {
+      for (const { gesture, count } of gestures) {
+        const step = `${gesture.name} at ${spot * 100}% of Comment`;
+        // The panel coming in makes the preview narrower, and the text moves under the pointer.
+        await expect(panel, `${step}: the pass starts with the Comments panel closed`).toHaveCount(0);
+        await dragSelect(page, "Target");
+        const point = await pointOn(bubbleButton(page, "Comment"), spot);
+        await watchPresses(page);
+        await gesture.run(page, point.x, point.y);
+
+        await expect(composer(page), `${step}: the composer has focus`).toBeFocused();
+        await expect(page.getByTestId("pending-comment"), `${step}: one composer`).toHaveCount(1);
+        await expect(page.getByTestId("comment-quote"), `${step}: on the selected text`).toHaveText("Target");
+        expect((await presses(page)).map((press) => press.on), `${step}: the first press is on the bubble, the rest on the box in its place`).toEqual([
+          "bubble",
+          ...Array.from({ length: count - 1 }, () => "box"),
+        ]);
+        await expect(bubble(page), `${step}: the bubble does not come back`).toHaveCount(0);
+        await expect(placeHold(page), `${step}: the place is given back`).toHaveCount(0);
+        await expect(composer(page), `${step}: the composer still has focus`).toBeFocused();
+        await expectDocument(page, "Target paragraph.", `${step}: nothing was typed or formatted`);
+
+        // Cancelling puts the caret at the end of the selection the comment was for: it was still "Target".
+        await page.keyboard.press("Escape");
+        await expect(page.getByTestId("pending-comment")).toHaveCount(0);
+        await expect.poll(() => caretPlace(page), { message: `${step}: the selection was not moved` }).toBe("Target paragraph. @6 caret");
+        await page.getByRole("button", { name: "Close comments" }).click();
+      }
+    }
+    await context.close();
+  });
+
+  for (const size of SIZES) {
+    test(`${size.name}: a click on the Link dialog 150 ms after the bubble's Link reaches the dialog`, async ({ browser }) => {
+      const id = await newDocument(browser, {}, LINK_DOC);
+      const { page, context } = await openAs(browser, "owner", id, size.layout, size.options);
+      const dialog = page.getByRole("dialog");
+      const textField = page.getByTestId("link-text");
+
+      // Where the dialog puts its Text field, and where the bubble sits relative to the text it is for.
+      await dragSelect(page, "Target");
+      const lift = (await bubble(page).boundingBox())!.y - (await textBox(page, "Target")).y;
+      await bubbleButton(page, "Link").click();
+      await expect(page.getByTestId("link-url"), "the dialog opens on its URL field").toBeFocused();
+      let field = (await textField.boundingBox())!;
+      await expect
+        .poll(
+          async () => {
+            const now = (await textField.boundingBox())!;
+            const still = now.x === field.x && now.y === field.y;
+            field = now;
+            return still;
+          },
+          { message: "the dialog has settled" },
+        )
+        .toBe(true);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+
+      // The row whose bubble is over that field.
+      let row = "";
+      let best = Number.POSITIVE_INFINITY;
+      for (const candidate of LINK_ROWS) {
+        const name = candidate.slice(0, 6);
+        const off = Math.abs((await textBox(page, name)).y + lift - field.y);
+        if (off < best) [row, best] = [name, off];
+      }
+      await dragSelect(page, row);
+      const spot = overlap((await bubble(page).boundingBox())!, field);
+      expect(spot, `the bubble over "${row}" covers part of the dialog's Text field`).not.toBeNull();
+
+      const link = await pointOn(bubbleButton(page, "Link"));
+      await watchPresses(page);
+      await page.mouse.click(link.x, link.y);
+      // The gap is the subject: the bubble is gone, and nothing may be in the way of the dialog.
+      await page.waitForTimeout(150);
+      await page.mouse.click(spot!.x, spot!.y);
+      await expect(textField, "the click reaches the Text field").toBeFocused();
+      expect((await presses(page)).map((press) => press.on)).toEqual(["bubble", "dialog"]);
+      await expect(placeHold(page), "Link never keeps the bubble's place").toHaveCount(0);
+      await page.keyboard.type("!");
+      await expect(textField).toHaveValue(/!/);
+      await context.close();
+    });
+
+    test(`${size.name}: the bubble's Bold, an arrow key, and a click on the text where the bubble was`, async ({ browser }) => {
+      const id = await newDocument(browser);
+      const { page, context } = await openAs(browser, "owner", id, size.layout, size.options);
+
+      // The bubble of a selection in "Target paragraph." floats over the line above it.
+      await dragSelect(page, "Target");
+      const box = (await bubble(page).boundingBox())!;
+      const intro = await textBox(page, "Intro");
+      const spot = overlap(box, { x: intro.left, y: intro.y - 6, width: intro.right - intro.left, height: 12 });
+      expect(spot, 'the bubble covers "Intro"').not.toBeNull();
+
+      const bold = await pointOn(bubbleButton(page, "Bold"));
+      await watchPresses(page);
+      await page.mouse.click(bold.x, bold.y);
+      await page.keyboard.press("ArrowRight");
+      // The gap is the subject: the arrow has collapsed the selection and the bubble is gone.
+      await page.waitForTimeout(150);
+      await page.mouse.click(spot!.x, spot!.y);
+
+      await expect.poll(() => caretPlace(page), { message: "the click puts the caret in the text" }).toMatch(/^Intro text\. @\d+ caret$/);
+      expect((await presses(page)).map((press) => press.on)).toEqual(["bubble", "preview"]);
+      await expectTarget(page, size.layout, "strong", "Bold was applied once");
+      await context.close();
+    });
+  }
+
+  test("the table menu's Row below, Escape, and a click on the text where the menu was", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+    await expectTableShape(page, 2, 2);
+
+    await clickCell(page, 1, 0);
+    const menu = page.getByTestId("table-menu");
+    const after = await textBox(page, "After");
+    const spot = overlap((await menu.boundingBox())!, { x: after.left, y: after.y - 6, width: after.right - after.left, height: 12 });
+    expect(spot, 'the table menu covers "After"').not.toBeNull();
+
+    const rowBelow = await pointOn(page.getByTestId("table-row-after"));
+    await watchPresses(page);
+    await page.mouse.click(rowBelow.x, rowBelow.y);
+    await expectTableShape(page, 3, 2);
+    await page.keyboard.press("Escape");
+    // The gap is the subject: Escape has hidden the menu.
+    await page.waitForTimeout(150);
+    await page.mouse.click(spot!.x, spot!.y);
+
+    await expect.poll(() => caretPlace(page), { message: "the click puts the caret in the text" }).toMatch(/^After text\. @\d+ caret$/);
+    expect((await presses(page)).map((press) => press.on)).toEqual(["table menu", "preview"]);
+    await expectTableShape(page, 3, 2);
+    await context.close();
+  });
+
+  test("the box is gone 600 ms after the click that put it up, also when a click landed on it in between", async ({ browser }) => {
+    const id = await newDocument(browser, {}, TABLE_DOC.replace("After text.", UNDER_MENU));
+    const { page, context } = await openAs(browser, "owner", id, "split");
+    await expectTableShape(page, 4, 4);
+
+    // Delete table takes the menu away; the long line above the table is under its place.
+    for (let attempt = 1; ; attempt++) {
+      await clickCell(page, 1, 0);
+      const point = await pointOn(page.getByTestId("table-delete"));
+      await watchPresses(page);
+      await page.mouse.click(point.x, point.y);
+      const clicked = Date.now();
+      // The gaps are the subject: 400 ms after the first click, and 650 ms after it.
+      await page.waitForTimeout(400);
+      await page.mouse.click(point.x, point.y);
+      await page.waitForTimeout(Math.max(0, 650 - (Date.now() - clicked)));
+      await page.mouse.click(point.x, point.y);
+
+      const seen = await presses(page);
+      const [, second, third] = seen.map((press) => press.at - seen[0].at);
+      // A machine too busy to place the clicks proves nothing either way: the second has to come well
+      // inside the 600 ms, and the third well before a box that started again at the second would have gone.
+      if ((second >= 550 || third >= second + 550) && attempt < 3) {
+        await page.keyboard.press("Control+z");
+        await expect(page.locator(".md-rich table")).toHaveCount(1);
+        continue;
+      }
+      expect(second, "the second click came inside the 600 ms").toBeLessThan(600);
+      expect(third, "the third click came after them").toBeGreaterThanOrEqual(600);
+      expect(third, "the third click came before 600 ms after the second").toBeLessThan(second + 600);
+      expect(seen.map((press) => press.on), "the second click lands on the box, the third on the text under it").toEqual(["table menu", "box", "preview"]);
+      break;
+    }
+    await expect(page.locator(".md-rich table")).toHaveCount(0);
+    // The delete leaves the caret at the end of that line; the third click put it inside the line.
+    const caret = await caretPlace(page);
+    expect(caret).toMatch(new RegExp(`^${UNDER_MENU.replace(".", "\\.")} @\\d+ caret$`));
+    expect(Number(/@(\d+)/.exec(caret)![1]), "the caret is where the third click was").toBeLessThan(UNDER_MENU.length);
+    await context.close();
+  });
+
+  test("390 px: typing goes to the composer after the bubble's Comment while the box may still be over the sheet", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "rich", { viewport: { width: 390, height: 844 } });
+
+    await dragSelect(page, "Target");
+    const comment = await pointOn(bubbleButton(page, "Comment"));
+    await page.mouse.click(comment.x, comment.y);
+    await expect(composer(page)).toBeFocused();
+    // The box may still be over part of the sheet: the keyboard is not its business.
+    await page.keyboard.type("A note");
+    await expect(composer(page)).toHaveValue("A note");
+    await expect(placeHold(page)).toHaveCount(0);
+    await context.close();
+  });
+
+  test("a click on the text after the box has gone takes focus from the composer and changes nothing else", async ({ browser }) => {
+    const id = await newDocument(browser);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+
+    await dragSelect(page, "Target");
+    const comment = await pointOn(bubbleButton(page, "Comment"));
+    await page.mouse.click(comment.x, comment.y);
+    await expect(composer(page)).toBeFocused();
+    await page.keyboard.type("A note");
+    await expect(placeHold(page)).toHaveCount(0);
+    // The same spot, once the box has gone: it is a click on the document now, as if made on purpose.
+    await watchPresses(page);
+    await page.mouse.click(comment.x, comment.y);
+    await expectFocus(page, "preview", "the click takes focus to the text");
+    expect((await presses(page)).map((press) => press.on)).toEqual(["preview"]);
+    await expect(page.getByTestId("pending-comment"), "the composer stays open").toHaveCount(1);
+    await expect(composer(page), "and keeps what was typed").toHaveValue("A note");
+    await expectDocument(page, "Target paragraph.", "nothing was typed or formatted in the document");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     await context.close();
   });
 });
