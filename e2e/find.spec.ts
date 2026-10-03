@@ -352,31 +352,114 @@ test.describe("find & replace", () => {
     await user.context.close();
   });
 
-  // The one input the old event-check gate dropped on main (#2228).
-  test("Escape in the replace input closes the bar after the row was hidden and brought back with Mod-H", async ({ browser }) => {
-    const user = await signIn(browser, "find-escape-replace");
-    const id = await createDocument(user.page, SAMPLE);
-    await openDocument(user.page, id);
-    const { page } = user;
+  // What the old event-check gate dropped on main (#2228): once the replace row had gone away and come
+  // back with the bar open, the bar ignored typing, Enter, F3, its buttons, Escape and Close until the
+  // next Mod-F.
+  for (const { way, cycle } of [
+    {
+      way: "hidden and shown with the Replace toggle",
+      cycle: async (page: Page) => {
+        await page.getByTestId("find-toggle-replace").click();
+        await expect(page.getByTestId("find-replace-row")).toHaveCount(0);
+        await page.getByTestId("find-toggle-replace").click();
+      },
+    },
+    {
+      way: "hidden with the Replace toggle and brought back with Mod-H",
+      cycle: async (page: Page) => {
+        await page.getByTestId("find-toggle-replace").click();
+        await expect(page.getByTestId("find-replace-row")).toHaveCount(0);
+        await page.keyboard.press("Control+h");
+      },
+    },
+    {
+      way: "taken away by a switch to viewing and brought back by the switch to editing",
+      cycle: async (page: Page) => {
+        await page.getByTestId("preview-mode-toggle").click();
+        await expect(page.getByTestId("find-replace-row")).toHaveCount(0);
+        await page.getByTestId("preview-mode-toggle").click();
+      },
+    },
+  ]) {
+    test(`the bar keeps taking every input after the replace row was ${way}`, async ({ browser }) => {
+      const user = await signIn(browser, "find-row-cycle");
+      const id = await createDocument(user.page, SAMPLE);
+      await openDocument(user.page, id);
+      const { page } = user;
+      const input = page.getByTestId("find-input");
+      const count = page.getByTestId("find-count");
 
-    await openFromCodePane(page);
-    await page.keyboard.type("cat");
-    await expect(page.getByTestId("find-count")).toHaveText("1 of 3");
-    await page.getByTestId("find-toggle-replace").click();
-    await expect(page.getByTestId("find-replace-row")).toHaveCount(0);
-    await page.keyboard.press("Control+h");
-    await expect(page.getByTestId("find-replace-row")).toBeVisible();
-    await page.getByTestId("replace-input").click();
-    await expect(page.getByTestId("replace-input")).toBeFocused();
+      await openFromCodePane(page);
+      await page.keyboard.type("cat");
+      await expect(count).toHaveText("1 of 3");
+      await cycle(page);
+      await expect(page.getByTestId("find-replace-row")).toBeVisible();
 
-    await page.keyboard.press("Escape");
+      // Typing and the keys in the find field.
+      await input.click();
+      await page.keyboard.press("Control+a");
+      await page.keyboard.type("mat");
+      await expect(input).toHaveValue("mat");
+      await expect(count).toHaveText("1 of 1");
+      await page.keyboard.press("Control+a");
+      await page.keyboard.type("cat");
+      await expect(count).toHaveText("1 of 3");
+      await page.keyboard.press("Enter");
+      await expect(count).toHaveText("2 of 3");
+      await page.keyboard.press("Shift+Enter");
+      await expect(count).toHaveText("1 of 3");
+      await page.keyboard.press("F3");
+      await expect(count).toHaveText("2 of 3");
+      await page.keyboard.press("Shift+F3");
+      await expect(count).toHaveText("1 of 3");
 
-    await expect(page.getByTestId("find-bar")).toHaveCount(0);
-    await expect(page.locator(".cm-content")).toBeFocused();
-    expect(await selectedText(page)).toBe("cat");
-    expect(await codeText(page)).toBe(SAMPLE);
-    await user.context.close();
-  });
+      // The buttons, by mouse and by keyboard.
+      await page.getByTestId("find-next").click();
+      await expect(count).toHaveText("2 of 3");
+      await page.getByTestId("find-prev").click();
+      await expect(count).toHaveText("1 of 3");
+      await page.getByTestId("find-next").focus();
+      await page.keyboard.press("Enter");
+      await expect(count).toHaveText("2 of 3");
+      await page.getByTestId("find-prev").focus();
+      await page.keyboard.press("Space");
+      await expect(count).toHaveText("1 of 3");
+
+      // The replace field and Replace all from the keyboard.
+      await page.getByTestId("replace-input").click();
+      await page.keyboard.type("dog");
+      await page.keyboard.press("Enter");
+      await expect.poll(() => codeText(page)).toContain("The dog sat on the mat. The cat ran.");
+      await page.getByTestId("replace-all").focus();
+      await page.keyboard.press("Enter");
+      await expect.poll(() => codeText(page)).toBe(SAMPLE.replace(/cat/g, "dog"));
+
+      // Escape in the replace field, then Close after the same cycle.
+      await page.getByTestId("replace-input").click();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("find-bar")).toHaveCount(0);
+      await expect(page.locator(".cm-content")).toBeFocused();
+
+      await page.keyboard.press("Control+f");
+      await expect(input).toBeFocused();
+      await cycle(page);
+      await expect(page.getByTestId("find-replace-row")).toBeVisible();
+      await page.getByTestId("find-close").click();
+      await expect(page.getByTestId("find-bar")).toHaveCount(0);
+      await expect(page.locator(".cm-content")).toBeFocused();
+
+      await page.keyboard.press("Control+f");
+      await expect(input).toBeFocused();
+      await cycle(page);
+      await expect(page.getByTestId("find-replace-row")).toBeVisible();
+      await page.getByTestId("find-close").focus();
+      await page.keyboard.press("Enter");
+      await expect(page.getByTestId("find-bar")).toHaveCount(0);
+      await expect(page.locator(".cm-content")).toBeFocused();
+      expect(await codeText(page)).toBe(SAMPLE.replace(/cat/g, "dog"));
+      await user.context.close();
+    });
+  }
 
   test("Replace and Replace all rewrite the source", async ({ browser }) => {
     const user = await signIn(browser, "solo");
@@ -985,10 +1068,10 @@ test.describe("find & replace: real input", () => {
         await gesture.run(page, x, y);
 
         await expect(count, step).toHaveText("0 of 0");
-        await expect(page.getByTestId("replace-one"), step).toHaveAttribute("aria-disabled", "true");
         await frames(page);
         await expectFocus(page, "replace-one", step);
         await expectParagraphs(page, layout, replaced(solos[i], `ONE${i}`), step);
+        await expect(page.getByTestId("replace-one"), step).toHaveAttribute("aria-disabled", "true");
         await expect(row, step).toBeVisible();
       }
 
