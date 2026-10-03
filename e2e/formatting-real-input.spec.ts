@@ -969,6 +969,64 @@ test.describe("one press is one action: the rest of a double-click", () => {
     await page.mouse.click(bold.x, bold.y, { clickCount: 3 });
     await expect(targetBlock(page).locator("strong")).toHaveText("Target");
     await expect(targetBlock(page).locator("em, s, del, code"), "a triple click on Bold is Bold only").toHaveCount(0);
+
+    // None of the four add buttons moves the menu, so a second click is on the same button.
+    const menuPlace = async () => {
+      const box = (await page.getByTestId("table-menu").boundingBox())!;
+      return [Math.round(box.x), Math.round(box.y), Math.round(box.width)];
+    };
+    for (const testId of ["table-row-before", "table-row-after", "table-col-before", "table-col-after"]) {
+      await clickCell(page, 1, 0);
+      const before = await menuPlace();
+      const size = await page.locator(".md-rich table td, .md-rich table th").count();
+      await page.getByTestId(testId).click();
+      await expect.poll(() => page.locator(".md-rich table td, .md-rich table th").count(), { message: testId }).toBeGreaterThan(size);
+      await frames(page);
+      expect(await menuPlace(), `${testId} leaves the menu where it was`).toEqual(before);
+    }
+    await context.close();
+  });
+
+  test("Delete column on the last column removes the table once and the click after it does not move the caret", async ({ browser }) => {
+    test.setTimeout(180_000);
+    const oneColumn = ["Intro text.", "", "Target paragraph.", "", "After text.", "", "| a |", "| --- |", "| 1 |", ""].join("\n");
+    const id = await newDocument(browser, {}, oneColumn);
+    const { page, context } = await openAs(browser, "owner", id, "split");
+    const caret = () =>
+      page.evaluate(() => {
+        const selection = window.getSelection();
+        const node = selection?.anchorNode ?? null;
+        const block = (node instanceof Element ? node : node?.parentElement)?.closest(".md-rich > *");
+        if (!document.activeElement?.closest(".md-rich") || !selection || !block) return `focus on ${document.activeElement?.tagName}`;
+        return `${block.textContent} @${selection.anchorOffset} ${selection.isCollapsed ? "caret" : "range"}`;
+      });
+    const restore = async () => {
+      await page.keyboard.press("Control+z");
+      await expect(page.locator(".md-rich table")).toHaveCount(1);
+    };
+
+    // The table has one column: deleting it removes the table, and the menu with it.
+    await clickCell(page, 1, 0);
+    await page.getByTestId("table-delete-col").click();
+    await expect(page.locator(".md-rich table")).toHaveCount(0);
+    await expect(placeHold(page)).toHaveCount(0);
+    const expected = await caret();
+    expect(expected, "the delete leaves a caret in the preview").toMatch(/caret$/);
+    await restore();
+
+    for (const spot of SPOTS) {
+      for (const gesture of MOUSE_GESTURES) {
+        const step = `${gesture.name} at ${spot * 100}% of Delete column`;
+        await clickCell(page, 1, 0);
+        const point = await pointOn(page.getByTestId("table-delete-col"), spot);
+        await gesture.run(page, point.x, point.y);
+        await expect(page.locator(".md-rich table"), step).toHaveCount(0);
+        await expect(placeHold(page), `${step}: the place is given back`).toHaveCount(0);
+        expect(await caret(), `${step}: the caret is where the delete left it`).toBe(expected);
+        expect(await blockTexts(page), `${step}: nothing else changed`).toEqual(["P:Intro text.", "P:Target paragraph.", "P:After text."]);
+        await restore();
+      }
+    }
     await context.close();
   });
 
