@@ -851,7 +851,6 @@ interface ImagePublication {
   readonly placement: ImagePlacement;
   readonly fileFacts: ImageFileFacts | null;
   readonly fileControl: object | null;
-  readonly authorizeDismissal: (event: Event) => void;
   readonly retire: () => boolean;
   readonly releaseTerminal: () => boolean;
   readonly isRetired: () => boolean;
@@ -886,13 +885,6 @@ interface ImagePublicationRuntime {
   readonly isExactReplay: () => boolean;
   readonly isRecoverablePartialReplay: () => boolean;
   readonly replay: () => ImagePublicationReplay | null;
-}
-
-interface ImageDismissalProof {
-  readonly publication: ImagePublication;
-  readonly control: object;
-  readonly reactEvent: object;
-  readonly nativeEvent: Event;
 }
 
 interface ImageInsertionOwner {
@@ -1100,7 +1092,6 @@ interface ImagePresentation {
   readonly establish: () => void | (() => void);
   readonly settlePortal: () => void | (() => void);
   readonly onOpenChange: (open: boolean) => void;
-  readonly onClickCapture: (event: React.MouseEvent<HTMLDivElement>) => void;
   readonly onUrlChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   readonly onAltChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   readonly onUploadClick: (
@@ -1435,7 +1426,6 @@ class ImageDismissalListener {
   #document: Document | null = null;
   #submitOwnerRealms = new Set<ImageNativeSubmitOwnerRealm>();
   #submitFormOwnerRealm: ImageNativeSubmitOwnerRealm | null = null;
-  #listener: ((event: Event) => void) | null = null;
   #submitForm: HTMLFormElement | null = null;
   #submitListener: ((event: Event) => void) | null = null;
   #submitProvenance: ImageSubmitProvenance | null = null;
@@ -1451,8 +1441,6 @@ class ImageDismissalListener {
   >();
   #pendingSubmitProofs = new Set<ImageSubmitCaptureProof>();
 
-  constructor(private readonly coordinator: ImagePublicationCoordinator) {}
-
   attach(bridge: HTMLDivElement) {
     const ownerRealm =
       this.findSubmitOwnerRealm(bridge) ??
@@ -1464,29 +1452,10 @@ class ImageDismissalListener {
     IMAGE_APPLY(IMAGE_SET_ADD, this.#submitOwnerRealms, [ownerRealm]);
     const ownerDocument = ownerRealm.ownerDocument;
     this.#bridge = bridge;
-    if (this.#document === ownerDocument && this.#listener) return;
+    if (this.#document === ownerDocument) return;
     this.release();
     this.#bridge = bridge;
-    const listener = (event: Event) => {
-      const publication = this.coordinator.authoritative();
-      const ownerWindow = ownerDocument.defaultView;
-      if (
-        !publication ||
-        !this.coordinator.isAuthoritative(publication) ||
-        publication.ownerDocument !== ownerDocument ||
-        !ownerWindow ||
-        (!(event instanceof ownerWindow.KeyboardEvent) &&
-          !(event instanceof ownerWindow.MouseEvent))
-      ) {
-        return;
-      }
-      publication.authorizeDismissal(event);
-    };
     this.#document = ownerDocument;
-    this.#listener = listener;
-    ownerDocument.addEventListener("keydown", listener, true);
-    ownerDocument.addEventListener("pointerdown", listener, true);
-    ownerDocument.addEventListener("click", listener, true);
   }
 
   submitOwnerRealm(node: Node) {
@@ -1736,16 +1705,9 @@ class ImageDismissalListener {
   }
 
   private release() {
-    const ownerDocument = this.#document;
-    const listener = this.#listener;
     this.#bridge = null;
     this.#document = null;
-    this.#listener = null;
     this.releaseSubmit();
-    if (!ownerDocument || !listener) return;
-    ownerDocument.removeEventListener("keydown", listener, true);
-    ownerDocument.removeEventListener("pointerdown", listener, true);
-    ownerDocument.removeEventListener("click", listener, true);
   }
 }
 
@@ -3677,84 +3639,6 @@ function imageSubmitProvenance(
   }
 }
 
-function imageExactNativeDismissal(
-  event: KeyboardEvent | PointerEvent,
-  publication: ImagePublication,
-) {
-  const ownerWindow = publication.ownerDocument.defaultView;
-  const target = event.target;
-  if (
-    !ownerWindow ||
-    event.eventPhase === ownerWindow.Event.NONE ||
-    !event.bubbles ||
-    event.defaultPrevented ||
-    !(target instanceof ownerWindow.Node) ||
-    !target.isConnected ||
-    target.ownerDocument !== publication.ownerDocument ||
-    !event.composedPath().includes(target) ||
-    !event.composedPath().includes(publication.ownerDocument)
-  ) {
-    return false;
-  }
-  if (event instanceof ownerWindow.KeyboardEvent) {
-    return (
-      event.type === "keydown" &&
-      event.key === "Escape" &&
-      publication.dom.content.contains(target) &&
-      imageSnapshotContains(publication.contentTree, target)
-    );
-  }
-  const PointerEventConstructor = ownerWindow.PointerEvent;
-  return Boolean(
-    PointerEventConstructor &&
-      event instanceof PointerEventConstructor &&
-      event.type === "pointerdown" &&
-      event.button === 0 &&
-      event.isPrimary &&
-      !event.ctrlKey &&
-      !publication.dom.content.contains(target) &&
-      imageSnapshotContains(publication.overlayTree, target),
-  );
-}
-
-function imageExactNativeOutsideClick(
-  pointer: {
-    readonly target: EventTarget | null;
-    readonly pointerId: number;
-    readonly pointerType: string;
-    readonly isPrimary: boolean;
-  },
-  event: MouseEvent,
-  publication: ImagePublication,
-) {
-  const ownerWindow = publication.ownerDocument.defaultView;
-  const PointerEventConstructor = ownerWindow?.PointerEvent;
-  const target = event.target;
-  return Boolean(
-    ownerWindow &&
-      PointerEventConstructor &&
-      event instanceof PointerEventConstructor &&
-      event.type === "click" &&
-      event.eventPhase !== ownerWindow.Event.NONE &&
-      event.bubbles &&
-      !event.defaultPrevented &&
-      event.button === 0 &&
-      event.isPrimary &&
-      !event.ctrlKey &&
-      target === pointer.target &&
-      target instanceof ownerWindow.Node &&
-      target.isConnected &&
-      target.ownerDocument === publication.ownerDocument &&
-      event.composedPath().includes(target) &&
-      event.composedPath().includes(publication.ownerDocument) &&
-      !publication.dom.content.contains(target) &&
-      imageSnapshotContains(publication.overlayTree, target) &&
-      event.pointerId === pointer.pointerId &&
-      event.pointerType === pointer.pointerType &&
-      event.isPrimary === pointer.isPrimary,
-  );
-}
-
 function createImagePublicationRuntime(
   authority: ImageAuthority,
   coordinator: ImagePublicationCoordinator,
@@ -3762,10 +3646,6 @@ function createImagePublicationRuntime(
   controls: ImageControls,
   submitDom: ImageNativeSubmitDomIntrinsics,
   authorityIsCurrent: () => boolean,
-  authorizeDismissal: (
-    publication: ImagePublication,
-    event: Event,
-  ) => void,
   owners: readonly ImageElementOwnerView[],
   onRetire: () => void,
 ): ImagePublicationRuntime | null {
@@ -3873,8 +3753,6 @@ function createImagePublicationRuntime(
     placement,
     fileFacts,
     fileControl: authority.uploadAvailable ? controls.file : null,
-    authorizeDismissal: (event: Event) =>
-      authorizeDismissal(publication, event),
     retire: () => retire("other"),
     releaseTerminal: () => {
       replayProofReleased = true;
@@ -4163,27 +4041,6 @@ function createImagePresentation(
       }
     | null = null;
   let replayRejected = false;
-  let dismissal: ImageDismissalProof | null = null;
-  let dismissalTimer: number | null = null;
-  let outsidePointer:
-    | {
-        readonly publication: ImagePublication;
-        readonly target: EventTarget | null;
-        readonly pointerId: number;
-        readonly pointerType: string;
-        readonly isPrimary: boolean;
-      }
-    | null = null;
-  const clearDismissal = () => {
-    dismissal = null;
-    outsidePointer = null;
-    if (dismissalTimer !== null) {
-      const ownerWindow =
-        lastRuntime?.publication.ownerDocument.defaultView;
-      ownerWindow?.clearTimeout(dismissalTimer);
-      dismissalTimer = null;
-    }
-  };
   const clearCommitFinish = () => {
     portalSettlement += 1;
     if (commitTimer) {
@@ -4228,7 +4085,6 @@ function createImagePresentation(
     ) {
       currentRuntime?.retireForElement();
       currentRuntime = null;
-      clearDismissal();
     }
     if (
       runtime?.isExactReplay() &&
@@ -4400,88 +4256,6 @@ function createImagePresentation(
     successorRequested = true;
     requestSuccessor();
   };
-  const stageDismissal = (
-    publication: ImagePublication,
-    proof: Omit<ImageDismissalProof, "publication">,
-  ) => {
-    clearDismissal();
-    if (
-      !owns(publication) ||
-      coordinator.hasClaimed(
-        publication,
-        proof.control,
-        insert.action,
-        proof.reactEvent,
-        proof.nativeEvent,
-      )
-    ) {
-      return;
-    }
-    dismissal = { publication, ...proof };
-    const ownerWindow = publication.ownerDocument.defaultView;
-    dismissalTimer =
-      ownerWindow?.setTimeout(() => {
-        dismissal = null;
-        dismissalTimer = null;
-      }, 0) ?? null;
-  };
-  const authorizeNativeDismissal = (
-    publication: ImagePublication,
-    event: Event,
-  ) => {
-    const ownerWindow = publication.ownerDocument.defaultView;
-    const PointerEventConstructor = ownerWindow?.PointerEvent;
-    if (!ownerWindow) return;
-    const pointer = outsidePointer;
-    clearDismissal();
-    if (!owns(publication)) return;
-    if (
-      event.type === "click" &&
-      PointerEventConstructor &&
-      event instanceof PointerEventConstructor
-    ) {
-      if (
-        pointer?.publication === publication &&
-        imageExactNativeOutsideClick(pointer, event, publication) &&
-        owns(publication)
-      ) {
-        stageDismissal(publication, {
-          control: publication.dom.overlay,
-          reactEvent: event,
-          nativeEvent: event,
-        });
-      }
-      return;
-    }
-    if (event instanceof ownerWindow.KeyboardEvent) {
-      if (
-        imageExactNativeDismissal(event, publication) &&
-        owns(publication)
-      ) {
-        stageDismissal(publication, {
-          control: publication.dom.content,
-          reactEvent: event,
-          nativeEvent: event,
-        });
-      }
-      return;
-    }
-    if (
-      !PointerEventConstructor ||
-      !(event instanceof PointerEventConstructor) ||
-      !imageExactNativeDismissal(event, publication) ||
-      !owns(publication)
-    ) {
-      return;
-    }
-    outsidePointer = {
-      publication,
-      target: event.target,
-      pointerId: event.pointerId,
-      pointerType: event.pointerType,
-      isPrimary: event.isPrimary,
-    };
-  };
   const establish = () => {
     if (lastRuntime) {
       if (
@@ -4537,10 +4311,8 @@ function createImagePresentation(
       controls,
       nextSubmitProvenance.nativeDom,
       factsAreCurrent,
-      authorizeNativeDismissal,
       expectedOwners(),
       () => {
-        clearDismissal();
         // A publication retired by a DOM change outside a render (focus guards, portal settling)
         // has no successor; render one so typing and Insert keep working. Capped per open.
         queueMicrotask(() => {
@@ -4888,39 +4660,20 @@ function createImagePresentation(
     releaseTerminalResources(publication);
     authority.onOpenChange(false);
   };
-  const onCancelClick = (event: React.MouseEvent<HTMLButtonElement>) => {
-    const publication = currentPublication();
-    const button = cancel.owner.element();
-    if (
-      !publication ||
-      !button ||
-      publication.dom.cancel !== button ||
-      event.currentTarget !== button
-    ) {
-      return;
+  // Cancel, and Radix's Escape, Close button and outside click, close the dialog without inserting,
+  // whatever state the controls' publication is in. Only a handler from a render that is no longer on
+  // the page is ignored. An Insert already on its way out keeps its image: its publication was
+  // released when it was claimed, so there is nothing here to cancel.
+  const dismiss = () => {
+    if (!bridge.owner.element()) return;
+    const publication = coordinator.authoritative();
+    if (publication?.authority.visit === authority.visit) {
+      closeCurrent(publication, false);
+    } else {
+      authority.onOpenChange(false);
     }
-    const nativeEvent = imageExactNativeClick(
-      event,
-      button,
-      button,
-      publication,
-    );
-    if (
-      !nativeEvent ||
-      !owns(publication) ||
-      publication.dom.cancel !== cancel.owner.element() ||
-      !claim(
-        publication,
-        cancel,
-        cancel.action,
-        event,
-        nativeEvent,
-      )
-    ) {
-      return;
-    }
-    closeCurrent(publication, false);
   };
+  const onCancelClick = () => dismiss();
   const deliverFormSubmit: ImageSubmitTerminalDelivery = (proof) => {
     let claimedPublication: ImagePublication | null = null;
     try {
@@ -5033,60 +4786,8 @@ function createImagePresentation(
     }
   };
   const onFormSubmit = () => {};
-  const onClickCapture = (event: React.MouseEvent<HTMLDivElement>) => {
-    const publication = currentPublication();
-    const bridgeElement = bridge.owner.element();
-    if (
-      !publication ||
-      !bridgeElement ||
-      publication.dom.bridge !== bridgeElement ||
-      event.currentTarget !== bridgeElement
-    ) {
-      return;
-    }
-    const target = event.target;
-    const ownerWindow = publication.ownerDocument.defaultView;
-    if (
-      !ownerWindow ||
-      !(target instanceof ownerWindow.Node) ||
-      !publication.dom.close.contains(target)
-    ) {
-      return;
-    }
-    const nativeEvent = imageExactNativeClick(
-      event,
-      bridgeElement,
-      publication.dom.close,
-      publication,
-    );
-    if (nativeEvent && owns(publication)) {
-      stageDismissal(publication, {
-        control: publication.dom.close,
-        reactEvent: event,
-        nativeEvent,
-      });
-    }
-  };
   const onOpenChange = (open: boolean) => {
-    const proof = dismissal;
-    if (
-      open ||
-      !proof ||
-      proof.publication.authority !== authority ||
-      !owns(proof.publication) ||
-      !coordinator.claim(
-        proof.publication,
-        proof.control,
-        insert.action,
-        proof.reactEvent,
-        proof.nativeEvent,
-      )
-    ) {
-      clearDismissal();
-      return;
-    }
-    clearDismissal();
-    closeCurrent(proof.publication, false);
+    if (!open) dismiss();
   };
   const settlePortal = () => {
     let cleanup: void | (() => void) = undefined;
@@ -5142,7 +4843,6 @@ function createImagePresentation(
     establish,
     settlePortal,
     onOpenChange,
-    onClickCapture,
     onUrlChange,
     onAltChange,
     onUploadClick,
@@ -5175,7 +4875,7 @@ export const ImageDialog = memo(function ImageDialog({
     if (open) imageRecoveries.delete(coordinator);
   }, [coordinator, open]);
   const [dismissalListener] = useState(
-    () => new ImageDismissalListener(coordinator),
+    () => new ImageDismissalListener(),
   );
   const [latestAuthority] = useState(
     () => new ImageCurrentValue<ImageAuthority | null>(null),
@@ -5751,7 +5451,6 @@ export const ImageDialog = memo(function ImageDialog({
     establish,
     settlePortal,
     onOpenChange: setOpen,
-    onClickCapture,
     onUrlChange,
     onAltChange,
     onUploadClick,
@@ -5767,7 +5466,6 @@ export const ImageDialog = memo(function ImageDialog({
       <div
         ref={captureBridge}
         className="contents"
-        onClickCapture={onClickCapture}
       >
         <DialogContent
           title={IMAGE_TITLE}

@@ -202,6 +202,28 @@ export const richText = (page: Page) =>
   });
 
 /**
+ * Each suggestion's own joined insert text, read from `.md-rich .md-suggest-insert` spans and grouped by
+ * the `data-highlight-id` attribute the rich-pane decorations carry (see highlights.ts: the id is the
+ * suggestion's `groupId ?? id`). A collaborator's live cursor widget can render inline inside the mark
+ * and split one suggestion into two sibling spans sharing the same id (#2239); joining by id proves the
+ * text still belongs to ONE suggestion, unlike reading the whole document, while a remote-caret label
+ * inside a span is stripped from a clone first so it never pollutes the joined text.
+ */
+export const suggestionInsertTexts = (page: Page) =>
+  page.evaluate(() => {
+    const root = document.querySelector(".md-rich");
+    if (!root) return [];
+    const byId = new Map<string, string>();
+    root.querySelectorAll(".md-suggest-insert").forEach((span) => {
+      const id = span.getAttribute("data-highlight-id") ?? "";
+      const clone = span.cloneNode(true) as HTMLElement;
+      clone.querySelectorAll(".md-remote-caret").forEach((n) => n.remove());
+      byId.set(id, (byId.get(id) ?? "") + (clone.textContent ?? ""));
+    });
+    return Array.from(byId.values());
+  });
+
+/**
  * Place the caret at the end of the rich editor's document. Clicks near the top-left of the first text
  * block, not the pane centre: on a fixture whose vertical middle is an image the centre click selects the
  * image node, `Control+End` stays on it and the caret never reaches text (a11y dark slash-menu flake).
@@ -243,7 +265,14 @@ const pmCaretAtDocEnd = (page: Page) =>
       const remainder = document.createRange();
       remainder.selectNodeContents(lastBlock);
       remainder.setStart(selection.anchorNode, selection.anchorOffset);
-      return remainder.toString() === "" && !remainder.cloneContents().querySelector("img, br:not(.ProseMirror-trailingBreak)")
+      // A collaborator's caret label (.md-remote-caret) can render as a sibling right after our own caret;
+      // strip it from a clone before checking for leftover content, the same way `richText` strips it.
+      // ProseMirror also adds an img.ProseMirror-separator next to a widget at the end of a block; it is
+      // not content, so a real image after the caret must still count as content but that one must not.
+      const fragment = remainder.cloneContents();
+      fragment.querySelectorAll(".md-remote-caret").forEach((n) => n.remove());
+      return (fragment.textContent ?? "") === "" &&
+        !fragment.querySelector("img:not(.ProseMirror-separator), br:not(.ProseMirror-trailingBreak)")
         ? true
         : "content follows the caret";
     }
@@ -259,31 +288,47 @@ export async function focusCodeEnd(page: Page) {
   await page.keyboard.press("Control+End");
 }
 
-export async function selectTextInRich(page: Page, text: string) {
+export async function selectTextInRich(page: Page, text: string, { scrollIntoView = false }: { scrollIntoView?: boolean } = {}) {
   const rich = page.locator(".md-rich");
   // "Saved" can precede the deferred rich-pane rebuild, while the server-rendered stand-in is visible.
   await expect(rich).toBeVisible();
   await expect(rich).toContainText(text);
-  await rich.evaluate((root, needle) => {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let node: Node | null;
-    while ((node = walker.nextNode())) {
-      const idx = node.textContent!.indexOf(needle);
-      if (idx >= 0) {
-        const range = document.createRange();
-        range.setStart(node, idx);
-        range.setEnd(node, idx + needle.length);
-        const sel = window.getSelection()!;
-        sel.removeAllRanges();
-        sel.addRange(range);
-        root.focus();
-        return;
-      }
-    }
-    throw new Error(`text not found: ${needle}`);
-  }, text);
-  // Let ProseMirror pick up the DOM selection (it reads it on `selectionchange`, a later task).
-  await expect.poll(() => pmSelectionSynced(page), { message: `ProseMirror should read the selection of "${text}"` }).toBe(true);
+  const prod = Boolean(process.env.PROD_BASE_URL);
+  await rich.evaluate(
+    (root, [needle, waitForSelectionChange, scroll]) =>
+      new Promise<void>((resolve, reject) => {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+          const idx = node.textContent!.indexOf(needle);
+          if (idx >= 0) {
+            // A real click/dblclick auto-scrolls its target into view; this synthetic Range selection does
+            // not. Opt in with `scrollIntoView` when a target may be scrolled off-screen (e.g. below a table
+            // from an earlier step), landing outside the selection bubble's visible-bounds check so it never
+            // shows. Leave this off by default: scrollIntoView() also moves every scrollable ancestor, which
+            // breaks callers that scroll the rich pane on purpose and then expect the selection to stay put.
+            if (scroll) node.parentElement?.scrollIntoView({ block: "center" });
+            const range = document.createRange();
+            range.setStart(node, idx);
+            range.setEnd(node, idx + needle.length);
+            if (waitForSelectionChange) document.addEventListener("selectionchange", () => requestAnimationFrame(() => resolve()), { once: true });
+            const sel = window.getSelection()!;
+            sel.removeAllRanges();
+            sel.addRange(range);
+            root.focus();
+            if (!waitForSelectionChange) resolve();
+            return;
+          }
+        }
+        reject(new Error(`text not found: ${needle}`));
+      }),
+    [text, prod, scrollIntoView] as const,
+  );
+  // Let ProseMirror pick up the DOM selection (it reads it on `selectionchange`, a later task). A production
+  // build waits for that event plus one frame above (there is no `__markdocRichView` hook there to poll
+  // directly), then polls `pmSelectionSynced`: on a production build that is this exact-text DOM check; on
+  // dev the `text` argument is ignored there and it instead compares ProseMirror's state against the DOM.
+  await expect.poll(() => pmSelectionSynced(page, text), { message: `ProseMirror should read the selection of "${text}"` }).toBe(true);
 }
 
 
@@ -343,25 +388,42 @@ export async function expectTableShape(page: Page, rows: number, cols: number) {
  * Does ProseMirror's *state* selection agree with the DOM selection? A key pressed while they
  * differ is judged against the stale state (the keymap declines or acts on the wrong block), so
  * every real-click helper waits for this before the test types. `__markdocRichView` is the dev-only
- * hook rich-pane.tsx sets next to `__markdocSession`.
+ * hook rich-pane.tsx sets next to `__markdocSession`. Production uses the DOM instead, since its state
+ * hook is absent: when `text` is given, the DOM selection must be a real (non-collapsed) selection
+ * inside `.md-rich` whose exact text is `text` - never just "something is selected". Without `text`
+ * (the caret-only callers below, which already verified DOM position themselves) it only requires a
+ * collapsed caret inside `.md-rich`.
  */
-export const pmSelectionSynced = (page: Page) =>
-  page.evaluate(() => {
-    type View = { hasFocus(): boolean; state: { selection: { anchor: number; head: number } }; posAtDOM(node: Node, offset: number): number };
-    const view = (window as unknown as { __markdocRichView?: View }).__markdocRichView;
-    const s = document.getSelection();
-    if (!view || !s?.anchorNode || !s.focusNode) return "no view or no DOM selection";
-    if (!view.hasFocus()) return "editor not focused";
-    let anchor: number, head: number;
-    try {
-      anchor = view.posAtDOM(s.anchorNode, s.anchorOffset);
-      head = view.posAtDOM(s.focusNode, s.focusOffset);
-    } catch (e) {
-      return `DOM selection outside the editor: ${String(e)}`;
-    }
-    const { selection } = view.state;
-    return selection.anchor === anchor && selection.head === head ? true : `state ${selection.anchor}-${selection.head} vs DOM ${anchor}-${head}`;
-  });
+export const pmSelectionSynced = (page: Page, text?: string) =>
+  page.evaluate(
+    ([renderedFallback, needle]) => {
+      type View = { hasFocus(): boolean; state: { selection: { anchor: number; head: number } }; posAtDOM(node: Node, offset: number): number };
+      const view = (window as unknown as { __markdocRichView?: View }).__markdocRichView;
+      const s = document.getSelection();
+      if (!view) {
+        if (!renderedFallback) return "no view";
+        if (!s?.anchorNode || !s.focusNode) return "no DOM selection";
+        const rich = document.querySelector(".md-rich");
+        if (!rich || !rich.contains(s.anchorNode) || !rich.contains(s.focusNode)) return "selection outside .md-rich";
+        if (needle === null) return s.isCollapsed ? true : "selection is not collapsed";
+        if (s.isCollapsed) return "selection is collapsed, expected selected text";
+        const selected = s.toString();
+        return selected === needle ? true : `DOM selection "${selected}" vs expected "${needle}"`;
+      }
+      if (!s?.anchorNode || !s.focusNode) return "no view or no DOM selection";
+      if (!view.hasFocus()) return "editor not focused";
+      let anchor: number, head: number;
+      try {
+        anchor = view.posAtDOM(s.anchorNode, s.anchorOffset);
+        head = view.posAtDOM(s.focusNode, s.focusOffset);
+      } catch (e) {
+        return `DOM selection outside the editor: ${String(e)}`;
+      }
+      const { selection } = view.state;
+      return selection.anchor === anchor && selection.head === head ? true : `state ${selection.anchor}-${selection.head} vs DOM ${anchor}-${head}`;
+    },
+    [Boolean(process.env.PROD_BASE_URL), text ?? null] as const,
+  );
 
 /**
  * Put the caret at the start or end of the text of the first element matching `selector`, with a

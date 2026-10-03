@@ -130,6 +130,21 @@ describe("ShareDialog", () => {
     expect(await screen.findByText("Nobody else has been added yet.")).toBeInTheDocument();
   });
 
+  it("keeps the loading row a real list item so the people list stays a valid list for axe", async () => {
+    const firstLoad = deferred<CollaboratorsResponse>();
+    vi.mocked(api.documents.collaborators).mockReturnValueOnce(firstLoad.promise);
+
+    renderShare();
+
+    const loadingRow = screen.getByTestId("collaborator-list-loading");
+    // role="status" must live on an inner element, not the <li> itself: overriding the <li>'s
+    // implicit listitem role breaks axe's "list" rule for the "People with access" <ul>.
+    expect(loadingRow.tagName).toBe("LI");
+    expect(loadingRow).not.toHaveAttribute("role");
+    expect(within(loadingRow).getByRole("status")).toHaveTextContent("Loading");
+    expect(screen.getByRole("list", { name: "People with access" })).toContainElement(loadingRow);
+  });
+
   it("shows a list load error and retries successfully", async () => {
     vi.mocked(api.documents.collaborators)
       .mockRejectedValueOnce(apiMessage(500, "People could not load"))
@@ -142,6 +157,20 @@ describe("ShareDialog", () => {
 
     expect(await screen.findByText("@bob")).toBeInTheDocument();
     expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the error row a real list item so the people list stays a valid list for axe", async () => {
+    vi.mocked(api.documents.collaborators).mockRejectedValueOnce(apiMessage(500, "People could not load"));
+
+    renderShare();
+
+    const errorRow = await screen.findByTestId("collaborator-list-error");
+    // role="alert" must live on an inner element, not the <li> itself: overriding the <li>'s
+    // implicit listitem role breaks axe's "list" rule for the "People with access" <ul>.
+    expect(errorRow.tagName).toBe("LI");
+    expect(errorRow).not.toHaveAttribute("role");
+    expect(within(errorRow).getByRole("alert")).toHaveTextContent("People could not load");
+    expect(screen.getByRole("list", { name: "People with access" })).toContainElement(errorRow);
   });
 
   it("lets an owner add a person with a trimmed login and selected role", async () => {
@@ -173,6 +202,39 @@ describe("ShareDialog", () => {
 
     expect(await screen.findByTestId("share-add-error")).toHaveTextContent("That person is already added");
     expect(screen.getByTestId("share-login")).toHaveValue("  bob  ");
+  });
+
+  it("picking a suggestion moves focus to the role select; Enter there never adds, held or released - same as main", async () => {
+    vi.mocked(api.github.searchUsers).mockResolvedValue({
+      users: [{ login: "octocat", name: null, avatarUrl: "https://avatars.githubusercontent.com/octocat?s=40" }],
+      limited: false,
+    });
+
+    renderShare();
+    await loadedRows();
+
+    const loginBox = screen.getByTestId("share-login");
+    loginBox.focus();
+    await fillLogin("octo");
+    const list = await screen.findByTestId("share-login-suggestions");
+    expect(within(list).getAllByTestId("share-login-option")).toHaveLength(1);
+
+    fireEvent.keyDown(loginBox, { key: "ArrowDown" });
+    fireEvent.keyDown(loginBox, { key: "Enter" }); // picks: fills the field, does not add
+
+    expect(loginBox).toHaveValue("octocat");
+    expect(screen.queryByTestId("share-login-suggestions")).not.toBeInTheDocument();
+    expect(screen.getByTestId("share-role")).toHaveFocus(); // onPick moved focus here
+    expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+
+    // A held Enter's auto-repeat must not add - the original review bug (#2248 round 1) and must stay fixed.
+    fireEvent.keyDown(screen.getByTestId("share-role"), { key: "Enter", repeat: true });
+    expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+
+    // The role select has no onKeyDown at all - same as main - so a released, non-repeat Enter here does not
+    // add either; only the Add button submits.
+    fireEvent.keyDown(screen.getByTestId("share-role"), { key: "Enter" });
+    expect(api.documents.addCollaborator).not.toHaveBeenCalled();
   });
 
   it("shows a note when the added person has not signed in yet", async () => {
