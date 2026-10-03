@@ -187,7 +187,8 @@ database or production mutation, the command binds the working
 `package-lock.json` to the exact bytes committed at the selected SHA, runs the
 package audit, rechecks the lock and withholds raw output. It accepts only the
 bounded pass report with an empty package list and all blocked, severity,
-vulnerability, reported and omitted counts equal to zero. An advisory whose
+vulnerability, reported and omitted counts equal to zero, or the accepted
+report described under [Accepted advisories](#accepted-advisories). An advisory whose
 optional fields npm sends as null, such as a CVSS vector, still counts as a
 finding. Each audit attempt gets 120 seconds. The preflight retries once, after
 2 seconds, only when an attempt printed nothing on stdout or exactly npm's
@@ -220,10 +221,87 @@ The current report prints `auditReportVersion,vulnerabilities,metadata`. A new
 key needs a human to review it and update `parseAuditJson`; it is never a reason
 to bypass the preflight.
 
+#### Accepted advisories
+
+Some advisories have no patched version to upgrade to. So that such an advisory
+does not block every release until upstream ships a fix,
+`scripts/lib/dependency-policy.ts` holds one list, `ACCEPTED_ADVISORIES`, next
+to `BLOCKED_DEPENDENCIES`. Each entry names one advisory on one package at one
+version, with an expiry date and a reason. The list is code: a change to it
+goes through a pull request and a review like any other change. No environment
+variable, flag or command-line option can add an entry, widen one or move the
+clock.
+
+| Advisory | Package | Version | Expires (UTC) | Reason |
+| --- | --- | --- | --- | --- |
+| `GHSA-vfj7-8cjw-p6xm` | `braces` | `3.0.3` | `2026-10-17` | Only the linter uses it (through `eslint-config-next`), every published `braces` is affected, and the runtime image installs with `npm ci --omit=dev` |
+
+An audit with findings is accepted only when all of these hold. Anything else
+is `rejected`, exactly as if the list did not exist:
+
+1. Every advisory object in the audit is a listed one: its `url` is exactly
+   `https://github.com/advisories/<listed id>`, it is reported on the listed
+   package, and every lock node npm reports for that package has the listed
+   version.
+2. Every other reported package is there only because it depends, directly or
+   through other such packages, on an accepted one. A package with any advisory
+   of its own that is not listed, or that names a package the audit does not
+   report, is rejected.
+3. Every lock node of every reported package has `"dev": true` in
+   `package-lock.json`. A node without it is in the production tree.
+4. The current time is before the end of the entry's expiry date in UTC. From
+   00:00 UTC on the next day the same audit is rejected again, so someone has
+   to decide again.
+5. No blocked dependency is present and nothing in the audit is `critical`. A
+   critical advisory is never accepted, listed or not.
+
+The accepted result is its own report, not the pass report. It has status
+`accepted`, the real severity counts, every reported lock node as a package
+with status `accepted` (a node of a listed package) or `dependent`, and an
+`exceptions` list with the advisory id, package, version and expiry date of
+each entry that was used. It never has more than 25 packages; a larger chain is
+rejected. For example:
+
+```json
+{"status":"accepted","counts":{"blocked":0,"info":0,"low":0,"moderate":0,"high":5,"critical":0,"vulnerabilities":5,"reported":5,"omitted":0},"packages":[{"name":"@next/eslint-plugin-next","version":"16.3.6","status":"dependent"},{"name":"braces","version":"3.0.3","status":"accepted"},{"name":"eslint-config-next","version":"16.3.6","status":"dependent"},{"name":"fast-glob","version":"3.3.1","status":"dependent"},{"name":"micromatch","version":"4.0.8","status":"dependent"}],"exceptions":[{"advisory":"GHSA-vfj7-8cjw-p6xm","package":"braces","version":"3.0.3","expires":"2026-10-17"}]}
+```
+
+`deploy/release-vm.ps1` does not trust that report. It checks it again as
+strictly as the pass report: exactly the keys `status`, `counts`, `packages`
+and `exceptions`; blocked, critical and omitted equal to zero; severity counts
+that add up to a vulnerability count of at least one; a reported count equal to
+the number of packages; a fixed pattern for every advisory id, package name,
+version and date; at least one exception, none twice; every exception's
+package and version among the packages marked `accepted`, and every package
+marked `accepted` named by an exception; and an expiry date that is today or
+later in UTC. A report that fails any check stops the release with the same
+message as any other failed preflight. For a valid one the release prints one
+line per accepted advisory and continues:
+
+```text
+Release warning: dependency advisory accepted; advisory=GHSA-vfj7-8cjw-p6xm; package=braces; expires=2026-10-17.
+```
+
+Nothing else from the audit reaches the release log. That line appears in
+every release while an entry is in use, so an accepted advisory is never
+silent.
+
+To remove an entry once upstream ships a fix: in one pull request, update
+`package-lock.json` to the patched version (for example with `npm update
+<package>`), delete the entry from `ACCEPTED_ADVISORIES` and its row from the
+table above, and run the preflight
+(`npm run --silent dependency:preflight -- --lock-sha256 <sha256 of package-lock.json> --run-audit`).
+It must print the plain pass report. If the expiry date arrives first, releases
+stop with `status rejected`. Extending the date is a new decision and a new
+pull request that changes only that entry; it is never done from the release
+machine.
 The current lock resolves the audited transitive packages to
 `fast-uri@3.1.8`, `qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and
-`sharp@0.35.4`. The bounded dependency preflight reports zero blocked,
-severity, vulnerability, reported and omitted counts. Workflow setup, a merge,
+`sharp@0.35.4`. Since 2026-10-03 the bounded dependency preflight returns the
+accepted report for `GHSA-vfj7-8cjw-p6xm` (five high findings, all in
+development-only packages) with zero blocked, critical and omitted counts.
+Before that advisory it reported zero for every count, and it must do so
+again once the list entry is removed. Workflow setup, a merge,
 audit evidence or this documentation update neither invokes nor approves a
 release.
 
