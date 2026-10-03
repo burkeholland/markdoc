@@ -671,8 +671,11 @@ test.describe("one press is one action: held keys", () => {
       await dragSelect(page, "Target");
       await pressOn(page, headingMenu(page), "Enter");
       await expect(menuItem(page, "Paragraph")).toBeFocused();
-      for (let i = 0; i < Number(item.at(-1)); i++) await page.keyboard.press("ArrowDown");
-      await expect(menuItem(page, item)).toBeFocused();
+      // Radix moves focus a moment after the key: wait for each step before the next key.
+      for (let level = 1; level <= Number(item.at(-1)); level++) {
+        await page.keyboard.press("ArrowDown");
+        await expect(menuItem(page, `Heading ${level}`)).toBeFocused();
+      }
       await holdKey(page, key, 6);
       await expect(menu).toHaveCount(0);
       await expectDocument(page, line, `a held ${name} on ${item}`);
