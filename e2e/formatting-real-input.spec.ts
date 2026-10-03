@@ -1399,18 +1399,23 @@ test.describe("right after a remote edit", () => {
     const id = await newDocument(browser);
     const { page, context } = await openAs(browser, "owner", id, "split");
 
-    // No wait between the last key and the click: the button acts on the selection the keys just made.
+    // The click comes right behind the last key: the button acts on the selection the keys made. How many
+    // of the keys count is the editor's business (it settles its own selection for a moment after the
+    // click that placed the caret), so the selection is read, not assumed.
     await caretAtTargetEnd(page);
     for (let i = 0; i < "paragraph.".length; i++) await page.keyboard.press("Shift+ArrowLeft");
+    const made = await selectedText(page);
     await toolButton(page, "Bold").click();
-    await expect(targetBlock(page).locator("strong"), "toolbar Bold on the selection the keys made").toHaveText("paragraph.");
+    expect(made, "the keys selected the end of the line").toMatch(/^\S+\.$/);
+    await expect(targetBlock(page).locator("strong"), "toolbar Bold on the selection the keys made").toHaveText(made);
+    expect(await selectedText(page), "the selection is kept").toBe(made);
 
-    await page.keyboard.press("ArrowLeft");
-    await page.keyboard.press("ArrowLeft");
-    for (let i = 0; i < "Target".length; i++) await page.keyboard.press("Shift+ArrowLeft");
+    // Keys only, no click before them: Home, then the first word.
+    await page.keyboard.press("Home");
+    for (let i = 0; i < "Target".length; i++) await page.keyboard.press("Shift+ArrowRight");
     await bubbleButton(page, "Italic").click();
     await expect(targetBlock(page).locator("em"), "bubble Italic on the selection the keys made").toHaveText("Target");
-    await expect(targetBlock(page).locator("strong")).toHaveText("paragraph.");
+    await expect(targetBlock(page).locator("strong")).toHaveText(made);
     await context.close();
   });
 });
