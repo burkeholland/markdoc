@@ -22,7 +22,7 @@ import { Tip } from "@/components/ui/primitives";
 import { cn, shortcut } from "@/lib/utils";
 import { clampToViewport } from "@/lib/viewport";
 import { useSessionValue } from "./use-session";
-import { useEnterOnRelease, usePlaceHold } from "./press-once";
+import { useEnterOnRelease, usePlaceHold } from "./toolbar";
 
 const MENU_WIDTH = 372;
 const MENU_HEIGHT = 40;
