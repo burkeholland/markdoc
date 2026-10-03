@@ -57,6 +57,8 @@ interface BubbleOwner {
   scroller: HTMLElement;
   session: CollabSession;
   schedule: () => void;
+  /** Hide the bubble now and keep it hidden until the selection changes or the editor loses focus. */
+  dismiss: () => void;
   dispose: () => void;
 }
 
@@ -142,8 +144,7 @@ export function SelectionBubble({
   const [requestedRovingIndex, setRovingIndex] = useState(-1);
   const ownerRef = useRef<BubbleOwner | null>(null);
   const shown = Boolean(geometry && geometry.view === view);
-  // Comment and Link take the selection or the focus away and the bubble hides under the pointer: its
-  // place is kept for the rest of the gesture.
+  // Comment hides the bubble under the pointer: its place is kept for the rest of the gesture.
   const placeHold = usePlaceHold(!shown);
   const enterOnRelease = useEnterOnRelease();
 
@@ -168,6 +169,9 @@ export function SelectionBubble({
     if (topLayer) layer.popover = "manual";
     let disposed = false;
     let pointerDown = false;
+    // The selection a pointer click on Comment was made on. The composer takes focus a moment later, and
+    // the Comments panel moves the text on its way in: until then the bubble stays away.
+    let dismissed: EditorView["state"]["selection"] | null = null;
     let frame: number | null = null;
     let fullscreenWidget: {
       decorations: NonNullable<EditorView["props"]["decorations"]>;
@@ -195,7 +199,8 @@ export function SelectionBubble({
       }
       const { from, to, empty } = view.state.selection;
       const ownsFocus = view.hasFocus() || Boolean(document.activeElement && layer.contains(document.activeElement));
-      if (empty || !ownsFocus || pointerDown || session.activeSurface !== "rich" || !(session.canEdit || session.canComment)) {
+      if (dismissed && !(view.hasFocus() && view.state.selection.eq(dismissed))) dismissed = null;
+      if (dismissed || empty || !ownsFocus || pointerDown || session.activeSurface !== "rich" || !(session.canEdit || session.canComment)) {
         hide();
         return;
       }
@@ -321,6 +326,7 @@ export function SelectionBubble({
       if (disposed) return;
       if (event.target instanceof Node && editor.contains(event.target) && !layer.contains(event.target)) {
         pointerDown = true;
+        dismissed = null;
         hide();
       }
     };
@@ -331,7 +337,13 @@ export function SelectionBubble({
     };
     const onBlur = (event: FocusEvent) => {
       if (disposed) return;
+      dismissed = null;
       if (event.relatedTarget instanceof Node && layer.contains(event.relatedTarget)) return;
+      hide();
+    };
+    const dismiss = () => {
+      if (disposed) return;
+      dismissed = view.state.selection;
       hide();
     };
     const onMutation: MutationCallback = (records) => {
@@ -394,7 +406,7 @@ export function SelectionBubble({
       removeFullscreenWidget();
       layer.remove();
     };
-    ownerRef.current = { view, editor, scroller, session, schedule, dispose };
+    ownerRef.current = { view, editor, scroller, session, schedule, dismiss, dispose };
     schedule();
   });
 
@@ -444,14 +456,19 @@ export function SelectionBubble({
 
   // Permissions and the pane are read at click time, so a click that lands between a change and the
   // re-render that hides or disables the bubble does nothing.
-  const hold = (e: ReactMouseEvent<HTMLButtonElement>) => placeHold.arm(e, e.currentTarget.closest("[data-testid=selection-bubble]"));
-  const editAction = (action: () => void) => (e: ReactMouseEvent<HTMLButtonElement>) => {
-    hold(e);
+  const editAction = (action: () => void) => () => {
     if (session.canEdit && session.activeSurface === "rich") action();
   };
+  // A pointer click on Comment takes the bubble away at once, and a box keeps its place: the Comments
+  // panel moves the text on its way in, and the rest of a double-click or a second tap would land on it.
+  // A click from the keyboard has its focus on the button, and the bubble stays until the composer takes it.
   const commentAction = (e: ReactMouseEvent<HTMLButtonElement>) => {
-    hold(e);
-    if (session.canComment && session.activeSurface === "rich") onComment();
+    if (!(session.canComment && session.activeSurface === "rich")) return;
+    if (e.detail > 0) {
+      placeHold.arm(e, e.currentTarget.closest("[data-testid=selection-bubble]"));
+      ownerRef.current?.dismiss();
+    }
+    onComment();
   };
 
   return createPortal(

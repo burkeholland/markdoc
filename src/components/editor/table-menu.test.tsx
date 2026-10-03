@@ -660,48 +660,75 @@ describe("TableMenu keyboard and click checks", () => {
     }
   });
 
-  it("keeps the menu's place after a pointer click removed it, and not after a keyboard click", () => {
+  it("keeps the menu's place only after a pointer click whose own delete removed the table", () => {
     const browser = controlledBrowser();
     const current = fixture({ host: new DOMRect(50, 120, 800, 600), tableBox: new DOMRect(400, 360, 500, 300) });
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
+    const rerender = () => {
+      act(() => root.render(<Boundary current={current} />));
+      browser.flush();
+    };
+    /** The editor's own state after the click: the caret is no longer in a table. */
+    const tableGone = () => {
+      current.live.format = { ...current.format, tablePos: -1 };
+    };
     const removeTable = () => {
       current.format = { ...current.format, tablePos: -1 };
       current.live.format = current.format;
-      act(() => root.render(<Boundary current={current} />));
-      browser.flush();
+      rerender();
+      expect(screen.queryByTestId("table-menu")).toBeNull();
     };
     const restoreTable = () => {
       current.format = { ...current.format, tablePos: 7 };
       current.live.format = current.format;
-      act(() => root.render(<Boundary current={current} />));
-      browser.flush();
-    };
-    try {
-      act(() => root.render(<Boundary current={current} />));
-      browser.flush();
+      rerender();
       vi.spyOn(screen.getByTestId("table-menu"), "getBoundingClientRect").mockReturnValue(new DOMRect(350, 212, 372, 40));
-      fireEvent.click(button("table-delete"), { detail: 1 });
-      expect(current.tableAction.mock.calls).toEqual([["deleteTable"]]);
-      removeTable();
-      expect(screen.queryByTestId("table-menu")).toBeNull();
-      const box = screen.getByTestId("place-hold");
-      expect(box).toHaveStyle({ left: "350px", top: "212px", width: "372px", height: "40px" });
-      expect(fireEvent.mouseDown(box)).toBe(false);
-      fireEvent.click(box, { detail: 2 });
-      expect(current.tableAction).toHaveBeenCalledTimes(1);
-
-      // The menu comes back: the box goes. A keyboard click that removes the menu leaves no box.
+    };
+    const box = () => screen.queryByTestId("place-hold");
+    try {
+      rerender();
       restoreTable();
-      expect(screen.queryByTestId("place-hold")).toBeNull();
+
+      // Every button, with the table still there after its action: when the menu goes later (Esc, the
+      // caret leaving the table), nothing keeps its place.
+      for (const testId of ORDER) {
+        fireEvent.click(button(testId), { detail: 1 });
+        removeTable();
+        expect(box(), testId).toBeNull();
+        restoreTable();
+      }
+
+      // Each of the three deletes can take the table away. The box is where the menu was at the click.
+      for (const [testId, command] of [
+        ["table-delete", "deleteTable"],
+        ["table-delete-col", "deleteColumn"],
+        ["table-delete-row", "deleteRow"],
+      ] as const) {
+        current.tableAction.mockClear();
+        current.tableAction.mockImplementationOnce(tableGone);
+        fireEvent.click(button(testId), { detail: 1 });
+        expect(current.tableAction.mock.calls).toEqual([[command]]);
+        removeTable();
+        expect(box(), testId).toHaveStyle({ left: "350px", top: "212px", width: "372px", height: "40px" });
+        expect(fireEvent.mouseDown(box()!)).toBe(false);
+        fireEvent.click(box()!, { detail: 2 });
+        expect(current.tableAction).toHaveBeenCalledTimes(1);
+        // The menu comes back: the box goes.
+        restoreTable();
+        expect(box()).toBeNull();
+      }
+
+      // A click from the keyboard that removes the table leaves no box.
+      current.tableAction.mockImplementationOnce(tableGone);
       fireEvent.click(button("table-delete"), { detail: 0 });
       removeTable();
-      expect(screen.queryByTestId("place-hold")).toBeNull();
+      expect(box()).toBeNull();
     } finally {
       act(() => root.unmount());
     }
-    expect(screen.queryByTestId("place-hold")).toBeNull();
+    expect(box()).toBeNull();
   });
 
   it("runs each command exactly once per click under Strict Mode", () => {

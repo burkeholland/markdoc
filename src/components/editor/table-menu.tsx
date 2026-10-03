@@ -117,7 +117,8 @@ export function TableMenu({
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
   const shown = Boolean(geometry && geometry.authority.view === view && geometry.authority.session === session);
-  // Delete table removes the menu under the pointer: its place is kept for the rest of the gesture.
+  // A delete that removes the table removes the menu under the pointer: its place is kept for the rest
+  // of the gesture.
   const placeHold = usePlaceHold(!shown);
   const enterOnRelease = useEnterOnRelease();
 
@@ -244,18 +245,26 @@ export function TableMenu({
   // Read the live state at click time, the editor's own selection included: a click that lands between a
   // change (read-only, code pane, caret left the table or moved to another column, Esc) and the re-render
   // that follows acts on what is there now, or does nothing.
-  const run = (action: (now: FormatState) => void) => (e: MouseEvent<HTMLButtonElement>) => {
-    placeHold.arm(e, e.currentTarget.closest("[data-testid=table-menu]"));
+  const run = (action: (now: FormatState, e: MouseEvent<HTMLButtonElement>) => void) => (e: MouseEvent<HTMLButtonElement>) => {
     const live = authorityRef.current;
     if (!live || live !== geometry.authority || live.view.isDestroyed || !session.canEdit || session.activeSurface !== "rich" || isTableMenuHidden(live.view.state)) {
       return;
     }
     const now = actions.formatState();
-    if (now.tablePos >= 0) action(now);
+    if (now.tablePos >= 0) action(now, e);
   };
-  const table = (command: Parameters<EditorActions["table"]>[0]) => run(() => actions.table(command));
+  // A delete can take the table away, and this menu with it: Delete table, Delete column on the last
+  // column, Delete row on a table that is only its header. The menu's place is remembered before the
+  // delete and given up again when the table is still there after it. No other button keeps the place.
+  const table = (command: Parameters<EditorActions["table"]>[0]) =>
+    run((_, e) => {
+      const removes = command === "deleteTable" || command === "deleteColumn" || command === "deleteRow";
+      if (removes) placeHold.arm(e, e.currentTarget.closest("[data-testid=table-menu]"));
+      actions.table(command);
+      if (removes && actions.formatState().tablePos >= 0) placeHold.disarm();
+    });
   // The row or column under a second Delete is not the one the pointer was aimed at: a double-click
-  // (or a double tap) deletes one. Two separate clicks delete two.
+  // (or a double tap) deletes one. Two clicks 500 ms or more apart delete two.
   const remove = (command: "deleteRow" | "deleteColumn") => {
     const click = table(command);
     return (e: MouseEvent<HTMLButtonElement>) => {

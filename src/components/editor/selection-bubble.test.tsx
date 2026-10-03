@@ -708,11 +708,14 @@ describe("SelectionBubble geometry scheduling", () => {
       expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks[mark])).toBe(false);
     }
     for (const [label, handler] of [["Link", f.onLink], ["Comment", f.onComment]] as const) {
-      await user.click(screen.getByRole("button", { name: label }));
       screen.getByRole("button", { name: label }).focus();
       await user.keyboard(" ");
+      await user.click(screen.getByRole("button", { name: label }));
       expect(handler).toHaveBeenCalledTimes(2);
     }
+    // The pointer click on Comment took the bubble away until the editor loses focus, as it does to the composer.
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
+    fireEvent.blur(f.editor);
     f.setHost(new DOMRect(0, 300, 180, 200));
     fireEvent.scroll(f.scroller);
     env.flush();
@@ -917,42 +920,101 @@ describe("SelectionBubble keyboard and permissions", () => {
     expect(toggleMark).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the bubble's place after a pointer click hid it, and not after a keyboard click", async () => {
+  it("a pointer click on Comment hides the bubble at once and keeps its place; no other button and no keyboard click does", async () => {
     const env = environment();
     const f = fixture();
     const user = userEvent.setup();
     const rendered = render(<SelectionBubble {...f.props} />);
     env.flush();
-    const hideBubble = () => {
-      f.select(1, 1);
+    const rerender = () => {
       rendered.rerender(<SelectionBubble {...f.props} format={{ ...EMPTY_FORMAT }} />);
       env.flush();
+    };
+    const hideBubble = () => {
+      f.select(1, 1);
+      rerender();
       expect(screen.queryByTestId("selection-bubble")).toBeNull();
     };
     const showBubble = () => {
       f.select(1, 9);
-      rendered.rerender(<SelectionBubble {...f.props} format={{ ...EMPTY_FORMAT }} />);
-      env.flush();
+      rerender();
       expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
     };
 
+    // The format buttons and Link leave the bubble where it is: when it goes later, nothing keeps its place.
+    for (const label of ["Bold", "Italic", "Strikethrough", "Inline code", "Link"]) {
+      await user.click(button(label));
+      hideBubble();
+      expect(screen.queryByTestId("place-hold"), label).toBeNull();
+      showBubble();
+    }
+    expect(f.onLink).toHaveBeenCalledTimes(1);
+
+    // Comment: the bubble is gone in the same click, with no frame in between, and the box is in its place.
+    vi.spyOn(screen.getByTestId("selection-bubble"), "getBoundingClientRect").mockReturnValue(new DOMRect(60, 150, 232, 40));
     await user.click(button("Comment"));
     expect(f.onComment).toHaveBeenCalledTimes(1);
-    hideBubble();
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
     const box = screen.getByTestId("place-hold");
+    expect(box).toHaveStyle({ left: "60px", top: "150px", width: "232px", height: "40px" });
     expect(box).toBeEmptyDOMElement();
     expect(box).toHaveAttribute("aria-hidden", "true");
     expect(fireEvent.mouseDown(box)).toBe(false);
     fireEvent.click(box, { detail: 2 });
     expect(f.onComment).toHaveBeenCalledTimes(1);
 
-    // The bubble comes back: the box goes. A keyboard click that hides the bubble leaves no box.
-    showBubble();
+    // The same selection with focus still in the editor: the bubble stays away, whatever asks for it.
+    rerender();
+    fireEvent.scroll(f.scroller);
+    env.flush();
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
+
+    // The selection changes: the bubble is back, and the box goes.
+    f.select(2, 9);
+    rerender();
+    expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
     expect(screen.queryByTestId("place-hold")).toBeNull();
+
+    // The editor loses focus (the composer took it) and gets it back on the same selection: the bubble is back.
+    await user.click(button("Comment"));
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
+    fireEvent.blur(f.editor);
+    rerender();
+    expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
+
+    // A press in the text ends it too.
+    await user.click(button("Comment"));
+    expect(screen.queryByTestId("selection-bubble")).toBeNull();
+    fireEvent.pointerDown(f.paragraph);
+    fireEvent.pointerUp(f.paragraph);
+    env.flush();
+    expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
+    expect(screen.queryByTestId("place-hold"), "a press on anything else takes the box away").toBeNull();
+    expect(f.onComment).toHaveBeenCalledTimes(3);
+
+    // A click from the keyboard has its focus on the button: the bubble stays, and no box follows it.
     focusButton("Comment");
     await user.keyboard("{Enter}");
-    expect(f.onComment).toHaveBeenCalledTimes(2);
+    expect(f.onComment).toHaveBeenCalledTimes(4);
+    expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
     hideBubble();
+    expect(screen.queryByTestId("place-hold")).toBeNull();
+  });
+
+  it("a Comment click that is not allowed hides nothing and keeps no place", async () => {
+    const env = environment();
+    const f = fixture();
+    const user = userEvent.setup();
+    const session = f.session as unknown as { canComment: boolean; activeSurface: string };
+    render(<SelectionBubble {...f.props} />);
+    env.flush();
+    session.canComment = false;
+    await user.click(button("Comment"));
+    session.canComment = true;
+    session.activeSurface = "code";
+    await user.click(button("Comment"));
+    expect(f.onComment).not.toHaveBeenCalled();
+    expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
     expect(screen.queryByTestId("place-hold")).toBeNull();
   });
 

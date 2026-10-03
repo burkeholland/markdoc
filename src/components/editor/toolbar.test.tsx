@@ -174,15 +174,6 @@ describe("Toolbar actions", () => {
     expect(t.actions.redo).not.toHaveBeenCalled();
   });
 
-  it("gives the caret back to the editor when the focused button is disabled", () => {
-    const t = setup();
-    act(() => button("Bold").focus());
-    t.session.publish({ canUndo: false });
-    expect(t.actions.focus).not.toHaveBeenCalled();
-    t.session.publish({ canEdit: false });
-    expect(t.actions.focus).toHaveBeenCalledOnce();
-  });
-
   it("Enter acts once, on release, however long it is held; Ctrl, Alt and Meta+Enter do nothing", () => {
     for (const strict of [false, true]) {
       const t = setup({ strict });
@@ -449,6 +440,18 @@ describe("Toolbar Text style menu", () => {
     await waitFor(() => expect(radio("Paragraph")).toHaveFocus());
     await userEvent.keyboard("heading 3");
     await waitFor(() => expect(radio("Heading 3")).toHaveFocus());
+    expect(t.actions.setHeading).not.toHaveBeenCalled();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
+  it("keeps a space in the search when the pointer opened the menu and the letter before it went to the menu itself", async () => {
+    const t = setup();
+    await userEvent.click(heading());
+    const menu = await screen.findByRole("menu");
+    await waitFor(() => expect(menu).toHaveFocus());
+    await userEvent.keyboard("h");
+    await waitFor(() => expect(radio("Heading 1")).toHaveFocus());
+    await userEvent.keyboard(" ");
     expect(t.actions.setHeading).not.toHaveBeenCalled();
     expect(screen.getByRole("menu")).toBeInTheDocument();
   });

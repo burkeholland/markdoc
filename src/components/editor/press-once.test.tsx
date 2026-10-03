@@ -139,7 +139,7 @@ describe("useEnterOnRelease", () => {
 function Items({ onPick }: { onPick: (name: string) => void }) {
   const pick = usePickOnRelease();
   return (
-    <div role="menu">
+    <div role="menu" tabIndex={-1} onKeyDown={pick.onMenuKeyDown}>
       {["One", "Two"].map((name) => (
         <div key={name} role="menuitem" tabIndex={-1} onKeyDown={pick.onKeyDown} onKeyUp={pick.onKeyUp} onBlur={pick.onBlur} onClick={() => onPick(name)}>
           <span tabIndex={-1}>{name}</span>
@@ -198,6 +198,36 @@ describe("usePickOnRelease", () => {
     expect(onPick).not.toHaveBeenCalled();
   });
 
+  it("counts a letter typed on the menu itself, where focus is after the pointer opened it", () => {
+    const { onPick, one } = setup();
+    const clock = vi.spyOn(Event.prototype, "timeStamp", "get");
+    // The letter goes to the menu and its search moves focus to an item; the space follows on that item.
+    clock.mockReturnValue(1_000);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "o" });
+    act(() => one.focus());
+    clock.mockReturnValue(1_900);
+    expect(fireEvent.keyDown(one, { key: " " }), "within a second: part of the name").toBe(true);
+    fireEvent.keyUp(one, { key: " " });
+    expect(onPick).not.toHaveBeenCalled();
+
+    // A second after the last letter the search is over, and Space picks again.
+    clock.mockReturnValue(2_100);
+    expect(fireEvent.keyDown(one, { key: " " })).toBe(false);
+    fireEvent.keyUp(one, { key: " " });
+    expect(onPick).toHaveBeenCalledExactlyOnceWith("One");
+  });
+
+  it("does not take a shortcut, a space or an arrow for a typed letter", () => {
+    const { onPick, one } = setup();
+    act(() => one.focus());
+    for (const init of [{ key: "a", ctrlKey: true }, { key: "a", altKey: true }, { key: "a", metaKey: true }, { key: " " }, { key: "ArrowDown" }]) {
+      fireEvent.keyDown(screen.getByRole("menu"), init);
+    }
+    expect(fireEvent.keyDown(one, { key: " " }), "Space still picks").toBe(false);
+    fireEvent.keyUp(one, { key: " " });
+    expect(onPick).toHaveBeenCalledExactlyOnceWith("One");
+  });
+
   it("leaves keys from inside an item and handled keys alone", () => {
     const { onPick, one } = setup();
     expect(fireEvent.keyDown(screen.getByText("One"), { key: "Enter" })).toBe(true);
@@ -226,7 +256,17 @@ function Hold({ onAction }: { onAction: () => void }) {
           >
             close
           </button>
+          {/* The control goes a moment after the click, as the table menu does: a frame after its table. */}
           <button type="button" onClick={(event) => hold.arm(event, event.currentTarget.parentElement)}>
+            close later
+          </button>
+          <button
+            type="button"
+            onClick={(event) => {
+              hold.arm(event, event.currentTarget.parentElement);
+              hold.disarm();
+            }}
+          >
             stay
           </button>
         </div>
@@ -253,6 +293,9 @@ describe("usePlaceHold", () => {
   };
   const shield = () => screen.queryByTestId("place-hold");
   const pointerClose = () => fireEvent.click(screen.getByRole("button", { name: "close" }), { detail: 1 });
+  const reopen = () => act(() => screen.getByRole("button", { name: "reopen" }).click());
+  /** The control goes without a pointer click of its own. */
+  const hide = () => fireEvent.click(screen.getByTestId("hide"), { detail: 0 });
 
   it("puts an empty box where the control was after a pointer click removed it, and takes it away 600 ms later", () => {
     setup();
@@ -270,13 +313,14 @@ describe("usePlaceHold", () => {
     expect(shield()).toBeNull();
   });
 
-  it("cancels the box's own mousedown, so focus and selection stay, and keeps its press from the page", () => {
+  it("cancels its own mousedown and the end of a touch, so focus and selection stay, and keeps its press from the page", () => {
     setup();
     const onDocument = vi.fn();
     document.addEventListener("pointerdown", onDocument);
     try {
       pointerClose();
       expect(fireEvent.mouseDown(shield()!)).toBe(false);
+      expect(fireEvent.touchEnd(shield()!), "a tap on the box sends no click to what is under it").toBe(false);
       fireEvent.pointerDown(shield()!);
       expect(onDocument, "a layer that closes on an outside press does not hear it").not.toHaveBeenCalled();
       expect(shield()).not.toBeNull();
@@ -296,31 +340,72 @@ describe("usePlaceHold", () => {
 
   it("shows nothing while the control is still there, and forgets the click after 600 ms", () => {
     setup();
-    fireEvent.click(screen.getByRole("button", { name: "stay" }), { detail: 1 });
+    fireEvent.click(screen.getByRole("button", { name: "close later" }), { detail: 1 });
     expect(shield()).toBeNull();
     act(() => vi.advanceTimersByTime(600));
-    fireEvent.click(screen.getByTestId("hide"), { detail: 0 });
+    hide();
     expect(shield()).toBeNull();
   });
 
-  it("stays while a pointer is pressed on it, for 600 ms after the release, and at most 10 s", () => {
+  it("counts the 600 ms from the click, not from the moment the control went", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "close later" }), { detail: 1 });
+    act(() => vi.advanceTimersByTime(400));
+    hide();
+    expect(shield()).not.toBeNull();
+    act(() => vi.advanceTimersByTime(199));
+    expect(shield()).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(shield(), "600 ms after the click, 200 ms after the control went").toBeNull();
+  });
+
+  it("gives the place up when the click turned out to leave the control where it is", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "stay" }), { detail: 1 });
+    hide();
+    expect(shield(), "the control went later, for another reason").toBeNull();
+  });
+
+  it("does not start the 600 ms again for a press on it", () => {
     setup();
     pointerClose();
     act(() => vi.advanceTimersByTime(400));
     fireEvent.pointerDown(shield()!);
-    act(() => vi.advanceTimersByTime(5_000));
-    expect(shield(), "a press that is still down keeps it").not.toBeNull();
-    // A touch fires pointerleave right after pointerup; neither that nor pointerout ends the hold early.
     fireEvent.pointerUp(shield()!);
-    fireEvent.pointerLeave(shield()!);
-    fireEvent.pointerOut(shield()!);
-    act(() => vi.advanceTimersByTime(599));
+    fireEvent.click(shield()!, { detail: 2 });
+    act(() => vi.advanceTimersByTime(199));
     expect(shield()).not.toBeNull();
     act(() => vi.advanceTimersByTime(1));
+    expect(shield(), "600 ms after the click that armed it").toBeNull();
+  });
+
+  it("stays while a pointer is still pressed on it, until that press ends, and at most 10 s", () => {
+    setup();
+    pointerClose();
+    act(() => vi.advanceTimersByTime(500));
+    fireEvent.pointerDown(shield()!);
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(shield(), "a press that is still down keeps it").not.toBeNull();
+    // Leaving the box with the pointer down does not end the press.
+    fireEvent.pointerLeave(shield()!);
+    fireEvent.pointerOut(shield()!);
+    expect(shield()).not.toBeNull();
+    fireEvent.pointerUp(shield()!);
+    expect(shield(), "the 600 ms are over: it goes when the press ends").toBeNull();
+
+    // A press that ends inside the 600 ms changes nothing.
+    reopen();
+    pointerClose();
+    fireEvent.pointerDown(shield()!);
+    act(() => vi.advanceTimersByTime(100));
+    fireEvent.pointerUp(shield()!);
+    expect(shield()).not.toBeNull();
+    act(() => vi.advanceTimersByTime(500));
     expect(shield()).toBeNull();
 
-    act(() => screen.getByRole("button", { name: "reopen" }).click());
+    reopen();
     pointerClose();
+    act(() => vi.advanceTimersByTime(300));
     fireEvent.pointerDown(shield()!);
     act(() => vi.advanceTimersByTime(9_999));
     expect(shield()).not.toBeNull();
@@ -328,12 +413,28 @@ describe("usePlaceHold", () => {
     expect(shield(), "the cap for a press that never ends").toBeNull();
   });
 
+  it("waits for the last of two fingers", () => {
+    setup();
+    pointerClose();
+    fireEvent.pointerDown(shield()!, { pointerId: 1 });
+    fireEvent.pointerDown(shield()!, { pointerId: 2 });
+    act(() => vi.advanceTimersByTime(700));
+    fireEvent.pointerUp(shield()!, { pointerId: 1 });
+    expect(shield()).not.toBeNull();
+    // A pointer that never pressed the box ends nothing.
+    fireEvent.pointerUp(document.body, { pointerId: 3 });
+    expect(shield()).not.toBeNull();
+    fireEvent.pointerUp(shield()!, { pointerId: 2 });
+    expect(shield()).toBeNull();
+  });
+
   it("a press that ends outside the box, or is cancelled, still ends", () => {
     setup();
     pointerClose();
     fireEvent.pointerDown(shield()!);
+    act(() => vi.advanceTimersByTime(700));
+    expect(shield()).not.toBeNull();
     fireEvent.pointerCancel(document.body);
-    act(() => vi.advanceTimersByTime(600));
     expect(shield()).toBeNull();
   });
 
@@ -347,13 +448,13 @@ describe("usePlaceHold", () => {
   it("leaves when the control comes back, and does not return when it goes again without a pointer", () => {
     setup();
     pointerClose();
-    act(() => screen.getByRole("button", { name: "reopen" }).click());
+    reopen();
     expect(shield()).toBeNull();
     act(() => screen.getByTestId("hide").click());
     expect(shield()).toBeNull();
   });
 
-  it("removes the box, its timer and its listeners on unmount", () => {
+  it("removes the box, its timers and its listeners on unmount", () => {
     const added = vi.spyOn(window, "addEventListener");
     const removed = vi.spyOn(window, "removeEventListener");
     const { unmount } = setup();

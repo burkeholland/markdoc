@@ -170,13 +170,7 @@ export const Toolbar = memo(function Toolbar({
     const stop = last && enabled.includes(last) ? last : enabled[0];
     for (const b of root.querySelectorAll<HTMLButtonElement>("button")) b.tabIndex = b === stop ? 0 : -1;
   }, [enabledButtons]);
-  useLayoutEffect(() => {
-    syncTabStops();
-    // The focused button was switched off (editing was revoked): the caret goes back to the document
-    // instead of focus falling to the page.
-    const focused = document.activeElement;
-    if (focused instanceof HTMLButtonElement && focused.disabled && rootRef.current?.contains(focused)) actions.focus();
-  });
+  useLayoutEffect(syncTabStops);
 
   const onToolbarFocus = (e: FocusEvent<HTMLDivElement>) => {
     const btn = (e.target as HTMLElement).closest("button");
@@ -269,6 +263,7 @@ export const Toolbar = memo(function Toolbar({
             align="start"
             className="w-56"
             onFocus={onHeadingContentFocus}
+            onKeyDown={pickOnRelease.onMenuKeyDown}
             // Radix hands focus back to the trigger when the menu closes; the caret belongs in the editor
             // the moment a style is picked (task #437: Ctrl+Z and typing went to the toolbar button).
             onCloseAutoFocus={(e) => {
