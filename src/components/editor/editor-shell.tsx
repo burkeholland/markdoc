@@ -38,6 +38,7 @@ import { PanelResizeHandle, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, PANEL_WIDTH_KEY
 import type { SyncActions } from "./sync-dialog";
 import type { NameVersionSaveOwner, NameVersionVisit } from "./dialogs";
 import { useEverTrue } from "@/lib/hooks";
+import { focusReturnTarget, restoreFocus } from "@/lib/a11y";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
 // Not on demand: the bar must be mounted and focused inside the Mod-F keydown, or the keys typed while
 // its chunk loads go into the document.
@@ -3066,6 +3067,19 @@ export function EditorShell({
   }, []);
   const toggleOutline = useCallback(() => (isPhone ? setOutlineDrawerOpen((o) => !o) : setOutlineOpen((o) => !o)), [isPhone]);
   const closeOutlineDrawer = useCallback(() => setOutlineDrawerOpen(false), []);
+  // A phone's Version history and Activity sheets and its Outline drawer are bare Radix content, and Radix
+  // leaves focus on <body> when they close. What had focus when one opened is read while that render is
+  // still pending (a ⋮ menu item resolves to the ⋮ button; the item is gone a moment later) and gets focus back.
+  const phoneLayer = !isPhone ? null : outlineDrawerOpen ? "outline" : sidePanel === "versions" || sidePanel === "activity" ? sidePanel : null;
+  const [layerOpener, setLayerOpener] = useState<{ layer: string | null; element: HTMLElement | null }>({ layer: null, element: null });
+  if (layerOpener.layer !== phoneLayer) setLayerOpener({ layer: phoneLayer, element: phoneLayer ? focusReturnTarget() : layerOpener.element });
+  const returnLayerFocus = useCallback(
+    (event: Event) => {
+      event.preventDefault();
+      restoreFocus(layerOpener.element);
+    },
+    [layerOpener.element],
+  );
 
   // Stable handlers for the dialogs: each is memoized, so a render of the shell (a toast, a sync poll, a
   // format change) does not re-render the closed ones.
@@ -3252,7 +3266,7 @@ export function EditorShell({
             <Dialog open={outlineDrawerOpen} onOpenChange={setOutlineDrawerOpen}>
               <DialogPortal>
                 <DialogOverlay className="dialog-overlay animate-fade-in" data-testid="outline-drawer-backdrop" />
-                <DialogPrimitiveContent className="drawer" aria-describedby={undefined} data-testid="outline-drawer">
+                <DialogPrimitiveContent className="drawer" aria-describedby={undefined} data-testid="outline-drawer" onCloseAutoFocus={returnLayerFocus}>
                   <DialogTitle className="sr-only">Outline</DialogTitle>
                   <OutlinePanel session={session} open onToggle={closeOutlineDrawer} onSelect={onOutlinePick} />
                 </DialogPrimitiveContent>
@@ -3375,7 +3389,7 @@ export function EditorShell({
                     aria-describedby={undefined}
                     data-testid="sheet"
                     data-panel={sidePanel}
-                    onCloseAutoFocus={sidePanel === "comments" ? (event) => event.preventDefault() : undefined}
+                    onCloseAutoFocus={sidePanel === "comments" ? (event) => event.preventDefault() : returnLayerFocus}
                   >
                     <DialogTitle className="sr-only">{panelTitle}</DialogTitle>
                     <span className="sheet-handle" aria-hidden />
