@@ -494,11 +494,9 @@ function acceptedAudit(
   { now, advisories }: Acceptance,
 ): { packages: DependencyPackageResult[]; exceptions: AcceptedAdvisory[] } | null {
   if (audit.entries.length === 0 || audit.counts.critical > 0) return null;
-  const entryNames = new Set(audit.entries.map((entry) => entry.name));
   const matched = new Set<ListedAdvisory>();
   for (const entry of audit.entries) {
     if (!entry.nodes.every((node) => node.dev)) return null;
-    if (!entry.dependsOn.every((name) => name !== entry.name && entryNames.has(name))) return null;
     for (const advisory of entry.advisories) {
       const listed = advisories.find((item) =>
         advisory.url === ADVISORY_URL_PREFIX + item.advisory
@@ -521,7 +519,8 @@ function acceptedAudit(
   }
 
   // An entry stands once everything it depends on stands. One with only advisory objects stands at once, because
-  // the loop above already matched all of them. A name that never stands (a cycle) leaves the audit rejected.
+  // the loop above already matched all of them. An entry that never stands leaves the audit rejected: it names a
+  // package the audit does not report, or itself, or it is part of a cycle.
   const standing = new Set<string>();
   for (let grew = true; grew;) {
     grew = false;
