@@ -356,10 +356,24 @@ describe("FindBar search, options and buttons", () => {
 
     fireEvent.change(screen.getByTestId("find-input"), { target: { value: "mat" } });
 
+    // In the same event, before the session has told its subscribers: React would put the old value
+    // back otherwise (the caret jumps to the end and an IME composition breaks).
     expect(setFind).toHaveBeenCalledWith("mat", options);
     expect(screen.getByTestId("find-input")).toHaveValue("mat");
     expect(screen.getByTestId("find-count")).toHaveTextContent("1 of 1");
     expect(cb.onReveal).toHaveBeenCalledWith(s.find!.matches[0]);
+  });
+
+  it("shows a query the shell set from outside the field", async () => {
+    const s = session("owner", "outside-query");
+    render(<FindBoundary session={s} replaceVisible={false} {...callbacks()} />);
+    fireEvent.change(screen.getByTestId("find-input"), { target: { value: "ma" } });
+    expect(screen.getByTestId("find-input")).toHaveValue("ma");
+
+    act(() => s.setFind("ran"));
+
+    await waitFor(() => expect(screen.getByTestId("find-input")).toHaveValue("ran"));
+    expect(screen.getByTestId("find-count")).toHaveTextContent("1 of 1");
   });
 
   it("toggles an option with the current query and reveals that update's active match", () => {
@@ -401,8 +415,12 @@ describe("FindBar search, options and buttons", () => {
     for (const testId of ["find-match-case", "find-whole-word", "find-regex", "find-prev", "find-next", "find-toggle-replace"]) {
       expect([testId, fireEvent.mouseDown(screen.getByTestId(testId))]).toEqual([testId, false]);
     }
-    for (const testId of ["find-close", "replace-one", "replace-all"]) {
+    for (const testId of ["find-close", "replace-one", "replace-all", "find-input", "replace-input"]) {
       expect([testId, fireEvent.mouseDown(screen.getByTestId(testId))]).toEqual([testId, true]);
+    }
+    // A press on the bar itself (padding, a gap, the counter) leaves focus where it is.
+    for (const testId of ["find-bar", "find-row", "find-count", "find-replace-row"]) {
+      expect([testId, fireEvent.mouseDown(screen.getByTestId(testId))]).toEqual([testId, false]);
     }
   });
 
@@ -427,7 +445,7 @@ describe("FindBar search, options and buttons", () => {
     expect(s.ytext.toString()).toBe("The dog sat on the mat. The fox ran.");
   });
 
-  it("disables the click controls with no matches but keeps Enter in both inputs", () => {
+  it("switches the click controls off with no matches, keeps them focusable, and keeps Enter in both inputs", () => {
     const s = session("owner", "no-matches");
     s.setFind("missing");
     const stepFind = vi.spyOn(s, "stepFind");
@@ -439,18 +457,50 @@ describe("FindBar search, options and buttons", () => {
     expect(screen.getByTestId("find-count")).toHaveTextContent("0 of 0");
     for (const testId of ["find-prev", "find-next", "replace-one", "replace-all"]) {
       const element = screen.getByTestId(testId);
-      expect(element).toBeDisabled();
+      // `aria-disabled`, not `disabled`: a button that is switched off while it has focus keeps it.
+      expect(element).toHaveAttribute("aria-disabled", "true");
+      expect(element).not.toHaveAttribute("disabled");
+      element.focus();
+      expect(element).toHaveFocus();
       fireEvent.click(element);
     }
-    expect(stepFind).not.toHaveBeenCalled();
-    expect(replaceActive).not.toHaveBeenCalled();
-    expect(replaceAll).not.toHaveBeenCalled();
+    expect(cb.onReveal).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+    expect(screen.getByTestId("find-count")).toHaveTextContent("0 of 0");
 
+    stepFind.mockClear();
+    replaceActive.mockClear();
+    replaceAll.mockClear();
     fireEvent.keyDown(screen.getByTestId("find-input"), { key: "Enter" });
     fireEvent.keyDown(screen.getByTestId("replace-input"), { key: "Enter" });
     expect(stepFind).toHaveBeenCalledOnce();
     expect(replaceActive).toHaveBeenCalledOnce();
+    expect(replaceAll).not.toHaveBeenCalled();
     expect(cb.onReveal).not.toHaveBeenCalled();
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it("keeps focus on Replace and Replace all when the last match is replaced under them", async () => {
+    const s = session("owner", "focus-after-last-replace");
+    s.setFind("mat");
+    render(<FindBoundary session={s} replaceVisible {...callbacks()} />);
+    fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "rug" } });
+
+    const one = screen.getByTestId("replace-one");
+    one.focus();
+    fireEvent.click(one);
+    await waitFor(() => expect(one).toHaveAttribute("aria-disabled", "true"));
+    expect(one).toHaveFocus();
+    expect(s.ytext.toString()).toBe("The cat sat on the rug. The cat ran.");
+
+    act(() => s.setFind("cat"));
+    const all = screen.getByTestId("replace-all");
+    await waitFor(() => expect(all).not.toHaveAttribute("aria-disabled"));
+    all.focus();
+    fireEvent.click(all);
+    await waitFor(() => expect(all).toHaveAttribute("aria-disabled", "true"));
+    expect(all).toHaveFocus();
+    expect(s.ytext.toString()).toBe("The rug sat on the rug. The rug ran.");
   });
 });
 
@@ -525,12 +575,101 @@ describe("FindBar Enter and Escape", () => {
     expect(cb.onClose).not.toHaveBeenCalled();
   });
 
-  it("closes from the close button", () => {
+  it("closes from the close button and hands the shell the click only when a pointer made it", () => {
     const s = session("owner", "close-click");
     const cb = callbacks();
-    render(<FindBoundary session={s} replaceVisible {...cb} />);
+    const rendered = render(<FindBoundary session={s} replaceVisible {...cb} />);
+    // `detail` 0: Space, Enter on release, or assistive technology.
     fireEvent.click(screen.getByTestId("find-close"));
     expect(cb.onClose).toHaveBeenCalledOnce();
+    expect(cb.onClose).toHaveBeenCalledWith(undefined);
+
+    const next = callbacks();
+    rendered.rerender(<FindBoundary session={session("owner", "close-pointer")} replaceVisible {...next} />);
+    const close = screen.getByTestId("find-close");
+    fireEvent.click(close, { detail: 1 });
+    expect(next.onClose).toHaveBeenCalledOnce();
+    const click = vi.mocked(next.onClose).mock.calls[0][0];
+    expect(click?.detail).toBe(1);
+    expect(click?.currentTarget ?? click?.target).toBe(close);
+  });
+
+  it("closes from Enter on the close button when the key is released, not while it is held", () => {
+    const s = session("owner", "close-enter-release");
+    const cb = callbacks();
+    render(<FindBoundary session={s} replaceVisible {...cb} />);
+    const close = screen.getByTestId("find-close");
+
+    expect(press(close, "Enter").defaultPrevented).toBe(true);
+    press(close, "Enter", { repeat: true });
+    press(close, "Enter", { repeat: true });
+    expect(cb.onClose).not.toHaveBeenCalled();
+
+    fireEvent.keyUp(close, { key: "Enter" });
+    expect(cb.onClose).toHaveBeenCalledOnce();
+    expect(cb.onClose).toHaveBeenCalledWith(undefined);
+  });
+
+  it("replaces once per Enter press in the replace input: the repeats of a held key do nothing", () => {
+    const s = session("owner", "replace-input-held-enter");
+    render(<FindBoundary session={s} replaceVisible {...callbacks()} />);
+    const input = screen.getByTestId("replace-input");
+    fireEvent.change(input, { target: { value: "dog" } });
+
+    expect(press(input, "Enter").defaultPrevented).toBe(true);
+    expect(press(input, "Enter", { repeat: true }).defaultPrevented).toBe(true);
+    press(input, "Enter", { repeat: true });
+    expect(s.ytext.toString()).toBe("The dog sat on the mat. The cat ran.");
+
+    press(input, "Enter");
+    expect(s.ytext.toString()).toBe("The dog sat on the mat. The dog ran.");
+  });
+
+  it("keeps stepping back while Shift+Enter is held in the replace input", () => {
+    const s = session("owner", "replace-input-held-shift-enter");
+    const stepFind = vi.spyOn(s, "stepFind");
+    render(<FindBoundary session={s} replaceVisible {...callbacks()} />);
+    const input = screen.getByTestId("replace-input");
+
+    press(input, "Enter", { shiftKey: true });
+    press(input, "Enter", { shiftKey: true, repeat: true });
+
+    expect(stepFind).toHaveBeenCalledTimes(2);
+    expect(s.ytext.toString()).toBe(TEXT);
+  });
+
+  it.each([
+    ["replace-one", "The dog sat on the mat. The cat ran."],
+    ["replace-all", "The dog sat on the mat. The dog ran."],
+  ] as const)("runs %s once when Enter is released on it, however long it was held", (testId, expected) => {
+    const s = session("owner", `held-enter-${testId}`);
+    const replaceActive = vi.spyOn(s, "replaceActive");
+    const replaceAll = vi.spyOn(s, "replaceAll");
+    render(<FindBoundary session={s} replaceVisible {...callbacks()} />);
+    fireEvent.change(screen.getByTestId("replace-input"), { target: { value: "dog" } });
+    const button = screen.getByTestId(testId);
+
+    expect(press(button, "Enter").defaultPrevented).toBe(true);
+    press(button, "Enter", { repeat: true });
+    press(button, "Enter", { repeat: true });
+    expect(s.ytext.toString()).toBe(TEXT);
+
+    fireEvent.keyUp(button, { key: "Enter" });
+    expect(s.ytext.toString()).toBe(expected);
+    expect(replaceActive.mock.calls.length + replaceAll.mock.calls.length).toBe(1);
+  });
+
+  it("keeps stepping while Enter is held in the find input", () => {
+    const s = session("owner", "find-input-held-enter");
+    const stepFind = vi.spyOn(s, "stepFind");
+    render(<FindBoundary session={s} replaceVisible {...callbacks()} />);
+    const input = screen.getByTestId("find-input");
+
+    press(input, "Enter");
+    press(input, "Enter", { repeat: true });
+    press(input, "Enter", { repeat: true });
+
+    expect(stepFind).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -799,27 +938,28 @@ describe("FindBar first-row action navigation", () => {
     expect(document.activeElement).toBe(view.action(destinationId));
   });
 
-  it("skips disabled Previous and Next and never wraps past the shortened group", async () => {
+  it("keeps switched-off Previous and Next in the arrow order: they stay focusable and do nothing", async () => {
     const s = session("owner", "actions-disabled-steps");
     s.setFind("missing");
-    const focus = trackActionFocus();
-    const view = renderStrict(s, callbacks());
+    const cb = callbacks();
+    const view = renderStrict(s, cb);
     await act(async () => {});
-    expect(view.action("find-prev")).toBeDisabled();
-    expect(view.action("find-next")).toBeDisabled();
-
-    const forward = press(view.action("find-toggle-replace"), "ArrowRight");
-    expect(forward.defaultPrevented).toBe(true);
-    expect(document.activeElement).toBe(view.action("find-close"));
+    expect(view.action("find-prev")).toHaveAttribute("aria-disabled", "true");
+    expect(view.action("find-next")).toHaveAttribute("aria-disabled", "true");
 
     const backward = press(view.action("find-close"), "Home");
     expect(backward.defaultPrevented).toBe(true);
-    expect(document.activeElement).toBe(view.action("find-toggle-replace"));
+    expect(document.activeElement).toBe(view.action("find-prev"));
 
-    focus.reset();
-    const bounded = press(view.action("find-toggle-replace"), "ArrowLeft");
-    expect(bounded.defaultPrevented).toBe(false);
-    expect(focus.moves()).toHaveLength(0);
+    const forward = press(view.action("find-prev"), "ArrowRight");
+    expect(forward.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(view.action("find-next"));
+
+    fireEvent.click(view.action("find-next"));
+    expect(cb.onReveal).not.toHaveBeenCalled();
+    expect(view.element("find-count")).toHaveTextContent("0 of 0");
+
+    expect(press(view.action("find-next"), "ArrowRight").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(view.action("find-toggle-replace"));
   });
 
@@ -833,22 +973,6 @@ describe("FindBar first-row action navigation", () => {
     expect(document.activeElement).toBe(view.action("find-close"));
     expect(press(view.action("find-close"), "ArrowLeft").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(view.action("find-next"));
-  });
-
-  it("does nothing when only one enabled action remains", async () => {
-    const s = session("viewer", "actions-single");
-    s.setFind("missing");
-    const focus = trackActionFocus();
-    const view = renderStrict(s, callbacks());
-    await act(async () => {});
-    const close = view.action("find-close");
-
-    for (const key of ["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Home", "End"]) {
-      focus.reset();
-      const event = press(close, key);
-      expect([key, event.defaultPrevented, focus.moves().length]).toEqual([key, false, 0]);
-      expect(document.activeElement).toBe(close);
-    }
   });
 
   it.each(["find-input", "find-match-case", "find-whole-word", "find-regex", "replace-input", "replace-one", "replace-all"])(
@@ -921,8 +1045,8 @@ describe("FindBar replace row", () => {
     const row = screen.getByTestId("find-replace-row");
     expect(row).toHaveAttribute("id", "find-replace-row");
     expect(screen.getByTestId("replace-input")).toBeInTheDocument();
-    expect(screen.getByTestId("replace-one")).toBeEnabled();
-    expect(screen.getByTestId("replace-all")).toBeEnabled();
+    expect(screen.getByTestId("replace-one")).not.toHaveAttribute("aria-disabled");
+    expect(screen.getByTestId("replace-all")).not.toHaveAttribute("aria-disabled");
 
     const toggle = screen.getByTestId("find-toggle-replace");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
@@ -985,10 +1109,9 @@ describe("FindBar invalid regular expressions", () => {
     expect(input).toHaveAttribute("aria-invalid", "true");
     expect(input).toHaveAttribute("aria-describedby", error.id);
     expect(screen.queryByTestId("find-count")).toBeNull();
-    expect(screen.getByTestId("find-prev")).toBeDisabled();
-    expect(screen.getByTestId("find-next")).toBeDisabled();
-    expect(screen.getByTestId("replace-one")).toBeDisabled();
-    expect(screen.getByTestId("replace-all")).toBeDisabled();
+    for (const testId of ["find-prev", "find-next", "replace-one", "replace-all"]) {
+      expect(screen.getByTestId(testId)).toHaveAttribute("aria-disabled", "true");
+    }
 
     fireEvent.keyDown(input, { key: "Enter" });
     fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
@@ -1004,10 +1127,9 @@ describe("FindBar invalid regular expressions", () => {
     expect(input).toHaveAttribute("aria-invalid", "false");
     expect(input).not.toHaveAttribute("aria-describedby");
     expect(screen.getByTestId("find-count")).toHaveTextContent("1 of 2");
-    expect(screen.getByTestId("find-prev")).toBeEnabled();
-    expect(screen.getByTestId("find-next")).toBeEnabled();
-    expect(screen.getByTestId("replace-one")).toBeEnabled();
-    expect(screen.getByTestId("replace-all")).toBeEnabled();
+    for (const testId of ["find-prev", "find-next", "replace-one", "replace-all"]) {
+      expect(screen.getByTestId(testId)).not.toHaveAttribute("aria-disabled");
+    }
   });
 
   it("clears the error when regex mode is turned off and does not reject an empty query", async () => {

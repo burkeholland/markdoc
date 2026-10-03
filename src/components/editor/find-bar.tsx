@@ -5,6 +5,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -16,6 +17,7 @@ import type { CollabSession } from "@/editor/collab/session";
 import { compileFindRegex, type FindMatch, type FindOptions } from "@/editor/find";
 import { Tip } from "@/components/ui/primitives";
 import { cn, findReplaceShortcut, shortcut } from "@/lib/utils";
+import { useEnterOnRelease } from "./press-once";
 import { shallowEqual, useSessionValue } from "./use-session";
 
 export interface FindBarProps {
@@ -27,8 +29,12 @@ export interface FindBarProps {
   focusNonce: number;
   /** Called after the active match changes so the shell can scroll it into view. */
   onReveal: (match: FindMatch) => void;
-  /** Called when the bar wants to close (Escape or the close button). */
-  onClose: () => void;
+  /**
+   * Called when the bar wants to close (Escape or the close button). `click` is the pointer click on the
+   * close button when that is what closed it, so the shell can hold the button's place for the rest of a
+   * double-click; a close from the keyboard has none.
+   */
+  onClose: (click?: ReactMouseEvent<HTMLButtonElement>) => void;
 }
 
 /** One session's use of the bar. Work started for an old session never touches a new one. */
@@ -67,6 +73,19 @@ const EDITOR_PANES = ".cm-editor, .md-rich";
 
 /** Mouse down on these controls keeps focus (and the caret) in the find input. */
 const keepInputFocus = (e: ReactMouseEvent) => e.preventDefault();
+
+/** A press on the bar itself (padding, a gap between buttons, the counter) leaves focus where it is. */
+const keepFocusOnBackground = (e: ReactMouseEvent) => {
+  if (!(e.target as Element).closest("input, button")) e.preventDefault();
+};
+
+/**
+ * Step and replace buttons with nothing to act on are `aria-disabled`, not `disabled`: a disabled button
+ * drops focus to the page when it switches off while it has focus (Replace on the last match), and the
+ * rest of a double-click would fall through it. Pressing one does nothing: the session has no match.
+ */
+const OFF_ICON = "aria-disabled:cursor-default aria-disabled:opacity-40 aria-disabled:hover:bg-transparent aria-disabled:hover:text-ink-2";
+const OFF_BUTTON = "aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-surface";
 
 function OptionToggle({
   label,
@@ -115,6 +134,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
   const barRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
+  const replaceRowRef = useRef<HTMLDivElement>(null);
   const prevRef = useRef<HTMLButtonElement>(null);
   const nextRef = useRef<HTMLButtonElement>(null);
   const toggleReplaceRef = useRef<HTMLButtonElement>(null);
@@ -122,6 +142,11 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
   const activeVisit = useRef<FindBarVisit | null>(null);
   const replaceFocusIntent = useRef<FindBarVisit | null>(null);
   const replacement = replacementDraft.visit === visit ? replacementDraft.value : "";
+  // The session tells its subscribers in a microtask, and the find field shows the session's query. The
+  // field needs its new value in the same event: React puts the old one back first otherwise, which
+  // throws the caret to the end and breaks an IME composition. This render reads the session again.
+  const [, renderNow] = useReducer((n: number) => n + 1, 0);
+  const enterOnRelease = useEnterOnRelease();
 
   const ownsVisit = useCallback((owner: FindBarVisit) => activeVisit.current === owner, []);
   const retireVisit = useCallback((owner: FindBarVisit) => {
@@ -161,6 +186,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
     (nextQuery: string, nextOptions?: FindOptions) => {
       if (!ownsVisit(visit)) return;
       session.setFind(nextQuery, nextOptions);
+      renderNow();
       if (!ownsVisit(visit)) return;
       const m = session.find?.matches[session.find.active];
       if (m) onReveal(m);
@@ -193,16 +219,19 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
     session.replaceAll(replacement);
   };
 
-  const close = () => {
+  const close = (click?: ReactMouseEvent<HTMLButtonElement>) => {
     if (!ownsVisit(visit)) return;
     retireVisit(visit);
-    onClose();
+    // A click made with the keyboard (or by assistive technology) has no pointer and `detail` 0.
+    onClose(click && click.detail > 0 ? click : undefined);
   };
 
   const toggleReplace = () => {
     if (!ownsVisit(visit)) return;
     const nextVisible = !replaceVisible;
     replaceFocusIntent.current = nextVisible ? visit : null;
+    // Hiding the row removes whatever has focus inside it; the find input takes it instead of the page.
+    if (!nextVisible && replaceRowRef.current?.contains(document.activeElement)) searchRef.current?.focus();
     onReplaceVisible(nextVisible);
   };
 
@@ -233,7 +262,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
     if (e.defaultPrevented || e.nativeEvent.isComposing) return;
     if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     const group = [prevRef.current, nextRef.current, toggleReplaceRef.current, closeRef.current].filter(
-      (button): button is HTMLButtonElement => !!button && !button.disabled,
+      (button): button is HTMLButtonElement => !!button,
     );
     const index = group.indexOf(e.target as HTMLButtonElement);
     if (index < 0) return;
@@ -254,12 +283,16 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
     e.preventDefault();
     if (invalidRegex) return;
     if (e.shiftKey) step(-1);
-    else replaceOne();
+    // One press replaces one match: a held Enter does not run through the document.
+    else if (!e.repeat) replaceOne();
   };
 
   if (!find || !options) return null;
 
   const counter = query ? `${total === 0 ? 0 : active + 1} of ${total}` : "";
+  // Room for "<total> of <total>", so the buttons after the counter do not move under the pointer when
+  // the active match gains or loses a digit (72 px holds every count below 100 of 100).
+  const counterWidth = `max(72px, calc(${2 * String(total).length + 3}ch + 0.5rem))`;
 
   return (
     <div
@@ -269,6 +302,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
       aria-label="Find and replace"
       data-testid="find-bar"
       onKeyDown={onBarKeyDown}
+      onMouseDown={keepFocusOnBackground}
     >
       <div className="flex items-start gap-1.5" data-testid="find-actions" onKeyDown={onActionsKeyDown}>
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5" data-testid="find-row">
@@ -302,7 +336,12 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
             Invalid regular expression
           </span>
         ) : (
-          <span className={cn("min-w-[72px] px-1 tabular-nums", noMatches && query ? "text-danger" : "text-ink-3")} aria-live="polite" data-testid="find-count">
+          <span
+            className={cn("px-1 tabular-nums", noMatches && query ? "text-danger" : "text-ink-3")}
+            style={{ minWidth: counterWidth }}
+            aria-live="polite"
+            data-testid="find-count"
+          >
             {counter}
           </span>
         )}
@@ -310,8 +349,8 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
           <button
             ref={prevRef}
             type="button"
-            className="icon-btn h-7 w-7 rounded-md"
-            disabled={actionsDisabled}
+            className={cn("icon-btn h-7 w-7 rounded-md", OFF_ICON)}
+            aria-disabled={actionsDisabled || undefined}
             onMouseDown={keepInputFocus}
             onClick={() => step(-1)}
             aria-label="Previous match"
@@ -324,8 +363,8 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
           <button
             ref={nextRef}
             type="button"
-            className="icon-btn h-7 w-7 rounded-md"
-            disabled={actionsDisabled}
+            className={cn("icon-btn h-7 w-7 rounded-md", OFF_ICON)}
+            aria-disabled={actionsDisabled || undefined}
             onMouseDown={keepInputFocus}
             onClick={() => step(1)}
             aria-label="Next match"
@@ -347,8 +386,12 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
               data-testid="find-toggle-replace"
             >
               <Replace size={15} aria-hidden="true" />
-              {/* Icon only below 640 px so the row keeps its one-line shape on phones. */}
-              <span className="sr-only sm:not-sr-only">{replaceVisible ? "Hide replace" : "Replace"}</span>
+              {/* Icon only below 640 px so the row keeps its one-line shape on phones. From 640 px the
+                  label keeps the width of the longer text (the hidden `after`), so the button does not
+                  shrink under the pointer between the two clicks of a double-click. */}
+              <span className="sr-only sm:not-sr-only sm:inline-grid sm:after:invisible sm:after:col-start-1 sm:after:row-start-1 sm:after:content-['Hide_replace']">
+                <span className="col-start-1 row-start-1 text-left">{replaceVisible ? "Hide replace" : "Replace"}</span>
+              </span>
             </button>
           </Tip>
         )}
@@ -360,6 +403,8 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
             ref={closeRef}
             type="button"
             className="icon-btn mt-0.5 h-7 w-7 shrink-0 rounded-md"
+            // Enter closes on release: the bar hands focus to the editor, where a held Enter would type.
+            {...enterOnRelease}
             onClick={close}
             aria-label="Close find"
             data-testid="find-close"
@@ -369,7 +414,7 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
         </Tip>
       </div>
       {showReplace && (
-        <div id="find-replace-row" className="flex flex-wrap items-center gap-1.5" data-testid="find-replace-row">
+        <div ref={replaceRowRef} id="find-replace-row" className="flex flex-wrap items-center gap-1.5" data-testid="find-replace-row">
           <div className="min-w-[9rem] flex-1 md:w-[min(420px,40vw)] md:flex-none">
             <input
               ref={replaceRef}
@@ -386,10 +431,12 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
               data-testid="replace-input"
             />
           </div>
+          {/* Enter replaces on release, once per press, as Space does. */}
           <button
             type="button"
-            className="btn btn-outline h-8 shrink-0 whitespace-nowrap px-2.5 text-[13px]"
-            disabled={actionsDisabled}
+            className={cn("btn btn-outline h-8 shrink-0 whitespace-nowrap px-2.5 text-[13px]", OFF_BUTTON)}
+            aria-disabled={actionsDisabled || undefined}
+            {...enterOnRelease}
             onClick={replaceOne}
             data-testid="replace-one"
           >
@@ -397,8 +444,9 @@ export function FindBar({ session, replaceVisible, onReplaceVisible, focusNonce,
           </button>
           <button
             type="button"
-            className="btn btn-outline h-8 shrink-0 whitespace-nowrap px-2.5 text-[13px]"
-            disabled={actionsDisabled}
+            className={cn("btn btn-outline h-8 shrink-0 whitespace-nowrap px-2.5 text-[13px]", OFF_BUTTON)}
+            aria-disabled={actionsDisabled || undefined}
+            {...enterOnRelease}
             onClick={replaceAll}
             data-testid="replace-all"
           >
