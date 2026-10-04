@@ -2,18 +2,7 @@
 import { compile } from "tailwindcss";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import {
-  StrictMode,
-  createElement,
-  useLayoutEffect,
-  type ComponentProps,
-  type MouseEvent as ReactMouseEvent,
-  type ReactNode,
-  type RefCallback,
-} from "react";
-import { flushSync } from "react-dom";
-import { createRoot, hydrateRoot, type Root } from "react-dom/client";
-import { renderToString } from "react-dom/server";
+import { StrictMode, type ComponentProps } from "react";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, type SyncStatusDto } from "@/lib/api";
 import { formatDateTime, relativeTime } from "@/lib/utils";
@@ -126,58 +115,6 @@ function syncActions(overrides: Partial<SyncActions> = {}): SyncActions {
   };
 }
 
-interface DirectView {
-  host: HTMLDivElement;
-  root: Root;
-}
-
-const directViews: DirectView[] = [];
-const documentViews: { frame: HTMLIFrameElement; root: Root }[] = [];
-const mutationObservers: MutationObserver[] = [];
-
-function renderDirect(node: ReactNode): DirectView {
-  const host = document.createElement("div");
-  document.body.append(host);
-  const view = { host, root: createRoot(host) };
-  directViews.push(view);
-  act(() => view.root.render(node));
-  return view;
-}
-
-function reactHandler<T>(element: Element, name: string): T {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error(`React props were not attached to ${element.getAttribute("data-testid") ?? element.tagName}`);
-  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  const handler = props?.[name];
-  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.getAttribute("data-testid") ?? element.tagName}`);
-  return handler as T;
-}
-
-type PublishActionName = "publish" | "pull" | "sync";
-
-interface PublishCallbacks {
-  publish: Mock<() => void>;
-  pull: Mock<() => void>;
-  sync: Mock<() => void>;
-}
-
-interface CapturedPublishFrame {
-  button: HTMLButtonElement;
-  icon: Element;
-  status: HTMLSpanElement;
-  capture: (event: ReactMouseEvent<HTMLButtonElement>) => void;
-  click: (event: ReactMouseEvent<HTMLButtonElement>) => void;
-  refs: readonly ((element: Element | null) => void)[];
-}
-
-function publishCallbacks(): PublishCallbacks {
-  return {
-    publish: vi.fn<() => void>(),
-    pull: vi.fn<() => void>(),
-    sync: vi.fn<() => void>(),
-  };
-}
-
 function statusSnapshot(
   status: SyncStatusDto["status"],
   overrides: Partial<SyncStatusDto> = {},
@@ -200,671 +137,269 @@ function statusSnapshot(
   return { ...base, ...overrides };
 }
 
-function publishButton(
-  sync: SyncStatusDto,
-  callbacks: PublishCallbacks,
-  publishing = false,
-) {
-  return (
-    <PublishStatusButton
-      sync={sync}
-      publishing={publishing}
-      onPublishNow={callbacks.publish}
-      onPull={callbacks.pull}
-      onSync={callbacks.sync}
-    />
-  );
-}
-
-function capturePublishFrame(host: ParentNode = document): CapturedPublishFrame {
-  const button = host.querySelector('[data-testid="publish-button"]');
-  if (!(button instanceof (button?.ownerDocument.defaultView?.HTMLButtonElement ?? HTMLButtonElement))) {
-    throw new Error("The Publish status button was not committed");
-  }
-  const icon = button.firstElementChild;
-  const status = button.querySelector('[data-testid="publish-status"]');
-  if (!icon || !(status instanceof (button.ownerDocument.defaultView?.HTMLSpanElement ?? HTMLSpanElement))) {
-    throw new Error("The Publish status descendants were not committed");
-  }
-  return {
-    button,
-    icon,
-    status,
-    capture: reactHandler(button, "onClickCapture"),
-    click: reactHandler(button, "onClick"),
-    refs: [
-      capturePublishRef(button),
-      capturePublishRef(icon),
-      capturePublishRef(status),
-    ],
-  };
-}
-
-function capturePublishRef<T extends Element>(element: T): (next: Element | null) => void {
-  const ref = reactHandler<RefCallback<T>>(element, "ref");
-  return (next) => ref(next as T | null);
-}
-
-function primaryPublishClick(
-  target: Element,
-  event = new (target.ownerDocument.defaultView?.MouseEvent ?? MouseEvent)("click", {
-    bubbles: true,
-    button: 0,
-    cancelable: true,
-  }),
-) {
-  target.dispatchEvent(event);
-  return event;
-}
-
-function detachedReactClick(
-  button: HTMLButtonElement,
-  nativeEvent: MouseEvent = new (button.ownerDocument.defaultView?.MouseEvent ?? MouseEvent)(
-    "click",
-    { bubbles: true, button: 0, cancelable: true },
-  ),
-) {
-  return {
-    nativeEvent,
-    type: "click",
-    currentTarget: button,
-    target: button,
-    button: nativeEvent.button,
-    buttons: nativeEvent.buttons,
-    altKey: nativeEvent.altKey,
-    ctrlKey: nativeEvent.ctrlKey,
-    metaKey: nativeEvent.metaKey,
-    shiftKey: nativeEvent.shiftKey,
-    clientX: nativeEvent.clientX,
-    clientY: nativeEvent.clientY,
-    detail: nativeEvent.detail,
-    bubbles: nativeEvent.bubbles,
-    cancelable: nativeEvent.cancelable,
-    eventPhase: nativeEvent.eventPhase,
-    isTrusted: nativeEvent.isTrusted,
-    timeStamp: nativeEvent.timeStamp,
-    defaultPrevented: false,
-    preventDefault: vi.fn(),
-    stopPropagation: vi.fn(),
-    isDefaultPrevented: () => false,
-    isPropagationStopped: () => false,
-    persist: vi.fn(),
-  } as unknown as ReactMouseEvent<HTMLButtonElement>;
-}
-
-function expectPublishCalls(
-  callbacks: PublishCallbacks,
-  accepted?: PublishActionName,
-) {
-  expect(callbacks.publish).toHaveBeenCalledTimes(accepted === "publish" ? 1 : 0);
-  expect(callbacks.pull).toHaveBeenCalledTimes(accepted === "pull" ? 1 : 0);
-  expect(callbacks.sync).toHaveBeenCalledTimes(accepted === "sync" ? 1 : 0);
-}
-
-function PublishLayoutProbe({
-  capture,
-  children,
-}: {
-  capture: () => void;
-  children: ReactNode;
-}) {
-  useLayoutEffect(() => {
-    capture();
-  }, [capture]);
-  return children;
-}
-
-function PublishMutationProbe({ mutate }: { mutate: () => void }) {
-  useLayoutEffect(mutate, [mutate]);
-  return null;
-}
-
-function PublishBoundary({
-  boundary = 0,
-  callbacks,
-  onLayout,
-  present = true,
-  publishing = false,
-  sync,
-  visit = "a",
-}: {
-  boundary?: number;
-  callbacks: PublishCallbacks;
-  onLayout?: () => void;
-  present?: boolean;
-  publishing?: boolean;
-  sync: SyncStatusDto;
-  visit?: string;
-}) {
-  useLayoutEffect(() => {
-    if (boundary > 0) onLayout?.();
-  }, [boundary, onLayout]);
-  return present
-    ? (
-        <section key={visit} data-testid="publish-higher">
-          <i data-testid="publish-before" />
-          <div data-testid="publish-parent">
-            {publishButton(sync, callbacks, publishing)}
-          </div>
-          <i data-testid="publish-after" />
-        </section>
-      )
-    : null;
-}
-
-async function hydratePublishDocument(
-  sync: SyncStatusDto,
-  callbacks: PublishCallbacks,
-) {
-  const frame = document.createElement("iframe");
-  document.body.append(frame);
-  const ownerDocument = frame.contentDocument;
-  if (!ownerDocument) throw new Error("The hydration frame did not have a document");
-  const tree = (
-    <StrictMode>
-      <html>
-        {createElement("head")}
-        <body>{publishButton(sync, callbacks)}</body>
-      </html>
-    </StrictMode>
-  );
-  ownerDocument.open();
-  ownerDocument.write(`<!doctype html>${renderToString(tree)}`);
-  ownerDocument.close();
-  let root!: Root;
-  await act(async () => {
-    root = hydrateRoot(ownerDocument, tree);
-  });
-  documentViews.push({ frame, root });
-  return { ownerDocument, root };
-}
-
 afterEach(() => {
-  for (const view of documentViews.splice(0)) {
-    act(() => view.root.unmount());
-    view.frame.remove();
-  }
-  for (const view of directViews.splice(0)) {
-    act(() => view.root.unmount());
-    view.host.remove();
-  }
-  for (const observer of mutationObservers.splice(0)) observer.disconnect();
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
-describe("Publish status action lifecycle", () => {
-  it.each([
-    ["in-sync", "publish"],
-    ["local-ahead", "publish"],
-    ["remote-ahead", "pull"],
-    ["diverged", "sync"],
-    ["remote-unreadable", "sync"],
-  ] as const)("keeps %s mapped to exactly one %s through direct-root Strict Mode replay", (status, action) => {
-    const sync = statusSnapshot(status);
-    const callbacks = publishCallbacks();
-    const layouts: CapturedPublishFrame[] = [];
-    const view = renderDirect(
-      <StrictMode>
-        <PublishLayoutProbe capture={() => layouts.push(capturePublishFrame())}>
-          {publishButton(sync, callbacks)}
-        </PublishLayoutProbe>
-      </StrictMode>,
-    );
-    const retired = layouts[0];
-    const current = capturePublishFrame(view.host);
-    if (!retired) throw new Error("Strict Mode did not expose the retired Publish status publication");
+describe.each([
+  ["without Strict Mode", false],
+  ["in Strict Mode", true],
+])("status chip %s", (_name, strict) => {
+  type Props = ComponentProps<typeof PublishStatusButton>;
+  type Action = "onPublishNow" | "onPull" | "onSync";
 
-    expect(retired.button).toBe(current.button);
-    expect(retired.capture).not.toBe(current.capture);
-    expect(retired.click).not.toBe(current.click);
-    act(() => {
-      const stale = detachedReactClick(current.button);
-      retired.capture(stale);
-      retired.click(stale);
-    });
-    expectPublishCalls(callbacks);
-
-    const repeated = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
-    act(() => {
-      primaryPublishClick(current.icon, repeated);
-      primaryPublishClick(current.icon, repeated);
-    });
-    expectPublishCalls(callbacks, action);
-  });
-
-  it.each([
-    ["in-sync", "publish"],
-    ["local-ahead", "publish"],
-    ["remote-ahead", "pull"],
-    ["diverged", "sync"],
-    ["remote-unreadable", "sync"],
-  ] as const)("authenticates %s as %s from document-root hydration", async (status, action) => {
-    const callbacks = publishCallbacks();
-    const { ownerDocument } = await hydratePublishDocument(statusSnapshot(status), callbacks);
-    const frame = capturePublishFrame(ownerDocument);
-    expect(frame.button.ownerDocument).toBe(ownerDocument);
-
-    act(() => primaryPublishClick(frame.status));
-    expectPublishCalls(callbacks, action);
-  });
-
-  it("preserves labels, titles, colors, icon structure, type, focus, and keyboard-style activation", () => {
-    const cases = [
-      ["in-sync", "Up to date", "bg-emerald-300", "Up to date"],
-      ["local-ahead", "Publish", "bg-amber-300", "Unpublished changes"],
-      ["remote-ahead", "Pull", "lucide-refresh-cw", "GitHub has changes"],
-      ["diverged", "Both changed", "lucide-git-merge", "Both changed"],
-      ["remote-unreadable", "GitHub file too large", "lucide-triangle-alert", "GitHub file too large"],
-    ] as const;
-
-    for (const [status, label, iconClass, title] of cases) {
-      const callbacks = publishCallbacks();
-      const { unmount } = render(publishButton(statusSnapshot(status), callbacks));
-      const frame = capturePublishFrame();
-      expect(frame.button).toHaveAttribute("type", "button");
-      expect(frame.button).toHaveAttribute("title", title);
-      expect(frame.button).toHaveTextContent(label);
-      expect(frame.status).toHaveAttribute("data-status", status);
-      expect(frame.icon).toHaveClass(iconClass);
-      frame.button.focus();
-      act(() => primaryPublishClick(
-        frame.button,
-        new MouseEvent("click", { bubbles: true, button: 0, cancelable: true, detail: 0 }),
-      ));
-      expect(frame.button).toHaveFocus();
-      unmount();
-    }
-  });
-
-  it("retires publishing transitions and restores a fresh exact action", () => {
-    const sync = statusSnapshot("local-ahead");
-    const callbacks = publishCallbacks();
-    const view = renderDirect(<PublishBoundary callbacks={callbacks} sync={sync} />);
-    const stale = capturePublishFrame(view.host);
-
-    act(() => view.root.render(
-      <PublishBoundary callbacks={callbacks} sync={sync} publishing />,
-    ));
-    const disabled = capturePublishFrame(view.host);
-    expect(disabled.button).toBeDisabled();
-    expect(disabled.icon).toHaveClass("animate-spin");
-    act(() => {
-      const event = detachedReactClick(disabled.button);
-      stale.capture(event);
-      stale.click(event);
-      primaryPublishClick(disabled.button);
-    });
-    expectPublishCalls(callbacks);
-
-    act(() => view.root.render(
-      <PublishBoundary callbacks={callbacks} sync={sync} publishing={false} />,
-    ));
-    const current = capturePublishFrame(view.host);
-    expect(current.button).toBeEnabled();
-    act(() => primaryPublishClick(current.button));
-    expectPublishCalls(callbacks, "publish");
-  });
-
-  it.each([
-    "status",
-    "remote",
-    "remote.sha",
-    "remote.revision",
-    "remote.url",
-    "remote.updatedAt",
-    "localChanged",
-    "remoteChanged",
-    "lines",
-    "lines.local",
-    "lines.remote",
-    "size",
-    "limit",
-    "pollMs",
-    "remoteContent",
-  ] as const)("permanently retires mutable %s drift before callback work", (field) => {
-    const sync = statusSnapshot("local-ahead", {
-      size: null,
-      limit: 2_097_152,
-      remoteContent: "remote",
-    });
-    const callbacks = publishCallbacks();
-    const view = renderDirect(<PublishBoundary callbacks={callbacks} sync={sync} />);
-    const current = capturePublishFrame(view.host);
-    const remote = sync.remote;
-    const lines = sync.lines;
-
-    if (field === "status") sync.status = "remote-ahead";
-    else if (field === "remote") sync.remote = { ...remote };
-    else if (field === "remote.sha") remote.sha = "changed-sha";
-    else if (field === "remote.revision") remote.revision = "changed-revision";
-    else if (field === "remote.url") remote.url = "https://github.com/o/r/blob/main/changed.md";
-    else if (field === "remote.updatedAt") remote.updatedAt = "2026-09-08T00:00:00.000Z";
-    else if (field === "localChanged") sync.localChanged = false;
-    else if (field === "remoteChanged") sync.remoteChanged = true;
-    else if (field === "lines") sync.lines = { ...lines };
-    else if (field === "lines.local") lines.local++;
-    else if (field === "lines.remote") lines.remote++;
-    else if (field === "size") sync.size = 1;
-    else if (field === "limit") sync.limit = 1;
-    else if (field === "pollMs") sync.pollMs = 60_000;
-    else sync.remoteContent = "changed remote";
-
-    act(() => primaryPublishClick(current.button));
-    expectPublishCalls(callbacks);
-
-    sync.status = "local-ahead";
-    sync.remote = remote;
-    remote.sha = REMOTE.sha;
-    remote.revision = REMOTE.revision;
-    remote.url = REMOTE.url;
-    remote.updatedAt = REMOTE.updatedAt;
-    sync.localChanged = true;
-    sync.remoteChanged = false;
-    sync.lines = lines;
-    lines.local = 2;
-    lines.remote = 0;
-    sync.size = null;
-    sync.limit = 2_097_152;
-    sync.pollMs = 2_000;
-    sync.remoteContent = "remote";
-    act(() => primaryPublishClick(current.button));
-    expectPublishCalls(callbacks);
-
-    act(() => view.root.render(
-      <PublishBoundary callbacks={callbacks} sync={{ ...sync, remote: { ...remote }, lines: { ...lines } }} />,
-    ));
-    act(() => primaryPublishClick(capturePublishFrame(view.host).button));
-    expectPublishCalls(callbacks, "publish");
-  });
-
-  it.each(["sync-object", "publish-callback", "pull-callback", "sync-callback"] as const)(
-    "retires equal-looking %s replacement without letting A borrow B",
-    (replacement) => {
-      const syncA = statusSnapshot("remote-ahead");
-      const callbacksA = publishCallbacks();
-      const view = renderDirect(<PublishBoundary callbacks={callbacksA} sync={syncA} />);
-      const stale = capturePublishFrame(view.host);
-      const syncB = replacement === "sync-object"
-        ? { ...syncA, remote: { ...syncA.remote }, lines: { ...syncA.lines } }
-        : syncA;
-      const callbacksB = {
-        publish: replacement === "publish-callback" ? vi.fn() : callbacksA.publish,
-        pull: replacement === "pull-callback" ? vi.fn() : callbacksA.pull,
-        sync: replacement === "sync-callback" ? vi.fn() : callbacksA.sync,
-      };
-
-      act(() => view.root.render(
-        <PublishBoundary callbacks={callbacksB} sync={syncB} />,
-      ));
-      const current = capturePublishFrame(view.host);
-      expect(current.button).toBe(stale.button);
-      expect(current.click).not.toBe(stale.click);
-      act(() => {
-        const crossed = detachedReactClick(current.button);
-        stale.capture(crossed);
-        stale.click(crossed);
-      });
-      expectPublishCalls(callbacksA);
-      expectPublishCalls(callbacksB);
-
-      act(() => primaryPublishClick(current.icon));
-      expect(callbacksB.pull).toHaveBeenCalledOnce();
-      expect(callbacksB.publish).not.toHaveBeenCalled();
-      expect(callbacksB.sync).not.toHaveBeenCalled();
-    },
-  );
-
-  it.each([
-    "button attribute",
-    "icon replacement",
-    "status text",
-    "button detach",
-    "parent detach",
-    "higher detach",
-    "adjacent placement",
-  ] as const)("latches post-publication %s mutation through restoration", (change) => {
-    const sync = statusSnapshot("diverged");
-    const callbacks = publishCallbacks();
-    const view = renderDirect(<PublishBoundary callbacks={callbacks} sync={sync} />);
-    const current = capturePublishFrame(view.host);
-    const parent = view.host.querySelector('[data-testid="publish-parent"]')!;
-    const higher = view.host.querySelector('[data-testid="publish-higher"]')!;
-
-    if (change === "button attribute") {
-      current.button.dataset.changed = "true";
-      delete current.button.dataset.changed;
-    } else if (change === "icon replacement") {
-      const replacement = current.icon.cloneNode(true) as Element;
-      current.icon.replaceWith(replacement);
-      replacement.replaceWith(current.icon);
-    } else if (change === "status text") {
-      current.status.textContent = "Changed";
-      current.status.textContent = "Both changed";
-    } else if (change === "button detach") {
-      const next = current.button.nextSibling;
-      current.button.remove();
-      parent.insertBefore(current.button, next);
-    } else if (change === "parent detach") {
-      const next = parent.nextSibling;
-      parent.remove();
-      higher.insertBefore(parent, next);
-    } else if (change === "higher detach") {
-      const next = higher.nextSibling;
-      higher.remove();
-      view.host.insertBefore(higher, next);
-    } else {
-      const adjacent = document.createElement("b");
-      higher.parentNode!.insertBefore(adjacent, higher);
-      adjacent.remove();
-    }
-
-    act(() => primaryPublishClick(current.button));
-    expectPublishCalls(callbacks);
-    act(() => primaryPublishClick(current.button));
-    expectPublishCalls(callbacks);
-
-    act(() => view.root.render(
-      <PublishBoundary boundary={1} callbacks={callbacks} sync={sync} />,
-    ));
-    act(() => primaryPublishClick(capturePublishFrame(view.host).button));
-    expectPublishCalls(callbacks, "sync");
-  });
-
-  it("allows genuinely nonadjacent ancestor churn", () => {
-    const callbacks = publishCallbacks();
-    const view = renderDirect(
-      <PublishBoundary callbacks={callbacks} sync={statusSnapshot("remote-ahead")} />,
-    );
-    const higher = view.host.querySelector('[data-testid="publish-higher"]')!;
-    const before = view.host.querySelector('[data-testid="publish-before"]')!;
-    const distant = document.createElement("b");
-    higher.insertBefore(distant, before);
-    distant.remove();
-
-    act(() => primaryPublishClick(capturePublishFrame(view.host).button));
-    expectPublishCalls(callbacks, "pull");
-  });
-
-  it("does not canonize prepublication mutation and restoration", () => {
-    const sync = statusSnapshot("diverged");
-    const callbacks = publishCallbacks();
-    let visits = 0;
-    const mutate = () => {
-      visits++;
-      if (visits !== 1) return;
-      const status = document.querySelector('[data-testid="publish-status"]');
-      if (!(status instanceof HTMLSpanElement)) {
-        throw new Error("The prepublication status text was not committed");
-      }
-      const nested = document.createElement("b");
-      nested.textContent = "Both changed";
-      status.replaceChildren(nested);
+  function show(sync: SyncStatusDto, overrides: Partial<Props> = {}) {
+    const props: Props = { sync, publishing: false, onPublishNow: vi.fn(), onPull: vi.fn(), onSync: vi.fn(), ...overrides };
+    const view = render(<PublishStatusButton {...props} />, { wrapper: strict ? StrictMode : undefined });
+    const update = (next: Partial<Props>) => {
+      Object.assign(props, next);
+      view.rerender(<PublishStatusButton {...props} />);
     };
-    const tree = (boundary: number) => (
-      <>
-        <PublishMutationProbe mutate={mutate} />
-        <PublishBoundary boundary={boundary} callbacks={callbacks} sync={sync} />
-      </>
-    );
-    const view = renderDirect(tree(0));
+    return { props, update };
+  }
+  const chip = () => screen.getByTestId("publish-button") as HTMLButtonElement;
+  const placeHold = () => screen.queryByTestId("place-hold");
+  /** A click as a pointer sends it: `detail` is the click count. A click from the keyboard has `detail` 0. */
+  const pointerClick = (count = 1) => fireEvent.click(chip(), { detail: count });
+  const keyboardClick = () => fireEvent.click(chip(), { detail: 0 });
+  const expectCalls = (props: Props, counts: Partial<Record<Action, number>>) => {
+    expect(props.onPublishNow).toHaveBeenCalledTimes(counts.onPublishNow ?? 0);
+    expect(props.onPull).toHaveBeenCalledTimes(counts.onPull ?? 0);
+    expect(props.onSync).toHaveBeenCalledTimes(counts.onSync ?? 0);
+  };
 
-    act(() => primaryPublishClick(capturePublishFrame(view.host).button));
-    expectPublishCalls(callbacks);
+  it.each([
+    ["in-sync", "Up to date", "Up to date", "bg-emerald-300", "onPublishNow"],
+    ["local-ahead", "Publish", "Unpublished changes", "bg-amber-300", "onPublishNow"],
+    ["remote-ahead", "Pull", "GitHub has changes", "lucide-refresh-cw", "onPull"],
+    ["diverged", "Both changed", "Both changed", "lucide-git-merge", "onSync"],
+    ["remote-unreadable", "GitHub file too large", "GitHub file too large", "lucide-triangle-alert", "onSync"],
+  ] as const)("%s: the chip says %s, its title is %s, and a press runs its one action", (status, label, title, iconClass, action) => {
+    const { props } = show(statusSnapshot(status));
+    expect(chip()).toHaveAttribute("type", "button");
+    expect(chip()).toHaveAttribute("title", title);
+    expect(chip()).toHaveTextContent(label);
+    expect(chip()).toHaveAccessibleName(label);
+    expect(chip()).not.toHaveAttribute("aria-disabled");
+    expect(chip()).toBeEnabled();
+    expect(screen.getByTestId("publish-status")).toHaveAttribute("data-status", status);
+    expect(chip().firstElementChild).toHaveClass(iconClass);
+    expect(chip().childElementCount).toBe(2);
 
-    capturePublishFrame(view.host).status.textContent = "Both changed";
-    act(() => primaryPublishClick(capturePublishFrame(view.host).button));
-    expectPublishCalls(callbacks);
-
-    act(() => view.root.render(tree(1)));
-    act(() => primaryPublishClick(capturePublishFrame(view.host).button));
-    expectPublishCalls(callbacks, "sync");
+    pointerClick();
+    expectCalls(props, { [action]: 1 });
+    keyboardClick();
+    expectCalls(props, { [action]: 2 });
   });
 
-  it.each(["button", "icon", "status"] as const)(
-    "rejects partial %s ref replay and recovers only on a fresh render",
-    (part) => {
-      const sync = statusSnapshot("local-ahead");
-      const callbacks = publishCallbacks();
-      const view = renderDirect(<PublishBoundary callbacks={callbacks} sync={sync} />);
-      const stale = capturePublishFrame(view.host);
-      const index = part === "button" ? 0 : part === "icon" ? 1 : 2;
-      act(() => {
-        stale.refs[index]?.(null);
-        stale.refs[index]?.(part === "button" ? stale.button : part === "icon" ? stale.icon : stale.status);
-        primaryPublishClick(stale.button);
-      });
-      expectPublishCalls(callbacks);
-
-      act(() => view.root.render(
-        <PublishBoundary boundary={1} callbacks={callbacks} sync={sync} />,
-      ));
-      act(() => primaryPublishClick(capturePublishFrame(view.host).button));
-      expectPublishCalls(callbacks, "publish");
-    },
-  );
-
-  it("rejects a fabricated live wrapper without poisoning the publication", () => {
-    const callbacks = publishCallbacks();
-    const sync = statusSnapshot("local-ahead");
-    const view = renderDirect(<PublishBoundary callbacks={callbacks} sync={sync} />);
-    const current = capturePublishFrame(view.host);
-    view.host.addEventListener("click", (nativeEvent) => {
-      if (!(nativeEvent instanceof MouseEvent)) return;
-      const forgedCapture = detachedReactClick(current.button, nativeEvent);
-      const forgedBubble = detachedReactClick(current.button, nativeEvent);
-      current.capture(forgedCapture);
-      current.click(forgedBubble);
-    }, { capture: true, once: true });
-
-    act(() => primaryPublishClick(current.button));
-    expectPublishCalls(callbacks);
-    act(() => primaryPublishClick(current.button));
-    expectPublishCalls(callbacks, "publish");
+  it("every press acts: presses in a row, with no new status in between, each run the action", () => {
+    const { props } = show(statusSnapshot("diverged"));
+    pointerClick();
+    pointerClick();
+    keyboardClick();
+    keyboardClick();
+    expectCalls(props, { onSync: 4 });
   });
 
-  it("rejects crossed handlers and native-event reuse without poisoning fresh B", () => {
-    const syncA = statusSnapshot("local-ahead");
-    const syncB = statusSnapshot("remote-ahead");
-    const callbacksA = publishCallbacks();
-    const callbacksB = publishCallbacks();
-    const view = renderDirect(<PublishBoundary callbacks={callbacksA} sync={syncA} />);
-    const stale = capturePublishFrame(view.host);
-    const reused = new MouseEvent("click", { bubbles: true, button: 0, cancelable: true });
-
-    act(() => primaryPublishClick(stale.button, reused));
-    expectPublishCalls(callbacksA, "publish");
-    act(() => view.root.render(
-      <PublishBoundary boundary={1} callbacks={callbacksB} sync={syncB} visit="b" />,
-    ));
-    const current = capturePublishFrame(view.host);
-    view.host.addEventListener("click", (nativeEvent) => {
-      if (!(nativeEvent instanceof MouseEvent)) return;
-      stale.capture(detachedReactClick(current.button, nativeEvent));
-      stale.click(detachedReactClick(current.button, nativeEvent));
-    }, { capture: true, once: true });
-
-    act(() => primaryPublishClick(current.button, reused));
-    expectPublishCalls(callbacksB);
-    act(() => primaryPublishClick(current.button));
-    expectPublishCalls(callbacksB, "pull");
+  it("the second and the third click of a multi-click are not presses", () => {
+    const { props } = show(statusSnapshot("remote-ahead"));
+    pointerClick(2);
+    pointerClick(3);
+    expectCalls(props, {});
+    pointerClick(1);
+    pointerClick(2);
+    pointerClick(3);
+    expectCalls(props, { onPull: 1 });
   });
 
-  it("blocks nested B until A returns, then gives B one fresh activation", () => {
-    const syncA = statusSnapshot("local-ahead");
-    const syncB = statusSnapshot("remote-ahead");
-    const callbacksB = publishCallbacks();
-    const host = document.createElement("div");
-    document.body.append(host);
-    const view: DirectView = { host, root: createRoot(host) };
-    directViews.push(view);
-    const callbacksA = publishCallbacks();
-    callbacksA.publish.mockImplementation(() => {
-      flushSync(() => {
-        view.root.render(<PublishBoundary callbacks={callbacksB} sync={syncB} visit="b" />);
-      });
-      primaryPublishClick(capturePublishFrame(view.host).button);
+  it("while a publish or a pull runs the chip is aria-disabled, never disabled, keeps focus and its label, and a press does nothing; it acts again when the request has ended", () => {
+    const { props, update } = show(statusSnapshot("remote-ahead"));
+    chip().focus();
+    update({ publishing: true });
+    expect(chip()).toHaveAttribute("aria-disabled", "true");
+    expect(chip()).toBeEnabled();
+    expect(chip()).toHaveFocus();
+    expect(chip()).toHaveTextContent("Pull");
+    expect(chip()).toHaveAttribute("title", "GitHub has changes");
+    expect(chip().firstElementChild).toHaveClass("animate-spin");
+
+    pointerClick();
+    keyboardClick();
+    fireEvent.keyDown(chip(), { key: "Enter" });
+    fireEvent.keyUp(chip(), { key: "Enter" });
+    expectCalls(props, {});
+    expect(placeHold()).toBeNull();
+
+    update({ publishing: false });
+    expect(chip()).not.toHaveAttribute("aria-disabled");
+    expect(chip()).toHaveFocus();
+    expect(chip().firstElementChild).toHaveClass("lucide-refresh-cw");
+    keyboardClick();
+    expectCalls(props, { onPull: 1 });
+  });
+
+  it("a press runs the action of the status on screen, with the newest callbacks: never the action of the status before", () => {
+    const { props, update } = show(statusSnapshot("local-ahead"));
+    const before = { ...props };
+    const onPull = vi.fn();
+    update({ sync: statusSnapshot("remote-ahead"), onPull });
+    expect(chip()).toHaveTextContent("Pull");
+    pointerClick();
+    expect(onPull).toHaveBeenCalledOnce();
+    expectCalls(before, {});
+
+    const onSync = vi.fn();
+    update({ sync: statusSnapshot("diverged"), onSync });
+    expect(chip()).toHaveTextContent("Both changed");
+    keyboardClick();
+    expect(onSync).toHaveBeenCalledOnce();
+    expect(onPull).toHaveBeenCalledOnce();
+    expectCalls(before, {});
+  });
+
+  it("Enter acts when the key is released, once; a repeat, a release without a press, Enter with Ctrl and a press that lost focus do nothing", () => {
+    const { props } = show(statusSnapshot("remote-ahead"));
+    chip().focus();
+    // The keydown is cancelled, so the browser does not click the button on it (nor on its repeats).
+    expect(fireEvent.keyDown(chip(), { key: "Enter" })).toBe(false);
+    expect(fireEvent.keyDown(chip(), { key: "Enter", repeat: true })).toBe(false);
+    expect(fireEvent.keyDown(chip(), { key: "Enter", repeat: true })).toBe(false);
+    expectCalls(props, {});
+    fireEvent.keyUp(chip(), { key: "Enter" });
+    expectCalls(props, { onPull: 1 });
+
+    // Repeats of a key that went down somewhere else, then its release here.
+    fireEvent.keyDown(chip(), { key: "Enter", repeat: true });
+    fireEvent.keyUp(chip(), { key: "Enter" });
+    fireEvent.keyUp(chip(), { key: "Enter" });
+    fireEvent.keyDown(chip(), { key: "Enter", ctrlKey: true });
+    fireEvent.keyUp(chip(), { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(chip(), { key: "Enter" });
+    chip().blur();
+    chip().focus();
+    fireEvent.keyUp(chip(), { key: "Enter" });
+    expectCalls(props, { onPull: 1 });
+
+    // Space is the browser's own: it clicks a button on release, and the chip leaves the key alone.
+    expect(fireEvent.keyDown(chip(), { key: " " })).toBe(true);
+    expect(fireEvent.keyUp(chip(), { key: " " })).toBe(true);
+    expectCalls(props, { onPull: 1 });
+  });
+
+  it("a pointer click that acts keeps the chip's place for the rest of the gesture: the box goes 600 ms later, and at once when focus is back on the chip", () => {
+    vi.useFakeTimers();
+    const { props } = show(statusSnapshot("diverged"));
+    expect(placeHold()).toBeNull();
+    pointerClick();
+    expect(placeHold()).not.toBeNull();
+    expect(placeHold()).toHaveAttribute("aria-hidden", "true");
+    act(() => void vi.advanceTimersByTime(599));
+    expect(placeHold()).not.toBeNull();
+    act(() => void vi.advanceTimersByTime(1));
+    expect(placeHold()).toBeNull();
+
+    // The dialog the press opened has closed and handed focus back: the chip is there again.
+    pointerClick();
+    expect(placeHold()).not.toBeNull();
+    act(() => chip().focus());
+    expect(placeHold()).toBeNull();
+    expectCalls(props, { onSync: 2 });
+  });
+
+  it("nothing but a pointer click that acts keeps the place: not a key, not the rest of a multi-click, not a press on a chip that is off, not a new status", () => {
+    const { props, update } = show(statusSnapshot("diverged"));
+    keyboardClick();
+    expect(placeHold()).toBeNull();
+    chip().focus();
+    fireEvent.keyDown(chip(), { key: "Enter" });
+    fireEvent.keyUp(chip(), { key: "Enter" });
+    expect(placeHold()).toBeNull();
+    pointerClick(2);
+    expect(placeHold()).toBeNull();
+    update({ sync: statusSnapshot("remote-ahead") });
+    expect(placeHold()).toBeNull();
+    update({ publishing: true });
+    pointerClick();
+    expect(placeHold()).toBeNull();
+    expectCalls(props, { onSync: 2 });
+  });
+
+  describe("taking the place of the Publish button", () => {
+    /** The header's slot: the plain Publish button until the first status arrives, the chip from then on, and the arrow beside either. */
+    function Slot({ sync, arrow = "on" }: { sync: SyncStatusDto | null; arrow?: "on" | "disabled" | "none" }) {
+      return (
+        <div>
+          <input data-testid="title" />
+          <div role="menu">
+            <button type="button" role="menuitem" data-testid="menu-entry">Commit to GitHub…</button>
+          </div>
+          <div>
+            {sync ? (
+              <PublishStatusButton sync={sync} publishing={false} onPublishNow={vi.fn()} onPull={vi.fn()} onSync={vi.fn()} />
+            ) : (
+              <button type="button" data-testid="publish-button" data-status-chip-place="">Publish</button>
+            )}
+            {arrow !== "none" && <button type="button" data-testid="publish-menu" aria-label="Publish options" disabled={arrow === "disabled"} />}
+          </div>
+        </div>
+      );
+    }
+    const swap = (focus: string | null, arrow: "on" | "disabled" | "none" = "on") => {
+      const view = render(<Slot sync={null} arrow={arrow} />, { wrapper: strict ? StrictMode : undefined });
+      if (focus) screen.getByTestId(focus).focus();
+      const plain = chip();
+      view.rerender(<Slot sync={statusSnapshot("remote-ahead")} arrow={arrow} />);
+      expect(chip()).not.toBe(plain);
+      expect(chip()).toHaveTextContent("Pull");
+    };
+
+    it("focus on the Publish button goes to the arrow beside the chip: not to the chip, whose press would pull, and not to the page", () => {
+      swap("publish-button");
+      expect(screen.getByTestId("publish-menu")).toHaveFocus();
+      expect(chip()).not.toHaveFocus();
     });
-    act(() => view.root.render(
-      <PublishBoundary callbacks={callbacksA} sync={syncA} visit="a" />,
-    ));
 
-    act(() => primaryPublishClick(capturePublishFrame(view.host).button));
-    expectPublishCalls(callbacksA, "publish");
-    expectPublishCalls(callbacksB);
+    it.each([
+      ["the title field", "title"],
+      ["an entry of the open Publish menu", "menu-entry"],
+      ["the arrow", "publish-menu"],
+    ])("focus on %s stays where it is", (_where, testId) => {
+      swap(testId);
+      expect(screen.getByTestId(testId)).toHaveFocus();
+    });
 
-    act(() => primaryPublishClick(capturePublishFrame(view.host).button));
-    expect(callbacksA.publish).toHaveBeenCalledOnce();
-    expectPublishCalls(callbacksB, "pull");
-  });
+    it("focus on the page stays on the page", () => {
+      swap(null);
+      expect(document.body).toHaveFocus();
+    });
 
-  it("retires an equal-looking remount and removal before the parent layout boundary", () => {
-    const callbacksA = publishCallbacks();
-    const callbacksB = publishCallbacks();
-    const sync = statusSnapshot("in-sync");
-    const view = renderDirect(
-      <PublishBoundary callbacks={callbacksA} sync={sync} visit="a" />,
-    );
-    const stale = capturePublishFrame(view.host);
-    let staleCallsAtBoundary = -1;
+    it.each(["disabled", "none"] as const)("with the arrow %s, focus on the Publish button is left to fall to the page: the chip never takes it", (arrow) => {
+      swap("publish-button", arrow);
+      expect(document.body).toHaveFocus();
+    });
 
-    act(() => view.root.render(
-      <PublishBoundary
-        boundary={1}
-        callbacks={callbacksB}
-        sync={sync}
-        visit="b"
-        onLayout={() => {
-          const event = detachedReactClick(stale.button);
-          stale.capture(event);
-          stale.click(event);
-          staleCallsAtBoundary = callbacksA.publish.mock.calls.length;
-        }}
-      />,
-    ));
-    expect(staleCallsAtBoundary).toBe(0);
-    act(() => primaryPublishClick(capturePublishFrame(view.host).button));
-    expectPublishCalls(callbacksB, "publish");
-
-    act(() => view.root.render(
-      <PublishBoundary
-        boundary={2}
-        callbacks={callbacksB}
-        present={false}
-        sync={sync}
-        visit="b"
-        onLayout={() => {
-          const event = detachedReactClick(stale.button);
-          stale.capture(event);
-          stale.click(event);
-        }}
-      />,
-    ));
-    expect(callbacksA.publish).not.toHaveBeenCalled();
+    it("another button with the Publish button's test id is not the button whose place the chip takes: its focus goes nowhere", () => {
+      const view = render(
+        <div>
+          <button type="button" data-testid="publish-button">Publish</button>
+          <button type="button" data-testid="publish-menu" />
+        </div>,
+        { wrapper: strict ? StrictMode : undefined },
+      );
+      chip().focus();
+      view.rerender(
+        <div>
+          <PublishStatusButton sync={statusSnapshot("remote-ahead")} publishing={false} onPublishNow={vi.fn()} onPull={vi.fn()} onSync={vi.fn()} />
+          <button type="button" data-testid="publish-menu" />
+        </div>,
+      );
+      expect(chip()).toHaveTextContent("Pull");
+      expect(document.body).toHaveFocus();
+    });
   });
 });
-
 describe("remote-unreadable sync status", () => {
   it("turns the first 413 poll into a labeled status chip that opens Sync", async () => {
     vi.spyOn(api.documents, "sync").mockRejectedValue(unreadableError());
