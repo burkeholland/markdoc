@@ -327,39 +327,44 @@ describe.each([
   });
 
   describe("taking the place of the Publish button", () => {
-    /** The header's slot: the plain Publish button until the first status arrives, the chip from then on. */
-    function Slot({ sync }: { sync: SyncStatusDto | null }) {
+    /** The header's slot: the plain Publish button until the first status arrives, the chip from then on, and the arrow beside either. */
+    function Slot({ sync, arrow = "on" }: { sync: SyncStatusDto | null; arrow?: "on" | "disabled" | "none" }) {
       return (
         <div>
           <input data-testid="title" />
           <div role="menu">
             <button type="button" role="menuitem" data-testid="menu-entry">Commit to GitHub…</button>
           </div>
-          {sync ? (
-            <PublishStatusButton sync={sync} publishing={false} onPublishNow={vi.fn()} onPull={vi.fn()} onSync={vi.fn()} />
-          ) : (
-            <button type="button" data-testid="publish-button">Publish</button>
-          )}
+          <div>
+            {sync ? (
+              <PublishStatusButton sync={sync} publishing={false} onPublishNow={vi.fn()} onPull={vi.fn()} onSync={vi.fn()} />
+            ) : (
+              <button type="button" data-testid="publish-button" data-status-chip-place="">Publish</button>
+            )}
+            {arrow !== "none" && <button type="button" data-testid="publish-menu" aria-label="Publish options" disabled={arrow === "disabled"} />}
+          </div>
         </div>
       );
     }
-    const swap = (focus: string | null) => {
-      const view = render(<Slot sync={null} />, { wrapper: strict ? StrictMode : undefined });
+    const swap = (focus: string | null, arrow: "on" | "disabled" | "none" = "on") => {
+      const view = render(<Slot sync={null} arrow={arrow} />, { wrapper: strict ? StrictMode : undefined });
       if (focus) screen.getByTestId(focus).focus();
       const plain = chip();
-      view.rerender(<Slot sync={statusSnapshot("remote-ahead")} />);
+      view.rerender(<Slot sync={statusSnapshot("remote-ahead")} arrow={arrow} />);
       expect(chip()).not.toBe(plain);
       expect(chip()).toHaveTextContent("Pull");
     };
 
-    it("focus on the Publish button goes to the chip, not to the page", () => {
+    it("focus on the Publish button goes to the arrow beside the chip: not to the chip, whose press would pull, and not to the page", () => {
       swap("publish-button");
-      expect(chip()).toHaveFocus();
+      expect(screen.getByTestId("publish-menu")).toHaveFocus();
+      expect(chip()).not.toHaveFocus();
     });
 
     it.each([
       ["the title field", "title"],
       ["an entry of the open Publish menu", "menu-entry"],
+      ["the arrow", "publish-menu"],
     ])("focus on %s stays where it is", (_where, testId) => {
       swap(testId);
       expect(screen.getByTestId(testId)).toHaveFocus();
@@ -369,9 +374,32 @@ describe.each([
       swap(null);
       expect(document.body).toHaveFocus();
     });
+
+    it.each(["disabled", "none"] as const)("with the arrow %s, focus on the Publish button is left to fall to the page: the chip never takes it", (arrow) => {
+      swap("publish-button", arrow);
+      expect(document.body).toHaveFocus();
+    });
+
+    it("another button with the Publish button's test id is not the button whose place the chip takes: its focus goes nowhere", () => {
+      const view = render(
+        <div>
+          <button type="button" data-testid="publish-button">Publish</button>
+          <button type="button" data-testid="publish-menu" />
+        </div>,
+        { wrapper: strict ? StrictMode : undefined },
+      );
+      chip().focus();
+      view.rerender(
+        <div>
+          <PublishStatusButton sync={statusSnapshot("remote-ahead")} publishing={false} onPublishNow={vi.fn()} onPull={vi.fn()} onSync={vi.fn()} />
+          <button type="button" data-testid="publish-menu" />
+        </div>,
+      );
+      expect(chip()).toHaveTextContent("Pull");
+      expect(document.body).toHaveFocus();
+    });
   });
 });
-
 describe("remote-unreadable sync status", () => {
   it("turns the first 413 poll into a labeled status chip that opens Sync", async () => {
     vi.spyOn(api.documents, "sync").mockRejectedValue(unreadableError());

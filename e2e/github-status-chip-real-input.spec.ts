@@ -1112,12 +1112,66 @@ test.describe("status chip: what changes without the user asking", () => {
     }
   });
 
-  test("the chip takes the place of the Publish button when the first status arrives: a press aimed at Publish opens the menu and sends nothing, focus on Publish goes to the chip, and the chip then acts on the first press", async ({ browser }) => {
-    const { page } = await signInWith(browser, "chip-arrives");
+  // The plain Publish button opens the Publish menu. The chip that takes its place pulls or publishes. So focus
+  // that rested on the button goes to the arrow beside the chip, which opens the same menu.
+  for (const { kind, state } of [
+    { kind: "repo", state: "remote-ahead" },
+    { kind: "gist", state: "local-ahead" },
+  ] as const) {
+    test(`${kind}, "${LABELS[state].label}": focus on the Publish button when the chip takes its place goes to the arrow, Enter and Space there each open the Publish menu on the first press, and nothing is pulled or published`, async ({ browser }) => {
+      const { page } = await signInWith(browser, `chip-arrives-${kind}`);
+      test.skip(!(await hasFakeGitHub(page)), "needs the fake GitHub of the e2e server");
+      for (const key of ["Enter", "Space"] as const) {
+        await test.step(key, async () => {
+          const doc = await linkedDocument(page, state, kind);
+          const requests = requestsOf(page);
+          // The first status is held back: the header shows the plain Publish button for now.
+          let release!: () => void;
+          const gate = new Promise<void>((resolve) => (release = resolve));
+          await page.route(onPath(SYNC_STATUS), async (route) => {
+            await gate;
+            await route.continue();
+          });
+          await openDocument(page, doc.id);
+          await expect(chip(page)).toHaveText("Publish");
+          await expect(status(page)).toHaveCount(0);
+          await chip(page).focus();
+          await expectFocusOnChip(page);
+
+          release();
+          await expectChipSays(page, state);
+          await expect.poll(() => focusOf(page)).toBe("publish-menu");
+
+          // The key the user had ready for Publish opens the Publish menu, on the first press.
+          await page.keyboard.press(key);
+          const menu = page.getByRole("menu");
+          await expect(menu).toBeVisible();
+          await expect(menu.getByRole("menuitem", { name: kind === "gist" ? "Update gist" : /Commit to GitHub/ })).toBeVisible();
+          await expect.poll(() => page.evaluate(() => !!document.activeElement?.closest('[role="menu"]'))).toBe(true);
+          await page.keyboard.press("Escape");
+          await expect(menu).toHaveCount(0);
+          await expect.poll(() => focusOf(page)).toBe("publish-menu");
+          expect(requests.seen).toEqual([]);
+          expect(await remoteText(page, doc)).toBe(state === "remote-ahead" ? REMOTE_EDIT : BASE);
+          expect(await documentText(page, doc.id)).toBe(state === "remote-ahead" ? BASE : LOCAL_EDIT);
+
+          // The chip itself acts on its first press, when it is the chip the user presses.
+          await press(page, key);
+          await expect.poll(() => requests.seen).toEqual([state === "remote-ahead" ? "/pull" : "/publish"]);
+          await requests.settled();
+          await expectChipSays(page, "in-sync");
+          await expectFocusOnChip(page);
+          await page.unrouteAll({ behavior: "ignoreErrors" });
+        });
+      }
+    });
+  }
+
+  test("a click on the Publish button before the first status opens the Publish menu and sends nothing", async ({ browser }) => {
+    const { page } = await signInWith(browser, "chip-arrives-click");
     test.skip(!(await hasFakeGitHub(page)), "needs the fake GitHub of the e2e server");
     const doc = await linkedDocument(page, "remote-ahead");
     const requests = requestsOf(page);
-    // The first status is held back: the header shows the plain Publish button for now.
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     await page.route(onPath(SYNC_STATUS), async (route) => {
@@ -1126,34 +1180,15 @@ test.describe("status chip: what changes without the user asking", () => {
     });
     await openDocument(page, doc.id);
     await expect(chip(page)).toHaveText("Publish");
-    await expect(status(page)).toHaveCount(0);
-
-    await test.step("a click on Publish opens the Publish menu and sends nothing", async () => {
-      await mouseClick(page, chip(page));
-      await expect(page.getByRole("menu")).toBeVisible();
-      await page.keyboard.press("Escape");
-      await expect(page.getByRole("menu")).toHaveCount(0);
-      expect(requests.seen).toEqual([]);
-    });
-
-    await test.step("focus is on Publish when the chip takes its place: it is on the chip then, not on the page", async () => {
-      await chip(page).focus();
-      await expectFocusOnChip(page);
-      release();
-      await expectChipSays(page, "remote-ahead");
-      await expectFocusOnChip(page);
-      expect(requests.seen).toEqual([]);
-    });
-
-    await test.step("the chip acts on the first press", async () => {
-      await page.keyboard.press("Enter");
-      await expect.poll(() => requests.seen).toEqual(["/pull"]);
-      await requests.settled();
-      await expectChipSays(page, "in-sync");
-      await expectFocusOnChip(page);
-    });
+    await mouseClick(page, chip(page));
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    expect(requests.seen).toEqual([]);
+    release();
+    await expectChipSays(page, "remote-ahead");
+    expect(requests.seen).toEqual([]);
   });
-
   for (const how of ["mouse", "keyboard"] as const) {
     test(`the Publish menu, opened by ${how}, is open when the first status arrives: the chip takes the button's place under it, the menu keeps focus and still works, and nothing is pressed`, async ({ browser }) => {
       const { page } = await signInWith(browser, `chip-arrives-menu-${how}`);
@@ -1207,6 +1242,51 @@ test.describe("status chip: what changes without the user asking", () => {
       expect(requests.seen).toEqual([]);
     });
   }
+
+  test("a key or the mouse button goes down on the Publish button and comes up after a gist's chip has taken its place: the Publish menu is open, nothing is pressed and nothing is published", async ({ browser }) => {
+    const { page } = await signInWith(browser, "chip-arrives-held");
+    test.skip(!(await hasFakeGitHub(page)), "needs the fake GitHub of the e2e server");
+    for (const how of ["Space", "Enter", "mouse"] as const) {
+      await test.step(how, async () => {
+        // A gist that has unpublished changes: its chip would publish at once.
+        const doc = await linkedDocument(page, "local-ahead", "gist");
+        const requests = requestsOf(page);
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        await page.route(onPath(SYNC_STATUS), async (route) => {
+          await gate;
+          await route.continue();
+        });
+        await openDocument(page, doc.id);
+        await expect(chip(page)).toHaveText("Publish");
+        await expect(status(page)).toHaveCount(0);
+        if (how === "mouse") {
+          const { x, y } = await pointOn(chip(page));
+          await page.mouse.move(x, y);
+          await page.mouse.down();
+        } else {
+          await chip(page).focus();
+          await page.keyboard.down(how);
+        }
+        // The Publish button opens its menu when the key or the button goes down.
+        await expect(page.getByRole("menu")).toBeVisible();
+        release();
+        await expectStatus(page, "local-ahead");
+        if (how === "mouse") await page.mouse.up();
+        else await page.keyboard.up(how);
+        await expect(page.getByRole("menu")).toBeVisible();
+        await expect(page.getByRole("dialog")).toHaveCount(0);
+        await expect.poll(() => page.evaluate(() => !!document.activeElement?.closest('[role="menu"]'))).toBe(true);
+        await page.keyboard.press("Escape");
+        await expect(page.getByRole("menu")).toHaveCount(0);
+        await expect.poll(() => focusOf(page)).toMatch(/^publish-(menu|button)$/);
+        await expectChipSays(page, "local-ahead");
+        expect(requests.seen).toEqual([]);
+        expect(await remoteText(page, doc)).toBe(BASE);
+        await page.unrouteAll({ behavior: "ignoreErrors" });
+      });
+    }
+  });
 
   test("focus in the editor, in the title and on the page stays where it is when the chip takes the Publish button's place", async ({ browser }) => {
     const { page } = await signInWith(browser, "chip-arrives-focus");

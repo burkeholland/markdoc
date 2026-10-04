@@ -4289,6 +4289,9 @@ function GitHubEntryLabel({ configured, children }: { configured: boolean; child
   );
 }
 
+/** Marks the plain Publish button that stands in the status chip's place until the first status arrives. */
+const STATUS_CHIP_PLACE = "data-status-chip-place";
+
 /** What one press on the status chip does, per sync status. */
 function statusChipAction(status: SyncStatusDto["status"]): "publish" | "pull" | "sync" {
   if (status === "remote-ahead") return "pull";
@@ -4329,14 +4332,17 @@ export function PublishStatusButton({
   // A press can put a dialog over the chip, and a click on the page behind a dialog closes it. So the chip's
   // place is kept for the rest of the pointer gesture; the box goes when focus is back on the chip.
   const hold = usePlaceHold(true);
-  // The chip takes the place of the plain Publish button when the first status arrives. Focus that was on
-  // that button goes to the chip, not to the page. Read while this render is pending: once React commits,
-  // the button is gone and focus is on <body>.
-  const [takesFocus] = useState(() => typeof document !== "undefined" && document.activeElement?.getAttribute("data-testid") === "publish-button");
+  // The chip takes the place of the plain Publish button when the first status arrives. That button opens
+  // the Publish menu, and focus that was on it would fall to the page with it. It goes to the arrow beside
+  // the chip instead, which opens the same menu: a key aimed at Publish must not press the chip, whose
+  // press pulls or publishes. Focus anywhere else is left alone. Read while this render is pending: once
+  // React commits, the button is gone and focus is on <body>.
+  const [replacesFocused] = useState(() => typeof document !== "undefined" && !!document.activeElement?.hasAttribute(STATUS_CHIP_PLACE));
   const button = useRef<HTMLButtonElement | null>(null);
   useLayoutEffect(() => {
-    if (takesFocus && document.activeElement === document.body) button.current?.focus({ preventScroll: true });
-  }, [takesFocus]);
+    const beside = button.current?.nextElementSibling;
+    if (replacesFocused && document.activeElement === document.body && beside instanceof HTMLButtonElement && !beside.disabled) beside.focus({ preventScroll: true });
+  }, [replacesFocused]);
 
   const onClick = (event: React.MouseEvent<HTMLButtonElement>) => {
     // The second click of a double-click, or of a double tap, is not a second press.
@@ -6935,7 +6941,7 @@ function PublishMenu({ props }: { props: HeaderProps }) {
           <PublishStatusButton sync={chipSync} publishing={props.publishing} onPublishNow={props.onPublishNow} onPull={props.onPull} onSync={props.onSync} />
         ) : (
           <MenuTrigger asChild>
-            <button type="button" className="btn btn-primary gap-1.5 rounded-r-none pl-4 pr-3" disabled={props.publishing} data-testid="publish-button">
+            <button type="button" className="btn btn-primary gap-1.5 rounded-r-none pl-4 pr-3" disabled={props.publishing} data-testid="publish-button" {...{ [STATUS_CHIP_PLACE]: "" }}>
               {props.publishing ? <Loader2 size={16} className="animate-spin" /> : null}
               Publish
             </button>
