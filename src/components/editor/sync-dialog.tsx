@@ -36,6 +36,8 @@ const CLOSE_AFTER_MS = 900;
  * first one was aimed at, never on its neighbour. A card taller than the window scrolls inside.
  */
 const PINNED = "[--pin:max(0.75rem,calc(50dvh-15rem))] top-(--pin) translate-y-0 max-h-[calc(100dvh-var(--pin)-0.75rem)] overflow-y-auto";
+/** How far the pointer has to travel before it counts as moved: more than a shaking hand moves it. */
+const TRAVEL_PX = 24;
 
 const plural = (n: number) => `${n} line${n === 1 ? "" : "s"}`;
 const formatMb = (bytes: number) => {
@@ -57,12 +59,15 @@ export const SyncDialog = memo(function SyncDialog({
   doc,
   sync,
   actions,
+  unprompted = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   doc: DocumentDto;
   sync: SyncStatusDto | null;
   actions: SyncActions;
+  /** The editor opened the dialog on its own: GitHub refused a commit or a pull. Read when a visit starts. */
+  unprompted?: boolean;
 }) {
   const defaultMessage = `Update ${doc.repoPath ?? doc.gistFile ?? "document"}`;
   // One visit is the dialog open on one file. Opening it, or the file changing under it, starts over.
@@ -72,6 +77,11 @@ export const SyncDialog = memo(function SyncDialog({
   const [busy, setBusy] = useState<SyncActionKind | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+  // An unprompted visit appears under a pointer and a key that were aimed at something else: the Commit
+  // button lies where Take GitHub is now, and a second click or Enter meant for it would run a choice. So
+  // it starts "waiting": focus is on the dialog's body, not on a choice, and the choices are off. They
+  // switch on ("ready") when the user does something new that is aimed at this dialog (see below).
+  const [entry, setEntry] = useState<"asked" | "waiting" | "ready">(unprompted ? "waiting" : "asked");
   if (shownVisit !== visit) {
     setShownVisit(visit);
     if (visit !== null) {
@@ -79,6 +89,7 @@ export const SyncDialog = memo(function SyncDialog({
       setBusy(null);
       setError(null);
       setDone(null);
+      setEntry(unprompted ? "waiting" : "asked");
     }
   }
   // The action this visit is waiting for, from its click until its result has closed the dialog (or its
@@ -99,15 +110,45 @@ export const SyncDialog = memo(function SyncDialog({
   const enterOnRelease = useEnterOnRelease();
   // Compare closes the dialog under the pointer: the rest of a double-click must not land on the page.
   const compareHold = usePlaceHold(!open);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const live = entry !== "waiting";
+  // What switches the choices of an unprompted visit on. No clock: only something the user does.
+  useEffect(() => {
+    if (live || visit === null) return;
+    const ready = () => setEntry("ready");
+    // The pointer has travelled, measured from where it is first seen: a shaking hand stays under that, and
+    // so does the move a browser sends by itself when the page changes under a pointer that rests.
+    let seen: { x: number; y: number } | null = null;
+    const onPointerMove = (event: PointerEvent) => {
+      seen ??= { x: event.clientX, y: event.clientY };
+      if (Math.hypot(event.clientX - seen.x, event.clientY - seen.y) > TRAVEL_PX) ready();
+    };
+    // One whole press, or a tap, anywhere on the card. Heard on the document, so after the choices' own
+    // handlers: the press that switches them on starts nothing itself.
+    const onClick = (event: MouseEvent) => {
+      if (event.target instanceof Node && bodyRef.current?.closest('[role="dialog"]')?.contains(event.target)) ready();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Tab" || event.key.startsWith("Arrow")) ready();
+    };
+    document.addEventListener("pointermove", onPointerMove);
+    document.addEventListener("click", onClick);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [live, visit]);
 
   const status = sync?.status ?? "diverged";
   const remoteUnreadable = status === "remote-unreadable";
-  const off = busy !== null || done !== null;
+  const off = busy !== null || done !== null || !live;
 
   // A double-click, or a double tap, is one press: its second click (`detail` 2) starts nothing, also
   // when the first one has already failed and the choices are on again.
   const run = (kind: SyncActionKind, event: ReactMouseEvent, action: () => Promise<string>) => {
-    if (running.current || event.detail > 1) return;
+    if (running.current || event.detail > 1 || !live) return;
     const own = Symbol(kind);
     running.current = own;
     // An error from the try before stays until this one has ended, so nothing moves at the click.
@@ -140,7 +181,7 @@ export const SyncDialog = memo(function SyncDialog({
     );
   };
   const compare = (event: ReactMouseEvent<HTMLButtonElement>) => {
-    if (running.current || event.detail > 1) return;
+    if (running.current || event.detail > 1 || !live) return;
     compareHold.arm(event, event.currentTarget);
     actions.compare();
     onOpenChange(false);
@@ -186,10 +227,20 @@ export const SyncDialog = memo(function SyncDialog({
           description={remoteUnreadable ? `The file in ${where} cannot be read until it is made smaller or replaced.` : `This document and ${where} both changed since they were last in sync.`}
         >
           <div
+            ref={bodyRef}
             className="flex flex-col gap-4"
             data-testid="sync-dialog"
             data-status={status}
-            onKeyDown={enterOnRelease.onKeyDown}
+            // The opening focus of an unprompted visit: the dialog takes its first tab stop, and Enter and
+            // Space do nothing here. Tab goes on to the first choice, and so does an arrow key.
+            tabIndex={entry === "asked" ? undefined : live ? -1 : 0}
+            onKeyDown={(event) => {
+              if (event.target === event.currentTarget && event.key.startsWith("Arrow") && !(event.altKey || event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                event.currentTarget.querySelector("button")?.focus({ preventScroll: true });
+              }
+              enterOnRelease.onKeyDown(event);
+            }}
             onKeyUp={enterOnRelease.onKeyUp}
             onBlur={enterOnRelease.onBlur}
           >

@@ -938,6 +938,225 @@ test.describe("Sync dialog: every control", () => {
   });
 });
 
+/**
+ * GitHub refuses a commit when its file and the document both changed (409), and the editor then puts Sync in
+ * the Commit dialog's place by itself. Take GitHub lies where the Commit button was, and focus used to land on
+ * Merge: one more click or one more Enter, meant for the commit, must not run a choice nobody chose.
+ */
+test.describe("Sync opened by the editor itself after a commit that GitHub refuses", () => {
+  const CHOICES = ["sync-merge", "sync-keep-mine", "sync-take-remote", "sync-compare"];
+  const expectChoices = async (page: Page, state: "on" | "off") => {
+    for (const testId of CHOICES) {
+      if (state === "off") await expect(page.getByTestId(testId)).toHaveAttribute("aria-disabled", "true");
+      else await expect(page.getByTestId(testId)).not.toHaveAttribute("aria-disabled", "true");
+    }
+  };
+  /** What was sent, in order, without the document's id and the body: "/publish", "/pull?merge=1". */
+  const sent = (requests: string[]) => requests.map((request) => request.slice(0, request.indexOf(" ")).replace(/^.*\//, "/"));
+  /** Sync has taken the Commit dialog's place: its choices are off and focus is on its body, not on a choice. */
+  const expectUnprompted = async (page: Page) => {
+    await expect(syncDialog(page)).toBeVisible();
+    await expect(commitDialog(page)).toHaveCount(0);
+    await expectChoices(page, "off");
+    await expect.poll(() => focusOf(page)).toBe("sync-dialog");
+  };
+
+  test("mouse: more clicks where Commit was start nothing; the first one switches the choices on, and so does moving the pointer", async ({ browser }) => {
+    test.setTimeout(180_000);
+    const { page } = await signInWith(browser, "dialogs-handover-mouse");
+    test.skip(!(await hasFakeGitHub(page)), "needs the fake GitHub of the e2e server");
+
+    await test.step("a second click on the same spot, then the rest of a double-click, then a choice", async () => {
+      const { id, path } = await linkedDocument(page, "diverged");
+      await openEditor(page, id, "diverged");
+      const requests = posts(page, PUBLISH_OR_PULL);
+      await pickFromPublishMenu(page, COMMIT, "mouse");
+      await expect(messageField(page)).toBeFocused();
+      const { x, y } = await pointOn(commitButton(page));
+      await page.mouse.click(x, y);
+      await expectUnprompted(page);
+      // The pointer has not moved. What lies under it now is a choice.
+      expect(await page.evaluate(([px, py]) => document.elementFromPoint(px, py)?.closest("button")?.getAttribute("data-testid"), [x, y])).toMatch(/^sync-/);
+      await page.mouse.click(x, y);
+      // That press is seen: the choices are on now. It started nothing, and neither does the rest of a double-click.
+      await expectChoices(page, "on");
+      await page.mouse.down({ clickCount: 2 });
+      await page.mouse.up({ clickCount: 2 });
+      await expect(syncDialog(page)).toBeVisible();
+      await expect(page.getByTestId("sync-done")).toHaveCount(0);
+      expect(await documentText(page, id)).toBe(LOCAL_EDIT);
+      expect(await remoteText(page, path)).toBe(REMOTE_EDIT);
+      // The dialog is as easy to use as ever: one click on a choice is one action.
+      await mouseClick(page, page.getByTestId("sync-merge"));
+      await expect(page.getByTestId("sync-done")).toContainText("Merged");
+      await expect(syncDialog(page)).toHaveCount(0);
+      expect(sent(requests)).toEqual(["/publish", "/pull?merge=1"]);
+    });
+
+    await test.step("a click 7 px beside the spot starts nothing either; a pointer that has moved 30 px finds the choices on", async () => {
+      const { id, path } = await linkedDocument(page, "diverged");
+      await openEditor(page, id, "diverged");
+      const requests = posts(page, PUBLISH_OR_PULL);
+      await pickFromPublishMenu(page, COMMIT, "mouse");
+      await expect(messageField(page)).toBeFocused();
+      const { x, y } = await pointOn(commitButton(page));
+      await page.mouse.click(x, y);
+      await expectUnprompted(page);
+      // A hand that shakes is not a move.
+      await page.mouse.move(x + 7, y);
+      await page.mouse.move(x, y + 7);
+      await page.mouse.move(x, y);
+      await expectChoices(page, "off");
+      await page.mouse.move(x, y + 30, { steps: 3 });
+      await expectChoices(page, "on");
+      await expect.poll(() => focusOf(page)).toBe("sync-dialog");
+      await mouseClick(page, page.getByTestId("sync-take-remote"));
+      await expect(page.getByTestId("sync-done")).toContainText("Replaced with GitHub's copy");
+      await expect(syncDialog(page)).toHaveCount(0);
+      expect(sent(requests)).toEqual(["/publish", "/pull?force=1"]);
+      await expect.poll(() => documentText(page, id)).toBe(REMOTE_EDIT);
+      expect(await remoteText(page, path)).toBe(REMOTE_EDIT);
+    });
+  });
+
+  test("keyboard: Enter again, Space and a held Enter after the commit start nothing; Tab or an arrow key goes to a choice and Enter there acts once", async ({ browser }) => {
+    test.setTimeout(180_000);
+    const { page } = await signInWith(browser, "dialogs-handover-keys");
+    test.skip(!(await hasFakeGitHub(page)), "needs the fake GitHub of the e2e server");
+    for (const key of ["Tab", "ArrowDown"] as const) {
+      await test.step(`then ${key}`, async () => {
+        const { id, path } = await linkedDocument(page, "diverged");
+        await openEditor(page, id, "diverged");
+        const requests = posts(page, PUBLISH_OR_PULL);
+        await pickFromPublishMenu(page, COMMIT, "keyboard");
+        await expect(messageField(page)).toBeFocused();
+        await page.keyboard.press("Enter");
+        await expectUnprompted(page);
+        await page.keyboard.press("Enter");
+        await page.keyboard.press("Space");
+        await holdKey(page, "Enter", 500);
+        await expect(syncDialog(page)).toBeVisible();
+        await expectChoices(page, "off");
+        expect(await focusOf(page)).toBe("sync-dialog");
+        expect(await documentText(page, id)).toBe(LOCAL_EDIT);
+        expect(await remoteText(page, path)).toBe(REMOTE_EDIT);
+
+        await page.keyboard.press(key);
+        await expect(page.getByTestId("sync-merge")).toBeFocused();
+        await expectChoices(page, "on");
+        await page.keyboard.press("Enter");
+        await expect(page.getByTestId("sync-done")).toContainText("Merged");
+        await expect(syncDialog(page)).toHaveCount(0);
+        expect(sent(requests)).toEqual(["/publish", "/pull?merge=1"]);
+        await expect.poll(() => focusOf(page)).toMatch(/^publish-(menu|button)$/);
+      });
+    }
+  });
+
+  test("touch (390 px): more taps where Commit was start nothing; the first one switches the choices on, the next tap on a choice acts once", async ({ browser }) => {
+    test.setTimeout(180_000);
+    const { page } = await signInWith(browser, "dialogs-handover-touch", PHONE);
+    test.skip(!(await hasFakeGitHub(page)), "needs the fake GitHub of the e2e server");
+    for (const gesture of ["one more tap once Sync is there", "a double tap on Commit"] as const) {
+      await test.step(gesture, async () => {
+        const { id, path } = await linkedDocument(page, "diverged");
+        await openEditor(page, id);
+        const requests = posts(page, PUBLISH_OR_PULL);
+        await pickFromMoreMenu(page, page.getByTestId("menu-publish"), "touch");
+        await expect(messageField(page)).toBeFocused();
+        const { x, y } = await pointOn(commitButton(page));
+        await page.touchscreen.tap(x, y);
+        if (gesture === "one more tap once Sync is there") {
+          await expectUnprompted(page);
+          await page.touchscreen.tap(x, y);
+          // That tap is seen: the choices are on now. It started nothing.
+          await expectChoices(page, "on");
+        } else {
+          // The second tap lands on Commit while it is busy, or on the Sync dialog that has just taken its place.
+          await page.touchscreen.tap(x, y);
+          await expect(syncDialog(page)).toBeVisible();
+          await tap(page, syncDialog(page).getByRole("heading", { name: "Sync with GitHub" }));
+          await expectChoices(page, "on");
+        }
+        await expect(syncDialog(page)).toBeVisible();
+        await expect(page.getByTestId("sync-compare-bar")).toHaveCount(0);
+        await expect(page.getByTestId("sync-done")).toHaveCount(0);
+        expect(await documentText(page, id)).toBe(LOCAL_EDIT);
+        await tap(page, page.getByTestId("sync-keep-mine"));
+        await expect(page.getByTestId("sync-done")).toContainText("Published your version");
+        await expect(syncDialog(page)).toHaveCount(0);
+        expect(sent(requests)).toEqual(["/publish", "/publish?force=1"]);
+        expect(await remoteText(page, path)).toBe(LOCAL_EDIT);
+      });
+    }
+  });
+
+  test("Sync the user asked for, from the Publish menu and from the status chip, is live at once: focus on Merge and the first press acts", async ({ browser }) => {
+    const { page } = await signInWith(browser, "dialogs-sync-asked");
+    test.skip(!(await hasFakeGitHub(page)), "needs the fake GitHub of the e2e server");
+    for (const from of ["the Publish menu", "the status chip"] as const) {
+      await test.step(from, async () => {
+        const { id } = await linkedDocument(page, "diverged");
+        await openEditor(page, id, "diverged");
+        const requests = posts(page, PUBLISH_OR_PULL);
+        if (from === "the Publish menu") await pickFromPublishMenu(page, SYNC, "mouse");
+        else await mouseClick(page, page.getByTestId("publish-button"));
+        await expect(syncDialog(page)).toBeVisible();
+        await expect(page.getByTestId("sync-merge")).toBeFocused();
+        await expectChoices(page, "on");
+        await expect(page.getByTestId("sync-dialog")).not.toHaveAttribute("tabindex");
+        // No pointer travel inside the dialog is asked for: one press on a choice is one action.
+        await mouseClick(page, page.getByTestId("sync-take-remote"));
+        await expect(page.getByTestId("sync-done")).toContainText("Replaced with GitHub's copy");
+        await expect(syncDialog(page)).toHaveCount(0);
+        expect(sent(requests)).toEqual(["/pull?force=1"]);
+      });
+    }
+  });
+});
+
+test.describe("people who may not edit a linked document", () => {
+  for (const role of ["commenter", "viewer"] as const) {
+    test(`a ${role} gets no status chip, and Commit, Pull and Sync in the Publish menu are off: real clicks open nothing and send nothing`, async ({ browser }) => {
+      const owner = await signInWith(browser, `dialogs-owner-of-${role}`);
+      test.skip(!(await hasFakeGitHub(owner.page)), "needs the fake GitHub of the e2e server");
+      const { id } = await linkedDocument(owner.page, "diverged");
+      const login = uniqueLogin(`dialogs-${role}`);
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      await devLogin(page, login);
+      const share = await owner.page.request.post(`/api/documents/${id}/collaborators`, { data: { login, role } });
+      expect(share.ok()).toBeTruthy();
+      await page.goto(`/d/${id}`);
+      await waitForEditor(page);
+      // The sync status has arrived in this page too: an editor's Publish button turns into the chip now.
+      await expect(page.locator('[data-sync-status="diverged"]')).toBeVisible({ timeout: 65_000 });
+      await expect(status(page)).toHaveCount(0);
+      await expect(page.getByTestId("publish-button")).toHaveText("Publish");
+      const requests = posts(page, PUBLISH_OR_PULL);
+
+      await mouseClick(page, page.getByTestId("publish-menu"));
+      for (const name of [COMMIT, /Pull latest/, SYNC]) {
+        const entry = page.getByRole("menuitem", { name });
+        await expect(entry).toHaveAttribute("data-disabled", "");
+        await mouseClick(page, entry);
+        await expect(page.getByRole("dialog")).toHaveCount(0);
+      }
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      // The left half opens the same menu for them; it never commits, pulls or opens Sync by itself.
+      await mouseClick(page, page.getByTestId("publish-button"));
+      await expect(page.getByRole("menu")).toBeVisible();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      await page.keyboard.press("Escape");
+      expect(requests).toEqual([]);
+      // The server is the permission check; the header only does not offer what it would refuse.
+      expect((await page.request.post(`/api/documents/${id}/publish`, { data: { message: "no" } })).status()).toBe(403);
+      expect((await page.request.post(`/api/documents/${id}/pull?force=1`)).status()).toBe(403);
+    });
+  }
+});
+
 test.describe("dialogs of an unlinked document (no GitHub needed)", () => {
   for (const how of ["mouse", "keyboard"] as const) {
     test(`Share link and Connect to GitHub opened from the Publish menu by ${how} close on Escape, the X and a click outside, and focus is back on the Publish control`, async ({ browser }) => {

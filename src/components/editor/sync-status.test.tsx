@@ -1720,4 +1720,153 @@ describe.each([
     expect(onOpenChange.mock.calls.every(([next]) => next === false)).toBe(true);
     await settle(() => pending.resolve(0));
   });
+
+  // An unprompted visit: the editor opened the dialog on its own, because GitHub refused a commit or a pull.
+  const body = () => screen.getByTestId("sync-dialog");
+  const expectChoices = (state: "on" | "off") => {
+    for (const testId of CHOICES) {
+      if (state === "off") expect(choice(testId)).toHaveAttribute("aria-disabled", "true");
+      else expect(choice(testId)).not.toHaveAttribute("aria-disabled");
+      expect(choice(testId)).not.toBeDisabled();
+    }
+  };
+  /** jsdom lays nothing out; the dialog picks its opening focus among the controls that are rendered. */
+  const withLayout = () => vi.spyOn(Element.prototype, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+
+  it("a visit the user asked for is live at once: focus on the first choice, every choice on, no tab stop on the body", async () => {
+    withLayout();
+    const { actions } = open();
+    expect(choice("sync-merge")).toHaveFocus();
+    expect(body()).not.toHaveAttribute("tabindex");
+    expectChoices("on");
+    await settle(() => fireEvent.click(choice("sync-take-remote")));
+    expect(actions.takeRemote).toHaveBeenCalledOnce();
+  });
+
+  it("an unprompted visit starts on the dialog body with every choice off: Enter, Space and typing in the field start nothing and switch nothing on", () => {
+    withLayout();
+    const { actions } = open({ unprompted: true });
+    expect(body()).toHaveFocus();
+    expect(body()).toHaveAttribute("tabindex", "0");
+    expectChoices("off");
+    for (const key of ["Enter", " ", "a", "Home", "End", "PageDown"]) {
+      fireEvent.keyDown(body(), { key });
+      fireEvent.keyUp(body(), { key });
+    }
+    // The pointer is seen for the first time, wherever it is, and a hand that shakes: not a move.
+    fireEvent.pointerMove(document, { clientX: 500, clientY: 500 });
+    fireEvent.pointerMove(document, { clientX: 524, clientY: 500 });
+    fireEvent.pointerMove(document, { clientX: 485, clientY: 515 });
+    // A click that is not on the card.
+    fireEvent.click(document.body);
+    fireEvent.change(field(), { target: { value: "typed while the choices are off" } });
+    expect(field()).toHaveValue("typed while the choices are off");
+    expect(body()).toHaveFocus();
+    expectChoices("off");
+    expectNothingStarted(actions);
+  });
+
+  it.each(CHOICES)("unprompted: one whole press on %s starts nothing and switches the choices on; the next press acts once", async (testId) => {
+    const { actions, onOpenChange } = open({ unprompted: true });
+    await settle(() => fireEvent.click(choice(testId), { detail: 1 }));
+    expectNothingStarted(actions);
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expectChoices("on");
+    expect(body()).toHaveAttribute("tabindex", "-1");
+    // The rest of that double-click is still no press.
+    await settle(() => fireEvent.click(choice(testId), { detail: 2 }));
+    expectNothingStarted(actions);
+    await settle(() => fireEvent.click(choice(testId), { detail: 1 }));
+    const started = { "sync-merge": actions.merge, "sync-keep-mine": actions.keepMine, "sync-take-remote": actions.takeRemote, "sync-compare": actions.compare }[testId];
+    expect(started).toHaveBeenCalledOnce();
+    expect([actions.merge, actions.keepMine, actions.takeRemote, actions.compare].filter((action) => vi.mocked(action).mock.calls.length > 0)).toHaveLength(1);
+  });
+
+  it("unprompted: a press on the title or in the message field switches the choices on too", () => {
+    const first = open({ unprompted: true });
+    fireEvent.click(screen.getByText("Sync with GitHub"));
+    expectChoices("on");
+    expectNothingStarted(first.actions);
+    cleanup();
+    const second = open({ unprompted: true });
+    fireEvent.click(field());
+    expectChoices("on");
+    expectNothingStarted(second.actions);
+  });
+
+  it("unprompted: the pointer switches the choices on once it has travelled more than 24 px from where it was first seen", async () => {
+    const { actions } = open({ unprompted: true });
+    fireEvent.pointerMove(document, { clientX: 200, clientY: 300 });
+    fireEvent.pointerMove(document, { clientX: 200, clientY: 324 });
+    expectChoices("off");
+    fireEvent.pointerMove(document, { clientX: 215, clientY: 320 });
+    expectChoices("on");
+    expectNothingStarted(actions);
+    await settle(() => fireEvent.click(choice("sync-take-remote"), { detail: 1 }));
+    expect(actions.takeRemote).toHaveBeenCalledOnce();
+    expect(actions.merge).not.toHaveBeenCalled();
+    expect(actions.keepMine).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Tab", {}],
+    ["Tab", { shiftKey: true }],
+    ["ArrowDown", {}],
+    ["ArrowUp", {}],
+    ["ArrowRight", {}],
+    ["ArrowLeft", {}],
+  ] as const)("unprompted: %s %j switches the choices on, an arrow key goes to the first choice, and Enter there acts once", async (key, init) => {
+    withLayout();
+    const { actions } = open({ unprompted: true });
+    const moved = fireEvent.keyDown(body(), { key, ...init });
+    expectChoices("on");
+    expectNothingStarted(actions);
+    if (key === "Tab") {
+      // The browser moves the focus itself; jsdom does not.
+      expect(moved).toBe(true);
+      choice("sync-merge").focus();
+    } else {
+      expect(moved).toBe(false);
+    }
+    expect(choice("sync-merge")).toHaveFocus();
+    fireEvent.keyDown(choice("sync-merge"), { key: "Enter" });
+    await settle(() => fireEvent.keyUp(choice("sync-merge"), { key: "Enter" }));
+    expect(actions.merge).toHaveBeenCalledOnce();
+    expect(actions.takeRemote).not.toHaveBeenCalled();
+    expect(actions.keepMine).not.toHaveBeenCalled();
+  });
+
+  it("unprompted is read when a visit starts: a later change of the prop changes nothing, and every new visit starts over", () => {
+    const { update } = open({ unprompted: true });
+    update({ unprompted: false });
+    expectChoices("off");
+    fireEvent.keyDown(body(), { key: "Tab" });
+    expectChoices("on");
+    // The same dialog again, opened by the editor again: off again.
+    update({ open: false });
+    update({ open: true, unprompted: true });
+    expectChoices("off");
+    // Opened by the user: on, and a 409 from one of its own choices (the shell then says "unprompted") leaves it on.
+    update({ open: false });
+    update({ open: true, unprompted: false });
+    expectChoices("on");
+    expect(body()).not.toHaveAttribute("tabindex");
+    update({ unprompted: true });
+    expectChoices("on");
+  });
+
+  it("unprompted with an unreadable GitHub file: Keep mine starts off, and an arrow key from the body goes to it", () => {
+    withLayout();
+    const { actions } = open({ unprompted: true, sync: UNREADABLE_SYNC });
+    expect(body()).toHaveFocus();
+    expect(choice("sync-keep-mine")).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(choice("sync-keep-mine"), { detail: 1 });
+    expectNothingStarted(actions);
+    expect(choice("sync-keep-mine")).not.toHaveAttribute("aria-disabled");
+    cleanup();
+    open({ unprompted: true, sync: UNREADABLE_SYNC });
+    fireEvent.keyDown(body(), { key: "ArrowDown" });
+    expect(choice("sync-keep-mine")).toHaveFocus();
+    expect(choice("sync-keep-mine")).not.toHaveAttribute("aria-disabled");
+  });
 });
