@@ -304,13 +304,19 @@ const roleOf = async (login: string, id = docId) => (await listCollaborators(id)
 const rowsLike = async (login: string) => (await listCollaborators(docId)).filter((c) => c.login.toLowerCase() === login.toLowerCase()).length;
 const addsFor = async (login: string) => (await shareActivity("share.add")).filter((a) => (a.detail as { login?: string }).login === login);
 const transitions = () => vi.mocked(changeCollaboratorAccess).mock.calls.length;
-/** Everything a request could have written or touched for this login. */
+/**
+ * Everything a request could have written or touched for this login. `recorded` and `notified` count the
+ * calls themselves (tests run one after the other): a second share notification for the same person and
+ * document is dropped by its unique key, so the row count alone would not show a notification that was sent.
+ */
 const written = async (login: string) => ({
   role: await roleOf(login),
   rows: await rowsLike(login),
   activity: (await addsFor(login)).length,
   notifications: (await notificationsFor(login)).length,
   transitions: transitions(),
+  recorded: vi.mocked(recordActivity).mock.calls.length,
+  notified: vi.mocked(notifyShare).mock.calls.length,
 });
 const refusal = (login: string, role: Role) => ({
   error: `${login} already has access as ${role}. Send change: true to change the role.`,
@@ -366,8 +372,19 @@ describe("POST /api/documents/:id/collaborators: an add never changes a role (#2
     if (posted === before) {
       expect(after).toEqual(first);
     } else {
-      expect(after).toEqual({ role: posted, rows: 1, activity: 2, notifications: 1, transitions: first.transitions + 1 });
+      // As before #2252 for a role change: one more activity row, and the share notification is asked for
+      // again but its row already exists (unique per person and document), so the person gets no second one.
+      expect(after).toEqual({
+        role: posted,
+        rows: 1,
+        activity: 2,
+        notifications: 1,
+        transitions: first.transitions + 1,
+        recorded: first.recorded + 1,
+        notified: first.notified + 1,
+      });
       expect((await addsFor(login)).map((a) => a.detail)).toContainEqual({ login, role: posted });
+      expect(vi.mocked(notifyShare).mock.calls.at(-1)?.slice(0, 3)).toEqual([docId, login, posted]);
     }
 
     // And once more with the flag: nothing left to change, nothing written.

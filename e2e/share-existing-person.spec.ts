@@ -13,6 +13,8 @@ type Role = "editor" | "commenter" | "viewer";
 type Sent = { body: { login: string; role: Role; change?: unknown }; status: number | null };
 
 const collaborators = (id: string) => `/api/documents/${id}/collaborators`;
+/** A 1 px image for made-up accounts, so no avatar is fetched from anywhere. */
+const PIXEL = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
 
 async function openShare(page: Page) {
   await page.getByTestId("share-button").click();
@@ -95,7 +97,7 @@ test.describe("share dialog · adding someone who already has access", () => {
       // where the dialog puts its answer when the handle is submitted.
       await page.route(/\/api\/github\/users(\?|$)/, async (route) => {
         const q = new URL(route.request().url()).searchParams.get("q") ?? "";
-        const users = Array.from({ length: 8 }, (_, i) => ({ login: `${q}${i}`, name: null, avatarUrl: "" }));
+        const users = Array.from({ length: 8 }, (_, i) => ({ login: `${q}${i}`, name: null, avatarUrl: PIXEL }));
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ users, limited: false }) });
       });
       await openDocument(page, id);
