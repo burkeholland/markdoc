@@ -85,7 +85,6 @@ export const SyncDialog = memo(function SyncDialog({
   // failure is shown). While it is set no other action starts. Ending the visit lets go of it: the
   // request itself goes on and the editor reports how it ended, but it no longer changes this dialog.
   const running = useRef<symbol | null>(null);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const onOpenChangeRef = useRef(onOpenChange);
   useEffect(() => {
     onOpenChangeRef.current = onOpenChange;
@@ -93,7 +92,6 @@ export const SyncDialog = memo(function SyncDialog({
   useEffect(
     () => () => {
       running.current = null;
-      clearTimeout(closeTimer.current);
     },
     [visit],
   );
@@ -126,7 +124,8 @@ export const SyncDialog = memo(function SyncDialog({
         setBusy(null);
         setError(null);
         setDone(note);
-        closeTimer.current = setTimeout(() => {
+        // The result stays for a moment, then the dialog closes, unless the visit has ended by then.
+        setTimeout(() => {
           if (running.current !== own) return;
           running.current = null;
           onOpenChangeRef.current(false);

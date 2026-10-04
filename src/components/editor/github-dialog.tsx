@@ -6777,7 +6777,6 @@ export const CommitDialog = memo(function CommitDialog({
   // a click outside, a new destination) lets go of it: the request itself goes on and the editor reports
   // how it ended, but it no longer changes this form.
   const running = useRef<symbol | null>(null);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const onOpenChangeRef = useRef(onOpenChange);
   useEffect(() => {
     onOpenChangeRef.current = onOpenChange;
@@ -6785,7 +6784,6 @@ export const CommitDialog = memo(function CommitDialog({
   useEffect(
     () => () => {
       running.current = null;
-      clearTimeout(closeTimer.current);
     },
     [visit],
   );
@@ -6818,7 +6816,8 @@ export const CommitDialog = memo(function CommitDialog({
         setBusy(false);
         setError(null);
         setDone(true);
-        closeTimer.current = setTimeout(() => {
+        // "Published" stays for a moment, then the dialog closes, unless the visit has ended by then.
+        setTimeout(() => {
           if (running.current !== own) return;
           running.current = null;
           onOpenChangeRef.current(false);

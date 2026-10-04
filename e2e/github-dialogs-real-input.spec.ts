@@ -48,15 +48,16 @@ const remoteText = async (page: Page, path: string) => {
 const documentText = async (page: Page, id: string) => ((await (await page.request.get(`/api/documents/${id}/content`)).json()) as { content: string }).content;
 
 /** A document linked to a file of the fake repository, brought to `state` through the API before any page opens it. */
-async function linkedDocument(page: Page, state: SyncState = "in-sync") {
-  const id = await createDocument(page, BASE);
+async function linkedDocument(page: Page, state: SyncState = "in-sync", more = "") {
+  const base = BASE + more;
+  const id = await createDocument(page, base);
   const path = `docs/dialogs-${Date.now()}-${++files}.md`;
-  await setRemote(page, path, BASE);
+  await setRemote(page, path, base);
   const link = await page.request.post(`/api/documents/${id}/link`, { data: { storage: "repo", ...REPO, path } });
   expect(link.ok()).toBeTruthy();
-  if (state === "diverged" || state === "remote-ahead") await setRemote(page, path, REMOTE_EDIT);
+  if (state === "diverged" || state === "remote-ahead") await setRemote(page, path, REMOTE_EDIT + more);
   if (state === "diverged" || state === "local-ahead") {
-    const put = await page.request.put(`/api/documents/${id}/content`, { data: { content: LOCAL_EDIT } });
+    const put = await page.request.put(`/api/documents/${id}/content`, { data: { content: LOCAL_EDIT + more } });
     expect(put.ok()).toBeTruthy();
   }
   return { id, path };
@@ -703,7 +704,8 @@ test.describe("Sync dialog: every control", () => {
     test.setTimeout(180_000);
     const { page } = await signInWith(browser, "dialogs-sync-compare");
     test.skip(!(await hasFakeGitHub(page)), "needs the fake GitHub of the e2e server");
-    const { id } = await linkedDocument(page, "diverged");
+    // A long document, so that the comparison has text where the Compare button was.
+    const { id } = await linkedDocument(page, "diverged", `\n${"Plain words to select, line after line of them, as far as the page goes.\n".repeat(80)}`);
     await openEditor(page, id, "diverged");
     const requests = posts(page, PUBLISH_OR_PULL);
     let compares = 0;
@@ -731,8 +733,10 @@ test.describe("Sync dialog: every control", () => {
         await expect(syncDialog(page)).toHaveCount(0);
         await expect.poll(() => compares).toBe(index + 1);
         await expectNothingOpen(page);
-        // The comparison is still there: the rest of the gesture did not press its Back control or anything else.
+        // The comparison is still there: the rest of the gesture did not press its Back control or anything
+        // else, and it selected no word of the text that is now under the pointer.
         await expect(page.getByTestId("version-diff")).toBeVisible();
+        expect(await page.evaluate(() => String(getSelection()))).toBe("");
         await mouseClick(page, page.getByTestId("sync-compare-close"));
         await expect(page.getByTestId("sync-compare-bar")).toHaveCount(0);
       });
@@ -1045,11 +1049,11 @@ test.describe("phone (390 x 844): sheets and the Outline drawer give focus back"
     });
 
     await test.step("Version history and the Outline opened from the palette, then Escape: the editor the palette came from", async () => {
+      const editor = page.locator(".md-rich:visible, .cm-content:visible").first();
       for (const [query, surface] of [
         ["Version history", sheet("versions")],
         ["outline", page.getByTestId("outline-drawer")],
       ] as const) {
-        const editor = page.locator(".md-rich:visible, .cm-content:visible").first();
         await tap(page, editor, 0.5, 0.9);
         await expect.poll(() => focusOf(page)).toMatch(/^(rich|code) pane$/);
         await fromPalette(query);
@@ -1058,6 +1062,26 @@ test.describe("phone (390 x 844): sheets and the Outline drawer give focus back"
         await expect(surface).toHaveCount(0);
         await expect.poll(() => focusOf(page)).toMatch(/^(rich|code) pane$/);
       }
+      // Switched from inside: the first opener (the editor) still gets focus back, not the ⋮ button.
+      await fromPalette("Version history");
+      await expect(sheet("versions")).toBeVisible();
+      await fromPalette("Activity");
+      await expect(sheet("activity")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("sheet")).toHaveCount(0);
+      await expect.poll(() => focusOf(page)).toMatch(/^(rich|code) pane$/);
+    });
+
+    await test.step("nothing had focus when the Outline opened: the More button gets it", async () => {
+      await page.reload();
+      await waitForEditor(page);
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      expect(await focusOf(page)).toBe("body");
+      await fromPalette("outline");
+      await expect(page.getByTestId("outline-drawer")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("outline-drawer")).toHaveCount(0);
+      await expect.poll(() => focusOf(page)).toBe("more-menu");
     });
 
     await test.step("the Comments sheet still leaves focus in the editor, by Escape and by a tap outside", async () => {
