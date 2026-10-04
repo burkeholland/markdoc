@@ -38,6 +38,7 @@ import { PanelResizeHandle, PANEL_DEFAULT, PANEL_MAX, PANEL_MIN, PANEL_WIDTH_KEY
 import type { SyncActions } from "./sync-dialog";
 import type { NameVersionSaveOwner, NameVersionVisit } from "./dialogs";
 import { useEverTrue } from "@/lib/hooks";
+import { focusReturnTarget, restoreFocus } from "@/lib/a11y";
 import { lazyOnFirstUse } from "./lazy-on-first-use";
 // Not on demand: the bar must be mounted and focused inside the Mod-F keydown, or the keys typed while
 // its chunk loads go into the document.
@@ -1752,6 +1753,12 @@ export function EditorShell({
   const namedVersionOperationSequence = useRef(0);
   const [sync, setSync] = useState<SyncStatusDto | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
+  // Sync opens in two ways. The user asks for it (`openSync`: Publish menu > Sync, the "Both changed" chip). Or
+  // the shell opens it on its own, when GitHub answers 409 to a publish (Commit in the Commit dialog; for a gist
+  // "Update gist" in the Publish menu, the phone's More menu and the command palette, and the chip's Publish) or to
+  // a pull ("Pull latest from GitHub" in the Publish menu, the chip's Pull). Then the dialog appears under a pointer
+  // and a key that were aimed at something else, and it keeps its choices off until the user turns to it.
+  const [syncUnprompted, setSyncUnprompted] = useState(false);
   const [syncTick, setSyncTick] = useState(0);
   const toastAuthorityRef = useRef<ToastAuthority | null>(null);
   const pendingNoticeConsumedRef = useRef<ToastAuthority | null>(null);
@@ -2341,6 +2348,7 @@ export function EditorShell({
             if (e instanceof ApiError && e.status === 409 && e.body?.status) {
               setSync((s) => ({ ...(s ?? emptySync()), ...(e.body as Partial<SyncStatusDto>), status: e.body!.status as SyncStatusDto["status"] }));
               setCommitOpen(false);
+              setSyncUnprompted(true);
               setSyncOpen(true);
             } else {
               toast(apiErrorText(e, "Publish failed"), "error");
@@ -2381,6 +2389,7 @@ export function EditorShell({
       if (error instanceof ApiError && error.status === 409 && error.body?.status) {
         if (error.body.status !== "conflict") {
           setSync((s) => ({ ...(s ?? emptySync()), ...(error.body as Partial<SyncStatusDto>), status: error.body!.status as SyncStatusDto["status"] }));
+          setSyncUnprompted(true);
           setSyncOpen(true);
         }
       } else {
@@ -2848,7 +2857,10 @@ export function EditorShell({
     const request = startPull();
     if (request) void request.catch(() => undefined);
   }, [startPull]);
-  const openSync = useCallback(() => setSyncOpen(true), []);
+  const openSync = useCallback(() => {
+    setSyncUnprompted(false);
+    setSyncOpen(true);
+  }, []);
   const deleteFromHeader = useCallback(() => void deleteDoc(), [deleteDoc]);
   const duplicateFromHeader = useCallback(() => void duplicateDoc(), [duplicateDoc]);
   const copyFromHeader = useCallback(() => void copyMarkdown(), [copyMarkdown]);
@@ -3066,6 +3078,20 @@ export function EditorShell({
   }, []);
   const toggleOutline = useCallback(() => (isPhone ? setOutlineDrawerOpen((o) => !o) : setOutlineOpen((o) => !o)), [isPhone]);
   const closeOutlineDrawer = useCallback(() => setOutlineDrawerOpen(false), []);
+  // A phone's Version history and Activity sheets and its Outline drawer are bare Radix content, and Radix
+  // leaves focus on <body> when they close. What had focus when one opened is read while that render is
+  // still pending (a ⋮ menu item resolves to the ⋮ button; the item is gone a moment later) and gets focus
+  // back. When that is gone too (a command palette entry), the ⋮ button gets it: it lists these panels.
+  const phoneLayer = !isPhone ? null : outlineDrawerOpen ? "outline" : sidePanel === "versions" || sidePanel === "activity" ? sidePanel : null;
+  const [layerOpener, setLayerOpener] = useState<{ layer: string | null; element: HTMLElement | null }>({ layer: null, element: null });
+  if (layerOpener.layer !== phoneLayer) setLayerOpener({ layer: phoneLayer, element: phoneLayer && !layerOpener.layer ? focusReturnTarget() : layerOpener.element });
+  const returnLayerFocus = useCallback(
+    (event: Event) => {
+      event.preventDefault();
+      if (!restoreFocus(layerOpener.element)) restoreFocus(document.querySelector<HTMLElement>('header button[aria-label="More"]'));
+    },
+    [layerOpener.element],
+  );
 
   // Stable handlers for the dialogs: each is memoized, so a render of the shell (a toast, a sync poll, a
   // format change) does not re-render the closed ones.
@@ -3252,7 +3278,7 @@ export function EditorShell({
             <Dialog open={outlineDrawerOpen} onOpenChange={setOutlineDrawerOpen}>
               <DialogPortal>
                 <DialogOverlay className="dialog-overlay animate-fade-in" data-testid="outline-drawer-backdrop" />
-                <DialogPrimitiveContent className="drawer" aria-describedby={undefined} data-testid="outline-drawer">
+                <DialogPrimitiveContent className="drawer" aria-describedby={undefined} data-testid="outline-drawer" onCloseAutoFocus={returnLayerFocus}>
                   <DialogTitle className="sr-only">Outline</DialogTitle>
                   <OutlinePanel session={session} open onToggle={closeOutlineDrawer} onSelect={onOutlinePick} />
                 </DialogPrimitiveContent>
@@ -3375,7 +3401,7 @@ export function EditorShell({
                     aria-describedby={undefined}
                     data-testid="sheet"
                     data-panel={sidePanel}
-                    onCloseAutoFocus={sidePanel === "comments" ? (event) => event.preventDefault() : undefined}
+                    onCloseAutoFocus={sidePanel === "comments" ? (event) => event.preventDefault() : returnLayerFocus}
                   >
                     <DialogTitle className="sr-only">{panelTitle}</DialogTitle>
                     <span className="sheet-handle" aria-hidden />
@@ -3424,7 +3450,7 @@ export function EditorShell({
               <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} isOwner={isOwner} />
             )}
             {everOpened.commit && <CommitDialog key={`commit:${operationDialogKey}`} open={commitOpen} onOpenChange={changeCommitOpen} doc={docView} onCommit={publishNow} isOwner={isOwner} />}
-            {everOpened.sync && <SyncDialog key={`sync:${operationDialogKey}`} open={syncOpen} onOpenChange={changeSyncOpen} doc={docView} sync={sync} actions={syncActions} />}
+            {everOpened.sync && <SyncDialog key={`sync:${operationDialogKey}`} open={syncOpen} onOpenChange={changeSyncOpen} doc={docView} sync={sync} actions={syncActions} unprompted={syncUnprompted} />}
           </>
         )}
         {everOpened.link && <LinkDialog open={dialog === "link"} onOpenChange={dialogOpenChange.link} initial={linkInitial} onSubmit={applyLink} onRemove={removeLink} />}
