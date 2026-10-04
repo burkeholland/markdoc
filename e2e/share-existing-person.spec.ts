@@ -278,7 +278,12 @@ test.describe("share dialog · adding someone who already has access", () => {
     const { page } = owner;
     const person = uniqueLogin("sx-roll-new");
     const id = await createDocument(page, "# One roll\n", "One roll");
-    expect((await page.request.get("/api/github/users?q=octoc", { timeout: 120_000 })).status()).toBe(200);
+    // GitHub knows one account here, `octocat` (answered in the browser, so this runs on any build).
+    await page.route(/\/api\/github\/users(\?|$)/, async (route) => {
+      const q = (new URL(route.request().url()).searchParams.get("q") ?? "").toLowerCase();
+      const users = "octocat".startsWith(q) ? [{ login: "octocat", name: null, avatarUrl: PIXEL }] : [];
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ users, limited: false }) });
+    });
     await openDocument(page, id);
     const { input, add } = await openShare(page);
     const adds = watchAdds(page, id);
