@@ -25,7 +25,7 @@ vi.mock("@/lib/api", async () => {
 });
 
 import { ApiError } from "@/lib/api";
-import { CollaboratorLoginInput, SHIELD_MS, SUGGEST_DEBOUNCE_MS, isValidLogin, suggestQuery } from "./collaborator-login-input";
+import { CollaboratorLoginInput, SHIELD_MS, SUGGEST_DEBOUNCE_MS, isValidLogin, suggestQuery, type CollaboratorLoginInputHandle } from "./collaborator-login-input";
 
 const user = (login: string) => ({ login, name: null, avatarUrl: `https://avatars.githubusercontent.com/${login}?s=40` });
 const answer = (...logins: string[]) => Promise.resolve({ users: logins.map(user), limited: false });
@@ -133,6 +133,18 @@ describe("isValidLogin()", () => {
     expect(isValidLogin("-abc")).toBe(true); // leading hyphen: the server's regex allows it
     expect(isValidLogin("a".repeat(39))).toBe(true); // exactly 39 characters: the server's max
     expect(isValidLogin("a".repeat(40))).toBe(false); // 40 characters: over the server's max
+  });
+
+  // The server drops one leading @ before it measures the handle (#2252 item 2), so the @ never counts here either.
+  // src/app/api/documents/collaborators.test.ts runs the same handles through the route and through this function.
+  it("does not count one leading @ toward the 39 characters, and allows only one", () => {
+    expect(isValidLogin(`@${"a".repeat(39)}`)).toBe(true);
+    expect(isValidLogin(`@${"a".repeat(40)}`)).toBe(false);
+    expect(isValidLogin("@")).toBe(false);
+    expect(isValidLogin("@@name")).toBe(false);
+    expect(isValidLogin("@ name")).toBe(false);
+    expect(isValidLogin("trailing-space ")).toBe(true);
+    expect(isValidLogin("UPPER-Case")).toBe(true);
   });
 });
 
@@ -437,6 +449,115 @@ describe("CollaboratorLoginInput", () => {
     expect(onPick).not.toHaveBeenCalled();
     fireEvent.submit(input().closest("form")!);
     expect(onSubmit).toHaveBeenCalledWith("octo");
+  });
+
+  it("that Enter closes the list, so what the dialog answers under the field is not hidden behind it; ArrowDown shows it again without asking (#2252)", async () => {
+    searchUsers.mockImplementation(() => answer("octocat", "octodog"));
+    render(<Harness />);
+    type("octo");
+    await settle();
+    expect(input()).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.keyDown(input(), { key: "Enter" });
+    expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
+    expect(input()).toHaveAttribute("aria-expanded", "false");
+    expect(input().value).toBe("octo"); // the typed handle stays as typed
+    expect(input()).toHaveFocus();
+
+    // The suggestions are still there for the asking, and typing on brings a list back as before.
+    fireEvent.keyDown(input(), { key: "ArrowDown" });
+    expect(options()).toEqual(["octocat", "octodog"]);
+    expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input(), { key: "Escape" });
+    type("octoc");
+    await settle();
+    expect(options()).toEqual(["octocat", "octodog"]);
+    expect(searchUsers).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets the dialog put focus in the field through its ref", () => {
+    function WithRef() {
+      const handle = useRef<CollaboratorLoginInputHandle>(null);
+      return (
+        <>
+          <CollaboratorLoginInput ref={handle} value="" onChange={() => {}} exclude={[]} />
+          <button type="button" onClick={() => handle.current?.focus()}>
+            Focus the field
+          </button>
+        </>
+      );
+    }
+    render(<WithRef />);
+    expect(input()).not.toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Focus the field" }));
+    expect(input()).toHaveFocus();
+  });
+
+  describe("a key pressed in the first moments after the list appears (#2252 item 3)", () => {
+    /**
+     * In a browser the answer arrives outside any event: React commits the list in one task and runs that
+     * commit's effects in a later one, a few ms apart. A key can land in between. `act()` would run both in
+     * one go, so this lets the answer land without it and presses the key from a MutationObserver, whose
+     * callback runs right after the commit that added the list and before those effects.
+     */
+    async function pressWhenTheListAppears(key: string, strict: boolean) {
+      vi.useRealTimers();
+      const pending = deferred<SearchAnswer>();
+      searchUsers.mockReturnValue(pending.promise);
+      const box = <Harness />;
+      render(strict ? <StrictMode>{box}</StrictMode> : box);
+      type("octo");
+      await waitFor(() => expect(searchUsers).toHaveBeenCalledTimes(1));
+
+      let pressed = false;
+      const observer = new MutationObserver(() => {
+        if (pressed || !screen.queryByTestId("share-login-suggestions")) return;
+        pressed = true;
+        // A plain DOM event, not fireEvent: fireEvent wraps the dispatch in act().
+        input().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      const environment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+      const before = environment.IS_REACT_ACT_ENVIRONMENT;
+      environment.IS_REACT_ACT_ENVIRONMENT = false; // these updates are meant to happen outside act()
+      try {
+        pending.resolve({ users: [user("octocat"), user("octodog"), user("octofox")], limited: false });
+        await vi.waitFor(() => expect(pressed).toBe(true));
+        // Let the effects of the list's commit (and anything they schedule) run.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      } finally {
+        observer.disconnect();
+        environment.IS_REACT_ACT_ENVIRONMENT = before;
+      }
+    }
+
+    it.each([false, true])("ArrowDown keeps the highlight it set, and the next ArrowDown moves on from it (StrictMode: %s)", async (strict) => {
+      await pressWhenTheListAppears("ArrowDown", strict);
+      expect(options()).toEqual(["octocat", "octodog", "octofox"]);
+      expect(listOptions()[0]).toHaveAttribute("aria-selected", "true");
+      expect(input().getAttribute("aria-activedescendant")).toBe(listOptions()[0]!.id);
+
+      fireEvent.keyDown(input(), { key: "ArrowDown" });
+      expect(listOptions().map((o) => o.getAttribute("aria-selected"))).toEqual(["false", "true", "false"]);
+    });
+
+    it.each([false, true])("End keeps its highlight too, and Enter then picks that option (StrictMode: %s)", async (strict) => {
+      await pressWhenTheListAppears("End", strict);
+      expect(listOptions()[2]).toHaveAttribute("aria-selected", "true");
+      fireEvent.keyDown(input(), { key: "Enter" });
+      expect(input().value).toBe("octofox");
+    });
+
+    it("a new query still starts with nothing highlighted", async () => {
+      await pressWhenTheListAppears("ArrowDown", false);
+      vi.useFakeTimers();
+      searchUsers.mockImplementation(() => answer("octopus", "octopod"));
+      type("octop");
+      await settle();
+      expect(options()).toEqual(["octopus", "octopod"]);
+      expect(listOptions().filter((o) => o.getAttribute("aria-selected") === "true")).toHaveLength(0);
+      expect(input()).not.toHaveAttribute("aria-activedescendant");
+    });
   });
 
   it("a click picks the option without stealing focus from the box first", async () => {

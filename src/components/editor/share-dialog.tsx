@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 type CollaboratorRole = Exclude<Role, "owner">;
 type LinkAccess = DocumentDto["linkAccess"];
 type Owner = { login: string | null; name: string | null; image: string | null };
+type People = Awaited<ReturnType<typeof api.documents.collaborators>>;
 
 const ROLE_OPTIONS: readonly { value: CollaboratorRole; label: string }[] = [
   { value: "editor", label: "Editor" },
@@ -135,6 +136,12 @@ export const ShareDialog = memo(function ShareDialog({
     setRefused(null);
   }, [open, doc.id]);
 
+  /** Shows a list the server just sent. "Already has access" is only true while the person is in the list it points to. */
+  const showPeople = useCallback((documentId: string, res: People) => {
+    setList({ status: "loaded", documentId, owner: res.owner, collaborators: res.collaborators });
+    setRefused((current) => (current && !res.collaborators.some((c) => c.login === current.login) ? null : current));
+  }, []);
+
   // A response that arrives after the dialog closed, or for another document, is dropped.
   useEffect(() => {
     if (!open) return;
@@ -143,10 +150,7 @@ export const ShareDialog = memo(function ShareDialog({
     setList((current) => (current.status === "loaded" && current.documentId === documentId ? current : { status: "loading" }));
     api.documents.collaborators(documentId).then(
       (res) => {
-        if (stale) return;
-        setList({ status: "loaded", documentId, owner: res.owner, collaborators: res.collaborators });
-        // "Already has access" is only true while the person is in the list it points to.
-        setRefused((current) => (current && !res.collaborators.some((c) => c.login === current.login) ? null : current));
+        if (!stale) showPeople(documentId, res);
       },
       (e) => {
         if (!stale) setList({ status: "error", message: apiErrorText(e, "Could not load the people with access.") });
@@ -155,7 +159,7 @@ export const ShareDialog = memo(function ShareDialog({
     return () => {
       stale = true;
     };
-  }, [open, doc.id, retry]);
+  }, [open, doc.id, retry, showPeople]);
 
   const setBusy = useCallback((who: string, busy: boolean) => {
     setBusyLogins((current) => {
@@ -184,7 +188,7 @@ export const ShareDialog = memo(function ShareDialog({
         if (currentDoc.current === documentId) setList({ status: "error", message: apiErrorText(e, failure) });
         return null;
       });
-      if (res && currentDoc.current === documentId) setList({ status: "loaded", documentId, owner: res.owner, collaborators: res.collaborators });
+      if (res && currentDoc.current === documentId) showPeople(documentId, res);
     };
     try {
       const result = await api.documents.addCollaborator(documentId, handle, role);
