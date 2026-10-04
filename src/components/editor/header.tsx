@@ -4341,7 +4341,8 @@ export function PublishStatusButton({
   const button = useRef<HTMLButtonElement | null>(null);
   useLayoutEffect(() => {
     const beside = button.current?.nextElementSibling;
-    if (replacesFocused && document.activeElement === document.body && beside instanceof HTMLButtonElement && !beside.disabled) beside.focus({ preventScroll: true });
+    // An arrow that is disabled does not take focus: it then stays where the browser left it.
+    if (replacesFocused && document.activeElement === document.body && beside instanceof HTMLElement) beside.focus({ preventScroll: true });
   }, [replacesFocused]);
 
   const onClick = (event: React.MouseEvent<HTMLButtonElement>) => {
