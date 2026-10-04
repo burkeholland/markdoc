@@ -241,8 +241,16 @@ export const api = {
         /** Agents that can be @-mentioned here: `login` is `<ownerLogin>/<slug>` (see src/server/agents.ts `MentionableAgent`). */
         agents: { name: string; login: string; ownerLogin: string; ownerName: string | null; present: boolean; collaboratorsMayAsk: boolean }[];
       }>(`/api/documents/${id}/collaborators`),
-    addCollaborator: (id: string, login: string, role: Exclude<Role, "owner">) =>
-      request<{ ok: true; login: string; role: string; pending: boolean }>(`/api/documents/${id}/collaborators`, { method: "POST", body: JSON.stringify({ login, role }) }),
+    /**
+     * Add a person. An add never changes a role: a login that already has another role is refused with
+     * `ApiError` 409 whose `body` is `{ code: "already-collaborator", login, role }` (the role they keep).
+     * `change: true` says the caller means to set the role (the role select of a person already listed).
+     */
+    addCollaborator: (id: string, login: string, role: Exclude<Role, "owner">, options: { change?: boolean } = {}) =>
+      request<{ ok: true; login: string; role: string; pending: boolean }>(`/api/documents/${id}/collaborators`, {
+        method: "POST",
+        body: JSON.stringify(options.change ? { login, role, change: true } : { login, role }),
+      }),
     removeCollaborator: (id: string, login: string) =>
       request<{ ok: true }>(`/api/documents/${id}/collaborators`, { method: "DELETE", body: JSON.stringify({ login }) }),
     publish: (id: string, message?: string, options: { force?: boolean } = {}) =>

@@ -735,6 +735,58 @@ export async function upsertCollaborator(docId: string, login: string, role: Exc
   return normalized;
 }
 
+/** The role this login holds on the document as a collaborator, or null when it has none (login normalized like `upsertCollaborator`). */
+export async function getCollaboratorRole(docId: string, login: string): Promise<Exclude<Role, "owner"> | null> {
+  const db = await getDb();
+  const normalized = login.trim().toLowerCase().replace(/^@/, "");
+  const [row] = await db
+    .select({ role: schema.collaborators.role })
+    .from(schema.collaborators)
+    .where(and(eq(schema.collaborators.documentId, docId), eq(schema.collaborators.login, normalized)));
+  return row?.role ?? null;
+}
+
+/** What `addCollaborator` did: wrote a row (`written`), found the same role (`unchanged`), or left another role alone (`refused`). */
+export type AddCollaboratorResult = { outcome: "written" } | { outcome: "unchanged" } | { outcome: "refused"; role: Exclude<Role, "owner"> };
+
+/**
+ * Give a login a role without ever changing a role nobody asked to change (#2252). The decision and the
+ * write are one statement, so two requests for the same login cannot both win:
+ * - without `change`, an insert that leaves an existing row alone: the same role is `unchanged`, another
+ *   role is `refused` with the role the person keeps;
+ * - with `change`, an upsert that only writes when the role differs (a login without access is added).
+ */
+export async function addCollaborator(
+  docId: string,
+  login: string,
+  role: Exclude<Role, "owner">,
+  addedBy: string,
+  options: { change?: boolean } = {},
+): Promise<AddCollaboratorResult> {
+  const db = await getDb();
+  const normalized = login.trim().toLowerCase().replace(/^@/, "");
+  const values = { documentId: docId, login: normalized, role, addedBy };
+  const target = [schema.collaborators.documentId, schema.collaborators.login];
+  if (options.change) {
+    const written = await db
+      .insert(schema.collaborators)
+      .values(values)
+      .onConflictDoUpdate({ target, set: { role }, setWhere: ne(schema.collaborators.role, role) })
+      .returning();
+    return { outcome: written.length > 0 ? "written" : "unchanged" };
+  }
+  // A row that is there on the insert and gone on the read was removed in between: insert again. Three rounds
+  // would need three removals of this login to land in those gaps; then give up (a 500, nothing written).
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const inserted = await db.insert(schema.collaborators).values(values).onConflictDoNothing({ target }).returning();
+    if (inserted.length > 0) return { outcome: "written" };
+    const current = await getCollaboratorRole(docId, normalized);
+    if (current === role) return { outcome: "unchanged" };
+    if (current) return { outcome: "refused", role: current };
+  }
+  throw new Error(`collaborator ${normalized} on ${docId} kept changing while it was added`);
+}
+
 /** Remove a collaborator (login normalized like `upsertCollaborator`). Returns whether a row was actually removed. */
 export async function removeCollaborator(docId: string, login: string): Promise<boolean> {
   const db = await getDb();
