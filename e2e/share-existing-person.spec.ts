@@ -33,9 +33,12 @@ function watchAdds(page: Page, id: string) {
     if (request.method() !== "POST" || !request.url().endsWith(collaborators(id))) return;
     const entry: Sent = { body: request.postDataJSON() as Sent["body"], status: null };
     sent.push(entry);
-    void request.response().then((response) => {
-      entry.status = response?.status() ?? null;
-    });
+    void request
+      .response()
+      .then((response) => {
+        entry.status = response?.status() ?? null;
+      })
+      .catch(() => {}); // the page closed first: the status stays null and "answered" says so
   });
   return {
     sent,
