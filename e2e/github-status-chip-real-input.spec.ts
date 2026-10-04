@@ -1345,12 +1345,23 @@ test.describe("status chip: its place is kept for the rest of a pointer gesture,
     await test.step("a mouse click that acts: the box is the chip's rectangle, the arrow beside it is free", async () => {
       const chipBox = await box(chip(page));
       const { x, y } = await pointOn(chip(page));
-      await page.mouse.click(x, y);
-      await expect(dialog).toBeVisible();
-      await expect(placeHold(page)).toHaveCount(1);
-      expect(await box(placeHold(page))).toEqual(chipBox);
       const arrowPoint = await pointOn(arrow(page));
-      expect(await page.evaluate(([px, py]) => document.elementFromPoint(px, py)?.getAttribute("data-testid") ?? null, [arrowPoint.x, arrowPoint.y])).not.toBe("place-hold");
+      await page.mouse.click(x, y);
+      // One read, at once, before the dialog is waited for: the box leaves 600 ms after the click, and a busy
+      // machine can take longer than that to show the dialog.
+      const held = await page.evaluate(
+        ([px, py]) => ({
+          boxes: [...document.querySelectorAll('[data-testid="place-hold"]')].map((el) => {
+            const { left, top, width, height } = el.getBoundingClientRect();
+            return [left, top, width, height].map(Math.round);
+          }),
+          atArrow: document.elementFromPoint(px, py)?.getAttribute("data-testid") ?? null,
+        }),
+        [arrowPoint.x, arrowPoint.y],
+      );
+      expect(held.boxes).toEqual([chipBox]);
+      expect(held.atArrow).not.toBe("place-hold");
+      await expect(dialog).toBeVisible();
     });
 
     await test.step("presses on the box do not close the dialog, start nothing, and the box still leaves on time", async () => {
@@ -1362,17 +1373,19 @@ test.describe("status chip: its place is kept for the rest of a pointer gesture,
       await expect(placeHold(page)).toHaveCount(0);
       await page.mouse.click(x, y);
       const armed = Date.now();
-      await expect(dialog).toBeVisible();
+      // The presses come at once, before the dialog is waited for: they have to land while the box is there, and a
+      // busy machine can take longer than the box's 600 ms to show the dialog.
       for (const count of [2, 3, 1]) {
-        await page.waitForTimeout(100);
+        await page.waitForTimeout(60);
         await page.mouse.down({ clickCount: count });
         await page.mouse.up({ clickCount: count });
       }
+      await expect(placeHold(page)).toHaveCount(0);
+      const gone = Date.now() - armed;
       await expect(dialog).toBeVisible();
       await expect(page.getByTestId("sync-merge")).toBeFocused();
-      await expect(placeHold(page)).toHaveCount(0);
-      expect(Date.now() - armed).toBeLessThan(2_000);
-      expect(Date.now() - armed).toBeGreaterThanOrEqual(500);
+      expect(gone).toBeLessThan(2_000);
+      expect(gone).toBeGreaterThanOrEqual(500);
       // Its time is over: the same spot is the page behind the dialog again, and a click there closes the dialog.
       await page.mouse.click(x, y);
       await expect(dialog).toHaveCount(0);
@@ -1381,8 +1394,9 @@ test.describe("status chip: its place is kept for the rest of a pointer gesture,
 
     await test.step("a press anywhere else takes the box away at once", async () => {
       await press(page, "mouse");
-      await expect(dialog).toBeVisible();
+      // Before the dialog is waited for, as above.
       await expect(placeHold(page)).toHaveCount(1);
+      await expect(dialog).toBeVisible();
       await mouseClick(page, dialog.getByRole("heading", { name: "Sync with GitHub" }));
       await expect(placeHold(page)).toHaveCount(0);
       await expect(dialog).toBeVisible();
@@ -1390,15 +1404,17 @@ test.describe("status chip: its place is kept for the rest of a pointer gesture,
 
     await test.step("focus back on the chip takes the box away at once: a click right after Escape is a press", async () => {
       await closeWith(page, dialog, "Escape");
+      const { x, y } = await pointOn(chip(page));
       for (let round = 0; round < 3; round++) {
-        const { x, y } = await pointOn(chip(page));
+        // The click comes as soon as focus is back, with no wait for the box to go: a box that had stayed would
+        // take this click, and the dialog would not open.
         await page.mouse.click(x, y);
         await expect(dialog).toBeVisible();
         await page.keyboard.press("Escape");
         await expect(dialog).toHaveCount(0);
         await expectFocusOnChip(page);
-        await expect(placeHold(page)).toHaveCount(0);
       }
+      await expect(placeHold(page)).toHaveCount(0);
     });
 
     await test.step("a key press, a status change and a press on a chip that is off leave no box", async () => {
