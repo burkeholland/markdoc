@@ -332,6 +332,37 @@ describe.each([
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
+  it("a gist's first publication keeps Published while its owner control appears", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<void>();
+    const unpublished: DocumentDto = { ...GIST_DOC, publishedAt: null };
+    const { onOpenChange, update } = open({ doc: unpublished, onCommit: vi.fn(() => pending.promise) });
+    expect(screen.queryByTestId("gist-auto-update-stub")).toBeNull();
+    type("First gist publication");
+    fireEvent.click(submit());
+    await settle(() => pending.resolve());
+    update({ doc: { ...GIST_DOC } });
+    expect(screen.getByTestId("gist-auto-update-stub")).toBeInTheDocument();
+    expect(submit()).toHaveTextContent("Published");
+    expect(field()).toHaveValue("First gist publication");
+    act(() => void vi.advanceTimersByTime(900));
+    expect(onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it("after a failed Enter in the field, Enter in the field and Enter on Commit each retry once", async () => {
+    const onCommit = vi.fn<(message: string) => Promise<void>>(() => Promise.reject(new Error("Refused")));
+    open({ onCommit });
+    await settle(() => void pressEnterInField());
+    expect(screen.getByRole("alert")).toHaveTextContent("Refused");
+    expect(field()).toHaveFocus();
+    await settle(() => void pressEnterInField());
+    expect(onCommit).toHaveBeenCalledTimes(2);
+    submit().focus();
+    fireEvent.keyDown(submit(), { key: "Enter" });
+    await settle(() => fireEvent.keyUp(submit(), { key: "Enter" }));
+    expect(onCommit).toHaveBeenCalledTimes(3);
+  });
+
   it("the close after Published uses the newest onOpenChange and is cancelled by an unmount", async () => {
     vi.useFakeTimers();
     const first = open({ onCommit: vi.fn(async () => undefined) });
@@ -369,6 +400,9 @@ describe.each([
     for (const key of ["ArrowLeft", "ArrowUp", "Home"]) expect(press(cancel(), key)).toBe(true);
     for (const key of ["ArrowRight", "ArrowDown", "End"]) expect(press(submit(), key)).toBe(true);
     expect(press(cancel(), "ArrowRight", { shiftKey: true })).toBe(true);
+    expect(cancel()).toHaveFocus();
+    // An arrow key that belongs to an IME composition is not navigation.
+    expect(press(cancel(), "ArrowRight", { isComposing: true })).toBe(true);
     expect(cancel()).toHaveFocus();
     expect(press(field(), "ArrowRight")).toBe(true);
     expect(field()).toHaveFocus();

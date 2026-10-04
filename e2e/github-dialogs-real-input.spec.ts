@@ -1019,4 +1019,57 @@ test.describe("phone (390 x 844): sheets and the Outline drawer give focus back"
       }
     }
   });
+
+  test("a sheet whose opener is gone, a sheet switched from inside, and the Comments sheet: focus never ends on the page body", async ({ browser }) => {
+    const { page } = await signInWith(browser, "dialogs-phone-edges", PHONE);
+    const id = await createDocument(page, "# Phone\n\n## One\n\nText.\n\n## Two\n\nMore text.\n");
+    await openEditor(page, id);
+    const sheet = (panel: string) => page.locator(`[data-testid="sheet"][data-panel="${panel}"]`);
+    /** Run a command from the palette, which is gone by the time the command has opened its panel. */
+    const fromPalette = async (query: string) => {
+      await page.keyboard.press("Control+K");
+      await expect(page.getByTestId("palette-input")).toBeFocused();
+      await page.keyboard.type(query);
+      await page.keyboard.press("Enter");
+      await expect(page.getByTestId("command-palette")).toHaveCount(0);
+    };
+
+    await test.step("Version history, then Activity through the palette, then Escape: More", async () => {
+      await pickFromMoreMenu(page, page.getByTestId("menu-history"), "touch");
+      await expect(sheet("versions")).toBeVisible();
+      await fromPalette("Activity");
+      await expect(sheet("activity")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("sheet")).toHaveCount(0);
+      await expect.poll(() => focusOf(page)).toBe("more-menu");
+    });
+
+    await test.step("Version history and the Outline opened from the palette, then Escape: the editor the palette came from", async () => {
+      for (const [query, surface] of [
+        ["Version history", sheet("versions")],
+        ["outline", page.getByTestId("outline-drawer")],
+      ] as const) {
+        const editor = page.locator(".md-rich:visible, .cm-content:visible").first();
+        await tap(page, editor, 0.5, 0.9);
+        await expect.poll(() => focusOf(page)).toMatch(/^(rich|code) pane$/);
+        await fromPalette(query);
+        await expect(surface).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(surface).toHaveCount(0);
+        await expect.poll(() => focusOf(page)).toMatch(/^(rich|code) pane$/);
+      }
+    });
+
+    await test.step("the Comments sheet still leaves focus in the editor, by Escape and by a tap outside", async () => {
+      for (const closer of ["Escape", "a tap outside"] as const) {
+        await tap(page, page.getByTestId("comments-toggle"));
+        await expect(sheet("comments")).toBeVisible();
+        await expect.poll(() => page.evaluate(() => !!document.activeElement?.closest('[role="dialog"]'))).toBe(true);
+        if (closer === "Escape") await page.keyboard.press("Escape");
+        else await page.touchscreen.tap(page.viewportSize()!.width / 2, (await settledBox(sheet("comments"))).y / 2);
+        await expect(page.getByTestId("sheet")).toHaveCount(0);
+        await expect.poll(() => focusOf(page)).toMatch(/^(rich|code) pane$/);
+      }
+    });
+  });
 });

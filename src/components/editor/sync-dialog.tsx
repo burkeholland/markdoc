@@ -35,7 +35,7 @@ const CLOSE_AFTER_MS = 900;
  * field stay where they are when one appears, changes or goes: a second click lands on the choice the
  * first one was aimed at, never on its neighbour. A card taller than the window scrolls inside.
  */
-const PINNED = "[--pin:max(0.75rem,calc(50dvh-14rem))] top-(--pin) translate-y-0 max-h-[calc(100dvh-var(--pin)-0.75rem)] overflow-y-auto";
+const PINNED = "[--pin:max(0.75rem,calc(50dvh-15rem))] top-(--pin) translate-y-0 max-h-[calc(100dvh-var(--pin)-0.75rem)] overflow-y-auto";
 
 const plural = (n: number) => `${n} line${n === 1 ? "" : "s"}`;
 const formatMb = (bytes: number) => {

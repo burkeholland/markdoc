@@ -3069,14 +3069,15 @@ export function EditorShell({
   const closeOutlineDrawer = useCallback(() => setOutlineDrawerOpen(false), []);
   // A phone's Version history and Activity sheets and its Outline drawer are bare Radix content, and Radix
   // leaves focus on <body> when they close. What had focus when one opened is read while that render is
-  // still pending (a ⋮ menu item resolves to the ⋮ button; the item is gone a moment later) and gets focus back.
+  // still pending (a ⋮ menu item resolves to the ⋮ button; the item is gone a moment later) and gets focus
+  // back. When that is gone too (a command palette entry), the ⋮ button gets it: it lists these panels.
   const phoneLayer = !isPhone ? null : outlineDrawerOpen ? "outline" : sidePanel === "versions" || sidePanel === "activity" ? sidePanel : null;
   const [layerOpener, setLayerOpener] = useState<{ layer: string | null; element: HTMLElement | null }>({ layer: null, element: null });
-  if (layerOpener.layer !== phoneLayer) setLayerOpener({ layer: phoneLayer, element: phoneLayer ? focusReturnTarget() : layerOpener.element });
+  if (layerOpener.layer !== phoneLayer) setLayerOpener({ layer: phoneLayer, element: phoneLayer && !layerOpener.layer ? focusReturnTarget() : layerOpener.element });
   const returnLayerFocus = useCallback(
     (event: Event) => {
       event.preventDefault();
-      restoreFocus(layerOpener.element);
+      if (!restoreFocus(layerOpener.element)) restoreFocus(document.querySelector<HTMLElement>('header button[aria-label="More"]'));
     },
     [layerOpener.element],
   );

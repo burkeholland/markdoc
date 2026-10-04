@@ -6734,7 +6734,7 @@ const COMMIT_CLOSE_AFTER_MS = 900;
  * appears, changes or goes: a second click lands on the button the first one was aimed at, never beside
  * the card. A card taller than the window scrolls inside.
  */
-const COMMIT_PINNED = "[--pin:max(0.75rem,calc(50dvh-9rem))] top-(--pin) translate-y-0 max-h-[calc(100dvh-var(--pin)-0.75rem)] overflow-y-auto";
+const COMMIT_PINNED = "[--pin:max(0.75rem,calc(50dvh-8.5rem))] top-(--pin) translate-y-0 max-h-[calc(100dvh-var(--pin)-0.75rem)] overflow-y-auto";
 
 /** Where a commit goes. The form starts over when this changes under an open dialog. */
 const commitDestination = (doc: DocumentDto) =>
