@@ -641,6 +641,7 @@ test.describe("status chip: one press is one action", () => {
         for (const gesture of GESTURES) {
           for (const spot of SPOTS) {
             await test.step(`"${LABELS[state].label}": ${gesture.name} at ${spot * 100} percent`, async () => {
+              await expect(placeHold(page)).toHaveCount(0);
               const { x, y } = await pointOn(chip(page), spot);
               await gesture.run(page, x, y);
               // Every click of the gesture has been delivered. The dialog the first one opened is still there:
@@ -670,6 +671,8 @@ test.describe("status chip: one press is one action", () => {
       for (const gesture of GESTURES) {
         for (const spot of SPOTS) {
           await test.step(`${gesture.name} at ${spot * 100} percent`, async () => {
+            // A new gesture: the place the gesture before it held is free again.
+            await expect(placeHold(page)).toHaveCount(0);
             const { x, y } = await pointOn(chip(page), spot);
             await gesture.run(page, x, y);
             await expect.poll(() => requests.seen.length).toBe(++round);
@@ -735,6 +738,12 @@ test.describe("status chip: one press is one action", () => {
     test.setTimeout(180_000);
     const { page } = await signInWith(browser, "chip-double-tap", { hasTouch: true });
     test.skip(!(await hasFakeGitHub(page)), "needs the fake GitHub of the e2e server");
+    // The browser counts taps itself: a double tap starts a new count only once its double-tap time has passed
+    // since the tap before it, and the chip's place is free again by then too.
+    const newGesture = async () => {
+      await page.waitForTimeout(700); // Time is the subject: longer than the double-tap time.
+      await expect(placeHold(page)).toHaveCount(0);
+    };
     const doubleTap = async (x: number, y: number) => {
       await page.touchscreen.tap(x, y);
       await page.waitForTimeout(120); // Time is the subject: the gap inside a double tap.
@@ -745,6 +754,7 @@ test.describe("status chip: one press is one action", () => {
     await openEditor(page, both.id, "diverged");
     const requests = requestsOf(page);
     for (const spot of SPOTS) {
+      await newGesture();
       const { x, y } = await pointOn(chip(page), spot);
       await doubleTap(x, y);
       await expect(syncDialog(page)).toBeVisible();
@@ -760,6 +770,7 @@ test.describe("status chip: one press is one action", () => {
     const pulls = requestsOf(page);
     let round = 0;
     for (const spot of SPOTS) {
+      await newGesture();
       const { x, y } = await pointOn(chip(page), spot);
       await doubleTap(x, y);
       await expect.poll(() => pulls.seen.length).toBe(++round);
@@ -1346,6 +1357,9 @@ test.describe("status chip: its place is kept for the rest of a pointer gesture,
       // Time is the subject: the box leaves 600 ms after the click that armed it, whatever lands on it meanwhile.
       const { x, y } = await pointOn(chip(page));
       await closeWith(page, dialog, "Escape");
+      // Focus comes back to the chip one task after the dialog has left, and takes the first click's box with it.
+      await expectFocusOnChip(page);
+      await expect(placeHold(page)).toHaveCount(0);
       await page.mouse.click(x, y);
       const armed = Date.now();
       await expect(dialog).toBeVisible();
