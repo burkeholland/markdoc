@@ -1237,7 +1237,14 @@ test.describe("status chip: what changes without the user asking", () => {
       const entry = page.getByTestId("menu-sync");
       if (how === "mouse") await mouseClick(page, entry);
       else {
-        for (let i = 0; i < 20 && !(await entry.evaluate((el) => el === document.activeElement)); i++) await page.keyboard.press("ArrowDown");
+        // A menu does not take arrow keys in its first moment: a press that moved nothing is sent again, for 5 s at most.
+        const onEntry = () => entry.evaluate((el) => el === document.activeElement, undefined, { timeout: 500 }).catch(() => false);
+        for (const end = Date.now() + 5_000; Date.now() < end && !(await onEntry()); ) {
+          const was = await page.evaluateHandle(() => document.activeElement);
+          await page.keyboard.press("ArrowDown");
+          await page.waitForFunction((el) => document.activeElement !== el, was, { timeout: 500 }).catch(() => undefined);
+          await was.dispose();
+        }
         await expect(entry).toBeFocused();
         await page.keyboard.press("Enter");
       }

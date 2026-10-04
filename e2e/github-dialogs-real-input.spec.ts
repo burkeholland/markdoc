@@ -137,9 +137,16 @@ const PUBLISH_OR_PULL = /\/api\/documents\/[^/]+\/(publish|pull)$/;
 /** For `page.route`: the same paths, whatever the query (`?merge=1`, `?force=1`). */
 const onPath = (path: RegExp) => (url: URL) => path.test(url.pathname);
 
-/** Arrow down in an open menu until `entry` has focus. */
+/** Arrow down in an open menu until `entry` has focus. A menu does not take arrow keys in its first moment, so a
+ *  press that moved nothing is sent again; the bound is in time (5 s), not in presses. */
 async function arrowTo(page: Page, entry: Locator) {
-  for (let i = 0; i < 20 && !(await entry.evaluate((el) => el === document.activeElement)); i++) await page.keyboard.press("ArrowDown");
+  const onEntry = () => entry.evaluate((el) => el === document.activeElement, undefined, { timeout: 500 }).catch(() => false);
+  for (const end = Date.now() + 5_000; Date.now() < end && !(await onEntry()); ) {
+    const was = await page.evaluateHandle(() => document.activeElement);
+    await page.keyboard.press("ArrowDown");
+    await page.waitForFunction((el) => document.activeElement !== el, was, { timeout: 500 }).catch(() => undefined);
+    await was.dispose();
+  }
   await expect(entry).toBeFocused();
 }
 /** Open the Publish menu from its arrow and pick an entry, with the mouse or with the keyboard only. */
