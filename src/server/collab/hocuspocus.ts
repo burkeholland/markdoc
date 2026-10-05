@@ -20,7 +20,9 @@ import { documentStoreSnapshot, installDocumentAutosave } from "./autosave";
 import { hydrateDoc, revertDoubledSeed, META_KEY, TEXT_KEY } from "./seed";
 import { installOriginAwareBroadcast } from "./broadcast";
 import {
-  collabAccessChangeBlocks,
+  collabMessageBegins,
+  collabMessageEnds,
+  collabSyncReceived,
   resolveStableCollabAccess,
   unauthorizedCollabError,
 } from "./authorization";
@@ -128,9 +130,25 @@ export function createCollabServer() {
 
     async beforeHandleMessage({ connection }) {
       // Access changes, token revocation, and token expiry are pushed to live connections.
-      // Do not query here: a transition is waiting for this message to drain, and steady-state
-      // Yjs/awareness traffic must not add database round trips per message.
-      if (collabAccessChangeBlocks(connection)) connection.readOnly = true;
+      // Do not query here: steady-state Yjs/awareness traffic must not add database round trips
+      // per message. While an access change has this connection paused, its messages wait here
+      // (they are not refused) and go on under the access the connection has afterwards.
+      await collabMessageBegins(connection);
+    },
+
+    async afterHandleMessage({ connection }) {
+      collabMessageEnds(connection);
+    },
+
+    async beforeSync({ connection, type }) {
+      collabSyncReceived(connection, type);
+    },
+
+    async beforeHandleAwareness(payload) {
+      // A message that waited out an access change and finds its connection closed (removed for good, or the
+      // tab closed meanwhile) must not put that person's presence back.
+      const { connection } = payload as typeof payload & { connection?: connectedPayload<CollabContext>["connection"] };
+      if (connection && !connection.document.hasConnection(connection)) payload.states.clear();
     },
 
     async onLoadDocument({ document, documentName }: onLoadDocumentPayload<CollabContext>) {

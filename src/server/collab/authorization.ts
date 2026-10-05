@@ -1,4 +1,4 @@
-import type { Connection } from "@hocuspocus/server";
+import { OutgoingMessage, type Connection } from "@hocuspocus/server";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import { canEdit, getDocumentAccess, getUserById } from "@/server/documents";
@@ -12,9 +12,36 @@ type CollabContext = CollabClaims & { version?: 2; principal?: "user" | "token" 
 
 const UNAUTHORIZED = { code: 4401, reason: "Unauthorized" };
 
+/**
+ * How long, and how much, a paused connection's messages wait for an access change. Past either bound the
+ * pause falls back to refusing (see {@link refuseHeld}), so a change that hangs or a client that floods
+ * cannot grow memory without end. The time stays well under the 15 s a page waits for a save confirmation.
+ */
+export const HOLD_LIMITS = { ms: 3_000, messages: 500, bytes: 1024 * 1024 };
+
+/** One per paused connection, however many access changes pause it at once. */
+interface Hold {
+  /** Access changes that have this connection paused right now. */
+  count: number;
+  /** A bound was hit: messages are no longer held, they are refused until the last change resolves the access. */
+  refusing: boolean;
+  /** Settles when the pause ends or falls back to refusing. */
+  released: Promise<void>;
+  release: () => void;
+  /** Messages that arrived while paused. */
+  messages: number;
+  bytes: number;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 interface AuthorizationState {
   transitions: Map<string, Promise<void>>;
-  blockedConnections: WeakSet<object>;
+  /** Connections paused by an access change: their messages wait until their access is known. */
+  holds: WeakMap<object, Hold>;
+  /** The message each connection is handling right now, with whoever waits for it to finish. */
+  handling: WeakMap<object, { waiting?: (() => void)[] }>;
+  /** Sync messages refused (or not confirmed) per connection since its last full sync. */
+  refused: WeakMap<object, number>;
   revision: number;
 }
 
@@ -26,10 +53,30 @@ const state =
   globalState.__markdocCollabAuthorization ??
   (globalState.__markdocCollabAuthorization = {
     transitions: new Map(),
-    blockedConnections: new WeakSet(),
+    holds: new WeakMap(),
+    handling: new WeakMap(),
+    refused: new WeakMap(),
     revision: 0,
   });
 state.revision ??= 0;
+// A development server keeps this object across hot reloads of this module.
+state.holds ??= new WeakMap();
+state.handling ??= new WeakMap();
+state.refused ??= new WeakMap();
+
+/**
+ * Test seam: extra milliseconds inside every access change, right after its database write, so tests meet the
+ * pause a database on another machine gives production (the in-process test database answers without the server
+ * taking another message). Honoured only where the development login is (the rule of `devLoginEnabled` in
+ * src/auth.ts, pinned by access-change-delay.test.ts), capped, and 0 for anything that is not a positive number.
+ */
+export const ACCESS_CHANGE_TEST_DELAY_MAX_MS = 2_000;
+export function accessChangeTestDelayMs(env: Record<string, string | undefined> = process.env): number {
+  const allowed = (env.AUTH_DEV_LOGIN === "1" && env.NODE_ENV !== "production") || env.AUTH_DEV_LOGIN === "force";
+  if (!allowed) return 0;
+  const ms = Number(env.COLLAB_ACCESS_CHANGE_TEST_DELAY_MS);
+  return Number.isFinite(ms) && ms > 0 ? Math.min(ms, ACCESS_CHANGE_TEST_DELAY_MAX_MS) : 0;
+}
 
 function accessKey(docId: string, login: string): string {
   return `${docId}\0${login.trim().replace(/^@/, "").toLowerCase()}`;
@@ -127,8 +174,83 @@ export async function resolveStableCollabAccess(claims: VerifiedCollabClaims): P
   }
 }
 
+/**
+ * True while an access change has this connection paused and none of its messages is being handled.
+ * A message whose handling began before the pause still runs under the access it began with.
+ */
 export function collabAccessChangeBlocks(connection: Connection<CollabContext>): boolean {
-  return state.blockedConnections.has(connection);
+  return state.holds.has(connection) && !state.handling.has(connection);
+}
+
+const attached = (connection: Connection<CollabContext>) => connection.document.hasConnection(connection);
+
+/**
+ * `beforeHandleMessage`: a paused connection's message waits here, in arrival order (Hocuspocus handles one
+ * message per connection at a time, so everything behind it waits too), until every access change that paused
+ * the connection has resolved its access. No database query: this runs for every message.
+ */
+export async function collabMessageBegins(connection: Connection<CollabContext>): Promise<void> {
+  let held = false;
+  for (let hold = state.holds.get(connection); hold && !hold.refusing; hold = state.holds.get(connection)) {
+    held = true;
+    await hold.released;
+  }
+  // A connection that closed while its messages were held handles none of them.
+  if (held && !attached(connection)) connection.readOnly = true;
+  state.handling.set(connection, {});
+}
+
+/** `afterHandleMessage`: lets an access change that waits for this message go on. */
+export function collabMessageEnds(connection: Connection<CollabContext>): void {
+  const current = state.handling.get(connection);
+  state.handling.delete(connection);
+  for (const resume of current?.waiting ?? []) resume();
+}
+
+/** Resolves once the message this connection is handling (if any) is done; never waits longer than a pause may. */
+function handled(connection: Connection<CollabContext>): Promise<void> | undefined {
+  const current = state.handling.get(connection);
+  if (!current) return undefined;
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, HOLD_LIMITS.ms);
+    timer.unref?.();
+    (current.waiting ??= []).push(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+/**
+ * `beforeSync`: count what a read-only connection sends that Hocuspocus will not apply. An update is dropped
+ * and answered "not applied", and the client never sends it again; sync step 2 is counted too (cheaper than
+ * checking whether it held anything new, and one sync too many is harmless). {@link heal} uses the count.
+ */
+export function collabSyncReceived(connection: Connection<CollabContext>, type: number): void {
+  if (!connection.readOnly || type === 0) return;
+  state.refused.set(connection, (state.refused.get(connection) ?? 0) + 1);
+}
+
+/**
+ * A connection that had updates refused can edit again: ask it for everything this server lacks. Later
+ * updates build on the refused ones, so without this nothing it sends can be applied until a reload.
+ * The server sends sync step 1 and the stock client answers with the missing part. Its counter of
+ * unacknowledged changes still holds one per refused message; the answer is acknowledged once, the rest here.
+ */
+function heal(connection: Connection<CollabContext>): void {
+  const refused = state.refused.get(connection);
+  if (!refused) return;
+  state.refused.delete(connection);
+  connection.send(new OutgoingMessage(connection.messageAddress).createSyncMessage().writeFirstSyncStepFor(connection.document).toUint8Array());
+  const acknowledged = new OutgoingMessage(connection.messageAddress).writeSyncStatus(true).toUint8Array();
+  for (let i = 1; i < refused; i += 1) connection.send(acknowledged);
+}
+
+/** The access of this connection is known: open it for writing, or keep it read-only. A closed one stays shut. */
+function settle(connection: Connection<CollabContext>): void {
+  const editable = attached(connection) && canEdit((connection.context as CollabContext).role);
+  connection.readOnly = !editable;
+  if (editable) heal(connection);
 }
 
 function applyCurrentAccess(connection: Connection<CollabContext>, current: CollabContext | null): void {
@@ -138,7 +260,53 @@ function applyCurrentAccess(connection: Connection<CollabContext>, current: Coll
     return;
   }
   connection.context = current;
-  connection.readOnly = !canEdit(current.role);
+  // A bound was hit and another change still has this connection paused: it stays refused until that one ends.
+  const hold = state.holds.get(connection);
+  if (hold?.refusing && hold.count > 1) return;
+  settle(connection);
+}
+
+/** A bound was hit: stop holding and refuse instead. {@link heal} repairs a connection that turns out to keep edit. */
+function refuseHeld(connection: Connection<CollabContext>, hold: Hold): void {
+  if (hold.refusing) return;
+  hold.refusing = true;
+  connection.readOnly = true;
+  hold.release();
+}
+
+function pause(connection: Connection<CollabContext>): void {
+  const paused = state.holds.get(connection);
+  if (paused) {
+    paused.count += 1;
+    return;
+  }
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const hold: Hold = { count: 1, refusing: false, released, release, messages: 0, bytes: 0, timer: setTimeout(() => refuseHeld(connection, hold), HOLD_LIMITS.ms) };
+  hold.timer.unref?.();
+  // Hocuspocus queues without a limit; count what arrives while paused so the wait is bounded in size too.
+  const receive = connection.handleMessage;
+  connection.handleMessage = (data: Uint8Array) => {
+    hold.messages += 1;
+    hold.bytes += data.byteLength;
+    if (hold.messages > HOLD_LIMITS.messages || hold.bytes > HOLD_LIMITS.bytes) refuseHeld(connection, hold);
+    receive.call(connection, data);
+  };
+  state.holds.set(connection, hold);
+}
+
+function resume(connection: Connection<CollabContext>): void {
+  const hold = state.holds.get(connection);
+  if (!hold) return;
+  hold.count -= 1;
+  if (hold.count > 0) return;
+  state.holds.delete(connection);
+  clearTimeout(hold.timer);
+  delete (connection as { handleMessage?: unknown }).handleMessage;
+  if (hold.refusing) settle(connection);
+  hold.release();
 }
 
 interface AccessTransition {
@@ -147,15 +315,17 @@ interface AccessTransition {
   key: string;
   /** Pick the live connections whose access the mutation may take away. */
   select: (connections: Connection<CollabContext>[]) => Promise<Connection<CollabContext>[]> | Connection<CollabContext>[];
-  /** Whether edit rights may be lost: new messages from the selected connections are gated while prior ones drain. */
+  /** Whether edit rights may be lost: the selected connections are paused until their access is known again. */
   gate: boolean;
   mutation: () => Promise<void>;
   what: string;
 }
 
 /**
- * Apply an access database mutation without losing edits already accepted by the live document:
- * gate, flush pending messages and stores, mutate, then re-resolve each affected connection.
+ * Apply an access database mutation without losing edits and without accepting any after access ended:
+ * pause the affected connections (their messages wait, none is refused), let the message already being
+ * handled finish, flush pending stores, mutate, re-resolve each connection, then let the waiting messages
+ * through under the access each connection has now.
  */
 async function transitionAccess({ docId, key, select, gate, mutation, what }: AccessTransition): Promise<void> {
   const previous = state.transitions.get(key) ?? Promise.resolve();
@@ -171,37 +341,35 @@ async function transitionAccess({ docId, key, select, gate, mutation, what }: Ac
   const collab = getCollab();
   const document = collab?.documents.get(docId);
   const connections = await select(document?.getConnections() ?? []);
+  const paused = gate ? connections : [];
+  for (const connection of paused) pause(connection);
 
-  if (gate) {
-    for (const connection of connections) {
-      state.blockedConnections.add(connection);
-      connection.readOnly = true;
-    }
-  }
+  const resolveAccess = async (connection: Connection<CollabContext>) =>
+    applyCurrentAccess(connection, isVerifiedCollabClaims(connection.context) ? await resolveCollabAccess(connection.context) : null);
 
   try {
-    await Promise.all(connections.map((connection) => connection.waitForPendingMessages()));
+    // Not `waitForPendingMessages`: the messages behind the one being handled wait for this change to end.
+    await Promise.all(connections.map(handled));
     if (collab && document) {
       const pendingStore = collab.debouncer.executeNow(`onStoreDocument-${docId}`);
       if (pendingStore) await pendingStore;
       await document.saveMutex.waitForUnlock();
     }
 
-    await mutation();
+    try {
+      await mutation();
+    } finally {
+      const delay = accessChangeTestDelayMs();
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    }
 
-    await Promise.all(
-      connections.map(async (connection) => {
-        const current = isVerifiedCollabClaims(connection.context) ? await resolveCollabAccess(connection.context) : null;
-        applyCurrentAccess(connection, current);
-      }),
-    );
+    await Promise.all(connections.map(resolveAccess));
   } catch (error) {
-    for (const connection of connections) state.blockedConnections.delete(connection);
+    // The connections stay paused while their access is restored (they are resumed in `finally`).
     await Promise.all(
       connections.map(async (connection) => {
         try {
-          const current = isVerifiedCollabClaims(connection.context) ? await resolveCollabAccess(connection.context) : null;
-          applyCurrentAccess(connection, current);
+          await resolveAccess(connection);
         } catch (recoveryError) {
           connection.readOnly = true;
           connection.close(UNAUTHORIZED);
@@ -211,7 +379,7 @@ async function transitionAccess({ docId, key, select, gate, mutation, what }: Ac
     );
     throw error;
   } finally {
-    for (const connection of connections) state.blockedConnections.delete(connection);
+    for (const connection of paused) resume(connection);
     release();
     if (state.transitions.get(key) === queued) state.transitions.delete(key);
   }
@@ -219,7 +387,9 @@ async function transitionAccess({ docId, key, select, gate, mutation, what }: Ac
 
 /**
  * Apply a collaborator database mutation without losing edits already accepted by the live
- * document. New messages from that collaborator are gated while prior messages and stores drain.
+ * document. That collaborator's live connections are paused while it runs: what they send meanwhile
+ * waits and is applied afterwards if they may still edit (through the link, or because the change
+ * was refused), and refused if they may not.
  */
 export async function changeCollaboratorAccess(
   docId: string,
@@ -241,7 +411,7 @@ export async function changeCollaboratorAccess(
 /**
  * Apply a link-access database mutation to a document. Every live connection whose access derives
  * from the link — neither the owner nor an explicit collaborator, anonymous visitors included — is
- * gated, flushed and re-resolved: a closed link disconnects them (4401), a downgraded link makes
+ * paused, flushed and re-resolved: a closed link disconnects them (4401), a downgraded link makes
  * them read-only, and edits accepted before the change are kept. Owner and collaborators are untouched.
  */
 export async function changeLinkAccess(docId: string, newLinkAccess: LinkAccess, mutation: () => Promise<void>): Promise<void> {

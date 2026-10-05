@@ -534,14 +534,23 @@ describe("collaboration server", () => {
     try {
       client.ydoc.getText(TEXT_KEY).insert(client.ydoc.getText(TEXT_KEY).length, " message");
       await withTimeout(pendingStarted);
+      // The database change stays open so the pause can be seen: on the in-process database it has no width,
+      // and the change no longer waits for a message whose handling has not begun (issue #2281).
+      let finishMutation!: () => void;
+      const mutationHeld = new Promise<void>((resolve) => {
+        finishMutation = resolve;
+      });
       const transition = changeCollaboratorAccess(doc.id, editor.login!, "viewer", async () => {
         await upsertCollaborator(doc.id, editor.login!, "viewer", owner.id);
+        await mutationHeld;
       });
       await waitFor(() => collabAccessChangeBlocks(connection), 1000);
       releasePending();
+      finishMutation();
       await withTimeout(Promise.all([transition, connection.waitForPendingMessages()]));
       expect(connection.readOnly).toBe(true);
       expect(connection.context.role).toBe("viewer");
+      expect(hocuspocus.documents.get(doc.id)?.getText(TEXT_KEY).toString()).toBe("Pending");
     } finally {
       releasePending();
       client.provider.destroy();
