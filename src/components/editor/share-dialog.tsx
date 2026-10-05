@@ -1,18 +1,19 @@
 "use client";
 
-import { memo, useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { BookOpen, Bot, Check, ChevronRight, Copy, Globe, Link2, Loader2, Lock, Trash2 } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
-import { api, apiErrorText, type CollaboratorDto } from "@/lib/api";
+import { ApiError, api, apiErrorText, type CollaboratorDto } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
-import { CollaboratorLoginInput, isValidLogin } from "@/components/editor/collaborator-login-input";
+import { CollaboratorLoginInput, isValidLogin, type CollaboratorLoginInputHandle } from "@/components/editor/collaborator-login-input";
 import { cn } from "@/lib/utils";
 
 type CollaboratorRole = Exclude<Role, "owner">;
 type LinkAccess = DocumentDto["linkAccess"];
 type Owner = { login: string | null; name: string | null; image: string | null };
+type People = Awaited<ReturnType<typeof api.documents.collaborators>>;
 
 const ROLE_OPTIONS: readonly { value: CollaboratorRole; label: string }[] = [
   { value: "editor", label: "Editor" },
@@ -33,6 +34,17 @@ type ListState =
   | { status: "loaded"; documentId: string; owner: Owner | null; collaborators: CollaboratorDto[] };
 
 const ERROR_CLASS = "rounded-lg bg-red-50 px-3 py-2 text-sm text-danger wrap-anywhere dark:bg-red-950/40";
+
+/** An add the server refused because the person already has another role: who, and the role they keep. */
+type Refusal = { login: string; role: CollaboratorRole };
+
+/** Reads `409 { code: "already-collaborator", login, role }` (POST /api/documents/[id]/collaborators); null for any other failure. */
+function refusalOf(error: unknown): Refusal | null {
+  if (!(error instanceof ApiError) || error.status !== 409 || error.body?.code !== "already-collaborator") return null;
+  const { login, role } = error.body;
+  const known = ROLE_OPTIONS.find((option) => option.value === role);
+  return typeof login === "string" && known ? { login, role: known.value } : null;
+}
 
 /** A URL with a Copy button. When both copy paths fail the URL is selected so the person can finish with Ctrl+C. */
 function LinkRow({
@@ -91,6 +103,7 @@ export const ShareDialog = memo(function ShareDialog({
   const [role, setRole] = useState<CollaboratorRole>("editor");
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [refused, setRefused] = useState<Refusal | null>(null);
   const [addNote, setAddNote] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyLogins, setBusyLogins] = useState<ReadonlySet<string>>(new Set());
@@ -100,6 +113,14 @@ export const ShareDialog = memo(function ShareDialog({
   const roleSelect = useRef<HTMLSelectElement>(null);
   // Stable identity: the handle box keys its bindings on its callbacks, so a new function on every render would make it rebuild them.
   const focusRole = useCallback(() => roleSelect.current?.focus(), []);
+  const loginInput = useRef<CollaboratorLoginInputHandle>(null);
+  const addButton = useRef<HTMLButtonElement>(null);
+  // What is shown under the field answers the handle that was submitted: it goes when the text changes.
+  const changeLogin = useCallback((value: string) => {
+    setLogin(value);
+    setAddError(null);
+    setRefused(null);
+  }, []);
   const adder = useRef(false);
   const connectAfterClose = useRef(false);
   const currentDoc = useRef(doc.id);
@@ -108,6 +129,18 @@ export const ShareDialog = memo(function ShareDialog({
     currentDoc.current = doc.id;
   }, [doc.id]);
   useEffect(() => setOrigin(window.location.origin), []);
+  // A reopened dialog (or another document) starts without the last add's error.
+  useEffect(() => {
+    if (!open) return;
+    setAddError(null);
+    setRefused(null);
+  }, [open, doc.id]);
+
+  /** Shows a list the server just sent. "Already has access" is only true while the person is in the list it points to. */
+  const showPeople = useCallback((documentId: string, res: People) => {
+    setList({ status: "loaded", documentId, owner: res.owner, collaborators: res.collaborators });
+    setRefused((current) => (current && !res.collaborators.some((c) => c.login === current.login) ? null : current));
+  }, []);
 
   // A response that arrives after the dialog closed, or for another document, is dropped.
   useEffect(() => {
@@ -117,7 +150,7 @@ export const ShareDialog = memo(function ShareDialog({
     setList((current) => (current.status === "loaded" && current.documentId === documentId ? current : { status: "loading" }));
     api.documents.collaborators(documentId).then(
       (res) => {
-        if (!stale) setList({ status: "loaded", documentId, owner: res.owner, collaborators: res.collaborators });
+        if (!stale) showPeople(documentId, res);
       },
       (e) => {
         if (!stale) setList({ status: "error", message: apiErrorText(e, "Could not load the people with access.") });
@@ -126,7 +159,7 @@ export const ShareDialog = memo(function ShareDialog({
     return () => {
       stale = true;
     };
-  }, [open, doc.id, retry]);
+  }, [open, doc.id, retry, showPeople]);
 
   const setBusy = useCallback((who: string, busy: boolean) => {
     setBusyLogins((current) => {
@@ -148,19 +181,42 @@ export const ShareDialog = memo(function ShareDialog({
     const documentId = doc.id;
     setAdding(true);
     setAddError(null);
+    setRefused(null);
     setAddNote(null);
+    const refreshList = async (failure: string) => {
+      const res = await api.documents.collaborators(documentId).catch((e: unknown) => {
+        if (currentDoc.current === documentId) setList({ status: "error", message: apiErrorText(e, failure) });
+        return null;
+      });
+      if (res && currentDoc.current === documentId) showPeople(documentId, res);
+    };
     try {
       const result = await api.documents.addCollaborator(documentId, handle, role);
       if (currentDoc.current !== documentId) return;
+      // Add is disabled again once the field is empty; a disabled button cannot keep focus, so a press on Add
+      // hands focus to the field (ready for the next handle) instead of dropping it on the dialog.
+      if (document.activeElement === addButton.current) loginInput.current?.focus();
       setLogin("");
       if (result.pending) setAddNote(`@${result.login} has not signed in to Markdoc yet. They get access on their first sign-in, so check the spelling.`);
-      const res = await api.documents.collaborators(documentId).catch((e: unknown) => {
-        if (currentDoc.current === documentId) setList({ status: "error", message: apiErrorText(e, "Added, but the list could not be refreshed.") });
-        return null;
-      });
-      if (res && currentDoc.current === documentId) setList({ status: "loaded", documentId, owner: res.owner, collaborators: res.collaborators });
+      await refreshList("Added, but the list could not be refreshed.");
     } catch (e) {
-      if (currentDoc.current === documentId) setAddError(apiErrorText(e, "Could not add this person."));
+      if (currentDoc.current !== documentId) return;
+      const refusal = refusalOf(e);
+      if (!refusal) {
+        setAddError(apiErrorText(e, "Could not add this person."));
+        return;
+      }
+      // Nothing changed on the server. The typed handle stays, and the message points at the person's row: show
+      // the role the server just reported there, or fetch the list when this (stale) one does not have them.
+      setRefused(refusal);
+      const listed = list.status === "loaded" && list.documentId === documentId && list.collaborators.some((c) => c.login === refusal.login);
+      if (listed) {
+        setList((current) =>
+          current.status === "loaded" ? { ...current, collaborators: current.collaborators.map((c) => (c.login === refusal.login ? { ...c, role: refusal.role } : c)) } : current,
+        );
+      } else {
+        await refreshList("Could not load the people with access.");
+      }
     } finally {
       adder.current = false;
       setAdding(false);
@@ -173,7 +229,8 @@ export const ShareDialog = memo(function ShareDialog({
     setBusy(person.login, true);
     setActionError(null);
     try {
-      await api.documents.addCollaborator(documentId, person.login, next);
+      // `change`: the owner picked a role for someone already listed, so the server may replace the old one.
+      await api.documents.addCollaborator(documentId, person.login, next, { change: true });
       if (currentDoc.current !== documentId) return;
       setList((current) =>
         current.status === "loaded" ? { ...current, collaborators: current.collaborators.map((c) => (c.login === person.login ? { ...c, role: next } : c)) } : current,
@@ -194,6 +251,7 @@ export const ShareDialog = memo(function ShareDialog({
       await api.documents.removeCollaborator(documentId, person.login);
       if (currentDoc.current !== documentId) return;
       setList((current) => (current.status === "loaded" ? { ...current, collaborators: current.collaborators.filter((c) => c.login !== person.login) } : current));
+      setRefused((current) => (current?.login === person.login ? null : current));
     } catch (e) {
       if (currentDoc.current === documentId) setActionError(apiErrorText(e, `Could not remove ${person.login}.`));
     } finally {
@@ -222,6 +280,17 @@ export const ShareDialog = memo(function ShareDialog({
   const editorLink = `${origin}/d/${doc.id}`;
   const readerLink = `${origin}/p/${doc.id}`;
   const excluded = [...(owner?.login ? [owner.login] : []), ...collaborators.map((c) => c.login)];
+  // The role comes from the person's row when it is listed, so the sentence and the row below never disagree.
+  const refusedRole = refused ? (collaborators.find((c) => c.login === refused.login)?.role ?? refused.role) : null;
+  const addProblem = refused
+    ? `@${refused.login} already has access as ${ROLE_OPTIONS.find((option) => option.value === refusedRole)?.label}. Change the role in the list below.`
+    : addError;
+  // One press is one add: a held key's repeats (33 ms apart) never start another, in the field or on Add.
+  const ignoreRepeatedEnter = (event: KeyboardEvent<HTMLFormElement>) => {
+    if (event.key !== "Enter" || !event.repeat) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -238,8 +307,8 @@ export const ShareDialog = memo(function ShareDialog({
         <div className="flex flex-col gap-5" data-testid="share-presentation">
           {isOwner && (
             <div className="flex flex-col gap-2">
-              <form className="flex gap-2" onSubmit={(e) => void add(e)}>
-                <CollaboratorLoginInput value={login} onChange={setLogin} exclude={excluded} onPick={focusRole} />
+              <form className="flex gap-2" onSubmit={(e) => void add(e)} onKeyDownCapture={ignoreRepeatedEnter}>
+                <CollaboratorLoginInput ref={loginInput} value={login} onChange={changeLogin} exclude={excluded} onPick={focusRole} />
                 <select
                   ref={roleSelect}
                   className="select"
@@ -254,13 +323,23 @@ export const ShareDialog = memo(function ShareDialog({
                     </option>
                   ))}
                 </select>
-                <button type="submit" className="btn btn-primary" disabled={adding || !isValidLogin(login)} data-testid="share-add">
+                {/* While an add runs: aria-disabled, not disabled, which would drop focus from a pressed Add to
+                    the dialog (same as the link-preview switch below); `add` ignores a press meanwhile. */}
+                <button
+                  ref={addButton}
+                  type="submit"
+                  className="btn btn-primary aria-disabled:opacity-50"
+                  disabled={!isValidLogin(login)}
+                  aria-disabled={adding || undefined}
+                  aria-busy={adding || undefined}
+                  data-testid="share-add"
+                >
                   {adding ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : "Add"}
                 </button>
               </form>
-              {addError && (
-                <div className={ERROR_CLASS} role="alert" data-testid="share-add-error">
-                  {addError}
+              {addProblem && (
+                <div className={ERROR_CLASS} role="alert" data-testid="share-add-error" data-code={refused ? "already-collaborator" : undefined}>
+                  {addProblem}
                 </div>
               )}
               {addNote && (
@@ -313,10 +392,12 @@ export const ShareDialog = memo(function ShareDialog({
                       </div>
                       {isOwner ? (
                         <>
+                          {/* Busy: aria-disabled, not disabled, which would drop keyboard focus to the page in the
+                              middle of a role change; changeRole and remove ignore a press while the row is busy. */}
                           <select
-                            className="select h-8 text-xs"
+                            className="select h-8 text-xs aria-disabled:opacity-50"
                             value={person.role}
-                            disabled={busy}
+                            aria-disabled={busy || undefined}
                             onChange={(e) => void changeRole(person, e.target.value as CollaboratorRole)}
                             aria-label={`Role for ${person.login}`}
                           >
@@ -328,8 +409,8 @@ export const ShareDialog = memo(function ShareDialog({
                           </select>
                           <button
                             type="button"
-                            className="icon-btn h-8 w-8 text-ink-3 hover:text-danger"
-                            disabled={busy}
+                            className="icon-btn h-8 w-8 text-ink-3 hover:text-danger aria-disabled:opacity-40"
+                            aria-disabled={busy || undefined}
                             onClick={() => void remove(person)}
                             aria-label={`Remove ${person.login}`}
                           >

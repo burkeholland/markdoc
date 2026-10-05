@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useState, type ReactNode } from "react";
+import { StrictMode, useState, type ReactNode } from "react";
 
 import { ShareDialog } from "./share-dialog";
 import { ApiError, api, type CollaboratorDto } from "@/lib/api";
@@ -276,7 +276,8 @@ describe("ShareDialog", () => {
     const select = await screen.findByLabelText("Role for bob");
     fireEvent.change(select, { target: { value: "commenter" } });
 
-    await waitFor(() => expect(api.documents.addCollaborator).toHaveBeenCalledWith("doc-1", "bob", "commenter"));
+    // The role select of a listed person says it means to change the role; an add (above) never does.
+    await waitFor(() => expect(api.documents.addCollaborator).toHaveBeenCalledWith("doc-1", "bob", "commenter", { change: true }));
     await waitFor(() => expect(select).toHaveValue("commenter"));
 
     fireEvent.change(select, { target: { value: "editor" } });
@@ -511,6 +512,339 @@ describe("ShareDialog", () => {
 
     expect(screen.getByText("@current")).toBeInTheDocument();
     expect(screen.queryByText("@stale")).not.toBeInTheDocument();
+  });
+
+  describe("adding someone who already has access (#2252)", () => {
+    /** What POST /api/documents/:id/collaborators answers when an add would change a role. */
+    const refused = (login: string, role: Role) =>
+      new ApiError(409, `${login} already has access as ${role}. Send change: true to change the role.`, undefined, {
+        error: `${login} already has access as ${role}. Send change: true to change the role.`,
+        code: "already-collaborator",
+        login,
+        role,
+      });
+    const submit = () => fireEvent.submit(screen.getByTestId("share-login").closest("form")!);
+    const problem = () => screen.queryByTestId("share-add-error");
+
+    it.each([false, true])("shows why the add was refused next to the field, keeps the typed handle and leaves the role alone (StrictMode: %s)", async (strict) => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue(people([alice, bob]));
+      vi.mocked(api.documents.addCollaborator).mockRejectedValueOnce(refused("bob", "viewer"));
+      const dialog = <ShareDialog open onOpenChange={vi.fn()} doc={doc()} isOwner onDocChange={vi.fn()} />;
+      render(strict ? <StrictMode>{dialog}</StrictMode> : dialog);
+      await loadedRows();
+      const loads = vi.mocked(api.documents.collaborators).mock.calls.length;
+      screen.getByTestId("share-login").focus();
+      await fillLogin(" @Bob ");
+      submit();
+
+      const alert = await screen.findByTestId("share-add-error");
+      expect(alert).toHaveTextContent("@bob already has access as Viewer. Change the role in the list below.");
+      expect(alert.textContent).toBe("@bob already has access as Viewer. Change the role in the list below.");
+      expect(alert).toHaveAttribute("role", "alert");
+      expect(alert).toHaveAttribute("data-code", "already-collaborator");
+      // One request, an add (no change flag), with the role the select showed.
+      expect(vi.mocked(api.documents.addCollaborator).mock.calls).toEqual([["doc-1", "@Bob", "editor"]]);
+      expect(screen.getByTestId("share-login")).toHaveValue(" @Bob ");
+      expect(screen.getByTestId("share-login")).toHaveFocus();
+      expect(screen.getByLabelText("Role for bob")).toHaveValue("viewer");
+      expect(screen.getByLabelText("Role for alice")).toHaveValue("editor");
+      expect(screen.queryByTestId("share-add-note")).not.toBeInTheDocument();
+      // The person is in the list already: no reload.
+      expect(api.documents.collaborators).toHaveBeenCalledTimes(loads);
+      await waitFor(() => expect(screen.getByTestId("share-add")).not.toHaveAttribute("aria-disabled"));
+    });
+
+    it("shows the role the server reported in the row too when this dialog's list was out of date", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([collaborator("bob", "commenter")]));
+      vi.mocked(api.documents.addCollaborator).mockRejectedValueOnce(refused("bob", "viewer"));
+      renderShare();
+      await loadedRows();
+      await fillLogin("bob");
+      submit();
+
+      expect(await screen.findByTestId("share-add-error")).toHaveTextContent("@bob already has access as Viewer.");
+      expect(screen.getByLabelText("Role for bob")).toHaveValue("viewer");
+    });
+
+    it("loads the list again when the refused person is not in it, so the row the message points to is there", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([])).mockResolvedValueOnce(people([collaborator("carl", "commenter")]));
+      vi.mocked(api.documents.addCollaborator).mockRejectedValueOnce(refused("carl", "commenter"));
+      renderShare();
+      await screen.findByText("Nobody else has been added yet.");
+      await fillLogin("carl");
+      submit();
+
+      expect(await screen.findByLabelText("Role for carl")).toHaveValue("commenter");
+      expect(problem()).toHaveTextContent("@carl already has access as Commenter. Change the role in the list below.");
+      expect(api.documents.collaborators).toHaveBeenCalledTimes(2);
+    });
+
+    it("drops the message when that reload shows the person is gone (removed elsewhere in between)", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([])).mockResolvedValueOnce(people([alice]));
+      vi.mocked(api.documents.addCollaborator).mockRejectedValueOnce(refused("carl", "commenter"));
+      renderShare();
+      await screen.findByText("Nobody else has been added yet.");
+      await fillLogin("carl");
+      submit();
+
+      expect(await screen.findByText("@alice")).toBeInTheDocument();
+      await waitFor(() => expect(problem()).not.toBeInTheDocument());
+      expect(screen.getByTestId("share-login")).toHaveValue("carl");
+    });
+
+    it("the next try is sent to the server again, and works as an add once the person was removed elsewhere", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([bob])).mockResolvedValueOnce(people([collaborator("bob", "editor")]));
+      vi.mocked(api.documents.addCollaborator).mockRejectedValueOnce(refused("bob", "viewer")).mockResolvedValueOnce({ ok: true, login: "bob", role: "editor", pending: false });
+      renderShare();
+      await loadedRows();
+      await fillLogin("bob");
+      submit();
+      await screen.findByTestId("share-add-error");
+      await waitFor(() => expect(screen.getByTestId("share-add")).not.toHaveAttribute("aria-disabled"));
+
+      submit();
+      await waitFor(() => expect(screen.getByTestId("share-login")).toHaveValue(""));
+      expect(vi.mocked(api.documents.addCollaborator).mock.calls).toEqual([
+        ["doc-1", "bob", "editor"],
+        ["doc-1", "bob", "editor"],
+      ]);
+      expect(problem()).not.toBeInTheDocument();
+      await waitFor(() => expect(screen.getByLabelText("Role for bob")).toHaveValue("editor"));
+    });
+
+    it("the message follows the row: a role change in the list updates it, removing the person drops it", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([alice, bob]));
+      vi.mocked(api.documents.addCollaborator)
+        .mockRejectedValueOnce(refused("bob", "viewer"))
+        .mockResolvedValueOnce({ ok: true, login: "bob", role: "commenter", pending: false });
+      renderShare();
+      await loadedRows();
+      await fillLogin("bob");
+      submit();
+      await screen.findByTestId("share-add-error");
+
+      fireEvent.change(screen.getByLabelText("Role for bob"), { target: { value: "commenter" } });
+      await waitFor(() => expect(problem()).toHaveTextContent("@bob already has access as Commenter. Change the role in the list below."));
+      expect(api.documents.addCollaborator).toHaveBeenLastCalledWith("doc-1", "bob", "commenter", { change: true });
+
+      // Someone else leaving does not touch it; bob leaving does.
+      fireEvent.click(screen.getByLabelText("Remove alice"));
+      await waitFor(() => expect(screen.queryByText("@alice")).not.toBeInTheDocument());
+      expect(problem()).toHaveTextContent("@bob already has access as Commenter.");
+      fireEvent.click(screen.getByLabelText("Remove bob"));
+      await waitFor(() => expect(screen.queryByText("@bob")).not.toBeInTheDocument());
+      expect(problem()).not.toBeInTheDocument();
+      expect(screen.getByTestId("share-login")).toHaveValue("bob");
+    });
+
+    it.each([
+      ["a refusal", () => refused("bob", "viewer"), "@bob already has access as Viewer."],
+      ["any other add error", () => apiMessage(400, "That is the owner"), "That is the owner"],
+    ])("%s goes away when the handle text changes", async (_label, error, text) => {
+      vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([bob]));
+      vi.mocked(api.documents.addCollaborator).mockRejectedValueOnce(error());
+      renderShare();
+      await loadedRows();
+      await fillLogin("bob");
+      submit();
+      expect(await screen.findByTestId("share-add-error")).toHaveTextContent(text);
+
+      await fillLogin("bobb");
+      expect(problem()).not.toBeInTheDocument();
+      await fillLogin("bob");
+      expect(problem()).not.toBeInTheDocument();
+      expect(api.documents.addCollaborator).toHaveBeenCalledTimes(1);
+    });
+
+    it("a reopened dialog, another document and a person who is no longer the owner see no stale message", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue(people([bob]));
+      const refuseOnce = async (rerender: (ui: ReactNode) => void, document: DocumentDto) => {
+        vi.mocked(api.documents.addCollaborator).mockRejectedValueOnce(refused("bob", "viewer"));
+        rerender(<ShareDialog open onOpenChange={vi.fn()} doc={document} isOwner onDocChange={vi.fn()} />);
+        await loadedRows();
+        await fillLogin("bob");
+        submit();
+        await screen.findByTestId("share-add-error");
+      };
+      const { rerender } = renderShare();
+
+      // Closed and opened again.
+      await refuseOnce(rerender, doc());
+      rerender(<ShareDialog open={false} onOpenChange={vi.fn()} doc={doc()} isOwner onDocChange={vi.fn()} />);
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      rerender(<ShareDialog open onOpenChange={vi.fn()} doc={doc()} isOwner onDocChange={vi.fn()} />);
+      await loadedRows();
+      expect(problem()).not.toBeInTheDocument();
+
+      // Another document in the same dialog.
+      await fillLogin("");
+      await refuseOnce(rerender, doc());
+      rerender(<ShareDialog open onOpenChange={vi.fn()} doc={doc({ id: "doc-2" })} isOwner onDocChange={vi.fn()} />);
+      await loadedRows();
+      expect(problem()).not.toBeInTheDocument();
+
+      // No longer the owner: the add form and its message are not shown at all.
+      await fillLogin("");
+      await refuseOnce(rerender, doc({ id: "doc-2" }));
+      rerender(<ShareDialog open onOpenChange={vi.fn()} doc={doc({ id: "doc-2" })} isOwner={false} onDocChange={vi.fn()} />);
+      expect(problem()).not.toBeInTheDocument();
+      expect(screen.queryByTestId("share-login")).not.toBeInTheDocument();
+    });
+
+    it("a 409 without the code, or with a role this dialog does not know, is shown as the server's own text", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue(people([bob]));
+      vi.mocked(api.documents.addCollaborator)
+        .mockRejectedValueOnce(new ApiError(409, "Conflict of another kind", undefined, { error: "Conflict of another kind", login: "bob", role: "viewer" }))
+        .mockRejectedValueOnce(new ApiError(409, "bob already has access as admin", undefined, { code: "already-collaborator", login: "bob", role: "admin" }));
+      renderShare();
+      await loadedRows();
+      await fillLogin("bob");
+      submit();
+      expect(await screen.findByTestId("share-add-error")).toHaveTextContent("Conflict of another kind");
+      expect(problem()).not.toHaveAttribute("data-code");
+      await waitFor(() => expect(screen.getByTestId("share-add")).not.toHaveAttribute("aria-disabled"));
+
+      submit();
+      await waitFor(() => expect(problem()).toHaveTextContent("bob already has access as admin"));
+      expect(problem()).not.toHaveAttribute("data-code");
+    });
+  });
+
+  describe("one press is one action, and focus stays put (#2252)", () => {
+    type Added = Awaited<ReturnType<typeof api.documents.addCollaborator>>;
+
+    it("Add stays focusable while the add runs (aria-disabled, not disabled) and ignores a second press", async () => {
+      const request = deferred<Added>();
+      vi.mocked(api.documents.addCollaborator).mockReturnValueOnce(request.promise);
+      renderShare();
+      await loadedRows();
+      await fillLogin("zoe");
+      const add = screen.getByTestId("share-add");
+      add.focus();
+      fireEvent.click(add);
+
+      expect(add).toHaveAttribute("aria-disabled", "true");
+      expect(add).toHaveAttribute("aria-busy", "true");
+      expect(add).not.toBeDisabled();
+      expect(add).toHaveFocus();
+      fireEvent.click(add);
+      fireEvent.submit(add.closest("form")!);
+      expect(api.documents.addCollaborator).toHaveBeenCalledTimes(1);
+
+      // Added: the field empties, Add is disabled again, and the focus it held goes to the field, not nowhere.
+      request.resolve({ ok: true, login: "zoe", role: "editor", pending: false });
+      await waitFor(() => expect(screen.getByTestId("share-login")).toHaveValue(""));
+      expect(screen.getByTestId("share-login")).toHaveFocus();
+      await waitFor(() => expect(add).not.toHaveAttribute("aria-disabled"));
+      expect(add).toBeDisabled();
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    it("focus that moved on while the add ran is left where the person put it", async () => {
+      const request = deferred<Added>();
+      vi.mocked(api.documents.addCollaborator).mockReturnValueOnce(request.promise);
+      renderShare();
+      await loadedRows();
+      await fillLogin("zoe");
+      const add = screen.getByTestId("share-add");
+      add.focus();
+      fireEvent.click(add);
+      const elsewhere = screen.getByLabelText("Role for alice");
+      elsewhere.focus();
+
+      request.resolve({ ok: true, login: "zoe", role: "editor", pending: false });
+      await waitFor(() => expect(screen.getByTestId("share-login")).toHaveValue(""));
+      expect(elsewhere).toHaveFocus();
+    });
+
+    it("a refused or failed add leaves focus on Add, which stays usable", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue(people([bob]));
+      vi.mocked(api.documents.addCollaborator).mockRejectedValueOnce(
+        new ApiError(409, "refused", undefined, { code: "already-collaborator", login: "bob", role: "viewer" }),
+      );
+      renderShare();
+      await loadedRows();
+      await fillLogin("bob");
+      const add = screen.getByTestId("share-add");
+      add.focus();
+      fireEvent.click(add);
+
+      await screen.findByTestId("share-add-error");
+      await waitFor(() => expect(add).not.toHaveAttribute("aria-disabled"));
+      expect(add).toHaveFocus();
+      expect(add).toBeEnabled();
+    });
+
+    it("a held Enter's repeats never start an add, in the field or on Add; the first press is left alone", async () => {
+      renderShare();
+      await loadedRows();
+      await fillLogin("zoe");
+      const box = screen.getByTestId("share-login");
+      const add = screen.getByTestId("share-add");
+
+      // fireEvent returns false when the event was cancelled: a cancelled Enter keydown submits nothing.
+      expect(fireEvent.keyDown(box, { key: "Enter", repeat: true })).toBe(false);
+      expect(fireEvent.keyDown(add, { key: "Enter", repeat: true })).toBe(false);
+      expect(fireEvent.keyDown(screen.getByTestId("share-role"), { key: "Enter", repeat: true })).toBe(false);
+      expect(fireEvent.keyDown(box, { key: "Enter" })).toBe(true);
+      expect(fireEvent.keyDown(add, { key: "Enter" })).toBe(true);
+      // Other held keys are none of this guard's business.
+      expect(fireEvent.keyDown(box, { key: "a", repeat: true })).toBe(true);
+      expect(fireEvent.keyDown(box, { key: "ArrowDown", repeat: true })).toBe(true);
+      expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+    });
+
+    it("the request carries the role the select showed when it was sent", async () => {
+      vi.mocked(api.documents.collaborators).mockResolvedValue(people([]));
+      renderShare();
+      await screen.findByText("Nobody else has been added yet.");
+      await fillLogin("zoe");
+      // The role changes and the form is submitted in the same tick, before any effect could run.
+      act(() => {
+        fireEvent.change(screen.getByTestId("share-role"), { target: { value: "viewer" } });
+        fireEvent.submit(screen.getByTestId("share-login").closest("form")!);
+      });
+      expect(vi.mocked(api.documents.addCollaborator).mock.calls).toEqual([["doc-1", "zoe", "viewer"]]);
+      await waitFor(() => expect(screen.getByTestId("share-login")).toHaveValue(""));
+    });
+
+    it("a row's role select and Remove stay focusable while their request runs, and ignore a second press", async () => {
+      const change = deferred<Added>();
+      const removal = deferred<{ ok: true }>();
+      vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([alice, bob]));
+      vi.mocked(api.documents.addCollaborator).mockReturnValueOnce(change.promise);
+      vi.mocked(api.documents.removeCollaborator).mockReturnValueOnce(removal.promise);
+      renderShare();
+      await loadedRows();
+
+      const select = screen.getByLabelText("Role for bob");
+      select.focus();
+      fireEvent.change(select, { target: { value: "commenter" } });
+      expect(select).toHaveAttribute("aria-disabled", "true");
+      expect(select).not.toBeDisabled();
+      expect(select).toHaveFocus();
+      // A second pick and a Remove on the busy row are ignored; the select shows the confirmed role meanwhile.
+      fireEvent.change(select, { target: { value: "editor" } });
+      fireEvent.click(screen.getByLabelText("Remove bob"));
+      expect(select).toHaveValue("viewer");
+      expect(api.documents.addCollaborator).toHaveBeenCalledTimes(1);
+      expect(api.documents.removeCollaborator).not.toHaveBeenCalled();
+      change.resolve({ ok: true, login: "bob", role: "commenter", pending: false });
+      await waitFor(() => expect(select).toHaveValue("commenter"));
+      await waitFor(() => expect(select).not.toHaveAttribute("aria-disabled"));
+      expect(select).toHaveFocus();
+
+      const remove = screen.getByLabelText("Remove alice");
+      remove.focus();
+      fireEvent.click(remove);
+      expect(remove).toHaveAttribute("aria-disabled", "true");
+      expect(remove).not.toBeDisabled();
+      expect(remove).toHaveFocus();
+      fireEvent.click(remove);
+      expect(api.documents.removeCollaborator).toHaveBeenCalledTimes(1);
+      removal.resolve({ ok: true });
+      await waitFor(() => expect(screen.queryByText("@alice")).not.toBeInTheDocument());
+    });
   });
 
   it("closes when Done is clicked", async () => {

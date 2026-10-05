@@ -240,6 +240,41 @@ describe("api request contracts", () => {
   });
 });
 
+describe("addCollaborator (#2252)", () => {
+  const sent = () => JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as Record<string, unknown>;
+
+  it("an add sends the handle and the role and nothing else: it never asks to change a role", async () => {
+    respond(JSON.stringify({ ok: true, login: "octocat", role: "viewer", pending: false }), { status: 200 });
+    await api.documents.addCollaborator("document-one", "octocat", "viewer");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/documents/document-one/collaborators");
+    expect(fetchMock.mock.calls[0][1]?.method).toBe("POST");
+    expect(sent()).toEqual({ login: "octocat", role: "viewer" });
+  });
+
+  it.each([{}, { change: false }, { change: undefined }])("options %j send no change flag either", async (options) => {
+    respond(JSON.stringify({ ok: true, login: "octocat", role: "viewer", pending: false }), { status: 200 });
+    await api.documents.addCollaborator("document-one", "octocat", "viewer", options);
+    expect(sent()).toEqual({ login: "octocat", role: "viewer" });
+  });
+
+  it("change: true is sent as a real boolean", async () => {
+    respond(JSON.stringify({ ok: true, login: "octocat", role: "editor", pending: false }), { status: 200 });
+    await api.documents.addCollaborator("document-one", "octocat", "editor", { change: true });
+    expect(sent()).toEqual({ login: "octocat", role: "editor", change: true });
+  });
+
+  it("a refused add rejects with the status, the code and the role the person keeps", async () => {
+    const body = { error: "octocat already has access as viewer. Send change: true to change the role.", code: "already-collaborator", login: "octocat", role: "viewer" };
+    respond(JSON.stringify(body), { status: 409 });
+    const error = await captureError(api.documents.addCollaborator("document-one", "octocat", "editor"));
+    expect(error instanceof ApiError).toBe(true);
+    if (!(error instanceof ApiError)) return;
+    expect(error.status).toBe(409);
+    expect(error.message).toBe(body.error);
+    expect(error.body).toEqual(body);
+  });
+});
+
 describe("uploadAsset", () => {
   it("preserves success and uploads the exact named image without a multipart content type", async () => {
     const file = new File(["image data"], "diagram.png", { type: "image/png" });

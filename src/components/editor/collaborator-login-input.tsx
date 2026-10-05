@@ -4,10 +4,12 @@ import {
   useCallback,
   useEffect,
   useId,
+  useImperativeHandle,
   useRef,
   useState,
   type ChangeEvent,
   type KeyboardEvent,
+  type Ref,
 } from "react";
 import { Loader2, UserPlus } from "lucide-react";
 import { api, apiErrorText, type GitHubUserDto } from "@/lib/api";
@@ -63,11 +65,15 @@ type Lookup = Readonly<{ status: "loading" } | { status: "error"; message: strin
 
 type PendingRequest = Readonly<{ id: number; controller: AbortController }>;
 
+/** What the dialog may do to the handle field from outside: put keyboard focus in it. */
+export type CollaboratorLoginInputHandle = { focus: () => void };
+
 export function CollaboratorLoginInput({
   value,
   onChange,
   exclude,
   onPick,
+  ref,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -75,6 +81,7 @@ export function CollaboratorLoginInput({
   exclude: string[];
   /** Called after a suggestion fills the box, so the dialog can move focus on (e.g. to the role select). */
   onPick?: (login: string) => void;
+  ref?: Ref<CollaboratorLoginInputHandle>;
 }) {
   const listId = useId();
   const feedbackId = `${listId}-feedback`;
@@ -107,6 +114,7 @@ export function CollaboratorLoginInput({
   const [shielding, setShielding] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  useImperativeHandle(ref, () => ({ focus: () => inputRef.current?.focus() }), []);
   const retryButtonRef = useRef<HTMLButtonElement>(null);
   // State, not a ref: `candidates` below reads it during render (for the cache-hit render-time fallback,
   // see there) and ESLint's react-hooks/refs rule rightly refuses a ref read in render — a ref's mutations
@@ -199,7 +207,11 @@ export function CollaboratorLoginInput({
     // setActiveState directly, not the `setActive(index)` wrapper below (which closes over `query` and would
     // need to be in this effect's own deps, re-running it on every render instead of only on these five): the
     // dispatch function itself is what react-hooks/exhaustive-deps already treats as exempt from the list.
-    setActiveState({ query, index: -1 });
+    //
+    // An entry that is already for this query is kept: this effect also re-runs when only `cache` changed (the
+    // answer for the current text just arrived and the list appeared), a few ms after that list was first shown.
+    // Resetting then took away the highlight an ArrowDown had set in between (#2252 item 3).
+    setActiveState((prev) => (prev.query === query ? prev : { query, index: -1 }));
 
     if (!query || noToken || query === picked) {
       // Deliberately `null`, not left as whatever answered the previous query: the just-picked login can equal
@@ -313,6 +325,10 @@ export function CollaboratorLoginInput({
         if (activeIndex >= 0) {
           event.preventDefault();
           pick(candidates[activeIndex]!.login);
+        } else {
+          // The typed handle is the choice: close the list so whatever the dialog answers under the field (an
+          // error, "already has access") is not hidden behind suggestions for other people. ArrowDown reopens it.
+          setOpen(false);
         }
         return;
       case "Escape":
