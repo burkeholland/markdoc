@@ -577,7 +577,8 @@ describe("an access change while the person types (issue #2281)", () => {
       expect(anonymous.connection.readOnly).toBe(true);
       await eventually(() => s.personClient.got.refused === 1, "the visitor's key to be refused");
       expect(s.serverText()).toBe("Start collaborator");
-      expect(await s.stored()).toBe("Start collaborator");
+      // The collaborator's key came after the change had stored the document: it is stored by the next autosave.
+      await eventually(async () => (await s.stored()) === "Start collaborator", "the collaborator's key to be stored");
     });
 
     it("a token revoked while its connection is paused: what the agent sent meanwhile is not applied", async () => {
