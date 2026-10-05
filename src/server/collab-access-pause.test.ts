@@ -25,13 +25,14 @@ delete process.env.COLLAB_ACCESS_CHANGE_TEST_DELAY_MS;
 // between a failed change and the restored access.
 // `gate` holds a lookup before it reads; `keepNextAnswer` holds the next lookup AFTER it has read (its answer
 // is then older than anything written meanwhile).
-const accessLookup = vi.hoisted(() => ({ gate: null as Promise<void> | null, waiting: 0, keepNextAnswer: null as Promise<void> | null, kept: 0 }));
+// `letThrough` lookups pass the gate first (to hold only a later connection's lookup).
+const accessLookup = vi.hoisted(() => ({ gate: null as Promise<void> | null, letThrough: 0, waiting: 0, keepNextAnswer: null as Promise<void> | null, kept: 0 }));
 vi.mock("./documents", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./documents")>();
   return {
     ...actual,
     getDocumentAccess: async (...args: Parameters<typeof actual.getDocumentAccess>) => {
-      if (accessLookup.gate) {
+      if (accessLookup.gate && accessLookup.letThrough-- <= 0) {
         accessLookup.waiting += 1;
         await accessLookup.gate;
       }
@@ -145,6 +146,7 @@ describe("an access change while the person types (issue #2281)", () => {
 
   afterEach(() => {
     accessLookup.gate = null;
+    accessLookup.letThrough = 0;
     accessLookup.waiting = 0;
     accessLookup.keepNextAnswer = null;
     accessLookup.kept = 0;
@@ -826,8 +828,11 @@ describe("an access change while the person types (issue #2281)", () => {
       const change = removeRow(s);
       await change.written;
       const typed = Array.from({ length: keys }, (_, i) => ` ${i}${"x".repeat(250)}`);
+      const flooded = performance.now();
       for (const key of typed) s.personClient.type(key);
-      await eventually(() => s.personClient.got.refused === keys, "every key to be refused");
+      // At once, because of the size: long before the time limit (3 s) could do it.
+      await eventually(() => s.personClient.got.refused === keys, "every key to be refused", 1500);
+      expect(performance.now() - flooded).toBeLessThan(1500);
       expect(s.waiting()).toBe(0);
       expect(s.serverText()).toBe("Start");
 
@@ -839,6 +844,87 @@ describe("an access change while the person types (issue #2281)", () => {
       s.personClient.type(" after");
       await expectNothingLost(s, `Start${typed.join("")} after`);
       expect(s.personClient.got.refused).toBe(keys);
+    });
+  });
+
+  describe("a bound hit after the access was applied (issue #2281, review point e)", () => {
+    it.each([
+      ["the size limit", "size", false],
+      ["the time limit", "time", false],
+      ["the size limit, while access is restored after a failed change", "size", true],
+    ])("two tabs of one person, the second tab's access lookup still running, the first hits %s: it ends writable and loses nothing", async (_what, bound, fail) => {
+      if (bound === "size") authorization.HOLD_LIMITS.messages = 3;
+      else authorization.HOLD_LIMITS.ms = 250;
+      const s = await scene();
+      const second = connect(await signCollabToken({ userId: s.person.id, docId: s.doc.id, role: "editor", name: "Person", login: s.login, avatar: null }), s.doc.id);
+      await eventually(() => second.provider.isSynced && second.unsent() === 0, "the second tab");
+      const [first, other] = s.live.getConnections().filter((candidate) => candidate.context.userId === s.person.id);
+      expect(first).toBe(s.connection);
+
+      // The first tab's lookup answers; the second tab's is still out. The first is settled and still paused.
+      const lookup = deferred();
+      accessLookup.gate = lookup.promise;
+      accessLookup.letThrough = 1;
+      const change = fail ? slowChange((mutation) => changeCollaboratorAccess(s.doc.id, s.login, "viewer", mutation), () => Promise.resolve(), { fail: true }) : removeRow(s);
+      await change.written;
+      change.finish();
+      await eventually(() => accessLookup.waiting === 1, "the second tab's access lookup");
+      expect(first.readOnly).toBe(false);
+      expect(collabAccessChangeBlocks(first)).toBe(true);
+      expect(collabAccessChangeBlocks(other)).toBe(true);
+
+      const keys = bound === "size" ? 5 : 1;
+      const typed = Array.from({ length: keys }, (_, i) => ` k${i}`);
+      for (const key of typed) s.personClient.type(key);
+      await eventually(() => s.personClient.got.refused === keys, "the keys to be refused once the limit is hit", 2000);
+      expect(first.readOnly).toBe(true);
+
+      accessLookup.gate = null;
+      lookup.resolve();
+      if (fail) await expect(withTimeout(change.done, "the failed change")).rejects.toThrow("the change was refused");
+      else await withTimeout(change.done, "the removal");
+      expect(first.readOnly).toBe(false);
+      expect(other.readOnly).toBe(false);
+      await expectNothingLost(s, `Start${typed.join("")}`);
+      s.personClient.type(" after");
+      await expectNothingLost(s, `Start${typed.join("")} after`);
+      await eventually(() => second.text() === s.personClient.text(), "the second tab to have the same text");
+    });
+  });
+
+  describe("a save request and the pause (the reads in collab/autosave.ts)", () => {
+    it("a save request that waited out one change is answered, not refused, when the next change has already paused the connection", async () => {
+      const s = await scene();
+      const first = removeRow(s);
+      await first.written;
+      s.personClient.provider.sendStateless(JSON.stringify({ type: "document-persistence-flush", docId: s.doc.id, requestId: "save-between-two-changes" }));
+      await eventually(() => s.waiting() === 1, "the save request to reach the server");
+      // A second change for the same person is already queued: it pauses the connection the moment the first ends.
+      const second = setRow(s, "viewer", { fail: true });
+      first.finish();
+      await withTimeout(first.done, "the removal");
+      await second.written;
+      await eventually(() => s.personClient.stateless.some((message) => message.requestId === "save-between-two-changes"), "the answer to the save request");
+      const answer = s.personClient.stateless.find((message) => message.requestId === "save-between-two-changes")!;
+      expect(answer.error ?? null).toBeNull();
+      expect(answer.state).not.toBe("error");
+      second.finish();
+      await expect(withTimeout(second.done, "the failed change")).rejects.toThrow("the change was refused");
+      expect(s.connection.readOnly).toBe(false);
+    });
+
+    it("a save request from someone whose edit access ended while it waited is answered with \"no permission\"", async () => {
+      const s = await scene();
+      const change = setRow(s, "viewer");
+      await change.written;
+      s.personClient.provider.sendStateless(JSON.stringify({ type: "document-persistence-flush", docId: s.doc.id, requestId: "save-after-lowering" }));
+      await eventually(() => s.waiting() === 1, "the save request to reach the server");
+      change.finish();
+      await withTimeout(change.done, "the lowering");
+      await eventually(() => s.personClient.stateless.some((message) => message.requestId === "save-after-lowering"), "the answer to the save request");
+      const answer = s.personClient.stateless.find((message) => message.requestId === "save-after-lowering")!;
+      expect(answer.state).toBe("error");
+      expect(answer.error).toBe("You do not have permission to save this document.");
     });
   });
 

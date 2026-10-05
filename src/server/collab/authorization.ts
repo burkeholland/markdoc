@@ -171,9 +171,13 @@ export async function resolveStableCollabAccess(claims: VerifiedCollabClaims): P
   }
 }
 
-/** True while an access change has this connection paused (its messages wait, or are refused past a bound). */
+/**
+ * True while an access change has this connection paused (its messages wait, or are refused past a bound),
+ * except for the message it is handling right now: that one was let in under the access the connection has,
+ * before the pause began or after an earlier pause ended, and is treated that way to its end.
+ */
 export function collabAccessChangeBlocks(connection: Connection<CollabContext>): boolean {
-  return state.holds.has(connection);
+  return state.holds.has(connection) && !state.handling.has(connection);
 }
 
 const attached = (connection: Connection<CollabContext>) => connection.document.hasConnection(connection);
@@ -310,6 +314,9 @@ function resume(connection: Connection<CollabContext>): void {
   state.holds.delete(connection);
   clearTimeout(hold.timer);
   hold.restore();
+  // A bound hit after this connection's access was applied (another connection's lookup was still running)
+  // made it read-only again: its access is known, so it is settled once more before its messages go on.
+  if (hold.refusing) settle(connection);
   hold.release();
 }
 
