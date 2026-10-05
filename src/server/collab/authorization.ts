@@ -1,5 +1,6 @@
 import { OutgoingMessage, type Connection } from "@hocuspocus/server";
 import { eq } from "drizzle-orm";
+import * as Y from "yjs";
 import { getDb, schema } from "@/server/db";
 import { canEdit, getDocumentAccess, getUserById } from "@/server/documents";
 import type { LinkAccess, Role } from "@/server/db/schema";
@@ -19,11 +20,9 @@ const UNAUTHORIZED = { code: 4401, reason: "Unauthorized" };
  */
 export const HOLD_LIMITS = { ms: 3_000, messages: 500, bytes: 1024 * 1024 };
 
-/** One per paused connection, however many access changes pause it at once. */
+/** One per paused connection. Access changes of a document run one at a time, so never two at once. */
 interface Hold {
-  /** Access changes that have this connection paused right now. */
-  count: number;
-  /** A bound was hit: messages are no longer held, they are refused until the last change resolves the access. */
+  /** A bound was hit: messages are no longer held, they are refused until the change resolves the access. */
   refusing: boolean;
   /** Settles when the pause ends or falls back to refusing. */
   released: Promise<void>;
@@ -32,6 +31,8 @@ interface Hold {
   messages: number;
   bytes: number;
   timer: ReturnType<typeof setTimeout>;
+  /** Puts the connection's own `handleMessage` back. */
+  restore: () => void;
 }
 
 interface AuthorizationState {
@@ -40,8 +41,12 @@ interface AuthorizationState {
   holds: WeakMap<object, Hold>;
   /** The message each connection is handling right now, with whoever waits for it to finish. */
   handling: WeakMap<object, { waiting?: (() => void)[] }>;
-  /** Sync messages refused (or not confirmed) per connection since its last full sync. */
+  /** Sync messages refused per connection since the server last asked it for a full sync. */
   refused: WeakMap<object, number>;
+  /** Acknowledgements owed to a connection once its answer to that full sync has been applied. */
+  owed: WeakMap<object, number>;
+  /** Connections whose answer is being handled right now. */
+  answering: WeakSet<object>;
   revision: number;
 }
 
@@ -56,6 +61,8 @@ const state =
     holds: new WeakMap(),
     handling: new WeakMap(),
     refused: new WeakMap(),
+    owed: new WeakMap(),
+    answering: new WeakSet(),
     revision: 0,
   });
 state.revision ??= 0;
@@ -63,6 +70,8 @@ state.revision ??= 0;
 state.holds ??= new WeakMap();
 state.handling ??= new WeakMap();
 state.refused ??= new WeakMap();
+state.owed ??= new WeakMap();
+state.answering ??= new WeakSet();
 
 /**
  * Test seam: extra milliseconds inside every access change, right after its database write, so tests meet the
@@ -76,15 +85,6 @@ export function accessChangeTestDelayMs(env: Record<string, string | undefined> 
   if (!allowed) return 0;
   const ms = Number(env.COLLAB_ACCESS_CHANGE_TEST_DELAY_MS);
   return Number.isFinite(ms) && ms > 0 ? Math.min(ms, ACCESS_CHANGE_TEST_DELAY_MAX_MS) : 0;
-}
-
-function accessKey(docId: string, login: string): string {
-  return `${docId}\0${login.trim().replace(/^@/, "").toLowerCase()}`;
-}
-
-/** Transition key for a document-wide link-access change; `\0\0` cannot occur in a login. */
-function linkKey(docId: string): string {
-  return `${docId}\0\0link`;
 }
 
 function loginOf(context: CollabContext): string | null {
@@ -111,12 +111,9 @@ export function disconnectCollabToken(tokenId: string): void {
   }
 }
 
-/**
- * Wait until an owner-initiated access change that could affect this identity has committed: a
- * change to this collaborator, or a link-access change on the document (which reaches everyone).
- */
-export async function waitForCollabAccessChange(docId: string, login: string | null): Promise<void> {
-  await Promise.all([state.transitions.get(linkKey(docId)), login ? state.transitions.get(accessKey(docId, login)) : undefined]);
+/** Wait until the owner-initiated access changes of this document (collaborators, link access) have committed. */
+export async function waitForCollabAccessChange(docId: string): Promise<void> {
+  await state.transitions.get(docId);
 }
 
 /** Resolve token identity and role from current database state instead of trusting the role claim. */
@@ -168,7 +165,7 @@ export async function resolveCollabAccess(claims: VerifiedCollabClaims): Promise
 export async function resolveStableCollabAccess(claims: VerifiedCollabClaims): Promise<CollabContext | null> {
   for (;;) {
     const revision = state.revision;
-    await waitForCollabAccessChange(claims.docId, claims.login);
+    await waitForCollabAccessChange(claims.docId);
     const current = await resolveCollabAccess(claims);
     if (state.revision === revision) return current;
   }
@@ -183,7 +180,7 @@ const attached = (connection: Connection<CollabContext>) => connection.document.
 
 /**
  * `beforeHandleMessage`: a paused connection's message waits here, in arrival order (Hocuspocus handles one
- * message per connection at a time, so everything behind it waits too), until every access change that paused
+ * message per connection at a time, so everything behind it waits too), until the access change that paused
  * the connection has resolved its access. No database query: this runs for every message.
  */
 export async function collabMessageBegins(connection: Connection<CollabContext>): Promise<void> {
@@ -202,6 +199,7 @@ export function collabMessageEnds(connection: Connection<CollabContext>): void {
   const current = state.handling.get(connection);
   state.handling.delete(connection);
   for (const resume of current?.waiting ?? []) resume();
+  if (state.answering.delete(connection)) acknowledgeOwed(connection);
 }
 
 /** Resolves once the message this connection is handling (if any) is done; never waits longer than a pause may. */
@@ -220,27 +218,40 @@ function handled(connection: Connection<CollabContext>): Promise<void> | undefin
 
 /**
  * `beforeSync`: count what a read-only connection sends that Hocuspocus will not apply. An update is dropped
- * and answered "not applied", and the client never sends it again; sync step 2 is counted too (cheaper than
- * checking whether it held anything new, and one sync too many is harmless). {@link heal} uses the count.
+ * and answered "not applied", and the client never sends it again; neither is a sync step 2 that holds
+ * something new (the same test Hocuspocus makes). {@link heal} uses the count.
  */
-export function collabSyncReceived(connection: Connection<CollabContext>, type: number): void {
-  if (!connection.readOnly || type === 0) return;
+export function collabSyncReceived(connection: Connection<CollabContext>, type: number, payload: Uint8Array): void {
+  if (type === 0) return;
+  if (!connection.readOnly) {
+    // The connection's answer to the full sync the server asked for: what is owed is sent once it is applied.
+    if (type === 1 && state.owed.has(connection)) state.answering.add(connection);
+    return;
+  }
+  if (type === 1 && Y.snapshotContainsUpdate(Y.snapshot(connection.document), payload)) return;
   state.refused.set(connection, (state.refused.get(connection) ?? 0) + 1);
 }
 
 /**
  * A connection that had updates refused can edit again: ask it for everything this server lacks. Later
  * updates build on the refused ones, so without this nothing it sends can be applied until a reload.
- * The server sends sync step 1 and the stock client answers with the missing part. Its counter of
- * unacknowledged changes still holds one per refused message; the answer is acknowledged once, the rest here.
+ * The server sends sync step 1 and the stock client answers with the missing part. The client still counts
+ * one unacknowledged change per refused message; its answer is acknowledged once by Hocuspocus, the others
+ * by {@link acknowledgeOwed} after that answer has been applied, never before.
  */
 function heal(connection: Connection<CollabContext>): void {
   const refused = state.refused.get(connection);
   if (!refused) return;
   state.refused.delete(connection);
+  state.owed.set(connection, (state.owed.get(connection) ?? 0) + refused - 1);
   connection.send(new OutgoingMessage(connection.messageAddress).createSyncMessage().writeFirstSyncStepFor(connection.document).toUint8Array());
+}
+
+function acknowledgeOwed(connection: Connection<CollabContext>): void {
+  const owed = state.owed.get(connection) ?? 0;
+  state.owed.delete(connection);
   const acknowledged = new OutgoingMessage(connection.messageAddress).writeSyncStatus(true).toUint8Array();
-  for (let i = 1; i < refused; i += 1) connection.send(acknowledged);
+  for (let i = 0; i < owed; i += 1) connection.send(acknowledged);
 }
 
 /** The access of this connection is known: open it for writing, or keep it read-only. A closed one stays shut. */
@@ -257,9 +268,6 @@ function applyCurrentAccess(connection: Connection<CollabContext>, current: Coll
     return;
   }
   connection.context = current;
-  // A bound was hit and another change still has this connection paused: it stays refused until that one ends.
-  const hold = state.holds.get(connection);
-  if (hold?.refusing && hold.count > 1) return;
   settle(connection);
 }
 
@@ -272,18 +280,16 @@ function refuseHeld(connection: Connection<CollabContext>, hold: Hold): void {
 }
 
 function pause(connection: Connection<CollabContext>): void {
-  const paused = state.holds.get(connection);
-  if (paused) {
-    paused.count += 1;
-    return;
-  }
+  if (state.holds.has(connection)) return;
   let release!: () => void;
   const released = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const hold: Hold = { count: 1, refusing: false, released, release, messages: 0, bytes: 0, timer: setTimeout(() => refuseHeld(connection, hold), HOLD_LIMITS.ms) };
+  const hold: Hold = { refusing: false, released, release, messages: 0, bytes: 0, timer: setTimeout(() => refuseHeld(connection, hold), HOLD_LIMITS.ms), restore: () => undefined };
   hold.timer.unref?.();
   // Hocuspocus queues without a limit; count what arrives while paused so the wait is bounded in size too.
+  // The socket looks `handleMessage` up on the connection for every message, so this wrapper sees them all.
+  const own = Object.hasOwn(connection, "handleMessage");
   const receive = connection.handleMessage;
   connection.handleMessage = (data: Uint8Array) => {
     hold.messages += 1;
@@ -291,25 +297,24 @@ function pause(connection: Connection<CollabContext>): void {
     if (hold.messages > HOLD_LIMITS.messages || hold.bytes > HOLD_LIMITS.bytes) refuseHeld(connection, hold);
     receive.call(connection, data);
   };
+  hold.restore = () => {
+    if (own) connection.handleMessage = receive;
+    else delete (connection as { handleMessage?: unknown }).handleMessage;
+  };
   state.holds.set(connection, hold);
 }
 
 function resume(connection: Connection<CollabContext>): void {
   const hold = state.holds.get(connection);
   if (!hold) return;
-  hold.count -= 1;
-  if (hold.count > 0) return;
   state.holds.delete(connection);
   clearTimeout(hold.timer);
-  delete (connection as { handleMessage?: unknown }).handleMessage;
-  if (hold.refusing) settle(connection);
+  hold.restore();
   hold.release();
 }
 
 interface AccessTransition {
   docId: string;
-  /** Serialises changes that affect the same identities; also what `waitForCollabAccessChange` awaits. */
-  key: string;
   /** Pick the live connections whose access the mutation may take away. */
   select: (connections: Connection<CollabContext>[]) => Promise<Connection<CollabContext>[]> | Connection<CollabContext>[];
   /** Whether edit rights may be lost: the selected connections are paused until their access is known again. */
@@ -323,8 +328,13 @@ interface AccessTransition {
  * pause the affected connections (their messages wait, none is refused), let the message already being
  * handled finish, flush pending stores, mutate, re-resolve each connection, then let the waiting messages
  * through under the access each connection has now.
+ *
+ * The access changes of one document run one at a time, whatever they change (a collaborator, the link):
+ * the access a change resolves for a connection is then never older than another change's write, and a
+ * connection is never paused by two changes at once. `waitForCollabAccessChange` awaits the same queue.
  */
-async function transitionAccess({ docId, key, select, gate, mutation, what }: AccessTransition): Promise<void> {
+async function transitionAccess({ docId, select, gate, mutation, what }: AccessTransition): Promise<void> {
+  const key = docId;
   const previous = state.transitions.get(key) ?? Promise.resolve();
   let release!: () => void;
   const settled = new Promise<void>((resolve) => {
@@ -337,14 +347,17 @@ async function transitionAccess({ docId, key, select, gate, mutation, what }: Ac
   await previous.catch(() => undefined);
   const collab = getCollab();
   const document = collab?.documents.get(docId);
-  const connections = await select(document?.getConnections() ?? []);
-  const paused = gate ? connections : [];
-  for (const connection of paused) pause(connection);
+  let connections: Connection<CollabContext>[] = [];
+  let paused: Connection<CollabContext>[] = [];
 
   const resolveAccess = async (connection: Connection<CollabContext>) =>
     applyCurrentAccess(connection, isVerifiedCollabClaims(connection.context) ? await resolveCollabAccess(connection.context) : null);
 
   try {
+    // Inside the `try`: a lookup that fails must still let the next change, and new connections, go on.
+    connections = await select(document?.getConnections() ?? []);
+    if (gate) paused = connections;
+    for (const connection of paused) pause(connection);
     // Not `waitForPendingMessages`: the messages behind the one being handled wait for this change to end.
     await Promise.all(connections.map(handled));
     if (collab && document) {
@@ -397,7 +410,6 @@ export async function changeCollaboratorAccess(
   const normalizedLogin = login.trim().replace(/^@/, "").toLowerCase();
   await transitionAccess({
     docId,
-    key: accessKey(docId, login),
     select: (connections) => connections.filter((connection) => loginOf(connection.context as CollabContext) === normalizedLogin),
     gate: !newRole || !canEdit(newRole),
     mutation,
@@ -414,7 +426,6 @@ export async function changeCollaboratorAccess(
 export async function changeLinkAccess(docId: string, newLinkAccess: LinkAccess, mutation: () => Promise<void>): Promise<void> {
   await transitionAccess({
     docId,
-    key: linkKey(docId),
     select: async (connections) => {
       if (connections.length === 0) return [];
       const db = await getDb();

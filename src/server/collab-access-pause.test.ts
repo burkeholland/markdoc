@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import WebSocket from "ws";
 import * as Y from "yjs";
+import * as encoding from "lib0/encoding";
 import { eq } from "drizzle-orm";
 import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 
@@ -22,7 +23,9 @@ delete process.env.COLLAB_ACCESS_CHANGE_TEST_DELAY_MS;
 
 // Lets one test keep "what access does this connection have now?" open, to stand inside the moment
 // between a failed change and the restored access.
-const accessLookup = vi.hoisted(() => ({ gate: null as Promise<void> | null, waiting: 0 }));
+// `gate` holds a lookup before it reads; `keepNextAnswer` holds the next lookup AFTER it has read (its answer
+// is then older than anything written meanwhile).
+const accessLookup = vi.hoisted(() => ({ gate: null as Promise<void> | null, waiting: 0, keepNextAnswer: null as Promise<void> | null, kept: 0 }));
 vi.mock("./documents", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./documents")>();
   return {
@@ -32,7 +35,14 @@ vi.mock("./documents", async (importOriginal) => {
         accessLookup.waiting += 1;
         await accessLookup.gate;
       }
-      return actual.getDocumentAccess(...args);
+      const answer = await actual.getDocumentAccess(...args);
+      const keep = accessLookup.keepNextAnswer;
+      if (keep) {
+        accessLookup.keepNextAnswer = null;
+        accessLookup.kept += 1;
+        await keep;
+      }
+      return answer;
     },
   };
 });
@@ -49,6 +59,10 @@ const { createDocument, deleteDocument, removeCollaborator, updateDocument, upse
 const authorization = await import("./collab/authorization");
 const { changeCollaboratorAccess, changeLinkAccess, collabAccessChangeBlocks } = authorization;
 const { createApiToken, revokeApiToken } = await import("./tokens");
+const { ClientDocumentPersistence } = await import("@/editor/collab/persistence");
+const { documentStoreSnapshot } = await import("./collab/autosave");
+// `deleteDocument` loads this on first use; loaded here so that a slow first import is not mistaken for a deadlock.
+await import("./livedoc");
 
 type Role = "editor" | "commenter" | "viewer";
 type LinkAccess = "private" | "view" | "comment" | "edit";
@@ -107,11 +121,19 @@ describe("an access change while the person types (issue #2281)", () => {
   let serial = 0;
   const open = new Set<{ provider: HocuspocusProvider; socket: HocuspocusProviderWebsocket }>();
   const limits = authorization.HOLD_LIMITS ? { ...authorization.HOLD_LIMITS } : null;
+  /** What the database holds per document, updated the moment a store has committed. */
+  const lastStored = new Map<string, string>();
 
   beforeAll(async () => {
     hocuspocus = createCollabServer();
     registerCollab(hocuspocus);
     hocuspocus.configuration.debounce = 20;
+    // Runs after the store of collab/hocuspocus.ts has written the row, and before clients are told "saved".
+    hocuspocus.configuration.extensions.push({
+      async onStoreDocument(payload) {
+        lastStored.set(payload.documentName, documentStoreSnapshot(payload).content);
+      },
+    });
     server = createServer((_req, res) => {
       res.statusCode = 404;
       res.end();
@@ -124,6 +146,8 @@ describe("an access change while the person types (issue #2281)", () => {
   afterEach(() => {
     accessLookup.gate = null;
     accessLookup.waiting = 0;
+    accessLookup.keepNextAnswer = null;
+    accessLookup.kept = 0;
     if (limits) Object.assign(authorization.HOLD_LIMITS, limits);
     for (const client of open) {
       client.provider.destroy();
@@ -143,16 +167,32 @@ describe("an access change while the person types (issue #2281)", () => {
     /** What the server sent this client, by kind. `applied` / `refused` are its answers to this client's sync messages. */
     const got = { step1: 0, step2: 0, update: 0, applied: 0, refused: 0, stateless: 0, other: 0 };
     const stateless: { type?: string; requestId?: string; state?: string; error?: string | null }[] = [];
-    const provider = new HocuspocusProvider({
+    /** Every message from the server in order, with what `watch` saw at that moment. */
+    const trace: { kind: ReturnType<typeof kindOf>; seen: string | undefined }[] = [];
+    const watching: { watch?: () => string; changed?: () => void } = {};
+    // The two parts that decide what the page's header says, wired as src/editor/collab/session.ts wires them.
+    const persistence = new ClientDocumentPersistence(
+      name,
+      ydoc,
+      (request) => provider.sendStateless(JSON.stringify(request)),
+      () => watching.changed?.(),
+    );
+    const provider: HocuspocusProvider = new HocuspocusProvider({
       websocketProvider: socket,
       name,
       document: ydoc,
       token,
       onMessage: ({ message }) => {
-        got[kindOf((message as unknown as { data: ArrayBuffer }).data)] += 1;
+        const kind = kindOf((message as unknown as { data: ArrayBuffer }).data);
+        got[kind] += 1;
+        trace.push({ kind, seen: watching.watch?.() });
       },
+      onSynced: () => persistence.synced(),
+      onUnsyncedChanges: () => watching.changed?.(),
       onStateless: ({ payload }) => {
-        stateless.push(JSON.parse(payload));
+        const message = JSON.parse(payload);
+        stateless.push(message);
+        if (message?.type === "document-persistence") persistence.receive(message);
       },
     });
     provider.attach();
@@ -163,6 +203,10 @@ describe("an access change while the person types (issue #2281)", () => {
       socket,
       got,
       stateless,
+      trace,
+      watching,
+      /** The header of the page: the rule of `CollabSession.saveState` for a connected page. */
+      saveState: () => (!provider.synced ? "saving" : persistence.state !== "saved" ? persistence.state : provider.unsyncedChanges > 0 ? "pending" : "saved"),
       text: () => ydoc.getText(TEXT_KEY).toString(),
       /** One Yjs update per call, at the end of the text: one "key". */
       type: (text: string) => ydoc.getText(TEXT_KEY).insert(ydoc.getText(TEXT_KEY).length, text),
@@ -207,6 +251,8 @@ describe("an access change while the person types (issue #2281)", () => {
     );
     await eventually(() => ownerClient.provider.isSynced && personClient.provider.isSynced && personClient.unsent() === 0, "both clients in sync");
     const live = hocuspocus.documents.get(doc.id)!;
+    lastStored.set(doc.id, "Start");
+    personClient.watching.watch = () => live.getText(TEXT_KEY).toString();
     const connectionOf = (userId: string) => live.getConnections().find((candidate) => candidate.context.userId === userId)!;
     const connection = connectionOf(person.id);
     return {
@@ -281,9 +327,12 @@ describe("an access change while the person types (issue #2281)", () => {
       s.personClient.type(" before");
       await eventually(() => s.serverText() === "Start before", "the key typed before the change");
 
+      expect(Object.hasOwn(s.connection, "handleMessage")).toBe(false);
       const change = removeRow(s);
       await change.written;
       expect(collabAccessChangeBlocks(s.connection)).toBe(true);
+      // While paused the connection counts what arrives; afterwards its own `handleMessage` is back.
+      expect(Object.hasOwn(s.connection, "handleMessage")).toBe(true);
       // Three keys while the change runs: the server has them and keeps them waiting, in order. None is refused.
       s.personClient.type(" one");
       s.personClient.type(" two");
@@ -295,6 +344,7 @@ describe("an access change while the person types (issue #2281)", () => {
       change.finish();
       await withTimeout(change.done, "the removal");
       expect(collabAccessChangeBlocks(s.connection)).toBe(false);
+      expect(Object.hasOwn(s.connection, "handleMessage")).toBe(false);
       expect(s.connection.readOnly).toBe(false);
       expect(s.connection.context.role).toBe("editor");
       await expectNothingLost(s, "Start before one two three");
@@ -656,6 +706,10 @@ describe("an access change while the person types (issue #2281)", () => {
       await expectNothingLost(s, "Start one two three");
       expect(s.personClient.got.step1).toBe(2);
       expect(s.ownerClient.got.step1).toBe(1);
+      // The page was told "applied" only once the server had the text: one answer and two owed, all after it.
+      const asked = s.personClient.trace.findLastIndex((entry) => entry.kind === "step1");
+      const acknowledged = s.personClient.trace.slice(asked + 1).filter((entry) => entry.kind === "applied");
+      expect(acknowledged.map((entry) => entry.seen)).toEqual(["Start one two three", "Start one two three", "Start one two three"]);
       s.personClient.type(" after");
       await expectNothingLost(s, "Start one two three after");
       expect(s.personClient.got.refused).toBe(3);
@@ -765,51 +819,11 @@ describe("an access change while the person types (issue #2281)", () => {
       change.finish();
       await withTimeout(change.done, "the removal");
       await expectNothingLost(s, `Start${typed.join("")}`);
-    });
-
-    it("past the limit, with two changes pausing one connection: it stays refused until the last one ends", async () => {
-      authorization.HOLD_LIMITS.ms = 150;
-      const s = await scene({ row: null });
-      const link = setLink(s, "view", { fail: true });
-      const row = setRow(s, "viewer", { fail: true });
-      await Promise.all([link.written, row.written]);
-      s.personClient.type(" one");
-      await eventually(() => s.personClient.got.refused === 1, "the key to be refused once the limit has passed");
-
-      link.finish();
-      await expect(withTimeout(link.done, "the failed link change")).rejects.toThrow();
-      // The other change is still running: the connection is not opened for writing yet.
-      expect(s.connection.readOnly).toBe(true);
-      s.personClient.type(" two");
-      await eventually(() => s.personClient.got.refused === 2, "a key between the two endings to be refused");
-      expect(s.serverText()).toBe("Start");
-
-      row.finish();
-      await expect(withTimeout(row.done, "the failed role change")).rejects.toThrow();
-      expect(s.connection.readOnly).toBe(false);
-      await expectNothingLost(s, "Start one two");
-    });
-
-    it("past the limit, with two changes that end in the same instant: an Editor is still opened for writing and healed", async () => {
-      authorization.HOLD_LIMITS.ms = 150;
-      const s = await scene({ row: null });
-      const link = setLink(s, "view", { fail: true });
-      const row = setRow(s, "viewer", { fail: true });
-      await Promise.all([link.written, row.written]);
-      s.personClient.type(" one");
-      await eventually(() => s.personClient.got.refused === 1, "the key to be refused once the limit has passed");
-      // Both are restoring access at the same time, so each sees the other still pausing the connection.
-      const lookup = deferred();
-      accessLookup.gate = lookup.promise;
-      link.finish();
-      row.finish();
-      await eventually(() => accessLookup.waiting === 2, "both access lookups");
-      accessLookup.gate = null;
-      lookup.resolve();
-      await expect(withTimeout(link.done, "the failed link change")).rejects.toThrow();
-      await expect(withTimeout(row.done, "the failed role change")).rejects.toThrow();
-      expect(s.connection.readOnly).toBe(false);
-      await expectNothingLost(s, "Start one");
+      // After the pause messages flow as before, through the connection's own `handleMessage`.
+      expect(Object.hasOwn(s.connection, "handleMessage")).toBe(false);
+      s.personClient.type(" after");
+      await expectNothingLost(s, `Start${typed.join("")} after`);
+      expect(s.personClient.got.refused).toBe(keys);
     });
   });
 
@@ -838,22 +852,20 @@ describe("an access change while the person types (issue #2281)", () => {
       expect(await s.stored()).toBe("Start one");
     });
 
-    it("a link change and a collaborator change overlap on one connection: it stays paused until both have ended", async () => {
+    it("a link change and a collaborator change at the same time on one connection run one after the other, and nothing is lost", async () => {
       const s = await scene({ row: null });
       const link = setLink(s, "view", { fail: true });
       const row = setRow(s, "viewer", { fail: true });
-      await Promise.all([link.written, row.written]);
+      await link.written;
+      expect(row.started()).toBe(false);
       s.personClient.type(" one");
       await eventually(() => s.waiting() === 1, "the key to reach the server");
-
       link.finish();
       await expect(withTimeout(link.done, "the failed link change")).rejects.toThrow();
-      expect(collabAccessChangeBlocks(s.connection)).toBe(true);
+      await row.written;
+      await eventually(() => s.serverText() === "Start one", "the key that waited out the link change");
       s.personClient.type(" two");
-      await eventually(() => s.waiting() === 2, "the second key to reach the server");
-      expect(s.serverText()).toBe("Start");
-      expect(s.personClient.got.refused).toBe(0);
-
+      await eventually(() => s.waiting() === 1, "the second key to reach the server");
       row.finish();
       await expect(withTimeout(row.done, "the failed role change")).rejects.toThrow();
       expect(collabAccessChangeBlocks(s.connection)).toBe(false);
@@ -861,21 +873,209 @@ describe("an access change while the person types (issue #2281)", () => {
       expect(s.personClient.got.refused).toBe(0);
     });
 
-    it("overlapping changes that end the access: nothing that waited through either is applied", async () => {
+    it("a stale answer cannot be applied last: the row is removed (the link gives edit) while the link is set to view", async () => {
+      const s = await scene();
+      // A removes the person's row and reads their access: "Editor, through the link". The answer is kept back.
+      const answer = deferred();
+      accessLookup.keepNextAnswer = answer.promise;
+      const a = removeRow(s);
+      await a.written;
+      a.finish();
+      await eventually(() => accessLookup.kept === 1, "A's access read");
+      // B lowers the link meanwhile. If B could run past A, A's older answer would be applied over B's.
+      const b = changeLinkAccess(s.doc.id, "view", async () => {
+        await updateDocument(s.doc.id, { linkAccess: "view" });
+      });
+      // B either waits behind A, or (before the fix) finishes while A's answer is still kept back.
+      await Promise.race([b, new Promise((resolve) => setTimeout(resolve, 100))]);
+      answer.resolve();
+      await withTimeout(a.done, "the removal");
+      await withTimeout(b, "the link change");
+      // What the database says: no row, a view link. The connection says the same, whatever the order was.
+      expect(s.connection.context.role).toBe("viewer");
+      expect(s.connection.readOnly).toBe(true);
+      s.personClient.type(" one");
+      await eventually(() => s.personClient.got.refused === 1, "the key to be refused");
+      expect(s.serverText()).toBe("Start");
+      expect(await s.stored()).toBe("Start");
+      expect(s.personClient.got.step1).toBe(1);
+    });
+
+    it("changes that end the access, started together: nothing that waited through either is applied", async () => {
       const s = await scene({ row: null });
       const link = setLink(s, "view");
       const row = setRow(s, "viewer", { fail: true });
-      await Promise.all([link.written, row.written]);
+      await link.written;
       s.personClient.type(" one");
       await eventually(() => s.waiting() === 1, "the key to reach the server");
-      row.finish();
-      await expect(withTimeout(row.done, "the failed role change")).rejects.toThrow();
       link.finish();
       await withTimeout(link.done, "the link change");
+      await row.written;
+      row.finish();
+      await expect(withTimeout(row.done, "the failed role change")).rejects.toThrow();
       await eventually(() => s.personClient.got.refused === 1, "the key to be refused");
       expect(s.connection.readOnly).toBe(true);
       expect(s.serverText()).toBe("Start");
       expect(await s.stored()).toBe("Start");
+    });
+
+    it("a change whose lookup of the affected connections fails: later changes and new connections still go through", async () => {
+      const s = await scene({ row: null });
+      const context = s.connection.context;
+      Object.defineProperty(s.connection, "context", {
+        configurable: true,
+        get() {
+          throw new Error("the lookup failed");
+        },
+      });
+      let ran = false;
+      const failed = changeLinkAccess(s.doc.id, "view", async () => {
+        ran = true;
+      });
+      await expect(withTimeout(failed, "the change whose lookup fails")).rejects.toThrow("the lookup failed");
+      Object.defineProperty(s.connection, "context", { configurable: true, writable: true, enumerable: true, value: context });
+      expect(ran).toBe(false);
+      expect(collabAccessChangeBlocks(s.connection)).toBe(false);
+
+      // The document's queue of access changes is not stuck: the next change runs, and a new connection gets in.
+      const next = setLink(s, "comment");
+      await withTimeout(next.written, "the next change to begin");
+      next.finish();
+      await withTimeout(next.done, "the next change");
+      expect(s.connection.context.role).toBe("commenter");
+      const late = await withTimeout(s.join(`pause-late-${Date.now().toString(36)}`, "commenter"), "a new connection");
+      expect(late.connection.readOnly).toBe(true);
+    });
+
+    it("after a message whose handling throws, an access change does not wait for it", async () => {
+      const s = await scene();
+      const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        // A sync message of a kind that does not exist: Hocuspocus throws while handling it and resets the connection.
+        const broken = encoding.createEncoder();
+        encoding.writeVarString(broken, s.doc.id);
+        encoding.writeVarUint(broken, 0);
+        encoding.writeVarUint(broken, 99);
+        encoding.writeVarUint8Array(broken, new Uint8Array([1, 2, 3]));
+        s.personClient.socket.send(encoding.toUint8Array(broken));
+        await eventually(() => !s.live.hasConnection(s.connection), "the connection to be reset");
+        expect(logged.mock.calls.some((call) => String(call[0]).includes("because of exception"))).toBe(true);
+      } finally {
+        logged.mockRestore();
+      }
+      // The same person on a new connection, idle: nothing of theirs is being handled.
+      const again = connect(await signCollabToken({ userId: s.person.id, docId: s.doc.id, role: "editor", name: "Person", login: s.login, avatar: null }), s.doc.id);
+      await eventually(() => again.provider.isSynced && again.unsent() === 0, "the person's new connection");
+      const started = performance.now();
+      const change = removeRow(s);
+      await withTimeout(change.written, "the change to begin", 1000);
+      change.finish();
+      await withTimeout(change.done, "the removal", 1000);
+      // Far below the 3 s a change may wait for a message that is being handled.
+      expect(performance.now() - started).toBeLessThan(1000);
+      again.type(" after");
+      await eventually(() => s.serverText() === "Start after", "a key on the new connection");
+    });
+
+    it("a message still being handled when its connection closes does not hold the next access change up", async () => {
+      const s = await scene();
+      const before = s.connection.callbacks.beforeSync;
+      const reached = deferred();
+      const letGo = deferred();
+      s.connection.callbacks.beforeSync = async (connection, payload) => {
+        s.connection.callbacks.beforeSync = before;
+        reached.resolve();
+        await letGo.promise;
+        return before(connection, payload);
+      };
+      s.personClient.type(" in flight");
+      await reached.promise;
+      s.personClient.socket.disconnect();
+      await eventually(() => !s.live.hasConnection(s.connection), "the connection to close");
+      const started = performance.now();
+      const change = removeRow(s);
+      await withTimeout(change.written, "the change to begin", 1000);
+      change.finish();
+      await withTimeout(change.done, "the removal", 1000);
+      expect(performance.now() - started).toBeLessThan(1000);
+      letGo.resolve();
+    });
+  });
+
+  describe("what the page says while the server asks for the missing part", () => {
+    it("typing on through lowered-then-raised: whenever the page says Saved, the stored document equals its text", async () => {
+      const s = await scene({ row: null });
+      const page = s.personClient;
+      const wrong: string[] = [];
+      const saidSaved = { editor: 0, lowered: 0, raised: 0 };
+      let phase: keyof typeof saidSaved = "editor";
+      /** Looked at after every event that can change the header: an acknowledgement, a save notice, a key. */
+      const look = () => {
+        if (page.saveState() !== "saved") return;
+        saidSaved[phase] += 1;
+        const stored = lastStored.get(s.doc.id);
+        if (stored !== page.text()) wrong.push(`${phase}: the page says Saved with "${page.text()}" while the database holds "${stored}"`);
+      };
+      page.watching.changed = look;
+      page.ydoc.on("update", look);
+
+      /** A few keys, then a breath long enough for an Editor's text to be stored (never a fixed wait for the result). */
+      const burst = async (label: string) => {
+        for (const key of [`${label}a`, `${label}b`, `${label}c`, `${label}d`]) {
+          page.type(` ${key}`);
+          look();
+          await new Promise((resolve) => setImmediate(resolve));
+          look();
+        }
+        const until = Date.now() + 150;
+        while (Date.now() < until && page.saveState() !== "saved") {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          look();
+        }
+      };
+
+      await eventually(() => page.saveState() === "saved", "the page to say Saved at the start");
+      await burst("e1");
+      await burst("e2");
+      expect(saidSaved.editor).toBeGreaterThan(0);
+
+      const lowered = setRow(s, "viewer");
+      await lowered.written;
+      lowered.finish();
+      await withTimeout(lowered.done, "the lowering");
+      phase = "lowered";
+      await burst("v1");
+      await burst("v2");
+      // Nothing of this is stored, and the page never claimed it was.
+      expect(saidSaved.lowered).toBe(0);
+      expect(lastStored.get(s.doc.id)).not.toContain("v1a");
+
+      // Edit comes back while they keep typing: keys before the answer, with it, and after it.
+      const raised = removeRow(s);
+      page.type(" r0");
+      look();
+      await raised.written;
+      page.type(" r1");
+      look();
+      raised.finish();
+      phase = "raised";
+      page.type(" r2");
+      look();
+      await withTimeout(raised.done, "giving edit back");
+      await burst("r3");
+      await burst("r4");
+
+      await eventually(() => page.saveState() === "saved", "the page to end at Saved");
+      look();
+      expect(wrong).toEqual([]);
+      expect(saidSaved.raised).toBeGreaterThan(0);
+      expect(page.unsent()).toBe(0);
+      const text = page.text();
+      for (const part of ["e1a", "e2d", "v1a", "v2d", "r0", "r1", "r2", "r3a", "r4d"]) expect(text).toContain(part);
+      expect(s.serverText()).toBe(text);
+      expect(s.ownerClient.text()).toBe(text);
+      expect(await s.stored()).toBe(text);
+      expect(lastStored.get(s.doc.id)).toBe(text);
     });
   });
 });

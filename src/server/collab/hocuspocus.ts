@@ -140,8 +140,8 @@ export function createCollabServer() {
       collabMessageEnds(connection);
     },
 
-    async beforeSync({ connection, type }) {
-      collabSyncReceived(connection, type);
+    async beforeSync({ connection, type, payload }) {
+      collabSyncReceived(connection, type, payload);
     },
 
     async beforeHandleAwareness(payload) {
