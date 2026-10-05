@@ -742,6 +742,21 @@ describe("an access change while the person types (issue #2281)", () => {
       expect(s.personClient.got.step1).toBe(2);
     });
 
+    it("a Viewer who typed nothing and is made an Editor is not asked for anything", async () => {
+      const s = await scene({ row: "viewer" });
+      expect(s.connection.readOnly).toBe(true);
+      const raised = setRow(s, "editor");
+      await raised.written;
+      raised.finish();
+      await withTimeout(raised.done, "the change to Editor");
+      expect(s.connection.readOnly).toBe(false);
+      s.personClient.type(" one");
+      await expectNothingLost(s, "Start one");
+      // Their opening handshake held nothing new, so nothing was refused and no full sync is asked for.
+      expect(s.personClient.got.step1).toBe(1);
+      expect(s.personClient.got.refused).toBe(0);
+    });
+
     it("a link lowered to view and opened for editing again: the visitor's typing arrives and saving goes on", async () => {
       const s = await scene({ row: null });
       const lowered = setLink(s, "view");
