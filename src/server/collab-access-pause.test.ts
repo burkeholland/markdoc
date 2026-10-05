@@ -462,6 +462,25 @@ describe("an access change while the person types (issue #2281)", () => {
       expect(s.live.store.pendingStructs).toBeNull();
     });
 
+    it("a change that fails after its write went through: the connection gets the access the database has, not the one it had", async () => {
+      const s = await scene();
+      const change = slowChange(
+        (mutation) => changeCollaboratorAccess(s.doc.id, s.login, "viewer", mutation),
+        () => upsertCollaborator(s.doc.id, s.login, "viewer", s.owner.id),
+        { fail: true },
+      );
+      await change.written;
+      s.personClient.type(" one");
+      await eventually(() => s.waiting() === 1, "the key to reach the server");
+      change.finish();
+      await expect(withTimeout(change.done, "the failed change")).rejects.toThrow("the change was refused");
+      expect(s.connection.context.role).toBe("viewer");
+      expect(s.connection.readOnly).toBe(true);
+      await eventually(() => s.personClient.got.refused === 1, "the key to be refused");
+      expect(s.serverText()).toBe("Start");
+      expect(await s.stored()).toBe("Start");
+    });
+
     it("removed for good (4401): nothing that waited is applied, and their presence does not come back", async () => {
       const s = await scene({ link: "private" });
       s.personClient.type(" before");
@@ -769,6 +788,28 @@ describe("an access change while the person types (issue #2281)", () => {
       await expect(withTimeout(row.done, "the failed role change")).rejects.toThrow();
       expect(s.connection.readOnly).toBe(false);
       await expectNothingLost(s, "Start one two");
+    });
+
+    it("past the limit, with two changes that end in the same instant: an Editor is still opened for writing and healed", async () => {
+      authorization.HOLD_LIMITS.ms = 150;
+      const s = await scene({ row: null });
+      const link = setLink(s, "view", { fail: true });
+      const row = setRow(s, "viewer", { fail: true });
+      await Promise.all([link.written, row.written]);
+      s.personClient.type(" one");
+      await eventually(() => s.personClient.got.refused === 1, "the key to be refused once the limit has passed");
+      // Both are restoring access at the same time, so each sees the other still pausing the connection.
+      const lookup = deferred();
+      accessLookup.gate = lookup.promise;
+      link.finish();
+      row.finish();
+      await eventually(() => accessLookup.waiting === 2, "both access lookups");
+      accessLookup.gate = null;
+      lookup.resolve();
+      await expect(withTimeout(link.done, "the failed link change")).rejects.toThrow();
+      await expect(withTimeout(row.done, "the failed role change")).rejects.toThrow();
+      expect(s.connection.readOnly).toBe(false);
+      await expectNothingLost(s, "Start one");
     });
   });
 

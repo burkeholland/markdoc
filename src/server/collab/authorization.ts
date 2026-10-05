@@ -174,12 +174,9 @@ export async function resolveStableCollabAccess(claims: VerifiedCollabClaims): P
   }
 }
 
-/**
- * True while an access change has this connection paused and none of its messages is being handled.
- * A message whose handling began before the pause still runs under the access it began with.
- */
+/** True while an access change has this connection paused (its messages wait, or are refused past a bound). */
 export function collabAccessChangeBlocks(connection: Connection<CollabContext>): boolean {
-  return state.holds.has(connection) && !state.handling.has(connection);
+  return state.holds.has(connection);
 }
 
 const attached = (connection: Connection<CollabContext>) => connection.document.hasConnection(connection);
