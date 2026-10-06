@@ -1180,4 +1180,448 @@ describe("an access change while the person types (issue #2281)", () => {
       expect(lastStored.get(s.doc.id)).toBe(text);
     });
   });
+
+  describe("bounded against a client that floods, and shut for good once access ended (review of PR 2283)", () => {
+    /** A raw Hocuspocus sync message: 1 = sync step 2, 2 = update. */
+    function frame(docId: string, sync: 1 | 2, payload: Uint8Array) {
+      const encoder = encoding.createEncoder();
+      encoding.writeVarString(encoder, docId);
+      encoding.writeVarUint(encoder, 0);
+      encoding.writeVarUint(encoder, sync);
+      encoding.writeVarUint8Array(encoder, payload);
+      return encoding.toUint8Array(encoder);
+    }
+
+    /** A client that only does what it is told: it authenticates and never answers the server on its own. */
+    async function silentClient(token: string, docId: string) {
+      const ws = new WebSocket(url);
+      const got = { step1: 0, step2: 0, update: 0, applied: 0, refused: 0, stateless: 0, other: 0 };
+      ws.on("message", (data: Buffer) => {
+        got[kindOf(new Uint8Array(data.buffer, data.byteOffset, data.byteLength))] += 1;
+      });
+      await new Promise<void>((resolve, reject) => {
+        ws.once("open", () => resolve());
+        ws.once("error", reject);
+      });
+      const hello = encoding.createEncoder();
+      encoding.writeVarString(hello, docId);
+      encoding.writeVarUint(hello, 2);
+      encoding.writeVarUint(hello, 0);
+      encoding.writeVarString(hello, token);
+      ws.send(encoding.toUint8Array(hello));
+      return { ws, got };
+    }
+
+    const setRole = async (s: Scene, role: Role | null) => {
+      const change = role ? setRow(s, role) : removeRow(s);
+      await change.written;
+      change.finish();
+      await withTimeout(change.done, `the change to ${role ?? "no row"}`);
+    };
+
+    it("more refused keys than the limit, then edit comes back: no more acknowledgements than the limit are sent, and all the text is in", async () => {
+      const limit = authorization.HOLD_LIMITS.refused;
+      const extra = 5_000;
+      const s = await scene({ row: null });
+      await setRole(s, "viewer");
+      let typed = "";
+      for (let i = 0; i < limit + extra; i += 1) {
+        typed += i % 10;
+        s.personClient.type(String(i % 10));
+      }
+      await eventually(() => s.personClient.got.refused === limit + extra, "every key to be refused", 60_000);
+      expect(s.serverText()).toBe("Start");
+      expect(s.personClient.unsent()).toBe(limit + extra);
+      const acknowledgedBefore = s.personClient.got.applied;
+
+      await setRole(s, null);
+      // Past the limit the connection is still asked for everything: the text is in the live document, the
+      // owner's copy and the stored row.
+      await eventually(() => s.serverText() === `Start${typed}`, "the text typed while lowered", 20_000);
+      expect(s.personClient.got.step1).toBe(2);
+      await eventually(() => s.ownerClient.text() === `Start${typed}`, "the owner's copy to have all of it");
+      await eventually(async () => (await s.stored()) === `Start${typed}`, "the stored document to have all of it");
+      // One acknowledgement for the answer and the owed ones: the limit in all, not one per refused key.
+      await eventually(() => s.personClient.got.applied - acknowledgedBefore >= limit, "the acknowledgements");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(s.personClient.got.applied - acknowledgedBefore).toBe(limit);
+      // The accepted cost: the page's counter stays above zero, so its header says "Unsaved changes" until a reload.
+      expect(s.personClient.unsent()).toBe(extra);
+      await eventually(() => s.personClient.saveState() === "pending", `the page to say Unsaved changes (it says ${s.personClient.saveState()})`);
+      // Saving goes on all the same.
+      s.personClient.type(" after");
+      await eventually(async () => (await s.stored()) === `Start${typed} after`, "a later key to be stored");
+      expect(s.ownerClient.text()).toBe(`Start${typed} after`);
+      expect(s.personClient.unsent()).toBe(extra);
+      expect(s.live.store.pendingStructs).toBeNull();
+    }, 120_000);
+
+    it("lowered and raised three times without ever answering: what is owed does not add up past the limit", async () => {
+      authorization.HOLD_LIMITS.refused = 20;
+      const s = await scene({ link: "private", row: "viewer" });
+      const silent = await silentClient(await signCollabToken({ userId: s.person.id, docId: s.doc.id, role: "viewer", name: "Person", login: s.login, avatar: null }), s.doc.id);
+      await eventually(() => s.live.getConnections().filter((candidate) => candidate.context.userId === s.person.id).length === 2, "the silent client to be connected");
+      try {
+        const update = frame(s.doc.id, 2, new Uint8Array(0));
+        for (let cycle = 1; cycle <= 3; cycle += 1) {
+          for (let i = 0; i < 15; i += 1) silent.ws.send(update);
+          await eventually(() => silent.got.refused === 15 * cycle, "fifteen updates to be refused");
+          await setRole(s, "editor");
+          await eventually(() => silent.got.step1 === cycle, "the server to ask for a full sync");
+          if (cycle < 3) await setRole(s, "viewer");
+        }
+        expect(silent.got.applied).toBe(0);
+        // Now it answers, with nothing: 1 for the answer and 19 owed, not 1 + 14 + 14 + 14.
+        silent.ws.send(frame(s.doc.id, 1, Y.encodeStateAsUpdate(new Y.Doc())));
+        await eventually(() => silent.got.applied >= 20, "the acknowledgements");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect(silent.got.applied).toBe(20);
+        expect(s.serverText()).toBe("Start");
+      } finally {
+        silent.ws.terminate();
+      }
+    });
+
+    it("a person below the limit still gets the exact number: 150 keys refused while lowered, 150 acknowledgements, and the page ends at Saved", async () => {
+      const s = await scene({ row: null });
+      await setRole(s, "viewer");
+      let typed = "";
+      for (let i = 0; i < 150; i += 1) {
+        const key = String.fromCharCode(97 + (i % 26));
+        typed += key;
+        s.personClient.type(key);
+      }
+      await eventually(() => s.personClient.got.refused === 150, "every key to be refused");
+      const acknowledgedBefore = s.personClient.got.applied;
+      await setRole(s, null);
+      await expectNothingLost(s, `Start${typed}`);
+      expect(s.personClient.got.applied - acknowledgedBefore).toBe(150);
+      await eventually(() => s.personClient.saveState() === "saved", "the page to say Saved");
+    });
+
+    it.each([
+      ["the time limit", "time"],
+      ["the size limit", "size"],
+    ])("removed for good after the pause fell back to refusing at %s: the connection stays shut, nothing is applied, nothing is asked for", async (_what, bound) => {
+      if (bound === "time") authorization.HOLD_LIMITS.ms = 120;
+      else authorization.HOLD_LIMITS.messages = 3;
+      const s = await scene({ link: "private" });
+      s.personClient.type(" before");
+      await eventually(() => s.serverText() === "Start before", "the key typed before the change");
+      const change = removeRow(s);
+      await change.written;
+      const keys = bound === "time" ? 2 : 6;
+      for (let i = 0; i < keys; i += 1) s.personClient.type(` k${i}`);
+      await eventually(() => s.personClient.got.refused === keys, "the keys to be refused once the limit is hit", 2000);
+      expect(collabAccessChangeBlocks(s.connection)).toBe(true);
+      const everything = Y.encodeStateAsUpdate(s.personClient.ydoc);
+
+      change.finish();
+      await withTimeout(change.done, "the removal");
+      // The pause ended while refusing, so the connection's access was applied once more: it must not be opened again.
+      expect(s.live.hasConnection(s.connection)).toBe(false);
+      expect(s.connection.readOnly).toBe(true);
+      // A full state and an update that were already in the server's hands: neither is applied.
+      s.connection.handleMessage(frame(s.doc.id, 1, everything));
+      s.connection.handleMessage(frame(s.doc.id, 2, everything));
+      await eventually(() => s.waiting() === 0, "the two messages to be handled");
+      expect(s.connection.readOnly).toBe(true);
+      expect(s.serverText()).toBe("Start before");
+      expect(s.ownerClient.text()).toBe("Start before");
+      expect(await s.stored()).toBe("Start before");
+      // No full sync is asked of someone whose access ended.
+      expect(s.personClient.got.step1).toBe(1);
+      expect(s.live.store.pendingStructs).toBeNull();
+    });
+
+    it("a failed change whose access lookup fails too: the connection is closed and nothing that waited is applied", async () => {
+      const s = await scene({ link: "private" });
+      const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const change = setRow(s, "viewer", { fail: true });
+        await change.written;
+        s.personClient.type(" one");
+        await eventually(() => s.waiting() === 1, "the key to reach the server");
+        // The database still says Editor, but nobody can tell: restoring the access fails as well.
+        const failing = Promise.reject(new Error("the access lookup failed"));
+        failing.catch(() => undefined);
+        accessLookup.gate = failing;
+        change.finish();
+        await expect(withTimeout(change.done, "the failed change")).rejects.toThrow("the change was refused");
+        expect(logged.mock.calls.some((call) => String(call[0]).includes("failed to restore access"))).toBe(true);
+      } finally {
+        logged.mockRestore();
+      }
+      expect(s.live.hasConnection(s.connection)).toBe(false);
+      expect(s.connection.readOnly).toBe(true);
+      await eventually(() => s.waiting() === 0, "the key that waited to be handled");
+      expect(s.serverText()).toBe("Start");
+      expect(s.ownerClient.text()).toBe("Start");
+      expect(await s.stored()).toBe("Start");
+      expect(s.personClient.got.step1).toBe(1);
+    });
+
+    it.each([
+      ["removed for good", null],
+      ["lowered to Viewer", "viewer"],
+    ] as const)("a second connection of theirs that authenticates during the pause, before the database write, waits for the change: %s", async (_what, role) => {
+      const s = await scene({ link: "private" });
+      const token = await signCollabToken({ userId: s.person.id, docId: s.doc.id, role: "editor", name: "Person", login: s.login, avatar: null });
+      const mine = () => s.live.getConnections().filter((candidate) => candidate.context.userId === s.person.id);
+      const write = deferred();
+      const change = slowChange(
+        (mutation) => changeCollaboratorAccess(s.doc.id, s.login, role, mutation),
+        async () => {
+          await write.promise;
+          await (role ? upsertCollaborator(s.doc.id, s.login, role, s.owner.id) : removeCollaborator(s.doc.id, s.login));
+        },
+      );
+      await eventually(() => collabAccessChangeBlocks(s.connection), "the pause");
+      s.personClient.type(" one");
+      // The database still says Editor. A connection that did not wait for the change would come in writable
+      // and, not being one of the paused connections, would stay writable after the change.
+      const second = await silentClient(token, s.doc.id);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(mine()).toHaveLength(1);
+        write.resolve();
+        await change.written;
+        change.finish();
+        await withTimeout(change.done, "the change");
+        if (role) await eventually(() => mine().length === 2, "the second connection to be let in after the change");
+        else await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(mine()).toHaveLength(role ? 2 : 0);
+        expect(mine().filter((candidate) => !candidate.readOnly)).toEqual([]);
+        // Everything the person has, sent over the second connection as a full state and as an update.
+        const everything = Y.encodeStateAsUpdate(s.personClient.ydoc);
+        second.ws.send(frame(s.doc.id, 1, everything));
+        second.ws.send(frame(s.doc.id, 2, everything));
+        if (role) await eventually(() => second.got.refused === 2, "both to be refused");
+        else await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(second.got.applied).toBe(0);
+        expect(s.serverText()).toBe("Start");
+        expect(s.ownerClient.text()).toBe("Start");
+        expect(await s.stored()).toBe("Start");
+      } finally {
+        second.ws.terminate();
+      }
+    });
+
+    it("messages of several kinds that waited are handled in the order they arrived", async () => {
+      const s = await scene();
+      const handled: string[] = [];
+      const after = s.connection.callbacks.afterHandleMessage;
+      s.connection.callbacks.afterHandleMessage = async (connection, update) => {
+        handled.push(kindOf(update));
+        return after(connection, update);
+      };
+      const change = removeRow(s);
+      await change.written;
+      s.personClient.type(" one");
+      s.personClient.provider.sendStateless(JSON.stringify({ type: "document-persistence-status", docId: s.doc.id, requestId: "status-between" }));
+      s.personClient.type(" two");
+      s.personClient.provider.setAwarenessField("user", { name: "Person" });
+      s.personClient.provider.sendStateless(JSON.stringify({ type: "document-persistence-status", docId: s.doc.id, requestId: "status-last" }));
+      s.personClient.type(" three");
+      await eventually(() => s.waiting() === 6, "the six messages to reach the server");
+      expect(handled).toEqual([]);
+
+      change.finish();
+      await withTimeout(change.done, "the removal");
+      await eventually(() => handled.length === 6, "the six messages to be handled");
+      // An update, a status request, an update, presence ("other"), a status request, an update: as sent.
+      expect(handled).toEqual(["update", "stateless", "update", "other", "stateless", "update"]);
+      expect(s.personClient.stateless.filter((message) => message.requestId?.startsWith("status-")).map((message) => message.requestId)).toEqual(["status-between", "status-last"]);
+      await expectNothingLost(s, "Start one two three");
+    });
+
+    describe("the owed acknowledgements go out a slice per turn of the event loop, the least owed first", () => {
+      const sockets: WebSocket[] = [];
+      afterEach(() => {
+        vi.restoreAllMocks();
+        for (const socket of sockets.splice(0)) socket.terminate();
+      });
+
+      /** `count` connections of the person, a signed-in visitor of a "view" link: read-only until the link gives edit. */
+      async function visitors(s: Scene, count: number) {
+        const token = await signCollabToken({ userId: s.person.id, docId: s.doc.id, role: "viewer", name: "Person", login: s.login, avatar: null });
+        const mine = () => s.live.getConnections().filter((candidate) => candidate.context.userId === s.person.id && candidate !== s.connection);
+        const clients: Awaited<ReturnType<typeof silentClient>>[] = [];
+        for (let i = 0; i < count; i += 1) {
+          clients.push(await silentClient(token, s.doc.id));
+          sockets.push(clients[i].ws);
+          await eventually(() => mine().length === i + 1, "the visitor's connection");
+        }
+        // What the server sends each of them as "applied", counted where it is sent.
+        const sent = mine().map((connection) => {
+          const counter = { applied: 0, connection };
+          const send = connection.send.bind(connection);
+          connection.send = (message: Uint8Array) => {
+            if (kindOf(message) === "applied") counter.applied += 1;
+            send(message);
+          };
+          return counter;
+        });
+        return { clients, sent, total: () => sent.reduce((sum, counter) => sum + counter.applied, 0) };
+      }
+
+      /** Each client has `count` updates refused, the link is opened for editing, and the server asks each for a full sync. */
+      async function refusedThenRaised(s: Scene, clients: Awaited<ReturnType<typeof silentClient>>[], counts: number[]) {
+        const update = frame(s.doc.id, 2, new Uint8Array(0));
+        const before = clients.map((client) => ({ refused: client.got.refused, step1: client.got.step1 }));
+        clients.forEach((client, index) => {
+          for (let i = 0; i < counts[index]; i += 1) client.ws.send(update);
+        });
+        await eventually(() => clients.every((client, index) => client.got.refused === before[index].refused + counts[index]), "every update to be refused", 20_000);
+        const raised = setLink(s, "edit");
+        await raised.written;
+        raised.finish();
+        await withTimeout(raised.done, "the link change");
+        await eventually(() => clients.every((client, index) => client.got.step1 === before[index].step1 + 1), "the server to ask every connection for a full sync");
+      }
+
+      /** Takes over the turns of the event loop the pump waits for: `turn()` runs one and says how many acknowledgements it sent. */
+      function pumpByHand(total: () => number) {
+        const real = globalThis.setImmediate;
+        const waiting: (() => void)[] = [];
+        vi.spyOn(globalThis, "setImmediate").mockImplementation(((callback: (...args: unknown[]) => void, ...args: unknown[]) => {
+          if (callback.name !== "pumpAcknowledgements") return real(callback, ...args);
+          waiting.push(() => callback(...args));
+          return undefined;
+        }) as never);
+        return {
+          scheduled: () => waiting.length,
+          turn: () => {
+            const before = total();
+            waiting.shift()!();
+            return total() - before;
+          },
+        };
+      }
+
+      const answer = (s: Scene) => frame(s.doc.id, 1, Y.encodeStateAsUpdate(new Y.Doc()));
+
+      it("fifty flooded connections raised by one link change and answering at once: one slice per turn, and each still gets exactly the limit", async () => {
+        Object.assign(authorization.HOLD_LIMITS, { refused: 40, acknowledgedPerTurn: 25 });
+        const s = await scene({ link: "view", row: null });
+        const { clients, sent, total } = await visitors(s, 50);
+        await refusedThenRaised(s, clients, clients.map(() => 45));
+        const pump = pumpByHand(total);
+        for (const client of clients) client.ws.send(answer(s));
+        // Every answer is handled (Hocuspocus acknowledges each itself). 50 x 39 are owed; only the first slice is out.
+        await eventually(() => sent.every((counter) => counter.applied >= 1), "every answer to be handled");
+        expect(total()).toBe(50 + 25);
+        expect(pump.scheduled()).toBe(1);
+        const slices: number[] = [];
+        while (pump.scheduled() > 0) {
+          slices.push(pump.turn());
+          // One pump, whatever else happens: never two turns waiting.
+          expect(pump.scheduled()).toBeLessThanOrEqual(1);
+        }
+        // The other 1,925 took 77 turns of 25, not one turn; then nothing is left scheduled.
+        expect(slices).toEqual(Array.from({ length: 77 }, () => 25));
+        expect(sent.map((counter) => counter.applied)).toEqual(sent.map(() => 40));
+        await eventually(() => clients.every((client) => client.got.applied === 40), "every client to have received the limit");
+        expect(s.serverText()).toBe("Start");
+      });
+
+      it("a person's 149 owed do not wait behind a flood: ten flooded connections are queued first, the person is done after 8 turns", async () => {
+        Object.assign(authorization.HOLD_LIMITS, { refused: 400, acknowledgedPerTurn: 20 });
+        const s = await scene({ link: "view", row: null });
+        const { clients, sent, total } = await visitors(s, 11);
+        const person = 10;
+        await refusedThenRaised(s, clients, clients.map((_, index) => (index === person ? 150 : 410)));
+        const pump = pumpByHand(total);
+        clients.forEach((client, index) => {
+          if (index !== person) client.ws.send(answer(s));
+        });
+        await eventually(() => sent.every((counter, index) => index === person || counter.applied >= 1), "the ten flooded answers to be handled");
+        // The flood is queued: 10 x 399, of which the first 20 are out.
+        expect(total()).toBe(10 + 20);
+        clients[person].ws.send(answer(s));
+        await eventually(() => sent[person].applied === 1, "the person's answer to be handled");
+        let turns = 0;
+        while (sent[person].applied < 150) {
+          pump.turn();
+          turns += 1;
+        }
+        expect(turns).toBe(8);
+        // At that moment the flood has got the first slice and what the person's last turn left over: 20 + 11.
+        expect(total() - sent[person].applied).toBe(10 + 20 + 11);
+        while (pump.scheduled() > 0) pump.turn();
+        expect(sent.map((counter) => counter.applied)).toEqual(sent.map((_, index) => (index === person ? 150 : 400)));
+      });
+
+      it.each([
+        ["closes", "close"],
+        ["cannot be sent to (the send throws)", "throw"],
+      ])("a connection that %s while its acknowledgements wait loses its place, and the others still get theirs", async (_what, how) => {
+        Object.assign(authorization.HOLD_LIMITS, { refused: 60, acknowledgedPerTurn: 10 });
+        const s = await scene({ link: "view", row: null });
+        const { clients, sent, total } = await visitors(s, 3);
+        await refusedThenRaised(s, clients, [65, 65, 65]);
+        const pump = pumpByHand(total);
+        for (const client of clients) client.ws.send(answer(s));
+        await eventually(() => sent.every((counter) => counter.applied >= 1), "every answer to be handled");
+        expect(total()).toBe(3 + 10);
+        const gone = sent.findIndex((counter) => counter.applied === 1);
+        if (how === "close") sent[gone].connection.close({ code: 1000, reason: "gone" });
+        else {
+          const send = sent[gone].connection.send.bind(sent[gone].connection);
+          sent[gone].connection.send = (message: Uint8Array) => {
+            if (kindOf(message) === "applied") throw new Error("the socket is gone");
+            send(message);
+          };
+        }
+        while (pump.scheduled() > 0) pump.turn();
+        expect(sent.map((counter) => counter.applied)).toEqual(sent.map((_, index) => (index === gone ? 1 : 60)));
+        expect(pump.scheduled()).toBe(0);
+      });
+
+      it("more is owed to a connection that is still waiting: one entry, never more than the limit, one pump", async () => {
+        Object.assign(authorization.HOLD_LIMITS, { refused: 60, acknowledgedPerTurn: 10 });
+        const s = await scene({ link: "view", row: null });
+        const { clients, total } = await visitors(s, 1);
+        await refusedThenRaised(s, clients, [65]);
+        const pump = pumpByHand(total);
+        clients[0].ws.send(answer(s));
+        await eventually(() => total() === 1 + 10, "the answer to be handled and the first slice sent");
+        // 49 are still waiting. The link is lowered and raised again, and the connection answers once more.
+        const lowered = setLink(s, "view");
+        await lowered.written;
+        lowered.finish();
+        await withTimeout(lowered.done, "the link change");
+        await refusedThenRaised(s, clients, [65]);
+        clients[0].ws.send(answer(s));
+        await eventually(() => total() === 1 + 10 + 1, "the second answer to be handled");
+        expect(pump.scheduled()).toBe(1);
+        const slices: number[] = [];
+        while (pump.scheduled() > 0) slices.push(pump.turn());
+        // 49 + 59 would be 108: the entry is held at the limit, 60.
+        expect(slices).toEqual([10, 10, 10, 10, 10, 10]);
+        expect(total()).toBe(1 + 10 + 1 + 60);
+      });
+
+      it("the bounds are the ones the review of PR 2283 settled on: changing one is a decision, not a side effect", () => {
+        // The tests above lower the limit and the slice to keep their numbers small. These are the real ones.
+        expect({ ...authorization.HOLD_LIMITS }).toEqual({ ms: 3_000, messages: 500, bytes: 1024 * 1024, refused: 2_000, acknowledgedPerTurn: 100 });
+      });
+
+      it("at the real bounds, one connection past the limit: 2,000 acknowledgements in 20 slices, never more than 100 in one turn", async () => {
+        const s = await scene({ link: "view", row: null });
+        const { clients, sent, total } = await visitors(s, 1);
+        await refusedThenRaised(s, clients, [2_500]);
+        const pump = pumpByHand(total);
+        clients[0].ws.send(answer(s));
+        // The answer is handled: Hocuspocus acknowledges it itself, and the first slice of the 1,999 owed is out.
+        await eventually(() => total() >= 1, "the answer to be handled");
+        expect(total()).toBe(1 + 100);
+        const slices = [100];
+        while (pump.scheduled() > 0) slices.push(pump.turn());
+        expect(slices).toEqual([...Array.from({ length: 19 }, () => 100), 99]);
+        expect(sent[0].applied).toBe(2_000);
+        await eventually(() => clients[0].got.applied === 2_000, "the client to have received all of them");
+      });
+    });
+  });
 });

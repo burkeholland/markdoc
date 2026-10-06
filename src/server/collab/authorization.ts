@@ -17,8 +17,17 @@ const UNAUTHORIZED = { code: 4401, reason: "Unauthorized" };
  * How long, and how much, a paused connection's messages wait for an access change. Past either bound the
  * pause falls back to refusing (see {@link refuseHeld}), so a change that hangs or a client that floods
  * cannot grow memory without end. The time stays well under the 15 s a page waits for a save confirmation.
+ *
+ * `refused` bounds the count of refused messages per connection, and with it the acknowledgements owed for
+ * them (see {@link acknowledgeOwed}): a client that floods while read-only cannot make them, or the memory
+ * they take, grow without end. Past it the connection still gets the full sync and its text is stored; only
+ * its page's counter of unsent changes stays above zero until a reload.
+ *
+ * Those acknowledgements are sent by {@link pumpAcknowledgements}, no more than `acknowledgedPerTurn` in one
+ * turn of the event loop over all connections together: many connections that answer at once cannot hold
+ * the server up either.
  */
-export const HOLD_LIMITS = { ms: 3_000, messages: 500, bytes: 1024 * 1024 };
+export const HOLD_LIMITS = { ms: 3_000, messages: 500, bytes: 1024 * 1024, refused: 2_000, acknowledgedPerTurn: 100 };
 
 /** One per paused connection. Access changes of a document run one at a time, so never two at once. */
 interface Hold {
@@ -47,6 +56,9 @@ interface AuthorizationState {
   owed: WeakMap<object, number>;
   /** Connections whose answer is being handled right now. */
   answering: WeakSet<object>;
+  /** Acknowledgements still to send, one entry per connection, and whether the pump that sends them is running. */
+  acknowledging: Map<Connection<CollabContext>, number>;
+  pumping: boolean;
   revision: number;
 }
 
@@ -63,6 +75,8 @@ const state =
     refused: new WeakMap(),
     owed: new WeakMap(),
     answering: new WeakSet(),
+    acknowledging: new Map(),
+    pumping: false,
     revision: 0,
   });
 state.revision ??= 0;
@@ -72,6 +86,8 @@ state.handling ??= new WeakMap();
 state.refused ??= new WeakMap();
 state.owed ??= new WeakMap();
 state.answering ??= new WeakSet();
+state.acknowledging ??= new Map();
+state.pumping ??= false;
 
 /**
  * Test seam: extra milliseconds inside every access change, right after its database write, so tests meet the
@@ -232,8 +248,11 @@ export function collabSyncReceived(connection: Connection<CollabContext>, type: 
     if (type === 1 && state.owed.has(connection)) state.answering.add(connection);
     return;
   }
+  const refused = state.refused.get(connection) ?? 0;
+  // Counted up to the limit, and before the snapshot below: a flood past it costs no more than on a plain refusal.
+  if (refused >= HOLD_LIMITS.refused) return;
   if (type === 1 && Y.snapshotContainsUpdate(Y.snapshot(connection.document), payload)) return;
-  state.refused.set(connection, (state.refused.get(connection) ?? 0) + 1);
+  state.refused.set(connection, refused + 1);
 }
 
 /**
@@ -247,15 +266,49 @@ function heal(connection: Connection<CollabContext>): void {
   const refused = state.refused.get(connection);
   if (!refused) return;
   state.refused.delete(connection);
-  state.owed.set(connection, (state.owed.get(connection) ?? 0) + refused - 1);
+  // What is owed adds up when a client never answers (lowered and raised again and again): the total is bounded
+  // too. With the one acknowledgement Hocuspocus sends for the answer, no more than the limit are ever sent.
+  state.owed.set(connection, Math.min(HOLD_LIMITS.refused - 1, (state.owed.get(connection) ?? 0) + refused - 1));
   connection.send(new OutgoingMessage(connection.messageAddress).createSyncMessage().writeFirstSyncStepFor(connection.document).toUint8Array());
 }
 
+/** The connection's answer has been applied: what it is owed joins the one queue that {@link pumpAcknowledgements} empties. */
 function acknowledgeOwed(connection: Connection<CollabContext>): void {
   const owed = state.owed.get(connection) ?? 0;
   state.owed.delete(connection);
-  const acknowledged = new OutgoingMessage(connection.messageAddress).writeSyncStatus(true).toUint8Array();
-  for (let i = 0; i < owed; i += 1) connection.send(acknowledged);
+  if (owed <= 0) return;
+  // One entry per connection, never more than the limit, also when more is owed while it waits.
+  state.acknowledging.set(connection, Math.min(HOLD_LIMITS.refused, (state.acknowledging.get(connection) ?? 0) + owed));
+  if (!state.pumping) pumpAcknowledgements();
+}
+
+/**
+ * Sends one slice of the owed acknowledgements, then lets everything else have its turn until the queue is
+ * empty. The least owed goes first, so a person's few are not kept waiting behind a flood's thousands. A
+ * connection that closed, or whose send fails, loses its entry; nothing stays scheduled once the queue is empty.
+ */
+function pumpAcknowledgements(): void {
+  state.pumping = true;
+  try {
+    let budget = HOLD_LIMITS.acknowledgedPerTurn;
+    for (const [connection, left] of [...state.acknowledging].sort((a, b) => a[1] - b[1])) {
+      if (budget <= 0) break;
+      state.acknowledging.delete(connection);
+      if (!attached(connection)) continue;
+      const count = Math.min(left, budget);
+      try {
+        const acknowledged = new OutgoingMessage(connection.messageAddress).writeSyncStatus(true).toUint8Array();
+        for (let i = 0; i < count; i += 1) connection.send(acknowledged);
+      } catch {
+        continue;
+      }
+      budget -= count;
+      if (left > count) state.acknowledging.set(connection, left - count);
+    }
+  } finally {
+    if (state.acknowledging.size > 0) setImmediate(pumpAcknowledgements);
+    else state.pumping = false;
+  }
 }
 
 /** The access of this connection is known: open it for writing, or keep it read-only. A closed one stays shut. */
