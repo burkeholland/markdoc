@@ -374,7 +374,9 @@ Before the audit runs, the preflight refuses the lock itself with the status
 the package feed's address of the tarball of the entry's own name and version,
 on one of the feed's four hosts, with the version written the canonical way.
 The only entries without `"resolved"` are bundled ones, and links and
-workspace folders are refused. `npm ci` installs what `"resolved"` points at
+workspace folders are refused, as is any key that is not plain package folders
+under `node_modules/` and any `npm-shrinkwrap.json` next to the lock, which
+npm would read instead of it. `npm ci` installs what `"resolved"` points at
 and never compares it with the entry's `"name"` and `"version"`, which are all
 that `npm audit` and the lists look at, so without this a lock edited by hand
 could name one package and install another (#2297). No environment variable,

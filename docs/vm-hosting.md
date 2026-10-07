@@ -236,9 +236,20 @@ So the preflight judges the lock before it runs the audit, and refuses it with
 the status `invalid_lock` unless every entry other than the root passes all of
 these:
 
-1. Its key is a folder under `node_modules/` and it has no `"link"` field. This
-   repository has no workspace, no `file:` dependency and no link. npm
-   installs those from a folder on disk, which the preflight cannot judge.
+1. Its key is nothing but package folders, each directly inside a
+   `node_modules` folder: `node_modules/<package>`, repeated with `/` between,
+   such as `node_modules/a/node_modules/@scope/b`. No folder is called
+   `node_modules`. npm reads a key as a path and names an entry without a
+   `"name"` field after the last folder that comes out: with the key
+   `node_modules/lodash/../harmless` and the honest tarball of `lodash`
+   `4.17.20`, real npm asked `npm audit` about `harmless`, found nothing, and
+   `npm ci` filled `node_modules/harmless` with `lodash` `4.17.20`. So a dot
+   segment, an empty segment, a trailing slash, a backslash, a leading `./` or
+   `/`, an encoded character, or anything else that is not a package folder
+   refuses the lock, and the name in the path is always the last folder of the
+   whole key. The entry has no `"link"` field. This repository has no
+   workspace, no `file:` dependency and no link. npm installs those from a
+   folder on disk, which the preflight cannot judge.
 2. Its `"version"` is written the one way the registry stores it: three
    numbers without leading zeros and an optional prerelease, such as `1.2.3`
    or `5.0.0-beta.32`, with no leading `v` and no build metadata (`+...`). The
@@ -263,10 +274,27 @@ these:
    passes rule 3 itself and names it in `"bundleDependencies"`. Today these
    are the six packages inside `@tailwindcss/oxide-wasm32-wasi`. Without
    `"resolved"` npm would fetch `<name>@<version>` from whatever registry the
-   machine is configured for.
+   machine is configured for. A package that brings bundled packages its
+   entry does not name in `"bundleDependencies"`, or that nests them more
+   than one folder down, is refused today: for `npm` `10.9.2`, real npm wrote
+   215 bundled entries and this rule refuses 147 of them. The command and the
+   test below name them. Widening the rule is a reviewed change of its own,
+   with proof from real npm of what `npm ci` does for a bundled entry added by
+   hand at each depth.
+
+The preflight also answers `invalid_lock`, before any audit runs, while
+anything called `npm-shrinkwrap.json` stands next to `package-lock.json`. npm
+reads `npm-shrinkwrap.json` instead of `package-lock.json` when a folder holds
+both, so `npm audit --package-lock-only` would judge a file the policy never
+reads, while the image is built from `package.json` and `package-lock.json`
+alone: with a shrinkwrap that held `lodash` `4.18.1` next to a lock that held
+`lodash` `4.17.20`, real npm reported 0 findings. This repository has no
+`npm-shrinkwrap.json`; delete one that appears. If it appears while the audit
+runs, the status is `lock_mismatch`.
 
 After that, the package and version that `npm audit`, `BLOCKED_DEPENDENCIES`
-and `ACCEPTED_ADVISORIES` judge are the ones `npm ci` asks the feed for. The
+and `ACCEPTED_ADVISORIES` judge are the ones `npm ci` asks the feed for, and
+the folder they are judged in is the folder `npm ci` fills. The
 rule is code in `parsePackageLock` in `scripts/lib/dependency-policy.ts`; no
 environment variable, flag or command-line option turns it off or adds a host.
 

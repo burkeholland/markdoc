@@ -27,6 +27,13 @@ const MAX_PACKAGE_LOCK_BYTES = 8 * 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i;
 const PACKAGE_VERSION_PATTERN = /^[0-9a-z][0-9a-z.+_-]{0,127}$/i;
+// A whole lock key the way npm writes it for a package it installs: package folders, each directly inside a
+// node_modules folder, and nothing else. npm reads the key as a path and names the package after its last folder:
+// with "node_modules/lodash/../harmless" it fills the folder "harmless" and npm audit is asked about "harmless".
+// The one group is that last folder, scope included. No folder is called node_modules, so every "/node_modules/"
+// in a key that fits is one of the separators.
+const LOCK_FOLDER = "(?:@[0-9A-Za-z][0-9A-Za-z._-]*/)?(?!node_modules(?:/|$))[0-9A-Za-z][0-9A-Za-z._-]*";
+const LOCK_KEY_PATTERN = new RegExp(`^(?:node_modules/${LOCK_FOLDER}/)*node_modules/(${LOCK_FOLDER})$`);
 // The one place a locked tarball may come from: the registry of the package feed, on the four hosts that serve it
 // without a login. Every "resolved" this repository's lock ever held is on one of them. The list is code: no
 // environment variable, flag or option adds a host, and none turns the check in parsePackageLock off.
@@ -213,16 +220,6 @@ function validPackageVersion(value: unknown): value is string {
   return typeof value === "string" && PACKAGE_VERSION_PATTERN.test(value);
 }
 
-function packageNameFromLockPath(lockPath: string): string | null {
-  const marker = "node_modules/";
-  const markerIndex = lockPath.lastIndexOf(marker);
-  if (markerIndex < 0) return null;
-  const remainder = lockPath.slice(markerIndex + marker.length);
-  const parts = remainder.split("/");
-  const name = remainder.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
-  return validPackageName(name) ? name : null;
-}
-
 // `npm ci` installs the tarball in "resolved" into the folder in the entry's path, whatever the entry's "name" and
 // "version" say, while npm audit and the lists below judge the entry by those two fields. So "resolved" must be,
 // character for character, the feed's address of the tarball of exactly that name and version. No URL is parsed:
@@ -256,15 +253,16 @@ function readLockEntries(packageLockText: string): Record<string, unknown> | nul
 // is for packageLockProblems only: parsePackageLock drops it, so no report and no release log ever carries it.
 function judgeLockEntry(lockPath: string, entry: unknown, entries: Record<string, unknown>): LockedPackage | string {
   // This repository has no workspace, no file: dependency and no link. Such an entry is installed from a folder,
-  // not from the feed, so nothing below could judge it.
-  if (!lockPath.includes("node_modules/")) return "the key is not a folder under node_modules/";
+  // not from the feed, so nothing below could judge it. The name in the path is read from the whole key, so it is
+  // the folder npm fills and the name npm audit asks about when the entry has no "name".
+  const pathName = LOCK_KEY_PATTERN.exec(lockPath)?.[1];
+  if (!pathName) return "the key is not package folders under node_modules/ and nothing else";
   if (!isRecord(entry)) return "the entry is not an object";
   if (entry.link !== undefined) return "the entry is a link to a folder, not a package from the feed";
   // An aliased dependency ("x": "npm:qs@6.15.3") is installed at .../node_modules/x and carries its real name in
   // "name". npm audit reports it under the real name, and the blocked and accepted lists name real packages.
-  const pathName = packageNameFromLockPath(lockPath);
   const name = entry.name === undefined ? pathName : entry.name;
-  if (!pathName || !validPackageName(name)) return "the folder or the \"name\" is not a package name";
+  if (!validPackageName(pathName) || !validPackageName(name)) return "the folder or the \"name\" is not a package name";
   if (!validPackageVersion(entry.version) || !CANONICAL_VERSION_PATTERN.test(entry.version)) {
     return "the \"version\" is not three numbers without leading zeros and an optional prerelease";
   }
@@ -719,8 +717,14 @@ export function evaluateDependencyPolicy(options: AcceptanceOptions & {
   return assessAuditExecution(lock, options.execution, 1, acceptanceFrom(options)).report;
 }
 
+// npm reads npm-shrinkwrap.json instead of package-lock.json when a folder holds both. `npm audit` would then judge
+// a file this policy never reads, while the image is built from package-lock.json alone. So the lock is not read
+// while anything called npm-shrinkwrap.json stands next to it.
 async function readLock(lockPath: string): Promise<{ text: string; snapshot: PackageLockSnapshot } | null> {
   try {
+    const absent = await fs.lstat(path.join(path.dirname(lockPath), "npm-shrinkwrap.json"))
+      .then(() => false, (error) => isRecord(error) && error.code === "ENOENT");
+    if (!absent) return null;
     const text = await fs.readFile(lockPath, "utf8");
     const snapshot = parsePackageLock(text);
     return snapshot ? { text, snapshot } : null;
