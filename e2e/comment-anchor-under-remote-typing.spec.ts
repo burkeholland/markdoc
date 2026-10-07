@@ -310,11 +310,26 @@ async function startComment(page: Page, how: Start, typing?: { release: () => vo
     await page.keyboard.press("Control+Alt+m");
   } else {
     typing?.release();
+    // Two things about the palette that are not this spec's subject, and that only a robot's speed shows.
+    // 1. When the palette hands focus back, the browser puts a caret at the start of the document, and
+    //    ProseMirror puts the selection back only when the person's last press in the editor is more than
+    //    300 ms old. Nobody opens the palette, types seven letters and picks an item that fast; this
+    //    robot does, and the comment would then be about the whole document. So it waits that long.
+    await page.waitForTimeout(350);
     await page.keyboard.press("Control+Shift+p");
     await page.getByTestId("palette-input").waitFor();
     await page.keyboard.type("Comment");
-    const point = await pointOn(page.getByTestId("palette-item-block:comment"));
-    await page.mouse.click(point.x, point.y);
+    // 2. The palette does not take every press while a collaborator's keys arrive: now and then it stays
+    //    open, focus still in its input (on main as well). A person presses again, and so does this.
+    for (let press = 0; press < 3; press++) {
+      const point = await pointOn(page.getByTestId("palette-item-block:comment"));
+      await page.mouse.click(point.x, point.y);
+      const taken = await page.getByTestId("palette-input").waitFor({ state: "detached", timeout: 1_500 }).then(
+        () => true,
+        () => false,
+      );
+      if (taken) break;
+    }
   }
   await expect(pending(page), `${how}: the composer opens`).toBeVisible();
 }
