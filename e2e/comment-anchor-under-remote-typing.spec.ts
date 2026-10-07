@@ -441,7 +441,9 @@ test.describe("a comment started while a collaborator types before the selection
         else await selectInCode(alice.page, "Target");
         await caretAfterLineStart(bob.page, "Lead");
         const mark = await lengthOf(alice.page, paragraph);
-        const typing = typeSteadily(bob.page, 30, { max: 150 });
+        // Long enough for the slowest way in: the palette step waits 350 ms and may press up to three times,
+        // and 15 of Bob's keys must still arrive after the composer has focus.
+        const typing = typeSteadily(bob.page, 30, { max: 400 });
         try {
           await arrived(alice.page, paragraph, 2, mark);
           await startComment(alice.page, how, typing);

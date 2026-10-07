@@ -573,6 +573,30 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
       expect(all.find((thread) => thread.id === anchored.id)).toMatchObject({ quote: "", currentText: "" });
     });
 
+    it("a quote given next to an anchor wins, as it does next to offsets", async () => {
+      const copy = browserCopy();
+      const selected = anchorOn(copy, "paragraph");
+      copy.destroy();
+      actor = carol;
+      const res = await post(docId, { action: "add", quote: "Shared", ...selected, body: "A quote beside an anchor" });
+      expect(res.status).toBe(200);
+      const answer = (await res.json()) as { id: string; anchored?: boolean };
+      expect(answer).toEqual({ id: answer.id });
+      expect((await threads()).find((thread) => thread.id === answer.id)).toMatchObject({ quote: "Shared", currentText: "Shared" });
+    });
+
+    it.each([
+      ["a position with nothing in it", { start: {}, end: {} }],
+      ["a position that is an assoc alone", { start: { assoc: 0 }, end: { assoc: -1 } }],
+      ["an empty position beside the end of the text", { start: {}, end: { tname: "content", assoc: 0 } }],
+    ])("%s passes the shape but names no place: the offsets are used and the answer says so, and with no offsets it is refused", async (what, anchor) => {
+      await fallsBack(anchor, `Names no place: ${what}`);
+      const before = (await threads()).length;
+      const res = await post(docId, { action: "add", anchor, body: "Must not land" });
+      expect(res.status).toBe(400);
+      expect((await threads()).length).toBe(before);
+    });
+
     it("refuses a body over the size limit before reading an anchor out of it", async () => {
       actor = carol;
       const before = (await threads()).length;

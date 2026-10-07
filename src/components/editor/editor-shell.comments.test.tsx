@@ -694,6 +694,22 @@ describe("a comment started while edits land around the selection (#2258)", () =
     expect(quote()).toBe(WORD);
   });
 
+  it("a comment started on other text while the first waits on another tab is a new comment: the Open tab comes back with its composer", async () => {
+    mount(1280, "rich");
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await screen.findByTestId("pending-comment");
+    await userEvent.click(screen.getByTestId("comments-tab-resolved"));
+    expect(screen.queryByTestId("pending-comment")).toBeNull();
+
+    const other = TEXT.indexOf("commented");
+    selectRich(other + 1, other + 1 + "commented".length);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await waitFor(() => expect(screen.getByTestId("comments-tab-open")).toHaveAttribute("aria-selected", "true"));
+    expect(quote()).toBe("commented");
+    expect(pendingText()).toBe("commented");
+  });
+
   it("what is typed in the composer, the caret in it and its focus survive 20 remote keys before the selection", async () => {
     mount(1280, "rich");
     selectRich(FROM + 1, TO + 1);

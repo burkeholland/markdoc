@@ -222,6 +222,44 @@ describe("CollabSession pending comment under edits (#2258)", () => {
     expect(session.pendingComment).toEqual({ from: FROM + 1, to: TO + 1 });
   });
 
+  it("every comment that is started has an id of its own: edits keep it, another comment or the same text again gets a new one, none has null", () => {
+    expect(session.pendingCommentId).toBeNull();
+    startOnTarget();
+    const first = session.pendingCommentId;
+    expect(first).not.toBeNull();
+    remoteEdit(7, 7, " wwww");
+    expect(pendingText()).toBe("Target");
+    expect(session.pendingCommentId, "an edit that moves the range leaves the comment the same one").toBe(first);
+
+    const intro = session.ytext.toString().indexOf("Intro");
+    session.setPendingComment({ from: intro, to: intro + 5 });
+    const second = session.pendingCommentId;
+    expect(second).not.toBeNull();
+    expect(second, "a comment started on other text is another comment").not.toBe(first);
+
+    session.setPendingComment(null);
+    expect(session.pendingCommentId).toBeNull();
+    session.setPendingComment({ from: intro, to: intro + 5 });
+    expect(session.pendingCommentId, "started again after it was cancelled, it is a new comment").not.toBeNull();
+    expect([first, second]).not.toContain(session.pendingCommentId);
+  });
+
+  it("hands out snapshots: a range that was read is never changed afterwards, and a moved range is a new object", () => {
+    const given = { from: FROM, to: TO };
+    session.setPendingComment(given);
+    given.from = 0;
+    given.to = 1;
+    const before = session.pendingComment!;
+    expect(before, "the caller's object is not kept").toEqual({ from: FROM, to: TO });
+
+    remoteEdit(7, 7, " wwww");
+    const after = session.pendingComment!;
+    expect(after).toEqual({ from: FROM + 5, to: TO + 5 });
+    expect(after, "a moved range is a new object").not.toBe(before);
+    expect(before, "what a reader holds from before the edit is as it was").toEqual({ from: FROM, to: TO });
+    expect(session.pendingComment, "the same object while the range does not move again").toBe(after);
+  });
+
   it("a second comment started on other text replaces the first, and edits move the new one", () => {
     startOnTarget();
     const intro = TEXT.indexOf("Intro");
