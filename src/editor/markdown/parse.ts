@@ -334,15 +334,14 @@ class Converter {
 
   /**
    * The link when a top-level paragraph is a card (#2317): its text is one line that starts in the first
-   * column, has nothing after it, and is exactly a known link (`link-cards.ts`). The rule reads the text,
-   * not the tree, so `<link>`, `[text](link)`, a link in a sentence and an indented line are all
-   * paragraphs: none of them is exactly the link.
+   * column and is exactly a known link (`link-cards.ts`). The rule reads the text, not the tree, so
+   * `<link>`, `[text](link)`, a link in a sentence and an indented line are all paragraphs: none of them
+   * is exactly the link. A paragraph's range runs to the end of its last line, spaces included, so a
+   * link with a space after it is not exactly the link either.
    */
   private cardUrl(node: Md.Paragraph): string | null {
     const { from, to } = offsets(node);
-    if (to - from > MAX_CARD_URL_LENGTH || this.src.lastIndexOf("\n", from - 1) + 1 !== from) return null;
-    const next = this.src.charCodeAt(to);
-    if (to < this.src.length && next !== 10 && !(next === 13 && this.src.charCodeAt(to + 1) === 10)) return null;
+    if (to - from > MAX_CARD_URL_LENGTH || node.position?.start.column !== 1) return null;
     const raw = this.src.slice(from, to);
     return matchLinkCard(raw) ? raw : null;
   }

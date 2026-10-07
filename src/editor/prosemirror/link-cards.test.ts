@@ -136,6 +136,19 @@ describe("link cards in the rich pane (#2317)", () => {
       expect(Array.from(view.dom.querySelectorAll(".md-link-card [href]"), (el) => el.getAttribute("href"))).toEqual([TWEET, VIDEO]);
     });
 
+    it("a card node whose link is not on the list (no text can make one) is drawn without an address", () => {
+      for (const url of ["javascript:alert(1)", "https://evil.example/", "data:text/html,<script>alert(1)</script>", ""]) {
+        const state = EditorState.create({ doc: schema.nodes.doc.create(null, [schema.nodes.link_card.create({ url })]) });
+        const view = new EditorView(document.body.appendChild(document.createElement("div")), { state, nodeViews: createNodeViews(() => true) });
+        const card = view.dom.querySelector<HTMLElement>('[data-testid="link-card"]')!;
+        expect(card.getAttribute("data-provider"), url).toBe("");
+        expect(card.querySelector(".md-link-card-label")!.textContent, url).toBe("Link");
+        expect(card.querySelector("a")!.hasAttribute("href"), url).toBe(false);
+        expect(view.dom.querySelectorAll("script, iframe, [src]"), url).toHaveLength(0);
+        view.destroy();
+      }
+    });
+
     it("redraws the card when its link changes under it", () => {
       const { session, cards } = open(TWEET);
       session.ydoc.transact(() => {

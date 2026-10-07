@@ -88,6 +88,15 @@ describe("the allow-list: which links are cards", () => {
     ["a longer host name that ends like the provider's", "https://notx.com/jack/status/20"],
     ["a host one letter longer", "https://xx.com/jack/status/20"],
     ["a subdomain that is not listed", "https://api.x.com/jack/status/20"],
+    ["another character where the dot of x.com is", "https://x-com/jack/status/20"],
+    ["another character where the dot of twitter.com is", "https://twitter-com/jack/status/20"],
+    ["another character where the dot after www is", "https://www-x.com/jack/status/20"],
+    ["another character where the dot after mobile is", "https://mobile-twitter.com/jack/status/20"],
+    ["another character where the dot of youtube.com is", "https://www.youtube-com/watch?v=dQw4w9WgXcQ"],
+    ["another character where the dot after www is, YouTube", "https://www-youtube.com/watch?v=dQw4w9WgXcQ"],
+    ["another character where the dot after m is", "https://m-youtube.com/shorts/dQw4w9WgXcQ"],
+    ["another character where the dot of youtu.be is", "https://youtu-be/dQw4w9WgXcQ"],
+    ["another character where the dots of the no-cookie host are", "https://www-youtube-nocookie-com/embed/dQw4w9WgXcQ"],
     ["a port", "https://x.com:8443/jack/status/20"],
     ["the default port", "https://x.com:443/jack/status/20"],
     ["an upper-case host", "https://X.com/jack/status/20"],
@@ -121,6 +130,11 @@ describe("the allow-list: which links are cards", () => {
     ["two video ids", "https://www.youtube.com/watch?v=dQw4w9WgXcQ&v=AAAAAAAAAAA"],
     ["a video id one character short", "https://www.youtube.com/watch?v=dQw4w9WgXc"],
     ["a video id one character long", "https://www.youtube.com/watch?v=dQw4w9WgXcQQ"],
+    ["a short-host id one character short", "https://youtu.be/dQw4w9WgXc"],
+    ["a short-host id one character long", "https://youtu.be/dQw4w9WgXcQQ"],
+    ["a shorts id one character short", "https://www.youtube.com/shorts/dQw4w9WgXc"],
+    ["an embed id one character long", "https://www.youtube.com/embed/dQw4w9WgXcQQ"],
+    ["a no-cookie id one character short", "https://www.youtube-nocookie.com/embed/dQw4w9WgXc?t=1"],
     ["a path as the video id", "https://www.youtube.com/watch?v=../../embed/x"],
     ["an encoded video id", "https://www.youtube.com/watch?v=dQw4w9WgXc%51"],
     ["no video id", "https://www.youtube.com/watch"],
@@ -149,6 +163,20 @@ describe("the allow-list: which links are cards", () => {
     "a longer host name that ends like the provider's",
     "a host one letter longer",
     "a subdomain that is not listed",
+    "another character where the dot of x.com is",
+    "another character where the dot of twitter.com is",
+    "another character where the dot after www is",
+    "another character where the dot after mobile is",
+    "another character where the dot of youtube.com is",
+    "another character where the dot after www is, YouTube",
+    "another character where the dot after m is",
+    "another character where the dot of youtu.be is",
+    "another character where the dots of the no-cookie host are",
+    "a short-host id one character short",
+    "a short-host id one character long",
+    "a shorts id one character short",
+    "an embed id one character long",
+    "a no-cookie id one character short",
     "dot segments after the id",
     "a trailing slash",
     "an extra path segment",
@@ -318,6 +346,7 @@ describe("the Markdown form", () => {
   });
 
   it("reads a card on a line that ends with CRLF, and at the end of a text without a line break", () => {
+    expect(read(`Intro\r\r${TWEET}\r\rOutro`)).toBe(`p(text:Intro) | card(${TWEET}) | p(text:Outro)`);
     expect(read(`Intro\r\n\r\n${TWEET}\r\n\r\nOutro\r\n`)).toBe(`p(text:Intro) | card(${TWEET}) | p(text:Outro)`);
     expect(read(`Intro\n\n${TWEET}`)).toBe(`p(text:Intro) | card(${TWEET})`);
     expect(read(`${TWEET}\n`)).toBe(`card(${TWEET})`);

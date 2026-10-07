@@ -1,4 +1,4 @@
-import { Plugin, Selection, TextSelection } from "prosemirror-state";
+import { Plugin, TextSelection } from "prosemirror-state";
 import type { Slice } from "prosemirror-model";
 import type { EditorView } from "prosemirror-view";
 import type * as Y from "yjs";
@@ -177,7 +177,7 @@ function pasteAsCard(view: EditorView, session: PasteSession, url: string): bool
   const last = end === view.state.doc.content.size;
   // After the last block there is nowhere to go on typing, so an empty line follows the card.
   const tr = view.state.tr.replaceWith(pos, end, last ? [schema.nodes.link_card.create({ url }), schema.nodes.paragraph.create()] : schema.nodes.link_card.create({ url }));
-  tr.setSelection(Selection.near(tr.doc.resolve(pos + 1), 1));
+  // The caret was in the paragraph that is replaced: it lands after the card, on the empty line or in the next block.
   view.dispatch(tr.setMeta("paste", true).setMeta("uiEvent", "paste").scrollIntoView());
   session.undoManager?.stopCapturing();
   return true;
