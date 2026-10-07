@@ -94,6 +94,7 @@ export default defineConfig({
           // session; the limiter would refuse them. Production keeps it on (e2e/prod-smoke.spec.ts checks).
           // `RATE_LIMIT=on npx playwright test …` runs a spec with the limiter on (e2e/rate-limit.spec.ts).
           RATE_LIMIT: process.env.RATE_LIMIT ?? "off",
+          COLLAB_ACCESS_CHANGE_TEST_DELAY_MS: process.env.COLLAB_ACCESS_CHANGE_TEST_DELAY_MS ?? "40", // every access change pauses live connections about as long as a database on another machine does (#2281)
           NODE_ENV: "development",
         },
       },
