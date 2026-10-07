@@ -427,6 +427,13 @@ body {
 .cm-editor .cm-activeLine {
   background: var(--cm-active-line);
 }
+/* #2325: drawSelection() paints the selection in a layer BEHIND the lines, and the active-line tint is an
+   opaque colour on the line itself, so it covered the selection on the line that holds the caret (a
+   selection inside one line showed nothing at all). While a selection is drawn the tint steps aside; the
+   gutter still marks the line. e2e/code-selection-visible.spec.ts checks the painted pixels. */
+.cm-editor:has(.cm-selectionBackground) .cm-activeLine {
+  background: transparent;
+}
 .cm-editor .cm-selectionBackground,
 .cm-editor.cm-focused .cm-selectionBackground {
   background: var(--cm-selection) !important;
