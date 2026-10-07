@@ -107,9 +107,24 @@ export class EditorActions {
       if (!main.empty) a.view.dispatch({ selection: { anchor: main.to } });
     } else {
       const { selection } = a.view.state;
-      if (!selection.empty) a.view.dispatch(a.view.state.tr.setSelection(TextSelection.create(a.view.state.doc, selection.to)));
+      // A selected link card stays selected: there is no caret position inside it to collapse to.
+      if (!selection.empty && !pm.selectedCard(a.view.state)) a.view.dispatch(a.view.state.tr.setSelection(TextSelection.create(a.view.state.doc, selection.to)));
     }
     a.view.focus();
+  }
+
+  /** What the palette can do about a link card here (#2317): a card is selected, or the caret is in a paragraph that is only a known link. */
+  cardState(): "card" | "link" | null {
+    const view = this.surface === "rich" || !this.code ? this.rich : null;
+    if (!view) return null;
+    return pm.selectedCard(view.state) ? "card" : pm.cardLinkParagraph(view.state) ? "link" : null;
+  }
+
+  /** "Show as text" for the selected card, or the reverse for a paragraph that is only a known link. */
+  showCard(as: "text" | "card") {
+    if (!this.guard()) return;
+    this.runPm(as === "text" ? pm.showSelectedCardAsText : pm.showLinkAsCard);
+    this.discrete();
   }
 
   private runPm(command: import("prosemirror-state").Command) {
@@ -310,6 +325,12 @@ export class EditorActions {
     const { from, to } = a.view.state.selection;
     if (from === to) return null;
     const map = this.session.binding.getSourceMap();
+    // A selected link card is its whole line: the card has no text of its own to map (#2317).
+    const card = pm.selectedCard(a.view.state);
+    if (card) {
+      const block = map.blocks[map.blockIndexAt(card.pos)];
+      return block && block.to > block.from ? { from: block.from, to: block.to } : null;
+    }
     const sFrom = map.pmToSrc(from);
     const sTo = map.pmToSrc(to);
     return sTo > sFrom ? { from: sFrom, to: sTo } : null;

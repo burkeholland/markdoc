@@ -130,6 +130,35 @@ describe("buildCommands", () => {
     );
   });
 
+  it("offers the link card command that applies, to people who can edit, in the document and in the canvas (#2317)", () => {
+    const calls: string[] = [];
+    const withCard = (state: "card" | "link" | null, session: Partial<EditorCommandContext["session"]> = {}, embed = false) => {
+      const ctx = stubCtx({ embed }, session);
+      ctx.actions = { ...ctx.actions, cardState: () => state, showCard: (as) => calls.push(`card:${as}`) };
+      return buildCommands(ctx);
+    };
+    const cardIds = (cmds: Command[]) => ids(visible(cmds)).filter((id) => id.startsWith("card:"));
+
+    expect(cardIds(withCard("card"))).toEqual(["card:as-text"]);
+    expect(cardIds(withCard("link"))).toEqual(["card:as-card"]);
+    expect(cardIds(withCard(null))).toEqual([]);
+    expect(cardIds(withCard("card", {}, true))).toEqual(["card:as-text"]);
+    // Not for people who cannot edit, and not when the shell gives no card state at all.
+    expect(cardIds(withCard("card", { canEdit: false }))).toEqual([]);
+    expect(cardIds(withCard("link", { canEdit: false }))).toEqual([]);
+    expect(cardIds(buildCommands(stubCtx()))).toEqual([]);
+
+    const byId = new Map(withCard("card").map((c) => [c.id, c]));
+    expect(byId.get("card:as-text")?.title).toBe("Show card as text");
+    expect(byId.get("card:as-card")?.title).toBe("Show link as card");
+    void byId.get("card:as-text")!.run();
+    void byId.get("card:as-card")!.run();
+    expect(calls).toEqual(["card:text", "card:card"]);
+    // Found by the words a person would type.
+    expect(ids(filterCommands("show as text", visible(withCard("card"))))[0]).toBe("card:as-text");
+    expect(ids(filterCommands("card", visible(withCard("link"))))).toContain("card:as-card");
+  });
+
   it("lists headings and recent documents as children", async () => {
     const ctx = stubCtx();
     const byId = new Map(buildCommands(ctx).map((c) => [c.id, c]));

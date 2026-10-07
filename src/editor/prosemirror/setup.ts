@@ -50,6 +50,7 @@ import {
   codeFenceOnEnter,
   toggleTaskAtCaret,
   tableAt,
+  focusSelectedCard,
 } from "./commands";
 
 export interface RichEditorHandlers extends HighlightHandlers {
@@ -329,7 +330,9 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     ArrowDown: guard(exitTableOnArrowDown),
     // Tab in the bottom-right cell adds a row (every table editor does; without it the key fell
     // through to the browser and moved focus out of the editor — task #437).
-    Tab: guard(chainCommands(goToNextCell(1), addRowOnEnterAtEnd, sinkListItem(schema.nodes.list_item))),
+    // With a link card selected, Tab moves into the card (#2317). A read-only editor takes no keys: there the
+    // card's link is an ordinary tab stop.
+    Tab: chainCommands(focusSelectedCard, guard(chainCommands(goToNextCell(1), addRowOnEnterAtEnd, sinkListItem(schema.nodes.list_item)))),
     "Shift-Tab": guard(chainCommands(goToNextCell(-1), liftListItem(schema.nodes.list_item))),
     Backspace: guard(isolatedBackspace),
   });

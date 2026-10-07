@@ -1,7 +1,10 @@
 import type { Node as PMNode } from "prosemirror-model";
+import { NodeSelection } from "prosemirror-state";
 import type { EditorView, NodeView, NodeViewConstructor, ViewMutationRecord } from "prosemirror-view";
-import { toggleTaskChecked, setCodeBlockLanguage } from "./commands";
+import { toggleTaskChecked, setCodeBlockLanguage, showCardAsText } from "./commands";
 import { normalizeLanguage } from "./code-highlight";
+import { cardLinkText, matchLinkCard } from "../markdown/link-cards";
+import { safeLinkHref } from "../links";
 
 class ListItemView implements NodeView {
   dom: HTMLElement;
@@ -140,10 +143,130 @@ class CodeBlockView implements NodeView {
   }
 }
 
-export function createNodeViews(canEdit: () => boolean): Record<string, NodeViewConstructor> {
+/**
+ * A link card (#2317): Markdoc's own markup around a link to a known site. The header names the card,
+ * shows the link (it opens in a new tab) and, for people who can edit, "Show as text". Nothing here
+ * comes from the other site: no script, no frame, no request.
+ *
+ * Keyboard: the arrow keys select the card as one block; Tab then moves into it (`focusSelectedCard`),
+ * the link and the button are ordinary tab stops, and Escape returns to the editor with the card
+ * selected. The button is hidden from people who cannot edit by CSS on the editor's `contenteditable`
+ * (see globals.css), since a node view is not redrawn when the role changes.
+ */
+class LinkCardView implements NodeView {
+  dom: HTMLElement;
+  private label: HTMLElement;
+  private link: HTMLAnchorElement;
+  private button: HTMLButtonElement;
+
+  constructor(
+    private node: PMNode,
+    private view: EditorView,
+    private getPos: () => number | undefined,
+    private canEdit: () => boolean,
+    private isolateUndo: () => void,
+  ) {
+    this.dom = document.createElement("figure");
+    this.dom.className = "md-link-card";
+    this.dom.setAttribute("contenteditable", "false");
+    this.dom.setAttribute("data-testid", "link-card");
+
+    const header = document.createElement("figcaption");
+    header.className = "md-link-card-header";
+    this.label = document.createElement("span");
+    this.label.className = "md-link-card-label";
+    this.link = document.createElement("a");
+    this.link.className = "md-link-card-link";
+    this.link.target = "_blank";
+    this.link.rel = "noopener noreferrer";
+    this.button = document.createElement("button");
+    this.button.type = "button";
+    this.button.className = "md-link-card-as-text";
+    this.button.textContent = "Show as text";
+    this.button.setAttribute("data-testid", "link-card-as-text");
+    this.button.addEventListener("click", (event) => {
+      event.preventDefault();
+      this.showAsText();
+    });
+    header.append(this.label, this.link, this.button);
+    this.dom.appendChild(header);
+    this.dom.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !this.isControl(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.selectCard();
+    });
+    this.render();
+  }
+
+  private isControl(target: EventTarget | null): boolean {
+    return target instanceof Node && (this.link.contains(target) || this.button.contains(target));
+  }
+
+  /** Back to the editor with the card selected: where Tab came from. */
+  private selectCard() {
+    const pos = this.getPos();
+    this.view.focus();
+    if (pos === undefined) return;
+    this.view.dispatch(this.view.state.tr.setSelection(NodeSelection.create(this.view.state.doc, pos)));
+  }
+
+  private showAsText() {
+    if (!this.canEdit()) return;
+    const pos = this.getPos();
+    if (pos === undefined) return;
+    // Its own undo step, also right after typing: one undo brings the card back and nothing else.
+    this.isolateUndo();
+    showCardAsText(pos)(this.view.state, this.view.dispatch);
+    this.isolateUndo();
+    this.view.focus();
+  }
+
+  private render() {
+    const url = String(this.node.attrs.url);
+    const card = matchLinkCard(url);
+    const label = card?.label ?? "Link";
+    const text = cardLinkText(url);
+    this.dom.setAttribute("data-provider", card?.provider ?? "");
+    this.dom.setAttribute("aria-label", `${label}: ${text}`);
+    this.label.textContent = label;
+    this.link.textContent = text;
+    const href = card ? safeLinkHref(url) : undefined;
+    if (href) this.link.href = href;
+    else this.link.removeAttribute("href");
+    // The visible words first, then which card: several cards on a page have several of these buttons.
+    this.button.setAttribute("aria-label", `Show as text: ${label}`);
+  }
+
+  update(node: PMNode) {
+    if (node.type !== this.node.type) return false;
+    if (node.attrs.url !== this.node.attrs.url) {
+      this.node = node;
+      this.render();
+    } else this.node = node;
+    return true;
+  }
+
+  ignoreMutation() {
+    return true;
+  }
+
+  /** Clicks and keys on the link and the button are theirs; anywhere else on the card the editor selects it. */
+  stopEvent(event: Event) {
+    return this.isControl(event.target);
+  }
+}
+
+export interface NodeViewOptions {
+  /** Called before and after a card's own action so that it is one undo step by itself. */
+  isolateUndo?: () => void;
+}
+
+export function createNodeViews(canEdit: () => boolean, { isolateUndo = () => {} }: NodeViewOptions = {}): Record<string, NodeViewConstructor> {
   return {
     list_item: (node, view, getPos) => new ListItemView(node, view, getPos, canEdit),
     code_block: (node, view, getPos) => new CodeBlockView(node, view, getPos, canEdit),
+    link_card: (node, view, getPos) => new LinkCardView(node, view, getPos, canEdit, isolateUndo),
   };
 }
 

@@ -1,8 +1,9 @@
-import { Plugin, TextSelection } from "prosemirror-state";
+import { Plugin, Selection, TextSelection } from "prosemirror-state";
 import type { Slice } from "prosemirror-model";
 import type { EditorView } from "prosemirror-view";
 import type * as Y from "yjs";
 import { schema } from "../markdown/schema";
+import { matchLinkCard } from "../markdown/link-cards";
 import { decideInsert, wrapInCodeFence } from "../markdown/renderable";
 import { tsvToMarkdownTable, TSV_TABLE_NOTICE, type NoticeAction } from "../markdown/tsv";
 import type { MarkdownBinding } from "../sync/markdown-binding";
@@ -153,10 +154,41 @@ function pasteMarkdownSource(view: EditorView, session: PasteSession, text: stri
 }
 
 /**
+ * A known link (`link-cards.ts`) pasted into an empty top-level paragraph becomes a card (#2317). It is
+ * two steps, so the first undo leaves the plain link (written `<link>`) and the second the empty line.
+ * Anywhere else (in a sentence, a list, a quote, a cell) the link is pasted as the text it is.
+ */
+function pasteAsCard(view: EditorView, session: PasteSession, url: string): boolean {
+  const { selection } = view.state;
+  const { $from } = selection;
+  if (!selection.empty || $from.depth !== 1 || $from.parent.type !== schema.nodes.paragraph || $from.parent.content.size !== 0) return false;
+  if (!matchLinkCard(url)) return false;
+  const pos = $from.before(1);
+  const link = schema.text(url, [schema.marks.link.create({ href: url })]);
+
+  session.undoManager?.stopCapturing();
+  view.dispatch(view.state.tr.insert(pos + 1, link).setMeta("paste", true).setMeta("uiEvent", "paste"));
+  session.undoManager?.stopCapturing();
+  if (view.isDestroyed) return true;
+
+  const paragraph = view.state.doc.nodeAt(pos);
+  if (!paragraph || paragraph.type !== schema.nodes.paragraph || paragraph.textContent !== url) return true;
+  const end = pos + paragraph.nodeSize;
+  const last = end === view.state.doc.content.size;
+  // After the last block there is nowhere to go on typing, so an empty line follows the card.
+  const tr = view.state.tr.replaceWith(pos, end, last ? [schema.nodes.link_card.create({ url }), schema.nodes.paragraph.create()] : schema.nodes.link_card.create({ url }));
+  tr.setSelection(Selection.near(tr.doc.resolve(pos + 1), 1));
+  view.dispatch(tr.setMeta("paste", true).setMeta("uiEvent", "paste").scrollIntoView());
+  session.undoManager?.stopCapturing();
+  return true;
+}
+
+/**
  * Smarter paste for the rich pane:
  *
  * - a URL pasted over a selection turns the selection into a link (the word-processor convention);
  *   without a selection it is inserted as text and autolinked by the Markdown;
+ * - a link to a known site pasted on an empty line of its own becomes a card (not while suggesting);
  * - multi-line plain text that looks like Markdown is inserted as Markdown source so it
  *   renders as real structure instead of escaped literal text;
  * - tab-separated plain text (a spreadsheet range, `psql` or `jq -r @tsv` output) with the
@@ -177,6 +209,7 @@ export function smartPastePlugin(session: PasteSession, options: SmartPasteOptio
         if (isUrlText(text) && linkSelection(view, text)) return true;
 
         if (session.mode === "suggesting") return false;
+        if (isUrlText(text) && pasteAsCard(view, session, text.trim())) return true;
         // Text micromark would choke on goes in as a fenced code block (which the guard skips),
         // whatever the clipboard's HTML says; inside a code block it is already safe.
         if (!view.state.selection.$from.parent.type.spec.code) {

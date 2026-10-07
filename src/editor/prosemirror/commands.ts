@@ -16,6 +16,7 @@ import {
 } from "prosemirror-tables";
 import { findParentNode } from "./utils";
 import { schema } from "../markdown/schema";
+import { matchLinkCard } from "../markdown/link-cards";
 
 export { toggleMark, wrapInList, liftListItem, sinkListItem, splitListItem };
 
@@ -645,6 +646,77 @@ export const toggleTaskAtCaret: Command = (state, dispatch) => {
   const item = findParentNode(state.selection.$from, (n) => n.type === schema.nodes.list_item);
   if (!item || item.node.attrs.checked === null) return false;
   return toggleTaskChecked(item.pos)(state, dispatch);
+};
+
+/* ---------- Link cards (#2317) ---------- */
+
+/** The card the selection is on (a click or the arrow keys select the whole card), or null. */
+export function selectedCard(state: EditorState): { pos: number; node: PMNode } | null {
+  const { selection } = state;
+  return selection instanceof NodeSelection && selection.node.type === schema.nodes.link_card ? { pos: selection.from, node: selection.node } : null;
+}
+
+/** The link when a paragraph is nothing but a known link, as plain text or linked to itself: what "Show as text" leaves behind. */
+function cardLinkOf(node: PMNode): string | null {
+  if (node.type !== schema.nodes.paragraph || node.childCount !== 1) return null;
+  const text = node.firstChild!;
+  if (!text.isText || !matchLinkCard(text.text!)) return null;
+  const linked = text.marks.every((mark) => mark.type === schema.marks.link && mark.attrs.href === text.text && !mark.attrs.title);
+  return linked ? text.text! : null;
+}
+
+/** The top-level paragraph around the selection when it is nothing but a known link, or null. */
+export function cardLinkParagraph(state: EditorState): { pos: number; node: PMNode; url: string } | null {
+  const { $from, $to } = state.selection;
+  if ($from.depth !== 1 || !$from.sameParent($to)) return null;
+  const url = cardLinkOf($from.parent);
+  return url ? { pos: $from.before(1), node: $from.parent, url } : null;
+}
+
+/** "Show as text": the card at `pos` becomes a paragraph holding its link, which is written `<link>`. One step, so one undo. */
+export function showCardAsText(pos: number): Command {
+  return (state, dispatch) => {
+    const node = state.doc.nodeAt(pos);
+    if (!node || node.type !== schema.nodes.link_card) return false;
+    if (dispatch) {
+      const url = String(node.attrs.url);
+      // The paragraph `<link>` reads back as: the text of the link, linked to itself.
+      const paragraph = schema.nodes.paragraph.create(null, schema.text(url, [schema.marks.link.create({ href: url })]));
+      const tr = state.tr.replaceWith(pos, pos + node.nodeSize, paragraph);
+      tr.setSelection(TextSelection.create(tr.doc, pos + 1 + url.length));
+      dispatch(tr.scrollIntoView());
+    }
+    return true;
+  };
+}
+
+/** "Show as text" for the selected card. */
+export const showSelectedCardAsText: Command = (state, dispatch, view) => {
+  const card = selectedCard(state);
+  return card ? showCardAsText(card.pos)(state, dispatch, view) : false;
+};
+
+/** The reverse: the top-level paragraph around the selection, when it is nothing but a known link, becomes a card. */
+export const showLinkAsCard: Command = (state, dispatch) => {
+  const paragraph = cardLinkParagraph(state);
+  if (!paragraph) return false;
+  if (dispatch) {
+    const tr = state.tr.replaceWith(paragraph.pos, paragraph.pos + paragraph.node.nodeSize, schema.nodes.link_card.create({ url: paragraph.url }));
+    tr.setSelection(NodeSelection.create(tr.doc, paragraph.pos));
+    dispatch(tr.scrollIntoView());
+  }
+  return true;
+};
+
+/** Tab with a card selected moves focus into the card: its link first, then "Show as text". Escape there comes back (`nodeviews.ts`). */
+export const focusSelectedCard: Command = (state, _dispatch, view) => {
+  const card = selectedCard(state);
+  if (!card || !view) return false;
+  const dom = view.nodeDOM(card.pos);
+  const first = dom instanceof HTMLElement ? dom.querySelector<HTMLElement>("a[href], button") : null;
+  if (!first) return false;
+  first.focus();
+  return true;
 };
 
 export { NodeSelection, Fragment };
