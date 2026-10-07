@@ -96,6 +96,8 @@ const ascii = (bytes: Uint8Array, at: number, text: string): boolean => {
 };
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+/** How many fill bytes may stand between a JPEG's start marker and its first marker segment. Real files have none or very few. */
+const MAX_JPEG_FILL_BYTES = 16;
 const XML_SPACE = new Set([0x20, 0x09, 0x0a, 0x0d]);
 /** Encodings an XML declaration may name. All keep ASCII as ASCII (or carry a byte-order mark), so the script check reads what a browser parses. */
 const TEXT_ENCODINGS = new Set(["utf-8", "utf8", "utf-16", "us-ascii", "ascii", "iso-8859-1", "latin1", "windows-1252"]);
@@ -133,6 +135,12 @@ function markupRoot(text: string): string | null {
         const c = text[j];
         if (quote) {
           if (c === quote) quote = "";
+        } else if (c === "<" && depth > 0 && j + 3 < text.length && (text[j + 1] === "?" || (text[j + 1] === "!" && text[j + 2] === "-" && text[j + 3] === "-"))) {
+          // Inside the internal subset a comment or a processing instruction is one unit (four characters at the least): a quote or a bracket in it means nothing.
+          const comment = text[j + 1] === "!";
+          const close = text.indexOf(comment ? "-->" : "?>", j + (comment ? 4 : 2));
+          if (close < 0) break;
+          j = close + (comment ? 2 : 1);
         } else if (c === '"' || c === "'") quote = c;
         else if (c === "[") depth++;
         else if (c === "]") depth = Math.max(0, depth - 1);
@@ -166,7 +174,10 @@ export function detectContentType(bytes: Uint8Array): ContentType {
   }
   if (bytes[0] === 0xff && bytes[1] === 0xd8) {
     // Start of image, then a marker segment (JFIF, Exif, a quantisation table, …): `FF` and a marker byte.
-    return bytes.length >= 4 && bytes[2] === 0xff && bytes[3] >= 0xc0 && bytes[3] <= 0xfe ? "image/jpeg" : null;
+    // The standard allows fill bytes (more `FF`) before a marker and decoders skip them; so does this, up to a fixed few.
+    let at = 2;
+    while (at < 2 + MAX_JPEG_FILL_BYTES && bytes[at] === 0xff && bytes[at + 1] === 0xff) at++;
+    return bytes[at] === 0xff && bytes[at + 1] >= 0xc0 && bytes[at + 1] <= 0xfe ? "image/jpeg" : null;
   }
   if (ascii(bytes, 0, "GIF87a") || ascii(bytes, 0, "GIF89a")) {
     if (bytes.length < 14) return null;

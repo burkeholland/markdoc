@@ -346,6 +346,67 @@ describe("upload byte check", () => {
     }
   });
 
+  it("accepts a JPEG with fill bytes before its first marker, up to a fixed few", () => {
+    // The JPEG standard allows fill bytes (FF) before any marker; decoders skip them and browsers show the file.
+    const filled = (count: number) => Uint8Array.from([0xff, 0xd8, ...new Array<number>(count).fill(0xff), ...JPEG.subarray(2)]);
+    for (const count of [1, 2, 16]) {
+      expect(detectContentType(filled(count)), `${count} fill bytes`).toBe("image/jpeg");
+      expect(status("image/jpeg", filled(count)), `${count} fill bytes`).toBe("ok");
+      expect(status("image/png", filled(count)), `${count} fill bytes, sent as PNG`).toBe("image/jpeg");
+    }
+    // More than the fixed few, fill bytes with no marker behind them, or fill bytes up to the end of the file: not a JPEG.
+    expect(detectContentType(filled(17))).toBeNull();
+    expect(status("image/jpeg", filled(17))).toBe(415);
+    expect(detectContentType(Uint8Array.from([0xff, 0xd8, 0xff, 0xff, 0x00, 0x10]))).toBeNull();
+    expect(detectContentType(Uint8Array.from([0xff, 0xd8, 0x00, 0xe0, 0x00, 0x10]))).toBeNull();
+    expect(detectContentType(Uint8Array.from([0xff, 0xd8, 0xff, 0xff, 0xff]))).toBeNull();
+    expect(detectContentType(Uint8Array.from([0xff, 0xd8, ...new Array<number>(40).fill(0xff)]))).toBeNull();
+  });
+
+  it("steps over comments and processing instructions inside a doctype's internal subset", () => {
+    const withSubset = (inner: string, body = SVG_TEXT) => enc(`<?xml version="1.0"?>\n<!DOCTYPE svg [\n${inner}\n]>\n${body}`);
+    const accepted: [name: string, inner: string][] = [
+      ["a comment with an apostrophe", `  <!-- the tool's entities -->\n  <!ENTITY ns_svg "http://www.w3.org/2000/svg">`],
+      ["a comment with a double quote", `<!-- 6" wide -->`],
+      ["a comment with brackets and a closing sign", `<!-- a ]> b [ c -->`],
+      ["a comment whose text starts with a closing sign", `<!--> it's -->`],
+      ["a processing instruction with an apostrophe", `<?tool don't ?>`],
+      ["a processing instruction with a closing bracket", `<?tool ]> ?>`],
+      ["comments between entities", `<!-- it's -->\n<!ENTITY a "x">\n<!-- "b" -->\n<!ENTITY gt ">">`],
+      ["a quoted value that holds a comment opener stays a string", `<!ENTITY a "<!--">\n<!ENTITY b '<?'>`],
+    ];
+    for (const [name, inner] of accepted) {
+      expect(detectContentType(withSubset(inner)), name).toBe("image/svg+xml");
+      expect(status("image/svg+xml", withSubset(inner)), name).toBe("ok");
+    }
+    // A comment or an instruction that never closes ends nothing: the root cannot be read, so the file is refused.
+    for (const inner of ["<!-- never closed", "<?tool never closed"]) {
+      expect(detectContentType(withSubset(inner)), inner).toBe("xml");
+      expect(status("image/svg+xml", withSubset(inner)), inner).toBe(415);
+    }
+    // Only inside the subset: XML has no comment in the doctype itself, so there a quote is read as before.
+    expect(detectContentType(enc(`<!DOCTYPE svg <!-- ' --> >${SVG_TEXT}`))).toBe("xml");
+  });
+
+  it("checks a file with a comment in its doctype subset for scripts on its whole text, like any other SVG", () => {
+    const SCRIPTS = "SVG images may not contain scripts or event handlers";
+    const withSubset = (body: string, comment = "the tool's entities") => enc(`<!DOCTYPE svg [\n<!-- ${comment} -->\n]>\n${body}`);
+    expect(status("image/svg+xml", withSubset(SVG_TEXT))).toBe("ok");
+    const refused = [
+      withSubset('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'),
+      withSubset('<svg xmlns="http://www.w3.org/2000/svg"><rect onload="alert(1)" width="1" height="1"/></svg>'),
+      // The rule reads the whole text, the stepped-over comment included.
+      withSubset(SVG_TEXT, "it's <script> here"),
+    ];
+    for (const mime of ALLOWED_IMAGE_TYPES) {
+      for (const bytes of refused) {
+        expect(detectContentType(bytes)).toBe("image/svg+xml");
+        expect(status(mime, bytes), mime).toBe(400);
+        expect(message(mime, bytes), mime).toBe(SCRIPTS);
+      }
+    }
+  });
+
   it("accepts SVG the way drawing tools write it: byte-order mark, whitespace, declaration, comments, doctype", () => {
     const accepted: [name: string, bytes: Uint8Array][] = [
       ["byte-order mark", Uint8Array.from([0xef, 0xbb, 0xbf, ...enc(SVG_TEXT)])],
@@ -460,6 +521,10 @@ describe("upload byte check", () => {
       ["one endless declaration", fill("?", "<?xml")],
       ["one endless doctype", fill("[", "<!DOCTYPE svg ")],
       ["doctype of quotes", fill('"', "<!DOCTYPE svg ")],
+      ["doctype subset of comment openers", fill("<!--", "<!DOCTYPE svg [")],
+      ["doctype subset of closed comments", fill("<!---->", "<!DOCTYPE svg [")],
+      ["doctype subset of instruction openers", fill("<?", "<!DOCTYPE svg [")],
+      ["fill bytes after a JPEG start marker", Uint8Array.from({ length: MAX_ASSET_BYTES }, (_, i) => (i === 1 ? 0xd8 : 0xff))],
       ["one endless element name", fill("s", "<")],
       ["whitespace only", fill("\n", "")],
       ["zero bytes", new Uint8Array(MAX_ASSET_BYTES)],
