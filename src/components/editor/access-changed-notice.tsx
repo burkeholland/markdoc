@@ -122,7 +122,7 @@ function hasCommentDraft(): boolean {
   );
 }
 
-function BlockedDialog({ change, discardLocal, onDocuments }: { change: AccessChange; discardLocal: () => Promise<void>; onDocuments: () => void }) {
+function BlockedDialog({ change, discardLocal, onDocuments, onReload }: Required<NoticeProps> & { change: AccessChange }) {
   const describedBy = useId();
   const button = useRef<HTMLButtonElement | null>(null);
   // Read once, as the dialog arrives: the composer under it can no longer be reached.
@@ -135,17 +135,19 @@ function BlockedDialog({ change, discardLocal, onDocuments }: { change: AccessCh
   }, [discardLocal]);
   const removed = change.kind === "removed";
   const leave = useCallback(() => {
-    const go = () => (removed ? onDocuments() : window.location.reload());
+    const go = () => (removed ? onDocuments() : onReload());
     const gone = discarded.current ?? Promise.resolve();
     void Promise.race([gone, new Promise((resolve) => setTimeout(resolve, DISCARD_WAIT_MS))]).then(go, go);
-  }, [removed, onDocuments]);
+  }, [removed, onDocuments, onReload]);
   const keep = (event: Event) => event.preventDefault();
   return (
     <Dialog open>
       <DialogPortal>
-        <DialogOverlay className="dialog-overlay animate-fade-in" />
+        {/* A press on the backdrop must not take focus off the button (it would fall to the page body). */}
+        <DialogOverlay className="dialog-overlay animate-fade-in" onMouseDown={(event) => event.preventDefault()} />
         <DialogPrimitiveContent
-          role="alertdialog"
+          // `dialog`, not `alertdialog`: a dialog that was open underneath (Share, the palette) hands focus
+          // over only to another `[role="dialog"]` (FLOATING_LAYER in ui/dialog.tsx).
           className="dialog animate-fade-in"
           aria-describedby={describedBy}
           data-testid="access-changed-dialog"
@@ -157,6 +159,10 @@ function BlockedDialog({ change, discardLocal, onDocuments }: { change: AccessCh
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             button.current?.focus({ preventScroll: true });
+          }}
+          onBlur={(event) => {
+            // Focus going nowhere (to the page body): back to the button.
+            if (!event.relatedTarget) queueMicrotask(() => document.activeElement === document.body && button.current?.focus({ preventScroll: true }));
           }}
         >
           <DialogTitle className="text-lg font-semibold text-ink wrap-anywhere">{ACCESS_CHANGED_TITLE}</DialogTitle>
@@ -173,28 +179,29 @@ function BlockedDialog({ change, discardLocal, onDocuments }: { change: AccessCh
   );
 }
 
-function RaisedNotice({ change }: { change: AccessChange }) {
-  const reload = useCallback(() => window.location.reload(), []);
+function RaisedNotice({ change, onReload }: { change: AccessChange; onReload: () => void }) {
   return (
     <div className="flex items-center justify-center gap-3 bg-accent-soft px-4 py-2 text-sm text-ink" role="status" data-testid="access-raised-notice">
       <span data-testid="access-changed-text">{accessChangedText(change)}</span>
-      <MeantButton label="Reload" onAct={reload} className="btn btn-sm btn-outline" />
+      <MeantButton label="Reload" onAct={onReload} className="btn btn-sm btn-outline" />
     </div>
   );
 }
 
-export function AccessChangedNotice({
-  change,
-  discardLocal,
-  onDocuments,
-}: {
+interface NoticeProps {
   change: AccessChange | null;
   /** Deletes what this device kept of the document; called once the blocking dialog is on screen. */
   discardLocal: () => Promise<void>;
   /** Leaves for the dashboard (a person who was removed has nothing to reload). */
   onDocuments: () => void;
-}) {
+  /** A normal load of the same URL; the server then renders the page for the role the person has now. */
+  onReload?: () => void;
+}
+
+const reloadPage = () => window.location.reload();
+
+export function AccessChangedNotice({ change, discardLocal, onDocuments, onReload = reloadPage }: NoticeProps) {
   if (!change) return null;
-  if (change.kind === "raised") return <RaisedNotice change={change} />;
-  return <BlockedDialog change={change} discardLocal={discardLocal} onDocuments={onDocuments} />;
+  if (change.kind === "raised") return <RaisedNotice change={change} onReload={onReload} />;
+  return <BlockedDialog change={change} discardLocal={discardLocal} onDocuments={onDocuments} onReload={onReload} />;
 }
