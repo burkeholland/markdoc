@@ -6,7 +6,7 @@ import type { Awareness } from "y-protocols/awareness";
 import { MarkdocProvider } from "./provider";
 import { ClientDocumentPersistence, type SavedDocumentVersion } from "./persistence";
 import type { PersistenceMessage } from "@/lib/document-persistence";
-import { CommentsModel, COMMENTS_ORIGIN, type CommentSuggestionSnapshot, type CommentSuggestionTarget } from "./comments";
+import { CommentsModel, COMMENTS_ORIGIN, isDocumentRange, type CommentSuggestionSnapshot, type CommentSuggestionTarget } from "./comments";
 import { SuggestionsModel, SUGGESTIONS_ORIGIN } from "./suggestions";
 import { MarkdownBinding } from "../sync/markdown-binding";
 import {
@@ -416,8 +416,14 @@ export class CollabSession {
   activeSuggestionId: string | null = null;
   /** Bumped by `revealComment` so the comments panel re-picks its tab even when the thread was already active. */
   revealSeq = 0;
-  /** Pending comment composer anchored to a selection, if any. */
-  pendingComment: { from: number; to: number } | null = null;
+  /**
+   * The comment being composed on a selection, if any. Its range is held the way a posted comment's
+   * is, as Yjs relative positions taken when the comment was started, and turned back into offsets only
+   * after the text has changed: plain offsets went stale with the first key a collaborator typed before
+   * the selection, and the comment was posted on text nobody had selected (#2258).
+   */
+  private pending: { id: number; anchor: TextAnchor | null; range: { from: number; to: number }; stale: boolean } | null = null;
+  private pendingSeq = 0;
   /** Find & replace state while the find bar is open (matches are in source offsets). */
   find: FindState | null = null;
   /** Collaborator whose cursor the viewport is glued to, if any. */
@@ -977,8 +983,39 @@ export class CollabSession {
     }
   }
 
+  /**
+   * Source range of the pending comment as the text is now, or null when none is pending. A comment on
+   * the whole document is `{ from: 0, to: 0 }` and stays there. Each value is a snapshot: the same
+   * object while the range has not moved, a new one when an edit (anyone's) has moved it.
+   */
+  get pendingComment(): { from: number; to: number } | null {
+    const pending = this.pending;
+    if (!pending) return null;
+    if (pending.stale) {
+      pending.stale = false;
+      const range = pending.anchor && resolveAnchor(this.ytext, pending.anchor);
+      if (range && (range.from !== pending.range.from || range.to !== pending.range.to)) pending.range = range;
+    }
+    return pending.range;
+  }
+
+  /** Which pending comment this is: a new number for each comment that is started, null when none is. Edits that move the range do not change it. */
+  get pendingCommentId(): number | null {
+    return this.pending?.id ?? null;
+  }
+
   setPendingComment(range: { from: number; to: number } | null) {
-    this.pendingComment = range;
+    const current = this.pendingComment;
+    if (!range) this.pending = null;
+    // Comment pressed again on the range that is already pending is still the same comment.
+    else if (!current || current.from !== range.from || current.to !== range.to) {
+      this.pending = {
+        id: ++this.pendingSeq,
+        anchor: isDocumentRange(range) ? null : createAnchor(this.ytext, range.from, range.to),
+        range: { from: range.from, to: range.to },
+        stale: false,
+      };
+    }
     this.notify();
   }
 
@@ -1431,6 +1468,8 @@ export class CollabSession {
   };
 
   private onTextChanged = (_event: Y.YTextEvent, transaction: Y.Transaction) => {
+    // Only a mark: the pending comment's range is worked out when it is next read.
+    if (this.pending) this.pending.stale = true;
     if (
       transaction.local &&
       transaction.origin !== this.undoManager &&

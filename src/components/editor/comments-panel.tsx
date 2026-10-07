@@ -11770,7 +11770,7 @@ export function CommentsPanel({
   const threads = useSessionValue(session, (s) => s.comments.list(), jsonEqual);
   const actionCoordinator = useCommentRowActionCoordinator(session, visit, threads);
   const text = useSessionValue(session, (s) => s.ytext.toString());
-  const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, mode, canEdit } = useSessionValue(
+  const { suggestions, activeCommentId, activeSuggestionId, revealSeq, pending, pendingId, mode, canEdit } = useSessionValue(
     session,
     (s) => ({
       suggestions: s.suggestions.groups(text),
@@ -11778,6 +11778,7 @@ export function CommentsPanel({
       activeSuggestionId: s.activeSuggestionId,
       revealSeq: s.revealSeq,
       pending: s.pendingComment,
+      pendingId: s.pendingCommentId,
       mode: s.mode,
       canEdit: s.canEdit,
     }),
@@ -11935,8 +11936,8 @@ export function CommentsPanel({
   }, [activeCommentId, activeSuggestionId, revealSeq]);
 
   useEffect(() => {
-    if (pending) setTab("open");
-  }, [pending]);
+    if (pendingId !== null) setTab("open");
+  }, [pendingId]);
 
   useEffect(() => {
     if (focusTab) setTab(focusTab.tab);
@@ -11962,12 +11963,12 @@ export function CommentsPanel({
   // hint bar), and the seed and the pending range land in the same commit.
   const hadPending = useRef(false);
   useEffect(() => {
-    if (pending) hadPending.current = true;
+    if (pendingId !== null) hadPending.current = true;
     else if (hadPending.current) {
       hadPending.current = false;
       setSeed(null);
     }
-  }, [pending]);
+  }, [pendingId]);
   // The panel's own entry points: the header button and the empty state (the shell's nonce space is not reused).
   const localNonce = useRef(0);
   const commentOnDocument = useCallback((mention: boolean) => startDocumentComment({ mention, nonce: -++localNonce.current }), [startDocumentComment]);
@@ -12083,15 +12084,17 @@ export function CommentsPanel({
               quote={pending.to > pending.from ? session.ytext.toString().slice(pending.from, pending.to) : undefined}
               request={{ canEdit, defaultMode: "suggest" }}
               onSubmit={(body) => {
-                const quote = session.ytext.toString().slice(pending.from, pending.to);
-                return ops.add(pending.from, pending.to, body).then((id) => ({ id, quote }));
+                // The range as it is now, not as it was at the last render: a key may have landed since (#2258).
+                const range = session.pendingComment ?? pending;
+                const quote = session.ytext.toString().slice(range.from, range.to);
+                return ops.add(range.from, range.to, body).then((id) => ({ id, quote, range }));
               }}
-              onSuccess={({ id, quote }, body, req) => {
+              onSuccess={({ id, quote, range }, body, req) => {
                 session.setPendingComment(null);
                 if (typeof id === "string") session.setActiveComment(id);
                 onPendingDone?.();
                 // A document comment asks about the whole document: the request carries selection: null (#1025).
-                const selection = isDocumentRange(pending) ? null : { from: pending.from, to: pending.to, quote };
+                const selection = isDocumentRange(range) ? null : { from: range.from, to: range.to, quote };
                 if (req && typeof id === "string") void postAgentRequest(id, body, req.mode, selection);
               }}
               onCancel={() => {

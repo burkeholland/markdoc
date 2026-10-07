@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { StrictMode, type SetStateAction } from "react";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 import { CollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { SUGGESTIONS_ORIGIN } from "@/editor/collab/suggestions";
@@ -234,7 +234,11 @@ function fixture() {
     dispatch: (transaction: Parameters<EditorView["dispatch"]>[0]) => { state = state.apply(transaction); },
     focus: vi.fn(),
   } as unknown as EditorView;
-  const session = { activeSurface: "rich", canEdit: true, canComment: true, undoManager: { stopCapturing: vi.fn() } } as unknown as CollabSession;
+  // The shared text holds the paragraph as it is: source offset n is editor position n + 1.
+  const ytext = new Y.Doc().getText("content");
+  ytext.insert(0, paragraph.textContent);
+  const binding = { getSourceMap: () => ({ pmToSrc: (pos: number) => pos - 1, srcToPm: (offset: number) => offset + 1 }) };
+  const session = { activeSurface: "rich", canEdit: true, canComment: true, undoManager: { stopCapturing: vi.fn() }, ytext, binding } as unknown as CollabSession;
   const actions = new EditorActions(session, vi.fn());
   actions.setRichView(view);
   const onLink = vi.fn();
@@ -1035,5 +1039,101 @@ describe("SelectionBubble keyboard and permissions", () => {
     expect(f.onLink).toHaveBeenCalledTimes(1);
     expect(f.view.state.selection.from).toBe(1);
     expect(f.view.state.selection.to).toBe(9);
+  });
+});
+
+describe("SelectionBubble after a pointer Comment, while edits land around the selection (#2258)", () => {
+  const button = (label: string) => screen.getByRole("button", { name: label }) as HTMLButtonElement;
+  /** An edit made by someone else: it arrives as an update, the way the socket delivers it. */
+  function remoteEdit(session: CollabSession, from: number, to: number, insert = "") {
+    act(() => {
+      const remote = new Y.Doc();
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(session.ydoc));
+      const known = Y.encodeStateVector(session.ydoc);
+      const text = remote.getText("content");
+      if (to > from) text.delete(from, to - from);
+      if (insert) text.insert(from, insert);
+      Y.applyUpdate(session.ydoc, Y.encodeStateAsUpdate(remote, known));
+      remote.destroy();
+    });
+  }
+
+  it("stays away while the selection is still the same text, and comes back when the selection or the focus changes", () => {
+    // The production session, binding and editor: "alpha beta gamma" with "beta" selected.
+    const f = productionFixture();
+    const env = environment();
+    const selected = () => f.view.state.doc.textBetween(f.view.state.selection.from, f.view.state.selection.to);
+    const select = (from: number, to: number) => {
+      act(() => {
+        f.view.dispatch(f.view.state.tr.setSelection(TextSelection.create(f.view.state.doc, from, to)));
+        f.view.focus();
+      });
+    };
+    /** The page moved or changed: every signal the bubble listens to asks for a new place. */
+    const settle = () => {
+      act(() => {
+        for (const observer of env.mutations) observer.fire();
+        document.dispatchEvent(new Event("selectionchange"));
+      });
+      env.flush();
+    };
+    const comment = () => {
+      settle();
+      expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
+      fireEvent.click(button("Comment"), { detail: 1 });
+      expect(screen.queryByTestId("selection-bubble")).toBeNull();
+    };
+    select(7, 11);
+    const rendered = render(<SelectionBubble {...f.props} />);
+    try {
+      expect(selected()).toBe("beta");
+      comment();
+      expect(f.props.onComment).toHaveBeenCalledTimes(1);
+
+      // A collaborator types and deletes before the selection: its positions move, its text does not.
+      remoteEdit(f.session, 0, 0, "Remote ");
+      settle();
+      expect(selected()).toBe("beta");
+      expect(f.view.state.selection.from, "the positions did move").toBe(14);
+      expect(screen.queryByTestId("selection-bubble"), "typed before the selection").toBeNull();
+      for (let i = 0; i < 20; i++) {
+        remoteEdit(f.session, 3, 3, "w");
+        settle();
+        expect(screen.queryByTestId("selection-bubble"), `key ${i + 1} before the selection`).toBeNull();
+      }
+      remoteEdit(f.session, 0, 10, "");
+      settle();
+      expect(selected()).toBe("beta");
+      expect(screen.queryByTestId("selection-bubble"), "deleted before the selection").toBeNull();
+      // Typed inside it: the selection and the commented text grow together.
+      remoteEdit(f.session, f.session.ytext.toString().indexOf("beta") + 2, f.session.ytext.toString().indexOf("beta") + 2, "XY");
+      settle();
+      expect(selected()).toBe("beXYta");
+      expect(screen.queryByTestId("selection-bubble"), "typed inside the selection").toBeNull();
+      // Typed after it.
+      remoteEdit(f.session, f.session.ytext.length, f.session.ytext.length, " tail");
+      settle();
+      expect(screen.queryByTestId("selection-bubble"), "typed after the selection").toBeNull();
+
+      // The person changes the selection: the bubble is back.
+      select(f.view.state.selection.from, f.view.state.selection.to + 1);
+      settle();
+      expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
+
+      // The editor loses focus (the composer took it) and gets it back on the same selection: the bubble is back.
+      comment();
+      remoteEdit(f.session, 0, 0, "Again ");
+      settle();
+      expect(screen.queryByTestId("selection-bubble")).toBeNull();
+      act(() => {
+        (f.view.dom as HTMLElement).blur();
+        f.view.focus();
+      });
+      settle();
+      expect(screen.getByTestId("selection-bubble")).toBeInTheDocument();
+    } finally {
+      rendered.unmount();
+      f.destroy();
+    }
   });
 });
