@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { getDocumentAsset } from "@/server/assets";
+import { AssetError, assetTypeFor, getDocumentAsset, type AssetContent } from "@/server/assets";
 import { findUnrenderable, UnrenderableDocumentError } from "@/editor/markdown/renderable";
 import { type RenderedHeading } from "./render-markdown";
 import { renderOffThread, RenderTimeoutError, RENDER_TIMEOUT_MS } from "./render-pool";
@@ -14,6 +14,14 @@ export interface InlineAssetsOptions {
   documentId: string;
   /** Byte budget for embedded assets; defaults to MAX_INLINE_ASSET_BYTES. */
   maxBytes?: number;
+  /**
+   * For a page the server's own Chromium renders (PDF export): embed an asset only when its bytes are an
+   * image the upload rule accepts today (`assetTypeFor`), under the type the bytes are, and put the alt text
+   * in place of any other. Uploads stored before that rule existed keep the type their client declared, so
+   * the stored type alone says nothing about the bytes (#2290). Off for the HTML download, which the
+   * reader's own browser opens.
+   */
+  verifyBytes?: boolean;
 }
 
 export interface RenderDocumentHtmlOptions {
@@ -135,6 +143,38 @@ function escapeRegExp(text: string): string {
 }
 
 /**
+ * The type to embed a stored asset under, by the rule uploads are stored by: a raster image goes under the
+ * type its bytes are, SVG only when it was stored as SVG, is SVG and passes the script check. `null` for
+ * anything that rule refuses.
+ */
+function embeddableType(asset: AssetContent): string | null {
+  try {
+    return assetTypeFor({ mime: asset.mime, bytes: asset.bytes });
+  } catch (err) {
+    if (err instanceof AssetError) return null;
+    throw err;
+  }
+}
+
+/** An `<img>` as rehype-stringify writes it: attribute values are double-quoted, with `"` and `&` escaped. */
+const IMG_TAG = /<img((?:\s+[^\s"'=<>/]+(?:="[^"]*")?)*)\s*\/?>/g;
+
+/**
+ * Put the alt text in place of every `<img>` that shows one of the assets in `ids`. The page is rendered
+ * offline, where an image without its bytes is a broken-picture icon; its alt text says what was there.
+ * The text comes out of an attribute, so `<` and `>` are escaped to keep it text.
+ */
+function showAltText(html: string, prefix: string, ids: Set<string>): string {
+  const src = new RegExp(`\\ssrc="${escapeRegExp(`${prefix}/api/assets/`)}([0-9a-zA-Z]+)"`);
+  return html.replace(IMG_TAG, (tag, attributes: string) => {
+    const id = src.exec(attributes)?.[1];
+    if (id === undefined || !ids.has(id)) return tag;
+    const alt = /\salt="([^"]*)"/.exec(attributes)?.[1] ?? "";
+    return `<span class="image-left-out">${alt.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</span>`;
+  });
+}
+
+/**
  * Replace the absolute asset URLs the worker produced with `data:` URIs. The fragment came out of
  * rehype-stringify, so `src` values are double-quoted and the ids are `[0-9a-z]+`: a plain string
  * replacement on the attribute is exact.
@@ -144,23 +184,44 @@ function escapeRegExp(text: string): string {
  * the reader). Assets are loaded one at a time, in document order, and embedding stops at the byte
  * budget, so one export can never hold more than the budget plus a single asset in memory. Assets
  * that no longer exist keep their URL, as before.
+ *
+ * With `verifyBytes` (the page for the server's Chromium) an asset is embedded only when the upload rule
+ * accepts its bytes, under the type the bytes are; the `<img>` of any other becomes its alt text. One
+ * warning per page counts both, with no document, file or user in it.
  */
-async function inlineAssetUrls(html: string, base: string, assetIds: string[], { documentId, maxBytes = MAX_INLINE_ASSET_BYTES }: InlineAssetsOptions): Promise<string> {
+async function inlineAssetUrls(html: string, base: string, assetIds: string[], { documentId, maxBytes = MAX_INLINE_ASSET_BYTES, verifyBytes = false }: InlineAssetsOptions): Promise<string> {
   if (assetIds.length === 0) return html;
   const prefix = base.replace(/\/+$/, "");
   const uris = new Map<string, string>();
+  const leftOut = new Set<string>();
+  let retyped = 0;
   let used = 0;
   for (const id of assetIds) {
     if (used >= maxBytes) break;
     const asset = await getDocumentAsset(documentId, id);
     if (!asset) continue;
     if (used + asset.bytes.byteLength > maxBytes) break;
+    let type = asset.mime;
+    if (verifyBytes) {
+      const checked = embeddableType(asset);
+      if (checked === null) {
+        leftOut.add(id);
+        continue;
+      }
+      if (checked !== asset.mime) retyped++;
+      type = checked;
+    }
     used += asset.bytes.byteLength;
-    uris.set(id, `data:${asset.mime};base64,${Buffer.from(asset.bytes).toString("base64")}`);
+    uris.set(id, `data:${type};base64,${Buffer.from(asset.bytes).toString("base64")}`);
   }
-  if (uris.size === 0) return html;
+  // Counts only: how many stored uploads the rule touches is not known before production says so.
+  if (leftOut.size > 0 || retyped > 0) {
+    console.warn(`[pdf] ${leftOut.size} image(s) left out: content is not an allowed image type; ${retyped} inlined under the type its bytes are`);
+  }
+  const page = leftOut.size > 0 ? showAltText(html, prefix, leftOut) : html;
+  if (uris.size === 0) return page;
   const pattern = new RegExp(`src="${escapeRegExp(`${prefix}/api/assets/`)}([0-9a-zA-Z]+)"`, "g");
-  return html.replace(pattern, (match, id: string) => {
+  return page.replace(pattern, (match, id: string) => {
     const uri = uris.get(id);
     return uri ? `src="${uri}"` : match;
   });
