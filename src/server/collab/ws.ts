@@ -4,6 +4,7 @@ import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Hocuspocus } from "@hocuspocus/server";
 import type { CollabContext, CollabPreAuthentication } from "./hocuspocus";
+import { rejectUnparseableUpgrade } from "../../../server/request-guards";
 
 export const COLLAB_PATH = "/collab";
 export const COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS = 3_000;
@@ -209,9 +210,32 @@ export function createCollabPreAuthenticationDeadline(
 }
 
 /**
+ * The pathname of an upgrade's request target, or null when the target cannot be parsed. An exception
+ * thrown inside an `upgrade` listener is an uncaughtException, and server/index.ts exits 1 on every one
+ * of those: a request target that `new URL` rejects must not be able to end the process (issue #2321).
+ */
+function upgradePathname(req: IncomingMessage): string | null {
+  try {
+    return new URL(req.url ?? "/", "http://localhost").pathname;
+  } catch {
+    return null;
+  }
+}
+
+/** `toWebRequest`, or null when the request target or the Host header does not make a URL a Request accepts. */
+function webRequestOrNull(req: IncomingMessage): Request | null {
+  try {
+    return toWebRequest(req);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Wrap upgrade listeners added after this call so they never receive `path`.
  * Next installs its HMR listener lazily on the first HTTP request; without this filter EventEmitter
  * also invokes it for the /collab socket that the existing router has already upgraded.
+ * An upgrade whose target cannot be parsed is not handed on either: `attachCollab` answers it with 400.
  */
 export function protectUpgradePath(server: HttpServer, path = COLLAB_PATH): () => void {
   const known = new Set(server.listeners("upgrade"));
@@ -221,8 +245,8 @@ export function protectUpgradePath(server: HttpServer, path = COLLAB_PATH): () =
       const listener = candidate as UpgradeListener;
       server.off("upgrade", listener);
       const filtered: UpgradeListener = (req, socket, head) => {
-        const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
-        if (pathname !== path) listener.call(server, req, socket, head);
+        const pathname = upgradePathname(req);
+        if (pathname !== null && pathname !== path) listener.call(server, req, socket, head);
       };
       known.add(filtered);
       server.on("upgrade", filtered);
@@ -240,7 +264,7 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
   );
   let stopped = false;
 
-  wss.on("connection", (socket: WebSocket, req: IncomingMessage) => {
+  wss.on("connection", (socket: WebSocket, req: IncomingMessage, request?: Request) => {
     socket.binaryType = "nodebuffer";
     const deadline = createCollabPreAuthenticationDeadline(socket, {
       request: req,
@@ -256,7 +280,7 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
     }
     const context = {} as CollabContext;
     context.preAuthentication = deadline;
-    const connection = hocuspocus.handleConnection(socket, toWebRequest(req), context);
+    const connection = hocuspocus.handleConnection(socket, request ?? toWebRequest(req), context);
     socket.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
       const bytes = Array.isArray(data)
         ? new Uint8Array(Buffer.concat(data))
@@ -270,9 +294,14 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
   });
 
   const onUpgrade: UpgradeListener = (req, socket, head) => {
-    const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    // Only the two parses are caught, and both before anything is written: once the 101 is out, a throw
+    // here would be an uncaughtException with a client already connected (issue #2321).
+    const pathname = upgradePathname(req);
+    if (pathname === null) return rejectUnparseableUpgrade(req, socket);
     if (pathname === path) {
-      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+      const request = webRequestOrNull(req);
+      if (request === null) return rejectUnparseableUpgrade(req, socket);
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req, request));
       return;
     }
     // Next's HMR listener is lazy. Use its handler before it exists, then leave non-collab upgrades
