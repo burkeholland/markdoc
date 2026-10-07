@@ -427,24 +427,29 @@ describe("the server tells a connection that its own access changed (issue #2269
   });
 
   describe("the link's access changes", () => {
-    it("edit to view: people in through the link are told, a visitor who is not signed in too; the owner and an explicit collaborator are not", async () => {
+    it("edit to view: a signed-in person who is in through the link is told; a visitor who is not signed in was a Viewer already and hears nothing; the owner and an explicit collaborator hear nothing", async () => {
       const s = await scene({ link: "edit", row: null });
       const collaborator = await s.join({ login: "explicit", role: "editor", row: "editor" });
-      const visitor = await s.join({ visitor: "editor" });
+      // Without a sign-in every open link gives Viewer, and that is what the token route signs.
+      const visitor = await s.join({ visitor: "viewer" });
       await setLink(s, "view");
-      await eventually(() => s.personClient.told.length > 0 && visitor.told.length > 0, "the link people to be told");
+      await eventually(() => s.personClient.told.length > 0, "the person to be told");
       await settled(s, s.personClient, collaborator, visitor);
       expect(s.personClient.roles()).toEqual(["viewer"]);
-      expect(visitor.roles()).toEqual(["viewer"]);
+      expect(visitor.told).toEqual([]);
       expect(collaborator.told).toEqual([]);
       expect(s.ownerClient.told).toEqual([]);
     });
 
-    it("edit to off: told null, then closed", async () => {
+    it("edit to off: the person and a visitor who is not signed in are told null, then closed", async () => {
       const s = await scene({ link: "edit", row: null });
+      const visitor = await s.join({ visitor: "viewer" });
       await setLink(s, "private");
-      await eventually(() => s.personClient.trace.includes("closed"), "the document to be closed for the person");
+      await eventually(() => s.personClient.trace.includes("closed") && visitor.trace.includes("closed"), "the document to be closed for both");
       expect(s.personClient.trace).toEqual(["access:null", "closed"]);
+      expect(visitor.trace).toEqual(["access:null", "closed"]);
+      await settled(s);
+      expect(s.ownerClient.told).toEqual([]);
     });
 
     it("view to edit: told Editor", async () => {
