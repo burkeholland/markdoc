@@ -559,6 +559,20 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
       expect((await threads()).find((thread) => thread.id === answer.id)).toMatchObject({ quote: "paragraph", currentText: "paragraph" });
     });
 
+    it("a collapsed range is still stored as a comment with an empty quote, from plain offsets as before and from an anchor alike", async () => {
+      actor = carol;
+      const text = await serverText();
+      const at = text.indexOf("paragraph");
+      const plain = (await (await post(docId, { action: "add", from: at, to: at, body: "At a point, by offsets" })).json()) as { id: string };
+      const copy = browserCopy();
+      const point = Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(copy.getText(TEXT_KEY), at, 0));
+      copy.destroy();
+      const anchored = (await (await post(docId, { action: "add", from: at, to: at, anchor: { start: point, end: point }, body: "At a point, by anchor" })).json()) as { id: string };
+      const all = await threads();
+      expect(all.find((thread) => thread.id === plain.id)).toMatchObject({ quote: "", currentText: "" });
+      expect(all.find((thread) => thread.id === anchored.id)).toMatchObject({ quote: "", currentText: "" });
+    });
+
     it("refuses a body over the size limit before reading an anchor out of it", async () => {
       actor = carol;
       const before = (await threads()).length;
