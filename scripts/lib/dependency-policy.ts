@@ -48,16 +48,9 @@ export interface ListedAdvisory extends AcceptedAdvisory {
 
 // Advisories that do not stop a release, for a limited time, because no patched version exists. The whole rule is
 // in acceptedAudit below and in docs/vm-hosting.md. This list is code: a change goes through a pull request, and no
-// environment variable, flag or option can add to it. Delete an entry as soon as the lock has a patched version.
-export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [
-  {
-    advisory: "GHSA-vfj7-8cjw-p6xm",
-    package: "braces",
-    version: "3.0.3",
-    expires: "2026-10-17",
-    reason: "Only the linter uses it, every published braces is affected, and the runtime image omits dev packages.",
-  },
-];
+// environment variable, flag or option can add to it. Delete an entry as soon as the lock has a patched version or
+// no longer has the package. The list is empty since #2294, when braces (GHSA-vfj7-8cjw-p6xm, #2260) left the lock.
+export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [];
 
 // What tests may set about the accepted-advisory rule: the clock that decides expiry and the list itself. These are
 // function parameters only. The command line and the release never pass them, so they use the real clock and

@@ -79,6 +79,20 @@ const eslintConfig = defineConfig([
   globalIgnores([".next/**", ".next-*/**", "out/**", "build/**", "dist/**", "next-env.d.ts", "drizzle/**", "playwright-report/**", "test-results/**"]),
 ]);
 
+// package.json "overrides" installs tinyglobby under the name fast-glob inside @next/eslint-plugin-next, so that
+// fast-glob's dependency braces is not installed (#2294; the same swap as https://github.com/vercel/next.js/pull/89531).
+// The plugin calls it in one place only, to expand settings.next.rootDir, and there tinyglobby returns other
+// directories than fast-glob does. Nothing here sets rootDir, so that call never happens, and this check keeps it
+// that way. scripts/lib/next-lint-fast-glob-override.test.ts watches the plugin itself. Delete the override, this
+// check and that test once @next/eslint-plugin-next no longer depends on fast-glob.
+export function assertNoNextRootDir(config) {
+  if (config.some((entry) => entry?.settings?.next?.rootDir !== undefined)) {
+    throw new Error("settings.next.rootDir cannot be set while package.json overrides fast-glob with tinyglobby (#2294).");
+  }
+}
+
+assertNoNextRootDir(eslintConfig);
+
 export default eslintConfig;
 
 

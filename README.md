@@ -371,15 +371,17 @@ to bypass the preflight.
 
 An advisory with no patched version can be accepted for a limited time through
 one list in code, `ACCEPTED_ADVISORIES` in `scripts/lib/dependency-policy.ts`.
-It has one entry: `GHSA-vfj7-8cjw-p6xm` on `braces` `3.0.3`, expiring at the
-end of 2026-10-17 UTC. An audit is accepted only when every advisory in it is
+The list is empty: its only entry so far, `GHSA-vfj7-8cjw-p6xm` on `braces`
+`3.0.3`, was deleted when `braces` left the lock (#2294). An audit is accepted
+only when every advisory in it is
 a listed one on the listed package and version, every other reported package
 is there only because it depends on an accepted one, every reported lock node
 is `"dev": true`, the expiry date has not passed, nothing is critical and no
 blocked dependency is present. Anything else is rejected as before, and no
 environment variable, flag or option can widen the list. The preflight then
 prints a separate `accepted` report, which the release command checks again in
-full before it prints one line per accepted advisory and continues:
+full before it prints one line per accepted advisory and continues. For the
+`braces` entry that line was:
 
 ```text
 Release warning: dependency advisory accepted; advisory=GHSA-vfj7-8cjw-p6xm; package=braces; expires=2026-10-17.
@@ -387,15 +389,19 @@ Release warning: dependency advisory accepted; advisory=GHSA-vfj7-8cjw-p6xm; pac
 
 When upstream ships a fix, one pull request updates `package-lock.json` and
 deletes the list entry; the preflight must then print the plain pass report.
+`braces` left the lock through an `overrides` entry in `package.json` that
+gives `@next/eslint-plugin-next` the package `tinyglobby` under the name
+`fast-glob`.
 [`docs/vm-hosting.md`](docs/vm-hosting.md#accepted-advisories) has the full
-rule, the report format and the removal steps.
+rule, the report format, the removal steps, and what keeps that override safe
+and when to delete it.
 The current lock resolves the audited transitive packages to
 `fast-uri@3.1.8`, `qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and
-`sharp@0.35.4`. Since 2026-10-03 the bounded dependency preflight returns the
-accepted report for `GHSA-vfj7-8cjw-p6xm` (five high findings, all in
-development-only packages) with zero blocked, critical and omitted counts.
-Before that advisory it reported zero for every count, and it must do so
-again once the list entry is removed. Workflow setup, a merge,
+`sharp@0.35.4`. From 2026-10-03 until #2294 the bounded dependency preflight
+returned the accepted report for `GHSA-vfj7-8cjw-p6xm` (five high findings,
+all in development-only packages) with zero blocked, critical and omitted
+counts. The list is empty again, so a release needs the plain pass report,
+with zero for every count. Workflow setup, a merge,
 audit evidence or this documentation update neither invokes nor approves a
 release.
 

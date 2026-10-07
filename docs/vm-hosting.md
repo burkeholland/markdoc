@@ -232,9 +232,15 @@ goes through a pull request and a review like any other change. No environment
 variable, flag or command-line option can add an entry, widen one or move the
 clock.
 
+The list is empty. Its only entry so far, `GHSA-vfj7-8cjw-p6xm` on `braces`
+`3.0.3` (only the linter used it, through `eslint-config-next`, and every
+published `braces` is affected), was added on 2026-10-03 and deleted in #2294,
+when `braces` left the lock; see
+[The fast-glob override](#the-fast-glob-override). A new entry adds a row here:
+
 | Advisory | Package | Version | Expires (UTC) | Reason |
 | --- | --- | --- | --- | --- |
-| `GHSA-vfj7-8cjw-p6xm` | `braces` | `3.0.3` | `2026-10-17` | Only the linter uses it (through `eslint-config-next`), every published `braces` is affected, and the runtime image installs with `npm ci --omit=dev` |
+| (no entries) | | | | |
 
 An audit with findings is accepted only when all of these hold. Anything else
 is `rejected`, exactly as if the list did not exist:
@@ -255,12 +261,21 @@ is `rejected`, exactly as if the list did not exist:
 5. No blocked dependency is present and nothing in the audit is `critical`. A
    critical advisory is never accepted, listed or not.
 
+A lock node is judged as the package it really is. An aliased dependency such
+as `"x": "npm:qs@6.15.3"` is installed in the folder `node_modules/x`, and its
+lock entry carries the real name in `"name"`. `npm audit` reports it under the
+real name, and both lists (`BLOCKED_DEPENDENCIES` and `ACCEPTED_ADVISORIES`)
+match on that name, so an alias cannot hide a blocked version or a second node
+of a listed package. An entry whose `"name"` is not a package name fails
+closed as `invalid_lock`.
+
 The accepted result is its own report, not the pass report. It has status
 `accepted`, the real severity counts, every reported lock node as a package
 with status `accepted` (a node of a listed package) or `dependent`, and an
 `exceptions` list with the advisory id, package, version and expiry date of
 each entry that was used. It never has more than 25 packages; a larger chain is
-rejected. For example:
+rejected. For example, the report for the `braces` entry while it was in the
+list:
 
 ```json
 {"status":"accepted","counts":{"blocked":0,"info":0,"low":0,"moderate":0,"high":5,"critical":0,"vulnerabilities":5,"reported":5,"omitted":0},"packages":[{"name":"@next/eslint-plugin-next","version":"16.3.6","status":"dependent"},{"name":"braces","version":"3.0.3","status":"accepted"},{"name":"eslint-config-next","version":"16.3.6","status":"dependent"},{"name":"fast-glob","version":"3.3.1","status":"dependent"},{"name":"micromatch","version":"4.0.8","status":"dependent"}],"exceptions":[{"advisory":"GHSA-vfj7-8cjw-p6xm","package":"braces","version":"3.0.3","expires":"2026-10-17"}]}
@@ -276,7 +291,8 @@ package and version among the packages marked `accepted`, and every package
 marked `accepted` named by an exception; and an expiry date that is today or
 later in UTC. A report that fails any check stops the release with the same
 message as any other failed preflight. For a valid one the release prints one
-line per accepted advisory and continues:
+line per accepted advisory and continues. For the `braces` entry that line
+was:
 
 ```text
 Release warning: dependency advisory accepted; advisory=GHSA-vfj7-8cjw-p6xm; package=braces; expires=2026-10-17.
@@ -291,17 +307,63 @@ To remove an entry once upstream ships a fix: in one pull request, update
 <package>`), delete the entry from `ACCEPTED_ADVISORIES` and its row from the
 table above, and run the preflight
 (`npm run --silent dependency:preflight -- --lock-sha256 <sha256 of package-lock.json> --run-audit`).
-It must print the plain pass report. If the expiry date arrives first, releases
+It must print the plain pass report. The same steps apply when the package
+leaves the lock in another way. If the expiry date arrives first, releases
 stop with `status rejected`. Extending the date is a new decision and a new
 pull request that changes only that entry; it is never done from the release
 machine.
+
+##### The fast-glob override
+
+`braces` was in the lock for one reason: `eslint-config-next` ->
+`@next/eslint-plugin-next` -> `fast-glob` `3.3.1` -> `micromatch` -> `braces`,
+all development-only. Every published `fast-glob` needs `micromatch`, every
+usable `micromatch` needs `braces`, no `braces` is patched, and the plugin pins
+`fast-glob` to one version. So `package.json` gives the plugin, and only the
+plugin, another package under that name (#2294):
+
+```json
+"overrides": {
+  "@next/eslint-plugin-next": { "fast-glob": "npm:tinyglobby@0.2.17" }
+}
+```
+
+Inside the plugin `require("fast-glob")` now loads `tinyglobby`. The lock has
+it as `node_modules/@next/eslint-plugin-next/node_modules/fast-glob` with
+`"name": "tinyglobby"`, and `fast-glob`, `micromatch` and `braces` are gone.
+It is the same swap as the upstream pull request
+[vercel/next.js#89531](https://github.com/vercel/next.js/pull/89531), which is
+not merged yet.
+
+This is safe only under two conditions, and each one is checked:
+
+- The plugin takes one function from `fast-glob`, `globSync`, in one file,
+  `dist/utils/get-root-dirs.js`. `tinyglobby` has a function with that name.
+  `scripts/lib/next-lint-fast-glob-override.test.ts` reads the installed plugin
+  and fails when another file mentions `fast-glob`, when anything other than
+  `globSync` is used from it, or when the plugin no longer depends on it.
+- That function is called only to expand the lint setting
+  `settings.next.rootDir`, and there `tinyglobby` answers differently: for a
+  plain directory it returns every directory below it, where `fast-glob`
+  returns the directory itself. `eslint.config.mjs` does not set `rootDir`, so
+  the function is never called, and the file refuses to load when any entry
+  sets it.
+
+Delete the override when `@next/eslint-plugin-next` no longer depends on
+`fast-glob` (the test above then fails and says so): remove the entry from
+`overrides`, the check at the end of `eslint.config.mjs` and that test file,
+run `npm install --package-lock-only`, and check that `npm explain braces`
+finds nothing. When `eslint-config-next` is upgraded while the override is
+still needed, run that test and compare the output of `npx eslint -f json`
+before and after.
+
 The current lock resolves the audited transitive packages to
 `fast-uri@3.1.8`, `qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and
-`sharp@0.35.4`. Since 2026-10-03 the bounded dependency preflight returns the
-accepted report for `GHSA-vfj7-8cjw-p6xm` (five high findings, all in
-development-only packages) with zero blocked, critical and omitted counts.
-Before that advisory it reported zero for every count, and it must do so
-again once the list entry is removed. Workflow setup, a merge,
+`sharp@0.35.4`. From 2026-10-03 until #2294 the bounded dependency preflight
+returned the accepted report for `GHSA-vfj7-8cjw-p6xm` (five high findings,
+all in development-only packages) with zero blocked, critical and omitted
+counts. The list is empty again, so a release needs the plain pass report,
+with zero for every count. Workflow setup, a merge,
 audit evidence or this documentation update neither invokes nor approves a
 release.
 
