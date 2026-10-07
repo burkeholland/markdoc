@@ -1,15 +1,18 @@
 import { EventEmitter } from "node:events";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import net, { type AddressInfo } from "node:net";
+import type { Duplex } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   attachRequestErrorGuards,
+  attachUpgradeErrorGuard,
   CLIENT_GONE_CODES,
   errorCode,
   formatStreamErrorLine,
   isClientGone,
   type GuardedRequest,
   type GuardedResponse,
+  type GuardedUpgradeSocket,
 } from "./request-guards";
 import { attachRequestLog } from "./request-log";
 
@@ -52,6 +55,12 @@ describe("formatStreamErrorLine", () => {
     const line = formatStreamErrorLine("request", { method: undefined, url: "/d/k3j9x0v2m8qa" }, withCode("secret /tmp/path in message", "EACCES"));
     expect(line).toBe("[http] request error - /d/:id EACCES");
     expect(line).not.toContain("secret");
+  });
+
+  it("names a websocket upgrade as `upgrade error`", () => {
+    expect(formatStreamErrorLine("upgrade", { method: "GET", url: "/collab?token=secret" }, withCode("timed out", "ETIMEDOUT"))).toBe(
+      "[http] upgrade error GET /collab ETIMEDOUT",
+    );
   });
 });
 
@@ -108,6 +117,47 @@ describe("attachRequestErrorGuards", () => {
       console.warn = original;
     }
     expect(warned).toEqual([["[http] response error GET /api/health ERR_STREAM_WRITE_AFTER_END"]]);
+  });
+});
+
+describe("attachUpgradeErrorGuard", () => {
+  function attachUpgrade(url = "/collab") {
+    const lines: string[] = [];
+    const socket = new EventEmitter();
+    attachUpgradeErrorGuard({ method: "GET", url }, socket as unknown as GuardedUpgradeSocket, { write: (line) => lines.push(line) });
+    return { socket, lines };
+  }
+
+  it("installs one error listener on the socket", () => {
+    expect(attachUpgrade().socket.listenerCount("error")).toBe(1);
+  });
+
+  it.each([...CLIENT_GONE_CODES])("swallows %s without a line", (code) => {
+    const { socket, lines } = attachUpgrade();
+    expect(() => socket.emit("error", withCode("gone", code))).not.toThrow();
+    expect(lines).toEqual([]);
+  });
+
+  it("writes one line for an error that is not a client leaving, without the message, and does not rethrow", () => {
+    const { socket, lines } = attachUpgrade("/collab?token=secret");
+    expect(() => socket.emit("error", withCode("secret /tmp/path in message", "EACCES"))).not.toThrow();
+    expect(() => socket.emit("error", new TypeError("boom"))).not.toThrow();
+    expect(lines).toEqual(["[http] upgrade error GET /collab EACCES", "[http] upgrade error GET /collab TypeError"]);
+  });
+
+  it("defaults to console.warn", () => {
+    const warned: unknown[][] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void warned.push(args);
+    try {
+      const socket = new EventEmitter();
+      attachUpgradeErrorGuard({ method: "GET", url: "/collab" }, socket as unknown as GuardedUpgradeSocket);
+      socket.emit("error", withCode("read ECONNRESET", "ECONNRESET"));
+      socket.emit("error", withCode("timed out", "ETIMEDOUT"));
+    } finally {
+      console.warn = original;
+    }
+    expect(warned).toEqual([["[http] upgrade error GET /collab ETIMEDOUT"]]);
   });
 });
 
@@ -321,5 +371,152 @@ describe("attachRequestErrorGuards on a real http server", () => {
     );
     expect(guardLines).toEqual(["[http] response error POST /api/documents/:id/versions ERR_STREAM_WRITE_AFTER_END"]);
     expect(processErrors).toEqual([]);
+  });
+});
+
+// Websocket upgrades (#2311). While server/index.ts is starting it answers every upgrade itself with a
+// 503, on a raw socket that Node hands over without any 'error' listener. The clients below leave at
+// each moment around that answer; with the guard on first, none of them may reach the process.
+describe("attachUpgradeErrorGuard on a real http server", () => {
+  /** The answer server/index.ts writes to an upgrade while it is starting. */
+  const STARTING = "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+  const TRIES = 25;
+  const processErrors: unknown[] = [];
+  const recordProcessError = (err: unknown) => void processErrors.push(err);
+
+  beforeEach(() => {
+    processErrors.length = 0;
+    process.on("uncaughtException", recordProcessError);
+    process.on("unhandledRejection", recordProcessError);
+  });
+
+  afterEach(() => {
+    process.off("uncaughtException", recordProcessError);
+    process.off("unhandledRejection", recordProcessError);
+  });
+
+  interface StartingServer {
+    port: number;
+    guardLines: string[];
+    /** Run inside the server's upgrade handler, around the answer; set per attempt. */
+    hooks: { beforeAnswer?: () => void; afterAnswer?: (socket: Duplex) => void; serverSocketClosed?: () => void };
+  }
+
+  /** An http server that treats upgrades the way server/index.ts does before it is ready. */
+  async function withStartingServer(guard: boolean, run: (server: StartingServer) => Promise<void>): Promise<void> {
+    const starting: StartingServer = { port: 0, guardLines: [], hooks: {} };
+    const server = http.createServer((_req, res) => {
+      res.statusCode = 503;
+      res.end("starting");
+    });
+    server.on("upgrade", (req: IncomingMessage, socket: Duplex) => {
+      const { hooks } = starting;
+      socket.once("close", () => hooks.serverSocketClosed?.());
+      hooks.beforeAnswer?.();
+      if (guard) attachUpgradeErrorGuard(req, socket, { write: (line) => starting.guardLines.push(line) });
+      socket.end(STARTING);
+      hooks.afterAnswer?.(socket);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    starting.port = (server.address() as AddressInfo).port;
+    try {
+      await run(starting);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  interface Leaving {
+    beforeAnswer?: (client: net.Socket) => void;
+    afterAnswer?: (client: net.Socket, serverSocket: Duplex) => void;
+    onAnswer?: (client: net.Socket) => void;
+  }
+
+  /** One upgrade request on a raw connection; resolves with what the client received once both ends have closed. */
+  function upgrade(server: StartingServer, leaving: Leaving = {}): Promise<string> {
+    return new Promise((resolve) => {
+      let received = "";
+      let open = 2;
+      const closed = () => {
+        if (--open === 0) resolve(received);
+      };
+      const client = net.connect({ host: "127.0.0.1", port: server.port }, () => {
+        client.write(`GET /collab?token=secret HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`);
+      });
+      server.hooks = {
+        serverSocketClosed: closed,
+        beforeAnswer: leaving.beforeAnswer && (() => leaving.beforeAnswer?.(client)),
+        afterAnswer: leaving.afterAnswer && ((socket) => leaving.afterAnswer?.(client, socket)),
+      };
+      client.setEncoding("latin1");
+      client.on("data", (text: string) => {
+        received += text;
+        leaving.onAnswer?.(client);
+      });
+      client.on("end", () => client.end());
+      client.on("error", () => {});
+      client.on("close", closed);
+    });
+  }
+
+  async function stillStarting(port: number): Promise<void> {
+    const response = await fetch(`http://127.0.0.1:${port}/api/health`, { headers: { connection: "close" } });
+    expect(response.status).toBe(503);
+    expect(await response.text()).toBe("starting");
+  }
+
+  const moments: [string, Leaving][] = [
+    ["resets the connection before the answer is written", { beforeAnswer: (client) => client.resetAndDestroy() }],
+    // An editor page that gave up waiting closes like this; on Windows the server then reads ECONNRESET.
+    ["closes (no reset) before the answer is written", { beforeAnswer: (client) => client.destroy() }],
+    ["resets the connection while the answer is on its way", { afterAnswer: (client) => client.resetAndDestroy() }],
+    ["resets the connection after it received the answer", { onAnswer: (client) => client.resetAndDestroy() }],
+  ];
+
+  it.each(moments)(`survives ${TRIES} clients in a row, each of which %s`, async (_name, leaving) => {
+    await withStartingServer(true, async (server) => {
+      for (let i = 0; i < TRIES; i++) await upgrade(server, leaving);
+      await sleep(50);
+      expect(server.guardLines).toEqual([]);
+      await stillStarting(server.port);
+      expect(await upgrade(server)).toBe(STARTING);
+    });
+    expect(processErrors).toEqual([]);
+  });
+
+  it("still gives a patient client the whole 503 and closes the socket", async () => {
+    await withStartingServer(true, async (server) => {
+      for (let i = 0; i < 3; i++) expect(await upgrade(server)).toBe(STARTING);
+      expect(server.guardLines).toEqual([]);
+    });
+    expect(processErrors).toEqual([]);
+  });
+
+  it("writes one line for a socket error that is not a client leaving, and nothing reaches the process", async () => {
+    await withStartingServer(true, async (server) => {
+      await upgrade(server, { afterAnswer: (_client, socket) => socket.destroy(withCode("secret /tmp/path in message", "EACCES")) });
+      await sleep(50);
+      expect(server.guardLines).toEqual(["[http] upgrade error GET /collab EACCES"]);
+    });
+    expect(processErrors).toEqual([]);
+  });
+
+  // The control: the same server without the guard. This is the bug itself, kept so that the tests above
+  // cannot pass for the wrong reason (a platform or a Node version where a leaving client raises nothing).
+  it("control: without the guard, a client that resets after the answer becomes an uncaughtException", async () => {
+    // The test runner's own listeners would fail the run for the exception this test is about.
+    const others = process.listeners("uncaughtException").filter((listener) => listener !== recordProcessError);
+    for (const listener of others) process.off("uncaughtException", listener);
+    try {
+      await withStartingServer(false, async (server) => {
+        await upgrade(server, { onAnswer: (client) => client.resetAndDestroy() });
+        await sleep(50);
+      });
+    } finally {
+      for (const listener of others) process.on("uncaughtException", listener);
+    }
+    expect(processErrors).toHaveLength(1);
+    expect(isClientGone(processErrors[0])).toBe(true);
   });
 });
