@@ -497,7 +497,8 @@ test.describe("a person's access changes while the document is open (#2269)", ()
       let release!: () => void;
       const released = new Promise<void>((resolve) => (release = resolve));
       await page.route("**/api/documents/*/collab-token", async (route) => {
-        const response = await route.fetch();
+        // A request of the runner itself to the dev server is reset now and then (known noise): once more then.
+        const response = await route.fetch().catch(() => route.fetch());
         fetched();
         await released;
         await route.fulfill({ response });
