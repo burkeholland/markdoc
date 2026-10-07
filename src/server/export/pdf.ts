@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { Browser } from "playwright-core";
+import { FairQueue, QueueCancelled, QueueRefusal, type RefusalReason, type Turn } from "./fair-queue";
 
 const IDLE_CLOSE_MS = 60_000;
 /** How long a close waits for Chromium to shut down before the caller moves on (task #1310). */
@@ -21,6 +22,8 @@ export const PDF_QUEUE_WAIT_MS = 30_000;
 export const PDF_RENDER_TIMEOUT_MS = 60_000;
 /** `Retry-After`, in seconds, for a caller refused because the renderer is busy. */
 export const PDF_RETRY_AFTER_SECONDS = 10;
+/** Time after which a caller's past use of the renderer counts half when turns are handed out. */
+export const PDF_USAGE_HALF_LIFE_MS = 60_000;
 
 let browserPromise: Promise<Browser> | null = null;
 let idleTimer: NodeJS.Timeout | null = null;
@@ -36,8 +39,8 @@ export class PdfUnavailableError extends Error {
   }
 }
 
-/** Why a render was refused or stopped: no room to wait, waited too long, or ran too long. */
-export type PdfBusyReason = "queue-full" | "queue-wait" | "render-timeout";
+/** Why a render was refused or stopped: no room to wait, its place went to a caller with fewer, waited too long, or ran too long. */
+export type PdfBusyReason = RefusalReason | "render-timeout";
 
 /** Thrown when the renderer has no room for this caller, or when its render ran past the time limit (HTTP 503 in the route). */
 export class PdfBusyError extends Error {
@@ -98,23 +101,32 @@ const isOtherProcessId = (pid: number) => Number.isInteger(pid) && pid > 1 && pi
 export const osProcess = {
   /**
    * A value that is the same for as long as process `pid` lives and differs for any later process that gets
-   * the same id: its start time. `undefined` when the platform offers no way to read it or the process is gone.
+   * the same id: its start time. Only for a process this server started itself: `undefined` when its parent
+   * is not this process, when the platform offers no way to read parent and start time, or when it is gone.
+   * So an id that Chromium reports about itself is never enough to have a process ended (#2290).
    */
   async startToken(pid: number): Promise<string | undefined> {
     if (!isOtherProcessId(pid)) return undefined;
+    const child = (parent: string | undefined, token: string | undefined) => (parent === String(process.pid) && token ? token : undefined);
     try {
       if (process.platform === "linux") {
         const stat = await readFile(`/proc/${pid}/stat`, "utf8");
-        // Field 22, the start time in clock ticks since boot. Counted after the command name, which is in brackets and may hold spaces.
-        return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] || undefined;
+        // Counted after the command name, which is in brackets and may hold spaces: field 4 is the parent's id,
+        // field 22 the start time in clock ticks since boot.
+        const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        return child(fields[1], fields[19]);
       }
       if (process.platform === "win32") {
-        const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`], { timeout: 10_000, windowsHide: true });
-        return /^\d+$/.test(stdout.trim()) ? stdout.trim() : undefined;
+        // WMI rather than Get-Process: Windows PowerShell's process objects have no parent.
+        const query = `$p = [wmi]"Win32_Process.Handle='${pid}'"; '{0} {1}' -f $p.ParentProcessId, $p.CreationDate`;
+        const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", query], { timeout: 10_000, windowsHide: true });
+        const [, parent, started] = /^(\d+) (\S+)$/.exec(stdout.trim()) ?? [];
+        return child(parent, started);
       }
       if (process.platform === "darwin") {
-        const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { timeout: 10_000 });
-        return stdout.trim() || undefined;
+        const { stdout } = await execFileAsync("ps", ["-o", "ppid=,lstart=", "-p", String(pid)], { timeout: 10_000 });
+        const [, parent, started] = /^\s*(\d+)\s+(\S.*?)\s*$/.exec(stdout) ?? [];
+        return child(parent, started);
       }
     } catch {
       // No such process, or the tool is missing: the process cannot be identified.
@@ -151,11 +163,12 @@ interface ProcessIdentity {
 const identities = new WeakMap<Browser, ProcessIdentity>();
 
 /**
- * Ask the browser for its own process id right after launch, and read that process's start time. Nobody
- * waits for the answer: the first render may already be running when it comes. `Browser` exposes no
- * process; the id is only ever used to end a Chromium that will not close (`retire`), and only when the
- * start time read here is still the same right before the kill. Until both are known, a Chromium that will
- * not close is left to Playwright, which ends a browser 30 s after its close was asked.
+ * Ask the browser for its own process id right after launch, and read that process's start time, which is
+ * given for a child of this server only. Nobody waits for the answer: the first render may already be
+ * running when it comes. `Browser` exposes no process; the id is only ever used to end a Chromium that will
+ * not close (`retire`), and only when the start time read here is still the same right before the kill.
+ * Until both are known, a Chromium that will not close is left to Playwright, which ends a browser 30 s
+ * after its close was asked.
  */
 async function identify(browser: Browser): Promise<void> {
   try {
@@ -258,9 +271,10 @@ function scheduleIdleClose() {
 /**
  * Take the browser of a render that ran past its time limit out of service: the slot is emptied so the next
  * render launches a new one, the browser is closed, and a Chromium that has not closed within
- * `BROWSER_CLOSE_TIMEOUT_MS` is killed. The kill needs the process id read from this very browser at launch
- * and a start time that still matches, so an id the system has given to another process is never hit; without
- * both, the process is left to Playwright, which kills a browser 30 s after its close was asked. Never throws.
+ * `BROWSER_CLOSE_TIMEOUT_MS` is killed. The kill needs the process id read from this very browser at launch,
+ * a process with that id that is this server's child, and a start time that still matches: an id the system
+ * has given to another process, or one the browser was wrong about, is never hit. Without all three the
+ * process is left to Playwright, which kills a browser 30 s after its close was asked. Never throws.
  */
 async function retire(p: Promise<Browser>): Promise<void> {
   try {
@@ -280,57 +294,31 @@ async function retire(p: Promise<Browser>): Promise<void> {
   }
 }
 
-interface Waiter {
-  /** Hand the renderer to this caller. */
-  grant: () => void;
-}
+/**
+ * The name a request waits under (`FairQueue`): a signed-in user by the id the access check verified, a
+ * session and an API token alike. Everybody without a session is one caller, first come first served
+ * among them: the only other thing known about such a caller is an address, which behind a proxy is
+ * either the proxy's own or text the client sent.
+ */
+const callerOf = (userId?: string): string => (userId ? `user:${userId}` : "anonymous");
 
-let running = 0;
-const waiting: Waiter[] = [];
+const queue = new FairQueue({ maxRunning: PDF_MAX_RUNNING, maxWaiting: PDF_MAX_WAITING, maxWaitMs: PDF_QUEUE_WAIT_MS, halfLifeMs: PDF_USAGE_HALF_LIFE_MS });
 
 /**
- * Wait for the renderer. Resolves when this caller may render; rejects with `PdfBusyError` when
- * `PDF_MAX_WAITING` callers already wait or this one has waited `PDF_QUEUE_WAIT_MS`, and with
- * `PdfCancelledError` when `signal` aborts first: a caller that went away leaves the queue and never renders.
+ * Wait for the renderer. Resolves with this caller's turn; rejects with `PdfBusyError` when the queue has
+ * no place for it, its place went to a caller with fewer places, or it has waited `PDF_QUEUE_WAIT_MS`, and
+ * with `PdfCancelledError` when `signal` aborts first: a caller that went away leaves the queue and never
+ * renders. One line per refusal says why, and of the caller only whether it is signed in.
  */
-function acquire(signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new PdfCancelledError());
-  if (running < PDF_MAX_RUNNING) {
-    running++;
-    return Promise.resolve();
+async function takeTurn(userId?: string, signal?: AbortSignal): Promise<Turn> {
+  try {
+    return await queue.enter(callerOf(userId), signal);
+  } catch (err) {
+    if (err instanceof QueueCancelled) throw new PdfCancelledError();
+    if (!(err instanceof QueueRefusal)) throw err;
+    console.warn(`[pdf] export refused: ${err.reason}, ${userId ? "signed in" : "anonymous"} caller, ${queue.waitingCount} waiting`);
+    throw new PdfBusyError(err.reason);
   }
-  if (waiting.length >= PDF_MAX_WAITING) return Promise.reject(new PdfBusyError("queue-full"));
-  return new Promise<void>((resolve, reject) => {
-    const settle = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-    };
-    const leave = (error: Error) => {
-      const at = waiting.indexOf(waiter);
-      if (at < 0) return;
-      waiting.splice(at, 1);
-      settle();
-      reject(error);
-    };
-    const onAbort = () => leave(new PdfCancelledError());
-    const timer = setTimeout(() => leave(new PdfBusyError("queue-wait")), PDF_QUEUE_WAIT_MS);
-    timer.unref?.();
-    const waiter: Waiter = {
-      grant: () => {
-        settle();
-        resolve();
-      },
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    waiting.push(waiter);
-  });
-}
-
-/** Give the renderer to the caller that has waited longest, or free it. */
-function release() {
-  const next = waiting.shift();
-  if (next) next.grant();
-  else running--;
 }
 
 /** Print `html` in an isolated context of `browser`. Closing the context is how an aborted `signal` stops the print. */
@@ -362,6 +350,8 @@ export type PdfSource = string | (() => Promise<string>);
 export interface RenderPdfOptions {
   /** Aborts when the caller goes away: it leaves the queue, or its running print is stopped. */
   signal?: AbortSignal;
+  /** The verified id of the user who asks, so that the renderer is shared between callers. Without one the request is anonymous. */
+  userId?: string;
 }
 
 /**
@@ -369,14 +359,15 @@ export interface RenderPdfOptions {
  * Each render uses an isolated offline context with JavaScript off and rejects every routed request: PDF
  * input is document-controlled, so all required assets must already be embedded as data URIs.
  *
- * One render runs at a time and at most `PDF_MAX_WAITING` callers wait for it (`PdfBusyError` otherwise).
+ * One render runs at a time and at most `PDF_MAX_WAITING` callers wait for it (`PdfBusyError` otherwise);
+ * places and turns are shared between callers as `FairQueue` describes.
  * Pass a function as `source` to build the page only once this caller has the renderer, so that waiting
  * callers hold no embedded pictures in memory. A render that takes longer than `PDF_RENDER_TIMEOUT_MS`
  * rejects with `PdfBusyError`, its browser is closed (killed when it will not close) and the next render
  * starts a new one; the renderer is handed on only when that browser is out of the way.
  */
-export async function renderPdf(source: PdfSource, { signal }: RenderPdfOptions = {}): Promise<Uint8Array> {
-  await acquire(signal);
+export async function renderPdf(source: PdfSource, { signal, userId }: RenderPdfOptions = {}): Promise<Uint8Array> {
+  const turn = await takeTurn(userId, signal);
   inFlight++;
   if (idleTimer) clearTimeout(idleTimer);
   let retiring: Promise<void> | undefined;
@@ -403,8 +394,12 @@ export async function renderPdf(source: PdfSource, { signal }: RenderPdfOptions 
   } catch (err) {
     if (err === timeout) {
       stopped = true;
-      console.warn(`[pdf] render stopped after ${PDF_RENDER_TIMEOUT_MS} ms; closing Chromium`);
-      if (browser) retiring = retire(browser);
+      if (browser) {
+        console.warn(`[pdf] render stopped after ${PDF_RENDER_TIMEOUT_MS} ms; closing Chromium`);
+        retiring = retire(browser);
+      } else {
+        console.warn(`[pdf] render stopped after ${PDF_RENDER_TIMEOUT_MS} ms; its page was still being built, no Chromium was in use`);
+      }
     } else if (signal?.aborted && !(err instanceof PdfUnavailableError)) {
       throw new PdfCancelledError();
     }
@@ -414,8 +409,8 @@ export async function renderPdf(source: PdfSource, { signal }: RenderPdfOptions 
     inFlight--;
     if (inFlight === 0) scheduleIdleClose();
     // The renderer goes to the next caller only once a browser that ran past the limit is out of the way.
-    if (retiring) void retiring.then(release);
-    else release();
+    if (retiring) void retiring.then(turn.release);
+    else turn.release();
   }
 }
 

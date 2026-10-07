@@ -149,19 +149,37 @@ describe("renderPdf", () => {
 describe("osProcess", () => {
   const known = ["linux", "win32", "darwin"].includes(process.platform);
 
-  it("startToken gives a living process one value that does not change, and nothing for an id no process has", async () => {
-    // The process that started this test worker: alive for the whole test.
-    const first = await osProcess.startToken(process.ppid);
-    if (!known) {
-      // A platform without a way to read start times: a hung Chromium is then left to Playwright's own close.
-      expect(first).toBeUndefined();
-      return;
+  it("startToken gives a child of this process one value that does not change, and nothing for any other process", async () => {
+    // A child that starts a child of its own and says which id that one has.
+    const child = spawn(process.execPath, ["-e", "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(c.pid); setInterval(() => {}, 1000)"], { stdio: ["ignore", "pipe", "ignore"] });
+    let grandchild: number | undefined;
+    try {
+      grandchild = Number(await new Promise<string>((resolve) => child.stdout!.once("data", (chunk: Buffer) => resolve(chunk.toString()))));
+      const first = await osProcess.startToken(child.pid!);
+      if (!known) {
+        // A platform without a way to read parent and start time: a hung Chromium is then left to Playwright's own close.
+        expect(first).toBeUndefined();
+        return;
+      }
+      expect(first).toMatch(/\S/);
+      expect(await osProcess.startToken(child.pid!)).toBe(first);
+      // Alive, and not started by this process: the child's own child, and the process that started this test worker.
+      expect(grandchild).toBeGreaterThan(1);
+      expect(await osProcess.startToken(grandchild)).toBeUndefined();
+      expect(await osProcess.startToken(process.ppid)).toBeUndefined();
+      // Above the highest process id Linux hands out, and not a multiple of 4 as Windows ids are.
+      expect(await osProcess.startToken(4_194_304 + 12_345)).toBeUndefined();
+    } finally {
+      if (grandchild) {
+        try {
+          process.kill(grandchild, "SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }
+      child.kill("SIGKILL");
     }
-    expect(first).toMatch(/\S/);
-    expect(await osProcess.startToken(process.ppid)).toBe(first);
-    // Above the highest process id Linux hands out, and not a multiple of 4 as Windows ids are.
-    expect(await osProcess.startToken(4_194_304 + 12_345)).toBeUndefined();
-  }, 30_000);
+  }, 60_000);
 
   it("kill ends a process of ours at once, and a later process never has its start token", async () => {
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", detached: process.platform !== "win32" });

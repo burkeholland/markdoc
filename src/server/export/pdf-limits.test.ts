@@ -46,6 +46,8 @@ interface FakeBrowser {
   printing: () => number;
   /** How many times `page.pdf()` was called on this browser. */
   prints: number;
+  /** The pages handed to this browser, in the order they came. */
+  pages: string[];
 }
 
 /** Just enough of Playwright's `Browser`. `pid` makes it answer the process question the way Chromium does. */
@@ -72,7 +74,9 @@ function fakeBrowser(name: string, options: { pid?: number; closeGate?: Promise<
       return {
         route: async () => {},
         newPage: async () => ({
-          setContent: async () => {},
+          setContent: async (html: string) => {
+            browser.pages.push(html);
+          },
           emulateMedia: async () => {},
           pdf: () => {
             browser.prints++;
@@ -92,6 +96,7 @@ function fakeBrowser(name: string, options: { pid?: number; closeGate?: Promise<
     finishPrint: () => gates.shift()?.resolve(new Uint8Array(PDF_MAGIC)),
     printing: () => gates.length,
     prints: 0,
+    pages: [],
   };
   if (options.pid !== undefined) {
     browser.newBrowserCDPSession = async () => ({
@@ -336,6 +341,156 @@ describe("PDF renderer limits (#2290)", () => {
       await first;
       await vi.advanceTimersByTimeAsync(0);
       expect(A.newContext, "the caller that gave up waiting was never rendered").toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("sharing between callers", () => {
+    /** The pages in the order they were handed to the browser: the order of turns. */
+    const printed = (browser: FakeBrowser) => browser.pages;
+
+    it("gives the turn to the caller that has used the renderer least, not to the one that asked first", async () => {
+      vi.useFakeTimers();
+      const A = fakeBrowser("A");
+      A.hold = true;
+      launch.mockResolvedValueOnce(A);
+
+      // The heavy user holds the renderer for 12 s and has two more requests waiting when the small one asks twice.
+      const renders = [
+        pdf.renderPdf("<p>heavy 1</p>", { userId: "heavy" }),
+        pdf.renderPdf("<p>heavy 2</p>", { userId: "heavy" }),
+        pdf.renderPdf("<p>heavy 3</p>", { userId: "heavy" }),
+      ];
+      await vi.advanceTimersByTimeAsync(12_000);
+      renders.push(pdf.renderPdf("<p>small 1</p>", { userId: "small" }), pdf.renderPdf("<p>small 2</p>", { userId: "small" }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      for (let n = 0; n < renders.length; n++) {
+        A.finishPrint();
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      await Promise.all(renders);
+
+      expect(printed(A)).toEqual(["<p>heavy 1</p>", "<p>small 1</p>", "<p>small 2</p>", "<p>heavy 2</p>", "<p>heavy 3</p>"]);
+    });
+
+    it("counts everybody without a user id as one caller, and puts a signed-in user ahead of them once they have used the renderer more", async () => {
+      vi.useFakeTimers();
+      const A = fakeBrowser("A");
+      A.hold = true;
+      launch.mockResolvedValueOnce(A);
+
+      const renders = [pdf.renderPdf("<p>visitor 1</p>")];
+      await vi.advanceTimersByTimeAsync(12_000);
+      // Three more requests without a session, then the user.
+      for (const n of [2, 3, 4]) renders.push(pdf.renderPdf(`<p>visitor ${n}</p>`));
+      renders.push(pdf.renderPdf("<p>user</p>", { userId: "u1" }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      for (let n = 0; n < renders.length; n++) {
+        A.finishPrint();
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      await Promise.all(renders);
+
+      expect(printed(A)).toEqual(["<p>visitor 1</p>", "<p>user</p>", "<p>visitor 2</p>", "<p>visitor 3</p>", "<p>visitor 4</p>"]);
+    });
+
+    it("keeps two users apart, and a user apart from a caller without a session whatever its id spells", async () => {
+      vi.useFakeTimers();
+      const A = fakeBrowser("A");
+      A.hold = true;
+      launch.mockResolvedValueOnce(A);
+
+      // "anonymous" as a user id is still a user: it does not share the use of the callers without a session.
+      const renders = [pdf.renderPdf("<p>visitor 1</p>")];
+      await vi.advanceTimersByTimeAsync(12_000);
+      renders.push(pdf.renderPdf("<p>visitor 2</p>"), pdf.renderPdf("<p>user named anonymous</p>", { userId: "anonymous" }), pdf.renderPdf("<p>another user</p>", { userId: "u2" }));
+      await vi.advanceTimersByTimeAsync(0);
+
+      for (let n = 0; n < renders.length; n++) {
+        A.finishPrint();
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      await Promise.all(renders);
+
+      expect(printed(A)).toEqual(["<p>visitor 1</p>", "<p>user named anonymous</p>", "<p>another user</p>", "<p>visitor 2</p>"]);
+    });
+
+    it("gives a newcomer a place when one caller holds the whole queue, and tells the caller that lost it to try again", async () => {
+      const A = fakeBrowser("A");
+      A.hold = true;
+      launch.mockResolvedValueOnce(A);
+
+      const running = pdf.renderPdf("<p>running</p>");
+      const waiting = Array.from({ length: pdf.PDF_MAX_WAITING }, (_, n) => failure(pdf.renderPdf(`<p>waiting ${n}</p>`)));
+      await settle();
+      const newcomer = pdf.renderPdf("<p>newcomer</p>", { userId: "u1" });
+      await settle();
+
+      const lost = await Promise.race([waiting.at(-1)!, settle().then(() => "still waiting")]);
+      expect(lost, "the newest request of the caller that held every place made room").toBeInstanceOf(pdf.PdfBusyError);
+      expect((lost as InstanceType<PdfModule["PdfBusyError"]>).reason).toBe("place-given");
+      expect((lost as InstanceType<PdfModule["PdfBusyError"]>).retryAfter).toBe(pdf.PDF_RETRY_AFTER_SECONDS);
+      expect((lost as Error).message).toBe("PDF export is busy. Try again in a few seconds");
+      expect(warn.mock.calls, "why, and of the caller only whether it is signed in").toEqual([["[pdf] export refused: place-given, anonymous caller, 8 waiting"]]);
+
+      // The same caller's own next request finds no room and takes nobody's place.
+      const again = await failure(pdf.renderPdf("<p>again</p>"));
+      expect((again as InstanceType<PdfModule["PdfBusyError"]>).reason).toBe("queue-full");
+      expect(warn.mock.calls.at(-1)).toEqual(["[pdf] export refused: queue-full, anonymous caller, 8 waiting"]);
+
+      // The newcomer has used nothing: it prints right after the running render.
+      A.finishPrint();
+      await running;
+      await settle();
+      A.finishPrint();
+      expect(Array.from(await newcomer)).toEqual(PDF_MAGIC);
+      expect(printed(A)).toEqual(["<p>running</p>", "<p>newcomer</p>"]);
+      for (let n = 0; n < pdf.PDF_MAX_WAITING; n++) {
+        await settle();
+        A.finishPrint();
+      }
+      expect((await Promise.all(waiting.slice(0, -1))).every((error) => error === undefined), "the seven older requests all got their PDF").toBe(true);
+    });
+
+    it("says in the log that a signed-in caller was refused, and nothing that names it", async () => {
+      vi.useFakeTimers();
+      const A = fakeBrowser("A");
+      A.hold = true;
+      launch.mockResolvedValueOnce(A);
+      const userId = "user-id-that-must-not-be-logged";
+
+      const first = pdf.renderPdf("<p>first</p>", { userId });
+      await vi.advanceTimersByTimeAsync(0);
+      const waited = failure(pdf.renderPdf("<p>waiting</p>", { userId }));
+      await vi.advanceTimersByTimeAsync(pdf.PDF_QUEUE_WAIT_MS);
+
+      expect(((await waited) as InstanceType<PdfModule["PdfBusyError"]>).reason).toBe("queue-wait");
+      expect(warn.mock.calls).toEqual([["[pdf] export refused: queue-wait, signed in caller, 0 waiting"]]);
+      A.finishPrint();
+      await first;
+    });
+
+    it("logs nothing for a caller that went away while it waited", async () => {
+      const A = fakeBrowser("A");
+      A.hold = true;
+      launch.mockResolvedValueOnce(A);
+      const gone = new AbortController();
+
+      const first = pdf.renderPdf("<p>first</p>");
+      await settle();
+      const leaving = failure(pdf.renderPdf("<p>leaving</p>", { signal: gone.signal, userId: "u1" }));
+      await settle();
+      gone.abort();
+
+      expect(await leaving).toBeInstanceOf(pdf.PdfCancelledError);
+      expect(warn).not.toHaveBeenCalled();
+      A.finishPrint();
+      await first;
+    });
+
+    it("forgets use by half every minute", () => {
+      expect(pdf.PDF_USAGE_HALF_LIFE_MS).toBe(60_000);
     });
   });
 
@@ -654,6 +809,7 @@ describe("PDF renderer limits (#2290)", () => {
       A.finishPrint();
       expect(Array.from(await next)).toEqual(PDF_MAGIC);
       expect(A.close, "no browser is closed: none was in use when the limit passed").not.toHaveBeenCalled();
+      expect(warn.mock.calls, "and the log does not say one was").toEqual([["[pdf] render stopped after 60000 ms; its page was still being built, no Chromium was in use"]]);
     });
 
     it("leaves no timer behind after an ordinary render", async () => {
