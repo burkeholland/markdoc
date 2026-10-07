@@ -43,6 +43,9 @@ import { lazyOnFirstUse } from "./lazy-on-first-use";
 // Not on demand: the bar must be mounted and focused inside the Mod-F keydown, or the keys typed while
 // its chunk loads go into the document.
 import { FindBar } from "./find-bar";
+// Not on demand either: it must be on screen in the same commit that blocks the panes, and a chunk that
+// failed to load would leave a blocked page that says nothing. It is not part of the page's first paint.
+import { AccessChangedNotice } from "./access-changed-notice";
 import { usePlaceHold } from "./press-once";
 import { emptySync, useSyncPolling } from "./use-sync-polling";
 import { CODE_COLUMN_BOX, CODE_COLUMN_SPLIT, MAIN_BOX, PANE_LABEL_ROW_BOX, PANES_BOX, RICH_COLUMN_BOX, RICH_COLUMN_SPLIT, RICH_PLACEHOLDER_BOX, RICH_SCROLLER_BOX, SHELL_BOX } from "./chrome-classes";
@@ -3017,6 +3020,11 @@ export function EditorShell({
   }, []);
 
   const authError = useSessionValue(session, (s) => s.authError);
+  // The server told this page that its own access changed (#2269). The session has made the panes read-only
+  // already when it was lowered or removed; the notice says so and offers the load of the page that follows.
+  const accessChange = useSessionValue(session, (s) => s.accessChange);
+  const discardLocalCopy = useCallback(() => session.clearLocal(), [session]);
+  const leaveForDocuments = useCallback(() => router.push("/"), [router]);
   // Keep the panes covered until either the local copy or the server state is in, so a
   // document never flashes empty before its content arrives. The server has no IndexedDB
   // and renders without the overlay, so only show it after hydration to keep markup in sync.
@@ -3265,7 +3273,8 @@ export function EditorShell({
         )}
         {findCloseHold.shield}
         <FollowBanner session={session} />
-        {authError && (
+        <AccessChangedNotice change={accessChange} discardLocal={discardLocalCopy} onDocuments={leaveForDocuments} />
+        {authError && accessChange?.kind !== "removed" && (
           <div className="flex items-center justify-center gap-3 bg-red-50 px-4 py-2 text-sm text-danger dark:bg-red-950/40" role="alert">
             Could not connect to the collaboration server ({authError}).
             <button type="button" className="btn btn-sm btn-outline" onClick={() => window.location.reload()}>

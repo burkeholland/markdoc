@@ -318,14 +318,42 @@ function settle(connection: Connection<CollabContext>): void {
   if (editable) heal(connection);
 }
 
+/**
+ * The stateless message that tells a live connection its own access changed (issue #2269): the role it has
+ * now, or null when it has none any more. The open page shows it (src/editor/collab/session.ts); agents ignore it.
+ */
+export const ACCESS_CHANGED_MESSAGE = "access-changed";
+
+function tellAccessChanged(connection: Connection<CollabContext>, role: Role | null): void {
+  connection.sendStateless(JSON.stringify({ type: ACCESS_CHANGED_MESSAGE, role }));
+}
+
+/**
+ * `connected`: a page fetches its token (and is told its role then) a moment before its socket is set up. An
+ * access change that commits in between reaches no live connection, so a connection that opens with another
+ * role than its token claimed (or with none any more, `role` null) is told here, once. Equal roles say nothing.
+ */
+export function collabConnectionOpened(connection: Connection<CollabContext>, tokenRole: Role | undefined, role: Role | null): void {
+  if (tokenRole && tokenRole !== role && attached(connection)) tellAccessChanged(connection, role);
+}
+
+/**
+ * Applies the access this connection has now and, when its role really changed, tells it so: once, after the
+ * new access is in place and while its waiting messages are still held, so the page hears of the change before
+ * any of them is refused. A change that leaves the role as it was (refused, restored after a failure) says nothing.
+ */
 function applyCurrentAccess(connection: Connection<CollabContext>, current: CollabContext | null): void {
+  const live = attached(connection);
   if (!current) {
     connection.readOnly = true;
+    if (live) tellAccessChanged(connection, null);
     connection.close(UNAUTHORIZED);
     return;
   }
+  const before = (connection.context as CollabContext).role;
   connection.context = current;
   settle(connection);
+  if (live && current.role !== before) tellAccessChanged(connection, current.role);
 }
 
 /** A bound was hit: stop holding and refuse instead. {@link heal} repairs a connection that turns out to keep edit. */
