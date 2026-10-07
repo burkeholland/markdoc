@@ -213,16 +213,25 @@ export function cleanAssetName(name: string, mime: string): string {
   return hasExt ? trimmed : trimmed + ext;
 }
 
-export function validateAsset(input: { mime: string; bytes: Uint8Array }): void {
+const SVG_TYPE = "image/svg+xml";
+
+/**
+ * The type to store `bytes` under, or the refusal as an {@link AssetError}. The bytes decide what the file
+ * is: a file that is one raster type but was sent as another (a PNG saved as `photo.jpg`, which browsers
+ * show all the same) is stored as what it is, never as what it was called. SVG is different in kind, so an
+ * SVG sent as a raster type, or the reverse, is refused; so are bytes that are no allowed type at all.
+ * Whatever is SVG by its bytes is checked for scripts first, under any declared type, so that refusal names
+ * the real problem. Other markup (a web page saved under an image name) is never an allowed type.
+ */
+export function assetTypeFor(input: { mime: string; bytes: Uint8Array }): string {
   if (!ALLOWED_IMAGE_TYPES.has(input.mime)) throw new AssetError(415, "Only PNG, JPEG, GIF, WebP and SVG images can be uploaded");
   if (input.bytes.byteLength === 0) throw new AssetError(400, "The file is empty");
   if (input.bytes.byteLength > MAX_ASSET_BYTES) throw new AssetError(413, "Images must be 5 MB or smaller");
-  // The bytes decide what the file is; the declared type only has to agree with them. Whatever is SVG by its
-  // bytes is checked for scripts first, under any declared type, so that refusal names the real problem.
-  // Other markup (an HTML page saved under an image name) is never an allowed type and stops at the comparison.
   const content = detectContentType(input.bytes);
-  if (content === "image/svg+xml" && isUnsafeSvg(input.bytes)) throw new AssetError(400, "SVG images may not contain scripts or event handlers");
-  if (content !== input.mime) throw new AssetError(415, mismatchMessage(input.mime, content));
+  if (content === SVG_TYPE && isUnsafeSvg(input.bytes)) throw new AssetError(400, "SVG images may not contain scripts or event handlers");
+  if (content === input.mime) return content;
+  if (content && content !== "xml" && content !== SVG_TYPE && input.mime !== SVG_TYPE) return content;
+  throw new AssetError(415, mismatchMessage(input.mime, content));
 }
 
 export function sha256Hex(bytes: Uint8Array): string {
@@ -231,8 +240,7 @@ export function sha256Hex(bytes: Uint8Array): string {
 
 const dbStore: AssetStore = {
   async put(input) {
-    const mime = normalizeMime(input.mime);
-    validateAsset({ mime, bytes: input.bytes });
+    const mime = assetTypeFor({ mime: normalizeMime(input.mime), bytes: input.bytes });
     const db = await getDb();
     const hash = sha256Hex(input.bytes);
     const name = cleanAssetName(input.name, mime);

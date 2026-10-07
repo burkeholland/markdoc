@@ -19,7 +19,7 @@ vi.mock("@/server/activity", async (importOriginal) => {
 });
 
 const { getDb, schema } = await import("./db");
-const { putAsset, getAsset, validateAsset, detectContentType, AssetError, MAX_ASSET_BYTES, ALLOWED_IMAGE_TYPES, isUnsafeSvg, cleanAssetName, sha256Hex } = await import("./assets");
+const { putAsset, getAsset, assetTypeFor, detectContentType, AssetError, MAX_ASSET_BYTES, ALLOWED_IMAGE_TYPES, isUnsafeSvg, cleanAssetName, sha256Hex } = await import("./assets");
 const { recordActivity } = await import("./activity");
 const { POST } = await import("@/app/api/documents/[id]/assets/route");
 
@@ -209,13 +209,21 @@ describe("POST /api/documents/[id]/assets", () => {
   });
 
   // The same route serves the editor, API tokens and agents: the refusal is one JSON error they can all read.
-  it("bytes of another type than the declared one: 415 with a message that names both, nothing stored, no activity", async () => {
+  it("a raster file sent as another raster type is stored and answered as what its bytes are", async () => {
+    const res = await upload("photo.png", JPEG);
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { id: string };
+    expect(body).toEqual({ id: expect.any(String), url: `/api/assets/${body.id}`, name: "photo.png", mime: "image/jpeg", size: JPEG.byteLength, alt: "photo" });
+    expect(await getAsset(body.id)).toMatchObject({ mime: "image/jpeg", name: "photo.png" });
+  });
+
+  it("bytes that are no allowed type, or an SVG sent as a raster type: 415 with a message, nothing stored, no activity", async () => {
     const db = await getDb();
     const stored = async () => (await db.select({ id: schema.assets.id }).from(schema.assets).where(eq(schema.assets.documentId, docId))).length;
     const before = { assets: await stored(), activity: (await uploads()).length };
-    const res = await upload("photo.png", JPEG);
+    const res = await upload("drawing.png", SVG);
     expect(res.status).toBe(415);
-    expect(await res.json()).toEqual({ error: "This file was sent as PNG but its content is JPEG. Give it the matching file extension (.jpg) and upload it again" });
+    expect(await res.json()).toEqual({ error: "This file was sent as PNG but its content is SVG. Give it the matching file extension (.svg) and upload it again" });
     const text = await upload("notes.png", new TextEncoder().encode("just some notes, not an image") as Uint8Array<ArrayBuffer>);
     expect(text.status).toBe(415);
     expect(await text.json()).toEqual({ error: "This file is not a PNG image: its content does not match its type. Save it again as PNG, JPEG, GIF, WebP or SVG and upload that file" });
@@ -224,15 +232,16 @@ describe("POST /api/documents/[id]/assets", () => {
 });
 
 /**
- * Uploaded bytes must be what their declared type says (#2287). `validateAsset` is the one check behind the
- * upload route and the file import; it reads signatures and text only.
+ * The bytes decide what an uploaded file is (#2287). `assetTypeFor` is the one check behind the upload route
+ * and the file import; it reads signatures and text only, and answers the type to store.
  */
 describe("upload byte check", () => {
   const enc = (s: string) => new TextEncoder().encode(s) as Uint8Array<ArrayBuffer>;
-  const status = (mime: string, bytes: Uint8Array): number | "ok" => {
+  /** "ok" when the file is stored under the type it was sent as, the stored type when that differs, else the refusal's status. */
+  const status = (mime: string, bytes: Uint8Array): number | string => {
     try {
-      validateAsset({ mime, bytes });
-      return "ok";
+      const stored = assetTypeFor({ mime, bytes });
+      return stored === mime ? "ok" : stored;
     } catch (err) {
       if (err instanceof AssetError) return err.status;
       throw err;
@@ -240,7 +249,7 @@ describe("upload byte check", () => {
   };
   const message = (mime: string, bytes: Uint8Array): string => {
     try {
-      validateAsset({ mime, bytes });
+      assetTypeFor({ mime, bytes });
       return "";
     } catch (err) {
       return err instanceof Error ? err.message : String(err);
@@ -263,20 +272,36 @@ describe("upload byte check", () => {
     expect(status(mime, bytes)).toBe("ok");
   });
 
-  it("refuses every allowed type whose bytes are another allowed type, and says which", () => {
+  /**
+   * Every declared type against every other content. A raster file sent as another raster type (a PNG saved
+   * as photo.jpg) is taken as what its bytes are; a difference that involves SVG is refused and says which.
+   */
+  it("takes a raster file sent as another raster type as what its bytes are, and refuses a difference that involves SVG", () => {
     const types = [...ALLOWED_IMAGE_TYPES];
     expect(types.sort()).toEqual(Object.keys(IMAGE_BY_TYPE).sort());
     const label: Record<string, string> = { "image/png": "PNG", "image/jpeg": "JPEG", "image/gif": "GIF", "image/webp": "WebP", "image/svg+xml": "SVG" };
+    const taken: string[] = [];
     const refused: string[] = [];
     for (const declared of types) {
       for (const content of types) {
         if (declared === content) continue;
-        expect(status(declared, IMAGE_BY_TYPE[content]), `${content} sent as ${declared}`).toBe(415);
-        expect(message(declared, IMAGE_BY_TYPE[content])).toContain(`was sent as ${label[declared]} but its content is ${label[content]}.`);
-        refused.push(`${declared}<-${content}`);
+        const pair = `${content} sent as ${declared}`;
+        if (declared === "image/svg+xml" || content === "image/svg+xml") {
+          expect(status(declared, IMAGE_BY_TYPE[content]), pair).toBe(415);
+          expect(message(declared, IMAGE_BY_TYPE[content]), pair).toContain(`was sent as ${label[declared]} but its content is ${label[content]}.`);
+          refused.push(pair);
+        } else {
+          expect(status(declared, IMAGE_BY_TYPE[content]), pair).toBe(content);
+          taken.push(pair);
+        }
       }
     }
-    expect(refused).toHaveLength(20);
+    expect({ taken: taken.length, refused: refused.length }).toEqual({ taken: 12, refused: 8 });
+    // The other real files too: the type comes from the bytes whichever raster type they were sent as.
+    for (const declared of ["image/png", "image/jpeg", "image/gif"]) {
+      for (const bytes of [WEBP_LOSSLESS, WEBP_ANIMATED]) expect(assetTypeFor({ mime: declared, bytes })).toBe("image/webp");
+    }
+    for (const declared of ["image/png", "image/jpeg", "image/webp"]) expect(assetTypeFor({ mime: declared, bytes: GIF_ANIMATED })).toBe("image/gif");
   });
 
   it("refuses a file cut inside its header, and an empty one", () => {
@@ -389,13 +414,29 @@ describe("upload byte check", () => {
     expect(message("image/png", SVG)).toBe("This file was sent as PNG but its content is SVG. Give it the matching file extension (.svg) and upload it again");
   });
 
-  it("stores nothing for a mismatch", async () => {
+  it("stores a file under the type its bytes are, never under a declared type they contradict, and nothing for a refusal", async () => {
     const db = await getDb();
     const [user] = await db.insert(schema.users).values({ name: "Cy", login: "cy", email: "cy@example.com" }).returning();
-    await db.insert(schema.documents).values({ id: "byte-check-doc", title: "Bytes", ownerId: user.id, content: "" });
-    await expect(putAsset({ documentId: "byte-check-doc", userId: user.id, name: "a.png", mime: "image/png", bytes: GIF })).rejects.toMatchObject({ status: 415 });
-    await expect(putAsset({ documentId: "byte-check-doc", userId: user.id, name: "a.svg", mime: "image/svg+xml", bytes: PNG })).rejects.toMatchObject({ status: 415 });
-    expect(await db.select({ id: schema.assets.id }).from(schema.assets).where(eq(schema.assets.documentId, "byte-check-doc"))).toEqual([]);
+    const documentId = "byte-check-doc";
+    await db.insert(schema.documents).values({ id: documentId, title: "Bytes", ownerId: user.id, content: "" });
+    const put = (name: string, mime: string, bytes: Uint8Array) => putAsset({ documentId, userId: user.id, name, mime, bytes });
+    const rows = () => db.select({ name: schema.assets.name, mime: schema.assets.mime }).from(schema.assets).where(eq(schema.assets.documentId, documentId));
+
+    for (const refused of [put("a.png", "image/png", SVG), put("a.svg", "image/svg+xml", PNG), put("a.gif", "image/gif", enc("notes")), put("a.jpg", "image/jpeg", enc("<html></html>"))]) {
+      await expect(refused).rejects.toMatchObject({ status: 415 });
+    }
+    expect(await rows()).toEqual([]);
+
+    // The stored name stays the one the file came with; a name without an extension gets the one of the real type.
+    const png = await put("photo.jpg", "image/jpeg", PNG);
+    expect(png).toMatchObject({ mime: "image/png", name: "photo.jpg", size: PNG.byteLength });
+    expect(await getAsset(png.id)).toMatchObject({ mime: "image/png", name: "photo.jpg" });
+    expect(await put("pasted image", "image/png", JPEG)).toMatchObject({ mime: "image/jpeg", name: "pasted-image.jpg" });
+    expect(await put("anim.png", "image/png", GIF_ANIMATED)).toMatchObject({ mime: "image/gif", name: "anim.png" });
+    expect(await put("shot.gif", "image/gif", WEBP)).toMatchObject({ mime: "image/webp", name: "shot.gif" });
+    // The same bytes sent again under their own type are the same asset: one row, typed by the bytes.
+    expect((await put("photo.png", "image/png", PNG)).id).toBe(png.id);
+    expect((await rows()).map((row) => row.mime).sort()).toEqual(["image/gif", "image/jpeg", "image/png", "image/webp"]);
   });
 
   /**

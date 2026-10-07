@@ -1,7 +1,7 @@
 import { crc32 } from "node:zlib";
 
 /**
- * Small REAL image files for tests. The upload check (`validateAsset`) reads a file's own bytes, so a test
+ * Small REAL image files for tests. The upload check (`assetTypeFor`) reads a file's own bytes, so a test
  * that stores an image needs bytes of the type it declares; made-up bytes are refused. Each constant below
  * was written by an image encoder and read back by a decoder before it was pasted here. Test-only: nothing
  * in the product imports this file.

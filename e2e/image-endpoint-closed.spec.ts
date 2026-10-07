@@ -1,11 +1,11 @@
 import { test, expect } from "./fixtures";
 import type { APIRequestContext, APIResponse, Page } from "@playwright/test";
-import { GIF, JPEG, PNG, SVG, WEBP } from "../src/server/assets.fixtures";
-import { codeText, createDocument, focusRichEnd, mintToken, openDocument, signIn, uniqueLogin } from "./helpers";
+import { GIF, JPEG, PNG, SVG, WEBP, WEBP_LOSSLESS } from "../src/server/assets.fixtures";
+import { codeText, createDocument, focusRichEnd, mintToken, openDocument, signIn, uniqueLogin, waitForHydration } from "./helpers";
 
 /**
  * #2287: nothing in the app uses Next's image optimisation endpoint, so it is switched off, and an
- * uploaded file must be the image type it is sent as. This spec runs on the dev server and, with
+ * uploaded file is typed by its own bytes, not by what it was sent as. This spec runs on the dev server and, with
  * PROD_BASE_URL, on a production build (`PROD_BASE_URL=http://localhost:<port> npx playwright test
  * e2e/image-endpoint-closed.spec.ts`).
  *
@@ -14,7 +14,7 @@ import { codeText, createDocument, focusRichEnd, mintToken, openDocument, signIn
  * text would mean the optimiser is on again and only its allow-lists refused the request.)
  */
 const bytes = (data: Uint8Array) => Buffer.from(data);
-const MISMATCH = "This file was sent as PNG but its content is JPEG. Give it the matching file extension (.jpg) and upload it again";
+const MISMATCH = "This file was sent as PNG but its content is SVG. Give it the matching file extension (.svg) and upload it again";
 const NOT_AN_IMAGE = "This file is not a PNG image: its content does not match its type. Save it again as PNG, JPEG, GIF, WebP or SVG and upload that file";
 
 const optimise = (url: string, w = 640, q = 75) => `/_next/image?url=${encodeURIComponent(url)}&w=${w}&q=${q}`;
@@ -189,14 +189,31 @@ test.describe("image optimisation endpoint is closed (#2287)", () => {
       await expect.poll(() => codeText(page), { message: `${gesture.how} on ${gesture.pane}` }).toMatch(pattern);
       urls.push(pattern.exec(await codeText(page))![1]);
     }
+    // A photo saved under another raster extension (a WebP named .png) is taken as what its bytes are.
+    await focusRichEnd(page);
+    await giveFile(page, "paste", ".md-rich", { name: "wrong extension.png", type: "image/png", data: WEBP_LOSSLESS });
+    const renamed = /!\[wrong extension\]\((\/api\/assets\/[a-z0-9]+)\)/;
+    await expect.poll(() => codeText(page), { message: "paste of a WebP named .png" }).toMatch(renamed);
+    urls.push(renamed.exec(await codeText(page))![1]);
+
     await expect(page.getByTestId("image-upload-placeholder")).toHaveCount(0);
-    expect(new Set(urls).size).toBe(5);
+    expect(new Set(urls).size).toBe(6);
     for (const url of urls) await expectShown(page, ".md-rich", url);
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
 
-    // Each upload is served under the type its bytes are.
-    const served = await Promise.all(urls.map(async (url) => (await page.request.get(url)).headers()["content-type"]));
-    expect(served).toEqual(["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"]);
+    // Each upload is served under the type its bytes are; the stored name is the one the file came with.
+    const responses = await Promise.all(urls.map((url) => page.request.get(url)));
+    expect(responses.map((res) => res.headers()["content-type"])).toEqual(["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "image/webp"]);
+    expect(responses[5].headers()["content-disposition"]).toBe('inline; filename="wrong-extension.png"');
+    expect(responses[5].headers()["x-content-type-options"]).toBe("nosniff");
+    expect((await responses[5].body()).equals(bytes(WEBP_LOSSLESS))).toBe(true);
+    // The exports read the stored type: the HTML download embeds it as WebP, and the PDF renders.
+    const download = await (await page.request.get(`/api/documents/${id}/export?format=html&download=1`)).text();
+    expect(download).toContain(`<img src="data:image/webp;base64,${bytes(WEBP_LOSSLESS).toString("base64")}" alt="wrong extension">`);
+    expect(download).not.toContain("/api/assets/");
+    const pdf = await page.request.get(`/api/documents/${id}/export?format=pdf`);
+    expect(pdf.status()).toBe(200);
+    expect((await pdf.body()).subarray(0, 5).toString("latin1")).toBe("%PDF-");
 
     // The reader view shows the same images by the same URLs, to a visitor without a session too.
     expect((await page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
@@ -222,7 +239,7 @@ test.describe("image optimisation endpoint is closed (#2287)", () => {
     await owner.context.close();
   });
 
-  test("an upload whose bytes are not its type is refused with a message, by button, paste, drop, import and API token; the document stays usable", async ({ browser }) => {
+  test("an upload that is no image, or an SVG sent as another type, is refused with a message, by button, paste, drop, import and API token; the document stays usable", async ({ browser }) => {
     const owner = await signIn(browser, uniqueLogin("img-refused"));
     const { page } = owner;
     const id = await createDocument(page, "Refusals\n\nCode drop line\n", "Refusals");
@@ -232,11 +249,11 @@ test.describe("image optimisation endpoint is closed (#2287)", () => {
     // Button: the dialog names the problem and keeps its URL field empty.
     await focusRichEnd(page);
     await page.getByTestId("tb-image").click();
-    await page.getByTestId("image-file").setInputFiles({ name: "photo.png", mimeType: "image/png", buffer: bytes(JPEG) });
+    await page.getByTestId("image-file").setInputFiles({ name: "drawing.png", mimeType: "image/png", buffer: bytes(SVG) });
     await expect(page.getByTestId("image-upload-error")).toHaveText(MISMATCH);
     await expect(page.getByTestId("image-url")).toHaveValue("");
     // The same dialog takes the right file straight away.
-    await page.getByTestId("image-file").setInputFiles({ name: "photo.jpg", mimeType: "image/jpeg", buffer: bytes(JPEG) });
+    await page.getByTestId("image-file").setInputFiles({ name: "drawing.svg", mimeType: "image/svg+xml", buffer: bytes(SVG) });
     await expect(page.getByTestId("image-url")).toHaveValue(/^\/api\/assets\/[a-z0-9]+$/);
     await expect(page.getByTestId("image-upload-error")).toHaveCount(0);
     await page.keyboard.press("Escape");
@@ -249,7 +266,7 @@ test.describe("image optimisation endpoint is closed (#2287)", () => {
     await expect(page.getByTestId("image-upload-placeholder")).toHaveCount(0);
     await page.locator(".cm-content").click();
     await page.keyboard.press("Control+End");
-    await giveFile(page, "drop", ".cm-content", { name: "photo.png", type: "image/png", data: JPEG, dropOn: "Code drop line" });
+    await giveFile(page, "drop", ".cm-content", { name: "drawing.png", type: "image/png", data: SVG, dropOn: "Code drop line" });
     await expect(page.getByTestId("toast").filter({ hasText: `Image upload failed: ${MISMATCH}` })).toBeVisible();
     expect(await codeText(page)).not.toContain("/api/assets/");
 
@@ -267,9 +284,10 @@ test.describe("image optimisation endpoint is closed (#2287)", () => {
     try {
       const before = (await codeText(page)).length;
       const attempts: [label: string, res: APIResponse, error: string][] = [
-        ["raw body, session", await page.request.post(`/api/documents/${id}/assets?name=a.png`, { headers: { "Content-Type": "image/png" }, data: bytes(JPEG) }), MISMATCH],
-        ["multipart, session", await page.request.post(`/api/documents/${id}/assets`, { multipart: { file: { name: "a.png", mimeType: "image/png", buffer: bytes(JPEG) } } }), MISMATCH],
-        ["raw body, token", await anonymous.request.post(`/api/documents/${id}/assets?name=a.png`, { headers: { "Content-Type": "image/png", Authorization: `Bearer ${token.token}` }, data: bytes(JPEG) }), MISMATCH],
+        ["raw body, session", await page.request.post(`/api/documents/${id}/assets?name=a.png`, { headers: { "Content-Type": "image/png" }, data: bytes(SVG) }), MISMATCH],
+        ["multipart, session", await page.request.post(`/api/documents/${id}/assets`, { multipart: { file: { name: "a.png", mimeType: "image/png", buffer: bytes(SVG) } } }), MISMATCH],
+        ["raw body, token", await anonymous.request.post(`/api/documents/${id}/assets?name=a.png`, { headers: { "Content-Type": "image/png", Authorization: `Bearer ${token.token}` }, data: bytes(SVG) }), MISMATCH],
+        ["PNG as SVG, token", await anonymous.request.post(`/api/documents/${id}/assets?name=a.svg`, { headers: { "Content-Type": "image/svg+xml", Authorization: `Bearer ${token.token}` }, data: bytes(PNG) }), "This file was sent as SVG but its content is PNG. Give it the matching file extension (.png) and upload it again"],
         ["text as PNG, token", await anonymous.request.post(`/api/documents/${id}/assets?name=n.png`, { headers: { "Content-Type": "image/png", Authorization: `Bearer ${token.token}` }, data: Buffer.from(notAnImage) }), NOT_AN_IMAGE],
       ];
       for (const [label, res, error] of attempts) {
@@ -282,22 +300,26 @@ test.describe("image optimisation endpoint is closed (#2287)", () => {
       });
       expect(scripted.status()).toBe(400);
       expect(await scripted.json()).toEqual({ error: "SVG images may not contain scripts or event handlers" });
-      const ok = await anonymous.request.post(`/api/documents/${id}/assets?name=ok.webp`, { headers: { "Content-Type": "image/webp", Authorization: `Bearer ${token.token}` }, data: bytes(WEBP) });
+      // A raster file under another raster type is not a refusal: the answer says what it was stored as.
+      const ok = await anonymous.request.post(`/api/documents/${id}/assets?name=photo.png`, { headers: { "Content-Type": "image/png", Authorization: `Bearer ${token.token}` }, data: bytes(WEBP) });
       expect(ok.status()).toBe(201);
+      expect(await ok.json()).toMatchObject({ name: "photo.png", mime: "image/webp", size: WEBP.byteLength });
       expect((await codeText(page)).length).toBe(before);
     } finally {
       await token.revoke();
       await anonymous.close();
     }
 
-    // Import: the documents are created, the refused image is named with the reason and its link is left as written.
+    // Import: the documents are created, the refused image is named with the reason and its link is left as
+    // written; an image with the wrong raster extension (a PNG named .jpg) comes in as what it is.
     await page.goto("/");
+    await waitForHydration(page);
     await expect(page.getByTestId("open-file")).toBeVisible();
     await page.getByTestId("import-file-input").setInputFiles([
-      { name: "trip.md", mimeType: "text/markdown", buffer: Buffer.from("# Trip\n\n![Beach](beach.png)\n\n![Hill](hill.png)\n") },
+      { name: "trip.md", mimeType: "text/markdown", buffer: Buffer.from("# Trip\n\n![Beach](beach.png)\n\n![Hill](hill.jpg)\n") },
       { name: "packing.md", mimeType: "text/markdown", buffer: Buffer.from("# Packing\n\nSocks.\n") },
-      { name: "beach.png", mimeType: "image/png", buffer: bytes(JPEG) },
-      { name: "hill.png", mimeType: "image/png", buffer: bytes(PNG) },
+      { name: "beach.png", mimeType: "image/png", buffer: bytes(SVG) },
+      { name: "hill.jpg", mimeType: "image/jpeg", buffer: bytes(PNG) },
     ]);
     // The import route compiles on its first use on the dev server.
     await expect(page.getByTestId("import-item")).toHaveCount(2, { timeout: 60_000 });
@@ -308,7 +330,10 @@ test.describe("image optimisation endpoint is closed (#2287)", () => {
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
     const imported = await codeText(page);
     expect(imported).toContain("![Beach](beach.png)");
-    expect(imported).toMatch(/!\[Hill\]\(\/api\/assets\/[a-z0-9]+\)/);
+    const hill = /!\[Hill\]\((\/api\/assets\/[a-z0-9]+)\)/.exec(imported);
+    expect(hill).not.toBeNull();
+    await expectShown(page, ".md-rich", hill![1]);
+    expect((await page.request.get(hill![1])).headers()["content-type"]).toBe("image/png");
     await owner.context.close();
   });
 });
