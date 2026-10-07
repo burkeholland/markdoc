@@ -295,6 +295,30 @@ export function isAccessRefusal(err: unknown): boolean {
   return status === 401 || status === 403 || status === 404;
 }
 
+/** What a token fetch answers: the token alone, or the token with the role the server holds at that moment. */
+export type CollabTokenGrant = string | { token: string; role?: Role };
+
+/**
+ * What the server has said about this page's own access since the page was built (issue #2269). The page
+ * keeps the role it was built with; this is shown to the person, who reloads to get a page for the new role.
+ */
+export interface AccessChange {
+  /** The role the server holds now, or null when access is gone. Always the newest one. */
+  role: Role | null;
+  /**
+   * `lowered` and `removed` block the page until it is loaded again, whatever comes later (`lowered` keeps
+   * blocking when the role goes up again, `removed` is final). `raised` blocks nothing.
+   */
+  kind: "lowered" | "removed" | "raised";
+  /** Changes made on this page that the server has not accepted and, with this role, never will. */
+  unsaved: boolean;
+}
+
+/** The server's refusal reason on a document-level close (see `UNAUTHORIZED` in src/server/collab/authorization.ts). */
+const ACCESS_REFUSED_REASON = "Unauthorized";
+const ACCESS_RANK: Record<Role, number> = { viewer: 0, commenter: 1, editor: 2, owner: 2 };
+const isRole = (value: unknown): value is Role => typeof value === "string" && Object.hasOwn(ACCESS_RANK, value);
+
 export interface FindState {
   query: string;
   options: FindOptions;
@@ -331,8 +355,8 @@ export interface CollabSessionOptions {
   docId: string;
   user: CollabUser;
   role: Role;
-  /** Returns a fresh collaboration token. */
-  getToken: () => Promise<string>;
+  /** Returns a fresh collaboration token, with the role the server holds now when the caller knows it. */
+  getToken: () => Promise<CollabTokenGrant>;
   wsUrl?: string;
   /**
    * Do not open the IndexedDB copy in the constructor; the owner calls
@@ -383,6 +407,10 @@ export class CollabSession {
   authError: string | null = null;
   /** Set when the server told us the document was moved to the trash; the editor navigates away. */
   trashed = false;
+  /** Set when the server told this page that its own access changed; the editor shell shows it. */
+  accessChange: AccessChange | null = null;
+  /** Unacknowledged local changes when the current connection began, read before the handshake resets the count. */
+  private unsentAtConnect = 0;
   unsyncedChanges = 0;
   /** Whether the locally persisted (IndexedDB) state has been applied; true at once when unavailable. */
   localLoaded = false;
@@ -510,10 +538,15 @@ export class CollabSession {
         const prefetched = this.tokenPrefetch;
         this.tokenPrefetch = null;
         try {
-          const token = prefetched ? await prefetched : await options.getToken();
+          const granted = prefetched ? await prefetched : await options.getToken();
+          const grant = typeof granted === "string" ? { token: granted } : granted;
           perfMark("markdoc:token");
           this.tokenFailure = null;
-          return token;
+          // The handshake that follows restarts the count; what was unsent before it is known only now.
+          this.unsentAtConnect = this.unsyncedChanges;
+          // A change made while this page had no connection: the token route knows the role of this moment.
+          if (isRole(grant.role)) this.learnAccess(grant.role);
+          return grant.token;
         } catch (err) {
           // The provider reports a failed fetch as an authentication failure; remember why so
           // `onAuthenticationFailed` can tell a refusal from a server that is not answering yet.
@@ -579,6 +612,9 @@ export class CollabSession {
         this.authError = reason;
         // Access was refused: do not keep a copy of the document on this device.
         void this.clearLocal();
+        // The server answered that this person may not have the document (not merely that nobody is signed in).
+        const status = (failure as { status?: unknown } | null)?.status;
+        if (status === 403 || status === 404) this.learnAccess(null);
         this.notify();
       },
       onAuthenticated: () => {
@@ -595,6 +631,11 @@ export class CollabSession {
           this.armProlongedOffline();
         }
         if (number === 0 && this.synced) perfMark("markdoc:sync-acked");
+        // Nothing is left unacknowledged on a synced connection: the server has all of it after all.
+        if (number === 0 && this.synced && this.unsentWhenBlocked) {
+          this.unsentWhenBlocked = false;
+          if (this.accessChange?.unsaved) this.accessChange = { ...this.accessChange, unsaved: false };
+        }
         this.updateRecovery();
         this.notifyAfterPaint(number > 0);
       },
@@ -603,9 +644,9 @@ export class CollabSession {
         this.notifyAfterPaint();
       },
       onStateless: ({ payload }) => {
-        let message: { type?: string } | null = null;
+        let message: { type?: string; role?: unknown } | null = null;
         try {
-          message = JSON.parse(payload) as { type?: string };
+          message = JSON.parse(payload) as { type?: string; role?: unknown };
         } catch {
           return;
         }
@@ -613,11 +654,25 @@ export class CollabSession {
           this.persistence.receive(message as PersistenceMessage);
           return;
         }
+        if (message?.type === "access-changed") {
+          // Anything but a role or null is not this message; nothing is blocked or deleted for it.
+          if (message.role === null || isRole(message.role)) this.learnAccess(message.role);
+          return;
+        }
         if (message?.type !== "trashed" || this.trashed) return;
         this.trashed = true;
         // Stop reconnecting: the server will refuse a token for a trashed document anyway.
         this.provider.disconnect();
         this.notify();
+      },
+      onClose: ({ event }) => {
+        // The server closed this document with its refusal reason while the socket stays open (code 1000 is
+        // what the provider gives such a close message). A socket that itself closes, whatever its code or
+        // reason (a network drop, a server restart, a missed sign-in deadline), is an outage, not a refusal.
+        const close = event as { code?: unknown; reason?: unknown; target?: unknown } | undefined;
+        if (close?.code !== 1000 || close.reason !== ACCESS_REFUSED_REASON || close.target) return;
+        if (options.preserveLocalOnAuthFailure) return;
+        this.learnAccess(null);
       },
     });
     this.awareness = this.provider.awareness!;
@@ -720,7 +775,7 @@ export class CollabSession {
    * the server through `forceSync` (see collab/provider.ts).
    */
   private restartConnection(why: string) {
-    if (this.destroyed || this.trashed || this.authError || !this.connectRequested || !this.localLoaded) return;
+    if (this.destroyed || this.trashed || this.authError || this.accessChange?.kind === "removed" || !this.connectRequested || !this.localLoaded) return;
     const socket = this.provider.configuration?.websocketProvider;
     if (!socket || typeof socket.connect !== "function") return;
     if (process.env.NODE_ENV !== "production") console.info(`[markdoc] reconnecting collaboration socket (${why})`);
@@ -780,9 +835,47 @@ export class CollabSession {
   }
 
   /** Token fetched by {@link connect}, consumed by the provider on the first socket open. */
-  private tokenPrefetch: Promise<string> | null = null;
+  private tokenPrefetch: Promise<CollabTokenGrant> | null = null;
+
+  /**
+   * The server holds `role` for this page now (null: none). Recorded when it differs from what the page
+   * shows, and never switched in place: a lowered page stops editing at once (see {@link canEdit}) and stays
+   * blocked until it is loaded again, a raised one only offers the reload.
+   */
+  private learnAccess(role: Role | null) {
+    const current = this.accessChange;
+    if (this.destroyed || current?.kind === "removed") return;
+    if (role === (current ? current.role : this.role)) return;
+    const blocked = current?.kind === "lowered";
+    const kind = role === null ? "removed" : blocked || ACCESS_RANK[role] < ACCESS_RANK[this.role] ? "lowered" : ACCESS_RANK[role] > ACCESS_RANK[this.role] ? "raised" : null;
+    // Counted once, when the page is first blocked: on a synced connection every change still unacknowledged
+    // was sent after the server's last acceptance; before the handshake, what was unsent when it began.
+    if (kind && kind !== "raised" && !blocked) this.unsentWhenBlocked = this.synced ? this.unsyncedChanges > 0 : this.unsentAtConnect > 0;
+    // Back at the role the page was built with, and nothing was blocked: nothing to say any more.
+    this.accessChange = kind ? { role, kind, unsaved: this.unsavedFor(role, kind) } : null;
+    // The browser's own Undo and Redo work on the whole page, whatever has focus and however inert the panes
+    // are: the code pane's binding answers them straight from the undo manager. A blocked page has no steps.
+    if (this.accessBlocked) this.undoManager.clear();
+    // Nothing more can come for this document, and a token would be refused: stop reconnecting.
+    if (kind === "removed") this.provider.disconnect();
+    this.notify();
+  }
+
+  /** Unsent changes existed when the page was blocked, and no acknowledgement has cleared them since. */
+  private unsentWhenBlocked = false;
+
+  /** With a role that may edit again the server takes the changes after all (it asks for them, see `heal` in the server's authorization.ts). */
+  private unsavedFor(role: Role | null, kind: AccessChange["kind"]): boolean {
+    return kind !== "raised" && this.unsentWhenBlocked && !(role === "editor" || role === "owner");
+  }
+
+  /** The server lowered or removed this page's access: nothing on it may be used until it is loaded again. */
+  get accessBlocked(): boolean {
+    return this.accessChange !== null && this.accessChange.kind !== "raised";
+  }
 
   get canEdit(): boolean {
+    if (this.accessBlocked) return false;
     return (this.role === "owner" || this.role === "editor") && this.mode !== "viewing";
   }
 
@@ -796,7 +889,7 @@ export class CollabSession {
   }
 
   get saveState(): SaveState {
-    if (this.authError) return "error";
+    if (this.authError || this.accessChange?.kind === "removed") return "error";
     if (this.status === "connecting") return this.everConnected ? "reconnecting" : "connecting";
     if (this.status !== "connected") return "offline";
     if (!this.synced) return "saving";
@@ -922,6 +1015,7 @@ export class CollabSession {
   }
 
   setTitle(title: string) {
+    if (this.accessBlocked) return;
     this.ydoc.transact(() => this.meta.set("title", title), COMMENTS_ORIGIN);
   }
 
@@ -973,6 +1067,7 @@ export class CollabSession {
 
   /** Text and annotation decisions share one history step, isolated from nearby typing. */
   reviewSuggestion(action: "accept" | "reject" | "acceptAll" | "rejectAll", id?: string): number {
+    if (this.accessBlocked) return 0;
     this.undoManager.stopCapturing();
     try {
       if (action === "acceptAll" || action === "rejectAll") return this.suggestions[action]();
@@ -1247,6 +1342,7 @@ export class CollabSession {
 
   /** Accept a root or reply suggestion as one text-and-comment undo step. */
   acceptCommentSuggestion(threadId: string, proposed: string, replyId?: string): boolean {
+    if (this.accessBlocked) return false;
     const target: CommentSuggestionTarget = replyId ? { kind: "reply", replyId } : { kind: "root" };
     const before = this.comments.snapshotSuggestion(threadId, target);
     if (!before) return false;
@@ -1325,7 +1421,10 @@ export class CollabSession {
   // last *edit*, and undo/redo do not reset that clock: an edit typed right after an undo would be
   // folded into the step below the one just undone, so the next undo removed both (task #437).
   // Closing the capture window makes whatever comes after an undo/redo its own step.
+  // Neither does anything on a page whose access was lowered or removed (#2269): an accepted comment
+  // suggestion is undone from the document itself, with no step on the stack.
   undo() {
+    if (this.accessBlocked) return;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.undoStack, "applied");
     if (this.undoManager.canUndo()) this.undoManager.undo();
     else this.replayCommentSuggestionTransition("applied");
@@ -1333,6 +1432,7 @@ export class CollabSession {
   }
 
   redo() {
+    if (this.accessBlocked) return;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.redoStack, "undone");
     const stored = this.readStoredCommentSuggestionTransition();
     const hasMatchingTransient =

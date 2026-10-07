@@ -11,6 +11,7 @@ import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import { collabTokenFailureMessage, isVerifiedCollabClaims, verifyCollabToken, type CollabClaims, type VerifiedCollabClaims } from "./token";
 import { canEdit } from "@/server/documents";
+import type { Role } from "@/server/db/schema";
 import { addVersion, latestVersion } from "@/server/documents";
 import { watchDocumentNotifications } from "@/server/notifications";
 import { startActivityWatch, stopActivityWatch } from "@/server/activity";
@@ -20,6 +21,7 @@ import { documentStoreSnapshot, installDocumentAutosave } from "./autosave";
 import { hydrateDoc, revertDoubledSeed, META_KEY, TEXT_KEY } from "./seed";
 import { installOriginAwareBroadcast } from "./broadcast";
 import {
+  collabConnectionOpened,
   collabMessageBegins,
   collabMessageEnds,
   collabSyncReceived,
@@ -38,6 +40,8 @@ export type CollabContext = CollabClaims & {
   version?: 2;
   principal?: "user" | "token";
   preAuthentication?: CollabPreAuthentication;
+  /** The role the token claimed: what the page was told when it fetched the token (see `collabConnectionOpened`). */
+  tokenRole?: Role;
 };
 
 /** Interval after which a new automatic version snapshot is taken while editing. */
@@ -100,7 +104,7 @@ export function createCollabServer() {
         if (!current) throw unauthorizedCollabError();
         if (context.preAuthentication && !context.preAuthentication.accepted()) throw unauthorizedCollabError();
         connectionConfig.readOnly = !canEdit(current.role);
-        return current;
+        return { ...current, tokenRole: claims.role };
       } catch (error) {
         context.preAuthentication?.rejected();
         throw error;
@@ -112,6 +116,7 @@ export function createCollabServer() {
     async connected({ connection, context }: connectedPayload<CollabContext>) {
       // Seal the small race between authentication and adding the connection to the live document:
       // a concurrent share change either sees this connection or this hook waits for that change.
+      const { tokenRole } = context;
       if (!isVerifiedCollabClaims(context)) {
         connection.readOnly = true;
         connection.close({ code: 4401, reason: "Unauthorized" });
@@ -120,11 +125,13 @@ export function createCollabServer() {
       const current = await resolveStableCollabAccess(context);
       if (!current) {
         connection.readOnly = true;
+        collabConnectionOpened(connection, tokenRole, null);
         connection.close({ code: 4401, reason: "Unauthorized" });
         return;
       }
       connection.context = current;
       connection.readOnly = !canEdit(current.role);
+      collabConnectionOpened(connection, tokenRole, current.role);
       armTokenExpiry(connection, current.tokenExpiresAt);
     },
 

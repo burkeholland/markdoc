@@ -37,6 +37,9 @@ vi.mock("@hocuspocus/provider", async () => {
     destroy() {
       this.awareness.destroy();
     }
+    disconnect() {
+      this.configuration.websocketProvider.disconnect();
+    }
   }
   return { HocuspocusProvider };
 });
@@ -178,6 +181,8 @@ describe("CollabSession reconnect across a server restart (#190)", () => {
     expect(session.authError).toMatch(/Forbidden/);
     expect(session.saveState).toBe("error");
     expect(clearLocal).toHaveBeenCalledTimes(1);
+    // The server answered that this person may not have the document: the page says so (#2269).
+    expect(session.accessChange).toEqual({ role: null, kind: "removed", unsaved: false });
     session.destroy();
 
     const other = makeSession();
@@ -185,7 +190,23 @@ describe("CollabSession reconnect across a server restart (#190)", () => {
     lastProvider().opts.onAuthenticationFailed({ reason: "permission-denied" });
     expect(other.authError).toBe("permission-denied");
     expect(clearOther).toHaveBeenCalledTimes(1);
+    // A token the collaboration server did not take is not an answer about the person's access.
+    expect(other.accessChange).toBeNull();
     other.destroy();
+  });
+
+  it("a refused token that only says nobody is signed in (401) is not shown as lost access", async () => {
+    const signedOut = Object.assign(new Error("Sign in required"), { status: 401 });
+    const session = makeSession(async () => {
+      throw signedOut;
+    });
+    vi.spyOn(session, "clearLocal").mockResolvedValue();
+    const p = lastProvider();
+    await expect(p.opts.token()).rejects.toBe(signedOut);
+    p.opts.onAuthenticationFailed({ reason: "Failed to get token during sendToken(): Error: Sign in required" });
+    expect(session.authError).toMatch(/Sign in required/);
+    expect(session.accessChange).toBeNull();
+    session.destroy();
   });
 
   it("retains local canvas edits and reconnects when an expired embed session returns 401", async () => {

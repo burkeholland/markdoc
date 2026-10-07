@@ -18,7 +18,7 @@ vi.mock("@/editor/collab/session", () => ({
     }
   },
 }));
-vi.mock("@/lib/api", () => ({ api: { documents: { collabToken: vi.fn(async (docId: string) => ({ token: `local-test-${docId}` })) } } }));
+vi.mock("@/lib/api", () => ({ api: { documents: { collabToken: vi.fn(async (docId: string) => ({ token: `local-test-${docId}`, role: "editor" })) } } }));
 
 const user = { id: "alice", name: "Alice", login: "alice", image: null };
 
@@ -37,8 +37,9 @@ describe("collaboration session identity and pending-save lifecycle", () => {
     expect(second.docId).toBe("b");
     expect(first.scheduleDestroy).toHaveBeenCalledOnce();
     expect(second.connect).toHaveBeenCalledOnce();
-    expect(await second.options.getToken()).toBe("local-test-b");
-    expect(await first.options.getToken()).toBe("local-test-a");
+    // The token goes to the session together with the role the server holds at that moment (#2269).
+    expect(await second.options.getToken()).toEqual({ token: "local-test-b", role: "editor" });
+    expect(await first.options.getToken()).toEqual({ token: "local-test-a", role: "editor" });
     unmount();
     expect(second.scheduleDestroy).toHaveBeenCalledOnce();
   });

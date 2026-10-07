@@ -22,7 +22,8 @@ export function useCollabSession(docId: string, user: EditorUser, role: Role, em
       docId,
       user: makeCollabUser(user.id, user.name, user.image, user.login),
       role,
-      getToken: async () => (await api.documents.collabToken(docId)).token,
+      // With the role the server holds at this moment: the session compares it with the role this page was built with.
+      getToken: () => api.documents.collabToken(docId),
       deferLocal: true,
       autoConnect: false,
       preserveLocalOnAuthFailure: embed,

@@ -191,30 +191,39 @@ test.describe("an access change while the person types (#2281)", () => {
     });
   }
 
-  test("lowered to Viewer and given edit back: nothing is accepted meanwhile, then what they typed arrives and their page ends at Saved", async ({ browser }) => {
+  test("lowered to Viewer while typing and given edit back: nothing is accepted meanwhile, then the keys their page had taken arrive, and after a reload their page ends at Saved", async ({ browser }) => {
     const s = await scene(browser, { link: "edit", row: null });
-    await s.person.page.locator(".cm-content").click();
-    await s.person.page.keyboard.press("Control+End");
-    await s.person.page.keyboard.press("Enter");
-    await s.person.page.keyboard.type(`before${s.tag}`);
-    await expect.poll(() => liveText(s.owner.page, s.id)).toContain(`before${s.tag}`);
-
+    const burst = `${s.tag}${BURST}`;
     // A plain add as Viewer: the row wins over the link, so the person is a real Viewer now.
-    expect((await s.owner.page.request.post(collaborators(s.id), { data: { login: s.person.login, role: "viewer" } })).status()).toBe(200);
-    const lowered = `lowered${s.tag}typedasaviewer`;
-    await s.person.page.keyboard.press("Enter");
-    await s.person.page.keyboard.type(lowered);
-    const marker = await ownerMarker(s);
-    expect(await liveText(s.owner.page, s.id)).not.toContain(lowered);
-    expect(await codeText(s.owner.page)).not.toContain(lowered);
+    const { stamps, change } = await typeThrough(s.person.page, burst, async () =>
+      (await s.owner.page.request.post(collaborators(s.id), { data: { login: s.person.login, role: "viewer" } })).status(),
+    );
 
-    // Edit comes back (the row is removed, the link gives edit): what they typed arrives with no reload.
+    // The page is told that it was lowered and takes no more keys (#2269). What it took before that is in
+    // its own copy; the keys that waited on the server while the change ran were refused.
+    await expect(s.person.page.getByTestId("access-changed-dialog")).toBeVisible();
+    const taken = prefixIn(await codeText(s.person.page), burst);
+    const marker = await ownerMarker(s);
+    const accepted = prefixIn(await liveText(s.owner.page, s.id), burst);
+    expect(prefixIn(await codeText(s.owner.page), burst)).toBe(accepted);
+    expect(accepted, "no key sent after the change was answered is in the document").toBeLessThanOrEqual(stamps.findIndex((at) => at > change.answered));
+    expect(taken - accepted, "keys the page had taken that the server refused while the person was a Viewer").toBeGreaterThan(0);
+
+    // Edit comes back (the row is removed, the link gives edit): the refused keys arrive with no reload.
     expect((await s.owner.page.request.delete(collaborators(s.id), { data: { login: s.person.login } })).status()).toBe(200);
-    await expect.poll(() => liveText(s.owner.page, s.id)).toContain(lowered);
-    await expect.poll(() => codeText(s.owner.page)).toContain(lowered);
+    await expect.poll(async () => prefixIn(await liveText(s.owner.page, s.id), burst)).toBe(taken);
+    await expect.poll(async () => prefixIn(await codeText(s.owner.page), burst)).toBe(taken);
     await saved(s.person.page);
 
+    // The page stays blocked until it is loaded again. Then the person edits, and saving goes on.
+    const reload = s.person.page.getByTestId("access-changed-action");
+    await expect(reload).toHaveAttribute("data-armed", "true");
+    await Promise.all([s.person.page.waitForEvent("load"), reload.click()]);
+    await expect(s.person.page.getByTestId("access-changed-dialog")).toHaveCount(0);
+    await saved(s.person.page);
     const after = `after${s.tag}editisback`;
+    await s.person.page.locator(".cm-content").click();
+    await s.person.page.keyboard.press("Control+End");
     await s.person.page.keyboard.press("Enter");
     await s.person.page.keyboard.type(after);
     await expect.poll(() => codeText(s.owner.page)).toContain(after);
@@ -226,6 +235,6 @@ test.describe("an access change while the person types (#2281)", () => {
     await openDocument(fresh.page, s.id);
     const stored = await codeText(fresh.page);
     expect(stored).toBe(await codeText(s.person.page));
-    for (const part of [`before${s.tag}`, lowered, after, marker]) expect(stored).toContain(part);
+    for (const part of [burst.slice(0, taken), after, marker]) expect(stored).toContain(part);
   });
 });
