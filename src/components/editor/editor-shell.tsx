@@ -2901,6 +2901,8 @@ export function EditorShell({
   // Global shortcuts that are not editor-specific.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Under the access-changed dialog nothing of the page is in use (#2269).
+      if (session.accessBlocked) return;
       const mod = e.metaKey || e.ctrlKey;
       // Option-letter on macOS reports a symbol in `key`; fall back to the physical key there.
       const key = isMac && e.altKey && /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
@@ -2936,14 +2938,14 @@ export function EditorShell({
   // editors' own Mod-K (Link) binding; with a selection the event falls through to them.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (paletteOpen || !isPaletteShortcut(e)) return;
+      if (paletteOpen || session.accessBlocked || !isPaletteShortcut(e)) return;
       e.preventDefault();
       e.stopPropagation();
       setPaletteOpen(true);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [paletteOpen]);
+  }, [paletteOpen, session]);
 
   const canChangeMode = role === "owner" || role === "editor";
   const paletteCtx: EditorCommandContext = {

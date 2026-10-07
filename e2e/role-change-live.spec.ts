@@ -694,6 +694,19 @@ test.describe("a person's access changes while the document is open (#2269)", ()
       await expect(page.getByRole("menu")).toHaveCount(0);
     });
 
+    test("the page's own shortcuts open nothing over the dialog", async ({ browser }) => {
+      const s = await scene(browser);
+      const { page } = s.person;
+      await page.locator(".cm-content").click();
+      await setRole(s, "viewer");
+      await expectBlocked(page, LOWERED("Viewer"), { unsaved: false });
+      for (const chord of ["Control+Shift+p", "Control+k", "Control+/", "Control+f", "Control+h", "Control+Alt+m", "Control+s"]) await page.keyboard.press(chord);
+      await expectOnTop(page);
+      await expect(page.getByRole("dialog")).toHaveCount(1);
+      for (const id of ["palette-input", "find-bar", "comment-composer", "toast"]) await expect(page.getByTestId(id), id).toHaveCount(0);
+      expect(await sameLoad(page)).toBe(true);
+    });
+
     test("the Share dialog: the access dialog is on top of it", async ({ browser }) => {
       const s = await scene(browser);
       const { page } = s.person;

@@ -860,8 +860,13 @@ export class CollabSession {
     return kind !== "raised" && this.unsentWhenBlocked && !(role === "editor" || role === "owner");
   }
 
+  /** The server lowered or removed this page's access: nothing on it may be used until it is loaded again. */
+  get accessBlocked(): boolean {
+    return this.accessChange !== null && this.accessChange.kind !== "raised";
+  }
+
   get canEdit(): boolean {
-    if (this.accessChange && this.accessChange.kind !== "raised") return false;
+    if (this.accessBlocked) return false;
     return (this.role === "owner" || this.role === "editor") && this.mode !== "viewing";
   }
 
