@@ -150,23 +150,28 @@ const STARTING_UPGRADE_ANSWER = "HTTP/1.1 503 Service Unavailable\r\nConnection:
 /**
  * Websocket clients that leave, from the first moment the port listens: one upgrade request every
  * 10 ms, taking turns to (0) reset the connection once the answer arrived, (1) reset it right after
- * sending, (2) close it right after sending, (3) wait for the whole answer. `stop()` ends the stream
- * of new clients and drops the ones still open.
+ * sending, (2) close it right after sending, (3) wait for the whole answer. Four in a row ask for the
+ * collaboration path, the next four for another path: the start-up answer is the same for every path.
+ * `stop()` ends the stream of new clients and drops the ones still open.
  */
 function leavingWebSocketClients(port: number) {
-  const seen = { answered: 0, resetAfterAnswer: 0, resetAtOnce: 0, closedAtOnce: 0, patientAnswers: [] as string[] };
+  const seen = { answered: 0, resetAfterAnswer: 0, resetAtOnce: 0, closedAtOnce: 0, otherPathLeft: 0, patientAnswers: [] as string[] };
   const open = new Set<net.Socket>();
   let turn = 0;
   const timer = setInterval(() => {
-    const kind = turn++ % 4;
+    const n = turn++;
+    const kind = n % 4;
+    const otherPath = n % 8 >= 4;
     let received = "";
     const socket = net.connect({ host: "127.0.0.1", port }, () => {
-      socket.write(`GET /collab HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`);
+      socket.write(`GET ${otherPath ? "/_next/webpack-hmr" : "/collab"} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`);
       if (kind === 1) {
         seen.resetAtOnce += 1;
+        if (otherPath) seen.otherPathLeft += 1;
         setImmediate(() => socket.resetAndDestroy());
       } else if (kind === 2) {
         seen.closedAtOnce += 1;
+        if (otherPath) seen.otherPathLeft += 1;
         setImmediate(() => socket.destroy());
       }
     });
@@ -229,6 +234,7 @@ describe("custom development server startup", () => {
       expect(seen.answered).toBeGreaterThan(0);
       expect(seen.resetAfterAnswer).toBeGreaterThan(0);
       expect(seen.resetAtOnce + seen.closedAtOnce).toBeGreaterThan(0);
+      expect(seen.otherPathLeft).toBeGreaterThan(0);
       expect(seen.patientAnswers.length).toBeGreaterThan(0);
       for (const answer of seen.patientAnswers) expect(answer).toBe(STARTING_UPGRADE_ANSWER);
     });

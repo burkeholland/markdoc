@@ -93,3 +93,24 @@ export function attachUpgradeErrorGuard(req: Pick<IncomingMessage, "method" | "u
     if (!isClientGone(err)) write(formatStreamErrorLine("upgrade", req, err));
   });
 }
+
+/** The answer to a websocket upgrade whose request target or Host header cannot be parsed into a URL. */
+export const UNPARSEABLE_UPGRADE_ANSWER = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+
+/** Stands where the route shape would be in the line for such an upgrade: a fixed word, never a part of the request. */
+export const UNPARSEABLE_UPGRADE_SHAPE = ":unparseable";
+
+/**
+ * Answers a websocket upgrade whose request target or Host header cannot be parsed (issue #2321): the
+ * guard first, then one `[http] upgrade error <METHOD> :unparseable ERR_INVALID_URL` line, a plain
+ * `400` and the socket closed once the answer is flushed. The caller catches only its own parse; the
+ * target and the header never reach the line.
+ */
+export function rejectUnparseableUpgrade(req: Pick<IncomingMessage, "method" | "url">, socket: Duplex, options: AttachRequestErrorGuardsOptions = {}): void {
+  const write = options.write ?? ((line: string) => console.warn(line));
+  attachUpgradeErrorGuard(req, socket, options);
+  const method = req.method && req.method.length > 0 ? req.method : "-";
+  write(`${HTTP_LOG_PREFIX} upgrade error ${method} ${UNPARSEABLE_UPGRADE_SHAPE} ERR_INVALID_URL`);
+  socket.once("finish", () => socket.destroy());
+  socket.end(UNPARSEABLE_UPGRADE_ANSWER);
+}

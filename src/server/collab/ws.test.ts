@@ -13,7 +13,9 @@ import {
   COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS,
   COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS,
   createCollabPreAuthenticationDeadline,
+  protectUpgradePath,
 } from "./ws";
+import { UNPARSEABLE_UPGRADE_ANSWER } from "../../../server/request-guards";
 
 class FakeSocket extends EventEmitter {
   readyState: number = WebSocket.OPEN;
@@ -1358,5 +1360,177 @@ describe("collaboration attachment first frames", () => {
       error.mockRestore();
       await site.close();
     }
+  });
+});
+
+// Issue #2321: a websocket upgrade whose request target or Host header cannot be parsed into a URL.
+// The parse runs inside the server's `upgrade` listeners, where an exception is an uncaughtException
+// and server/index.ts exits 1: one such request ended a ready server. Each one must get a plain 400,
+// be closed, and leave the routing of the next upgrade untouched.
+describe("collaboration attachment and upgrades that cannot be parsed", () => {
+  /** Request targets `new URL(target, "http://localhost")` rejects; Node's parser lets all of them through. */
+  const UNPARSEABLE_TARGETS = ["//", "///", "//?x", "//#", "//:80", "//[", "//@", "/\\\\", "http://", "http://[", "http://[::1", "http://a:99999/", "http://a:b/collab", "//a:b/collab", "ws://["];
+  /** Host header values that do not make a URL (the request target is the collaboration path). */
+  const UNPARSEABLE_HOSTS = ["", "[", ":80", "[::1", "%", "a:b", "a:99999", "<>", "a|b", "@", "a b", "a^b", "[::1]:x", "a%zz"];
+  /** Parses, but `Request` refuses a URL with credentials. */
+  const CREDENTIALS = [{ target: "/collab", host: "a@b" }, { target: "http://a@b/collab", host: "b" }];
+  const LINE = "[http] upgrade error GET :unparseable ERR_INVALID_URL";
+  const processErrors: unknown[] = [];
+  const recordProcessError = (err: unknown) => void processErrors.push(err);
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    processErrors.length = 0;
+    process.on("uncaughtException", recordProcessError);
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    process.off("uncaughtException", recordProcessError);
+    warn.mockRestore();
+  });
+
+  /** The listeners server/index.ts has once it is ready: the filtered stand-in for Next's, then the collaboration router. */
+  async function startRouted(options: { collab?: boolean } = {}) {
+    const server = createServer((_req, res) => {
+      res.statusCode = 404;
+      res.end();
+    });
+    const hocuspocus = new Hocuspocus({ quiet: true });
+    const handedOn: string[] = [];
+    let connections = 0;
+    // An upgrade socket that nobody answers outlives `closeAllConnections()`; the test closes them itself.
+    const sockets = new Set<{ destroy(): void }>();
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+    });
+    const protect = protectUpgradePath(server);
+    server.on("upgrade", (req) => void handedOn.push(req.url ?? ""));
+    protect();
+    const attachment = options.collab === false ? null : attachCollab(server, hocuspocus);
+    attachment?.on("connection", () => connections++);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    return {
+      port,
+      handedOn,
+      connections: () => connections,
+      openServerSockets: () => new Promise<number>((resolve) => server.getConnections((_error, count) => resolve(count))),
+      async close() {
+        for (const socket of attachment?.clients ?? []) socket.terminate();
+        hocuspocus.closeConnections();
+        for (const socket of sockets) socket.destroy();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      },
+    };
+  }
+
+  /** One raw upgrade request; the client never closes first, so `closedByServer` is the server's doing. */
+  function rawUpgrade(port: number, target: string, host = `127.0.0.1:${port}`, waitMs = 2_000) {
+    return new Promise<{ answer: string; closedByServer: boolean }>((resolve) => {
+      let answer = "";
+      let closedByServer = false;
+      const socket = connectTcp({ host: "127.0.0.1", port, allowHalfOpen: true }, () => {
+        socket.write(
+          `GET ${target} HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`,
+          "latin1",
+        );
+      });
+      const giveUp = setTimeout(() => socket.destroy(), waitMs);
+      socket.setEncoding("latin1");
+      socket.on("data", (text: string) => (answer += text));
+      socket.on("error", () => {});
+      socket.on("close", () => {
+        clearTimeout(giveUp);
+        resolve({ answer, closedByServer });
+      });
+      socket.on("end", () => {
+        closedByServer = true;
+        // The client still has not closed its side: the server must have let go of the socket by itself.
+        setTimeout(() => socket.destroy(), 50);
+      });
+    });
+  }
+
+  function opens(url: string): Promise<WebSocket> {
+    const socket = new WebSocket(url);
+    return new Promise((resolve, reject) => {
+      socket.once("open", () => resolve(socket));
+      socket.once("error", reject);
+    });
+  }
+
+  it("answers a request target that cannot be parsed with 400, closes it, hands it to no other listener and keeps routing", async () => {
+    const site = await startRouted();
+    try {
+      for (const target of UNPARSEABLE_TARGETS) {
+        const { answer, closedByServer } = await rawUpgrade(site.port, target);
+        expect({ target, answer, closedByServer }).toEqual({ target, answer: UNPARSEABLE_UPGRADE_ANSWER, closedByServer: true });
+      }
+      for (let i = 0; i < 100 && (await site.openServerSockets()) > 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await site.openServerSockets()).toBe(0);
+      expect(site.handedOn).toEqual([]);
+      expect(site.connections()).toBe(0);
+      expect(warn.mock.calls).toEqual(UNPARSEABLE_TARGETS.map(() => [LINE]));
+      const client = await opens(`ws://127.0.0.1:${site.port}/collab`);
+      expect(site.connections()).toBe(1);
+      client.terminate();
+    } finally {
+      await site.close();
+    }
+    expect(processErrors).toEqual([]);
+  });
+
+  it("answers a Host header that makes no URL with 400 before any 101, and opens no connection", async () => {
+    const site = await startRouted();
+    try {
+      const requests = [...UNPARSEABLE_HOSTS.map((host) => ({ target: "/collab", host })), ...CREDENTIALS];
+      for (const { target, host } of requests) {
+        const { answer, closedByServer } = await rawUpgrade(site.port, target, host);
+        expect({ target, host, answer, closedByServer }).toEqual({ target, host, answer: UNPARSEABLE_UPGRADE_ANSWER, closedByServer: true });
+      }
+      expect(site.connections()).toBe(0);
+      expect(site.handedOn).toEqual([]);
+      expect(warn.mock.calls).toEqual(requests.map(() => [LINE]));
+      const client = await opens(`ws://127.0.0.1:${site.port}/collab`);
+      expect(site.connections()).toBe(1);
+      client.terminate();
+    } finally {
+      await site.close();
+    }
+    expect(processErrors).toEqual([]);
+  });
+
+  it("lets go of the socket after the 400 although the client keeps its side open", async () => {
+    const site = await startRouted();
+    const client = connectTcp({ host: "127.0.0.1", port: site.port, allowHalfOpen: true });
+    try {
+      client.on("error", () => {});
+      client.resume();
+      await new Promise<void>((resolve) => client.once("connect", resolve));
+      const ended = new Promise<void>((resolve) => client.once("end", resolve));
+      client.write(`GET ${UNPARSEABLE_TARGETS[0]} HTTP/1.1\r\nHost: 127.0.0.1:${site.port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`);
+      await ended;
+      for (let i = 0; i < 100 && (await site.openServerSockets()) > 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(client.destroyed).toBe(false);
+      expect(await site.openServerSockets()).toBe(0);
+    } finally {
+      client.destroy();
+      await site.close();
+    }
+    expect(processErrors).toEqual([]);
+  });
+
+  it("the path filter alone neither throws on such a target nor hands it on", async () => {
+    const site = await startRouted({ collab: false });
+    try {
+      for (const target of UNPARSEABLE_TARGETS.slice(0, 4)) await rawUpgrade(site.port, target, undefined, 150);
+      await rawUpgrade(site.port, "/other", undefined, 150);
+      expect(site.handedOn).toEqual(["/other"]);
+    } finally {
+      await site.close();
+    }
+    expect(processErrors).toEqual([]);
   });
 });

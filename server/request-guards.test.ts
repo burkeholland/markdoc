@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import net, { type AddressInfo } from "node:net";
-import type { Duplex } from "node:stream";
+import { PassThrough, type Duplex } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   attachRequestErrorGuards,
@@ -10,6 +10,8 @@ import {
   errorCode,
   formatStreamErrorLine,
   isClientGone,
+  rejectUnparseableUpgrade,
+  UNPARSEABLE_UPGRADE_ANSWER,
   type GuardedRequest,
   type GuardedResponse,
   type GuardedUpgradeSocket,
@@ -518,5 +520,57 @@ describe("attachUpgradeErrorGuard on a real http server", () => {
     }
     expect(processErrors).toHaveLength(1);
     expect(isClientGone(processErrors[0])).toBe(true);
+  });
+});
+
+// Issue #2321: the answer to a websocket upgrade whose request target or Host header cannot be parsed.
+describe("rejectUnparseableUpgrade", () => {
+  function reject(req: { method?: string; url?: string }) {
+    const lines: string[] = [];
+    // autoDestroy off: only the function under test may destroy this socket.
+    const socket = new PassThrough({ autoDestroy: false });
+    const seen = { errorListenersAtAnswer: -1, answer: "" };
+    const end = socket.end.bind(socket) as (chunk: string) => PassThrough;
+    socket.end = ((chunk: string) => {
+      seen.errorListenersAtAnswer = socket.listenerCount("error");
+      seen.answer = chunk;
+      return end(chunk);
+    }) as typeof socket.end;
+    socket.resume();
+    rejectUnparseableUpgrade(req, socket, { write: (line) => lines.push(line) });
+    return { socket, lines, seen };
+  }
+
+  it("guards the socket first, writes one fixed line, answers a plain 400 and destroys the socket once the answer is flushed", async () => {
+    const { socket, lines, seen } = reject({ method: "GET", url: "//secret-host/secret-path?token=secret" });
+    expect(seen.errorListenersAtAnswer).toBe(1);
+    expect(seen.answer).toBe(UNPARSEABLE_UPGRADE_ANSWER);
+    expect(UNPARSEABLE_UPGRADE_ANSWER).toBe("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    expect(lines).toEqual(["[http] upgrade error GET :unparseable ERR_INVALID_URL"]);
+    expect(socket.destroyed).toBe(false);
+    await new Promise<void>((resolve) => socket.once("finish", resolve));
+    expect(socket.destroyed).toBe(true);
+  });
+
+  it("keeps the guard: a client that left is silent, another socket error is one line without the target", () => {
+    const { socket, lines } = reject({ method: "GET", url: "//secret?token=secret" });
+    lines.length = 0;
+    expect(() => socket.emit("error", withCode("read ECONNRESET", "ECONNRESET"))).not.toThrow();
+    expect(() => socket.emit("error", withCode("secret /tmp/path in message", "EACCES"))).not.toThrow();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^\[http\] upgrade error GET \S+ EACCES$/);
+    expect(lines[0]).not.toContain("secret");
+  });
+
+  it("writes `-` for a missing method and defaults to console.warn", () => {
+    const warned: unknown[][] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void warned.push(args);
+    try {
+      rejectUnparseableUpgrade({ url: "//" }, new PassThrough().resume());
+    } finally {
+      console.warn = original;
+    }
+    expect(warned).toEqual([["[http] upgrade error - :unparseable ERR_INVALID_URL"]]);
   });
 });
