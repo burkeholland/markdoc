@@ -36,6 +36,10 @@ const BLOCKS = [
   "```ts\nconst a = 1;\n\n\n```",
   "```ts\nconst a = 1;\n\n\n\n```",
   "> ```\n> quoted code\n> \n> ```",
+  // #2317: a known link alone on its line is a card; in angle brackets it is a paragraph.
+  "https://x.com/jack/status/20",
+  "<https://x.com/jack/status/20>",
+  "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
 ];
 
 const SNIPPETS = ["x", " ", "\n", "\n\n", "**", "`", "- ", "# ", "> ", "```", "|", "[", "]", "(", ")", "*", "\n- item", "\n\n## New", "~~~", "1. ", "<div>", "text with\nbreak", "---", "---\ntitle: t\n---\n", "\\\n", "<br>"];

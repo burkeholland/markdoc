@@ -8,6 +8,7 @@ import type * as Md from "mdast";
 import { schema } from "./schema";
 import { buildSourceMap, type BlockRange, type Segment, type SourceMap } from "./sourcemap";
 import { findUnrenderableRanges, type UnrenderableRange } from "./renderable";
+import { matchLinkCard, MAX_CARD_URL_LENGTH } from "./link-cards";
 
 export interface HeadingInfo {
   level: number;
@@ -267,8 +268,11 @@ class Converter {
 
   block(node: Md.RootContent, topLevel: boolean): PMNode | null {
     switch (node.type) {
-      case "paragraph":
+      case "paragraph": {
+        const cardUrl = topLevel ? this.cardUrl(node) : null;
+        if (cardUrl) return schema.nodes.link_card.create({ url: cardUrl });
         return schema.nodes.paragraph.create(null, this.inlineContent(node, topLevel));
+      }
       case "heading": {
         const content = this.inlineContent(node, false);
         const text = content.map((n) => n.textContent).join("");
@@ -326,6 +330,21 @@ class Converter {
         return schema.nodes.paragraph.create(null, b.nodes);
       }
     }
+  }
+
+  /**
+   * The link when a top-level paragraph is a card (#2317): its text is one line that starts in the first
+   * column, has nothing after it, and is exactly a known link (`link-cards.ts`). The rule reads the text,
+   * not the tree, so `<link>`, `[text](link)`, a link in a sentence and an indented line are all
+   * paragraphs: none of them is exactly the link.
+   */
+  private cardUrl(node: Md.Paragraph): string | null {
+    const { from, to } = offsets(node);
+    if (to - from > MAX_CARD_URL_LENGTH || this.src.lastIndexOf("\n", from - 1) + 1 !== from) return null;
+    const next = this.src.charCodeAt(to);
+    if (to < this.src.length && next !== 10 && !(next === 13 && this.src.charCodeAt(to + 1) === 10)) return null;
+    const raw = this.src.slice(from, to);
+    return matchLinkCard(raw) ? raw : null;
   }
 
   /** Text node for fenced/indented code, mapping source offsets to the content after the opening fence. */

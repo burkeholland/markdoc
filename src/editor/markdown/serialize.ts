@@ -2,6 +2,7 @@ import { MarkdownSerializer, MarkdownSerializerState } from "./to-markdown";
 import type { Node as PMNode } from "prosemirror-model";
 import { schema } from "./schema";
 import { fenceFor } from "./code-fence";
+import { matchLinkCard, MAX_CARD_URL_LENGTH } from "./link-cards";
 
 type NodeSerializer = (state: MarkdownSerializerState, node: PMNode, parent: PMNode, index: number) => void;
 
@@ -78,6 +79,24 @@ function renderCell(state: State, cell: PMNode): string {
 }
 
 const isEmptyParagraph = (node: PMNode) => node.type === schema.nodes.paragraph && node.content.size === 0;
+
+/**
+ * What a top-level paragraph would write when that is exactly a card link, else null. The bare link
+ * alone on its line means "card" (`parse.ts`), so a paragraph must never write that. Only a short
+ * paragraph that starts with the scheme can, and only those are looked at: first the usual case, one
+ * run of text that is the link (plain, or linked to itself), then whatever the paragraph renders to.
+ */
+function writtenCardLink(state: State, node: PMNode): string | null {
+  const first = node.firstChild;
+  if (!first || node.content.size > MAX_CARD_URL_LENGTH || (first.isText && !first.text!.startsWith("https://"))) return null;
+  if (node.childCount === 1 && first.isText && matchLinkCard(first.text!)) {
+    const text = first.text!;
+    if (first.marks.every((mark) => mark.type === schema.marks.link && mark.attrs.href === text && !mark.attrs.title)) return text;
+  }
+  const sub = new State(state.nodes, state.marks, state.options);
+  sub.renderInline(node);
+  return matchLinkCard(sub.out) ? sub.out : null;
+}
 
 const nodes: Record<string, NodeSerializer> = {
   /**
@@ -158,8 +177,19 @@ const nodes: Record<string, NodeSerializer> = {
   list_item(state, node) {
     state.renderContent(node);
   },
-  paragraph(state, node) {
-    state.renderInline(node);
+  /**
+   * A top-level paragraph whose text would be exactly a card link (typed in the rich pane, say) is
+   * written `<link>`, the text form, so it reads back as the paragraph it is and never as a card.
+   */
+  paragraph(state, node, parent) {
+    const link = parent.type === schema.nodes.doc ? writtenCardLink(state as State, node) : null;
+    if (link) state.write("<" + link + ">");
+    else state.renderInline(node);
+    state.closeBlock(node);
+  },
+  /** The bare link, exactly as it was read. */
+  link_card(state, node) {
+    state.text(String(node.attrs.url), false);
     state.closeBlock(node);
   },
   image(state, node) {
