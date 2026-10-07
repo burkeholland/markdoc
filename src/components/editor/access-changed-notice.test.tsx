@@ -291,6 +291,17 @@ describe.each([
       expect(onReload).not.toHaveBeenCalled();
     });
 
+    it("a key that went down before the button could act and only starts to repeat afterwards (a long repeat delay) presses nothing", async () => {
+      show(lowered());
+      fireEvent.keyDown(button(), { key: "Enter" });
+      quiet();
+      expect(button()).toHaveAttribute("data-armed", "true");
+      for (let i = 0; i < 3; i++) fireEvent.keyDown(button(), { key: "Enter", repeat: true });
+      fireEvent.keyUp(button(), { key: "Enter" });
+      await settle();
+      expect(onReload).not.toHaveBeenCalled();
+    });
+
     it("a release without its press on the button, a press that ends elsewhere, and a press with Ctrl, Alt or Meta do nothing", async () => {
       show(lowered());
       quiet();

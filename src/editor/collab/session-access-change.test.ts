@@ -160,6 +160,15 @@ describe("the session learns that its own access changed (#2269)", () => {
       session.destroy();
     });
 
+    it("a message that is not valid changes nothing on a page that is already blocked either", () => {
+      const { session, tell, told, live } = open("editor");
+      live();
+      told("viewer");
+      for (const message of [{ type: "access-changed" }, { type: "access-changed", role: "admin" }, { type: "access-changed", role: 3 }, { type: "access-changed", role: "constructor" }]) tell(message);
+      expect(session.accessChange).toEqual({ role: "viewer", kind: "lowered", unsaved: false });
+      session.destroy();
+    });
+
     it("the session itself never deletes the local copy for an access change (the shell does, once the notice is on screen)", () => {
       const { session, told, live } = open("editor");
       const clearLocal = vi.spyOn(session, "clearLocal");
