@@ -18,6 +18,7 @@ import {
   evaluateTemporaryAuditFile,
   formatDependencyPolicyReport,
   npmAuditEnvironment,
+  packageLockProblems,
   packageLockSha256,
   runBoundedProcess,
   runDependencyAudit,
@@ -34,8 +35,21 @@ afterEach(async () => {
     fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
 });
 
+// One of the four hosts of the package feed, written out here so that the tests do not read the policy's own list.
+const FEED = "https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/";
+
+// What npm writes in "resolved" for a registry package: a scope is part of the folder, not of the file name.
+function feedTarball(name: string, version: string, registry = FEED): string {
+  return `${registry}${name}/-/${name.split("/").pop()}-${version}.tgz`;
+}
+
+// Every fixture entry is honest unless a test says otherwise: its "resolved" is the feed tarball of the name the
+// policy judges it by (the "name" flag when it has one, otherwise the folder) and of its version (#2297).
 function packageLock(packages: Array<{ name: string; version: string; flags?: Record<string, unknown> }> = []): string {
-  const entries = Object.fromEntries(packages.map(({ name, version, flags }) => [`node_modules/${name}`, { version, ...flags }]));
+  const entries = Object.fromEntries(packages.map(({ name, version, flags }) => {
+    const judgedName = typeof flags?.name === "string" ? flags.name : name.split("node_modules/").pop() as string;
+    return [`node_modules/${name}`, { version, resolved: feedTarball(judgedName, version), ...flags }];
+  }));
   return JSON.stringify({
     name: "dependency-policy-fixture",
     version: "1.0.0",
@@ -418,6 +432,738 @@ describe("dependency policy", () => {
     expect(output).not.toContain("registry");
     expect(Object.keys(report)).toEqual(["status", "counts", "packages"]);
     expect(report.packages.every((item) => Object.keys(item).join(",") === "name,version,status")).toBe(true);
+  });
+});
+
+// `npm ci` installs the tarball in "resolved", checked against "integrity", into the folder in the entry's path. It
+// never compares that tarball with the entry's "name" and "version", and those two fields are all that npm audit
+// and the lists look at. So the lock is refused unless every entry's "resolved" is, character for character, the
+// package feed's address of the tarball of the entry's own name and version. Each case below that says "real npm"
+// was run with npm 11.12.1 against the feed in a scratch folder.
+describe("locked tarballs (#2297)", () => {
+  const INVALID_LOCK_OUTPUT =
+    '{"status":"invalid_lock","counts":{"blocked":0,"info":0,"low":0,"moderate":0,"high":0,"critical":0,"vulnerabilities":0,"reported":0,"omitted":0},"packages":[]}';
+  const NOT_THE_TARBALL = "\"resolved\" is not the package feed's address of the tarball of this name and version";
+  const NOT_CANONICAL = "the \"version\" is not three numbers without leading zeros and an optional prerelease";
+  const NOT_BUNDLED = "there is no \"resolved\", and the entry is not bundled by a feed package one folder up";
+  const NOT_A_FOLDER = "the key is not package folders under node_modules/ and nothing else";
+  const A_LINK = "the entry is a link to a folder, not a package from the feed";
+  const LODASH_4_17_20_INTEGRITY = "sha1-tEqbYpe8tpjxxRo1RaKzs2jVnFI=";
+  const GOOD = `${FEED}some-package/-/some-package-1.2.3.tgz`;
+
+  function rawLock(entries: Record<string, unknown>, root: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      name: "locked-tarball-fixture",
+      version: "1.0.0",
+      lockfileVersion: 3,
+      requires: true,
+      packages: { "": { name: "locked-tarball-fixture", version: "1.0.0", ...root }, ...entries },
+    });
+  }
+
+  // An entry the way npm writes it for a registry package.
+  function honest(name: string, version: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return { version, resolved: feedTarball(name, version), integrity: "sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=", ...extra };
+  }
+
+  function expectRefused(lock: string, problems: string[]): void {
+    expect(formatDependencyPolicyReport(evaluate(lock))).toBe(INVALID_LOCK_OUTPUT);
+    expect(packageLockProblems(lock)).toEqual(problems);
+  }
+
+  function expectJudged(lock: string): void {
+    expect(packageLockProblems(lock)).toEqual([]);
+    expect(formatDependencyPolicyReport(evaluate(lock))).toBe(PASS_OUTPUT);
+  }
+
+  it("judges an entry whose resolved is the feed tarball of its name and version", () => {
+    const lock = rawLock({ "node_modules/lodash": honest("lodash", "4.17.20", { integrity: LODASH_4_17_20_INTEGRITY }) });
+    expectJudged(lock);
+    const report = evaluate(lock, auditJson([{ name: "lodash", severity: "high" }]), 1);
+    expect(report.status).toBe("rejected");
+    expect(report.packages).toEqual([{ name: "lodash", version: "4.17.20", status: "vulnerable" }]);
+  });
+
+  // First row of the issue. Real npm: audit asks about "harmless" and finds nothing, npm ci installs lodash 4.17.20.
+  it("refuses a vulnerable tarball whose entry claims another name", () => {
+    expectRefused(rawLock({
+      "node_modules/lodash": { name: "harmless", ...honest("lodash", "4.17.20", { integrity: LODASH_4_17_20_INTEGRITY }) },
+    }), [`node_modules/lodash: ${NOT_THE_TARBALL}`]);
+  });
+
+  // Second row of the issue. Real npm: audit asks about lodash 4.18.1 and finds nothing, npm ci installs 4.17.20.
+  it("refuses a vulnerable tarball whose entry claims another version", () => {
+    expectRefused(rawLock({
+      "node_modules/lodash": { ...honest("lodash", "4.17.20", { integrity: LODASH_4_17_20_INTEGRITY }), version: "4.18.1" },
+    }), [`node_modules/lodash: ${NOT_THE_TARBALL}`]);
+  });
+
+  it("refuses a blocked tarball in a folder and under a name that are both harmless", () => {
+    const { name, version } = BLOCKED_DEPENDENCIES[0];
+    expectRefused(rawLock({
+      "node_modules/harmless": { version, resolved: feedTarball(name, version) },
+    }), [`node_modules/harmless: ${NOT_THE_TARBALL}`]);
+  });
+
+  it.each<[string, unknown]>([
+    ["the public npm registry", "https://registry.npmjs.org/some-package/-/some-package-1.2.3.tgz"],
+    ["another host with the feed's path", GOOD.replace("ms-feed-25.pkgs.visualstudio.com", "example.com")],
+    ["a host that only starts with the feed's host", GOOD.replace(".com/", ".com.example.com/")],
+    ["the feed's host as a folder of another host", GOOD.replace("https://", "https://example.com/")],
+    ["the feed's host as the user name for another host", GOOD.replace(".com/", ".com@example.com/")],
+    ["http", GOOD.replace("https://", "http://")],
+    ["no scheme", GOOD.replace("https:", "")],
+    ["an upper-case scheme", GOOD.replace("https://", "HTTPS://")],
+    ["an upper-case host", GOOD.replace("ms-feed-25", "MS-FEED-25")],
+    ["a user name", GOOD.replace("https://", "https://user@")],
+    ["a user name and a password", GOOD.replace("https://", "https://user:secret@")],
+    ["the default port", GOOD.replace(".com/", ".com:443/")],
+    ["another port", GOOD.replace(".com/", ".com:8443/")],
+    ["a query", `${GOOD}?download=1`],
+    // Real npm: the feed ignores the query, so this installs 1.2.2 while the text ends in the tarball of 1.2.3.
+    ["a query that ends in the right tarball", `${FEED}some-package/-/some-package-1.2.2.tgz?x=/some-package/-/some-package-1.2.3.tgz`],
+    ["a fragment", `${GOOD}#fragment`],
+    ["a fragment that ends in the right tarball", `${FEED}some-package/-/some-package-1.2.2.tgz#/some-package/-/some-package-1.2.3.tgz`],
+    ["another project on the feed's host", GOOD.replace("/1es-public/", "/other-project/")],
+    ["another feed in the project", GOOD.replace("/npm-public/", "/other-feed/")],
+    ["an upper-case project", GOOD.replace("/1es-public/", "/1ES-PUBLIC/")],
+    ["an upper-case package name", `${FEED}Some-Package/-/Some-Package-1.2.3.tgz`],
+    ["an upper-case file name", `${FEED}some-package/-/SOME-PACKAGE-1.2.3.tgz`],
+    ["an upper-case extension", GOOD.replace(".tgz", ".TGZ")],
+    ["a percent-encoded letter in the folder", `${FEED}some-packag%65/-/some-package-1.2.3.tgz`],
+    ["a percent-encoded letter in the file name", `${FEED}some-package/-/%73ome-package-1.2.3.tgz`],
+    ["a percent-encoded dash segment", `${FEED}some-package/%2d/some-package-1.2.3.tgz`],
+    ["a percent-encoded dot in the version", `${FEED}some-package/-/some-package-1%2e2%2e3.tgz`],
+    ["a dot segment", `${FEED}some-package/-/./some-package-1.2.3.tgz`],
+    ["a parent segment", `${FEED}other-package/../some-package/-/some-package-1.2.3.tgz`],
+    ["a parent segment after another tarball", `${FEED}some-package/-/some-package-1.2.2.tgz/../some-package-1.2.3.tgz`],
+    ["a double slash", `${FEED}some-package/-//some-package-1.2.3.tgz`],
+    ["a trailing slash", `${GOOD}/`],
+    ["a trailing space", `${GOOD} `],
+    ["a leading space", ` ${GOOD}`],
+    ["a trailing line feed", `${GOOD}\n`],
+    // `node` and `@types/node` are two real packages whose tarballs are both called node-<version>.tgz.
+    ["the right file name under another package's folder", `${FEED}other-package/-/some-package-1.2.3.tgz`],
+    ["the right folder with another package's file", `${FEED}some-package/-/other-package-1.2.3.tgz`],
+    ["the right name with another version", `${FEED}some-package/-/some-package-1.2.4.tgz`],
+    ["the right name with a longer version", `${FEED}some-package/-/some-package-1.2.34.tgz`],
+    ["the right name with a prerelease of the version", `${FEED}some-package/-/some-package-1.2.3-beta.1.tgz`],
+    // Real npm: the feed serves the tarball of 1.2.3 for each of these three spellings.
+    ["the version with a v", `${FEED}some-package/-/some-package-v1.2.3.tgz`],
+    ["the version with a leading zero", `${FEED}some-package/-/some-package-1.2.03.tgz`],
+    ["the version with build metadata", `${FEED}some-package/-/some-package-1.2.3+build.tgz`],
+    ["no dash segment", `${FEED}some-package/some-package-1.2.3.tgz`],
+    ["no extension", GOOD.replace(".tgz", "")],
+    ["another extension", GOOD.replace(".tgz", ".tar.gz")],
+    ["only the file name", "some-package-1.2.3.tgz"],
+    ["a git URL over ssh", "git+ssh://git@github.com/owner/some-package.git#0123456789abcdef0123456789abcdef01234567"],
+    ["a git URL over https", "git+https://github.com/owner/some-package.git#0123456789abcdef0123456789abcdef01234567"],
+    ["a GitHub tarball", "https://codeload.github.com/owner/some-package/tar.gz/0123456789abcdef0123456789abcdef01234567"],
+    ["a file: URL of a folder", "file:../some-package"],
+    ["a file: URL of a tarball", "file:some-package-1.2.3.tgz"],
+    ["a folder", "packages/some-package"],
+    ["empty text", ""],
+    ["null", null],
+    ["a number", 7],
+    ["true", true],
+    ["a list that holds the right address", [GOOD]],
+    ["an object that holds the right address", { href: GOOD }],
+  ])("refuses a resolved that is %s", (_case, resolved) => {
+    expectRefused(rawLock({ "node_modules/some-package": { version: "1.2.3", resolved } }), [`node_modules/some-package: ${NOT_THE_TARBALL}`]);
+  });
+
+  it.each([2, 12, 17, 25])("judges an entry from the feed host ms-feed-%i", (host) => {
+    const registry = FEED.replace("ms-feed-25", `ms-feed-${host}`);
+    expectJudged(rawLock({ "node_modules/some-package": { version: "1.2.3", resolved: feedTarball("some-package", "1.2.3", registry) } }));
+  });
+
+  // ms-feed-1 to ms-feed-28 exist, but only these four serve the feed without a login. A host name that does not
+  // exist yet could be registered by anyone. docs/vm-hosting.md names the hosts in backticks, and must name the same
+  // ones: a fifth host is added in the policy and in the docs in one pull request.
+  it("accepts the four feed hosts that docs/vm-hosting.md names, and no other number", async () => {
+    const accepted: string[] = [];
+    for (let host = 0; host <= 300; host += 1) {
+      const registry = FEED.replace("ms-feed-25", `ms-feed-${host}`);
+      const lock = rawLock({ "node_modules/some-package": { version: "1.2.3", resolved: feedTarball("some-package", "1.2.3", registry) } });
+      if (evaluate(lock).status !== "invalid_lock") accepted.push(`ms-feed-${host}.pkgs.visualstudio.com`);
+    }
+    expect(accepted).toEqual([2, 12, 17, 25].map((host) => `ms-feed-${host}.pkgs.visualstudio.com`));
+    const docs = await fs.readFile(new URL("../../docs/vm-hosting.md", import.meta.url), "utf8");
+    const documented = [...docs.matchAll(/`(ms-feed-[0-9]+\.pkgs\.visualstudio\.com)`/g)].map((match) => match[1]);
+    expect([...new Set(documented)], "docs/vm-hosting.md and PACKAGE_FEED_REGISTRIES must name the same hosts").toEqual(accepted);
+  });
+
+  describe("a scoped package", () => {
+    const folder = "node_modules/@scope/some-package";
+
+    it("is judged when the scope is in the folder and the file has the base name", () => {
+      expect(feedTarball("@scope/some-package", "1.2.3")).toBe(`${FEED}@scope/some-package/-/some-package-1.2.3.tgz`);
+      expectJudged(rawLock({ [folder]: honest("@scope/some-package", "1.2.3") }));
+    });
+
+    it.each([
+      ["the scope in the file name", `${FEED}@scope/some-package/-/@scope/some-package-1.2.3.tgz`],
+      ["the scope joined to the file name", `${FEED}@scope/some-package/-/scope-some-package-1.2.3.tgz`],
+      ["an encoded slash", `${FEED}@scope%2fsome-package/-/some-package-1.2.3.tgz`],
+      ["an encoded upper-case slash", `${FEED}@scope%2Fsome-package/-/some-package-1.2.3.tgz`],
+      // The unscoped package with the same base name is another package with the same file name.
+      ["no scope", `${FEED}some-package/-/some-package-1.2.3.tgz`],
+      ["another scope", `${FEED}@other/some-package/-/some-package-1.2.3.tgz`],
+      ["only the scope as the folder", `${FEED}@scope/-/some-package-1.2.3.tgz`],
+    ])("is refused with %s", (_case, resolved) => {
+      expectRefused(rawLock({ [folder]: { version: "1.2.3", resolved } }), [`${folder}: ${NOT_THE_TARBALL}`]);
+    });
+
+    it("is refused in the folder of the unscoped package with the same base name", () => {
+      expectRefused(rawLock({ "node_modules/some-package": honest("@scope/some-package", "1.2.3") }), [`node_modules/some-package: ${NOT_THE_TARBALL}`]);
+    });
+  });
+
+  describe("an alias", () => {
+    // Copied from this repository's lock: the first alias npm wrote into it (#2294).
+    const folder = "node_modules/@next/eslint-plugin-next/node_modules/fast-glob";
+    const written = {
+      name: "tinyglobby",
+      version: "0.2.17",
+      resolved: "https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/tinyglobby/-/tinyglobby-0.2.17.tgz",
+      integrity: "sha1-ViqabJ6ys7Ej05cZ+a9btE/NdjE=",
+      dev: true,
+      license: "MIT",
+      dependencies: { fdir: "^6.5.0", picomatch: "^4.0.4" },
+      engines: { node: ">=12.0.0" },
+    };
+
+    it("is judged the way npm writes it: the tarball of the real name in the folder of the alias", () => {
+      const lock = rawLock({ [folder]: written });
+      expectJudged(lock);
+      const audit = JSON.parse(auditJson([{ name: "tinyglobby", severity: "high" }]));
+      audit.vulnerabilities.tinyglobby.nodes = [folder];
+      expect(evaluate(lock, JSON.stringify(audit), 1).packages).toEqual([{ name: "tinyglobby", version: "0.2.17", status: "vulnerable" }]);
+    });
+
+    it("is judged when the real package is scoped and the folder is not", () => {
+      expectJudged(rawLock({ "node_modules/harmless-alias": { name: "@scope/some-package", ...honest("@scope/some-package", "1.2.3") } }));
+    });
+
+    it("is refused when resolved is the tarball of the folder's name", () => {
+      expectRefused(rawLock({ [folder]: { ...written, resolved: feedTarball("fast-glob", "0.2.17") } }), [`${folder}: ${NOT_THE_TARBALL}`]);
+    });
+
+    it("is refused when resolved is another version of the real package", () => {
+      expectRefused(rawLock({ [folder]: { ...written, resolved: feedTarball("tinyglobby", "0.2.16") } }), [`${folder}: ${NOT_THE_TARBALL}`]);
+    });
+  });
+
+  describe("the spelling of a version", () => {
+    it.each([
+      "1.2.3", "0.0.0", "10.20.30", "1.0.0-beta.2", "5.0.0-beta.32", "2.0.0-next.7", "1.0.0-0", "1.0.0-rc-1.x-y",
+      "0.0.0-experimental-abc123-20240101", "1.0.0-RC.1", "1.0.0-0a", "1.0.0-a.0.b",
+    ])("judges %s", (version) => {
+      expectJudged(rawLock({ "node_modules/some-package": honest("some-package", version) }));
+    });
+
+    // Every one of these comes with the "resolved" that spells the version the same way, so only the spelling is
+    // wrong. Real npm for the first four: the feed serves the tarball of 1.2.3, npm ci installs it, and for the
+    // leading zeros npm audit reports nothing because it cannot read the version.
+    it.each([
+      "v1.2.3", "01.2.3", "1.02.3", "1.2.03", "1.2.3+build", "1.2.3+build.1", "1.2.3-beta.1+build", "1.2.3+", "V1.2.3",
+      "=1.2.3", "+1.2.3", "1.2", "1", "1.2.3.4", "1.2.3-", "1.2.3-01", "1.2.3-beta.01", "1.2.3-beta..1", "1.2.3-beta.",
+      "1.2.3_", "1.2.3beta", "1.2.x", "1.x.3", "latest", "1.2.3-beta_1", "00.0.0", "1.2.3-.beta",
+    ])("refuses %s", (version) => {
+      expectRefused(rawLock({ "node_modules/some-package": honest("some-package", version) }), [`node_modules/some-package: ${NOT_CANONICAL}`]);
+    });
+
+    it.each([["a number", 1], ["null", null], ["a list", ["1.2.3"]], ["missing", undefined]])("refuses a version that is %s", (_case, version) => {
+      expectRefused(rawLock({ "node_modules/some-package": { version, resolved: GOOD } }), [`node_modules/some-package: ${NOT_CANONICAL}`]);
+    });
+
+    // Real npm: "06.15.3" with .../qs/-/qs-06.15.3.tgz gave 0 audit findings and installed the blocked qs 6.15.3.
+    it.each(BLOCKED_DEPENDENCIES.flatMap(({ name, version }) =>
+      [`0${version}`, `v${version}`, `${version}+x`].map((spelling) => ({ name, spelling }))))(
+      "refuses the blocked $name spelled $spelling",
+      ({ name, spelling }) => {
+        expectRefused(rawLock({ [`node_modules/${name}`]: honest(name, spelling) }), [`node_modules/${name}: ${NOT_CANONICAL}`]);
+      },
+    );
+  });
+
+  describe("an entry without resolved", () => {
+    // Copied from this repository's lock: the only entries npm wrote without "resolved". They arrive inside the
+    // tarball of the package one folder up, so npm fetches nothing for them.
+    const bundler = "node_modules/@tailwindcss/oxide-wasm32-wasi";
+    const bundlerEntry = honest("@tailwindcss/oxide-wasm32-wasi", "4.3.3", {
+      bundleDependencies: ["@napi-rs/wasm-runtime", "@emnapi/core", "tslib"],
+      cpu: ["wasm32"],
+      dev: true,
+      optional: true,
+    });
+    const core = `${bundler}/node_modules/@emnapi/core`;
+    const tslib = `${bundler}/node_modules/tslib`;
+    const bundledEntry = (version: string) => ({ version, dev: true, inBundle: true, license: "MIT", optional: true });
+    const bundle = (): Record<string, Record<string, unknown>> => ({
+      [bundler]: { ...bundlerEntry },
+      [core]: bundledEntry("1.11.1"),
+      [tslib]: bundledEntry("2.8.1"),
+    });
+
+    it("is judged when a feed package one folder up bundles it", () => {
+      const lock = rawLock(bundle());
+      expectJudged(lock);
+      const audit = JSON.parse(auditJson([{ name: "tslib", severity: "high" }]));
+      audit.vulnerabilities.tslib.nodes = [tslib];
+      expect(evaluate(lock, JSON.stringify(audit), 1).packages).toEqual([{ name: "tslib", version: "2.8.1", status: "vulnerable" }]);
+    });
+
+    it("stays blocked when it is a bundled copy of a blocked version", () => {
+      const { name, version } = BLOCKED_DEPENDENCIES[0];
+      const entries = bundle();
+      entries[bundler].bundleDependencies = [name];
+      const report = evaluate(rawLock({ [bundler]: entries[bundler], [`${bundler}/node_modules/${name}`]: bundledEntry(version) }));
+      expect(report.status).toBe("rejected");
+      expect(report.packages).toEqual([{ name, version, status: "blocked" }]);
+    });
+
+    // Real npm: without "resolved" npm ci fetches name@version from whatever registry is configured.
+    it("is refused for an ordinary package", () => {
+      expectRefused(rawLock({ "node_modules/some-package": { version: "1.2.3", integrity: "sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=" } }), [`node_modules/some-package: ${NOT_BUNDLED}`]);
+    });
+
+    it.each<[string, (entries: Record<string, Record<string, unknown>>) => void, string[]]>([
+      ["it has no inBundle flag", (entries) => { delete entries[tslib].inBundle; }, [tslib]],
+      ["inBundle is false", (entries) => { entries[tslib].inBundle = false; }, [tslib]],
+      ["inBundle is the text true", (entries) => { entries[tslib].inBundle = "true"; }, [tslib]],
+      ["inBundle is 1", (entries) => { entries[tslib].inBundle = 1; }, [tslib]],
+      ["the package one folder up does not name it", (entries) => { entries[bundler].bundleDependencies = ["@emnapi/core"]; }, [tslib]],
+      ["the package one folder up names a longer name", (entries) => { entries[bundler].bundleDependencies = ["@emnapi/core", "tslib-extra"]; }, [tslib]],
+      // npm decides by the folder: it would fetch other-package@2.8.1 into this folder from the configured registry.
+      ["the package one folder up names its \"name\" and not its folder", (entries) => {
+        entries[tslib].name = "other-package";
+        entries[bundler].bundleDependencies = ["@emnapi/core", "other-package"];
+      }, [tslib]],
+      ["the package one folder up bundles nothing", (entries) => { entries[bundler].bundleDependencies = []; }, [core, tslib]],
+      ["the package one folder up has no bundleDependencies", (entries) => { delete entries[bundler].bundleDependencies; }, [core, tslib]],
+      ["bundleDependencies is text that contains the names", (entries) => { entries[bundler].bundleDependencies = "@emnapi/core tslib"; }, [core, tslib]],
+      ["bundleDependencies is the name as text", (entries) => { entries[bundler].bundleDependencies = "tslib"; }, [core, tslib]],
+      ["bundleDependencies is true", (entries) => { entries[bundler].bundleDependencies = true; }, [core, tslib]],
+      ["bundleDependencies is an object", (entries) => { entries[bundler].bundleDependencies = { tslib: true, "@emnapi/core": true }; }, [core, tslib]],
+      ["the list is under the other spelling", (entries) => {
+        entries[bundler].bundledDependencies = entries[bundler].bundleDependencies;
+        delete entries[bundler].bundleDependencies;
+      }, [core, tslib]],
+      ["there is no package one folder up", (entries) => { delete entries[bundler]; }, [core, tslib]],
+      ["the package one folder up is not an object", (entries) => { (entries as Record<string, unknown>)[bundler] = "tslib"; }, [bundler, core, tslib]],
+      ["the package one folder up has no resolved", (entries) => { delete entries[bundler].resolved; }, [bundler, core, tslib]],
+      ["the package one folder up is not from the feed", (entries) => {
+        entries[bundler].resolved = "https://registry.npmjs.org/@tailwindcss/oxide-wasm32-wasi/-/oxide-wasm32-wasi-4.3.3.tgz";
+      }, [bundler, core, tslib]],
+      ["the package one folder up has another version in resolved", (entries) => {
+        entries[bundler].resolved = feedTarball("@tailwindcss/oxide-wasm32-wasi", "4.3.2");
+      }, [bundler, core, tslib]],
+      ["the package one folder up is a link", (entries) => { entries[bundler].link = true; }, [bundler, core, tslib]],
+      ["its version is not canonical", (entries) => { entries[tslib].version = "02.8.1"; }, [tslib]],
+    ])("is refused when %s", (_case, change, refused) => {
+      const entries = bundle();
+      change(entries);
+      const lock = rawLock(entries);
+      expect(formatDependencyPolicyReport(evaluate(lock))).toBe(INVALID_LOCK_OUTPUT);
+      expect(packageLockProblems(lock).map((problem) => problem.slice(0, problem.indexOf(": ")))).toEqual(refused);
+    });
+
+    it("is refused with a resolved that is not the feed's, even when it is bundled", () => {
+      const entries = bundle();
+      entries[tslib].resolved = "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz";
+      expectRefused(rawLock(entries), [`${tslib}: ${NOT_THE_TARBALL}`]);
+    });
+
+    it("is refused at the top level", () => {
+      expectRefused(rawLock({ "node_modules/tslib": bundledEntry("2.8.1") }), [`node_modules/tslib: ${NOT_BUNDLED}`]);
+    });
+
+    it("is refused at the top level when the root names it in bundleDependencies", () => {
+      expectRefused(rawLock({ "node_modules/tslib": bundledEntry("2.8.1") }, { bundleDependencies: ["tslib"], resolved: GOOD }), [`node_modules/tslib: ${NOT_BUNDLED}`]);
+    });
+
+    // The folder one level up is found by cutting the path at its last "/node_modules/". A top-level entry has
+    // none, and must not be matched with a neighbour whose path is the same text without the last letter.
+    it("is refused at the top level next to a package whose path is one letter shorter", () => {
+      expectRefused(rawLock({
+        "node_modules/tsli": honest("tsli", "1.0.0", { bundleDependencies: ["tslib"] }),
+        "node_modules/tslib": bundledEntry("2.8.1"),
+      }), [`node_modules/tslib: ${NOT_BUNDLED}`]);
+    });
+
+    it("is refused two folders below the package that names it", () => {
+      const entries = bundle();
+      entries[bundler].bundleDependencies = ["@emnapi/core", "some-package", "tslib"];
+      const deep = `${tslib}/node_modules/some-package`;
+      expectRefused(rawLock({ ...entries, [deep]: bundledEntry("1.2.3") }), [`${deep}: ${NOT_BUNDLED}`]);
+    });
+
+    it("is refused when the package one folder up is itself bundled", () => {
+      const entries = bundle();
+      entries[tslib].bundleDependencies = ["some-package"];
+      const deep = `${tslib}/node_modules/some-package`;
+      expectRefused(rawLock({ ...entries, [deep]: bundledEntry("1.2.3") }), [`${deep}: ${NOT_BUNDLED}`]);
+    });
+  });
+
+  // This repository has no workspace, no file: dependency and no link, so the lock has only the root and folders
+  // under node_modules/. npm installs a link from a folder on disk, which nothing here could judge.
+  describe("an entry that is not a package from the feed", () => {
+    it.each([
+      ["a link, the way npm writes a file: dependency", { resolved: "packages/some-package", link: true }],
+      ["a link with the fields of a feed package", { ...honest("some-package", "1.2.3"), link: true }],
+      ["an entry with link false", { ...honest("some-package", "1.2.3"), link: false }],
+      ["an entry with link as text", { ...honest("some-package", "1.2.3"), link: "true" }],
+      ["an entry with link null", { ...honest("some-package", "1.2.3"), link: null }],
+    ])("refuses %s", (_case, entry) => {
+      expectRefused(rawLock({ "node_modules/some-package": entry }), [`node_modules/some-package: ${A_LINK}`]);
+    });
+
+    it.each([
+      "packages/some-package", "some-package", "node_modules", "node_modules\\some-package", "NODE_MODULES/some-package",
+      "..", "/", " ", "__proto__", "constructor",
+    ])("refuses the key %j, which is not a folder under node_modules/", (key) => {
+      expectRefused(rawLock({ [key]: honest("some-package", "1.2.3") }), [`${key}: ${NOT_A_FOLDER}`]);
+    });
+
+    // npm reads a key as a path: it resolves dot segments and slashes, fills the folder that comes out and, for an
+    // entry without "name", asks npm audit about that folder's name. Each key below carries the honest tarball of
+    // some-package, so only the key is wrong. Real npm for the first six, with lodash 4.17.20 as the package: 0
+    // audit findings, and npm ci filled node_modules/harmless (or node_modules/@types/ms, or the scoped folder)
+    // with lodash 4.17.20. The fourth worked with no change to package.json, through a "dependencies" added by
+    // hand to another entry. For the next five npm audit named the folder node_modules/some-package, or one
+    // outside the project, which is not a key of the lock.
+    it.each([
+      "node_modules/some-package/../harmless",
+      "node_modules/some-package/./../harmless",
+      "node_modules/some-package/../@types/harmless",
+      "node_modules/other-package/node_modules/some-package/../harmless",
+      "node_modules/@x-node_modules/some-package",
+      "node_modules/@node_modules/some-package",
+      "node_modules/some-package/",
+      "node_modules/some-package/.",
+      "./node_modules/some-package",
+      "node_modules//some-package",
+      "../node_modules/some-package",
+      "/node_modules/some-package",
+      "C:/node_modules/some-package",
+      "node_modules/some-package/harmless",
+      "node_modules/some-package/node_modules",
+      "node_modules/some-package/node_modules/",
+      "node_modules/node_modules/some-package",
+      "node_modules/node_modules/node_modules/some-package",
+      "node_modules/@scope/node_modules/node_modules/some-package",
+      "node_modules/other-package/NODE_MODULES/some-package",
+      "node_modules/other-package\\node_modules/some-package",
+      "node_modules/other-package/node_modules\\some-package",
+      "node_modules/some-package\\..\\harmless",
+      "node_modules/some%2Dpackage",
+      "node_modules/%2E%2E/some-package",
+      "node_modules/some-package%2F..%2Fharmless",
+      "node_modules/@scope",
+      "node_modules/@scope/",
+      "node_modules/@/some-package",
+      "node_modules/@scope/@other/some-package",
+      "node_modules/@scope/some-package/extra",
+      "node_modules/.some-package",
+      "node_modules/..some-package",
+      "node_modules/some-package ",
+      " node_modules/some-package",
+      "node_modules/some-package\n",
+      "node_modules/some-package\t",
+      "node_modules/some\u2010package",
+      "node_modules/some-package/node_modules/..",
+    ])("refuses the key %j, which npm would not read as the folder of some-package", (key) => {
+      const name = key.includes("@x-node_modules") ? "@x-node_modules/some-package"
+        : key.includes("@node_modules") ? "@node_modules/some-package" : null;
+      // The two scoped keys are well formed: they are refused because the tarball is not the one of the scoped name.
+      expectRefused(rawLock({ [key]: honest("some-package", "1.2.3") }), [`${key}: ${name ? NOT_THE_TARBALL : NOT_A_FOLDER}`]);
+      if (name) expectJudged(rawLock({ [key]: honest(name, "1.2.3") }));
+    });
+
+    // The same tarball in the same lock is judged when the key is the folder npm fills.
+    it.each([
+      ["node_modules/some-package", "some-package"],
+      ["node_modules/@scope/some-package", "@scope/some-package"],
+      ["node_modules/other-package/node_modules/some-package", "some-package"],
+      ["node_modules/@scope/other-package/node_modules/@scope/some-package", "@scope/some-package"],
+      ["node_modules/a/node_modules/b/node_modules/c/node_modules/some-package", "some-package"],
+      ["node_modules/node_modules-extra/node_modules/some-package", "some-package"],
+      ["node_modules/some.package_1", "some.package_1"],
+      // A few old packages have capital letters in their names. The feed tells letter case apart, so the tarball
+      // must be spelled the same way.
+      ["node_modules/JSONStream", "JSONStream"],
+    ])("judges the key %j by its last folder, %j", (key, name) => {
+      expectJudged(rawLock({ [key]: honest(name, "1.2.3") }));
+      const lock = rawLock({ [key]: honest(BLOCKED_DEPENDENCIES[0].name, BLOCKED_DEPENDENCIES[0].version) });
+      expect(evaluate(lock).status).toBe("invalid_lock");
+    });
+
+    it("refuses a capital letter in the folder when the tarball is spelled without it", () => {
+      expectRefused(rawLock({ "node_modules/Some-Package": honest("some-package", "1.2.3") }), [`node_modules/Some-Package: ${NOT_THE_TARBALL}`]);
+    });
+
+    it("refuses a folder name longer than a package name can be, also behind a valid \"name\"", () => {
+      const alias = (length: number) => ({ [`node_modules/${"a".repeat(length)}`]: { name: "some-package", ...honest("some-package", "1.2.3") } });
+      expectJudged(rawLock(alias(214)));
+      expectRefused(rawLock(alias(215)), [`node_modules/${"a".repeat(215)}: the folder or the "name" is not a package name`]);
+    });
+
+    // The blocked list alone would catch a blocked version under such a key, because the policy reads its real
+    // name. The lock is refused all the same: npm audit would be asked about another name.
+    it.each(BLOCKED_DEPENDENCIES)("refuses the blocked $name $version under a key that names another folder", ({ name, version }) => {
+      const key = `node_modules/${name}/../harmless`;
+      expectRefused(rawLock({ [key]: honest(name, version) }), [`${key}: ${NOT_A_FOLDER}`]);
+    });
+
+    it("does not look for the bundler through a key that is not package folders", () => {
+      const bundler = "node_modules/some-package";
+      const key = `${bundler}/node_modules/bundled/../harmless`;
+      expectRefused(rawLock({
+        [bundler]: honest("some-package", "1.2.3", { bundleDependencies: ["bundled", "harmless"] }),
+        [key]: { version: "1.0.0", inBundle: true },
+      }), [`${key}: ${NOT_A_FOLDER}`]);
+    });
+
+    it("answers at once for a key of a million characters", () => {
+      for (const key of [
+        `${"node_modules/a/".repeat(70_000)}node_modules/b!`,
+        `node_modules/${"a-".repeat(500_000)}/..`,
+        `${`node_modules/${"a.".repeat(40)}/`.repeat(10_000)}x`,
+      ]) {
+        const started = performance.now();
+        expect(packageLockProblems(rawLock({ [key]: honest("b", "1.0.0") }))).toEqual([`${key}: ${NOT_A_FOLDER}`]);
+        expect(performance.now() - started).toBeLessThan(2_000);
+      }
+    });
+
+    it("refuses the pair npm writes for a workspace or a file: dependency", () => {
+      expectRefused(rawLock({
+        "node_modules/some-package": { resolved: "packages/some-package", link: true },
+        "packages/some-package": { version: "1.2.3" },
+      }), [`node_modules/some-package: ${A_LINK}`, `packages/some-package: ${NOT_A_FOLDER}`]);
+    });
+
+    it("refuses a package in the node_modules of such a folder too", () => {
+      const nested = "packages/some-package/node_modules/other-package";
+      expectRefused(rawLock({
+        "packages/some-package": { version: "1.2.3" },
+        [nested]: honest("other-package", "1.0.0"),
+      }), [`packages/some-package: ${NOT_A_FOLDER}`, `${nested}: ${NOT_A_FOLDER}`]);
+    });
+
+    it("refuses an entry that is not an object", () => {
+      expectRefused(rawLock({ "node_modules/some-package": GOOD }), ["node_modules/some-package: the entry is not an object"]);
+    });
+  });
+
+  it("names every refused entry, and only those", () => {
+    const lock = rawLock({
+      "node_modules/first": honest("first", "1.0.0"),
+      "node_modules/second": { version: "1.0.0" },
+      "node_modules/third": { version: "v1.0.0", resolved: feedTarball("third", "v1.0.0") },
+      "node_modules/fourth": honest("fourth", "1.0.1", { version: "1.0.0" }),
+      "node_modules/fifth": honest("fifth", "1.0.0"),
+    });
+    expectRefused(lock, [
+      `node_modules/second: ${NOT_BUNDLED}`,
+      `node_modules/third: ${NOT_CANONICAL}`,
+      `node_modules/fourth: ${NOT_THE_TARBALL}`,
+    ]);
+  });
+
+  it("says so when the file is not a lock at all", () => {
+    for (const text of ["", "{", "[]", JSON.stringify({ lockfileVersion: 2, packages: { "": {} } }), JSON.stringify({ lockfileVersion: 3, packages: {} })]) {
+      expect(packageLockProblems(text)).toEqual(["package-lock.json is not a version 3 lock with a root entry"]);
+    }
+  });
+
+  // The release prints "Dependency preflight failed (status invalid_lock); raw output withheld." and nothing else,
+  // because this report is all the preflight gives it. The reasons above exist for tests and for a terminal only.
+  it("reports a refused lock with the status alone, runs no audit and prints nothing about the entry", async () => {
+    const marker = "never-print-this-value";
+    const lock = rawLock({ [`node_modules/${marker}`]: { version: "1.2.3", resolved: `https://user:${marker}@example.com/${marker}.tgz` } });
+    expect(packageLockProblems(lock)).toHaveLength(1);
+
+    const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson(), stderr: "" });
+    const { report, onRetry } = await auditWith(executor, lock);
+    expect(formatDependencyPolicyReport(report)).toBe(INVALID_LOCK_OUTPUT);
+    expect(executor).not.toHaveBeenCalled();
+    expect(onRetry).not.toHaveBeenCalled();
+
+    const fixture = await fixtureDirectory(lock);
+    const printed: string[] = [];
+    const exitCode = await runMain(["--lock-sha256", fixture.identity, "--run-audit"], {
+      cwd: fixture.directory,
+      executor,
+      retryDelayMs: 0,
+      output: { log: (message) => printed.push(message), warn: (message) => printed.push(message) },
+    });
+    expect(exitCode).toBe(1);
+    expect(printed).toEqual([INVALID_LOCK_OUTPUT]);
+    expect(executor).not.toHaveBeenCalled();
+
+    const auditPath = path.join(fixture.directory, "audit.json");
+    await fs.writeFile(auditPath, auditJson());
+    const fromFile = await evaluateTemporaryAuditFile({ auditPath, lockPath: fixture.lockPath, expectedLockSha256: fixture.identity });
+    expect(formatDependencyPolicyReport(fromFile)).toBe(INVALID_LOCK_OUTPUT);
+  });
+
+  it("has no switch: neither the accepted list nor the clock nor the environment changes the answer", async () => {
+    const lock = rawLock({
+      "node_modules/lodash": { ...honest("lodash", "4.17.20"), version: "4.18.1", dev: true },
+    });
+    const listed: ListedAdvisory = { advisory: "GHSA-vfj7-8cjw-p6xm", package: "lodash", version: "4.18.1", expires: "2999-12-31", reason: "test list entry" };
+    const switches = ["MARKDOC_DEPENDENCY_POLICY", "DEPENDENCY_POLICY_SKIP_RESOLVED", "PACKAGE_FEED_REGISTRIES", "npm_config_registry", "NPM_CONFIG_REPLACE_REGISTRY_HOST"];
+    const before = switches.map((name) => process.env[name]);
+    try {
+      for (const name of switches) process.env[name] = "https://registry.npmjs.org/";
+      expect(evaluateDependencyPolicy({
+        expectedLockSha256: packageLockSha256(lock),
+        packageLockText: lock,
+        execution: { exitCode: 0, stdout: auditJson() },
+        now: 0,
+        acceptedAdvisories: [listed],
+      })).toEqual({ status: "invalid_lock", counts: ZERO_REPORT_COUNTS, packages: [] });
+    } finally {
+      switches.forEach((name, index) => {
+        if (before[index] === undefined) delete process.env[name];
+        else process.env[name] = before[index];
+      });
+    }
+    // The preflight has three options and passes the lock to the policy as it is; it never asks for the reasons.
+    const cli = await fs.readFile(path.resolve("scripts/dependency-policy-preflight.mts"), "utf8");
+    expect(cli).not.toContain("packageLockProblems");
+    expect(cli.match(/type: "(?:string|boolean)"/g)).toHaveLength(3);
+  });
+
+  // The real lock, so that a pull request that changes package-lock.json finds out here and not at the next
+  // release. The failure lists each refused entry with its reason.
+  it("accepts every entry of this repository's package-lock.json", async () => {
+    const whatToDo =
+      "package-lock.json has entries the release preflight refuses; they are listed below as \"entry: reason\", and a "
+      + "release would stop with the status invalid_lock. If npm itself wrote a \"resolved\" on a host of the package "
+      + "feed that is not in the list yet, check that the host serves the same feed without a login, then add it to "
+      + "PACKAGE_FEED_REGISTRIES in scripts/lib/dependency-policy.ts and to docs/vm-hosting.md in the same pull request. "
+      + "In every other case the entry was edited by hand, or it is a kind of dependency the preflight cannot judge "
+      + "(a link, a workspace, a git or file: dependency, a package that brings bundled packages its entry does not "
+      + "name in \"bundleDependencies\" or that nests them): change the lock, not the rule.";
+    const lock = await fs.readFile(new URL("../../package-lock.json", import.meta.url), "utf8");
+    expect(packageLockProblems(lock), whatToDo).toEqual([]);
+    expect(formatDependencyPolicyReport(evaluate(lock))).toBe(PASS_OUTPUT);
+  });
+
+  // The key rule against every key npm wrote into this repository's lock, apart from what the entries hold: each
+  // key gets the honest tarball of its last folder, taken here by cutting the key at "/node_modules/".
+  it("reads the last folder of every key of this repository's package-lock.json the way npm does", async () => {
+    const real = JSON.parse(await fs.readFile(new URL("../../package-lock.json", import.meta.url), "utf8")) as { packages: Record<string, unknown> };
+    const keys = Object.keys(real.packages).filter((key) => key !== "");
+    expect(keys.length).toBeGreaterThan(900);
+    const written = /^node_modules\/(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:\/node_modules\/(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*)*$/;
+    expect(keys.filter((key) => !written.test(key))).toEqual([]);
+    const lastFolder = (key: string) => `/${key}`.split("/node_modules/").pop() as string;
+    expectJudged(rawLock(Object.fromEntries(keys.map((key) => [key, honest(lastFolder(key), "1.2.3")]))));
+    // One wrong last folder anywhere is found: every key in turn gets the tarball of another package.
+    const wrong = keys.filter((key) =>
+      packageLockProblems(rawLock({ [key]: honest(`${lastFolder(key)}-other`, "1.2.3") })).join() !== `${key}: ${NOT_THE_TARBALL}`);
+    expect(wrong).toEqual([]);
+  });
+
+  // npm reads npm-shrinkwrap.json instead of package-lock.json when a folder holds both. Real npm: with a
+  // shrinkwrap that held lodash 4.18.1 next to a lock that held lodash 4.17.20, npm audit --package-lock-only
+  // reported 0 findings, and npm ci from package.json and package-lock.json alone, which is all the Dockerfile
+  // copies, installed lodash 4.17.20.
+  describe("an npm-shrinkwrap.json next to the lock", () => {
+    const shrinkwrapOf = (directory: string) => path.join(directory, "npm-shrinkwrap.json");
+
+    it("refuses the lock before any audit runs, whatever the file holds", async () => {
+      for (const content of [packageLock(), packageLock([{ name: "some-package", version: "1.2.3" }]), "", "{"]) {
+        const fixture = await fixtureDirectory();
+        await fs.writeFile(shrinkwrapOf(fixture.directory), content);
+        const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+        const report = await runDependencyAudit({ cwd: fixture.directory, lockPath: fixture.lockPath, expectedLockSha256: fixture.identity, executor });
+        expect(formatDependencyPolicyReport(report)).toBe(INVALID_LOCK_OUTPUT);
+        expect(executor).not.toHaveBeenCalled();
+      }
+    });
+
+    it("refuses a folder of that name too", async () => {
+      const fixture = await fixtureDirectory();
+      await fs.mkdir(shrinkwrapOf(fixture.directory));
+      const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+      const report = await runDependencyAudit({ cwd: fixture.directory, lockPath: fixture.lockPath, expectedLockSha256: fixture.identity, executor });
+      expect(formatDependencyPolicyReport(report)).toBe(INVALID_LOCK_OUTPUT);
+      expect(executor).not.toHaveBeenCalled();
+    });
+
+    it("passes the same lock once the file is gone, and without it as before", async () => {
+      const fixture = await fixtureDirectory();
+      const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+      const run = () => runDependencyAudit({ cwd: fixture.directory, lockPath: fixture.lockPath, expectedLockSha256: fixture.identity, executor });
+      expect(formatDependencyPolicyReport(await run())).toBe(PASS_OUTPUT);
+      await fs.writeFile(shrinkwrapOf(fixture.directory), packageLock());
+      expect(formatDependencyPolicyReport(await run())).toBe(INVALID_LOCK_OUTPUT);
+      await fs.rm(shrinkwrapOf(fixture.directory));
+      expect(formatDependencyPolicyReport(await run())).toBe(PASS_OUTPUT);
+      expect(executor).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not mind the file in another folder", async () => {
+      const fixture = await fixtureDirectory();
+      await fs.mkdir(path.join(fixture.directory, "nested"));
+      await fs.writeFile(shrinkwrapOf(path.join(fixture.directory, "nested")), packageLock());
+      await fs.writeFile(path.join(fixture.directory, "npm-shrinkwrap.json.bak"), packageLock());
+      const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+      const report = await runDependencyAudit({ cwd: fixture.directory, lockPath: fixture.lockPath, expectedLockSha256: fixture.identity, executor });
+      expect(formatDependencyPolicyReport(report)).toBe(PASS_OUTPUT);
+    });
+
+    it("stops with lock_mismatch when the file appears while the audit runs, and does not retry", async () => {
+      const fixture = await fixtureDirectory();
+      const executor = vi.fn<AuditExecutor>().mockImplementation(async ({ cwd }) => {
+        await fs.writeFile(shrinkwrapOf(cwd), packageLock());
+        return { exitCode: 1, stdout: "", stderr: "" };
+      });
+      const report = await runDependencyAudit({ cwd: fixture.directory, lockPath: fixture.lockPath, expectedLockSha256: fixture.identity, executor, retryDelayMs: 0 });
+      expect(report.status).toBe("lock_mismatch");
+      expect(executor).toHaveBeenCalledOnce();
+    });
+
+    it("refuses through the command line with the status alone, for an audit it runs and for an audit file", async () => {
+      const fixture = await fixtureDirectory();
+      await fs.writeFile(shrinkwrapOf(fixture.directory), packageLock());
+      const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+      const printed: string[] = [];
+      const output = { log: (message: string) => printed.push(message), warn: (message: string) => printed.push(message) };
+      expect(await runMain(["--lock-sha256", fixture.identity, "--run-audit"], { cwd: fixture.directory, executor, retryDelayMs: 0, output })).toBe(1);
+      const auditPath = path.join(fixture.directory, "audit.json");
+      await fs.writeFile(auditPath, auditJson());
+      expect(await runMain(["--lock-sha256", fixture.identity, "--audit-json", auditPath], { cwd: fixture.directory, output })).toBe(1);
+      expect(printed).toEqual([INVALID_LOCK_OUTPUT, INVALID_LOCK_OUTPUT]);
+      expect(executor).not.toHaveBeenCalled();
+      await fs.rm(shrinkwrapOf(fixture.directory));
+      expect(await runMain(["--lock-sha256", fixture.identity, "--audit-json", auditPath], { cwd: fixture.directory, output })).toBe(0);
+      expect(printed[2]).toBe(PASS_OUTPUT);
+    });
+
+    it("refuses the lock when it cannot tell whether the file is there", async () => {
+      const fixture = await fixtureDirectory();
+      const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+      const lstat = vi.spyOn(fs, "lstat").mockRejectedValue(Object.assign(new Error("denied"), { code: "EACCES" }));
+      try {
+        const report = await runDependencyAudit({ cwd: fixture.directory, lockPath: fixture.lockPath, expectedLockSha256: fixture.identity, executor });
+        expect(formatDependencyPolicyReport(report)).toBe(INVALID_LOCK_OUTPUT);
+        expect(lstat).toHaveBeenCalledWith(shrinkwrapOf(fixture.directory));
+        expect(executor).not.toHaveBeenCalled();
+      } finally {
+        lstat.mockRestore();
+      }
+    });
+
+    it("is not in this repository", async () => {
+      await expect(fs.lstat(new URL("../../npm-shrinkwrap.json", import.meta.url))).rejects.toMatchObject({ code: "ENOENT" });
+    });
   });
 });
 

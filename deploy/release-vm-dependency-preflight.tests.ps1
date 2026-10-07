@@ -162,7 +162,7 @@ try {
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\scripts\dependency-policy-preflight.mts') -Destination $freshScripts
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\scripts\lib\dependency-policy.ts') -Destination $freshLib
 
-  $lockText = '{"name":"fresh-copy","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"fresh-copy","version":"1.0.0"},"node_modules/unsafe-package":{"version":"1.2.3"}}}'
+  $lockText = '{"name":"fresh-copy","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"fresh-copy","version":"1.0.0"},"node_modules/unsafe-package":{"version":"1.2.3","resolved":"https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/unsafe-package/-/unsafe-package-1.2.3.tgz"}}}'
   $utf8 = [Text.UTF8Encoding]::new($false)
   [IO.File]::WriteAllText((Join-Path $freshRoot 'package-lock.json'), $lockText, $utf8)
   $lockIdentity = [Convert]::ToHexString(
