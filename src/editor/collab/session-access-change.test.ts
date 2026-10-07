@@ -179,6 +179,18 @@ describe("the session learns that its own access changed (#2269)", () => {
       session.destroy();
     });
 
+    it("nor for a raise, whatever comes after it: a raised page keeps what this device holds", () => {
+      const { session, told, live } = open("viewer");
+      const clearLocal = vi.spyOn(session, "clearLocal");
+      live(2);
+      told("commenter");
+      told("editor");
+      told("viewer");
+      expect(session.accessChange).toBeNull();
+      expect(clearLocal).not.toHaveBeenCalled();
+      session.destroy();
+    });
+
     it("subscribers hear of it", async () => {
       const { session, told, live } = open("editor");
       live();
@@ -448,6 +460,122 @@ describe("the session learns that its own access changed (#2269)", () => {
       live();
       provider.opts.onClose({ event: { code: 1000, reason: "Unauthorized" } });
       expect(session.accessChange).toBeNull();
+      session.destroy();
+    });
+  });
+
+  describe("nothing made on a blocked page changes the document", () => {
+    const alice = makeCollabUser("b", "Bea");
+    const SUGGESTION = "Tighten this.\n\n```suggestion\nslow red\n```";
+
+    /**
+     * An Editor's page with work on it: typed steps (the last one undone, so Redo has a step too), a
+     * tracked change waiting, a find with matches, one comment suggestion that was accepted (`undone`: and
+     * undone again) and one that is still open.
+     */
+    function written({ undone = false }: { undone?: boolean } = {}) {
+      const { session, told, live } = open("editor");
+      live();
+      const type = (text: string) => {
+        session.replaceSource([{ from: session.ytext.length, to: session.ytext.length, text }]);
+        session.undoManager.stopCapturing();
+      };
+      type("The quick brown fox jumps. The lazy dog sleeps. ");
+      const accepted = session.comments.add({ from: 4, to: 15, body: SUGGESTION, author: alice });
+      const open_ = session.comments.add({ from: 30, to: 38, body: SUGGESTION, author: alice });
+      session.setMode("suggesting");
+      session.replaceSource([{ from: 0, to: 0, text: "proposed " }]);
+      session.setMode("editing");
+      session.undoManager.stopCapturing();
+      if (!undone) expect(session.acceptCommentSuggestion(accepted, "slow red")).toBe(true);
+      for (const word of ["one ", "two ", "three "]) type(word);
+      // The step that is undone comes last: anything typed after it would take Redo away.
+      if (undone) {
+        expect(session.acceptCommentSuggestion(accepted, "slow red")).toBe(true);
+        session.undo();
+      } else {
+        session.undoManager.undo();
+      }
+      session.setFind("o");
+      let updates = 0;
+      session.ydoc.on("update", () => (updates += 1));
+      const state = () =>
+        JSON.stringify([session.ytext.toString(), session.title, session.suggestions.list().length, session.comments.list().map((thread) => [thread.id, thread.suggestionState, thread.resolved])]);
+      return { session, told, open: open_, state, updates: () => updates };
+    }
+
+    type Written = ReturnType<typeof written>;
+    const PATHS: [string, (w: Written) => unknown, { undone?: boolean }?][] = [
+      ["the browser's Undo, which the code pane's binding answers from the undo manager itself", (w) => w.session.undoManager.undo()],
+      ["the browser's Redo, the same way", (w) => w.session.undoManager.redo()],
+      ["undo() with steps on the stack", (w) => w.session.undo()],
+      ["redo() with steps on the stack", (w) => w.session.redo()],
+      ["setTitle()", (w) => w.session.setTitle("Another title")],
+      ["replaceSource()", (w) => w.session.replaceSource([{ from: 0, to: 0, text: "x" }])],
+      ["replaceActive()", (w) => w.session.replaceActive("0")],
+      ["replaceAll()", (w) => w.session.replaceAll("0")],
+      ['reviewSuggestion("acceptAll")', (w) => w.session.reviewSuggestion("acceptAll")],
+      ['reviewSuggestion("rejectAll")', (w) => w.session.reviewSuggestion("rejectAll")],
+      ["acceptCommentSuggestion()", (w) => w.session.acceptCommentSuggestion(w.open, "slow red")],
+    ];
+
+    it.each(PATHS)("%s: changes the document on a page that may edit, and nothing once the page is blocked", (_what, path, scene) => {
+      // The control: on a page that may edit, this path does change the document.
+      const control = written(scene);
+      path(control);
+      expect(control.updates(), "the control").toBeGreaterThan(0);
+      control.session.destroy();
+
+      for (const now of ["viewer", "commenter", null] as const) {
+        const blocked = written(scene);
+        blocked.told(now);
+        const before = blocked.state();
+        path(blocked);
+        expect(blocked.updates(), `no update leaves a page that was ${now === null ? "removed" : `lowered to ${now}`}`).toBe(0);
+        expect(blocked.state()).toBe(before);
+        blocked.session.destroy();
+      }
+    });
+
+    it.each([
+      ["undo()", false, (w: Written) => w.session.undo()],
+      ["redo()", true, (w: Written) => w.session.redo()],
+    ] as const)("%s of an accepted comment suggestion needs no step on the stack (it is kept in the document): on a blocked page it does nothing either", (_what, undone, path) => {
+      const control = written({ undone });
+      control.session.undoManager.clear();
+      expect(undone ? control.session.canRedo : control.session.canUndo).toBe(true);
+      path(control);
+      expect(control.updates(), "the control").toBeGreaterThan(0);
+      control.session.destroy();
+
+      const blocked = written({ undone });
+      blocked.told("viewer");
+      const before = blocked.state();
+      path(blocked);
+      expect(blocked.updates()).toBe(0);
+      expect(blocked.state()).toBe(before);
+      blocked.session.destroy();
+    });
+
+    it("a raised page is not blocked and keeps its steps: Undo and Redo work as before, also when the role returns to the built one", () => {
+      const { session, told, live } = open("commenter");
+      live();
+      // A step on the stack, made the way the rich pane's binding makes one.
+      session.ydoc.transact(() => session.ytext.insert(0, "text"), session.binding);
+      expect(session.undoManager.undoStack).toHaveLength(1);
+      told("editor");
+      expect(session.accessChange?.kind).toBe("raised");
+      expect(session.undoManager.undoStack).toHaveLength(1);
+      told("commenter");
+      expect(session.accessChange).toBeNull();
+      expect(session.undoManager.undoStack).toHaveLength(1);
+      session.undo();
+      expect(session.ytext.toString()).toBe("");
+      session.redo();
+      expect(session.ytext.toString()).toBe("text");
+      // Lowered below the built role: now the steps go.
+      told("viewer");
+      expect(session.undoManager.undoStack).toHaveLength(0);
       session.destroy();
     });
   });

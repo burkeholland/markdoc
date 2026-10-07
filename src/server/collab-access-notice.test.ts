@@ -478,6 +478,15 @@ describe("the server tells a connection that its own access changed (issue #2269
       expect(s.ownerClient.told).toEqual([]);
     });
 
+    it("the token still says Viewer, the database says Editor: a raise is told as the connection opens too, once, and the connection may write", async () => {
+      const s = await scene({ row: "editor", tokenRole: "viewer" });
+      await eventually(() => s.personClient.told.length > 0, "the person to be told");
+      await settled(s, s.personClient);
+      expect(s.personClient.roles()).toEqual(["editor"]);
+      expect(s.connection.readOnly).toBe(false);
+      expect(s.ownerClient.told).toEqual([]);
+    });
+
     it("the token and the database agree: nothing is said", async () => {
       const s = await scene({ row: "viewer" });
       await settled(s, s.personClient);

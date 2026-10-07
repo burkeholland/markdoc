@@ -847,6 +847,9 @@ export class CollabSession {
     if (kind && kind !== "raised" && !blocked) this.unsentWhenBlocked = this.synced ? this.unsyncedChanges > 0 : this.unsentAtConnect > 0;
     // Back at the role the page was built with, and nothing was blocked: nothing to say any more.
     this.accessChange = kind ? { role, kind, unsaved: this.unsavedFor(role, kind) } : null;
+    // The browser's own Undo and Redo work on the whole page, whatever has focus and however inert the panes
+    // are: the code pane's binding answers them straight from the undo manager. A blocked page has no steps.
+    if (this.accessBlocked) this.undoManager.clear();
     // Nothing more can come for this document, and a token would be refused: stop reconnecting.
     if (kind === "removed") this.provider.disconnect();
     this.notify();
@@ -1006,6 +1009,7 @@ export class CollabSession {
   }
 
   setTitle(title: string) {
+    if (this.accessBlocked) return;
     this.ydoc.transact(() => this.meta.set("title", title), COMMENTS_ORIGIN);
   }
 
@@ -1057,6 +1061,7 @@ export class CollabSession {
 
   /** Text and annotation decisions share one history step, isolated from nearby typing. */
   reviewSuggestion(action: "accept" | "reject" | "acceptAll" | "rejectAll", id?: string): number {
+    if (this.accessBlocked) return 0;
     this.undoManager.stopCapturing();
     try {
       if (action === "acceptAll" || action === "rejectAll") return this.suggestions[action]();
@@ -1295,6 +1300,7 @@ export class CollabSession {
 
   /** Accept a root or reply suggestion as one text-and-comment undo step. */
   acceptCommentSuggestion(threadId: string, proposed: string, replyId?: string): boolean {
+    if (this.accessBlocked) return false;
     const target: CommentSuggestionTarget = replyId ? { kind: "reply", replyId } : { kind: "root" };
     const before = this.comments.snapshotSuggestion(threadId, target);
     if (!before) return false;
@@ -1373,7 +1379,10 @@ export class CollabSession {
   // last *edit*, and undo/redo do not reset that clock: an edit typed right after an undo would be
   // folded into the step below the one just undone, so the next undo removed both (task #437).
   // Closing the capture window makes whatever comes after an undo/redo its own step.
+  // Neither does anything on a page whose access was lowered or removed (#2269): an accepted comment
+  // suggestion is undone from the document itself, with no step on the stack.
   undo() {
+    if (this.accessBlocked) return;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.undoStack, "applied");
     if (this.undoManager.canUndo()) this.undoManager.undo();
     else this.replayCommentSuggestionTransition("applied");
@@ -1381,6 +1390,7 @@ export class CollabSession {
   }
 
   redo() {
+    if (this.accessBlocked) return;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.redoStack, "undone");
     const stored = this.readStoredCommentSuggestionTransition();
     const hasMatchingTransient =

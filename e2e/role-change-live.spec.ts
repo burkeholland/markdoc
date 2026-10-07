@@ -748,4 +748,98 @@ test.describe("a person's access changes while the document is open (#2269)", ()
       await expect(action(page)).toBeFocused();
     });
   });
+
+  test.describe("the browser's own Undo and Redo, which work on the whole page whatever has focus", () => {
+    type Typed = "the code pane" | "the rich pane" | "the rich pane after one key in the code pane";
+    const PANES: Typed[] = ["the code pane", "the rich pane", "the rich pane after one key in the code pane"];
+
+    /** The person types `count` words, each one a step of its own for Undo, and all of them are stored. */
+    async function typeWords(s: Scene, where: Typed, count: number): Promise<string[]> {
+      const { page } = s.person;
+      if (where !== "the rich pane") {
+        await page.locator(".cm-content").click();
+        await page.keyboard.press("Control+End");
+        if (where !== "the code pane") await page.keyboard.type("!");
+      }
+      if (where !== "the code pane") {
+        await page.locator(".md-rich").click();
+        await page.keyboard.press("Control+End");
+      }
+      const words = Array.from({ length: count }, (_, i) => `w${i + 1}x${s.tag}`);
+      for (const word of words) {
+        await page.keyboard.press("Enter");
+        await page.keyboard.type(word);
+        // Longer than the time within which typing is one step.
+        await page.waitForTimeout(550);
+      }
+      await expect.poll(() => liveText(s.owner.page, s.id)).toContain(words.at(-1)!);
+      await saved(page);
+      return words;
+    }
+    const kept = (text: string, words: string[]) => words.filter((word) => text.includes(word)).length;
+
+    /** Edit comes back while the dialog is up: whatever the page changed under it would reach the document now. */
+    async function raiseAndCount(s: Scene, words: string[]): Promise<number> {
+      await setRole(s, "editor");
+      await expect(s.person.page.getByTestId("access-changed-text")).toHaveText(LOWERED("Editor"));
+      await ownerMarker(s);
+      const stored = kept(await liveText(s.owner.page, s.id), words);
+      expect(kept(await codeText(s.owner.page), words), "the owner's page shows the same").toBe(stored);
+      return stored;
+    }
+
+    for (const where of PANES) {
+      test(`Ctrl+Z and Ctrl+Y pressed under the dialog, typing was in ${where}: nothing is undone, and the owner keeps every word when edit comes back`, async ({ browser }) => {
+        const s = await scene(browser);
+        const { page } = s.person;
+        const words = await typeWords(s, where, 5);
+        await setRole(s, "viewer");
+        await expectBlocked(page, LOWERED("Viewer"), { unsaved: false });
+        // As a person presses it: one after the other, not in one burst.
+        for (let i = 0; i < 15; i += 1) {
+          await page.keyboard.press("Control+z");
+          await page.waitForTimeout(50);
+        }
+        for (const chord of ["Control+y", "Control+Shift+z", "Control+z"]) await page.keyboard.press(chord);
+        expect(kept(await codeText(page), words), "the person's own copy").toBe(5);
+        await expect(action(page)).toBeFocused();
+        expect(await raiseAndCount(s, words), "the owner's document").toBe(5);
+        expect(kept(await codeText(page), words), "the person's own copy after the raise").toBe(5);
+        expect(await sameLoad(page)).toBe(true);
+      });
+
+      test(`Ctrl+Z held while the dialog arrives, typing was in ${where}: the steps undone before it stay undone, none is undone after it`, async ({ browser }) => {
+        const s = await scene(browser);
+        const { page } = s.person;
+        const words = await typeWords(s, where, 10);
+        await page.keyboard.down("Control");
+        await page.keyboard.down("z");
+        let repeats = 0;
+        let stop = false;
+        const holding = (async () => {
+          while (!stop) {
+            await page.waitForTimeout(120);
+            // A key that is already down: the browser sends a repeat.
+            await page.keyboard.down("z");
+            repeats += 1;
+          }
+        })();
+        await expect.poll(() => repeats, { intervals: [10] }).toBeGreaterThanOrEqual(1);
+        await setRole(s, "viewer");
+        await expect(dialog(page)).toBeVisible();
+        const left = kept(await codeText(page), words);
+        const seen = repeats;
+        await expect.poll(() => repeats, { intervals: [20] }).toBeGreaterThanOrEqual(seen + 12);
+        stop = true;
+        await holding;
+        await page.keyboard.up("z");
+        await page.keyboard.up("Control");
+        expect(left, "words that were still there when the dialog arrived (otherwise this proves nothing)").toBeGreaterThan(0);
+        expect(left, "the held key had undone something before the dialog").toBeLessThan(10);
+        expect(kept(await codeText(page), words), "nothing is undone under the dialog").toBe(left);
+        expect(await raiseAndCount(s, words), "the owner's document").toBe(left);
+        expect(await sameLoad(page)).toBe(true);
+      });
+    }
+  });
 });
