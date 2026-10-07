@@ -1004,6 +1004,11 @@ export class CollabSession {
     return this.pending?.id ?? null;
   }
 
+  /** The pending comment's range as relative positions, for a post that the server resolves against its own copy; null for none or the whole document. */
+  get pendingCommentAnchor(): TextAnchor | null {
+    return this.pending?.anchor ?? null;
+  }
+
   setPendingComment(range: { from: number; to: number } | null) {
     const current = this.pendingComment;
     if (!range) this.pending = null;

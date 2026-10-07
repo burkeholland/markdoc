@@ -27,6 +27,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
       documents: {
         collaborators: vi.fn().mockResolvedValue({ owner: null, collaborators: [], agents: [] }),
         reviews: vi.fn().mockResolvedValue({ reviews: [] }),
+        // Only a commenter posts through the API; the test that signs in as one answers it.
+        comment: vi.fn(() => Promise.reject(new Error("Unexpected comment request"))),
       },
       tokens: { list: vi.fn().mockResolvedValue({ tokens: [] }) },
     },
@@ -94,6 +96,7 @@ import type { HighlightClickHandler } from "@/editor/highlight-activation";
 import { PHONE_MAX, TABLET_MAX, type Layout } from "@/lib/viewport";
 import type { DocumentDto } from "@/server/dto";
 import type { AgentRequestMirror } from "./agent-requests";
+import { api } from "@/lib/api";
 import { EditorShell } from "./editor-shell";
 
 // These are warm semantic scenarios, not cold chunk-load timing tests. Compile the real modules
@@ -143,10 +146,10 @@ function viewport(width: number) {
     window.dispatchEvent(new Event("resize"));
   });
 }
-function mount(width: number, layout?: Layout, strict = false) {
+function mount(width: number, layout?: Layout, strict = false, role: "owner" | "commenter" = "owner") {
   viewport(width);
   if (layout) localStorage.setItem("markdoc:layout", layout);
-  return render(<EditorShell doc={doc} role="owner" user={{ id: user.id, name: user.name, login: null, image: null }} githubAvailable={false} githubConfigured={false} />, { reactStrictMode: strict });
+  return render(<EditorShell doc={doc} role={role} user={{ id: user.id, name: user.name, login: null, image: null }} githubAvailable={false} githubConfigured={false} />, { reactStrictMode: strict });
 }
 function currentCodeView(container: HTMLElement, view = code): CMView {
   if (!view || codeOwner !== session || !view.dom.isConnected ||
@@ -725,6 +728,54 @@ describe("a comment started while edits land around the selection (#2258)", () =
     expect(within(pendingCard()).getByTestId("comment-composer"), "the composer is not mounted again").toBe(composer);
     expect(composer).toHaveValue("@someone please look");
     expect(composer).toHaveFocus();
+  });
+
+  it("a commenter's post carries the anchor next to the offsets, and the anchor finds the text in a copy that is further along", async () => {
+    // A commenter cannot write to the shared document: the comment goes through the API.
+    session.destroy();
+    session = new CollabSession({ docId: doc.id, user, role: "commenter", autoConnect: false, getToken: async () => { throw new Error("No provider connection permitted"); } });
+    session.keepAlive();
+    session.ytext.insert(0, TEXT);
+    session.binding.releaseRemoteSync();
+    await waitFor(() => expect(session.binding.hasHeldSync).toBe(false));
+    session.localLoaded = true;
+    const comment = vi.mocked(api.documents.comment).mockResolvedValue({ id: "via-api" });
+
+    mount(1280, "rich", false, "commenter");
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await screen.findByTestId("pending-comment");
+    remoteEdit(0, 0, "Remote ");
+    await waitFor(() => expect(quote()).toBe(WORD));
+    await userEvent.type(within(pendingCard()).getByTestId("comment-composer"), "From a commenter{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(comment).toHaveBeenCalledTimes(1));
+
+    const [documentId, payload] = comment.mock.calls[0] as [string, { action: string; from: number; to: number; body: string; anchor: { start: unknown; end: unknown } }];
+    expect(documentId).toBe(doc.id);
+    expect(payload).toMatchObject({ action: "add", from: FROM + 7, to: TO + 7, body: "From a commenter" });
+    // The server's copy has keys this browser has not seen: the offsets are off there, the anchor is not.
+    const server = new Y.Doc();
+    Y.applyUpdate(server, Y.encodeStateAsUpdate(session.ydoc));
+    const text = server.getText("content");
+    text.insert(0, "Keys on their way. ");
+    expect(text.toString().slice(payload.from, payload.to)).not.toBe(WORD);
+    const start = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(payload.anchor.start), server)!;
+    const end = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(payload.anchor.end), server)!;
+    expect(text.toString().slice(start.index, end.index)).toBe(WORD);
+    server.destroy();
+    await waitFor(() => expect(session.pendingComment).toBeNull());
+  });
+
+  it("a comment on the whole document is posted without an anchor", async () => {
+    mount(1280, "rich");
+    selectRich(5);
+    fireEvent.click(screen.getByRole("button", { name: "Ask an agent" }));
+    await screen.findByTestId("pending-comment");
+    expect(session.pendingCommentAnchor).toBeNull();
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await waitFor(() => expect(session.pendingComment).toEqual({ from: FROM, to: TO }));
+    expect(session.pendingCommentAnchor).not.toBeNull();
   });
 
   it("posting uses the range as it is when Post is pressed, also when an edit landed after the last render", async () => {

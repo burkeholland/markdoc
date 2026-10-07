@@ -22,6 +22,11 @@ vi.mock("@/server/activity", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/server/activity")>();
   return { ...actual, recordActivity: vi.fn(actual.recordActivity) };
 });
+// Wrapped so a test can show a request was refused before the document was opened at all.
+vi.mock("@/server/livedoc", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/server/livedoc")>();
+  return { ...actual, mutateLiveDoc: vi.fn(actual.mutateLiveDoc) };
+});
 vi.mock("@/server/agent-requests", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/server/agent-requests")>();
   return { ...actual, attachWork: vi.fn(actual.attachWork) };
@@ -33,7 +38,7 @@ const { createCollabServer, shutdownCollab, TEXT_KEY } = await import("@/server/
 const { attachCollab } = await import("@/server/collab/ws");
 const { signCollabToken } = await import("@/server/collab/token");
 const { registerCollab } = await import("@/server/collab/registry");
-const { mutateLiveDoc } = await import("@/server/livedoc");
+const { mutateLiveDoc, readLiveDoc } = await import("@/server/livedoc");
 const { listNotifications } = await import("@/server/notifications");
 const { listActivity, recordActivity } = await import("@/server/activity");
 const { attachWork, completeRequest, createRequest, listRequests } = await import("@/server/agent-requests");
@@ -377,6 +382,200 @@ describe("POST /api/documents/:id/comments as a commenter", () => {
     expect((await post(docId, { action: "add", from: 0, to: 5, body: "Nope" })).status).toBe(403);
     actor = null;
     expect((await post(docId, { action: "add", from: 0, to: 5, body: "Nope" })).status).toBe(401);
+  });
+
+  describe("an anchor from the browser (#2258)", () => {
+    /** The document as a commenter's browser holds it: a copy that may be behind the server's. */
+    const browserCopy = () => {
+      const copy = new Y.Doc();
+      Y.applyUpdate(copy, Y.encodeStateAsUpdate(aliceDoc));
+      return copy;
+    };
+    const anchorOn = (copy: Y.Doc, quote: string) => {
+      const text = copy.getText(TEXT_KEY);
+      const from = text.toString().indexOf(quote);
+      expect(from).toBeGreaterThanOrEqual(0);
+      const to = from + quote.length;
+      return {
+        from,
+        to,
+        anchor: {
+          start: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(text, from, 0)),
+          end: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(text, to, -1)),
+        },
+      };
+    };
+    const threads = async () => ((await (await get(docId)).json()) as { comments: ThreadJson[] }).comments;
+    const serverText = () => readLiveDoc(docId, (doc) => doc.getText(TEXT_KEY).toString());
+
+    it("puts the comment on the text the commenter selected when keys landed on the server after the browser's copy", async () => {
+      const copy = browserCopy();
+      const selected = anchorOn(copy, "paragraph");
+      // Keys the commenter's browser has not seen yet when Post is pressed.
+      aliceDoc.getText(TEXT_KEY).insert(0, "Typed meanwhile. ");
+      await expect.poll(serverText).toMatch(/^Typed meanwhile\. /);
+      actor = carol;
+
+      // The offsets alone, as the browser sent them before, land that many characters to the left.
+      const byOffsets = await post(docId, { action: "add", from: selected.from, to: selected.to, body: "By the browser's offsets" });
+      const stale = ((await byOffsets.json()) as { id: string }).id;
+      expect((await threads()).find((thread) => thread.id === stale)?.quote).not.toBe("paragraph");
+
+      const res = await post(docId, { action: "add", ...selected, body: "Anchored by the browser" });
+      expect(res.status).toBe(200);
+      const { id } = (await res.json()) as { id: string };
+      expect((await threads()).find((thread) => thread.id === id)).toMatchObject({ quote: "paragraph", currentText: "paragraph" });
+      copy.destroy();
+    });
+
+    it("still takes plain offsets and a quote, unchanged, for agents and other callers", async () => {
+      actor = carol;
+      const text = aliceDoc.getText(TEXT_KEY).toString();
+      const from = text.indexOf("Shared");
+      const byOffsets = (await (await post(docId, { action: "add", from, to: from + 6, body: "By offsets" })).json()) as { id: string };
+      const byQuote = (await (await post(docId, { action: "add", quote: "Shared", body: "By quote" })).json()) as { id: string };
+      const all = await threads();
+      expect(all.find((thread) => thread.id === byOffsets.id)).toMatchObject({ quote: "Shared", currentText: "Shared" });
+      expect(all.find((thread) => thread.id === byQuote.id)).toMatchObject({ quote: "Shared", currentText: "Shared" });
+    });
+
+    it.each([
+      ["not an object", "garbage"],
+      ["an end that is missing", { start: { tname: "content", assoc: -1 } }],
+      ["an unknown key", { start: { tname: "content" }, end: { tname: "content" }, extra: true }],
+      ["a key inside a position that is not a relative position's", { start: { tname: "content", evil: "x".repeat(100_000) }, end: { tname: "content" } }],
+      ["another shared type by name", { start: { tname: "comments" }, end: { tname: "comments" } }],
+      ["a nested type id", { start: { type: { client: 1, clock: 0 } }, end: { type: { client: 1, clock: 0 } } }],
+      ["a clock that is not a whole number", { start: { item: { client: 1, clock: 1.5 } }, end: { item: { client: 1, clock: 2 } } }],
+      ["a negative clock", { start: { item: { client: 1, clock: -1 } }, end: { item: { client: 1, clock: 2 } } }],
+      ["a clock past the largest whole number", { start: { item: { client: 1, clock: 1e308 } }, end: { item: { client: 1, clock: 2 } } }],
+      ["a client id past 32 bits", { start: { item: { client: 2 ** 40, clock: 1 } }, end: { item: { client: 1, clock: 2 } } }],
+      ["a clock that is a string", { start: { item: { client: 1, clock: "7" } }, end: { item: { client: 1, clock: 2 } } }],
+      ["an item that is an array", { start: { item: [1, 2] }, end: { item: [1, 3] } }],
+      ["deep nesting where an item id belongs", { start: { item: { client: { client: { client: 1 } }, clock: { clock: 1 } } }, end: { tname: "content" } }],
+      ["a wrong assoc", { start: { tname: "content", assoc: 7 }, end: { tname: "content", assoc: -1 } }],
+    ])("refuses %s by its shape with 400, before the document is looked at, and writes nothing", async (_what, anchor) => {
+      actor = carol;
+      const before = (await threads()).length;
+      vi.mocked(mutateLiveDoc).mockClear();
+      const res = await post(docId, { action: "add", from: 0, to: 5, anchor, body: "Must not land" });
+      expect(res.status).toBe(400);
+      expect(mutateLiveDoc, "the document is not opened").not.toHaveBeenCalled();
+      expect((await threads()).length).toBe(before);
+      expect((await threads()).some((thread) => thread.body === "Must not land")).toBe(false);
+    });
+
+    /** A well-formed anchor that names nothing in the server's text: the request's own offsets are used, and the answer says so. */
+    const fallsBack = async (anchor: unknown, body: string) => {
+      actor = carol;
+      const text = await serverText();
+      const from = text.indexOf("Shared");
+      const res = await post(docId, { action: "add", from, to: from + 6, anchor, body });
+      expect(res.status).toBe(200);
+      const answer = (await res.json()) as { id: string; anchored?: boolean };
+      expect(answer.anchored).toBe(false);
+      expect((await threads()).find((thread) => thread.id === answer.id)).toMatchObject({ quote: "Shared", currentText: "Shared" });
+    };
+
+    it("an anchor made on another document is not guessed at: the offsets of the same request are used", async () => {
+      const other = new Y.Doc();
+      other.getText(TEXT_KEY).insert(0, "# Another document\n\nFirst paragraph.\n");
+      await fallsBack(anchorOn(other, "paragraph").anchor, "From another document");
+      other.destroy();
+    });
+
+    it("an anchor whose items the server does not hold (a browser ahead of it, a restored document) falls back the same way", async () => {
+      const ahead = browserCopy();
+      ahead.getText(TEXT_KEY).insert(0, "Only in this browser. ");
+      const text = ahead.getText(TEXT_KEY);
+      const anchor = {
+        start: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(text, 0, 0)),
+        end: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(text, 4, -1)),
+      };
+      await fallsBack(anchor, "From a browser that is ahead");
+      ahead.destroy();
+      await fallsBack({ start: { item: { client: 1, clock: Number.MAX_SAFE_INTEGER } }, end: { item: { client: 1, clock: Number.MAX_SAFE_INTEGER } } }, "The largest clock there is");
+    });
+
+    it("an anchor whose start is after its end falls back the same way", async () => {
+      const copy = browserCopy();
+      const { anchor } = anchorOn(copy, "paragraph");
+      copy.destroy();
+      await fallsBack({ start: anchor.end, end: anchor.start }, "Inside out");
+    });
+
+    it("an item of this document that belongs to another shared type (a comment thread, the reactions map) is never a place in the text", async () => {
+      actor = carol;
+      const made = (await (await post(docId, { action: "add", quote: "Shared", body: "A thread to point at" })).json()) as { id: string };
+      await waitFor(() => aliceDoc.getMap("comments").has(made.id));
+      // The items Yjs made for that thread: the map entry and what is inside it.
+      const comments = aliceDoc.getMap<Y.Map<unknown>>("comments");
+      const ids = [comments._map.get(made.id)!.id, comments.get(made.id)!._map.get("body")!.id, comments.get(made.id)!._map.get("reactions")!.id];
+      for (const id of ids) {
+        const position = { item: { client: id.client, clock: id.clock } };
+        await fallsBack({ start: { ...position, assoc: 0 }, end: { ...position, assoc: -1 } }, `Pointing at item ${id.client}:${id.clock} of the comments map`);
+      }
+    });
+
+    it("an anchor that names nothing, in a request with no from/to to use instead, is refused and writes nothing", async () => {
+      actor = carol;
+      const before = (await threads()).length;
+      const res = await post(docId, { action: "add", anchor: { start: { item: { client: 4242424242, clock: 3 } }, end: { item: { client: 4242424242, clock: 9 } } }, body: "Must not land" });
+      expect(res.status).toBe(400);
+      expect((await threads()).length).toBe(before);
+    });
+
+    it("the stored quote is the server's own text at the resolved range, whatever offsets came with the anchor", async () => {
+      const copy = browserCopy();
+      const { anchor } = anchorOn(copy, "paragraph");
+      copy.destroy();
+      actor = carol;
+      // Offsets that point somewhere else entirely, and past the end: the anchor decides, the server reads its own text.
+      const res = await post(docId, { action: "add", from: 0, to: 999_999, anchor, body: "The server quotes its own text" });
+      expect(res.status).toBe(200);
+      const answer = (await res.json()) as { id: string; anchored?: boolean };
+      expect(answer).toEqual({ id: answer.id });
+      await waitFor(() => aliceDoc.getMap("comments").has(answer.id));
+      const model = new CommentsModel(aliceDoc, aliceDoc.getText(TEXT_KEY));
+      try {
+        const thread = model.get(answer.id)!;
+        const text = await serverText();
+        expect(thread.quote).toBe("paragraph");
+        expect(text.slice(thread.range!.from, thread.range!.to)).toBe(thread.quote);
+      } finally {
+        model.destroy();
+      }
+    });
+
+    it("an editor may send an anchor too, and it lands the same way", async () => {
+      const copy = browserCopy();
+      const selected = anchorOn(copy, "paragraph");
+      copy.destroy();
+      actor = alice;
+      const res = await post(docId, { action: "add", ...selected, body: "From the owner" });
+      expect(res.status).toBe(200);
+      const answer = (await res.json()) as { id: string };
+      expect(answer).toEqual({ id: answer.id });
+      expect((await threads()).find((thread) => thread.id === answer.id)).toMatchObject({ quote: "paragraph", currentText: "paragraph" });
+    });
+
+    it("refuses a body over the size limit before reading an anchor out of it", async () => {
+      actor = carol;
+      const before = (await threads()).length;
+      const huge = { start: { tname: "content" }, end: { tname: "content" }, padding: "x".repeat(2_000_000) };
+      const res = await post(docId, { action: "add", from: 0, to: 5, anchor: huge, body: "Must not land" });
+      expect([400, 413]).toContain(res.status);
+      expect((await threads()).length).toBe(before);
+    });
+    it("permissions are unchanged: a viewer and an anonymous caller cannot comment with an anchor either", async () => {
+      const copy = browserCopy();
+      const selected = anchorOn(copy, "paragraph");
+      copy.destroy();
+      actor = victor;
+      expect((await post(docId, { action: "add", ...selected, body: "Nope" })).status).toBe(403);
+      actor = null;
+      expect((await post(docId, { action: "add", ...selected, body: "Nope" })).status).toBe(401);
+    });
   });
 
   it("toggles reactions, persists them to the live document and never notifies", async () => {

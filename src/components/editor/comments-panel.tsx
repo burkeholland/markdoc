@@ -3355,8 +3355,8 @@ function useCommentOps(session: CollabSession) {
   const id = session.docId;
   return useMemo(
     () => ({
-      async add(from: number, to: number, body: string) {
-        if (viaApi) return (await api.documents.comment(id, { action: "add", from, to, body })).id ?? null;
+      async add(from: number, to: number, body: string, anchor?: CollabSession["pendingCommentAnchor"]) {
+        if (viaApi) return (await api.documents.comment(id, { action: "add", from, to, anchor: anchor ?? undefined, body })).id ?? null;
         return session.comments.add({ from, to, body, author: session.user });
       },
       /** Accept the thread's suggestion block. Editors apply it locally (one undo step); returns false when it could not be applied. */
@@ -12087,7 +12087,7 @@ export function CommentsPanel({
                 // The range as it is now, not as it was at the last render: a key may have landed since (#2258).
                 const range = session.pendingComment ?? pending;
                 const quote = session.ytext.toString().slice(range.from, range.to);
-                return ops.add(range.from, range.to, body).then((id) => ({ id, quote, range }));
+                return ops.add(range.from, range.to, body, session.pendingCommentAnchor).then((id) => ({ id, quote, range }));
               }}
               onSuccess={({ id, quote, range }, body, req) => {
                 session.setPendingComment(null);
