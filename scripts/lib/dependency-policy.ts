@@ -144,13 +144,18 @@ interface LockedPackage {
   // The name in the node's path: the folder that `npm ci` fills and that `require` finds.
   pathName: string;
   version: string;
-  // True only when the lock marks the node "dev": true, so it is not in the tree `npm ci --omit=dev` installs.
+  // True only when the lock marks the node "dev": true. npm 10 leaves exactly these out of `npm ci --omit=dev`.
   dev: boolean;
+  // True when something production needs leads to the node (productionPaths). npm 11 installs exactly these with
+  // `npm ci --omit=dev`. parsePackageLock gives out no node on which the two disagree.
+  production: boolean;
 }
 
 export interface PackageLockSnapshot {
   sha256: string;
   packages: readonly LockedPackage[];
+  // The lock's own root entry as rootRecordsText writes it, for the comparison with package.json in readLock.
+  rootRecords: string;
 }
 
 export interface AuditExecutionResult {
@@ -266,7 +271,7 @@ function judgeLockEntry(lockPath: string, entry: unknown, entries: Record<string
   if (!validPackageVersion(entry.version) || !CANONICAL_VERSION_PATTERN.test(entry.version)) {
     return "the \"version\" is not three numbers without leading zeros and an optional prerelease";
   }
-  const node = { path: lockPath, name, pathName, version: entry.version, dev: entry.dev === true };
+  const node = { path: lockPath, name, pathName, version: entry.version, dev: entry.dev === true, production: true };
   if (isFeedTarball(entry.resolved, name, entry.version)) return node;
   if (entry.resolved !== undefined) {
     return "\"resolved\" is not the package feed's address of the tarball of this name and version";
@@ -288,28 +293,127 @@ function judgeLockEntry(lockPath: string, entry: unknown, entries: Record<string
   return node;
 }
 
+// The five records in which package.json and the lock's root entry say what the project itself needs.
+const ROOT_RECORDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "peerDependenciesMeta"] as const;
+
+// The five records of a root (package.json, or the lock's "" entry) as one text, so two roots are equal exactly
+// when their texts are. A record that is missing counts as an empty one, and the order of the names does not
+// matter. Every value must be a text and is compared character for character; in peerDependenciesMeta it must be
+// {"optional": true} or {"optional": false}. Anything else, and any "workspaces", has no text: this repository has
+// no workspace, and a workspace is installed from a folder that nothing here judges.
+function rootRecordsText(root: unknown): string | null {
+  if (!isRecord(root) || root.workspaces !== undefined) return null;
+  const records: Array<Array<[string, string]>> = [];
+  for (const field of ROOT_RECORDS) {
+    const record = root[field] === undefined ? {} : root[field];
+    if (!isRecord(record)) return null;
+    const pairs: Array<[string, string]> = [];
+    for (const [name, value] of Object.entries(record)) {
+      const text = field !== "peerDependenciesMeta"
+        ? value
+        : isRecord(value) && Object.keys(value).length === 1 && typeof value.optional === "boolean" ? String(value.optional) : null;
+      if (typeof text !== "string") return null;
+      pairs.push([name, text]);
+    }
+    records.push(pairs.sort(([left], [right]) => (left < right ? -1 : 1)));
+  }
+  return JSON.stringify(records);
+}
+
+// The names an entry needs, each with whether the lock must hold an entry for it. npm reads the same three records
+// in the same order, a later one winning: peerDependencies, dependencies, optionalDependencies. An optional peer and
+// an optional dependency may be left out of a lock; everything else npm installs. A package in "bundleDependencies"
+// arrives inside the tarball of the entry itself, so it is there whenever the entry is.
+function neededNames(entry: Record<string, unknown>): Map<string, boolean> | string {
+  const needs = new Map<string, boolean>();
+  const meta = entry.peerDependenciesMeta;
+  for (const field of ["peerDependencies", "dependencies", "optionalDependencies"] as const) {
+    const record = entry[field] === undefined ? {} : entry[field];
+    if (!isRecord(record)) return `"${field}" is not an object`;
+    for (const name of Object.keys(record)) {
+      const optionalPeer = isRecord(meta) && isRecord(meta[name]) && meta[name].optional === true;
+      needs.set(name, field === "dependencies" || (field === "peerDependencies" && !optionalPeer));
+    }
+  }
+  const bundled = entry.bundleDependencies === undefined ? [] : entry.bundleDependencies;
+  if (!Array.isArray(bundled)) return "\"bundleDependencies\" is not a list";
+  for (const name of bundled) if (!needs.has(name)) needs.set(name, false);
+  for (const name of needs.keys()) if (!validPackageName(name)) return "a dependency is not called by a package name";
+  return needs;
+}
+
+// The paths of the entries production needs, worked out from what each entry depends on and never read from a flag.
+// The walk starts at the root's dependencies, optionalDependencies and peerDependencies (not its devDependencies),
+// finds each name the way npm and Node do, in the nearest node_modules folder going up from the entry that needs
+// it, and goes on from every entry it finds. An alias is found by its folder, like any other entry. npm keeps the
+// packages of a folder in a map that ignores letter case, so the walk does too, and it refuses two keys that
+// differ only by case. The answer is the set, or the reason the lock cannot be walked.
+function productionPaths(entries: Record<string, unknown>): Set<string> | string {
+  const pathByFoldedKey = new Map<string, string>();
+  for (const lockPath of Object.keys(entries)) {
+    if (pathByFoldedKey.has(lockPath.toLowerCase())) return `${lockPath}: another key differs only by letter case`;
+    pathByFoldedKey.set(lockPath.toLowerCase(), lockPath);
+  }
+  const production = new Set<string>();
+  const queue = [""];
+  for (let from = queue.pop(); from !== undefined; from = queue.pop()) {
+    const needs = neededNames(entries[from] as Record<string, unknown>);
+    const who = from === "" ? "the root entry" : from;
+    if (typeof needs === "string") return `${who}: ${needs}`;
+    for (const [name, required] of needs) {
+      let found: string | undefined;
+      for (let folder = from; ; folder = folder.slice(0, Math.max(0, folder.lastIndexOf("/node_modules/")))) {
+        found = pathByFoldedKey.get(`${folder === "" ? "" : `${folder}/`}node_modules/${name}`.toLowerCase());
+        if (found !== undefined || folder === "") break;
+      }
+      if (found === undefined) {
+        // An entry production needs is missing, so nothing here can say what `npm ci` would put in its place.
+        if (required) return `${who}: needs ${name}, which has no entry`;
+      } else if (!production.has(found)) {
+        production.add(found);
+        queue.push(found);
+      }
+    }
+  }
+  return production;
+}
+
+// Everything a lock is refused for, with the reason. The entries that were judged are added to `packages`.
+// The image has npm 10, which leaves out of `npm ci --omit=dev` exactly the entries marked "dev": true. npm 11 does
+// not read the mark: it leaves out the entries production does not need. So an entry is surely absent from
+// production only when both say so, and a lock in which the two disagree on any entry, in either direction, is
+// refused: npm would not write it, and the two versions would install different production trees from it (#2308).
+function lockProblems(entries: Record<string, unknown>, packages: LockedPackage[]): string[] {
+  const problems: string[] = [];
+  for (const [lockPath, entry] of Object.entries(entries)) {
+    if (lockPath === "") continue;
+    const node = judgeLockEntry(lockPath, entry, entries);
+    if (typeof node === "string") problems.push(`${lockPath}: ${node}`);
+    else packages.push(node);
+  }
+  if (rootRecordsText(entries[""]) === null) problems.push("the root entry has \"workspaces\", or one of its dependency records is not an object of texts");
+  if (problems.length > 0) return problems;
+  const production = productionPaths(entries);
+  if (typeof production === "string") return [production];
+  for (const node of packages) node.production = production.has(node.path);
+  return packages.filter((node) => node.dev === node.production).map((node) => node.dev
+    ? `${node.path}: the entry is marked "dev": true, but production needs it`
+    : `${node.path}: the entry is not marked "dev": true, but production does not need it`);
+}
+
 export function parsePackageLock(packageLockText: string): PackageLockSnapshot | null {
   const entries = readLockEntries(packageLockText);
   if (!entries) return null;
   const packages: LockedPackage[] = [];
-  for (const [lockPath, entry] of Object.entries(entries)) {
-    if (lockPath === "") continue;
-    const node = judgeLockEntry(lockPath, entry, entries);
-    if (typeof node === "string") return null;
-    packages.push(node);
-  }
-  return { sha256: packageLockSha256(packageLockText), packages };
+  if (lockProblems(entries, packages).length > 0) return null;
+  return { sha256: packageLockSha256(packageLockText), packages, rootRecords: rootRecordsText(entries[""]) as string };
 }
 
-// Every entry parsePackageLock refuses, with the reason, for a test or a person at a terminal. The preflight never
-// calls this: a failed release shows the status invalid_lock and nothing about the entry.
+// Everything parsePackageLock refuses the lock for, with the reason, for a test or a person at a terminal. The
+// preflight never calls this: a failed release shows the status invalid_lock and nothing about the entry.
 export function packageLockProblems(packageLockText: string): string[] {
   const entries = readLockEntries(packageLockText);
-  if (!entries) return ["package-lock.json is not a version 3 lock with a root entry"];
-  return Object.entries(entries).flatMap(([lockPath, entry]) => {
-    const node = lockPath === "" ? null : judgeLockEntry(lockPath, entry, entries);
-    return typeof node === "string" ? [`${lockPath}: ${node}`] : [];
-  });
+  return entries ? lockProblems(entries, []) : ["package-lock.json is not a version 3 lock with a root entry"];
 }
 
 // A node is the listed package under either of its names. The "name" field is only what the lock says: `npm ci`
@@ -317,6 +421,10 @@ export function packageLockProblems(packageLockText: string): string[] {
 // a listed package behind another folder, and a "name" field cannot hide the listed package that fills its folder.
 function isLockedPackage(node: LockedPackage, name: string): boolean {
   return node.name === name || node.pathName === name;
+}
+
+function isOutsideProduction(node: LockedPackage): boolean {
+  return node.dev && !node.production;
 }
 
 function isSeverity(value: unknown): value is (typeof VULNERABILITY_SEVERITIES)[number] {
@@ -554,11 +662,13 @@ function expiryEndMs(expires: string): number {
 }
 
 // Decides whether an audit with findings is covered by the list of accepted advisories. Every check must hold; anything
-// unexpected returns null and the caller reports "rejected" as before.
+// unexpected returns null and the caller reports "rejected" as before. A node is outside production when nothing
+// production needs leads to it (productionPaths) and the lock marks it "dev": true, so that neither npm 10 nor
+// npm 11 installs it with --omit=dev. parsePackageLock has already refused a lock in which the two disagree.
 //   a. Every advisory object is a listed one: the exact advisory URL, on the listed package, and every lock node of
-//      that package, whether npm reports it or not, has the listed version and is marked "dev": true.
+//      that package, whether npm reports it or not, has the listed version and is outside production.
 //   b. Every other entry is reported only because it depends, directly or through such entries, on an accepted one.
-//   c. Every lock node of every entry is marked "dev": true in package-lock.json.
+//   c. Every lock node of every entry is outside production.
 //   d. The current time is before the end of the listed expiry date in UTC.
 //   e. Nothing is critical. The caller has already ruled out blocked dependencies.
 function acceptedAudit(
@@ -569,7 +679,7 @@ function acceptedAudit(
   if (audit.entries.length === 0 || audit.counts.critical > 0) return null;
   const matched = new Set<ListedAdvisory>();
   for (const entry of audit.entries) {
-    if (!entry.nodes.every((node) => node.dev)) return null;
+    if (!entry.nodes.every(isOutsideProduction)) return null;
     for (const advisory of entry.advisories) {
       const listed = advisories.find((item) =>
         advisory.url === ADVISORY_URL_PREFIX + item.advisory
@@ -582,7 +692,7 @@ function acceptedAudit(
         || !ACCEPTED_PACKAGE_PATTERN.test(listed.package)
         || !validPackageVersion(listed.version)
         // Read from the lock itself, so a node of the package that npm left out of its report is checked too.
-        || !lock.packages.every((node) => !isLockedPackage(node, listed.package) || (node.dev && node.version === listed.version))
+        || !lock.packages.every((node) => !isLockedPackage(node, listed.package) || (isOutsideProduction(node) && node.version === listed.version))
         // Written so that an expiry date or a clock that is not a number is rejected too.
         || !(now < expiryEndMs(listed.expires))
       ) {
@@ -704,6 +814,8 @@ function assessAuditExecution(
   return execution.exitCode === 0 || AUDIT_REPORT_MARKER.test(execution.stdout) ? malformed : commandFailed(false);
 }
 
+// Judges the lock's text alone. The preflight never calls this directly: it uses runDependencyAudit and
+// evaluateTemporaryAuditFile, which read the lock through readLock and so also hold package.json to it.
 export function evaluateDependencyPolicy(options: AcceptanceOptions & {
   expectedLockSha256: string;
   packageLockText: string;
@@ -720,14 +832,21 @@ export function evaluateDependencyPolicy(options: AcceptanceOptions & {
 // npm reads npm-shrinkwrap.json instead of package-lock.json when a folder holds both. `npm audit` would then judge
 // a file this policy never reads, while the image is built from package-lock.json alone. So the lock is not read
 // while anything called npm-shrinkwrap.json stands next to it.
-async function readLock(lockPath: string): Promise<{ text: string; snapshot: PackageLockSnapshot } | null> {
+// Both npm 10 and npm 11 take what the project itself needs from package.json, not from the lock's root entry: a
+// package that package.json moves from devDependencies to dependencies is installed by `npm ci --omit=dev` even
+// when the lock still calls it a devDependency and marks it "dev": true. productionPaths starts at the lock's root
+// entry, so the lock is not read either unless the package.json next to it has the same five records (#2308).
+async function readLock(lockPath: string): Promise<{ text: string; snapshot: PackageLockSnapshot; packageJsonSha256: string } | null> {
   try {
-    const absent = await fs.lstat(path.join(path.dirname(lockPath), "npm-shrinkwrap.json"))
+    const folder = path.dirname(lockPath);
+    const absent = await fs.lstat(path.join(folder, "npm-shrinkwrap.json"))
       .then(() => false, (error) => isRecord(error) && error.code === "ENOENT");
     if (!absent) return null;
     const text = await fs.readFile(lockPath, "utf8");
+    const packageJson = await fs.readFile(path.join(folder, "package.json"), "utf8");
     const snapshot = parsePackageLock(text);
-    return snapshot ? { text, snapshot } : null;
+    if (!snapshot || rootRecordsText(JSON.parse(packageJson)) !== snapshot.rootRecords) return null;
+    return { text, snapshot, packageJsonSha256: packageLockSha256(packageJson) };
   } catch {
     return null;
   }
@@ -758,7 +877,10 @@ export async function runDependencyAudit(options: AcceptanceOptions & {
     }
 
     const after = await readLock(options.lockPath);
-    if (!after || after.snapshot.sha256 !== expected) return dependencyPolicyFailure("lock_mismatch");
+    // package.json has no identity the release pins, so it is held to the bytes it had before the audit.
+    if (!after || after.snapshot.sha256 !== expected || after.packageJsonSha256 !== before.packageJsonSha256) {
+      return dependencyPolicyFailure("lock_mismatch");
+    }
     const assessment: AuditAssessment = execution
       ? assessAuditExecution(after.snapshot, execution, attempt, acceptanceFrom(options))
       : { report: commandFailedReport(commandFailureReason({ startError }, attempt)), retryable: true };

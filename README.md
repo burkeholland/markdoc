@@ -385,6 +385,16 @@ flag or option turns the rule off.
 to see which entry is refused, and what to do when the feed hands out a new
 host.
 
+The lock is refused in the same way unless its `"dev": true` marks say
+exactly what production needs, which the preflight works out itself from what
+each entry depends on, and unless the `package.json` next to it needs the same
+packages as the lock's root entry. The image's npm 10 leaves out of
+`npm ci --omit=dev` the entries with the mark, npm 11 leaves out the entries
+production does not need, and both take what the project needs from
+`package.json`, so only a lock in which all three agree installs the same
+production tree on both (#2308).
+[`docs/vm-hosting.md`](docs/vm-hosting.md#what-production-needs) has the rule.
+
 An advisory with no patched version can be accepted for a limited time through
 one list in code, `ACCEPTED_ADVISORIES` in `scripts/lib/dependency-policy.ts`.
 The list is empty: its only entry so far, `GHSA-vfj7-8cjw-p6xm` on `braces`
@@ -392,7 +402,8 @@ The list is empty: its only entry so far, `GHSA-vfj7-8cjw-p6xm` on `braces`
 only when every advisory in it is
 a listed one on the listed package and version, every other reported package
 is there only because it depends on an accepted one, every reported lock node
-is `"dev": true`, the expiry date has not passed, nothing is critical and no
+is outside production (`"dev": true`, and nothing production needs leads to
+it), the expiry date has not passed, nothing is critical and no
 blocked dependency is present. Anything else is rejected as before, and no
 environment variable, flag or option can widen the list. The preflight then
 prints a separate `accepted` report, which the release command checks again in

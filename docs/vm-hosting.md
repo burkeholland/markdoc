@@ -332,12 +332,111 @@ What this rule does not prove:
 - What a bundled package holds. A package that brings others inside its own
   tarball installs those copies whatever the lock says about them, even when
   the lock has no entry for them.
-- That a node marked `"dev": true` is absent from production.
-  `npm ci --omit=dev` works out the production tree from the dependencies,
-  not from that flag, while rule 3 under
-  [Accepted advisories](#accepted-advisories) believes the flag. That only
-  matters while `ACCEPTED_ADVISORIES` has an entry (#2308).
+- Which npm the image has. It takes `node:22-alpine` as it comes, with
+  whatever npm 10 that brings (#2318). npm 10 and npm 11 do not leave the same
+  entries out of production; [What production needs](#what-production-needs)
+  is the rule that makes them agree.
 - How npm is configured on the machine that installs (#2262).
+
+#### What production needs
+
+The image installs with `npm ci --omit=dev`, so a package that only the linter
+or the tests need is not in production. The rule for
+[accepted advisories](#accepted-advisories) has to know which packages those
+are. The lock says it twice, with the mark `"dev": true` on an entry and with
+what each entry depends on, and npm itself does not always read the same one.
+Measured with real npm (#2308):
+
+- npm 10 (`10.9.4` and `10.9.9`; the image has npm 10) believes the mark. It
+  leaves out exactly the entries marked `"dev": true`. A production package
+  with the mark added by hand was not installed, and a linter package with
+  the mark taken off was installed.
+- npm 11 (`11.12.1`) does not read the mark. It leaves out the entries
+  production does not need, which it works out from what each entry depends
+  on. A production package with the mark added by hand was installed.
+- Both take what the project itself needs from `package.json`, not from the
+  lock's root entry. With a package moved from `devDependencies` to
+  `dependencies` in `package.json` and the lock left as it was, both installed
+  the package, although the lock still called it a devDependency and marked
+  it `"dev": true`.
+
+So an entry is surely absent from production only when the mark and the
+dependencies both say so and `package.json` agrees with the lock. The
+preflight works out what production needs itself, and answers `invalid_lock`,
+before any audit runs, unless all of these hold:
+
+1. Every package production needs has an entry. The preflight starts at the
+   root entry's `dependencies`, `optionalDependencies` and `peerDependencies`
+   (not its `devDependencies`). It finds each name the way npm and Node do, in
+   the nearest `node_modules` folder going up from the entry that needs it:
+   for a name `x` that `node_modules/a` needs, `node_modules/a/node_modules/x`
+   when the lock has that entry, otherwise `node_modules/x`. From every entry
+   it finds it goes on through that entry's `dependencies`,
+   `optionalDependencies`, `peerDependencies` (optional peers too) and the
+   names in its `bundleDependencies`. Every entry reached this way is one
+   production needs. An alias is found by its folder. Only three kinds of
+   name may have no entry, because npm leaves them out of a lock itself: an
+   optional dependency, a peer that `peerDependenciesMeta` marks
+   `"optional": true`, and a name that is only in `bundleDependencies`. Any
+   other name without an entry refuses the lock: nothing could say what
+   `npm ci` would install in its place.
+2. The marks say the same as rule 1, in both directions. An entry production
+   needs has no `"dev": true`: npm 11 would install it whatever the mark says.
+   Every other entry has `"dev": true`: npm 10 would install it without the
+   mark. Only a lock in which both agree installs the same production tree on
+   npm 10 and on npm 11, and it is the only kind npm writes.
+3. The `package.json` next to the lock has the same five records as the
+   lock's root entry: `dependencies`, `devDependencies`,
+   `optionalDependencies`, `peerDependencies` and `peerDependenciesMeta`. A
+   record that is missing equals an empty one, and the order of the names
+   does not matter. Every value is a text, compared character for character;
+   in `peerDependenciesMeta` it is `{"optional": true}` or
+   `{"optional": false}`. A record or a value of any other kind refuses the
+   lock, on either side, and so does a `"workspaces"` field on either side. A
+   missing or unreadable `package.json` refuses it too. Nothing else in
+   `package.json` is compared.
+4. The records are what npm writes: in every entry production needs, the three
+   dependency records are objects, `bundleDependencies` is a list, and every
+   name in them is a package name. npm ignores letter case when it looks a
+   name up in a folder, so the preflight does too, and it refuses two keys
+   that differ only in letter case.
+
+When in doubt the preflight counts an entry as production's: it may refuse a
+lock that npm would install correctly, and it never calls a production package
+dev-only. One case of that is known. A package named in both `dependencies`
+and `devDependencies` is a devDependency to real npm 10 and 11, which leave
+it out; the preflight counts it as a dependency, so the lock npm writes for it
+is refused by rule 2. Keep a package in one of the two.
+
+Today's lock has 1,006 entries; production needs 477 of them and the other 529
+are marked `"dev": true`. Rules 1 and 2 hold for it and for all 29 versions of
+the lock in `main`'s history without a single entry of difference, and rule 3
+holds for each with the `package.json` of the same commit.
+
+Two things in `package.json` are left out of rule 3 on purpose, each measured
+with real npm 10 and 11. An `overrides` entry that the lock does not already
+carry makes `npm ci` stop with an error and install nothing, so an override
+cannot bring in a package the lock does not hold. `bundleDependencies` of the
+project itself changes nothing about what `npm ci` installs.
+
+If `package.json` changes in any byte while the audit runs, the status is
+`lock_mismatch`, as for the lock itself. The command under
+[Locked tarballs](#locked-tarballs) that lists refused entries also lists what
+rules 1, 2 and 4 refuse, for example
+`node_modules/x: the entry is marked "dev": true, but production needs it`.
+It reads only the lock, so it cannot show rule 3; for that, compare the five
+records of `package.json` with the entry `""` under `"packages"` in the
+lock. Two unit tests under `this repository` in
+`scripts/lib/dependency-policy.test.ts` check the real lock and the real
+`package.json` against all four rules, so a pull request that breaks one
+finds out in CI and not at the next release. In every case change the lock or
+`package.json`, not the rule. The rule is code in `parsePackageLock` and `readLock` in
+`scripts/lib/dependency-policy.ts`; no environment variable, flag or
+command-line option turns it off.
+
+What this rule does not prove: that the image's npm is one of the versions
+measured here (#2318), how npm is configured on the machine that installs
+(#2262), and what a bundled package holds inside its own tarball.
 
 #### Accepted advisories
 
@@ -369,13 +468,17 @@ is `rejected`, exactly as if the list did not exist:
 1. Every advisory object in the audit is a listed one: its `url` is exactly
    `https://github.com/advisories/<listed id>`, it is reported on the listed
    package, and every lock node of that package in `package-lock.json`,
-   whether npm reports it or not, has the listed version and `"dev": true`.
+   whether npm reports it or not, has the listed version and is outside
+   production: it has `"dev": true` and nothing production needs leads to
+   it. [What production needs](#what-production-needs) says how the preflight
+   works that out and why it does not believe the mark alone.
 2. Every other reported package is there only because it depends, directly or
    through other such packages, on an accepted one. A package with any advisory
    of its own that is not listed, or that names a package the audit does not
    report, is rejected.
-3. Every lock node of every reported package has `"dev": true` in
-   `package-lock.json`. A node without it is in the production tree.
+3. Every lock node of every reported package is outside production in the
+   same sense. A lock in which the mark and the dependencies disagree about
+   any entry never gets this far: it is `invalid_lock`.
 4. The current time is before the end of the entry's expiry date in UTC. From
    00:00 UTC on the next day the same audit is rejected again, so someone has
    to decide again.
