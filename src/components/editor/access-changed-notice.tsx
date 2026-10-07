@@ -140,14 +140,30 @@ function BlockedDialog({ change, discardLocal, onDocuments, onReload }: Required
     void Promise.race([gone, new Promise((resolve) => setTimeout(resolve, DISCARD_WAIT_MS))]).then(go, go);
   }, [removed, onDocuments, onReload]);
   const keep = (event: Event) => event.preventDefault();
+  // Whatever else is on the page when the dialog arrives (the editor, a dialog or the palette that was
+  // open, a menu) can no longer be reached by key, pointer or assistive technology: it is made inert for
+  // as long as the dialog is on the page, and released when the page is left through the button.
+  const madeInert = useRef<Element[]>([]);
+  const isolate = useCallback((content: HTMLDivElement | null) => {
+    for (const element of madeInert.current.splice(0)) element.removeAttribute("inert");
+    if (!content) return;
+    for (const element of Array.from(document.body.children)) {
+      if (element.contains(content) || element.hasAttribute("data-access-changed-backdrop") || element.hasAttribute("inert")) continue;
+      element.setAttribute("inert", "");
+      madeInert.current.push(element);
+    }
+  }, []);
   return (
     <Dialog open>
       <DialogPortal>
         {/* A press on the backdrop must not take focus off the button (it would fall to the page body). */}
-        <DialogOverlay className="dialog-overlay animate-fade-in" onMouseDown={(event) => event.preventDefault()} />
+        <DialogOverlay className="dialog-overlay animate-fade-in" data-access-changed-backdrop="" onMouseDown={(event) => event.preventDefault()} />
         <DialogPrimitiveContent
+          ref={isolate}
           // `dialog`, not `alertdialog`: a dialog that was open underneath (Share, the palette) hands focus
-          // over only to another `[role="dialog"]` (FLOATING_LAYER in ui/dialog.tsx).
+          // over only to another `[role="dialog"]` (FLOATING_LAYER in ui/dialog.tsx). Named by its title and
+          // described by its text, so moving focus to the button announces both.
+          aria-modal="true"
           className="dialog animate-fade-in"
           aria-describedby={describedBy}
           data-testid="access-changed-dialog"

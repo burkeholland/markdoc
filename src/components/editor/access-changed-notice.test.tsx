@@ -182,6 +182,38 @@ describe.each([
       await settle();
       expect(button()).toHaveFocus();
     });
+
+    it("is a modal dialog, and everything else on the page is inert while it is there and released when it goes", () => {
+      const other = document.createElement("div");
+      other.setAttribute("role", "dialog");
+      other.append(document.createElement("button"));
+      document.body.append(other);
+      const already = document.createElement("div");
+      already.setAttribute("inert", "");
+      document.body.append(already);
+      try {
+        const view = show(lowered());
+        const dialog = screen.getByTestId("access-changed-dialog");
+        expect(dialog).toHaveAttribute("aria-modal", "true");
+        expect(dialog).toHaveAttribute("role", "dialog");
+        const editor = screen.getByLabelText("editor", { selector: "textarea" });
+        expect(editor.closest("[inert]"), "the page").not.toBeNull();
+        expect(other, "a dialog that was open").toHaveAttribute("inert");
+        expect(dialog.closest("[inert]"), "the dialog itself").toBeNull();
+        expect(document.querySelector("[data-access-changed-backdrop]"), "its backdrop takes the presses").not.toHaveAttribute("inert");
+        // Still so after the dialog has changed.
+        view.change(removed());
+        expect(other).toHaveAttribute("inert");
+
+        view.change(null);
+        expect(editor.closest("[inert]")).toBeNull();
+        expect(other).not.toHaveAttribute("inert");
+        expect(already, "what was inert before stays so").toHaveAttribute("inert");
+      } finally {
+        other.remove();
+        already.remove();
+      }
+    });
   });
 
   describe("the button acts only on a press that is meant for it", () => {
@@ -359,6 +391,7 @@ describe.each([
       expect(bar).toHaveTextContent("You can now edit this document.");
       expect(screen.queryByRole("dialog")).toBeNull();
       expect(editor).toHaveFocus();
+      expect(document.querySelector("[inert]"), "nothing is made inert").toBeNull();
       expect(button()).toHaveTextContent("Reload");
       await settle();
       expect(discardLocal).not.toHaveBeenCalled();

@@ -83,6 +83,9 @@ async function ownerMarker({ owner, id, tag }: Scene, name = "OWNER"): Promise<s
 async function expectBlocked(page: Page, text: string, { button = "Reload", unsaved }: { button?: string; unsaved?: boolean } = {}) {
   await expect(dialog(page)).toBeVisible();
   await expect(dialog(page)).toHaveAttribute("role", "dialog");
+  await expect(dialog(page)).toHaveAttribute("aria-modal", "true");
+  await expect(dialog(page)).toHaveAccessibleName(TITLE);
+  await expect(dialog(page)).toHaveAccessibleDescription(new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   await expect(dialog(page).getByRole("heading", { name: TITLE })).toBeVisible();
   await expect(page.getByTestId("access-changed-text")).toHaveText(text);
   await expect(dialog(page).getByRole("button")).toHaveCount(1);
@@ -636,7 +639,7 @@ test.describe("a person's access changes while the document is open (#2269)", ()
   });
 
   test.describe("other things that were open when the dialog arrived", () => {
-    /** The dialog's button has focus and is the topmost thing where it is drawn. */
+    /** The dialog's button has focus and is the topmost thing where it is drawn; the rest of the page is inert. */
     async function expectOnTop(page: Page) {
       await expect(action(page)).toBeFocused();
       const top = await action(page).evaluate((button) => {
@@ -644,6 +647,18 @@ test.describe("a person's access changes while the document is open (#2269)", ()
         return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) === button;
       });
       expect(top, "the dialog's button is on top").toBe(true);
+      const reachable = await dialog(page).evaluate((content) =>
+        Array.from(document.body.children)
+          .filter((element) => !element.contains(content) && !element.hasAttribute("data-access-changed-backdrop") && !element.hasAttribute("inert"))
+          .filter((element) => (element as HTMLElement).getBoundingClientRect().width > 0)
+          .map((element) => `${element.tagName.toLowerCase()}${element.id ? `#${element.id}` : ""}[${element.getAttribute("role") ?? ""}]`),
+      );
+      expect(reachable, "everything else on the page is inert").toEqual([]);
+      // Tab has nowhere else to go.
+      await page.keyboard.press("Tab");
+      await expect(action(page)).toBeFocused();
+      await page.keyboard.press("Shift+Tab");
+      await expect(action(page)).toBeFocused();
     }
 
     test("the find bar with Replace: Replace all cannot be used any more", async ({ browser }) => {
@@ -679,18 +694,27 @@ test.describe("a person's access changes while the document is open (#2269)", ()
       await expectOnTop(page);
       await page.keyboard.type("x");
       await expect(page.getByTestId("palette-input")).not.toBeFocused();
+      await expect(page.getByTestId("palette-input")).toHaveValue("bold");
       await expectOnTop(page);
     });
 
-    test("the header's menu: it closes, and the dialog is on top", async ({ browser }) => {
+    test("the header's menu: it stays drawn under the backdrop, and its items can no longer be used", async ({ browser }) => {
       const s = await scene(browser);
       const { page } = s.person;
       await page.getByTestId("more-menu").click();
       await expect(page.getByRole("menu")).toBeVisible();
+      const item = (await page.getByRole("menuitem", { name: "All documents" }).boundingBox())!;
 
       await setRole(s, "viewer");
       await expectBlocked(page, LOWERED("Viewer"), { unsaved: false });
       await expectOnTop(page);
+      await page.mouse.click(item.x + item.width / 2, item.y + item.height / 2);
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("Escape");
+      await expect(action(page)).toBeFocused();
+      expect(await sameLoad(page)).toBe(true);
+      expect(new URL(page.url()).pathname).toBe(`/d/${s.id}`);
+      // Out of reach for assistive technology too.
       await expect(page.getByRole("menu")).toHaveCount(0);
     });
 
@@ -712,10 +736,15 @@ test.describe("a person's access changes while the document is open (#2269)", ()
       const { page } = s.person;
       await page.getByTestId("share-button").click();
       await expect(page.getByRole("dialog")).toBeVisible();
+      const close = (await page.getByRole("dialog").getByRole("button", { name: "Close" }).boundingBox())!;
 
       await setRole(s, "viewer");
       await expectBlocked(page, LOWERED("Viewer"), { unsaved: false });
       await expectOnTop(page);
+      // The Share dialog is still drawn under the backdrop; a press where its Close button is does nothing to it.
+      await page.mouse.click(close.x + close.width / 2, close.y + close.height / 2);
+      await expect(page.locator('[role="dialog"]')).toHaveCount(2);
+      await expect(action(page)).toBeFocused();
     });
   });
 });
