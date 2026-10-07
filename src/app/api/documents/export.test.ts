@@ -20,7 +20,7 @@ vi.mock("@/auth", () => ({ auth: async () => (actor ? { user: actor } : null) })
 vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
 
 const { renderPdf } = vi.hoisted(() => ({
-  renderPdf: vi.fn<(html: string) => Promise<Uint8Array>>(),
+  renderPdf: vi.fn<(source: string | (() => Promise<string>), options?: { signal?: AbortSignal }) => Promise<Uint8Array>>(),
 }));
 // The real Chromium renderer runs in pdf.test.ts's single-worker project; this file verifies the route contract.
 vi.mock("@/server/export/pdf", async (importOriginal) => {
@@ -31,7 +31,7 @@ vi.mock("@/server/export/pdf", async (importOriginal) => {
 const { getDb, schema } = await import("@/server/db");
 const { createDocument, setDocumentText } = await import("@/server/documents");
 const { putAsset } = await import("@/server/assets");
-const { PdfUnavailableError } = await import("@/server/export/pdf");
+const { PdfBusyError, PdfCancelledError, PdfUnavailableError, PDF_RETRY_AFTER_SECONDS } = await import("@/server/export/pdf");
 const { renderDocumentHtml } = await import("@/server/export/html");
 const livedoc = await import("@/server/livedoc");
 const { readDownloadFilename } = await import("@/lib/download-filename");
@@ -46,8 +46,16 @@ describe("GET /api/documents/[id]/export", () => {
   let docId: string;
 
   beforeEach(() => {
-    renderPdf.mockReset().mockRejectedValue(new Error("PDF renderer mock was not configured"));
+    // Like the real renderer, the stand-in builds the page first, so a document the page builder refuses
+    // fails with the builder's own error.
+    renderPdf.mockReset().mockImplementation(async (source) => {
+      if (typeof source === "function") await source();
+      throw new Error("PDF renderer mock was not configured");
+    });
   });
+
+  /** The page the route asked the renderer to print (the route hands over a builder, #2290). */
+  const pageOf = (nthCall = 0) => (renderPdf.mock.calls[nthCall][0] as () => Promise<string>)();
 
   beforeAll(async () => {
     const db = await getDb();
@@ -124,7 +132,7 @@ describe("GET /api/documents/[id]/export", () => {
             expect(await res.text()).toBe(snapshot.clean);
             expect(renderPdf).not.toHaveBeenCalled();
           } else {
-            const html = format === "html" ? await res.text() : renderPdf.mock.calls[0][0];
+            const html = format === "html" ? await res.text() : await pageOf();
             expect(html).toContain(`<title>${title || "Export Me"}</title>`);
             expect(html).toContain('<h1 id="current-body">Current body</h1>');
             expect(html).not.toContain("with suggestions");
@@ -324,7 +332,102 @@ describe("GET /api/documents/[id]/export", () => {
     const bytes = new Uint8Array(await res.arrayBuffer());
     expect(Buffer.from(bytes.subarray(0, 5)).toString("latin1")).toBe("%PDF-");
     expect(renderPdf).toHaveBeenCalledOnce();
-    expect(renderPdf).toHaveBeenCalledWith(expect.stringContaining("<title>Export Me</title>"));
+    // The route hands over a builder, not the page: the page is made once the request has the renderer (#2290).
+    expect(typeof renderPdf.mock.calls[0][0]).toBe("function");
+    expect(await pageOf()).toContain("<title>Export Me</title>");
+  });
+
+  it("passes the request's own abort signal to the renderer, so a caller that goes away is not rendered", async () => {
+    renderPdf.mockResolvedValueOnce(PDF_BYTES);
+    const caller = new AbortController();
+    const req = new Request(`http://localhost:3700/api/documents/${docId}/export?format=pdf`, { signal: caller.signal });
+
+    await GET(req, { params: Promise.resolve({ id: docId }) });
+
+    const signal = renderPdf.mock.calls[0][1]?.signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(false);
+    caller.abort();
+    expect(signal?.aborted, "the renderer's signal follows the request").toBe(true);
+  });
+
+  it("answers 503 with Retry-After when the renderer has no room or the wait was too long", async () => {
+    for (const reason of ["queue-full", "queue-wait"] as const) {
+      renderPdf.mockRejectedValueOnce(new PdfBusyError(reason));
+
+      const res = await call("?format=pdf");
+
+      expect(res.status, reason).toBe(503);
+      expect(res.headers.get("Retry-After"), reason).toBe(String(PDF_RETRY_AFTER_SECONDS));
+      expect(res.headers.get("Content-Type"), reason).toContain("application/json");
+      expect(await res.json(), reason).toEqual({ error: "PDF export is busy. Try again in a few seconds" });
+    }
+  });
+
+  it("answers 503 without Retry-After when the render ran past its time limit", async () => {
+    renderPdf.mockRejectedValueOnce(new PdfBusyError("render-timeout"));
+
+    const res = await call("?format=pdf");
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    expect(await res.json()).toEqual({ error: "This PDF took longer than 60 seconds to make and was stopped" });
+  });
+
+  it("answers quietly when the caller went away", async () => {
+    renderPdf.mockRejectedValueOnce(new PdfCancelledError());
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await call("?format=pdf");
+
+      expect(res.status).toBe(499);
+      expect(error, "a caller that left is not a server error").not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+
+  describe("an upload whose bytes are not what it was stored as (#2290)", () => {
+    // A row as uploads were stored before the upload rule compared bytes with the declared type:
+    // text with an <svg> root, kept under image/png.
+    const OLD_SVG = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="teal"/></svg>');
+    const OLD_SVG_B64 = Buffer.from(OLD_SVG).toString("base64");
+    let oldDocId: string;
+
+    beforeAll(async () => {
+      const db = await getDb();
+      oldDocId = (await createDocument({ ownerId: actor!.id, title: "Old upload", content: "# Old upload\n" })).id;
+      await db.insert(schema.assets).values({ id: "oldupload0001", documentId: oldDocId, userId: actor!.id, name: "drawing.png", mime: "image/png", size: OLD_SVG.byteLength, sha256: "0".repeat(64), data: OLD_SVG });
+      await setDocumentText(oldDocId, "# Old upload\n\n![the drawing](/api/assets/oldupload0001)\n");
+    });
+
+    const exportOld = (query: string) => GET(new Request(`http://localhost:3700/api/documents/${oldDocId}/export${query}`), { params: Promise.resolve({ id: oldDocId }) });
+
+    it("is left out of the page that goes to Chromium and shows as its alt text", async () => {
+      renderPdf.mockResolvedValueOnce(PDF_BYTES);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        expect((await exportOld("?format=pdf")).status).toBe(200);
+        const page = await pageOf();
+
+        expect(page).toContain('<span class="image-left-out">the drawing</span>');
+        expect(page).not.toContain(OLD_SVG_B64);
+        expect(page).not.toContain("<img");
+        expect(warn).toHaveBeenCalledWith("[pdf] 1 image(s) left out: content is not an allowed image type; 0 inlined under the type its bytes are");
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it("stays as it was in the HTML download and in the HTML export for browsers", async () => {
+      const download = await (await exportOld("?format=html&download=1")).text();
+      expect(download).toContain(`<img src="data:image/png;base64,${OLD_SVG_B64}" alt="the drawing">`);
+
+      const inBrowser = await (await exportOld("?format=html")).text();
+      expect(inBrowser).toContain('<img src="http://localhost:3700/api/assets/oldupload0001" alt="the drawing">');
+      expect(renderPdf).not.toHaveBeenCalled();
+    });
   });
 
   it("returns the explicit unavailable response only for a Chromium launch failure", async () => {

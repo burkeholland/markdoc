@@ -1,7 +1,7 @@
 import { handler, requireAccess, json, HttpError } from "@/server/http";
 import { readLiveText } from "@/server/livedoc";
 import { renderDocumentHtml } from "@/server/export/html";
-import { renderPdf, PdfUnavailableError } from "@/server/export/pdf";
+import { renderPdf, PdfBusyError, PdfCancelledError, PdfUnavailableError } from "@/server/export/pdf";
 import { exportContentDisposition } from "@/lib/download-filename";
 
 type Params = { params: Promise<{ id: string }> };
@@ -41,23 +41,28 @@ export const GET = handler(async (req: Request, { params }: Params) => {
   let body: BodyInit;
   if (format === "md") {
     body = markdown;
-  } else {
-    // PDF rendering happens in a headless browser with no session, so its images must be inlined.
+  } else if (format === "html") {
     // Inlining is scoped to this document's own assets: the access check above covers the document, not every id its Markdown names.
-    const inlineAssets = download || format === "pdf" ? { documentId: id } : false;
-    const html = await renderDocumentHtml({ title, markdown, assetBaseUrl: url.origin, inlineAssets });
-    if (format === "html") {
-      body = html;
-    } else {
-      try {
-        body = new Uint8Array(await renderPdf(html));
-      } catch (err) {
-        if (err instanceof PdfUnavailableError) {
-          console.error("PDF export unavailable:", err.cause);
-          return json({ error: err.message }, { status: 503 });
-        }
-        throw err;
+    body = await renderDocumentHtml({ title, markdown, assetBaseUrl: url.origin, inlineAssets: download ? { documentId: id } : false });
+  } else {
+    // PDF rendering happens in a headless browser with no session, so its images must be inlined, and only
+    // bytes that are an allowed image go in (`verifyBytes`). The page is built once this request has the
+    // renderer: while it waits it holds no embedded pictures.
+    const page = () => renderDocumentHtml({ title, markdown, assetBaseUrl: url.origin, inlineAssets: { documentId: id, verifyBytes: true } });
+    try {
+      body = new Uint8Array(await renderPdf(page, { signal: req.signal }));
+    } catch (err) {
+      if (err instanceof PdfUnavailableError) {
+        console.error("PDF export unavailable:", err.cause);
+        return json({ error: err.message }, { status: 503 });
       }
+      // The renderer is busy or this render ran too long: nothing is wrong with the request, so it is a 503 too.
+      if (err instanceof PdfBusyError) {
+        return json({ error: err.message }, { status: 503, headers: err.retryAfter ? { "Retry-After": String(err.retryAfter) } : undefined });
+      }
+      // The caller went away; nobody reads this answer.
+      if (err instanceof PdfCancelledError) return json({ error: err.message }, { status: 499 });
+      throw err;
     }
   }
 

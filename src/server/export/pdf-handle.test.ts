@@ -30,6 +30,8 @@ function deferred<T = void>() {
 interface FakeBrowser {
   readonly name: string;
   on: ReturnType<typeof vi.fn<(event: string, listener: () => void) => FakeBrowser>>;
+  /** Logged once when the browser is launched. */
+  version: () => string;
   newContext: ReturnType<typeof vi.fn<() => Promise<unknown>>>;
   close: ReturnType<typeof vi.fn<() => Promise<void>>>;
   /** Fires this browser's own `disconnected` listeners, as Playwright does when the Chromium process ends. */
@@ -51,6 +53,7 @@ function fakeBrowser(
       if (event === "disconnected") disconnectedListeners.push(listener);
       return browser;
     }),
+    version: () => "0.0.0.0",
     newContext: vi.fn(async () => ({
       route: async () => {},
       newPage: async () => ({
@@ -242,13 +245,17 @@ describe("shared browser handle", () => {
     // Drops A's pending launch from the slot and waits for it to settle before closing it.
     const closing = pdf.closePdfBrowser();
 
-    await pdf.renderPdf("<p>b</p>");
-    expect(launch).toHaveBeenCalledTimes(2);
+    // One render runs at a time (#2290), so this one waits for the first, which is still held by A's launch.
+    const second = pdf.renderPdf("<p>b</p>");
+    await Promise.resolve();
+    expect(launch, "the second render has not started while the first holds the renderer").toHaveBeenCalledTimes(1);
 
-    // A's launch fails now, while B owns the slot.
+    // A's launch fails now; the second render gets the renderer and launches B into the empty slot.
     launchA.reject(new Error("chromium missing"));
     expect(await first).toBeInstanceOf(pdf.PdfUnavailableError);
     await closing;
+    await second;
+    expect(launch).toHaveBeenCalledTimes(2);
 
     await pdf.renderPdf("<p>c</p>");
     expect(launch, "the render after A's failed launch must reuse B, not launch a third browser").toHaveBeenCalledTimes(2);
