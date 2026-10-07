@@ -27,6 +27,16 @@ const MAX_PACKAGE_LOCK_BYTES = 8 * 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const PACKAGE_NAME_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i;
 const PACKAGE_VERSION_PATTERN = /^[0-9a-z][0-9a-z.+_-]{0,127}$/i;
+// The one place a locked tarball may come from: the registry of the package feed, on the four hosts that serve it
+// without a login. Every "resolved" this repository's lock ever held is on one of them. The list is code: no
+// environment variable, flag or option adds a host, and none turns the check in parsePackageLock off.
+const PACKAGE_FEED_REGISTRIES: readonly string[] = [2, 12, 17, 25].map((host) =>
+  `https://ms-feed-${host}.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/`);
+// A version written the one way the registry stores it: three numbers without leading zeros and an optional
+// prerelease, nothing else. The feed also answers for other spellings of a version ("v6.15.3", "06.15.3",
+// "6.15.3+x" all return the tarball of 6.15.3), which neither npm audit nor BLOCKED_DEPENDENCIES would recognise.
+const CANONICAL_VERSION_PATTERN =
+  /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[a-z-][0-9a-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[a-z-][0-9a-z-]*))*)?$/i;
 const VULNERABILITY_SEVERITIES = ["info", "low", "moderate", "high", "critical"] as const;
 const DEPENDENCY_COUNT_FIELDS = ["prod", "dev", "optional", "peer", "peerOptional", "total"] as const;
 
@@ -213,11 +223,20 @@ function packageNameFromLockPath(lockPath: string): string | null {
   return validPackageName(name) ? name : null;
 }
 
+// `npm ci` installs the tarball in "resolved" into the folder in the entry's path, whatever the entry's "name" and
+// "version" say, while npm audit and the lists below judge the entry by those two fields. So "resolved" must be,
+// character for character, the feed's address of the tarball of exactly that name and version. No URL is parsed:
+// a query, a fragment, an encoded character, another letter case or a dot segment is simply another text.
+function isFeedTarball(resolved: unknown, name: string, version: string): boolean {
+  const tarball = `${name}/-/${name.slice(name.indexOf("/") + 1)}-${version}.tgz`;
+  return PACKAGE_FEED_REGISTRIES.some((registry) => resolved === registry + tarball);
+}
+
 export function packageLockSha256(packageLockText: string): string {
   return createHash("sha256").update(packageLockText, "utf8").digest("hex");
 }
 
-export function parsePackageLock(packageLockText: string): PackageLockSnapshot | null {
+function readLockEntries(packageLockText: string): Record<string, unknown> | null {
   const byteLength = Buffer.byteLength(packageLockText, "utf8");
   if (byteLength === 0 || byteLength > MAX_PACKAGE_LOCK_BYTES) return null;
 
@@ -230,20 +249,69 @@ export function parsePackageLock(packageLockText: string): PackageLockSnapshot |
   if (!isRecord(value) || value.lockfileVersion !== 3 || !isRecord(value.packages) || !isRecord(value.packages[""])) {
     return null;
   }
+  return value.packages;
+}
 
+// Judges one lock entry other than the root. The answer is the node, or the reason the entry is refused. The reason
+// is for packageLockProblems only: parsePackageLock drops it, so no report and no release log ever carries it.
+function judgeLockEntry(lockPath: string, entry: unknown, entries: Record<string, unknown>): LockedPackage | string {
+  // This repository has no workspace, no file: dependency and no link. Such an entry is installed from a folder,
+  // not from the feed, so nothing below could judge it.
+  if (!lockPath.includes("node_modules/")) return "the key is not a folder under node_modules/";
+  if (!isRecord(entry)) return "the entry is not an object";
+  if (entry.link !== undefined) return "the entry is a link to a folder, not a package from the feed";
+  // An aliased dependency ("x": "npm:qs@6.15.3") is installed at .../node_modules/x and carries its real name in
+  // "name". npm audit reports it under the real name, and the blocked and accepted lists name real packages.
+  const pathName = packageNameFromLockPath(lockPath);
+  const name = entry.name === undefined ? pathName : entry.name;
+  if (!pathName || !validPackageName(name)) return "the folder or the \"name\" is not a package name";
+  if (!validPackageVersion(entry.version) || !CANONICAL_VERSION_PATTERN.test(entry.version)) {
+    return "the \"version\" is not three numbers without leading zeros and an optional prerelease";
+  }
+  const node = { path: lockPath, name, pathName, version: entry.version, dev: entry.dev === true };
+  if (isFeedTarball(entry.resolved, name, entry.version)) return node;
+  if (entry.resolved !== undefined) {
+    return "\"resolved\" is not the package feed's address of the tarball of this name and version";
+  }
+  // The only entries without "resolved" are the ones npm fetches nothing for: a package that arrives inside the
+  // tarball of the package one folder up, which names it in "bundleDependencies" and comes from the feed itself.
+  const bundlerPath = lockPath.slice(0, Math.max(0, lockPath.lastIndexOf("/node_modules/")));
+  const bundler = entries[bundlerPath];
+  if (
+    entry.inBundle !== true
+    || !isRecord(bundler)
+    || !Array.isArray(bundler.bundleDependencies)
+    || !bundler.bundleDependencies.includes(pathName)
+    || bundler.resolved === undefined
+    || typeof judgeLockEntry(bundlerPath, bundler, entries) === "string"
+  ) {
+    return "there is no \"resolved\", and the entry is not bundled by a feed package one folder up";
+  }
+  return node;
+}
+
+export function parsePackageLock(packageLockText: string): PackageLockSnapshot | null {
+  const entries = readLockEntries(packageLockText);
+  if (!entries) return null;
   const packages: LockedPackage[] = [];
-  for (const [lockPath, entry] of Object.entries(value.packages)) {
-    if (lockPath === "" || !lockPath.includes("node_modules/")) continue;
-    if (!isRecord(entry)) return null;
-    if (entry.link === true) continue;
-    // An aliased dependency ("x": "npm:qs@6.15.3") is installed at .../node_modules/x and carries its real name in
-    // "name". npm audit reports it under the real name, and the blocked and accepted lists name real packages.
-    const pathName = packageNameFromLockPath(lockPath);
-    const name = entry.name === undefined ? pathName : entry.name;
-    if (!pathName || !validPackageName(name) || !validPackageVersion(entry.version)) return null;
-    packages.push({ path: lockPath, name, pathName, version: entry.version, dev: entry.dev === true });
+  for (const [lockPath, entry] of Object.entries(entries)) {
+    if (lockPath === "") continue;
+    const node = judgeLockEntry(lockPath, entry, entries);
+    if (typeof node === "string") return null;
+    packages.push(node);
   }
   return { sha256: packageLockSha256(packageLockText), packages };
+}
+
+// Every entry parsePackageLock refuses, with the reason, for a test or a person at a terminal. The preflight never
+// calls this: a failed release shows the status invalid_lock and nothing about the entry.
+export function packageLockProblems(packageLockText: string): string[] {
+  const entries = readLockEntries(packageLockText);
+  if (!entries) return ["package-lock.json is not a version 3 lock with a root entry"];
+  return Object.entries(entries).flatMap(([lockPath, entry]) => {
+    const node = lockPath === "" ? null : judgeLockEntry(lockPath, entry, entries);
+    return typeof node === "string" ? [`${lockPath}: ${node}`] : [];
+  });
 }
 
 // A node is the listed package under either of its names. The "name" field is only what the lock says: `npm ci`

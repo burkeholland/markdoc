@@ -221,6 +221,96 @@ The current report prints `auditReportVersion,vulnerabilities,metadata`. A new
 key needs a human to review it and update `parseAuditJson`; it is never a reason
 to bypass the preflight.
 
+#### Locked tarballs
+
+For every entry of `package-lock.json`, `npm ci` installs the tarball in the
+entry's `"resolved"` field, checked against `"integrity"`, into the folder in
+the entry's path. It never compares that tarball with the entry's `"name"` and
+`"version"`. `npm audit` and both lists of the policy look only at those two
+fields. A lock edited by hand could therefore name one package and version and
+install another: with real npm, an entry for `lodash` `4.17.20` that claimed
+another name, or that claimed version `4.18.1`, got 0 audit findings and was
+installed all the same (#2297).
+
+So the preflight judges the lock before it runs the audit, and refuses it with
+the status `invalid_lock` unless every entry other than the root passes all of
+these:
+
+1. Its key is a folder under `node_modules/` and it has no `"link"` field. This
+   repository has no workspace, no `file:` dependency and no link. npm
+   installs those from a folder on disk, which the preflight cannot judge.
+2. Its `"version"` is written the one way the registry stores it: three
+   numbers without leading zeros and an optional prerelease, such as `1.2.3`
+   or `5.0.0-beta.32`, with no leading `v` and no build metadata (`+...`). The
+   feed also serves the tarball of `6.15.3` when it is asked for `v6.15.3`,
+   `06.15.3` or `6.15.3+x`, and neither `npm audit` nor `BLOCKED_DEPENDENCIES`
+   recognises those spellings.
+3. Its `"resolved"` is, character for character,
+   `https://<host>/1es-public/_packaging/npm-public/npm/registry/<name>/-/<base name>-<version>.tgz`.
+   `<name>` is the name the entry is judged by: its `"name"` field when it has
+   one, as an alias does, otherwise the name in its path. `<base name>` is that
+   name without its scope, and `<version>` is its `"version"`. `<host>` is one
+   of the four hosts that serve the package feed without a login:
+   `ms-feed-2.pkgs.visualstudio.com`, `ms-feed-12.pkgs.visualstudio.com`,
+   `ms-feed-17.pkgs.visualstudio.com` and `ms-feed-25.pkgs.visualstudio.com`.
+   The text is compared, never parsed as a URL. Another host, `http`, a user
+   name, a port, a query, a fragment, an encoded character, another letter
+   case, a dot segment, the right file name under another package's folder,
+   another version, a git or `file:` URL: each is simply another text.
+4. An entry may lack `"resolved"` only when npm fetches nothing for it because
+   it arrives inside another package's tarball: it has `"inBundle": true`, and
+   the entry one folder up (its path without the last `/node_modules/<name>`)
+   passes rule 3 itself and names it in `"bundleDependencies"`. Today these
+   are the six packages inside `@tailwindcss/oxide-wasm32-wasi`. Without
+   `"resolved"` npm would fetch `<name>@<version>` from whatever registry the
+   machine is configured for.
+
+After that, the package and version that `npm audit`, `BLOCKED_DEPENDENCIES`
+and `ACCEPTED_ADVISORIES` judge are the ones `npm ci` asks the feed for. The
+rule is code in `parsePackageLock` in `scripts/lib/dependency-policy.ts`; no
+environment variable, flag or command-line option turns it off or adds a host.
+
+A refused lock stops the release with
+`Dependency preflight failed (status invalid_lock); raw output withheld.` The
+report carries the status and nothing about the entry. To see which entries
+are refused and why, on a trusted machine:
+
+```powershell
+node --no-warnings --experimental-strip-types -e "import('./scripts/lib/dependency-policy.ts').then((policy) => console.log(policy.packageLockProblems(require('node:fs').readFileSync('package-lock.json', 'utf8'))))"
+```
+
+It prints `[]` for a lock that passes, otherwise one line per entry with its
+reason. The unit test `accepts every entry of this repository's
+package-lock.json` in `scripts/lib/dependency-policy.test.ts` prints the same
+list, so a pull request that changes the lock finds out in CI and not at the
+next release.
+
+The feed's proxy decides which host it writes into `"resolved"`. If npm itself
+writes a host that is not in the list, that test fails in the pull request
+that brings it. Check first that the new host serves the same feed without a
+login: request a tarball that the lock already holds from it, with no
+credentials, and compare the hash with the entry's `"integrity"`. Then add the
+host to `PACKAGE_FEED_REGISTRIES` in `scripts/lib/dependency-policy.ts` and to
+rule 3 above in the same pull request; a test fails while the two do not name
+the same hosts. `ms-feed-1` to `ms-feed-28` exist, but all except the four
+ask for a login, and a name that does not exist yet could be registered by
+anyone, so the list is never widened to a pattern. In every other case
+change the lock, not the rule.
+
+What this rule does not prove:
+
+- That the tarball has the hash in `"integrity"`. `npm ci` checks that itself
+  and fails with `EINTEGRITY` when it does not.
+- What a bundled package holds. A package that brings others inside its own
+  tarball installs those copies whatever the lock says about them, even when
+  the lock has no entry for them.
+- That a node marked `"dev": true` is absent from production.
+  `npm ci --omit=dev` works out the production tree from the dependencies,
+  not from that flag, while rule 3 under
+  [Accepted advisories](#accepted-advisories) believes the flag. That only
+  matters while `ACCEPTED_ADVISORIES` has an entry (#2308).
+- How npm is configured on the machine that installs (#2262).
+
 #### Accepted advisories
 
 Some advisories have no patched version to upgrade to. So that such an advisory
@@ -273,7 +363,9 @@ name, so an alias cannot hide a blocked version or a second node of a listed
 package, and neither can a `"name"` field that claims another package:
 `npm ci` installs the tarball into the folder in the path whatever that field
 says. An entry whose `"name"` is not a package name fails closed as
-`invalid_lock`.
+`invalid_lock`, and so does one whose `"name"` or `"version"` is not the
+package and version of the tarball in its `"resolved"`; see
+[Locked tarballs](#locked-tarballs).
 
 The accepted result is its own report, not the pass report. It has status
 `accepted`, the real severity counts, every reported lock node as a package

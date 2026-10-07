@@ -369,6 +369,20 @@ The current report prints `auditReportVersion,vulnerabilities,metadata`. A new
 key needs a human to review it and update `parseAuditJson`; it is never a reason
 to bypass the preflight.
 
+Before the audit runs, the preflight refuses the lock itself with the status
+`invalid_lock` unless every entry's `"resolved"` is, character for character,
+the package feed's address of the tarball of the entry's own name and version,
+on one of the feed's four hosts, with the version written the canonical way.
+The only entries without `"resolved"` are bundled ones, and links and
+workspace folders are refused. `npm ci` installs what `"resolved"` points at
+and never compares it with the entry's `"name"` and `"version"`, which are all
+that `npm audit` and the lists look at, so without this a lock edited by hand
+could name one package and install another (#2297). No environment variable,
+flag or option turns the rule off.
+[`docs/vm-hosting.md`](docs/vm-hosting.md#locked-tarballs) has the rule, how
+to see which entry is refused, and what to do when the feed hands out a new
+host.
+
 An advisory with no patched version can be accepted for a limited time through
 one list in code, `ACCEPTED_ADVISORIES` in `scripts/lib/dependency-policy.ts`.
 The list is empty: its only entry so far, `GHSA-vfj7-8cjw-p6xm` on `braces`
