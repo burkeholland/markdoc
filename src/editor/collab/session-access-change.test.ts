@@ -87,6 +87,7 @@ describe("the session learns that its own access changed (#2269)", () => {
       expect(session.accessChange).toEqual({ role: now, kind: "lowered", unsaved: false });
       // No await in between: nothing typed after the message can enter the document through a pane.
       expect(session.canEdit).toBe(false);
+      expect(session.accessBlocked).toBe(true);
       expect(before).toBe(built !== "commenter");
       expect(session.role).toBe(built);
       await expect(session.flushSave()).rejects.toThrow(/permission/);
@@ -102,6 +103,7 @@ describe("the session learns that its own access changed (#2269)", () => {
       live();
       told(now);
       expect(session.accessChange).toEqual({ role: now, kind: "raised", unsaved: false });
+      expect(session.accessBlocked).toBe(false);
       expect(session.canEdit).toBe(false);
       expect(session.canComment).toBe(built !== "viewer");
       expect(session.role).toBe(built);
@@ -352,6 +354,17 @@ describe("the session learns that its own access changed (#2269)", () => {
       second.provider.opts.onUnsyncedChanges({ number: 0 });
       expect(second.session.accessChange).toEqual({ role: "viewer", kind: "lowered", unsaved: false });
       second.session.destroy();
+    });
+
+    it("told as the connection opens, before the first sync: the count the handshake starts with is not a change of the person's", async () => {
+      const { session, provider, told } = open("editor");
+      await provider.opts.token();
+      provider.opts.onStatus({ status: "connected" });
+      // The provider restarts its count at one when the handshake begins.
+      provider.opts.onUnsyncedChanges({ number: 1 });
+      told("viewer");
+      expect(session.accessChange).toEqual({ role: "viewer", kind: "lowered", unsaved: false });
+      session.destroy();
     });
 
     it("the server's message after the token is the newer one", async () => {
