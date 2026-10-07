@@ -70,10 +70,137 @@ export function normalizeMime(mime: string | null | undefined): string {
   return (mime ?? "").split(";")[0].trim().toLowerCase();
 }
 
+/**
+ * The file as text: UTF-16 when it starts with a `FF FE` / `FE FF` byte-order mark, UTF-8 otherwise
+ * (`TextDecoder` drops the mark itself). The script check reads this, so a UTF-16 SVG is checked as
+ * the text a browser would parse, not as UTF-8 with a NUL between every letter.
+ */
+function decodeText(bytes: Uint8Array): string {
+  const encoding = bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" : bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : "utf-8";
+  return new TextDecoder(encoding, { fatal: false }).decode(bytes);
+}
+
 /** Reject SVG that could run script when rendered inline (`<script>`, `on*=` handlers, `javascript:` URLs). */
 export function isUnsafeSvg(bytes: Uint8Array): boolean {
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const text = decodeText(bytes);
   return /<\s*script\b/i.test(text) || /\son[a-z]+\s*=/i.test(text) || /javascript\s*:/i.test(text) || /<\s*foreignObject\b/i.test(text);
+}
+
+/** What a file is by its own bytes: one of the allowed image types, other markup (`xml`), or nothing we store (`null`). */
+export type ContentType = "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml" | "xml" | null;
+
+const ascii = (bytes: Uint8Array, at: number, text: string): boolean => {
+  if (bytes.length < at + text.length) return false;
+  for (let i = 0; i < text.length; i++) if (bytes[at + i] !== text.charCodeAt(i)) return false;
+  return true;
+};
+
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+const XML_SPACE = new Set([0x20, 0x09, 0x0a, 0x0d]);
+/** Encodings an XML declaration may name. All keep ASCII as ASCII (or carry a byte-order mark), so the script check reads what a browser parses. */
+const TEXT_ENCODINGS = new Set(["utf-8", "utf8", "utf-16", "us-ascii", "ascii", "iso-8859-1", "latin1", "windows-1252"]);
+
+/**
+ * The root element's name when `text` is markup (`<?xml …?>`, comments, a doctype and whitespace may come
+ * first, as drawing tools write them), `""` for markup whose root cannot be read, `null` for anything else.
+ * A linear scan with `indexOf`: no pattern here can run long on a 5 MB file.
+ */
+function markupRoot(text: string): string | null {
+  let i = 0;
+  const skipSpace = () => {
+    while (i < text.length && XML_SPACE.has(text.charCodeAt(i))) i++;
+  };
+  skipSpace();
+  if (text[i] !== "<") return null;
+  for (;;) {
+    skipSpace();
+    if (text.startsWith("<?", i)) {
+      const end = text.indexOf("?>", i + 2);
+      if (end < 0) return "";
+      const encoding = text.startsWith("<?xml", i) ? /\bencoding\s*=\s*["']([^"']*)["']/i.exec(text.slice(i, Math.min(end, i + 200)))?.[1] : undefined;
+      if (encoding !== undefined && !TEXT_ENCODINGS.has(encoding.trim().toLowerCase())) return "";
+      i = end + 2;
+    } else if (text.startsWith("<!--", i)) {
+      const end = text.indexOf("-->", i + 4);
+      if (end < 0) return "";
+      i = end + 3;
+    } else if (text.startsWith("<!DOCTYPE", i)) {
+      // Up to the closing `>`, stepping over quoted strings and an internal subset in `[ … ]` (Illustrator writes one).
+      let depth = 0;
+      let quote = "";
+      let end = -1;
+      for (let j = i + 9; j < text.length; j++) {
+        const c = text[j];
+        if (quote) {
+          if (c === quote) quote = "";
+        } else if (c === '"' || c === "'") quote = c;
+        else if (c === "[") depth++;
+        else if (c === "]") depth = Math.max(0, depth - 1);
+        else if (c === ">" && depth === 0) {
+          end = j;
+          break;
+        }
+      }
+      if (end < 0) return "";
+      i = end + 1;
+    } else break;
+  }
+  if (text[i] !== "<") return "";
+  let end = i + 1;
+  // Only the first few characters matter: no element this check knows has a long name.
+  while (end < text.length && end - i <= 16 && /[A-Za-z0-9_:.-]/.test(text[end])) end++;
+  // `svg:svg` (a prefixed root) is the same element.
+  return text.slice(i + 1, end).split(":").pop() ?? "";
+}
+
+/**
+ * What `bytes` are, from signatures and text only: no image library reads user bytes to decide this.
+ * Each binary type must show its signature AND the first structure that follows it (PNG's `IHDR`, a JPEG
+ * marker, GIF's first block, WebP's first chunk), so a signature glued in front of other content is not
+ * taken for an image. Text counts as SVG only when its root element is `svg`.
+ */
+export function detectContentType(bytes: Uint8Array): ContentType {
+  if (PNG_SIGNATURE.every((b, i) => bytes[i] === b)) {
+    // The first chunk is always IHDR, 13 bytes long.
+    return bytes.length >= 33 && bytes[8] === 0 && bytes[9] === 0 && bytes[10] === 0 && bytes[11] === 13 && ascii(bytes, 12, "IHDR") ? "image/png" : null;
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+    // Start of image, then a marker segment (JFIF, Exif, a quantisation table, …): `FF` and a marker byte.
+    return bytes.length >= 4 && bytes[2] === 0xff && bytes[3] >= 0xc0 && bytes[3] <= 0xfe ? "image/jpeg" : null;
+  }
+  if (ascii(bytes, 0, "GIF87a") || ascii(bytes, 0, "GIF89a")) {
+    if (bytes.length < 14) return null;
+    // Header (6), logical screen (7), the global colour table when flagged, then an extension, an image or the trailer.
+    const next = 13 + (bytes[10] & 0x80 ? 3 * 2 ** ((bytes[10] & 0x07) + 1) : 0);
+    return bytes[next] === 0x21 || bytes[next] === 0x2c || bytes[next] === 0x3b ? "image/gif" : null;
+  }
+  if (ascii(bytes, 0, "RIFF")) {
+    return bytes.length >= 20 && ascii(bytes, 8, "WEBP") && (ascii(bytes, 12, "VP8 ") || ascii(bytes, 12, "VP8L") || ascii(bytes, 12, "VP8X")) ? "image/webp" : null;
+  }
+  const text = decodeText(bytes);
+  // Text never holds U+0000: this is a binary file (a gzip-compressed .svgz, UTF-16 without its mark, …).
+  if (text.includes("\0")) return null;
+  const root = markupRoot(text);
+  if (root === null) return null;
+  return root === "svg" ? "image/svg+xml" : "xml";
+}
+
+const TYPE_LABEL: Record<string, string> = {
+  "image/png": "PNG",
+  "image/jpeg": "JPEG",
+  "image/gif": "GIF",
+  "image/webp": "WebP",
+  "image/svg+xml": "SVG",
+};
+
+/** The message for bytes that are not what the declared type says; it names what the content is when that is known. */
+function mismatchMessage(declared: string, content: ContentType): string {
+  const said = TYPE_LABEL[declared];
+  if (content && content !== "xml") {
+    return `This file was sent as ${said} but its content is ${TYPE_LABEL[content]}. Give it the matching file extension (${EXTENSION_BY_MIME[content]}) and upload it again`;
+  }
+  if (declared === "image/svg+xml") return "This file is not an SVG image: an SVG must be text with an <svg> root (compressed .svgz files are not accepted)";
+  return `This file is not a ${said} image: its content does not match its type. Save it again as PNG, JPEG, GIF, WebP or SVG and upload that file`;
 }
 
 /** Replace characters that are awkward in Markdown / URLs and make sure the name carries a fitting extension. */
@@ -90,7 +217,12 @@ export function validateAsset(input: { mime: string; bytes: Uint8Array }): void 
   if (!ALLOWED_IMAGE_TYPES.has(input.mime)) throw new AssetError(415, "Only PNG, JPEG, GIF, WebP and SVG images can be uploaded");
   if (input.bytes.byteLength === 0) throw new AssetError(400, "The file is empty");
   if (input.bytes.byteLength > MAX_ASSET_BYTES) throw new AssetError(413, "Images must be 5 MB or smaller");
-  if (input.mime === "image/svg+xml" && isUnsafeSvg(input.bytes)) throw new AssetError(400, "SVG images may not contain scripts or event handlers");
+  // The bytes decide what the file is; the declared type only has to agree with them. Whatever is SVG by its
+  // bytes is checked for scripts first, under any declared type, so that refusal names the real problem.
+  // Other markup (an HTML page saved under an image name) is never an allowed type and stops at the comparison.
+  const content = detectContentType(input.bytes);
+  if (content === "image/svg+xml" && isUnsafeSvg(input.bytes)) throw new AssetError(400, "SVG images may not contain scripts or event handlers");
+  if (content !== input.mime) throw new AssetError(415, mismatchMessage(input.mime, content));
 }
 
 export function sha256Hex(bytes: Uint8Array): string {

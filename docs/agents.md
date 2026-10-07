@@ -403,7 +403,7 @@ Two version-producing calls on one document at the same time (an agent's `PUT /c
 
 | Method & path | Body | Access | Purpose |
 | --- | --- | --- | --- |
-| `POST /api/documents/:id/assets` | multipart `file` field, or a raw image body with `Content-Type: image/png` and `?name=shot.png` | edit | Upload an image (PNG, JPEG, GIF, WebP, SVG; ≤ 5 MB). Returns `201 { id, url, name, mime, size, alt, warnings? }`; put `![alt](url)` in the Markdown. Identical bytes within a document share one asset, also when uploaded at the same time. `warnings: ["activity-not-recorded"]` means the asset is stored and only the feed row is missing. |
+| `POST /api/documents/:id/assets` | multipart `file` field, or a raw image body with `Content-Type: image/png` and `?name=shot.png` | edit | Upload an image (PNG, JPEG, GIF, WebP, SVG; ≤ 5 MB). The bytes must be the type they are sent as (multipart: the file part's type; raw body: `Content-Type`): anything else is `415 { error }`, and the message names the type the content really is when it is one of the five (`This file was sent as PNG but its content is JPEG. …`); SVG must be text with an `<svg>` root (not compressed `.svgz`), and SVG with scripts or event handlers is `400 { error }` under any declared type. Nothing is stored for a refused file. Returns `201 { id, url, name, mime, size, alt, warnings? }`; put `![alt](url)` in the Markdown. Identical bytes within a document share one asset, also when uploaded at the same time. `warnings: ["activity-not-recorded"]` means the asset is stored and only the feed row is missing. |
 | `GET /api/assets/:id` | | view (owning document) | The image bytes; shared links included. |
 
 ### Sharing and GitHub

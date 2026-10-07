@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeAll, beforeEach, vi } from "vitest";
+import { distinctPng } from "@/server/assets.fixtures";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -254,7 +255,7 @@ describe("GET /api/documents/[id]/export", () => {
     let malloryDocId: string;
     let secretDocId: string;
     let secretAssetId: string;
-    const SECRET_B64 = Buffer.from("alice-secret-png-bytes").toString("base64");
+    const SECRET_B64 = Buffer.from(distinctPng("alice-secret-png-bytes")).toString("base64");
 
     beforeAll(async () => {
       const db = await getDb();
