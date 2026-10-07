@@ -240,10 +240,9 @@ class LinkCardView implements NodeView {
 
   update(node: PMNode) {
     if (node.type !== this.node.type) return false;
-    if (node.attrs.url !== this.node.attrs.url) {
-      this.node = node;
-      this.render();
-    } else this.node = node;
+    const changed = node.attrs.url !== this.node.attrs.url;
+    this.node = node;
+    if (changed) this.render();
     return true;
   }
 
