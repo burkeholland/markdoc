@@ -236,7 +236,10 @@ The list is empty. Its only entry so far, `GHSA-vfj7-8cjw-p6xm` on `braces`
 `3.0.3` (only the linter used it, through `eslint-config-next`, and every
 published `braces` is affected), was added on 2026-10-03 and deleted in #2294,
 when `braces` left the lock; see
-[The fast-glob override](#the-fast-glob-override). A new entry adds a row here:
+[The fast-glob override](#the-fast-glob-override). A new entry adds a row
+here in the same pull request; a test in
+`scripts/lib/dependency-policy.test.ts` fails while this table and the list do
+not hold the same entries:
 
 | Advisory | Package | Version | Expires (UTC) | Reason |
 | --- | --- | --- | --- | --- |
@@ -261,13 +264,16 @@ is `rejected`, exactly as if the list did not exist:
 5. No blocked dependency is present and nothing in the audit is `critical`. A
    critical advisory is never accepted, listed or not.
 
-A lock node is judged as the package it really is. An aliased dependency such
-as `"x": "npm:qs@6.15.3"` is installed in the folder `node_modules/x`, and its
-lock entry carries the real name in `"name"`. `npm audit` reports it under the
-real name, and both lists (`BLOCKED_DEPENDENCIES` and `ACCEPTED_ADVISORIES`)
-match on that name, so an alias cannot hide a blocked version or a second node
-of a listed package. An entry whose `"name"` is not a package name fails
-closed as `invalid_lock`.
+A lock node has two names: the folder in its path and, when the entry has one,
+its `"name"` field. An aliased dependency such as `"x": "npm:qs@6.15.3"` is
+installed in the folder `node_modules/x`, and its lock entry carries the real
+name in `"name"`. `npm audit` reports it under the real name. Both lists
+(`BLOCKED_DEPENDENCIES` and `ACCEPTED_ADVISORIES`) match a node under either
+name, so an alias cannot hide a blocked version or a second node of a listed
+package, and neither can a `"name"` field that claims another package:
+`npm ci` installs the tarball into the folder in the path whatever that field
+says. An entry whose `"name"` is not a package name fails closed as
+`invalid_lock`.
 
 The accepted result is its own report, not the pass report. It has status
 `accepted`, the real severity counts, every reported lock node as a package

@@ -278,9 +278,38 @@ describe("dependency policy", () => {
     expect(report.packages).toEqual([{ name, version, status: "blocked" }]);
   });
 
-  it("does not block another package that is installed under a blocked name at the blocked version", () => {
-    const { name, version } = BLOCKED_DEPENDENCIES[0];
+  // The "name" field of a lock entry is only what the lock says. `npm ci` installs the tarball in "resolved" into
+  // the folder in the path whatever that field holds, so a blocked package stays blocked under either name.
+  it.each(BLOCKED_DEPENDENCIES)("rejects the blocked node $name@$version whose lock entry claims another name", ({ name, version }) => {
     const report = evaluate(packageLock([{ name, version, flags: { name: "another-package" } }]));
+    expect(report.status).toBe("rejected");
+    expect(report.counts.blocked).toBe(1);
+    expect(report.packages).toEqual([{ name, version, status: "blocked" }]);
+  });
+
+  it.each(BLOCKED_DEPENDENCIES)("rejects the blocked node $name@$version in a nested folder whose lock entry claims another name", ({ name, version }) => {
+    const report = evaluate(packageLock([
+      { name: "parent-package", version: "1.0.0" },
+      { name: `parent-package/node_modules/${name}`, version, flags: { name: "another-package", dev: true } },
+    ]));
+    expect(report.status).toBe("rejected");
+    expect(report.counts.blocked).toBe(1);
+    expect(report.packages).toEqual([{ name, version, status: "blocked" }]);
+  });
+
+  it("counts a blocked node once when its folder and its lock entry both name it", () => {
+    const { name, version } = BLOCKED_DEPENDENCIES[0];
+    const report = evaluate(packageLock([{ name, version, flags: { name } }]));
+    expect(report.counts.blocked).toBe(1);
+    expect(report.packages).toEqual([{ name, version, status: "blocked" }]);
+  });
+
+  it("does not block a blocked name at another version, under either name", () => {
+    const { name } = BLOCKED_DEPENDENCIES[0];
+    const report = evaluate(packageLock([
+      { name, version: "0.0.1", flags: { name: "another-package" } },
+      { name: "harmless-alias", version: "0.0.1", flags: { name } },
+    ]));
     expect(formatDependencyPolicyReport(report)).toBe(PASS_OUTPUT);
   });
 
@@ -830,6 +859,27 @@ describe("accepted advisories (#2260)", () => {
     }
   });
 
+  // The table in docs/vm-hosting.md is where a person reads which advisories a release accepts, so it must hold the
+  // real list row for row: an entry cannot be added, changed or brought back without its documented row. The test
+  // reads no clock and needs no change when an entry and its row are added or deleted together.
+  it("holds exactly the entries in the table of docs/vm-hosting.md", async () => {
+    const whatToDo =
+      "ACCEPTED_ADVISORIES and the table under \"Accepted advisories\" in docs/vm-hosting.md do not hold the same "
+      + "entries. In the same pull request, add or remove the table row: one row per list entry, in list order, with "
+      + "the advisory, package, version and expiry date each in backticks. With an empty list the only row is "
+      + "\"| (no entries) | | | | |\".";
+    const lines = (await fs.readFile(new URL("../../docs/vm-hosting.md", import.meta.url), "utf8")).split(/\r?\n/);
+    const header = "| Advisory | Package | Version | Expires (UTC) | Reason |";
+    expect(lines.filter((line) => line === header), whatToDo).toHaveLength(1);
+    const rows: string[][] = [];
+    for (let index = lines.indexOf(header) + 2; lines[index]?.startsWith("|"); index += 1) {
+      rows.push(lines[index].split("|").slice(1, 5).map((cell) => cell.trim()));
+    }
+    const listed = ACCEPTED_ADVISORIES.map(({ advisory, package: name, version, expires }) =>
+      [advisory, name, version, expires].map((cell) => `\`${cell}\``));
+    expect(rows, whatToDo).toEqual(listed.length > 0 ? listed : [["(no entries)", "", "", ""]]);
+  });
+
   it("rejects the same audit, exactly as before, once the list is empty", () => {
     expect(evaluateBraces({ ...bracesCase(), advisories: [] })).toEqual(BRACES_REJECTED);
   });
@@ -987,6 +1037,13 @@ describe("accepted advisories (#2260)", () => {
     }],
     ["the lock has an aliased braces node at a different version that npm does not report", ({ packages }) => {
       packages.push({ name: "harmless-alias", version: "3.0.2", flags: { name: "braces", dev: true } });
+    }],
+    // The other direction: a braces folder stays a braces node whatever name its lock entry claims.
+    ["the lock has a braces folder that claims another name, without a dev flag", ({ packages }) => {
+      packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.3", flags: { name: "another-package" } });
+    }],
+    ["the lock has a braces folder that claims another name, at a different version", ({ packages }) => {
+      packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.2", flags: { name: "another-package", dev: true } });
     }],
     ["a dependent names a package that is not in the audit", ({ audit }) => {
       audit.vulnerabilities.micromatch.via = ["picomatch"];

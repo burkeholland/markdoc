@@ -122,7 +122,10 @@ export interface DependencyPolicyReport {
 
 interface LockedPackage {
   path: string;
+  // The name npm audit judges the node by: the entry's "name" field when it has one, otherwise the name in its path.
   name: string;
+  // The name in the node's path: the folder that `npm ci` fills and that `require` finds.
+  pathName: string;
   version: string;
   // True only when the lock marks the node "dev": true, so it is not in the tree `npm ci --omit=dev` installs.
   dev: boolean;
@@ -238,9 +241,16 @@ export function parsePackageLock(packageLockText: string): PackageLockSnapshot |
     const pathName = packageNameFromLockPath(lockPath);
     const name = entry.name === undefined ? pathName : entry.name;
     if (!pathName || !validPackageName(name) || !validPackageVersion(entry.version)) return null;
-    packages.push({ path: lockPath, name, version: entry.version, dev: entry.dev === true });
+    packages.push({ path: lockPath, name, pathName, version: entry.version, dev: entry.dev === true });
   }
   return { sha256: packageLockSha256(packageLockText), packages };
+}
+
+// A node is the listed package under either of its names. The "name" field is only what the lock says: `npm ci`
+// installs the tarball in "resolved" into the folder in the path whatever that field holds. So an alias cannot hide
+// a listed package behind another folder, and a "name" field cannot hide the listed package that fills its folder.
+function isLockedPackage(node: LockedPackage, name: string): boolean {
+  return node.name === name || node.pathName === name;
 }
 
 function isSeverity(value: unknown): value is (typeof VULNERABILITY_SEVERITIES)[number] {
@@ -506,7 +516,7 @@ function acceptedAudit(
         || !ACCEPTED_PACKAGE_PATTERN.test(listed.package)
         || !validPackageVersion(listed.version)
         // Read from the lock itself, so a node of the package that npm left out of its report is checked too.
-        || !lock.packages.every((node) => node.name !== listed.package || (node.dev && node.version === listed.version))
+        || !lock.packages.every((node) => !isLockedPackage(node, listed.package) || (node.dev && node.version === listed.version))
         // Written so that an expiry date or a clock that is not a number is rejected too.
         || !(now < expiryEndMs(listed.expires))
       ) {
@@ -547,8 +557,9 @@ function acceptedAudit(
 }
 
 function policyReport(lock: PackageLockSnapshot, audit: ParsedAudit, acceptance: Acceptance): DependencyPolicyReport {
-  const blocked = lock.packages.filter((item) =>
-    BLOCKED_DEPENDENCIES.some((blockedNode) => blockedNode.name === item.name && blockedNode.version === item.version));
+  // Reported under the listed name, which for an alias or a false "name" field is not the name in the lock entry.
+  const blocked = BLOCKED_DEPENDENCIES.flatMap(({ name, version }) =>
+    lock.packages.filter((item) => item.version === version && isLockedPackage(item, name)).map(() => ({ name, version })));
   const accepted = blocked.length === 0 ? acceptedAudit(lock, audit, acceptance) : null;
   if (accepted) {
     return {
