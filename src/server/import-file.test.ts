@@ -433,6 +433,49 @@ describe("importFiles", () => {
     expect(versions[0].title).toBe("Imported from trip.md");
   });
 
+  // #2287: the same rule as the upload route (`assetTypeFor`). The bytes decide the stored type; the name is kept.
+  it("stores an image with the wrong raster extension as what its bytes are, and refuses a mismatch that involves SVG", async () => {
+    const svg = bytes('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>');
+    const md = "# Mixed\n\n![Photo](photo.jpg)\n\n![Drawing](drawing.png)\n\n![Pixel](pixel.svg)\n\n![Notes](notes.gif)\n\n![Logo](logo.svg)\n";
+    const {
+      documents: [doc],
+    } = await importFiles({
+      ownerId: owner.id,
+      files: [{ name: "mixed.md", bytes: bytes(md) }],
+      images: [
+        { name: "photo.jpg", mime: "image/jpeg", bytes: PNG },
+        { name: "drawing.png", mime: "image/png", bytes: svg },
+        { name: "pixel.svg", mime: "image/svg+xml", bytes: PNG },
+        { name: "notes.gif", mime: "image/gif", bytes: bytes("meeting notes") },
+        { name: "logo.svg", mime: "image/svg+xml", bytes: svg },
+      ],
+    });
+    expect(doc.warnings).toEqual([
+      "“drawing.png”: This file was sent as PNG but its content is SVG. Give it the matching file extension (.svg) and upload it again",
+      "“pixel.svg”: This file was sent as SVG but its content is PNG. Give it the matching file extension (.png) and upload it again",
+      "“notes.gif”: This file is not a GIF image: its content does not match its type. Save it again as PNG, JPEG, GIF, WebP or SVG and upload that file",
+      "3 images not found: drawing.png, pixel.svg, notes.gif",
+    ]);
+
+    const db = await getDb();
+    const [row] = await db.select().from(schema.documents).where(eq(schema.documents.id, doc.id));
+    // The PNG named .jpg is in the document, stored and typed as PNG under the name it came with.
+    const photo = /!\[Photo\]\(\/api\/assets\/([a-z0-9]+)\)/.exec(row.content);
+    expect(photo).not.toBeNull();
+    expect(textFromYstate(row.ystate ?? null, row.content, row.title)).toBe(row.content);
+    const stored = await getAsset(photo![1]);
+    expect(stored).toMatchObject({ mime: "image/png", name: "photo.jpg", documentId: doc.id });
+    expect(Buffer.from(stored!.bytes).equals(PNG)).toBeTruthy();
+    // The refused ones keep their link as written and nothing of them is stored.
+    for (const kept of ["![Drawing](drawing.png)", "![Pixel](pixel.svg)", "![Notes](notes.gif)"]) expect(row.content).toContain(kept);
+    expect(row.content).toMatch(/!\[Logo\]\(\/api\/assets\/[a-z0-9]+\)/);
+    const assets = await db.select({ mime: schema.assets.mime, name: schema.assets.name }).from(schema.assets).where(eq(schema.assets.documentId, doc.id));
+    expect(assets.sort((a, b) => a.name.localeCompare(b.name))).toEqual([
+      { mime: "image/svg+xml", name: "logo.svg" },
+      { mime: "image/png", name: "photo.jpg" },
+    ]);
+  });
+
   it("updateDocument refuses a content write that leaves ystate behind", async () => {
     const doc = await importText({ ownerId: owner.id, content: "# Guarded\n", format: "markdown" });
     await expect(updateDocument(doc.id, { content: "# Changed\n" })).rejects.toThrow(/ystate/);

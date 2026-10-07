@@ -17,8 +17,15 @@ const nextConfig: NextConfig = {
   // module"). Bundled, they are plain modules in the chunk graph. drizzle-orm is multi-copy safe
   // (Symbol.for + entityKind), so the custom server's copy and the bundled one share one db.
   serverExternalPackages: ["@electric-sql/pglite", "pg", "@hocuspocus/server", "ws", "yjs"],
+  // Nothing uses next/image, so Next's image optimisation endpoint is off (#2287): with `unoptimized`
+  // every request to /_next/image answers 404 before it reads a parameter, fetches or decodes anything.
+  // The two empty lists are the second layer should that line ever go: no remote host and no local path
+  // may be optimised (Next itself adds only its own /_next/static/media files to an empty local list).
+  // Avatars and uploaded images are plain <img> tags that load from their own URLs.
   images: {
-    remotePatterns: [{ protocol: "https", hostname: "avatars.githubusercontent.com" }],
+    unoptimized: true,
+    localPatterns: [],
+    remotePatterns: [],
   },
   // `next build` type-checks the whole tsconfig project, including playwright.config.ts and e2e/**, and
   // fails inside the container image (whose context has no test code). tsconfig.build.json extends the

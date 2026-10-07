@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll } from "vitest";
 import { eq } from "drizzle-orm";
+import { distinctPng } from "../assets.fixtures";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 delete process.env.DATABASE_URL;
@@ -13,7 +14,7 @@ const { UnrenderableDocumentError } = await import("@/editor/markdown/renderable
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 const PNG = Uint8Array.from(Buffer.from(PNG_B64, "base64"));
 // Distinct bytes standing in for another user's private image.
-const SECRET_PNG_B64 = Buffer.from("PNG-secret-bytes-that-must-not-leak").toString("base64");
+const SECRET_PNG_B64 = Buffer.from(distinctPng("PNG-secret-bytes-that-must-not-leak")).toString("base64");
 const SECRET_PNG = Uint8Array.from(Buffer.from(SECRET_PNG_B64, "base64"));
 
 const BASE = "https://docs.example.com";
@@ -138,7 +139,7 @@ describe("renderDocumentHtml", () => {
       const db = await getDb();
       const [user] = await db.select().from(schema.users).where(eq(schema.users.login, "exp"));
       await db.insert(schema.documents).values({ id: "budget-doc", title: "Budget", ownerId: user.id, content: "" });
-      const blobs = ["a", "b", "c"].map((c) => Uint8Array.from(Buffer.from(c.repeat(100))));
+      const blobs = ["a", "b", "c"].map((c) => distinctPng(c.repeat(13)));
       const ids: string[] = [];
       for (const [i, bytes] of blobs.entries()) {
         ids.push((await putAsset({ documentId: "budget-doc", userId: user.id, name: `${i}.png`, mime: "image/png", bytes })).id);

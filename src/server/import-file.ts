@@ -9,7 +9,7 @@ import { customAlphabet } from "nanoid";
 import { getDb, schema, type Tx } from "@/server/db";
 import { addVersion, createDocument, setDocumentText } from "@/server/documents";
 import { boundTitle } from "@/server/document-title";
-import { AssetError, assetUrl, cleanAssetName, normalizeMime, sha256Hex, validateAsset, type PutAssetInput, type StoredAsset } from "@/server/assets";
+import { AssetError, assetTypeFor, assetUrl, cleanAssetName, normalizeMime, sha256Hex, type PutAssetInput, type StoredAsset } from "@/server/assets";
 import { IMPORT_EXTENSIONS_LIST, importFormatFor, type ImportFormat } from "@/lib/import-extensions";
 
 // The extension map lives in `@/lib/import-extensions` (shared with the dashboard's import dialog);
@@ -279,8 +279,7 @@ const assetNanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);
  * would wait for the transaction's lock forever. `seen` dedupes by digest within the new document.
  */
 async function putImportedAsset(tx: Tx, input: PutAssetInput, seen: Map<string, StoredAsset>): Promise<StoredAsset> {
-  const mime = normalizeMime(input.mime);
-  validateAsset({ mime, bytes: input.bytes });
+  const mime = assetTypeFor({ mime: normalizeMime(input.mime), bytes: input.bytes });
   const hash = sha256Hex(input.bytes);
   const existing = seen.get(hash);
   if (existing) return existing;
