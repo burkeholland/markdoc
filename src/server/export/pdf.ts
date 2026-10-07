@@ -151,9 +151,11 @@ interface ProcessIdentity {
 const identities = new WeakMap<Browser, ProcessIdentity>();
 
 /**
- * Read the browser's own process id and start time, once, right after launch: before any document is
- * loaded, so the answer comes from a browser that has seen no document bytes. `Browser` exposes no process;
- * the id is only ever used to end a Chromium that will not close (`retire`).
+ * Ask the browser for its own process id right after launch, and read that process's start time. Nobody
+ * waits for the answer: the first render may already be running when it comes. `Browser` exposes no
+ * process; the id is only ever used to end a Chromium that will not close (`retire`), and only when the
+ * start time read here is still the same right before the kill. Until both are known, a Chromium that will
+ * not close is left to Playwright, which ends a browser 30 s after its close was asked.
  */
 async function identify(browser: Browser): Promise<void> {
   try {
@@ -178,7 +180,9 @@ async function launch(onDisconnected: () => void): Promise<Browser> {
   // CHROMIUM_PATH points at a system Chromium (the Docker image installs Alpine's). Playwright's
   // own download is used when it is unset.
   const executablePath = process.env.CHROMIUM_PATH || undefined;
-  const browser = await chromium.launch({ headless: true, executablePath, env: chromiumEnvironment() });
+  // A launch gets the time one render gets, not Playwright's own 180 s. A Chromium that hangs while it starts is given
+  // up and ended by Playwright then; `retire` waits for that: past the render limit, no longer than the page took to build (#2290).
+  const browser = await chromium.launch({ headless: true, executablePath, env: chromiumEnvironment(), timeout: PDF_RENDER_TIMEOUT_MS });
   browser.on("disconnected", onDisconnected);
   console.log(`[pdf] launched Chromium ${browser.version()}`);
   void identify(browser);

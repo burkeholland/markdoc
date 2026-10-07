@@ -44,6 +44,8 @@ interface FakeBrowser {
   finishPrint: () => void;
   /** Prints that are waiting right now. */
   printing: () => number;
+  /** How many times `page.pdf()` was called on this browser. */
+  prints: number;
 }
 
 /** Just enough of Playwright's `Browser`. `pid` makes it answer the process question the way Chromium does. */
@@ -73,6 +75,7 @@ function fakeBrowser(name: string, options: { pid?: number; closeGate?: Promise<
           setContent: async () => {},
           emulateMedia: async () => {},
           pdf: () => {
+            browser.prints++;
             if (!browser.hold) return Promise.resolve(new Uint8Array(PDF_MAGIC));
             const gate = deferred<Uint8Array>();
             gates.push(gate);
@@ -88,6 +91,7 @@ function fakeBrowser(name: string, options: { pid?: number; closeGate?: Promise<
     }),
     finishPrint: () => gates.shift()?.resolve(new Uint8Array(PDF_MAGIC)),
     printing: () => gates.length,
+    prints: 0,
   };
   if (options.pid !== undefined) {
     browser.newBrowserCDPSession = async () => ({
@@ -155,6 +159,8 @@ describe("PDF renderer limits (#2290)", () => {
       "AUTH_SECRET", "AUTH_GITHUB_ID", "AUTH_GITHUB_SECRET", "AUTH_URL", "AUTH_DEV_LOGIN", "DATABASE_URL", "PGPASSWORD", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_APP_PRIVATE_KEY",
       "MARKDOC_API_TOKEN", "WEBHOOK_SIGNING_KEY", "AWS_SECRET_ACCESS_KEY", "AZURE_CLIENT_SECRET", "NODE_OPTIONS", "npm_config_registry", "npm_package_name", "CHROMIUM_PATH",
       "PGLITE_DATA_DIR", "MARKDOC_URL", "TRUST_PROXY", "PORT", "HOST", "NODE_ENV", "APP_VERSION", "SOME_PASSWORD", "MY_API_KEY",
+      // An allowed family's letters in the middle of a name: the families are matched at the start only.
+      "MY_LC_TOKEN", "APP_XDG_SECRET", "OLD_PROGRAMFILES_KEY",
     ];
 
     it("hands over allow-listed names only, whatever the server's environment holds", async () => {
@@ -193,6 +199,8 @@ describe("PDF renderer limits (#2290)", () => {
         DATABASE_URL: "postgres://",
         PATH_TO_KEY: "/k",
         HOMEPAGE_TOKEN: "t",
+        MY_LC_TOKEN: "t",
+        APP_XDG_SECRET: "s",
         NODE_OPTIONS: "--inspect",
         npm_config_token: "t",
         CHROMIUM_PATH: "/usr/bin/chromium-browser",
@@ -342,6 +350,28 @@ describe("PDF renderer limits (#2290)", () => {
       expect(launch).not.toHaveBeenCalled();
     });
 
+    it("takes no place in the queue and builds no page when the request is already aborted", async () => {
+      const A = fakeBrowser("A");
+      A.hold = true;
+      launch.mockResolvedValueOnce(A);
+      const built: string[] = [];
+      const gone = new AbortController();
+      gone.abort();
+
+      const first = pdf.renderPdf("<p>first</p>");
+      await settle();
+      let answer: unknown = "still waiting";
+      void failure(pdf.renderPdf(async () => (built.push("gone"), "<p>gone</p>"), { signal: gone.signal })).then((error) => (answer = error));
+      await settle();
+      expect(answer, "refused at once, not left waiting for the renderer").toBeInstanceOf(pdf.PdfCancelledError);
+
+      A.finishPrint();
+      await first;
+      await settle();
+      expect(built, "no page is built for a caller that is already gone").toEqual([]);
+      expect(A.newContext).toHaveBeenCalledTimes(1);
+    });
+
     it("leaves the queue, never renders, and makes room for another caller", async () => {
       const A = fakeBrowser("A");
       A.hold = true;
@@ -390,6 +420,42 @@ describe("PDF renderer limits (#2290)", () => {
       A.finishPrint();
       expect(Array.from(await next)).toEqual(PDF_MAGIC);
       expect(launch).toHaveBeenCalledTimes(1);
+    });
+
+    it("gets no Chromium when it goes away while its page is being built", async () => {
+      launch.mockResolvedValue(fakeBrowser("A"));
+      const page = deferred<string>();
+      const gone = new AbortController();
+
+      const leaving = failure(pdf.renderPdf(() => page.promise, { signal: gone.signal }));
+      await settle();
+      gone.abort();
+      page.resolve("<p>built for nobody</p>");
+
+      expect(await leaving).toBeInstanceOf(pdf.PdfCancelledError);
+      expect(launch, "no Chromium is started for a caller that is gone").not.toHaveBeenCalled();
+      // The renderer is free: the next caller renders.
+      expect(Array.from(await pdf.renderPdf("<p>next</p>"))).toEqual(PDF_MAGIC);
+    });
+
+    it("is not printed when it goes away while Chromium is starting", async () => {
+      const A = fakeBrowser("A");
+      const starting = deferred<FakeBrowser>();
+      launch.mockReturnValueOnce(starting.promise);
+      const gone = new AbortController();
+
+      const leaving = failure(pdf.renderPdf("<p>leaving</p>", { signal: gone.signal }));
+      await settle();
+      expect(launch).toHaveBeenCalledTimes(1);
+      gone.abort();
+      starting.resolve(A);
+
+      expect(await leaving).toBeInstanceOf(pdf.PdfCancelledError);
+      expect(A.prints, "nothing is printed for a caller that is gone").toBe(0);
+      expect(A.contexts[0].close, "the context made for it is closed").toHaveBeenCalled();
+      expect(A.close, "the browser is healthy and stays").not.toHaveBeenCalled();
+      expect(Array.from(await pdf.renderPdf("<p>next</p>"))).toEqual(PDF_MAGIC);
+      expect(launch, "the next caller uses the same browser").toHaveBeenCalledTimes(1);
     });
   });
 
@@ -520,6 +586,74 @@ describe("PDF renderer limits (#2290)", () => {
       }
       expect(kill).not.toHaveBeenCalled();
       expect(startToken).not.toHaveBeenCalled();
+    });
+
+    it("gives a launch the render limit, so a Chromium that hangs while it starts holds the renderer no longer than that", async () => {
+      vi.useFakeTimers();
+      // Like Playwright: a launch that gets no answer rejects when its `timeout` option runs out, and never without one.
+      launch.mockImplementationOnce(
+        (options) =>
+          new Promise((_, reject) => {
+            const limit = options.timeout;
+            if (typeof limit === "number") setTimeout(() => reject(new Error(`browserType.launch: Timeout ${limit}ms exceeded.`)), limit);
+          }),
+      );
+      const B = fakeBrowser("B");
+      launch.mockResolvedValueOnce(B);
+
+      const hung = failure(pdf.renderPdf("<p>hung</p>"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(launch).toHaveBeenCalledTimes(1);
+      expect(launch.mock.calls[0][0]).toMatchObject({ timeout: pdf.PDF_RENDER_TIMEOUT_MS });
+      await vi.advanceTimersByTimeAsync(pdf.PDF_RENDER_TIMEOUT_MS - 5_000);
+      let served: number[] | undefined;
+      void pdf.renderPdf("<p>waiting</p>").then((bytes) => (served = Array.from(bytes)), () => {});
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      const error = await hung;
+      expect(error).toBeInstanceOf(pdf.PdfBusyError);
+      expect((error as InstanceType<PdfModule["PdfBusyError"]>).reason).toBe("render-timeout");
+      await vi.advanceTimersByTimeAsync(pdf.BROWSER_CLOSE_TIMEOUT_MS);
+      expect(served, "the waiting caller is served within the close bound after the limit, not when Playwright's own 180 s are over").toEqual(PDF_MAGIC);
+      expect(launch, "from a new browser").toHaveBeenCalledTimes(2);
+      expect(B.newContext).toHaveBeenCalledTimes(1);
+
+      // Nothing is left running or waiting: the next caller renders at once, and only the new browser's idle timer remains.
+      expect(Array.from(await pdf.renderPdf("<p>next</p>"))).toEqual(PDF_MAGIC);
+      expect(vi.getTimerCount()).toBe(1);
+      expect(warn.mock.calls).toEqual([["[pdf] render stopped after 60000 ms; closing Chromium"]]);
+    });
+
+    it("never launches or prints a page that took longer than the limit to build, and hands the renderer on at the limit", async () => {
+      vi.useFakeTimers();
+      const A = fakeBrowser("A");
+      A.hold = true;
+      launch.mockResolvedValue(A);
+      const page = deferred<string>();
+
+      const late = failure(pdf.renderPdf(() => page.promise));
+      await vi.advanceTimersByTimeAsync(pdf.PDF_RENDER_TIMEOUT_MS);
+      const error = await late;
+      expect(error).toBeInstanceOf(pdf.PdfBusyError);
+      expect((error as InstanceType<PdfModule["PdfBusyError"]>).reason).toBe("render-timeout");
+      expect(launch, "no browser was started for it").not.toHaveBeenCalled();
+
+      // The renderer went to the next caller at the limit: there was no browser to close first.
+      const next = pdf.renderPdf("<p>next</p>");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(A.printing()).toBe(1);
+
+      // Its page arrives now, while the next caller prints: it must not be printed beside it.
+      page.resolve("<p>too late</p>");
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(A.newContext, "the late page gets no context").toHaveBeenCalledTimes(1);
+      expect(A.prints).toBe(1);
+      expect(launch).toHaveBeenCalledTimes(1);
+
+      A.finishPrint();
+      expect(Array.from(await next)).toEqual(PDF_MAGIC);
+      expect(A.close, "no browser is closed: none was in use when the limit passed").not.toHaveBeenCalled();
     });
 
     it("leaves no timer behind after an ordinary render", async () => {

@@ -151,6 +151,18 @@ describe("byte check when a page is built for the server's Chromium", () => {
     expect(warn.mock.calls).toEqual([["[pdf] 1 image(s) left out: content is not an allowed image type; 0 inlined under the type its bytes are"]]);
   });
 
+  it("keeps a less-than sign, and anything in the alt text that looks like a tag, as text", async () => {
+    put("svgaspng", "image/png", SVG);
+
+    const page = await forChromium(["Before", image("1 < 2 and <b>bold</b> words", "svgaspng"), "After"].join("\n\n"));
+
+    const body = page.slice(page.indexOf("<p>Before</p>"));
+    const span = /<span class="image-left-out">(.*?)<\/span>/.exec(body)?.[1];
+    expect(span, "neither sign is left raw").toMatch(/^1 (&lt;|&#x3C;) 2 and (&lt;|&#x3C;)b(&gt;|&#x3E;)bold(&lt;|&#x3C;)\/b(&gt;|&#x3E;) words$/);
+    expect(body, "the alt text made no element of its own").not.toContain("<b>");
+    expect(body).not.toContain("<img");
+  });
+
   it("does not count a left-out image against the embedding budget", async () => {
     put("notimg1", "image/png", text("x".repeat(600)));
     put("fine001", "image/png", PNG);
