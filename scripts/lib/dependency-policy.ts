@@ -240,8 +240,11 @@ export function parsePackageLock(packageLockText: string): PackageLockSnapshot |
     if (lockPath === "" || !lockPath.includes("node_modules/")) continue;
     if (!isRecord(entry)) return null;
     if (entry.link === true) continue;
-    const name = packageNameFromLockPath(lockPath);
-    if (!name || !validPackageVersion(entry.version)) return null;
+    // An aliased dependency ("x": "npm:qs@6.15.3") is installed at .../node_modules/x and carries its real name in
+    // "name". npm audit reports it under the real name, and the blocked and accepted lists name real packages.
+    const pathName = packageNameFromLockPath(lockPath);
+    const name = entry.name === undefined ? pathName : entry.name;
+    if (!pathName || !validPackageName(name) || !validPackageVersion(entry.version)) return null;
     packages.push({ path: lockPath, name, version: entry.version, dev: entry.dev === true });
   }
   return { sha256: packageLockSha256(packageLockText), packages };
