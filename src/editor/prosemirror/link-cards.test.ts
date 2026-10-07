@@ -278,6 +278,40 @@ describe("link cards in the rich pane (#2317)", () => {
     });
   });
 
+  describe("typing a link in the rich pane", () => {
+    it.each([
+      ["a post link", TWEET],
+      ["a video link", VIDEO],
+    ])("%s typed key by key on an empty line stays a link, in angle brackets in the text, and typing goes on", async (_what, url) => {
+      const { view, shape, text, cards } = open("Intro");
+      view.dispatch(view.state.tr.insert(view.state.doc.content.size, schema.nodes.paragraph.create()));
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 1)));
+      for (const [i, char] of [...url].entries()) {
+        view.dispatch(view.state.tr.insertText(char));
+        expect(cards(), `after ${i + 1} keys`).toHaveLength(0);
+        expect(view.state.doc.child(1).textContent, `after ${i + 1} keys`).toBe(url.slice(0, i + 1));
+        expect(view.state.selection.from, `caret after ${i + 1} keys`).toBe(8 + i + 1);
+        // The text never holds the bare link alone on its line: a collaborator's preview never shows a card for it.
+        expect(parseMarkdown(text()).doc.child(1).type, `after ${i + 1} keys`).toBe(schema.nodes.paragraph);
+      }
+      expect(text()).toBe(`Intro\n\n<${url}>`);
+      // A moment later the pane has taken the text back in (the link is now a link); nothing else changed.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      expect(text()).toBe(`Intro\n\n<${url}>`);
+      expect(shape()).toBe(`p(Intro) | p(${url})`);
+      view.dispatch(view.state.tr.insertText(" and more", view.state.doc.content.size - 1));
+      expect(text()).toBe(`Intro\n\n<${url}> and more`);
+      expect(cards()).toHaveLength(0);
+    });
+
+    it("deleting the words around a link on a line of its own does not make it a card behind the person's back", () => {
+      const { view, text, cards } = open(`See ${TWEET}`);
+      view.dispatch(view.state.tr.delete(1, 5));
+      expect(cards()).toHaveLength(0);
+      expect(text()).toBe(`<${TWEET}>`);
+    });
+  });
+
   describe("copying a card", () => {
     const htmlToDoc = (html: string) => {
       const dom = document.createElement("div");

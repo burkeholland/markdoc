@@ -29,6 +29,13 @@ export const MAX_CARD_URL_LENGTH = 512;
  */
 const SAFE_URL = /^https:\/\/[a-z0-9.-]+\/[A-Za-z0-9\-._~%/?&=+]*$/;
 
+/**
+ * The first of two checks, each of which alone refuses a link that is not a card: the link is short and
+ * made of the characters above. The second is the provider's own anchored pattern in `PROVIDERS`.
+ */
+export function hasCardLinkShape(url: string): boolean {
+  return url.length <= MAX_CARD_URL_LENGTH && SAFE_URL.test(url);
+}
 /** Optional query string of plain `key=value` pairs. It is dropped unless a rule reads a key from it. */
 const QUERY = "(?:\\?([A-Za-z0-9\\-._~%&=+]*))?";
 
@@ -105,7 +112,7 @@ export const CARD_FRAME_HOSTS: readonly string[] = PROVIDERS.map((provider) => p
 
 /** The card for a link, or null when the link is not exactly one of the known forms. */
 export function matchLinkCard(url: string): LinkCard | null {
-  if (url.length > MAX_CARD_URL_LENGTH || !SAFE_URL.test(url)) return null;
+  if (!hasCardLinkShape(url)) return null;
   for (const provider of PROVIDERS) {
     for (const rule of provider.rules) {
       const match = rule.pattern.exec(url);

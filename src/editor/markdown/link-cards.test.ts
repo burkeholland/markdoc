@@ -4,7 +4,7 @@ import { parseMarkdown } from "./parse";
 import { serializeBlocks, serializeMarkdown } from "./serialize";
 import { reparseRange, textChangeSpan } from "./incremental";
 import { schema } from "./schema";
-import { CARD_FRAME_HOSTS, cardLinkText, matchLinkCard, MAX_CARD_URL_LENGTH } from "./link-cards";
+import { CARD_FRAME_HOSTS, cardLinkText, hasCardLinkShape, matchLinkCard, MAX_CARD_URL_LENGTH } from "./link-cards";
 
 const TWEET = "https://x.com/jack/status/20";
 const VIDEO = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
@@ -62,6 +62,7 @@ describe("the allow-list: which links are cards", () => {
     ["https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"],
   ])("%s is a card", (url, provider, label, frameUrl) => {
     expect(matchLinkCard(url)).toEqual({ provider, label, frameUrl });
+    expect(hasCardLinkShape(url)).toBe(true);
   });
 
   it("keeps only a start time from the query, and only as whole seconds", () => {
@@ -138,6 +139,43 @@ describe("the allow-list: which links are cards", () => {
     ["nothing", ""],
     ["a query longer than the limit", `https://x.com/jack/status/20?${"a".repeat(MAX_CARD_URL_LENGTH)}`],
   ];
+
+  // Two checks refuse a link, and each must do so alone. These are well formed (short, https, a lower-case
+  // host, plain characters), so only the provider's own pattern refuses them. Every other entry above has
+  // a character or a shape that no card link may have at all, and the first check refuses it already.
+  const WELL_FORMED = new Set([
+    "another site whose name starts like the provider's",
+    "the provider as a subdomain label of another site",
+    "a longer host name that ends like the provider's",
+    "a host one letter longer",
+    "a subdomain that is not listed",
+    "dot segments after the id",
+    "a trailing slash",
+    "an extra path segment",
+    "a punycode host",
+    "a user name that is too long",
+    "an id that is too long",
+    "an id with a letter",
+    "no id",
+    "a profile, not a post",
+    "two video ids",
+    "a video id one character short",
+    "a video id one character long",
+    "a path as the video id",
+    "an encoded video id",
+    "no video id",
+    "an extra segment on the short host",
+    "a playlist, not a video",
+    "a YouTube host that is not listed",
+    "the no-cookie host without www",
+    "a frame host with another path",
+  ]);
+
+  it("each of the two checks refuses alone: the shape of the link, and the provider's pattern", () => {
+    for (const name of WELL_FORMED) expect(HOSTILE.some(([what]) => what === name), name).toBe(true);
+    for (const [what, url] of HOSTILE) expect(hasCardLinkShape(url), what).toBe(WELL_FORMED.has(what));
+    expect(HOSTILE.filter(([what]) => !WELL_FORMED.has(what)).length).toBeGreaterThan(25);
+  });
 
   it.each(HOSTILE)("%s is not a card", (_what, url) => {
     expect(matchLinkCard(url)).toBeNull();
