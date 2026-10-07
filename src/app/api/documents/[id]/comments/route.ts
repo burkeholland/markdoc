@@ -1,4 +1,5 @@
 import { z } from "zod";
+import * as Y from "yjs";
 import { handler, json, readJson, requireAccess, HttpError } from "@/server/http";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
 import { CommentsModel, DecidedSuggestionEditError, isEmoji, type CommentReply, type CommentThread } from "@/editor/collab/comments";
@@ -13,6 +14,40 @@ import { warnTail } from "@/server/warnings";
 
 type Params = { params: Promise<{ id: string }> };
 
+/**
+ * One end of a browser's anchor: a Yjs relative position into the document text, and nothing else. The
+ * shape is checked before the document is looked at: an item id is two whole numbers in Yjs's ranges,
+ * the only type that may be named is the text, and no other key is taken.
+ */
+const relativePosition = z
+  .object({
+    item: z.object({ client: z.number().int().min(0).max(0xffffffff), clock: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) }).strict().optional(),
+    tname: z.literal(TEXT_KEY).optional(),
+    assoc: z.number().int().min(-1).max(0).optional(),
+  })
+  .strict();
+
+/**
+ * Where a browser's anchor is in the server's copy of the text, or null when it names no range of it:
+ * an item this document does not hold (a browser ahead of the server, a document restored from a
+ * version, another document), an item of another shared type, or a start after its end. Two lookups,
+ * each what reading one stored thread's anchor costs.
+ */
+function resolveBrowserAnchor(doc: Y.Doc, anchor: { start: z.infer<typeof relativePosition>; end: z.infer<typeof relativePosition> }) {
+  const text = doc.getText(TEXT_KEY);
+  const index = (position: z.infer<typeof relativePosition>) => {
+    try {
+      const absolute = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(position), doc);
+      return absolute && absolute.type === text ? absolute.index : null;
+    } catch {
+      return null;
+    }
+  };
+  const from = index(anchor.start);
+  const to = index(anchor.end);
+  return from === null || to === null || from > to ? null : { from, to };
+}
+
 const schema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("add"),
@@ -20,6 +55,11 @@ const schema = z.discriminatedUnion("action", [
     to: z.number().int().min(0).optional(),
     /** Alternative to from/to: anchor the comment on the first occurrence of this text. */
     quote: z.string().min(1).max(2000).optional(),
+    /**
+     * The range as the browser holds it for a comment being composed: Yjs relative positions, resolved here
+     * against the server's copy. Offsets from a browser are off by every key that was on its way (#2258).
+     */
+    anchor: z.object({ start: relativePosition, end: relativePosition }).strict().optional(),
     body: z.string().trim().min(1).max(5000),
     /**
      * Link the comment to an agent request (it counts against the request). Fold rule: when that request
@@ -91,16 +131,22 @@ export const POST = handler(async (req: Request, { params }: Params) => {
           const text = doc.getText(TEXT_KEY).toString();
           let from: number;
           let to: number;
+          let unanchored = false;
           if (body.quote !== undefined) {
             const idx = text.indexOf(body.quote);
             if (idx === -1) throw new HttpError(400, `Text not found: ${JSON.stringify(body.quote.slice(0, 80))}`);
             from = idx;
             to = idx + body.quote.length;
           } else {
-            from = Math.min(body.from ?? 0, text.length);
-            to = Math.min(Math.max(body.to ?? from, from), text.length);
+            // An anchor that names nothing here is not guessed at: the offsets of the same request are used,
+            // as they were before there was an anchor, and the answer says so (`anchored: false`).
+            const anchored = body.anchor ? resolveBrowserAnchor(doc, body.anchor) : null;
+            unanchored = !!body.anchor && !anchored;
+            if (unanchored && body.from === undefined) throw new HttpError(400, "The anchor does not name a range of this document, and there is no from/to to use instead");
+            from = Math.min(anchored?.from ?? body.from ?? 0, text.length);
+            to = Math.min(Math.max(anchored?.to ?? body.to ?? from, from), text.length);
           }
-          result = { id: model.add({ from, to, body: body.body, author }) };
+          result = { id: model.add({ from, to, body: body.body, author }), ...(unanchored ? { anchored: false } : {}) };
           at = { from, to };
           break;
         }

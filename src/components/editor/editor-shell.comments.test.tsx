@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { TextSelection } from "prosemirror-state";
@@ -27,6 +27,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
       documents: {
         collaborators: vi.fn().mockResolvedValue({ owner: null, collaborators: [], agents: [] }),
         reviews: vi.fn().mockResolvedValue({ reviews: [] }),
+        // Only a commenter posts through the API; the test that signs in as one answers it.
+        comment: vi.fn(() => Promise.reject(new Error("Unexpected comment request"))),
       },
       tokens: { list: vi.fn().mockResolvedValue({ tokens: [] }) },
     },
@@ -59,7 +61,9 @@ vi.mock("./outline", () => ({ OutlinePanel: () => null }));
 vi.mock("./selection-bubble", () => ({ SelectionBubble: () => null }));
 vi.mock("./table-menu", () => ({ TableMenu: () => null }));
 vi.mock("./slash-menu", () => ({ SlashMenu: () => null, useSlashMenuController: () => ({ handlers: undefined }) }));
-vi.mock("./hint-bar", () => ({ HintBar: () => null }));
+vi.mock("./hint-bar", () => ({
+  HintBar: (props: ComponentProps<typeof import("./hint-bar").HintBar>) => <button onClick={props.onComment}>Ask an agent</button>,
+}));
 vi.mock("./follow-banner", () => ({ FollowBanner: () => null }));
 vi.mock("./scroll-sync", () => ({ useScrollSync: () => {} }));
 vi.mock("./rich-pane", async (importOriginal) => {
@@ -92,6 +96,7 @@ import type { HighlightClickHandler } from "@/editor/highlight-activation";
 import { PHONE_MAX, TABLET_MAX, type Layout } from "@/lib/viewport";
 import type { DocumentDto } from "@/server/dto";
 import type { AgentRequestMirror } from "./agent-requests";
+import { api } from "@/lib/api";
 import { EditorShell } from "./editor-shell";
 
 // These are warm semantic scenarios, not cold chunk-load timing tests. Compile the real modules
@@ -141,10 +146,10 @@ function viewport(width: number) {
     window.dispatchEvent(new Event("resize"));
   });
 }
-function mount(width: number, layout?: Layout, strict = false) {
+function mount(width: number, layout?: Layout, strict = false, role: "owner" | "commenter" = "owner") {
   viewport(width);
   if (layout) localStorage.setItem("markdoc:layout", layout);
-  return render(<EditorShell doc={doc} role="owner" user={{ id: user.id, name: user.name, login: null, image: null }} githubAvailable={false} githubConfigured={false} />, { reactStrictMode: strict });
+  return render(<EditorShell doc={doc} role={role} user={{ id: user.id, name: user.name, login: null, image: null }} githubAvailable={false} githubConfigured={false} />, { reactStrictMode: strict });
 }
 function currentCodeView(container: HTMLElement, view = code): CMView {
   if (!view || codeOwner !== session || !view.dom.isConnected ||
@@ -550,5 +555,265 @@ describe("responsive comment opening at the real shell boundary", () => {
     expect(activate).not.toHaveBeenCalled();
     expect(session.activeCommentId).toBeNull();
     expectClosed();
+  });
+});
+
+describe("a comment started while edits land around the selection (#2258)", () => {
+  const WORD = "editing";
+  const FROM = TEXT.indexOf(WORD);
+  const TO = FROM + WORD.length;
+  /** An edit made by someone else: it arrives as an update, the way the socket delivers it. */
+  function remoteEdit(from: number, to: number, insert = "") {
+    act(() => {
+      const remote = new Y.Doc();
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(session.ydoc));
+      const known = Y.encodeStateVector(session.ydoc);
+      const text = remote.getText("content");
+      if (to > from) text.delete(from, to - from);
+      if (insert) text.insert(from, insert);
+      Y.applyUpdate(session.ydoc, Y.encodeStateAsUpdate(remote, known));
+      remote.destroy();
+    });
+  }
+  const pendingCard = () => screen.getByTestId("pending-comment");
+  const quote = () => within(pendingCard()).getByTestId("comment-quote").textContent;
+  const drawn = (root: HTMLElement) => Array.from(root.querySelectorAll('[data-highlight-id="pending"]'), (element) => element.textContent).join("");
+  const pendingText = () => {
+    const pending = session.pendingComment!;
+    return session.ytext.toString().slice(pending.from, pending.to);
+  };
+  async function post(body: string) {
+    await userEvent.type(within(pendingCard()).getByTestId("comment-composer"), body);
+    // An edit lands between the last key and the post.
+    remoteEdit(0, 0, "Late ");
+    await userEvent.keyboard("{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(session.pendingComment).toBeNull());
+    return session.comments.list().find((thread) => thread.body === body)!;
+  }
+
+  it("from the preview: the range, the quote, the highlight and the posted thread stay on the selected text", async () => {
+    mount(1280, "rich");
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await screen.findByTestId("pending-comment");
+    expect(session.pendingComment).toEqual({ from: FROM, to: TO });
+    expect(quote()).toBe(WORD);
+
+    remoteEdit(0, 0, "Remote ");
+    remoteEdit(3, 3, "typing ");
+    expect(session.pendingComment).toEqual({ from: FROM + 14, to: TO + 14 });
+    expect(pendingText()).toBe(WORD);
+    await waitFor(() => expect(quote()).toBe(WORD));
+    await waitFor(() => expect(drawn(rich!.dom)).toBe(WORD));
+
+    // The commenter's own typing before the selection moves it too.
+    act(() => {
+      rich!.dispatch(rich!.state.tr.insertText("Mine ", 1));
+    });
+    expect(pendingText()).toBe(WORD);
+    await waitFor(() => expect(quote()).toBe(WORD));
+    await waitFor(() => expect(drawn(rich!.dom)).toBe(WORD));
+
+    const thread = await post("About that word");
+    expect(thread.quote).toBe(WORD);
+    expect(session.ytext.toString().slice(thread.range!.from, thread.range!.to)).toBe(WORD);
+    remoteEdit(0, 0, "After the post ");
+    const moved = session.comments.get(thread.id)!;
+    expect(session.ytext.toString().slice(moved.range!.from, moved.range!.to)).toBe(WORD);
+  });
+
+  it("from the Markdown pane: the range, the quote, the highlight and the posted thread stay on the selected text", async () => {
+    const { container } = mount(1280, "code");
+    const view = await sourceEditorReady(container);
+    act(() => {
+      view.dispatch({ selection: { anchor: FROM, head: TO } });
+      view.focus();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await screen.findByTestId("pending-comment");
+    expect(session.pendingComment).toEqual({ from: FROM, to: TO });
+
+    remoteEdit(0, 0, "Remote ");
+    remoteEdit(3, 3, "typing ");
+    expect(session.pendingComment).toEqual({ from: FROM + 14, to: TO + 14 });
+    await waitFor(() => expect(quote()).toBe(WORD));
+    await waitFor(() => expect(drawn(view.dom)).toBe(WORD));
+
+    const thread = await post("From the Markdown pane");
+    expect(thread.quote).toBe(WORD);
+    expect(session.ytext.toString().slice(thread.range!.from, thread.range!.to)).toBe(WORD);
+  });
+
+  it("the selected text itself is edited: the quote follows what is left of it, and an empty range keeps the composer", async () => {
+    mount(1280, "rich");
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await screen.findByTestId("pending-comment");
+    const composer = within(pendingCard()).getByTestId("comment-composer");
+    await userEvent.type(composer, "Draft");
+
+    remoteEdit(FROM + 4, FROM + 4, "XY");
+    await waitFor(() => expect(quote()).toBe("editXYing"));
+    remoteEdit(FROM - 4, FROM + 2, "");
+    await waitFor(() => expect(quote()).toBe("itXYing"));
+    await waitFor(() => expect(drawn(rich!.dom)).toBe("itXYing"));
+    expect(screen.getByTestId("comment-composer")).toBe(composer);
+    expect(composer).toHaveValue("Draft");
+    expect(composer).toHaveFocus();
+
+    remoteEdit(FROM - 6, FROM + 5, "");
+    await waitFor(() => expect(quote()).toBe("Selected text"));
+    expect(session.pendingComment!.to).toBe(session.pendingComment!.from);
+    expect(drawn(rich!.dom)).toBe("");
+    expect(screen.getByTestId("comment-composer")).toBe(composer);
+    expect(composer).toHaveValue("Draft");
+    expect(composer).toHaveFocus();
+  });
+
+  it("an edit before the selection does not bring the Open tab back while the pending comment waits on another tab", async () => {
+    mount(1280, "rich");
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await screen.findByTestId("pending-comment");
+    await userEvent.click(screen.getByTestId("comments-tab-resolved"));
+    expect(screen.queryByTestId("pending-comment")).toBeNull();
+    const focused = document.activeElement;
+
+    remoteEdit(0, 0, "Remote ");
+    remoteEdit(3, 3, "typing ");
+    await waitFor(() => expect(rich!.state.doc.textContent).toContain("Remtyping ote A commented"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(screen.getByTestId("comments-tab-resolved")).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByTestId("pending-comment")).toBeNull();
+    expect(document.activeElement).toBe(focused);
+
+    // The comment is still there, on its text, when the person goes back to it.
+    await userEvent.click(screen.getByTestId("comments-tab-open"));
+    expect(quote()).toBe(WORD);
+  });
+
+  it("a comment started on other text while the first waits on another tab is a new comment: the Open tab comes back with its composer", async () => {
+    mount(1280, "rich");
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await screen.findByTestId("pending-comment");
+    await userEvent.click(screen.getByTestId("comments-tab-resolved"));
+    expect(screen.queryByTestId("pending-comment")).toBeNull();
+
+    const other = TEXT.indexOf("commented");
+    selectRich(other + 1, other + 1 + "commented".length);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await waitFor(() => expect(screen.getByTestId("comments-tab-open")).toHaveAttribute("aria-selected", "true"));
+    expect(quote()).toBe("commented");
+    expect(pendingText()).toBe("commented");
+  });
+
+  it("what is typed in the composer, the caret in it and its focus survive 20 remote keys before the selection", async () => {
+    mount(1280, "rich");
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await screen.findByTestId("pending-comment");
+    const composer = within(pendingCard()).getByTestId<HTMLTextAreaElement>("comment-composer");
+    await userEvent.type(composer, "A draft in progress");
+    act(() => composer.setSelectionRange(2, 7));
+    for (let i = 0; i < 20; i++) remoteEdit(i, i, i % 5 === 4 ? " " : "w");
+    await waitFor(() => expect(rich!.state.doc.textContent).toContain("wwww wwww wwww wwww A commented"));
+    await waitFor(() => expect(quote()).toBe(WORD));
+    expect(within(pendingCard()).getByTestId("comment-composer"), "the composer is not mounted again").toBe(composer);
+    expect(composer).toHaveValue("A draft in progress");
+    expect([composer.selectionStart, composer.selectionEnd]).toEqual([2, 7]);
+    expect(composer).toHaveFocus();
+    expect(screen.getByTestId("comments-tab-open")).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("a comment on the whole document started with @ keeps its seed and what was typed while a collaborator types", async () => {
+    mount(1280, "rich");
+    selectRich(5);
+    fireEvent.click(screen.getByRole("button", { name: "Ask an agent" }));
+    await screen.findByTestId("pending-comment");
+    expect(session.pendingComment).toEqual({ from: 0, to: 0 });
+    const composer = within(pendingCard()).getByTestId<HTMLTextAreaElement>("comment-composer");
+    expect(composer).toHaveValue("@");
+    await userEvent.type(composer, "someone please look");
+    for (let i = 0; i < 20; i++) remoteEdit(i, i, i % 5 === 4 ? " " : "w");
+    await waitFor(() => expect(rich!.state.doc.textContent).toContain("wwww wwww wwww wwww A commented"));
+    expect(session.pendingComment).toEqual({ from: 0, to: 0 });
+    expect(within(pendingCard()).getByTestId("comment-quote-document")).toBeInTheDocument();
+    expect(within(pendingCard()).getByTestId("comment-composer"), "the composer is not mounted again").toBe(composer);
+    expect(composer).toHaveValue("@someone please look");
+    expect(composer).toHaveFocus();
+  });
+
+  it("a commenter's post carries the anchor next to the offsets, and the anchor finds the text in a copy that is further along", async () => {
+    // A commenter cannot write to the shared document: the comment goes through the API.
+    session.destroy();
+    session = new CollabSession({ docId: doc.id, user, role: "commenter", autoConnect: false, getToken: async () => { throw new Error("No provider connection permitted"); } });
+    session.keepAlive();
+    session.ytext.insert(0, TEXT);
+    session.binding.releaseRemoteSync();
+    await waitFor(() => expect(session.binding.hasHeldSync).toBe(false));
+    session.localLoaded = true;
+    const comment = vi.mocked(api.documents.comment).mockResolvedValue({ id: "via-api" });
+
+    mount(1280, "rich", false, "commenter");
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await screen.findByTestId("pending-comment");
+    remoteEdit(0, 0, "Remote ");
+    await waitFor(() => expect(quote()).toBe(WORD));
+    await userEvent.type(within(pendingCard()).getByTestId("comment-composer"), "From a commenter{Control>}{Enter}{/Control}");
+    await waitFor(() => expect(comment).toHaveBeenCalledTimes(1));
+
+    const [documentId, payload] = comment.mock.calls[0] as [string, { action: string; from: number; to: number; body: string; anchor: { start: unknown; end: unknown } }];
+    expect(documentId).toBe(doc.id);
+    expect(payload).toMatchObject({ action: "add", from: FROM + 7, to: TO + 7, body: "From a commenter" });
+    // The server's copy has keys this browser has not seen: the offsets are off there, the anchor is not.
+    const server = new Y.Doc();
+    Y.applyUpdate(server, Y.encodeStateAsUpdate(session.ydoc));
+    const text = server.getText("content");
+    text.insert(0, "Keys on their way. ");
+    expect(text.toString().slice(payload.from, payload.to)).not.toBe(WORD);
+    const start = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(payload.anchor.start), server)!;
+    const end = Y.createAbsolutePositionFromRelativePosition(Y.createRelativePositionFromJSON(payload.anchor.end), server)!;
+    expect(text.toString().slice(start.index, end.index)).toBe(WORD);
+    server.destroy();
+    await waitFor(() => expect(session.pendingComment).toBeNull());
+  });
+
+  it("a comment on the whole document is posted without an anchor", async () => {
+    mount(1280, "rich");
+    selectRich(5);
+    fireEvent.click(screen.getByRole("button", { name: "Ask an agent" }));
+    await screen.findByTestId("pending-comment");
+    expect(session.pendingCommentAnchor).toBeNull();
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await waitFor(() => expect(session.pendingComment).toEqual({ from: FROM, to: TO }));
+    expect(session.pendingCommentAnchor).not.toBeNull();
+  });
+
+  it("posting uses the range as it is when Post is pressed, also when an edit landed after the last render", async () => {
+    mount(1280, "rich");
+    selectRich(FROM + 1, TO + 1);
+    fireEvent.click(screen.getByRole("button", { name: "Add comment" }));
+    await screen.findByTestId("pending-comment");
+    const composer = within(pendingCard()).getByTestId("comment-composer");
+    await userEvent.type(composer, "Posted in the same turn");
+    // One turn: the edit lands and Ctrl+Enter is handled before anything is rendered again.
+    await act(async () => {
+      const remote = new Y.Doc();
+      Y.applyUpdate(remote, Y.encodeStateAsUpdate(session.ydoc));
+      const known = Y.encodeStateVector(session.ydoc);
+      remote.getText("content").insert(0, "Unrendered ");
+      Y.applyUpdate(session.ydoc, Y.encodeStateAsUpdate(remote, known));
+      remote.destroy();
+      fireEvent.keyDown(composer, { key: "Enter", ctrlKey: true });
+    });
+    await waitFor(() => expect(session.pendingComment).toBeNull());
+    const thread = session.comments.list().find((candidate) => candidate.body === "Posted in the same turn")!;
+    expect(thread.quote).toBe(WORD);
+    expect(session.ytext.toString().slice(thread.range!.from, thread.range!.to)).toBe(WORD);
   });
 });

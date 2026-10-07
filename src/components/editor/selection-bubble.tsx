@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
+import { createAnchor, resolveAnchor, type TextAnchor } from "@/editor/collab/shared";
 import type { EditorActions, FormatState } from "./actions";
 import { cn } from "@/lib/utils";
 import type { Box, Insets } from "@/lib/viewport";
@@ -169,9 +170,23 @@ export function SelectionBubble({
     if (topLayer) layer.popover = "manual";
     let disposed = false;
     let pointerDown = false;
-    // The selection a pointer click on Comment was made on. The composer takes focus a moment later, and
-    // the Comments panel moves the text on its way in: until then the bubble stays away.
-    let dismissed: EditorView["state"]["selection"] | null = null;
+    // The text a pointer click on Comment was made on. The composer takes focus a moment later, and
+    // the Comments panel moves the text on its way in: until then the bubble stays away. It is kept as
+    // an anchor in the shared text, not as editor positions: a key a collaborator types before the
+    // selection moves its positions but not its text, and the bubble came back under the rest of a
+    // double-click (#2258).
+    let dismissed: TextAnchor | null = null;
+    const selectedSource = () => {
+      const { from, to } = view.state.selection;
+      const map = session.binding.getSourceMap();
+      return { from: map.pmToSrc(from), to: map.pmToSrc(to) };
+    };
+    const stillDismissed = () => {
+      if (!dismissed || !view.hasFocus()) return false;
+      const kept = resolveAnchor(session.ytext, dismissed);
+      const now = selectedSource();
+      return !!kept && kept.from === now.from && kept.to === now.to;
+    };
     let frame: number | null = null;
     let fullscreenWidget: {
       decorations: NonNullable<EditorView["props"]["decorations"]>;
@@ -199,7 +214,7 @@ export function SelectionBubble({
       }
       const { from, to, empty } = view.state.selection;
       const ownsFocus = view.hasFocus() || Boolean(document.activeElement && layer.contains(document.activeElement));
-      if (dismissed && !(view.hasFocus() && view.state.selection.eq(dismissed))) dismissed = null;
+      if (dismissed && !stillDismissed()) dismissed = null;
       if (dismissed || empty || !ownsFocus || pointerDown || session.activeSurface !== "rich" || !(session.canEdit || session.canComment)) {
         hide();
         return;
@@ -343,7 +358,8 @@ export function SelectionBubble({
     };
     const dismiss = () => {
       if (disposed) return;
-      dismissed = view.state.selection;
+      const { from, to } = selectedSource();
+      dismissed = createAnchor(session.ytext, from, to);
       hide();
     };
     const onMutation: MutationCallback = (records) => {

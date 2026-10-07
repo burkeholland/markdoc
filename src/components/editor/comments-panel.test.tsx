@@ -6491,6 +6491,32 @@ describe("CommentsPanel", () => {
       expect(screen.queryByTestId("pending-comment")).toBeNull();
     });
 
+    it("the agent request carries the range as it is when Post is pressed, also when an edit landed after the last render (#2258)", async () => {
+      const { add, box } = await mountComposer();
+      fireEvent.change(box, { target: { value: "@alice/First look at this" } });
+      await screen.findByTestId("composer-agent-row");
+      // One turn: a collaborator's text lands before the selection and Ctrl+Enter is handled before anything is rendered again.
+      await act(async () => {
+        const remote = new Y.Doc();
+        Y.applyUpdate(remote, Y.encodeStateAsUpdate(session!.ydoc));
+        const known = Y.encodeStateVector(session!.ydoc);
+        remote.getText("content").insert(0, "Unrendered ");
+        Y.applyUpdate(session!.ydoc, Y.encodeStateAsUpdate(remote, known));
+        remote.destroy();
+        fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+      });
+      await waitFor(() => expect(add).toHaveBeenCalledTimes(1));
+      // The thread and the request to the agent are about the same text, where it is now.
+      expect(add.mock.calls[0][0]).toMatchObject({ from: 11, to: 16 });
+      const threadId = add.mock.results[0].value as string;
+      await waitFor(() =>
+        expect(api.documents.createRequest).toHaveBeenCalledWith(
+          "composer-doc",
+          expect.objectContaining({ selection: { from: 11, to: 16, quote: "Intro" }, threadId, agent: "alice/First" }),
+        ),
+      );
+    });
+
     it("claims two immediate clicks as one physical submission and clears current work once", async () => {
       const request = deferred<string>();
       const { add, box, onPendingDone, user } = await mountComposer();

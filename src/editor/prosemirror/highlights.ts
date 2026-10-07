@@ -35,8 +35,9 @@ export function collectHighlights(session: CollabSession, focusRange: { from: nu
       active: thread.id === session.activeCommentId,
     });
   }
-  if (session.pendingComment && session.pendingComment.to > session.pendingComment.from) {
-    out.push({ ...session.pendingComment, kind: "comment", id: "pending", active: true });
+  const pending = session.pendingComment;
+  if (pending && pending.to > pending.from) {
+    out.push({ from: pending.from, to: pending.to, kind: "comment", id: "pending", active: true });
   }
   for (const s of session.suggestions.list()) {
     out.push({
