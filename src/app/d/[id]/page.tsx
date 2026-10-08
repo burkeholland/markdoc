@@ -64,7 +64,7 @@ async function renderInitialHtml(id: string): Promise<string | null> {
   try {
     const live = await liveTextForRequest(id);
     if (live.clean.trim() === "") return null;
-    const { html } = await renderMarkdownBody(live.clean, { assetBaseUrl: "" });
+    const { html } = await renderMarkdownBody(live.clean, { assetBaseUrl: "", linkCards: true });
     return html;
   } catch {
     return null;

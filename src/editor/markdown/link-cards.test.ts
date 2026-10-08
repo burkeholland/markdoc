@@ -4,7 +4,19 @@ import { parseMarkdown } from "./parse";
 import { serializeBlocks, serializeMarkdown } from "./serialize";
 import { reparseRange, textChangeSpan } from "./incremental";
 import { schema } from "./schema";
-import { CARD_FRAME_HOSTS, cardLinkText, hasCardLinkShape, matchLinkCard, MAX_CARD_URL_LENGTH } from "./link-cards";
+import {
+  CARD_FRAME_ALLOW,
+  CARD_FRAME_HOSTS,
+  CARD_FRAME_REFERRER_POLICY,
+  CARD_SANDBOX,
+  CARD_SANDBOX_OWN_ORIGIN,
+  cardFrameTitle,
+  cardLinkText,
+  hasCardLinkShape,
+  matchLinkCard,
+  MAX_CARD_FRAMES,
+  MAX_CARD_URL_LENGTH,
+} from "./link-cards";
 
 const TWEET = "https://x.com/jack/status/20";
 const VIDEO = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
@@ -61,7 +73,7 @@ describe("the allow-list: which links are cards", () => {
     ["https://www.youtube.com/embed/dQw4w9WgXcQ", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"],
     ["https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"],
   ])("%s is a card", (url, provider, label, frameUrl) => {
-    expect(matchLinkCard(url)).toEqual({ provider, label, frameUrl });
+    expect(matchLinkCard(url)).toEqual({ provider, label, frameUrl, kind: provider === "x" ? "post" : "video", sandbox: "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox" });
     expect(hasCardLinkShape(url)).toBe(true);
   });
 
@@ -298,6 +310,27 @@ describe("the frame address", () => {
       // A URL parser agrees about where the frame goes.
       expect(CARD_FRAME_HOSTS, url).toContain(new URL(card.frameUrl).origin);
     }
+  });
+
+  it("the frame's limits are the ruled ones: scripts and new tabs, the provider's own origin only where it is blank without it", () => {
+    expect(CARD_SANDBOX).toBe("allow-scripts allow-popups allow-popups-to-escape-sandbox");
+    expect(CARD_SANDBOX_OWN_ORIGIN).toBe("allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox");
+    expect(CARD_FRAME_ALLOW).toBe("fullscreen; picture-in-picture; encrypted-media");
+    expect(CARD_FRAME_REFERRER_POLICY).toBe("strict-origin-when-cross-origin");
+    expect(MAX_CARD_FRAMES).toBe(20);
+    for (const url of LINKS) {
+      const card = matchLinkCard(url)!;
+      expect([CARD_SANDBOX, CARD_SANDBOX_OWN_ORIGIN], url).toContain(card.sandbox);
+      // Never: moving the Markdoc page, forms, dialogs, downloads, pointer lock, presentation, storage access.
+      for (const never of ["allow-top-navigation", "allow-top-navigation-by-user-activation", "allow-top-navigation-to-custom-protocols", "allow-forms", "allow-modals", "allow-downloads", "allow-pointer-lock", "allow-presentation", "allow-storage-access-by-user-activation", "allow-orientation-lock"]) {
+        expect(card.sandbox.split(" "), url).not.toContain(never);
+      }
+      expect(card.sandbox.split(" ")).toContain("allow-scripts");
+      expect(card.kind, url).toBe(card.provider === "x" ? "post" : "video");
+    }
+    for (const never of ["autoplay", "camera", "microphone", "geolocation", "display-capture", "payment", "clipboard", "*"]) expect(CARD_FRAME_ALLOW).not.toContain(never);
+    expect(cardFrameTitle(matchLinkCard(TWEET)!, TWEET)).toBe("Post on X: x.com/jack/status/20");
+    expect(cardFrameTitle(matchLinkCard(VIDEO)!, VIDEO)).toBe("YouTube video: youtube.com/watch?v=dQw4w9WgXcQ");
   });
 
   it("the fixed hosts are public https hosts, so none of them can be the app's own", () => {

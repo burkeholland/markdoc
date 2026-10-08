@@ -35,7 +35,7 @@ export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">)
   const { doc, role } = access;
   const [live, owner] = await Promise.all([liveTextForRequest(id), getUserById(doc.ownerId)]);
   // Pending suggestions are editor business; the audience reads the clean text.
-  const body = await renderMarkdownBody(live.clean, { assetBaseUrl: "" }).catch((err: unknown) => {
+  const body = await renderMarkdownBody(live.clean, { assetBaseUrl: "", linkCards: true }).catch((err: unknown) => {
     if (!(err instanceof UnrenderableDocumentError)) throw err;
     return { html: `<p><em>${UNRENDERABLE_MESSAGE}: it contains more unmatched brackets or emphasis markers than the renderer accepts. Open it in the editor to fix the source.</em></p>`, headings: [] };
   });

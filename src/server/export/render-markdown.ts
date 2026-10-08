@@ -31,6 +31,8 @@ export interface RenderedHeading {
 export interface RenderFragmentOptions {
   /** Origin (and optional base path) that relative `/api/assets/<id>` URLs are resolved against; "" keeps them relative. */
   assetBaseUrl: string;
+  /** A known link alone on its line becomes a card (#2317); see `readerHtml`. */
+  linkCards?: boolean;
 }
 
 export interface RenderedFragment {
@@ -124,10 +126,10 @@ function rehypeCollectHeadings(sink: RenderedHeading[]): (tree: HastRoot) => voi
  * slug ids, hljs classes, asset URLs made absolute. CPU-bound and synchronous apart from the
  * unified plumbing; callers on the server go through `render-pool.ts` instead.
  */
-export async function renderMarkdownFragment(markdown: string, { assetBaseUrl }: RenderFragmentOptions): Promise<RenderedFragment> {
+export async function renderMarkdownFragment(markdown: string, { assetBaseUrl, linkCards = false }: RenderFragmentOptions): Promise<RenderedFragment> {
   const headings: RenderedHeading[] = [];
   const assetIds: string[] = [];
-  const file = await readerHtml()
+  const file = await readerHtml({ linkCards })
     .use(() => rehypeLabelTaskCheckboxes())
     .use(rehypeSlug)
     .use(() => rehypeCollectHeadings(headings))
@@ -139,7 +141,7 @@ export async function renderMarkdownFragment(markdown: string, { assetBaseUrl }:
 }
 
 /** A job for the worker: render `markdown`, or with `preview` find its link preview text (`previewText`). */
-export type WorkerTask = { markdown: string; assetBaseUrl: string } | { markdown: string; preview: true };
+export type WorkerTask = { markdown: string; assetBaseUrl: string; linkCards?: boolean } | { markdown: string; preview: true };
 
 export type WorkerRequest = WorkerTask & { id: number };
 
@@ -147,7 +149,7 @@ export type WorkerResponse = { id: number; ok: true; result: RenderedFragment | 
 
 function runTask(task: WorkerTask): Promise<RenderedFragment | string> {
   if ("preview" in task) return new Promise((resolve) => resolve(previewText(task.markdown)));
-  return renderMarkdownFragment(task.markdown, { assetBaseUrl: task.assetBaseUrl });
+  return renderMarkdownFragment(task.markdown, { assetBaseUrl: task.assetBaseUrl, linkCards: task.linkCards });
 }
 
 if (!isMainThread && parentPort && (workerData as { role?: string } | null)?.role === WORKER_ROLE) {

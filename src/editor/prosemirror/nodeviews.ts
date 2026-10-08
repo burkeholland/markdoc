@@ -3,7 +3,8 @@ import { NodeSelection } from "prosemirror-state";
 import type { EditorView, NodeView, NodeViewConstructor, ViewMutationRecord } from "prosemirror-view";
 import { toggleTaskChecked, setCodeBlockLanguage, showCardAsText } from "./commands";
 import { normalizeLanguage } from "./code-highlight";
-import { cardLinkText, matchLinkCard } from "../markdown/link-cards";
+import { cardLinkText, matchLinkCard, type LinkCard } from "../markdown/link-cards";
+import { cardLoadLabel, claimCardFrame, createCardFrame, releaseCardFrame } from "../link-card-frame";
 import { safeLinkHref } from "../links";
 
 class ListItemView implements NodeView {
@@ -143,21 +144,32 @@ class CodeBlockView implements NodeView {
   }
 }
 
+/** How long a card's link must stay unchanged before its frame is made: a link being typed is a card one key early. */
+export const CARD_FRAME_DELAY_MS = 800;
+
 /**
  * A link card (#2317): Markdoc's own markup around a link to a known site. The header names the card,
- * shows the link (it opens in a new tab) and, for people who can edit, "Show as text". Nothing here
- * comes from the other site: no script, no frame, no request.
+ * shows the link (it opens in a new tab) and, for people who can edit, "Show as text". Under it is the
+ * frame to the provider's own embed page (`link-card-frame.ts`): made once the link has been unchanged
+ * for a moment, loaded by the browser only when the card is near the viewport, and replaced by a
+ * "Load" button on a page that already loads its limit of frames. No script from the other site runs
+ * in this page, and this page does not listen to the frame.
  *
  * Keyboard: the arrow keys select the card as one block; Tab then moves into it (`focusSelectedCard`),
- * the link and the button are ordinary tab stops, and Escape returns to the editor with the card
- * selected. The button is hidden from people who cannot edit by CSS on the editor's `contenteditable`
- * (see globals.css), since a node view is not redrawn when the role changes.
+ * the link, the button and the frame are ordinary tab stops, and Escape on the link or a button returns
+ * to the editor with the card selected. "Show as text" is hidden from people who cannot edit by CSS on
+ * the editor's `contenteditable` (see globals.css), since a node view is not redrawn when the role changes.
  */
 class LinkCardView implements NodeView {
   dom: HTMLElement;
   private label: HTMLElement;
   private link: HTMLAnchorElement;
   private button: HTMLButtonElement;
+  private frameBox: HTMLElement;
+  private load: HTMLButtonElement | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  /** This card holds one of the page's places for a frame that loads by itself. */
+  private claimed = false;
 
   constructor(
     private node: PMNode,
@@ -189,7 +201,9 @@ class LinkCardView implements NodeView {
       this.showAsText();
     });
     header.append(this.label, this.link, this.button);
-    this.dom.appendChild(header);
+    this.frameBox = document.createElement("div");
+    this.frameBox.className = "md-link-card-frame";
+    this.dom.append(header, this.frameBox);
     this.dom.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || !this.isControl(event.target)) return;
       event.preventDefault();
@@ -200,7 +214,7 @@ class LinkCardView implements NodeView {
   }
 
   private isControl(target: EventTarget | null): boolean {
-    return target instanceof Node && (this.link.contains(target) || this.button.contains(target));
+    return target instanceof Node && (this.link.contains(target) || this.button.contains(target) || !!this.load?.contains(target));
   }
 
   /** Back to the editor with the card selected: where Tab came from. */
@@ -236,6 +250,52 @@ class LinkCardView implements NodeView {
     else this.link.removeAttribute("href");
     // The visible words first, then which card: several cards on a page have several of these buttons.
     this.button.setAttribute("aria-label", `Show as text: ${label}`);
+
+    this.dropFrame();
+    if (!card) {
+      this.frameBox.removeAttribute("data-kind");
+      return;
+    }
+    // The box has the frame's size from the start, so the page does not move when the frame arrives.
+    this.frameBox.setAttribute("data-kind", card.kind);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.claimed = claimCardFrame(this.view.dom);
+      if (this.claimed) this.addFrame(card, url);
+      else this.addLoadButton(card, url);
+    }, CARD_FRAME_DELAY_MS);
+  }
+
+  private addFrame(card: LinkCard, url: string) {
+    const frame = createCardFrame(card, url);
+    if (frame) this.frameBox.replaceChildren(frame);
+  }
+
+  /** The page already loads its limit of frames: this one waits for the person. */
+  private addLoadButton(card: LinkCard, url: string) {
+    const load = document.createElement("button");
+    load.type = "button";
+    load.className = "md-link-card-load";
+    load.textContent = cardLoadLabel(card);
+    load.setAttribute("aria-label", `${cardLoadLabel(card)}: ${cardLinkText(url)}`);
+    load.setAttribute("data-testid", "link-card-load");
+    load.addEventListener("click", (event) => {
+      event.preventDefault();
+      this.load = null;
+      this.addFrame(card, url);
+    });
+    this.load = load;
+    this.frameBox.replaceChildren(load);
+  }
+
+  /** Take the frame (or the wait for it) away: the link changed, or the card is gone. */
+  private dropFrame() {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    if (this.claimed) releaseCardFrame(this.view.dom);
+    this.claimed = false;
+    this.load = null;
+    this.frameBox.replaceChildren();
   }
 
   update(node: PMNode) {
@@ -246,11 +306,15 @@ class LinkCardView implements NodeView {
     return true;
   }
 
+  destroy() {
+    this.dropFrame();
+  }
+
   ignoreMutation() {
     return true;
   }
 
-  /** Clicks and keys on the link and the button are theirs; anywhere else on the card the editor selects it. */
+  /** Clicks and keys on the link and the buttons are theirs; anywhere else on the card the editor selects it. */
   stopEvent(event: Event) {
     return this.isControl(event.target);
   }

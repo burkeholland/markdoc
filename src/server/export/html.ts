@@ -130,6 +130,8 @@ export interface RenderMarkdownBodyOptions {
   inlineAssets?: InlineAssetsOptions | false;
   /** Parse budget; defaults to RENDER_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** A known link alone on its line becomes a card (#2317): the reader page and the editor's stand-in ask for it, the exports do not yet. */
+  linkCards?: boolean;
 }
 
 export interface RenderedMarkdownBody {
@@ -235,12 +237,12 @@ async function inlineAssetUrls(html: string, base: string, assetIds: string[], {
  * document that is refused by either throws `UnrenderableDocumentError` (HTTP 422 in routes),
  * so one pathological document can never block the event loop for everyone else (#115).
  */
-export async function renderMarkdownBody(markdown: string, { assetBaseUrl, inlineAssets = false, timeoutMs = RENDER_TIMEOUT_MS }: RenderMarkdownBodyOptions): Promise<RenderedMarkdownBody> {
+export async function renderMarkdownBody(markdown: string, { assetBaseUrl, inlineAssets = false, timeoutMs = RENDER_TIMEOUT_MS, linkCards = false }: RenderMarkdownBodyOptions): Promise<RenderedMarkdownBody> {
   const reason = findUnrenderable(markdown);
   if (reason) throw new UnrenderableDocumentError(reason);
   let fragment;
   try {
-    fragment = await renderOffThread(markdown, assetBaseUrl, timeoutMs);
+    fragment = await renderOffThread(markdown, assetBaseUrl, timeoutMs, linkCards);
   } catch (err) {
     if (err instanceof RenderTimeoutError) throw new UnrenderableDocumentError("timeout");
     throw err;
