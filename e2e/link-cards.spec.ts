@@ -1,54 +1,21 @@
 import AxeBuilder from "@axe-core/playwright";
-import { devices, type BrowserContext, type Page } from "@playwright/test";
+import { devices, type Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
 import { codeText, createDocument, cssPx, devLogin, openDocument, reloadHydrated, setTheme, shareWith, signIn, uniqueLogin, waitForEditor } from "./helpers";
+import { expectOnlyCardFrames, standInForOtherSites, TWEET, TWEET_FRAME, VIDEO, VIDEO_FRAME } from "./link-card-helpers";
 
 /**
- * Link cards in the editor (#2317, pull request 1: the form, the node and a static card; no frame yet).
+ * Link cards in the editor (#2317): the form, the card and "Show as text". The frames themselves are in
+ * e2e/link-card-frames.spec.ts.
  *
- * No test here touches the network: every request that does not go to the app is refused in the browser
- * and written down, and each test ends by checking that nothing was written down.
+ * No test here touches the network (see e2e/link-card-helpers.ts): a card's frame is answered by a
+ * local stand-in page, and every other request that leaves the app is refused and written down. Each
+ * test ends by checking that nothing was written down.
  */
-const TWEET = "https://x.com/jack/status/20";
-const VIDEO = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 const DOC = `# Cards\n\nIntro\n\n${TWEET}\n\nBetween\n\n${VIDEO}\n\nOutro\n`;
 
 const cards = (page: Page) => page.locator('.md-rich [data-testid="link-card"]');
 const asText = (page: Page) => page.locator('.md-rich [data-testid="link-card-as-text"]');
-
-/** A 1x1 PNG: what the test answers for a person's avatar, which the app has always loaded from GitHub. */
-const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
-
-/**
- * Refuse and record every request that leaves the app. Returns the list; it must stay empty. The one
- * request the app makes to another site without this change, the avatar image, is answered here.
- */
-async function refuseOtherSites(context: BrowserContext, baseURL: string): Promise<string[]> {
-  const origin = new URL(baseURL).origin;
-  const refused: string[] = [];
-  await context.route(
-    (url) => (url.protocol === "http:" || url.protocol === "https:") && url.origin !== origin,
-    (route) => {
-      const url = route.request().url();
-      if (url.startsWith("https://avatars.githubusercontent.com/")) return route.fulfill({ status: 200, contentType: "image/png", body: PIXEL });
-      refused.push(url);
-      return route.abort("blockedbyclient");
-    },
-  );
-  return refused;
-}
-/** What the page holds that could load or run something from another site. */
-const foreignThings = (page: Page) =>
-  page.evaluate(() => {
-    const here = location.origin;
-    const foreign = (value: string | null) => !!value && /^(https?:)?\/\//i.test(value) && new URL(value, location.href).origin !== here;
-    return {
-      frames: document.querySelectorAll("iframe, frame, object, embed").length,
-      foreignScripts: Array.from(document.scripts, (script) => script.getAttribute("src")).filter(foreign),
-      foreignSources: Array.from(document.querySelectorAll(".md-rich [src], .md-rich [srcset], .md-rich [data], .md-rich link[href]"), (el) => el.outerHTML.slice(0, 120)),
-      windowFrames: window.frames.length,
-    };
-  });
 
 async function pasteInRich(page: Page, text: string) {
   await page.evaluate((value) => {
@@ -72,9 +39,9 @@ async function scanCards(page: Page, state: string) {
 test.describe("link cards in the editor (#2317)", () => {
   test("a known link alone on its line is a card; Show as text turns it back, for a collaborator too, through undo and a reload", async ({ browser, baseURL }) => {
     const owner = await signIn(browser, uniqueLogin("cards-owner"));
-    const ownerRefused = await refuseOtherSites(owner.context, baseURL!);
+    const ownerSites = await standInForOtherSites(owner.context, baseURL!);
     const collaborator = await signIn(browser, uniqueLogin("cards-collab"));
-    const collaboratorRefused = await refuseOtherSites(collaborator.context, baseURL!);
+    const collaboratorSites = await standInForOtherSites(collaborator.context, baseURL!);
     const id = await createDocument(owner.page, DOC, "Cards");
     await shareWith(owner.page, id, collaborator.login, "editor");
     await openDocument(owner.page, id);
@@ -131,22 +98,23 @@ test.describe("link cards in the editor (#2317)", () => {
     await expect(owner.page.locator(`.md-rich p a[href="${TWEET}"]`)).toHaveText(TWEET);
     expect(await codeText(owner.page)).toBe(asTextDoc);
 
-    // Nothing from another site is in either page, and nothing was asked of another site.
-    for (const page of [owner.page, collaborator.page]) {
-      expect(await foreignThings(page)).toEqual({ frames: 0, foreignScripts: [], foreignSources: [], windowFrames: 0 });
-    }
-    // The published page is not part of this step: there the link is still an ordinary link, and nothing else.
+    // Nothing from another site is in either page except the frame of the one card that is left.
+    for (const page of [owner.page, collaborator.page]) await expectOnlyCardFrames(page, [VIDEO_FRAME]);
+    // The published page shows the same thing: the card that is left, and the plain link.
     await owner.page.goto(`/p/${id}`);
-    await expect(owner.page.locator(`.reader-body a[href="${VIDEO}"]`)).toHaveText(VIDEO);
-    await expect(owner.page.locator(".reader-body figure, .reader-body iframe, .reader-body [data-link-card]")).toHaveCount(0);
-    expect(await foreignThings(owner.page)).toEqual({ frames: 0, foreignScripts: [], foreignSources: [], windowFrames: 0 });
-    expect(ownerRefused).toEqual([]);
-    expect(collaboratorRefused).toEqual([]);
+    await expect(owner.page.locator(".reader-body figure.md-link-card")).toHaveCount(1);
+    await expect(owner.page.locator(".reader-body figure.md-link-card")).toHaveAccessibleName("YouTube video: youtube.com/watch?v=dQw4w9WgXcQ");
+    await expect(owner.page.locator(`.reader-body p a[href="${TWEET}"]`)).toHaveText(TWEET);
+    await expectOnlyCardFrames(owner.page, [VIDEO_FRAME]);
+    expect(ownerSites.refused).toEqual([]);
+    expect(collaboratorSites.refused).toEqual([]);
+    // The only things asked of another site, by either person: the stand-ins for the two cards' frames.
+    for (const asked of [...ownerSites.frames, ...collaboratorSites.frames]) expect([TWEET_FRAME, VIDEO_FRAME]).toContain(asked);
   });
 
   test("typing the link in the Markdown pane, or its brackets, switches the preview between card and link", async ({ browser, baseURL }) => {
     const user = await signIn(browser, uniqueLogin("cards-typing"));
-    const refused = await refuseOtherSites(user.context, baseURL!);
+    const sites = await standInForOtherSites(user.context, baseURL!);
     const { page } = user;
     const id = await createDocument(page, "Intro\n", "Typing");
     await openDocument(page, id);
@@ -178,13 +146,13 @@ test.describe("link cards in the editor (#2317)", () => {
     await expect.poll(() => codeText(page)).toBe(`Intro\n\n${VIDEO}`);
     await expect(cards(page)).toHaveCount(1);
 
-    expect(await foreignThings(page)).toEqual({ frames: 0, foreignScripts: [], foreignSources: [], windowFrames: 0 });
-    expect(refused).toEqual([]);
+    await expectOnlyCardFrames(page, [VIDEO_FRAME]);
+    expect(sites.refused).toEqual([]);
   });
 
   test("a known link pasted on an empty line becomes a card; one undo leaves the link, another the empty line", async ({ browser, baseURL }) => {
     const user = await signIn(browser, uniqueLogin("cards-paste"));
-    const refused = await refuseOtherSites(user.context, baseURL!);
+    const sites = await standInForOtherSites(user.context, baseURL!);
     const { page } = user;
     const id = await createDocument(page, "Intro", "Paste");
     await openDocument(page, id);
@@ -222,13 +190,13 @@ test.describe("link cards in the editor (#2317)", () => {
     await expect.poll(() => codeText(page)).toContain("x.com.evil.example");
     await expect(cards(page)).toHaveCount(0);
 
-    expect(await foreignThings(page)).toEqual({ frames: 0, foreignScripts: [], foreignSources: [], windowFrames: 0 });
-    expect(refused).toEqual([]);
+    await expectOnlyCardFrames(page, []);
+    expect(sites.refused).toEqual([]);
   });
 
   test("keyboard: the arrow keys select the card, Tab goes into it, Escape comes back, Enter on the button turns it to text", async ({ browser, baseURL }) => {
     const user = await signIn(browser, uniqueLogin("cards-keys"));
-    const refused = await refuseOtherSites(user.context, baseURL!);
+    const sites = await standInForOtherSites(user.context, baseURL!);
     const { page } = user;
     const id = await createDocument(page, DOC, "Keys");
     await openDocument(page, id);
@@ -278,14 +246,14 @@ test.describe("link cards in the editor (#2317)", () => {
     await page.getByTestId("palette-item-card:as-text").click();
     await expect.poll(() => codeText(page)).toBe(DOC.replace(TWEET, `<${TWEET}>`));
 
-    expect(refused).toEqual([]);
+    expect(sites.refused).toEqual([]);
   });
 
   test("a viewer and a commenter see the card and its link, and no Show as text", async ({ browser, baseURL }) => {
     const owner = await signIn(browser, uniqueLogin("cards-share"));
     const viewer = await signIn(browser, uniqueLogin("cards-viewer"));
     const commenter = await signIn(browser, uniqueLogin("cards-commenter"));
-    const refused = [await refuseOtherSites(viewer.context, baseURL!), await refuseOtherSites(commenter.context, baseURL!)];
+    const sites = [await standInForOtherSites(viewer.context, baseURL!), await standInForOtherSites(commenter.context, baseURL!)];
     const id = await createDocument(owner.page, DOC, "Roles");
     await shareWith(owner.page, id, viewer.login, "viewer");
     await shareWith(owner.page, id, commenter.login, "commenter");
@@ -300,9 +268,12 @@ test.describe("link cards in the editor (#2317)", () => {
       const link = cards(person.page).first().getByRole("link");
       await expect(link).toBeVisible();
       await expect(link).toHaveAttribute("href", TWEET);
-      // The link is an ordinary tab stop for someone who cannot edit.
+      // The link and the frame are ordinary tab stops for someone who cannot edit: link, frame, the next card's link.
+      await expect(cards(person.page).first().locator("iframe")).toHaveCount(1);
       await link.focus();
       await expect(link).toBeFocused();
+      await person.page.keyboard.press("Tab");
+      await expect(cards(person.page).first().locator("iframe")).toBeFocused();
       await person.page.keyboard.press("Tab");
       await expect(cards(person.page).nth(1).getByRole("link")).toBeFocused();
       // The palette offers neither card command.
@@ -311,12 +282,12 @@ test.describe("link cards in the editor (#2317)", () => {
       await expect(person.page.locator('[data-testid^="palette-item-card:"]')).toHaveCount(0);
       await person.page.keyboard.press("Escape");
     }
-    expect(refused.flat()).toEqual([]);
+    expect(sites.flatMap((site) => site.refused)).toEqual([]);
   });
 
   test("a comment made on a selected card marks the card; Show as text while suggesting is a suggestion", async ({ browser, baseURL }) => {
     const user = await signIn(browser, uniqueLogin("cards-review"));
-    const refused = await refuseOtherSites(user.context, baseURL!);
+    const sites = await standInForOtherSites(user.context, baseURL!);
     const { page } = user;
     const id = await createDocument(page, DOC, "Review");
     await openDocument(page, id);
@@ -350,12 +321,12 @@ test.describe("link cards in the editor (#2317)", () => {
     await expect.poll(() => codeText(page)).toBe(DOC);
     await expect(cards(page)).toHaveCount(2);
 
-    expect(refused).toEqual([]);
+    expect(sites.refused).toEqual([]);
   });
 
   test("accessibility: axe on a page with cards in light and dark, one selected and one focused", async ({ browser, baseURL }) => {
     const user = await signIn(browser, uniqueLogin("cards-a11y"));
-    const refused = await refuseOtherSites(user.context, baseURL!);
+    const sites = await standInForOtherSites(user.context, baseURL!);
     const { page } = user;
     const id = await createDocument(page, DOC, "Accessible cards");
     await openDocument(page, id);
@@ -376,13 +347,13 @@ test.describe("link cards in the editor (#2317)", () => {
       // Never an animation or a transition on the card: nothing to reduce for reduced motion.
       expect(await cards(page).first().evaluate((el) => [getComputedStyle(el).animationName, getComputedStyle(el).transitionDuration])).toEqual(["none", "0s"]);
     }
-    expect(refused).toEqual([]);
+    expect(sites.refused).toEqual([]);
   });
 
   test("phone width: the card fits the column and Show as text is a finger-sized target", async ({ browser, baseURL }) => {
     const phone = devices["iPhone 13"];
     const context = await browser.newContext({ viewport: phone.viewport, deviceScaleFactor: phone.deviceScaleFactor, isMobile: true, hasTouch: true, userAgent: phone.userAgent });
-    const refused = await refuseOtherSites(context, baseURL!);
+    const sites = await standInForOtherSites(context, baseURL!);
     const page = await context.newPage();
     await devLogin(page, uniqueLogin("cards-phone"));
     const long = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf&index=12&t=42s";
@@ -409,6 +380,6 @@ test.describe("link cards in the editor (#2317)", () => {
     await asText(page).first().tap();
     await expect.poll(() => codeText(page)).toBe(`Intro\n\n<${TWEET}>\n\n${long}\n`);
     await expect(cards(page)).toHaveCount(1);
-    expect(refused).toEqual([]);
+    expect(sites.refused).toEqual([]);
   });
 });

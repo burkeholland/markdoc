@@ -76,7 +76,8 @@ test("the loopback canvas spends a token handoff and frames the editor without d
     expect(cookies.some((cookie) => cookie.name === "authjs.session-token")).toBe(false);
     // Since de84c79 the proxy scopes the frame-ancestors policy to the embedded document URL (`?embed=1`).
     const documentResponse = await embeddedFrame!.goto(`${appOrigin}/d/${documentId}?embed=1`);
-    expect(documentResponse?.headers()["content-security-policy"]).toBe(`frame-ancestors ${new URL(opened.url).origin}`);
+    // #2317: the embedded editor may frame the link card hosts, like any editor, and nothing else.
+    expect(documentResponse?.headers()["content-security-policy"]).toBe(`frame-ancestors ${new URL(opened.url).origin}; frame-src https://www.youtube-nocookie.com https://platform.twitter.com`);
     await expect(editor.getByTestId("header")).toHaveAttribute("data-embed", "true");
     await expect(editor.getByTestId("storage-indicator")).toBeDisabled();
     // The editors mount on the client, so once they are visible the freshly navigated frame is hydrated and clicks land.
