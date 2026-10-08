@@ -408,6 +408,44 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await context.close();
   });
 
+  test("a finger: a card that comes after the tap (tap, type, paste a link) is under the finger's rule from its first moment", async ({ browser, baseURL }) => {
+    const { page, context } = await signInWithTouch(browser, uniqueLogin("guard-touch-first"));
+    const sites = await standInWithKeyboard(context, baseURL!);
+    const id = await createDocument(page, "# Guard\n\nFirst paragraph\n", "The card comes later");
+    await openDocument(page, id);
+    await expect(cards(page)).toHaveCount(0);
+    // The only press the page ever sees in this test: a finger puts the caret into the document. No card is there yet.
+    await page.locator(".md-rich p", { hasText: "First paragraph" }).tap();
+    await page.keyboard.press("End");
+    await page.keyboard.press("Enter");
+    await page.evaluate((value) => {
+      const data = new DataTransfer();
+      data.setData("text/plain", value);
+      document.querySelector(".md-rich")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+    }, VIDEO);
+    await expect(cards(page)).toHaveCount(1);
+    await frameReady(page, VIDEO_FRAME);
+    const play = page.frameLocator(`.md-rich iframe[src="${VIDEO_FRAME}"]`).locator("#play");
+    await play.scrollIntoViewIfNeeded();
+    await page.keyboard.type("abc", { delay: 60 });
+    // Four taps on Play, each more than a second after the last key. With a mouse's rule each would count
+    // (the page never saw a pointer on the frame) and the third would turn the card off.
+    for (let tap = 1; tap <= 4; tap++) {
+      await page.waitForTimeout(1300);
+      const box = (await play.boundingBox())!;
+      await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+      await expect.poll(async () => (await frameCounts(page, ".md-rich", VIDEO_FRAME)).clicks, { message: `tap ${tap} lands` }).toBe(tap);
+      await expect.poll(() => keyboardPlace(page), { message: `tap ${tap}` }).toBe("preview");
+      await expect(notice(page)).toHaveCount(0);
+    }
+    await page.keyboard.type("XYZ", { delay: 60 });
+    expect(await codeText(page)).toContain("abcXYZ");
+    expect(await frameCounts(page, ".md-rich", VIDEO_FRAME)).toMatchObject({ clicks: 4, keys: 0 });
+    expect(sites.keys).toEqual([]);
+    expect(sites.refused).toEqual([]);
+    await context.close();
+  });
+
   test("where nothing is typed, a frame is left alone: the published page and a viewer's editor", async ({ browser, baseURL }) => {
     const owner = await signIn(browser, uniqueLogin("guard-pub"));
     const sites = await standInWithKeyboard(owner.context, baseURL!, (url) => (url === TWEET_FRAME ? 200 : 0));

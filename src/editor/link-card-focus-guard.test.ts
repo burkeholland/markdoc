@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CARD_FOCUS_QUIET_MS, CARD_FOCUS_TRIES, CARD_LOAD_AGAIN_LABEL, CARD_TURNED_OFF_TEXT, createTurnedOffNotice, guardCardFrame, isTypingPlace } from "./link-card-focus-guard";
+import { CARD_FOCUS_QUIET_MS, CARD_FOCUS_TRIES, CARD_LOAD_AGAIN_LABEL, CARD_TURNED_OFF_TEXT } from "./link-card-focus-guard";
+
+// The code keeps what the page saw (the last key, the last press) for the life of a page, from the moment
+// it is loaded. So each test loads it anew: a test starts on a page where nobody has typed or pressed yet.
+type Guard = typeof import("./link-card-focus-guard");
+let guardCardFrame: Guard["guardCardFrame"];
+let createTurnedOffNotice: Guard["createTurnedOffNotice"];
+let isTypingPlace: Guard["isTypingPlace"];
 
 /** The page's window. (In this test environment the global object is not the document's window.) */
 const page = document.defaultView!;
@@ -56,7 +63,9 @@ describe("the focus guard of a card's frame (#2338)", () => {
     return made;
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ guardCardFrame, createTurnedOffNotice, isTypingPlace } = await import("./link-card-focus-guard"));
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     document.body.innerHTML = `<div id="editor" contenteditable="true" tabindex="0">text</div><input id="field"><button id="button" type="button">A button</button>`;
     editor = document.getElementById("editor")!;
@@ -480,6 +489,76 @@ describe("the focus guard of a card's frame (#2338)", () => {
     });
   });
 
+  describe("what the page saw before there was a card, and between two cards", () => {
+    const press = (target: Element, kind: string, ms: number) => target.dispatchEvent(at(new PointerEvent("pointerdown", { pointerType: kind, bubbles: true, cancelable: true }), ms));
+
+    it("keys and presses are written down from the moment the code is loaded: two listeners on the document, none on the window", async () => {
+      const onDocument = vi.spyOn(document, "addEventListener");
+      const onWindow = vi.spyOn(page, "addEventListener");
+      vi.resetModules();
+      await import("./link-card-focus-guard");
+      expect(onDocument.mock.calls.map((call) => [call[0], call[2]])).toEqual([
+        ["keydown", true],
+        ["pointerdown", true],
+      ]);
+      expect(onWindow).not.toHaveBeenCalled();
+    });
+
+    it("a finger pressed the page before the first card came (tap, type, paste a link): the card's frame is under the finger's rule from its first moment", () => {
+      editor.focus();
+      press(editor, "touch", 500);
+      key(editor, "a", 1000);
+      const { frame, turnOff } = make();
+      for (let tap = 0; tap < CARD_FOCUS_TRIES + 1; tap++) {
+        grab(frame, 1000 + CARD_FOCUS_QUIET_MS + tap * 700);
+        expect(document.activeElement).toBe(editor);
+      }
+      expect(turnOff).not.toHaveBeenCalled();
+    });
+
+    it("a key typed before the first card came: a pointer that is on the new frame less than a second later is not a wish to go in", () => {
+      editor.focus();
+      key(editor, "a", 1000);
+      const { frame, box } = make();
+      pointer(frame, "pointerenter", 1100);
+      grab(frame, 1000 + CARD_FOCUS_QUIET_MS - 1);
+      expect(document.activeElement).toBe(editor);
+      expect(box.hasAttribute("data-has-keyboard")).toBe(false);
+      grab(frame, 1000 + CARD_FOCUS_QUIET_MS);
+      expect(document.activeElement).toBe(frame);
+    });
+
+    it("a Tab pressed just before the card's frame was made still counts as the person's own move", () => {
+      editor.focus();
+      key(editor, "Tab", 1000);
+      const { frame } = make();
+      grab(frame, 1010);
+      expect(document.activeElement).toBe(frame);
+    });
+
+    it("the only card goes and another comes: the last key and the last press are still known", () => {
+      const first = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      key(editor, "a", 1000);
+      first.stop();
+      const second = make();
+      for (let tap = 0; tap < CARD_FOCUS_TRIES + 1; tap++) grab(second.frame, 1000 + CARD_FOCUS_QUIET_MS + tap * 700);
+      expect(document.activeElement).toBe(editor);
+      expect(second.turnOff).not.toHaveBeenCalled();
+      // And the key: with a mouse now, the pointer on the frame goes in only when that key is a second old.
+      const third = make();
+      press(editor, "mouse", 9000);
+      key(editor, "b", 9100);
+      second.stop();
+      third.stop();
+      const fourth = make();
+      pointer(fourth.frame, "pointerenter", 9200);
+      grab(fourth.frame, 9100 + CARD_FOCUS_QUIET_MS - 1);
+      expect(document.activeElement).toBe(editor);
+    });
+  });
+
   describe("the cover: the pointer rests on a frame while the person types", () => {
     it("a key typed in the page puts a see-through cover over that frame, and one only", () => {
       const { frame, box } = make();
@@ -616,11 +695,11 @@ describe("the focus guard of a card's frame (#2338)", () => {
       }
       const first = card();
       const second = card();
-      expect(added.sort()).toEqual(["document focusin", "document focusout", "document keydown", "document pointerdown", "window blur", "window focus"]);
+      expect(added.sort()).toEqual(["document focusin", "document focusout", "document keydown", "window blur", "window focus"]);
       first.stop();
       expect(removed).toEqual([]);
       second.stop();
-      expect(removed.sort()).toEqual(["document focusin", "document focusout", "document keydown", "document pointerdown", "window blur", "window focus"]);
+      expect(removed.sort()).toEqual(["document focusin", "document focusout", "document keydown", "window blur", "window focus"]);
       // A frame guarded after that starts the page's guard again.
       const third = make();
       editor.focus();
@@ -683,7 +762,7 @@ describe("the focus guard of a card's frame (#2338)", () => {
       box.remove();
       page.dispatchEvent(at(new FocusEvent("blur"), 1000));
       vi.runOnlyPendingTimers();
-      expect(removed.mock.calls.map((call) => call[0]).sort()).toEqual(["focusin", "focusout", "keydown", "pointerdown"]);
+      expect(removed.mock.calls.map((call) => call[0]).sort()).toEqual(["focusin", "focusout", "keydown"]);
       expect(frame.isConnected).toBe(false);
     });
 

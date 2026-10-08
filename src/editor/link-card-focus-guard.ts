@@ -54,14 +54,52 @@ interface Guarded {
   stop: () => void;
 }
 
-interface PageGuard {
-  frames: Map<HTMLIFrameElement, Guarded>;
+/**
+ * What the person last did in the page. It is watched from the moment this code is loaded, not from the
+ * first card: a person taps into the document, types, pastes a link, and the card that appears then must
+ * already know that the last press was a finger and when the last key was typed. It also outlives the
+ * cards: when the only card is turned off and loaded again, nothing is forgotten.
+ */
+interface Seen {
   /** The time of the last key typed in the page; -Infinity before the first. */
   lastKeyAt: number;
   /** The last key event the page saw, to ask later whether it was a Tab that nothing used. */
   lastKey: KeyboardEvent | null;
   /** The last press the page saw itself was a finger: the page cannot see that pointer on a frame. */
   touch: boolean;
+}
+
+const seenByPage = new WeakMap<Document, Seen>();
+
+function seenIn(doc: Document): Seen {
+  const existing = seenByPage.get(doc);
+  if (existing) return existing;
+  const seen: Seen = { lastKeyAt: -Infinity, lastKey: null, touch: false };
+  // Two listeners for the life of the page, before anything in the page can keep the event to itself. They only write down.
+  doc.addEventListener(
+    "keydown",
+    (event) => {
+      seen.lastKey = event;
+      seen.lastKeyAt = event.timeStamp;
+    },
+    true,
+  );
+  doc.addEventListener(
+    "pointerdown",
+    (event) => {
+      seen.touch = event.pointerType === "touch";
+    },
+    true,
+  );
+  seenByPage.set(doc, seen);
+  return seen;
+}
+
+if (typeof document !== "undefined") seenIn(document);
+
+interface PageGuard {
+  frames: Map<HTMLIFrameElement, Guarded>;
+  seen: Seen;
   /** Where focus was before it left the page: the last element of the page that had it. */
   focused: Element | null;
   /** The frame whose cover the person just pressed, and when: that move is the person's own. */
@@ -115,11 +153,10 @@ function pageGuard(doc: Document): PageGuard | null {
   if (!win) return null;
   const live = liveRegion(doc);
 
-  const guard: PageGuard = { frames: new Map(), lastKeyAt: -Infinity, lastKey: null, touch: false, focused: doc.activeElement, entering: null, stop: () => {} };
+  const seen = seenIn(doc);
+  const guard: PageGuard = { frames: new Map(), seen, focused: doc.activeElement, entering: null, stop: () => {} };
 
-  const onKeyDown = (event: KeyboardEvent) => {
-    guard.lastKey = event;
-    guard.lastKeyAt = event.timeStamp;
+  const onKeyDown = () => {
     // The person is typing in the page. A pointer that rests on a frame is now invisible to the page: cover that frame.
     for (const guarded of guard.frames.values()) {
       if (!guarded.pointerInside || guarded.cover || doc.activeElement === guarded.frame) continue;
@@ -151,9 +188,6 @@ function pageGuard(doc: Document): PageGuard | null {
     }
   };
 
-  const onPointerDown = (event: PointerEvent) => {
-    guard.touch = event.pointerType === "touch";
-  };
 
   const onFocusIn = (event: FocusEvent) => {
     if (event.target instanceof Element && !(event.target instanceof win.HTMLIFrameElement)) guard.focused = event.target;
@@ -172,11 +206,11 @@ function pageGuard(doc: Document): PageGuard | null {
   const meant = (guarded: Guarded, from: Element | null, now: number): boolean => {
     if (guard.entering && guard.entering.frame === guarded.frame && now - guard.entering.at <= MOVE_FRESH_MS) return true;
     if (!isTypingPlace(from)) return true;
-    const key = guard.lastKey;
+    const key = seen.lastKey;
     if (key && key.key === "Tab" && !key.defaultPrevented && !key.ctrlKey && !key.altKey && !key.metaKey && now - key.timeStamp <= MOVE_FRESH_MS) return true;
     // After a press with a finger the page cannot know where the pointer is: it never says the person went in.
-    if (guard.touch) return false;
-    return guarded.pointerInside && !guarded.cover && guarded.pointerAt > guard.lastKeyAt && now - guard.lastKeyAt >= CARD_FOCUS_QUIET_MS;
+    if (seen.touch) return false;
+    return guarded.pointerInside && !guarded.cover && guarded.pointerAt > seen.lastKeyAt && now - seen.lastKeyAt >= CARD_FOCUS_QUIET_MS;
   };
 
   const decide = (now: number) => {
@@ -193,7 +227,7 @@ function pageGuard(doc: Document): PageGuard | null {
       return true;
     }
     // With a finger a tap in a player comes here too. It counts only while the person is typing.
-    if (guard.touch && now - guard.lastKeyAt >= CARD_FOCUS_QUIET_MS) guarded.tries = 0;
+    if (seen.touch && now - seen.lastKeyAt >= CARD_FOCUS_QUIET_MS) guarded.tries = 0;
     else guarded.tries++;
     const off = guarded.tries >= CARD_FOCUS_TRIES;
     // Back to where the person was. An editor puts its own selection back when it gets focus again.
@@ -233,14 +267,12 @@ function pageGuard(doc: Document): PageGuard | null {
   };
 
   doc.addEventListener("keydown", onKeyDown, true);
-  doc.addEventListener("pointerdown", onPointerDown, true);
   doc.addEventListener("focusin", onFocusIn, true);
   doc.addEventListener("focusout", onFocusOut, true);
   win.addEventListener("blur", onWindowBlur);
   win.addEventListener("focus", onWindowFocus);
   guard.stop = () => {
     doc.removeEventListener("keydown", onKeyDown, true);
-    doc.removeEventListener("pointerdown", onPointerDown, true);
     doc.removeEventListener("focusin", onFocusIn, true);
     doc.removeEventListener("focusout", onFocusOut, true);
     win.removeEventListener("blur", onWindowBlur);
