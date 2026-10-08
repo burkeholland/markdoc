@@ -6,11 +6,12 @@ process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.AUTH_SECRET_1;
 
-const { proxy, framePolicyApplies, frameSources, FRAME_ANCESTORS_NONE, CARD_FRAME_SOURCES, NO_FRAME_SOURCES } = await import("@/proxy");
+const proxyModule = await import("@/proxy");
+const { proxy, framePolicyApplies, FRAME_ANCESTORS_NONE, CARD_FRAME_SOURCES } = proxyModule;
 const { CARD_FRAME_HOSTS } = await import("@/editor/markdown/link-cards");
-// #2317: the editor and the published page may frame the hosts on the link card list; no other page has a frame.
+// #2317: every page may frame the hosts on the link card list and nothing else. The list is the same on
+// every page because a document is opened from the dashboard without a page load, under the dashboard's policy.
 const CARDS = "frame-src https://www.youtube-nocookie.com https://platform.twitter.com";
-const NO_FRAMES = "frame-src 'none'";
 const { EMBED_SESSION_COOKIE, SESSION_COOKIE, SECURE_SESSION_COOKIE, STALE_SESSION_MESSAGE, findStaleSessionCookie, stripCookies, hasSessionCookie, logAuthError } = await import("@/server/session-cookie");
 
 const OLD_SECRET = "old-secret-old-secret-old-secret-old";
@@ -146,37 +147,61 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
   /** Headers the proxy added itself (Next's x-middleware-* bookkeeping excluded). */
   const ownHeaders = (res: Response) => [...res.headers.keys()].filter((k) => !k.startsWith("x-middleware-")).sort();
 
-  it.each([
-    ["/", NO_FRAMES],
-    ["/login", NO_FRAMES],
-    ["/settings", NO_FRAMES],
-    ["/p/doc-1", CARDS],
-    ["/d/doc-1", CARDS],
-    ["/d/doc-1?mode=focus", CARDS],
-  ])("a plain page %s refuses to be framed, and may itself frame: %s", async (path, frames) => {
+  // Every kind of page: the dashboard, sign-in, settings, the editor, the published page, a page that
+  // does not exist (also under /d/ and /p/), a deeper path, the social card images and odd spellings.
+  const PAGES = [
+    "/",
+    "/login",
+    "/login?next=%2Fd%2Fdoc-1",
+    "/settings",
+    "/p/doc-1",
+    "/d/doc-1",
+    "/d/doc-1?mode=focus",
+    "/d/doc-1?embed=1",
+    "/no-such-page",
+    "/d",
+    "/p",
+    "/d/doc-1/x",
+    "/d/doc-1/opengraph-image",
+    "/p/doc-1/opengraph-image",
+    "/D/doc-1",
+    "/d/doc-1%2Fx",
+    "/d/doc-1;x=1",
+    "/x/d/doc-1",
+    "/apis",
+    "/embedded",
+  ];
+
+  it.each(PAGES)("a plain page %s refuses to be framed, and may itself frame the card hosts only", async (path) => {
     const res = await proxy(request(undefined, {}, path));
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors 'none'; ${frames}`);
+    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors 'none'; ${CARDS}`);
     expect(FRAME_ANCESTORS_NONE).toBe("frame-ancestors 'none'");
     expect(ownHeaders(res)).toEqual(["content-security-policy"]);
   });
 
+  it("the frame list does not depend on the page: the dashboard has the editor's (a document is opened from it without a page load)", async () => {
+    const policies = new Set<string | null>();
+    for (const path of PAGES) policies.add((await proxy(request(undefined, {}, path))).headers.get("content-security-policy"));
+    expect([...policies]).toEqual([`frame-ancestors 'none'; ${CARDS}`]);
+    // Signed in or not, with a session cookie the server cannot read or with none.
+    for (const cookie of [undefined, `${SESSION_COOKIE}=not-a-jwt`]) {
+      const dashboard = await proxy(request(cookie, {}, "/"));
+      const editor = await proxy(request(cookie, {}, "/d/doc-1"));
+      expect(dashboard.headers.get("content-security-policy")).toBe(editor.headers.get("content-security-policy"));
+    }
+    // No page is left with a policy of its own: there is one list and no way to choose another by path.
+    expect(Object.keys(proxyModule).filter((name) => /frame/i.test(name)).sort()).toEqual(["CARD_FRAME_SOURCES", "FRAME_ANCESTORS_NONE", "framePolicyApplies"]);
+  });
+
   it("frame-src is the link card list and nothing wider (#2317)", () => {
     expect(CARD_FRAME_SOURCES).toBe(CARDS);
-    expect(NO_FRAME_SOURCES).toBe(NO_FRAMES);
     expect(CARD_FRAME_SOURCES).toBe(`frame-src ${CARD_FRAME_HOSTS.join(" ")}`);
     const sources = CARD_FRAME_SOURCES.split(" ").slice(1);
     expect(sources.length).toBeGreaterThan(0);
     // Whole https origins only: no wildcard, no 'self', no bare scheme, no data: or blob:, no path, no port.
     for (const source of sources) expect(source).toMatch(/^https:\/\/(?:[a-z][a-z0-9-]*\.)+[a-z]{2,}$/);
     expect(CARD_FRAME_SOURCES).not.toMatch(/[*'";,]|\bself\b|data:|blob:|http:/);
-  });
-
-  it("frameSources: only a document's editor and published page draw cards", () => {
-    for (const path of ["/d/doc-1", "/p/doc-1", "/d/a", "/p/Zz09"]) expect(frameSources(path), path).toBe(CARDS);
-    for (const path of ["/", "/login", "/settings", "/d", "/d/", "/p", "/p/", "/d/doc-1/x", "/p/doc-1/opengraph-image", "/dd/doc-1", "/D/doc-1", "/x/d/doc-1", "/x/doc-1", "/s/doc-1", "/e/doc-1", "/a/b", "/api/documents/doc-1", "/embed/nonce"]) {
-      expect(frameSources(path), path).toBe(NO_FRAMES);
-    }
   });
 
   it("sets none of the server's four headers, with or without x-forwarded-proto: https (one owner each)", async () => {
@@ -210,7 +235,7 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
       ["/login?next=%2Fd%2Fdoc-1", false],
     ] as const) {
       const res = await proxy(request(withCookie ? cookie : undefined, {}, path));
-      expect(res.headers.get("content-security-policy"), path).toBe(`frame-ancestors 'none'; ${path.startsWith("/d/") ? CARDS : NO_FRAMES}`);
+      expect(res.headers.get("content-security-policy"), path).toBe(`frame-ancestors 'none'; ${CARDS}`);
     }
   });
 

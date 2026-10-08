@@ -30,7 +30,7 @@ import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
 import { httpOrigin, mcpRestOrigin } from "@/server/mcp-origin";
 import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
 import { localAccess } from "../scripts/lib/dev-origins.mjs";
-import { attachRequestErrorGuards } from "./request-guards";
+import { attachRequestErrorGuards, attachUpgradeErrorGuard } from "./request-guards";
 import { attachRequestLog } from "./request-log";
 import { serveStaticBrotli } from "./static-brotli";
 import { startGistAutoUpdateWorker, stopGistAutoUpdateWorker } from "@/server/gist-auto-update";
@@ -125,7 +125,12 @@ const runtime: RuntimeResources = {
 function closeHttpIntake(server: Server | null): Promise<void> {
   if (!server) return Promise.resolve();
   server.removeAllListeners("upgrade");
-  server.on("upgrade", (_req, socket) => socket.destroy());
+  // destroy() alone was not seen to raise an 'error' here; the guard keeps the rule "no upgrade socket
+  // of ours without an 'error' listener" (#2311) true on this path if it ever writes an answer.
+  server.on("upgrade", (req, socket) => {
+    attachUpgradeErrorGuard(req, socket);
+    socket.destroy();
+  });
   return new Promise((resolve, reject) => {
     server.close((error) => {
       if (!error || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolve();
@@ -266,7 +271,12 @@ async function main() {
   runtime.server = server;
   // Start accepting TCP connections before Next prepares. Reject upgrades promptly while starting:
   // a pending HMR handshake makes Chromium queue every later /collab socket behind it.
-  const rejectStartupUpgrade = (_req: IncomingMessage, socket: Duplex) => {
+  // The socket arrives here with no 'error' listener (Node removed its own before emitting 'upgrade'),
+  // and the client is often gone already: an editor page gives up a socket that waited 5 s while this
+  // process was busy starting. The guard goes on before the write so that answering a client that left
+  // cannot become an uncaughtException and exit(1) (#2311).
+  const rejectStartupUpgrade = (req: IncomingMessage, socket: Duplex) => {
+    attachUpgradeErrorGuard(req, socket);
     socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
   };
   server.on("upgrade", rejectStartupUpgrade);

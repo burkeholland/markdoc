@@ -10,7 +10,7 @@ import { QUICK_REACTIONS, isDocumentRange, type CommentReply, type CommentThread
 import { SuggestionConflictError, type SuggestionGroup } from "@/editor/collab/suggestions";
 import { agentDisplayName, agentMentionLogin, mentionTriggerAt, parseAgentMentions, splitMentions } from "@/editor/collab/mentions";
 import { renderCommentBody, wrapLink, wrapSelection } from "@/editor/collab/comment-markdown";
-import { isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, type SuggestionBlock } from "@/editor/collab/suggestion-block";
+import { isSuggestionOutdated, parseSuggestionBlock, reviewSuggestionNote, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, suggestionOutdatedCause, type SuggestionBlock } from "@/editor/collab/suggestion-block";
 import type { ReviewDto } from "@/server/reviews";
 import { Avatar, EmptyState, Menu, MenuContent, MenuItem, MenuTrigger, Popover, PopoverAnchor, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { api, apiErrorText } from "@/lib/api";
@@ -169,6 +169,33 @@ function commentSuggestionTargets(threads: CommentThread[], text: string): Comme
     }
     return targets;
   });
+}
+
+/**
+ * An undecided suggestion that still asks for a decision: one that can be applied, or an outdated one on a
+ * thread that is still open. An outdated suggestion on a resolved thread was set aside with its thread: it
+ * stays undecided, shows there with its Outdated badge, and counts again once the thread is reopened or the
+ * quoted text reads as before (#2327).
+ */
+function isLiveSuggestionState(state: CommentSuggestionState, threadResolved: boolean): boolean {
+  return state === "pending" || (state === "outdated" && !threadResolved);
+}
+
+interface PendingInsertionRange {
+  readonly from: number;
+  readonly to: number;
+}
+
+/** Ranges of the text that pending tracked insertions put into the document, in document order. */
+function pendingInsertionRanges(suggestions: readonly { type: string; from: number; to: number }[]): PendingInsertionRange[] {
+  return suggestions
+    .filter((suggestion) => suggestion.type === "insert" && suggestion.to > suggestion.from)
+    .map((suggestion) => ({ from: suggestion.from, to: suggestion.to }))
+    .sort((left, right) => left.from - right.from || left.to - right.to);
+}
+
+function samePendingInsertionRanges(left: readonly PendingInsertionRange[], right: readonly PendingInsertionRange[]): boolean {
+  return left.length === right.length && left.every((range, index) => range.from === right[index]!.from && range.to === right[index]!.to);
 }
 
 const SUGGESTION_ACTIONS_CLASS = "mt-2 flex flex-wrap items-center gap-2";
@@ -9499,14 +9526,15 @@ function reviewThreads(review: ReviewDto, threads: CommentThread[]): CommentThre
 }
 
 /**
- * A review is open while one of its threads is unresolved or still carries a pending (or outdated)
- * suggestion. Once every suggestion is decided and every thread resolved — or all of its threads were
- * deleted — it is resolved and lists at the top of the Resolved tab instead of Open (Burke, task #994).
+ * A review is open while one of its threads is unresolved or still carries a suggestion that can be
+ * applied. Once every thread is resolved and every suggestion is decided or set aside (outdated on a
+ * resolved thread, #2327), or all of its threads were deleted, it is resolved and lists at the top of
+ * the Resolved tab instead of Open (Burke, task #994).
  */
 export function isReviewOpen(review: ReviewDto, threads: CommentThread[], text: string): boolean {
   const mine = reviewThreads(review, threads);
   if (mine.some((t) => !t.resolved)) return true;
-  return commentSuggestionTargets(mine, text).some((target) => target.state === "pending" || target.state === "outdated");
+  return commentSuggestionTargets(mine, text).some((target) => isLiveSuggestionState(target.state, target.thread.resolved));
 }
 
 function snapshotCommentSuggestionTarget(session: CollabSession, target: CommentSuggestionTarget): CommentSuggestionBatchTarget | null {
@@ -9715,6 +9743,11 @@ const REVIEW_RESOLVE_ACTIONS_CLASS = "mt-2 flex";
 const REVIEW_ACCEPT_CLASS = "btn btn-sm btn-primary min-w-0 gap-1.5 whitespace-nowrap px-2";
 const REVIEW_REJECT_CLASS = "btn btn-sm btn-outline min-w-0 gap-1.5 whitespace-nowrap px-2";
 const REVIEW_RESOLVE_CLASS = "btn btn-sm btn-outline gap-1.5 whitespace-nowrap";
+// Resolve all beside Reject all, when nothing of the review can be applied: the step that changes no suggestion leads.
+const REVIEW_RESOLVE_LEAD_CLASS = "btn btn-sm btn-primary min-w-0 gap-1.5 whitespace-nowrap px-2";
+const REVIEW_NOTE_CLASS = "mt-1 text-xs leading-[18px] text-ink-2";
+const REVIEW_OPEN_SUGGESTIONS_CLASS = "inline-flex items-center gap-1 whitespace-nowrap font-medium text-accent hover:underline";
+const REVIEW_REJECT_TITLE = "Reject all suggestions";
 const REVIEW_THREADS_CLASS = "mt-2 flex flex-col gap-1 border-t border-line pt-2";
 const REVIEW_THREAD_LINK_CLASS = "flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs hover:bg-surface-2";
 const SUGGESTION_BATCH_ACTIONS_CLASS = "flex items-center justify-end gap-2 text-xs";
@@ -9762,10 +9795,11 @@ interface ReviewSuggestionPrimitiveSnapshot {
   readonly body: string;
   readonly proposed: string;
   readonly state: CommentSuggestionState;
+  readonly threadResolved: boolean;
 }
 
 
-type ReviewCardActionKind = "toggle" | "accept" | "reject" | "resolve" | "thread";
+type ReviewCardActionKind = "toggle" | "open-suggestions" | "accept" | "reject" | "resolve" | "thread";
 
 interface ReviewCardAuthority {
   readonly mount: symbol;
@@ -9776,6 +9810,8 @@ interface ReviewCardAuthority {
   readonly canEdit: boolean;
   readonly canComment: boolean;
   readonly text: string;
+  readonly pendingInsertionsSource: readonly PendingInsertionRange[];
+  readonly pendingInsertions: readonly PendingInsertionRange[];
   readonly reviewSource: ReviewDto;
   readonly review: ReviewDto;
   readonly reviewSnapshot: ReviewPrimitiveSnapshot;
@@ -9798,7 +9834,17 @@ interface ReviewCardAuthority {
   readonly blocked: boolean;
   readonly open: boolean;
   readonly actionRegion: "suggestions" | "resolve" | null;
+  /** The resolve region also carries Reject all: nothing can be applied, yet undecided suggestions remain. */
+  readonly resolveWithReject: boolean;
   readonly partial: boolean;
+  /** Undecided suggestions that are outdated only because of a pending tracked suggestion. */
+  readonly waiting: number;
+  /** Outdated, undecided suggestions on resolved threads: set aside, not decided. */
+  readonly setAside: number;
+  readonly note: string | null;
+  readonly noteId: string;
+  readonly offersOpenSuggestions: boolean;
+  readonly countsSuffix: string;
   readonly verdictLabel: string;
   readonly verdictClass: string;
   readonly timestampLabel: string;
@@ -9809,6 +9855,7 @@ interface ReviewCardAuthority {
   readonly ops: Readonly<Pick<ReturnType<typeof useCommentOps>, "acceptSuggestion" | "rejectSuggestion" | "resolve">>;
   readonly onToast: CommentsPanelProps["onToast"];
   readonly setOpen: (open: boolean) => void;
+  readonly openSuggestions: () => void;
   readonly setActiveComment: CollabSession["setActiveComment"];
 }
 
@@ -9816,6 +9863,7 @@ interface ReviewCardElements {
   readonly card: HTMLDivElement;
   readonly header: HTMLDivElement;
   readonly toggle: HTMLButtonElement;
+  readonly openSuggestions: HTMLButtonElement | null;
   readonly actions: HTMLDivElement | null;
   readonly accept: HTMLButtonElement | null;
   readonly reject: HTMLButtonElement | null;
@@ -9859,6 +9907,7 @@ interface ReviewCardRender {
   readonly identity: symbol;
   readonly authority: ReviewCardAuthority;
   readonly toggle: ReviewCardAction;
+  readonly openSuggestions: ReviewCardAction | null;
   readonly accept: ReviewCardAction | null;
   readonly reject: ReviewCardAction | null;
   readonly resolve: ReviewCardAction | null;
@@ -9870,6 +9919,8 @@ interface ReviewCardRender {
   readonly captureRows: readonly ((element: HTMLLIElement | null) => void)[];
   readonly captureToggle: (element: HTMLButtonElement | null) => void;
   readonly onToggle: (event: MouseEvent<HTMLButtonElement>) => void;
+  readonly captureOpenSuggestions: ((element: HTMLButtonElement | null) => void) | null;
+  readonly onOpenSuggestions: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
   readonly captureAccept: ((element: HTMLButtonElement | null) => void) | null;
   readonly onAccept: ((event: MouseEvent<HTMLButtonElement>) => void) | null;
   readonly captureReject: ((element: HTMLButtonElement | null) => void) | null;
@@ -10184,7 +10235,8 @@ function sameLiveSuggestionPrimitives(target: CommentSuggestionTarget, snapshot:
     (target.reply?.id ?? null) === snapshot.replyId &&
     (target.reply?.body ?? target.thread.body) === snapshot.body &&
     target.block.text === snapshot.proposed &&
-    target.state === snapshot.state
+    target.state === snapshot.state &&
+    target.thread.resolved === snapshot.threadResolved
   );
 }
 
@@ -10215,6 +10267,84 @@ function sameResolveTarget(left: CommentResolveBatchTarget | null, right: Commen
   );
 }
 
+interface ReviewCardDecisions {
+  readonly actionRegion: "suggestions" | "resolve" | null;
+  readonly resolveWithReject: boolean;
+  readonly partial: boolean;
+  readonly waiting: number;
+  readonly setAside: number;
+  readonly note: string | null;
+  readonly offersOpenSuggestions: boolean;
+  readonly countsSuffix: string;
+}
+
+/**
+ * What a review card says and offers, from the states of its suggestions (#2327):
+ *  - something can be applied and the viewer may edit: Accept all + Reject all;
+ *  - nothing can be applied and a thread is open: Resolve all (anyone who may comment), with Reject all
+ *    beside it while undecided suggestions remain and the viewer may edit. Resolve all decides nothing;
+ *  - the sentence says why some or all undecided suggestions cannot be applied, and points to the
+ *    Suggestions tab when a pending tracked suggestion is the cause.
+ */
+function reviewCardDecisions({
+  canEdit,
+  canComment,
+  suggestions,
+  unresolved,
+  waiting,
+}: {
+  canEdit: boolean;
+  canComment: boolean;
+  suggestions: readonly Pick<ReviewSuggestionPrimitiveSnapshot, "state" | "threadResolved">[];
+  unresolved: number;
+  waiting: number;
+}): ReviewCardDecisions {
+  const pending = suggestions.filter((target) => isLiveSuggestionState(target.state, target.threadResolved));
+  const applicable = pending.filter((target) => target.state === "pending").length;
+  const setAside = suggestions.filter((target) => target.state === "outdated" && target.threadResolved).length;
+  const actionRegion = canEdit && applicable > 0 ? "suggestions" : canComment && applicable === 0 && unresolved > 0 ? "resolve" : null;
+  const note = reviewSuggestionNote({ undecided: pending.length, applicable, waiting });
+  return Object.freeze({
+    actionRegion,
+    resolveWithReject: actionRegion === "resolve" && canEdit && pending.length > 0,
+    partial: applicable !== pending.length,
+    waiting,
+    setAside,
+    note,
+    offersOpenSuggestions: note !== null && waiting > 0,
+    countsSuffix: suggestions.length === 0 || pending.length > 0 ? "" : setAside > 0 ? ` · ${setAside} outdated, not decided` : " · all decided",
+  });
+}
+
+function sameReviewCardDecisions(left: ReviewCardDecisions, right: ReviewCardDecisions): boolean {
+  return (
+    left.actionRegion === right.actionRegion &&
+    left.resolveWithReject === right.resolveWithReject &&
+    left.partial === right.partial &&
+    left.waiting === right.waiting &&
+    left.setAside === right.setAside &&
+    left.note === right.note &&
+    left.offersOpenSuggestions === right.offersOpenSuggestions &&
+    left.countsSuffix === right.countsSuffix
+  );
+}
+
+/** Buttons a batch on this card would act on: the region's own targets, so a busy row blocks exactly what it conflicts with. */
+function reviewCardRenderedTargets(
+  decisions: Pick<ReviewCardDecisions, "actionRegion" | "resolveWithReject">,
+  pending: number,
+  suggestionTargets: readonly CommentSuggestionBatchTarget[],
+  resolveTargets: readonly CommentResolveBatchTarget[],
+): readonly CommentBatchTarget[] {
+  if (decisions.actionRegion === "suggestions") return suggestionTargets;
+  if (decisions.actionRegion === "resolve") return decisions.resolveWithReject ? [...resolveTargets, ...suggestionTargets] : resolveTargets;
+  return pending > 0 ? suggestionTargets : resolveTargets;
+}
+
+function reviewNoteId(reviewId: string): string {
+  return `review-note-${reviewId}`;
+}
+
 function createReviewCardAuthority({
   mount,
   position,
@@ -10222,11 +10352,13 @@ function createReviewCardAuthority({
   threads,
   session,
   text,
+  pendingInsertions,
   ops,
   coordinator,
   onToast,
   open,
   setOpen,
+  openSuggestions,
 }: {
   mount: symbol;
   position: number;
@@ -10234,16 +10366,19 @@ function createReviewCardAuthority({
   threads: CommentThread[];
   session: CollabSession;
   text: string;
+  pendingInsertions: readonly PendingInsertionRange[];
   ops: ReturnType<typeof useCommentOps>;
   coordinator: CommentRowActionCoordinator;
   onToast?: CommentsPanelProps["onToast"];
   open: boolean;
   setOpen: (open: boolean) => void;
+  openSuggestions: () => void;
 }): ReviewCardAuthority {
   const canEdit = session.role === "owner" || session.role === "editor";
   const canComment = session.canComment;
   const mineSources = reviewThreads(review, threads);
   const sourceSuggestions = commentSuggestionTargets(mineSources, text);
+  const frozenInsertions = Object.freeze(pendingInsertions.map((range) => Object.freeze({ from: range.from, to: range.to })));
   const suggestions = Object.freeze(
     sourceSuggestions.map((target) =>
       Object.freeze({
@@ -10254,12 +10389,13 @@ function createReviewCardAuthority({
         body: target.reply?.body ?? target.thread.body,
         proposed: target.block.text,
         state: target.state,
+        threadResolved: target.thread.resolved,
       }),
     ),
   );
   const mine = mineSources.map((thread) => snapshotReviewThread(session, thread, suggestions.filter((target) => target.threadId === thread.id)));
   const validMine = mine.filter((thread): thread is ReviewThreadPrimitiveSnapshot => thread !== null);
-  const pendingIndexes = suggestions.flatMap((target, index) => (target.state === "pending" || target.state === "outdated" ? [index] : []));
+  const pendingIndexes = suggestions.flatMap((target, index) => (isLiveSuggestionState(target.state, target.threadResolved) ? [index] : []));
   const pending = Object.freeze(pendingIndexes.map((index) => suggestions[index]!));
   const applicable = Object.freeze(pending.filter((target) => target.state === "pending"));
   const unresolved = Object.freeze(validMine.filter((thread) => !thread.resolved));
@@ -10268,13 +10404,18 @@ function createReviewCardAuthority({
   const resolveTargetSnapshots = Object.freeze(unresolved.map((thread) => snapshotCommentResolveTarget(session, thread.source)));
   const renderedSuggestionTargets = Object.freeze(suggestionTargetSnapshots.filter((target): target is CommentSuggestionBatchTarget => target !== null));
   const renderedResolveTargets = Object.freeze(resolveTargetSnapshots.filter((target): target is CommentResolveBatchTarget => target !== null));
-  const renderedTargets: readonly CommentBatchTarget[] = pending.length > 0 ? renderedSuggestionTargets : renderedResolveTargets;
+  const decisions = reviewCardDecisions({
+    canEdit,
+    canComment,
+    suggestions,
+    unresolved: unresolved.length,
+    waiting: pendingSourceTargets.filter((target) => target.state === "outdated" && suggestionOutdatedCause(target.thread, text, frozenInsertions) === "pending-suggestion").length,
+  });
+  const renderedTargets = reviewCardRenderedTargets(decisions, pending.length, renderedSuggestionTargets, renderedResolveTargets);
   const scope = reviewBatchScope(review.id);
   const batchOwner = coordinator.batchOwners.get(scope) ?? null;
   const blocked = isCommentBatchBlocked(coordinator, renderedTargets);
-  const partial = applicable.length !== pending.length;
   const { review: frozenReview, snapshot: reviewSnapshot } = freezeReview(review);
-  const actionRegion = canEdit && pending.length > 0 ? "suggestions" : canComment && pending.length === 0 && unresolved.length > 0 ? "resolve" : null;
   const opsSnapshot = Object.freeze({
     acceptSuggestion: ops.acceptSuggestion,
     rejectSuggestion: ops.rejectSuggestion,
@@ -10290,6 +10431,8 @@ function createReviewCardAuthority({
     canEdit,
     canComment,
     text,
+    pendingInsertionsSource: pendingInsertions,
+    pendingInsertions: frozenInsertions,
     reviewSource: review,
     review: frozenReview,
     reviewSnapshot,
@@ -10311,18 +10454,26 @@ function createReviewCardAuthority({
     busy: batchOwner !== null,
     blocked,
     open,
-    actionRegion,
-    partial,
+    actionRegion: decisions.actionRegion,
+    resolveWithReject: decisions.resolveWithReject,
+    partial: decisions.partial,
+    waiting: decisions.waiting,
+    setAside: decisions.setAside,
+    note: decisions.note,
+    noteId: reviewNoteId(review.id),
+    offersOpenSuggestions: decisions.offersOpenSuggestions,
+    countsSuffix: decisions.countsSuffix,
     verdictLabel: reviewVerdictLabel(review.authorName, review.verdict),
     verdictClass: cn("text-[13px] font-semibold", verdictTone(review.verdict)),
     timestampLabel: relativeTime(new Date(review.createdAt).getTime()),
-    countsLabel: `${reviewSummaryLabel(validMine.length, suggestions.length)}${suggestions.length > 0 && pending.length === 0 ? " · all decided" : ""}`,
-    acceptTitle: partial ? `Accept all suggestions (${applicable.length} of ${pending.length}; outdated ones are skipped)` : "Accept all suggestions",
+    countsLabel: `${reviewSummaryLabel(validMine.length, suggestions.length)}${decisions.countsSuffix}`,
+    acceptTitle: decisions.partial ? `Accept all suggestions (${applicable.length} of ${pending.length}; outdated ones are skipped)` : "Accept all suggestions",
     resolveTitle: `Resolve the ${unresolved.length === 1 ? "open comment" : `${unresolved.length} open comments`} of this review`,
     opsSource: ops,
     ops: opsSnapshot,
     onToast,
     setOpen,
+    openSuggestions,
     setActiveComment: session.setActiveComment,
   });
 }
@@ -10350,6 +10501,7 @@ function reviewCardFactsAreCurrent(authority: ReviewCardAuthority, allowPendingR
     (session.role === "owner" || session.role === "editor") !== authority.canEdit ||
     session.canComment !== authority.canComment ||
     session.ytext.toString() !== authority.text ||
+    !samePendingInsertionRanges(pendingInsertionRanges(session.suggestions.list()), authority.pendingInsertions) ||
     session.setActiveComment !== authority.setActiveComment ||
     !sameReviewPrimitives(reviewSource, reviewSnapshot) ||
     authority.review.documentId !== authority.documentId ||
@@ -10402,7 +10554,7 @@ function reviewCardFactsAreCurrent(authority: ReviewCardAuthority, allowPendingR
     return false;
   }
 
-  const currentPending = suggestions.filter((target) => target.state === "pending" || target.state === "outdated");
+  const currentPending = suggestions.filter((target) => isLiveSuggestionState(target.state, target.threadResolved));
   const currentApplicable = currentPending.filter((target) => target.state === "pending");
   const currentUnresolved = mine.filter((thread) => !thread.resolved);
   if (
@@ -10416,22 +10568,25 @@ function reviewCardFactsAreCurrent(authority: ReviewCardAuthority, allowPendingR
     return false;
   }
 
-  const livePending = liveSuggestions.filter((target) => target.state === "pending" || target.state === "outdated");
+  const livePending = liveSuggestions.filter((target) => isLiveSuggestionState(target.state, target.thread.resolved));
   const currentSuggestionTargets = livePending.map((target) => snapshotCommentSuggestionTarget(session, target));
   const currentResolveTargets = currentUnresolved.map((thread) => {
     const live = session.comments.get(thread.id);
     return live ? snapshotCommentResolveTarget(session, live) : null;
   });
-  const renderedTargets: readonly CommentBatchTarget[] =
-    pending.length > 0
-      ? currentSuggestionTargets.filter((target): target is CommentSuggestionBatchTarget => target !== null)
-      : currentResolveTargets.filter((target): target is CommentResolveBatchTarget => target !== null);
-  const expectedActionRegion =
-    authority.canEdit && pending.length > 0
-      ? "suggestions"
-      : authority.canComment && pending.length === 0 && unresolved.length > 0
-        ? "resolve"
-        : null;
+  const expected = reviewCardDecisions({
+    canEdit: authority.canEdit,
+    canComment: authority.canComment,
+    suggestions,
+    unresolved: unresolved.length,
+    waiting: livePending.filter((target) => target.state === "outdated" && suggestionOutdatedCause(target.thread, authority.text, authority.pendingInsertions) === "pending-suggestion").length,
+  });
+  const renderedTargets = reviewCardRenderedTargets(
+    expected,
+    pending.length,
+    currentSuggestionTargets.filter((target): target is CommentSuggestionBatchTarget => target !== null),
+    currentResolveTargets.filter((target): target is CommentResolveBatchTarget => target !== null),
+  );
   const matches =
     currentSuggestionTargets.length === suggestionTargetSnapshots.length &&
     suggestionTargetSnapshots.every((target, index) => sameSuggestionTarget(target, currentSuggestionTargets[index] ?? null)) &&
@@ -10440,8 +10595,9 @@ function reviewCardFactsAreCurrent(authority: ReviewCardAuthority, allowPendingR
     (coordinator.batchOwners.get(scope) ?? null) === authority.batchOwner &&
     ((coordinator.batchOwners.get(scope) ?? null) !== null) === authority.busy &&
     isCommentBatchBlocked(coordinator, renderedTargets) === authority.blocked &&
-    expectedActionRegion === authority.actionRegion &&
-    (currentApplicable.length !== currentPending.length) === authority.partial &&
+    sameReviewCardDecisions(expected, authority) &&
+    authority.noteId === reviewNoteId(reviewSnapshot.id) &&
+    authority.countsLabel === `${reviewSummaryLabel(mine.length, suggestions.length)}${expected.countsSuffix}` &&
     renderedTargets.length === authority.renderedTargets.length &&
     authority.renderedTargets.every((target, index) => {
       const current = renderedTargets[index];
@@ -10503,7 +10659,8 @@ function sameReviewSuggestionSnapshots(left: ReviewSuggestionPrimitiveSnapshot, 
     left.replyId === right.replyId &&
     left.body === right.body &&
     left.proposed === right.proposed &&
-    left.state === right.state
+    left.state === right.state &&
+    left.threadResolved === right.threadResolved
   );
 }
 
@@ -10554,6 +10711,8 @@ function reviewCardAuthoritiesMatch(previous: ReviewCardAuthority, current: Revi
     previous.canEdit === current.canEdit &&
     previous.canComment === current.canComment &&
     previous.text === current.text &&
+    previous.pendingInsertionsSource === current.pendingInsertionsSource &&
+    samePendingInsertionRanges(previous.pendingInsertions, current.pendingInsertions) &&
     previous.reviewSource === current.reviewSource &&
     sameReviewSnapshots(previous.reviewSnapshot, current.reviewSnapshot) &&
     sameReviewPrimitives(previous.review, current.reviewSnapshot) &&
@@ -10575,8 +10734,8 @@ function reviewCardAuthoritiesMatch(previous: ReviewCardAuthority, current: Revi
     previous.busy === current.busy &&
     previous.blocked === current.blocked &&
     previous.open === current.open &&
-    previous.actionRegion === current.actionRegion &&
-    previous.partial === current.partial &&
+    sameReviewCardDecisions(previous, current) &&
+    previous.noteId === current.noteId &&
     previous.verdictLabel === current.verdictLabel &&
     previous.verdictClass === current.verdictClass &&
     previous.timestampLabel === current.timestampLabel &&
@@ -10589,13 +10748,14 @@ function reviewCardAuthoritiesMatch(previous: ReviewCardAuthority, current: Revi
     previous.ops.resolve === current.ops.resolve &&
     previous.onToast === current.onToast &&
     previous.setOpen === current.setOpen &&
+    previous.openSuggestions === current.openSuggestions &&
     previous.setActiveComment === current.setActiveComment
   );
 }
 
 function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): boolean {
   const { authority, elements } = presentation;
-  const { card, header, toggle, actions, accept, reject, resolve, list, rows } = elements;
+  const { card, header, toggle, openSuggestions, actions, accept, reject, resolve, list, rows } = elements;
   const document = card.ownerDocument;
   const NodeConstructor = document.defaultView?.Node;
   if (
@@ -10635,10 +10795,11 @@ function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): bool
   const verdict = heading?.children.item(0);
   const timestamp = heading?.children.item(1);
   const counts = details?.children.item(1);
-  const summary = details?.children.item(2);
+  const note = authority.note === null ? null : (details?.children.item(2) ?? null);
+  const summary = details?.children.item(authority.note === null ? 2 : 3);
   if (
     !(details instanceof NodeConstructor) ||
-    details?.children.length !== (authority.reviewSnapshot.summary ? 3 : 2) ||
+    details?.children.length !== 2 + (authority.note === null ? 0 : 1) + (authority.reviewSnapshot.summary ? 1 : 0) ||
     !(verdict instanceof NodeConstructor) ||
     !(timestamp instanceof NodeConstructor) ||
     !(counts instanceof NodeConstructor) ||
@@ -10656,6 +10817,42 @@ function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): bool
     return false;
   }
 
+  // The sentence that says why suggestions cannot be applied, and its link to the Suggestions tab (#2327).
+  if (authority.note === null) {
+    if (openSuggestions !== null || authority.offersOpenSuggestions) return false;
+  } else {
+    const noteText = note?.children.item(0);
+    if (
+      !(note instanceof NodeConstructor) ||
+      note.tagName !== "DIV" ||
+      note.className !== REVIEW_NOTE_CLASS ||
+      (note as HTMLElement).dataset.testid !== "review-note" ||
+      note.children.length !== (authority.offersOpenSuggestions ? 2 : 1) ||
+      noteText?.tagName !== "SPAN" ||
+      noteText.id !== authority.noteId ||
+      noteText.textContent !== authority.note ||
+      authority.offersOpenSuggestions !== (openSuggestions !== null)
+    ) {
+      return false;
+    }
+    if (
+      openSuggestions &&
+      (note.children.item(1) !== openSuggestions ||
+        !openSuggestions.isConnected ||
+        openSuggestions.ownerDocument !== document ||
+        openSuggestions.tagName !== "BUTTON" ||
+        openSuggestions.type !== "button" ||
+        !reviewCardControlIsEnabled(openSuggestions) ||
+        openSuggestions.className !== REVIEW_OPEN_SUGGESTIONS_CLASS ||
+        openSuggestions.dataset.testid !== "review-open-suggestions" ||
+        openSuggestions.hasAttribute("aria-label") ||
+        openSuggestions.textContent?.trim() !== "Open Suggestions")
+    ) {
+      return false;
+    }
+  }
+  const describedBy = authority.note === null ? null : authority.noteId;
+
   const expectedChildren: Element[] = [header];
   if (authority.actionRegion) expectedChildren.push(actions!);
   if (authority.open) expectedChildren.push(list!);
@@ -10665,57 +10862,62 @@ function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): bool
     if (actions || accept || reject || resolve) return false;
   } else {
     const suggestionActions = authority.actionRegion === "suggestions";
+    const paired = suggestionActions || authority.resolveWithReject;
     if (
       !actions ||
       !actions.isConnected ||
       actions.ownerDocument !== document ||
       actions.parentElement !== card ||
       actions.dataset.testid !== "review-actions" ||
-      actions.className !== (suggestionActions ? REVIEW_SUGGESTION_ACTIONS_CLASS : REVIEW_RESOLVE_ACTIONS_CLASS)
+      actions.className !== (paired ? REVIEW_SUGGESTION_ACTIONS_CLASS : REVIEW_RESOLVE_ACTIONS_CLASS)
     ) {
       return false;
     }
+    const rejectEnabled = !authority.busy && !authority.blocked && authority.renderedSuggestionTargets.length === authority.pending.length;
+    const rejectIsExact = (position: number) =>
+      !!reject &&
+      actions.children.item(position) === reject &&
+      reject.isConnected &&
+      reject.ownerDocument === document &&
+      reject.parentElement === actions &&
+      reject.type === "button" &&
+      reject.disabled !== rejectEnabled &&
+      (!rejectEnabled || reviewCardControlIsEnabled(reject)) &&
+      reject.className === REVIEW_REJECT_CLASS &&
+      reject.dataset.testid === "review-reject-all" &&
+      reject.getAttribute("aria-label") === REVIEW_REJECT_TITLE &&
+      reject.title === REVIEW_REJECT_TITLE &&
+      reject.getAttribute("aria-describedby") === describedBy &&
+      reject.getAttribute("aria-busy") === (authority.batchOwner?.action === "review-reject" ? "true" : null) &&
+      reject.textContent?.trim() === (authority.batchOwner?.action === "review-reject" ? "Rejecting…" : "Reject all");
     if (suggestionActions) {
       const acceptEnabled =
         !authority.busy &&
         !authority.blocked &&
         authority.renderedSuggestionTargets.length === authority.pending.length &&
         authority.applicable.length > 0;
-      const rejectEnabled = !authority.busy && !authority.blocked && authority.renderedSuggestionTargets.length === authority.pending.length;
       if (
         !accept ||
-        !reject ||
         resolve !== null ||
         actions.children.length !== 2 ||
         actions.children.item(0) !== accept ||
-        actions.children.item(1) !== reject ||
+        !rejectIsExact(1) ||
         !accept.isConnected ||
-        !reject.isConnected ||
         accept.ownerDocument !== document ||
-        reject.ownerDocument !== document ||
         accept.parentElement !== actions ||
-        reject.parentElement !== actions ||
         accept.type !== "button" ||
-        reject.type !== "button" ||
         accept.disabled === acceptEnabled ||
-        reject.disabled === rejectEnabled ||
         (acceptEnabled && !reviewCardControlIsEnabled(accept)) ||
-        (rejectEnabled && !reviewCardControlIsEnabled(reject)) ||
         accept.className !== REVIEW_ACCEPT_CLASS ||
-        reject.className !== REVIEW_REJECT_CLASS ||
         accept.dataset.testid !== "review-accept-all" ||
-        reject.dataset.testid !== "review-reject-all" ||
         accept.getAttribute("aria-label") !== authority.acceptTitle ||
         accept.title !== authority.acceptTitle ||
-        reject.getAttribute("aria-label") !== "Reject all suggestions" ||
-        reject.title !== "Reject all suggestions" ||
+        accept.getAttribute("aria-describedby") !== describedBy ||
         accept.getAttribute("aria-busy") !== (authority.batchOwner?.action === "review-accept" ? "true" : null) ||
-        reject.getAttribute("aria-busy") !== (authority.batchOwner?.action === "review-reject" ? "true" : null) ||
         accept.textContent?.trim() !==
           (authority.batchOwner?.action === "review-accept"
             ? "Accepting…"
-            : `Accept all${authority.partial ? `(${authority.applicable.length} of ${authority.pending.length})` : ""}`) ||
-        reject.textContent?.trim() !== (authority.batchOwner?.action === "review-reject" ? "Rejecting…" : "Reject all")
+            : `Accept all${authority.partial ? `(${authority.applicable.length} of ${authority.pending.length})` : ""}`)
       ) {
         return false;
       }
@@ -10723,9 +10925,9 @@ function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): bool
       const resolveEnabled = !authority.busy && !authority.blocked && authority.renderedResolveTargets.length === authority.unresolved.length;
       if (
         accept !== null ||
-        reject !== null ||
+        (authority.resolveWithReject ? !rejectIsExact(1) : reject !== null) ||
         !resolve ||
-        actions.children.length !== 1 ||
+        actions.children.length !== (authority.resolveWithReject ? 2 : 1) ||
         actions.children.item(0) !== resolve ||
         !resolve.isConnected ||
         resolve.ownerDocument !== document ||
@@ -10733,9 +10935,11 @@ function exactReviewCardDomIsCurrent(presentation: ReviewCardPresentation): bool
         resolve.type !== "button" ||
         resolve.disabled === resolveEnabled ||
         (resolveEnabled && !reviewCardControlIsEnabled(resolve)) ||
-        resolve.className !== REVIEW_RESOLVE_CLASS ||
+        resolve.className !== (authority.resolveWithReject ? REVIEW_RESOLVE_LEAD_CLASS : REVIEW_RESOLVE_CLASS) ||
         resolve.dataset.testid !== "review-resolve-all" ||
+        resolve.hasAttribute("aria-label") ||
         resolve.title !== authority.resolveTitle ||
+        resolve.getAttribute("aria-describedby") !== describedBy ||
         resolve.getAttribute("aria-busy") !== (authority.batchOwner?.action === "review-resolve" ? "true" : null) ||
         resolve.textContent?.trim() !== (authority.batchOwner?.action === "review-resolve" ? "Resolving…" : "Resolve all")
       ) {
@@ -10870,22 +11074,23 @@ function createReviewCardRender(
   const listOwner = new ReviewCardElementOwner<HTMLUListElement>(onElementChange);
   const rowOwners = authority.mine.map(() => new ReviewCardElementOwner<HTMLLIElement>(onElementChange));
   const controlOwners: ReviewCardElementOwner<HTMLButtonElement>[] = [];
+  const actionOwners = new Map<ReviewCardAction, ReviewCardElementOwner<HTMLButtonElement>>();
+  const controlElement = (owned: ReviewCardAction | null | undefined) => (owned ? actionOwners.get(owned)?.element() ?? null : null);
 
   const committedElements = (): ReviewCardElements | null => {
     const card = cardOwner.element();
     const header = headerOwner.element();
-    const toggleElement = controlOwners[0]?.element() ?? null;
+    const toggleElement = controlElement(render.toggle);
+    const openSuggestionsElement = controlElement(render.openSuggestions);
     const actions = actionsOwner.element();
     const list = listOwner.element();
-    const actionOffset = 1;
-    const acceptElement = render.accept ? controlOwners[actionOffset]?.element() ?? null : null;
-    const rejectElement = render.reject ? controlOwners[actionOffset + 1]?.element() ?? null : null;
-    const resolveElement = render.resolve ? controlOwners[actionOffset]?.element() ?? null : null;
-    const threadOffset = 1 + (render.accept ? 2 : render.resolve ? 1 : 0);
+    const acceptElement = controlElement(render.accept);
+    const rejectElement = controlElement(render.reject);
+    const resolveElement = controlElement(render.resolve);
     const rowElements = authority.open
       ? authority.mine.map((_, index) => {
           const item = rowOwners[index]?.element() ?? null;
-          const link = controlOwners[threadOffset + index]?.element() ?? null;
+          const link = controlElement(render.threadLinks[index]);
           return item && link ? Object.freeze({ item, link }) : null;
         })
       : [];
@@ -10893,9 +11098,10 @@ function createReviewCardRender(
       !card ||
       !header ||
       !toggleElement ||
+      authority.offersOpenSuggestions !== !!openSuggestionsElement ||
       (authority.actionRegion !== null) !== !!actions ||
       (authority.actionRegion === "suggestions" && (!acceptElement || !rejectElement)) ||
-      (authority.actionRegion === "resolve" && !resolveElement) ||
+      (authority.actionRegion === "resolve" && (!resolveElement || authority.resolveWithReject !== !!rejectElement)) ||
       authority.open !== !!list ||
       rowElements.some((row) => row === null)
     ) {
@@ -10905,6 +11111,7 @@ function createReviewCardRender(
       card,
       header,
       toggle: toggleElement,
+      openSuggestions: openSuggestionsElement,
       actions,
       accept: acceptElement,
       reject: rejectElement,
@@ -11111,27 +11318,31 @@ function createReviewCardRender(
     const element =
       action.kind === "toggle"
         ? presentation?.elements.toggle
-        : action.kind === "accept"
-          ? presentation?.elements.accept
-          : action.kind === "reject"
-            ? presentation?.elements.reject
-            : action.kind === "resolve"
-              ? presentation?.elements.resolve
-              : action.index === null
-                ? null
-                : presentation?.elements.rows[action.index]?.link;
+        : action.kind === "open-suggestions"
+          ? presentation?.elements.openSuggestions
+          : action.kind === "accept"
+            ? presentation?.elements.accept
+            : action.kind === "reject"
+              ? presentation?.elements.reject
+              : action.kind === "resolve"
+                ? presentation?.elements.resolve
+                : action.index === null
+                  ? null
+                  : presentation?.elements.rows[action.index]?.link;
     const expectedAction =
       action.kind === "toggle"
         ? render.toggle
-        : action.kind === "accept"
-          ? render.accept
-          : action.kind === "reject"
-            ? render.reject
-            : action.kind === "resolve"
-              ? render.resolve
-              : action.index === null
-                ? null
-                : render.threadLinks[action.index];
+        : action.kind === "open-suggestions"
+          ? render.openSuggestions
+          : action.kind === "accept"
+            ? render.accept
+            : action.kind === "reject"
+              ? render.reject
+              : action.kind === "resolve"
+                ? render.resolve
+                : action.index === null
+                  ? null
+                  : render.threadLinks[action.index];
     if (
       !runtime ||
       !presentation ||
@@ -11201,6 +11412,15 @@ function createReviewCardRender(
       authority.setOpen(!authority.open);
       return;
     }
+    if (action.kind === "open-suggestions") {
+      // Navigation only: the panel shows the Suggestions tab; no suggestion or comment changes.
+      try {
+        authority.openSuggestions();
+      } finally {
+        claim.releaseAction();
+      }
+      return;
+    }
     if (action.kind === "thread") {
       try {
         authority.setActiveComment.call(authority.session, action.threadId!);
@@ -11230,6 +11450,7 @@ function createReviewCardRender(
     const owner = new ReviewCardElementOwner<HTMLButtonElement>(onElementChange);
     controlOwners.push(owner);
     const owned = {} as ReviewCardAction;
+    actionOwners.set(owned, owner);
     Object.assign(owned, {
       identity: Symbol(`review-card-${kind}`),
       renderIdentity: identity,
@@ -11244,6 +11465,7 @@ function createReviewCardRender(
   };
 
   const toggle = action("toggle", true);
+  const openSuggestions = authority.offersOpenSuggestions ? action("open-suggestions", true) : null;
   const acceptEnabled =
     !authority.busy &&
     !authority.blocked &&
@@ -11252,8 +11474,8 @@ function createReviewCardRender(
   const rejectEnabled = !authority.busy && !authority.blocked && authority.renderedSuggestionTargets.length === authority.pending.length;
   const resolveEnabled = !authority.busy && !authority.blocked && authority.renderedResolveTargets.length === authority.unresolved.length;
   const accept = authority.actionRegion === "suggestions" ? action("accept", acceptEnabled) : null;
-  const reject = authority.actionRegion === "suggestions" ? action("reject", rejectEnabled) : null;
   const resolve = authority.actionRegion === "resolve" ? action("resolve", resolveEnabled) : null;
+  const reject = authority.actionRegion === "suggestions" || authority.resolveWithReject ? action("reject", rejectEnabled) : null;
   const threadLinks = authority.open ? authority.mine.map((thread, index) => action("thread", true, index, thread.id)) : [];
 
   const establish = () => {
@@ -11341,6 +11563,7 @@ function createReviewCardRender(
     identity,
     authority,
     toggle,
+    openSuggestions,
     accept,
     reject,
     resolve,
@@ -11352,6 +11575,8 @@ function createReviewCardRender(
     captureRows: Object.freeze(rowOwners.map((owner) => owner.capture)),
     captureToggle: toggle.capture,
     onToggle: toggle.onClick,
+    captureOpenSuggestions: openSuggestions?.capture ?? null,
+    onOpenSuggestions: openSuggestions?.onClick ?? null,
     captureAccept: accept?.capture ?? null,
     onAccept: accept?.onClick ?? null,
     captureReject: reject?.capture ?? null,
@@ -11367,8 +11592,8 @@ function createReviewCardRender(
   return Object.freeze(render);
 }
 
-/** One agent/human review: verdict + summary, expandable to its threads, Accept all / Reject all on the pending suggestions. */
-const ReviewCard = memo(function ReviewCard({ position, review, threads, session, text, ops, coordinator, onToast }: { position: number; review: ReviewDto; threads: CommentThread[]; session: CollabSession; text: string; ops: ReturnType<typeof useCommentOps>; coordinator: CommentRowActionCoordinator; onToast?: CommentsPanelProps["onToast"] }) {
+/** One agent/human review: verdict + summary, expandable to its threads, Accept all / Reject all on the pending suggestions, Resolve all when nothing can be applied. */
+const ReviewCard = memo(function ReviewCard({ position, review, threads, session, text, pendingInsertions, ops, coordinator, onToast, onOpenSuggestions }: { position: number; review: ReviewDto; threads: CommentThread[]; session: CollabSession; text: string; pendingInsertions: readonly PendingInsertionRange[]; ops: ReturnType<typeof useCommentOps>; coordinator: CommentRowActionCoordinator; onToast?: CommentsPanelProps["onToast"]; onOpenSuggestions: () => void }) {
   const [open, setOpen] = useState(false);
   const [mount] = useState(() => Symbol("review-card"));
   const [cells] = useState<ReviewCardCells>(() => ({
@@ -11403,17 +11628,11 @@ const ReviewCard = memo(function ReviewCard({ position, review, threads, session
   }, []);
   const mine = reviewThreads(review, threads);
   const withSuggestion = commentSuggestionTargets(mine, text);
-  const pending = withSuggestion.filter((target) => target.state === "pending" || target.state === "outdated");
+  const pending = withSuggestion.filter((target) => isLiveSuggestionState(target.state, target.thread.resolved));
   const applicable = pending.filter((target) => target.state === "pending");
   const unresolved = mine.filter((t) => !t.resolved);
   const renderedSuggestionTargets = pending.map((target) => snapshotCommentSuggestionTarget(session, target)).filter((target): target is CommentSuggestionBatchTarget => target !== null);
   const renderedResolveTargets = unresolved.map((thread) => snapshotCommentResolveTarget(session, thread)).filter((target): target is CommentResolveBatchTarget => target !== null);
-  const renderedTargets = pending.length > 0 ? renderedSuggestionTargets : renderedResolveTargets;
-  const scope = reviewBatchScope(review.id);
-  const batchState = useCommentBatchState(coordinator, scope, renderedTargets);
-  const busy = batchState.owner !== null;
-  const partial = applicable.length !== pending.length;
-  const acceptTitle = partial ? `Accept all suggestions (${applicable.length} of ${pending.length}; outdated ones are skipped)` : "Accept all suggestions";
   const authority = createReviewCardAuthority({
     mount,
     position,
@@ -11421,12 +11640,19 @@ const ReviewCard = memo(function ReviewCard({ position, review, threads, session
     threads,
     session,
     text,
+    pendingInsertions,
     ops,
     coordinator,
     onToast,
     open,
     setOpen,
+    openSuggestions: onOpenSuggestions,
   });
+  const scope = reviewBatchScope(review.id);
+  const batchState = useCommentBatchState(coordinator, scope, authority.renderedTargets);
+  const busy = batchState.owner !== null;
+  const { partial, acceptTitle, note, noteId, resolveWithReject } = authority;
+  const describedBy = note === null ? undefined : noteId;
   const publication = createReviewCardRender(authority, cells, requestPublicationSuccessor);
   useLayoutEffect(() => publication.establish(), [publication]);
   const {
@@ -11437,6 +11663,8 @@ const ReviewCard = memo(function ReviewCard({ position, review, threads, session
     captureRows,
     captureToggle,
     onToggle,
+    captureOpenSuggestions,
+    onOpenSuggestions: onOpenSuggestionsClick,
     captureAccept,
     onAccept,
     captureReject,
@@ -11446,6 +11674,23 @@ const ReviewCard = memo(function ReviewCard({ position, review, threads, session
     captureThreadLinks,
     onThreadClicks,
   } = publication;
+  const rejectAll = (
+    <button
+      ref={captureReject}
+      type="button"
+      className={REVIEW_REJECT_CLASS}
+      disabled={busy || batchState.blocked || renderedSuggestionTargets.length !== pending.length}
+      aria-busy={batchState.owner?.action === "review-reject" || undefined}
+      aria-describedby={describedBy}
+      onClick={onReject ?? undefined}
+      title={REVIEW_REJECT_TITLE}
+      aria-label={REVIEW_REJECT_TITLE}
+      data-testid="review-reject-all"
+    >
+      {batchState.owner?.action === "review-reject" ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <X size={13} aria-hidden />}
+      {batchState.owner?.action === "review-reject" ? "Rejecting…" : "Reject all"}
+    </button>
+  );
 
   return (
     <div ref={captureCard} className={REVIEW_CARD_CLASS} data-testid="review-card" data-review-id={review.id} data-verdict={review.verdict}>
@@ -11462,8 +11707,20 @@ const ReviewCard = memo(function ReviewCard({ position, review, threads, session
           </div>
           <div className="text-xs text-ink-3" data-testid="review-counts">
             {reviewSummaryLabel(mine.length, withSuggestion.length)}
-            {withSuggestion.length > 0 && pending.length === 0 && <span> · all decided</span>}
+            {authority.countsSuffix && <span>{authority.countsSuffix}</span>}
           </div>
+          {/* Why some or all of the undecided suggestions cannot be applied, in words; the buttons below point at it (#2327). */}
+          {note !== null && (
+            <div className={REVIEW_NOTE_CLASS} data-testid="review-note">
+              <span id={noteId}>{note}</span>
+              {authority.offersOpenSuggestions && " "}
+              {authority.offersOpenSuggestions && (
+                <button ref={captureOpenSuggestions} type="button" className={REVIEW_OPEN_SUGGESTIONS_CLASS} onClick={onOpenSuggestionsClick ?? undefined} data-testid="review-open-suggestions">
+                  Open Suggestions <ArrowRight size={12} aria-hidden />
+                </button>
+              )}
+            </div>
+          )}
           {review.summary && <MentionBody body={review.summary} className="mt-1 text-[13px] leading-5 text-ink-2" />}
         </div>
         <button ref={captureToggle} type="button" className={REVIEW_TOGGLE_CLASS} onClick={onToggle} aria-expanded={open} aria-label={open ? "Collapse review" : "Expand review"} data-testid="review-toggle">
@@ -11480,6 +11737,7 @@ const ReviewCard = memo(function ReviewCard({ position, review, threads, session
             className={REVIEW_ACCEPT_CLASS}
             disabled={busy || batchState.blocked || renderedSuggestionTargets.length !== pending.length || applicable.length === 0}
             aria-busy={batchState.owner?.action === "review-accept" || undefined}
+            aria-describedby={describedBy}
             onClick={onAccept!}
             title={acceptTitle}
             aria-label={acceptTitle}
@@ -11489,31 +11747,20 @@ const ReviewCard = memo(function ReviewCard({ position, review, threads, session
             {batchState.owner?.action === "review-accept" ? "Accepting…" : "Accept all"}
             {partial && <span className="hidden text-[11px] opacity-80 @min-[18rem]:inline">({applicable.length} of {pending.length})</span>}
           </button>
-          <button
-            ref={captureReject}
-            type="button"
-            className={REVIEW_REJECT_CLASS}
-            disabled={busy || batchState.blocked || renderedSuggestionTargets.length !== pending.length}
-            aria-busy={batchState.owner?.action === "review-reject" || undefined}
-            onClick={onReject!}
-            title="Reject all suggestions"
-            aria-label="Reject all suggestions"
-            data-testid="review-reject-all"
-          >
-            {batchState.owner?.action === "review-reject" ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <X size={13} aria-hidden />}
-            {batchState.owner?.action === "review-reject" ? "Rejecting…" : "Reject all"}
-          </button>
+          {rejectAll}
         </div>
       )}
-      {/* Every suggestion decided but comments still open: one click clears the review from Open. */}
+      {/* Nothing can be applied but comments are still open: one click clears the review from Open. Resolve all decides
+          no suggestion; while undecided (outdated) ones remain, Reject all sits beside it (#2327). */}
       {authority.actionRegion === "resolve" && (
-        <div ref={captureActions} className={REVIEW_RESOLVE_ACTIONS_CLASS} data-testid="review-actions">
+        <div ref={captureActions} className={resolveWithReject ? REVIEW_SUGGESTION_ACTIONS_CLASS : REVIEW_RESOLVE_ACTIONS_CLASS} data-testid="review-actions">
           <button
             ref={captureResolve}
             type="button"
-            className={REVIEW_RESOLVE_CLASS}
+            className={resolveWithReject ? REVIEW_RESOLVE_LEAD_CLASS : REVIEW_RESOLVE_CLASS}
             disabled={busy || batchState.blocked || renderedResolveTargets.length !== unresolved.length}
             aria-busy={batchState.owner?.action === "review-resolve" || undefined}
+            aria-describedby={describedBy}
             onClick={onResolve!}
             title={`Resolve the ${unresolved.length === 1 ? "open comment" : `${unresolved.length} open comments`} of this review`}
             data-testid="review-resolve-all"
@@ -11521,6 +11768,7 @@ const ReviewCard = memo(function ReviewCard({ position, review, threads, session
             {batchState.owner?.action === "review-resolve" ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <Check size={13} aria-hidden />}
             {batchState.owner?.action === "review-resolve" ? "Resolving…" : "Resolve all"}
           </button>
+          {resolveWithReject && rejectAll}
         </div>
       )}
       {open && (
@@ -11886,10 +12134,14 @@ export function CommentsPanel({
   // Decided reviews leave Open: a card sits in Open while a thread of its is unresolved or a suggestion is pending.
   const openReviews = reviews.filter((r) => isReviewOpen(r, threads, text));
   const resolvedReviews = reviews.filter((r) => !isReviewOpen(r, threads, text));
+  // Undecided comment suggestions that still ask for a decision; an outdated one on a resolved thread was set aside with it (#2327).
   const commentSuggestions = useMemo(
-    () => commentSuggestionTargets(threads, text).filter((target) => target.state === "pending" || target.state === "outdated"),
+    () => commentSuggestionTargets(threads, text).filter((target) => isLiveSuggestionState(target.state, target.thread.resolved)),
     [threads, text],
   );
+  // Text that pending tracked insertions put into the document: a review card uses it to tell "a pending suggestion
+  // changes the quoted text" (comes back when that one is rejected) from "the text has changed" (#2327).
+  const pendingInsertions = useMemo(() => pendingInsertionRanges(suggestions.flatMap((group) => group.members)), [suggestions]);
   const commentSuggestionThreads = threads.filter((thread) => commentSuggestions.some((target) => target.thread.id === thread.id));
   const suggestionCount = suggestions.length + commentSuggestions.length;
   // Preserve the tab for current work; otherwise land on Suggestions when suggesting or when it is the only populated tab (#117).
@@ -11903,6 +12155,7 @@ export function CommentsPanel({
     }
     return mode === "suggesting" || (open.length === 0 && suggestionCount > 0) ? "suggestions" : "open";
   });
+  const openSuggestionsTab = useCallback(() => setTab("suggestions"), []);
   const renderedLocalSuggestionTargetSnapshots = snapshotLocalSuggestionTargets(session, suggestions, suggestions);
   const renderedLocalSuggestionTargets = renderedLocalSuggestionTargetSnapshots.filter((target): target is LocalSuggestionBatchTarget => target !== null);
   const renderedCommentSuggestionTargets = commentSuggestions.map((target) => snapshotCommentSuggestionTarget(session, target)).filter((target): target is CommentSuggestionBatchTarget => target !== null);
@@ -12060,7 +12313,7 @@ export function CommentsPanel({
         {tab === "open" && openReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
             {openReviews.map((r, index) => (
-             <ReviewCard key={r.id} position={index} review={r} threads={threads} session={session} text={text} ops={ops} coordinator={actionCoordinator} onToast={onToast} />
+             <ReviewCard key={r.id} position={index} review={r} threads={threads} session={session} text={text} pendingInsertions={pendingInsertions} ops={ops} coordinator={actionCoordinator} onToast={onToast} onOpenSuggestions={openSuggestionsTab} />
             ))}
           </div>
         )}
@@ -12152,7 +12405,7 @@ export function CommentsPanel({
         {tab === "resolved" && resolvedReviews.length > 0 && (
           <div className="flex flex-col gap-2" data-testid="review-cards">
             {resolvedReviews.map((r, index) => (
-             <ReviewCard key={r.id} position={index} review={r} threads={threads} session={session} text={text} ops={ops} coordinator={actionCoordinator} onToast={onToast} />
+             <ReviewCard key={r.id} position={index} review={r} threads={threads} session={session} text={text} pendingInsertions={pendingInsertions} ops={ops} coordinator={actionCoordinator} onToast={onToast} onOpenSuggestions={openSuggestionsTab} />
             ))}
           </div>
         )}

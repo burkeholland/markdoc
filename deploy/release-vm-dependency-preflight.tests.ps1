@@ -158,11 +158,16 @@ $freshScripts = Join-Path $freshRoot 'scripts'
 $freshLib = Join-Path $freshScripts 'lib'
 [void](New-Item -ItemType Directory -Path $freshLib -Force)
 try {
-  Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Destination $freshRoot
+  # The policy refuses a lock unless the package.json next to it needs the same packages (#2308). So the copy is the
+  # real package.json, exact preflight command included, with the one package of the fixture lock as all it needs.
+  $freshPackage = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\package.json') -Raw | ConvertFrom-Json -AsHashtable
+  $freshPackage.Remove('devDependencies')
+  $freshPackage['dependencies'] = [ordered]@{ 'unsafe-package' = '1.2.3' }
+  [IO.File]::WriteAllText((Join-Path $freshRoot 'package.json'), ($freshPackage | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\scripts\dependency-policy-preflight.mts') -Destination $freshScripts
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\scripts\lib\dependency-policy.ts') -Destination $freshLib
 
-  $lockText = '{"name":"fresh-copy","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"fresh-copy","version":"1.0.0"},"node_modules/unsafe-package":{"version":"1.2.3","resolved":"https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/unsafe-package/-/unsafe-package-1.2.3.tgz"}}}'
+  $lockText = '{"name":"fresh-copy","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"fresh-copy","version":"1.0.0","dependencies":{"unsafe-package":"1.2.3"}},"node_modules/unsafe-package":{"version":"1.2.3","resolved":"https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/unsafe-package/-/unsafe-package-1.2.3.tgz"}}}'
   $utf8 = [Text.UTF8Encoding]::new($false)
   [IO.File]::WriteAllText((Join-Path $freshRoot 'package-lock.json'), $lockText, $utf8)
   $lockIdentity = [Convert]::ToHexString(

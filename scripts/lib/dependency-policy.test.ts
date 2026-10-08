@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runMain } from "../dependency-policy-preflight.mjs";
 import {
@@ -43,9 +44,28 @@ function feedTarball(name: string, version: string, registry = FEED): string {
   return `${registry}${name}/-/${name.split("/").pop()}-${version}.tgz`;
 }
 
+// What a fixture's root entry must say so that the lock is one npm would write (#2308): every entry directly under
+// the top node_modules folder is something the project itself needs, a devDependency when it is marked "dev": true
+// and a dependency when it is not. An entry in a folder below another entry is not named here: a test that has one
+// says in the entry above what needs it.
+function honestRoot(entries: Record<string, unknown>): Record<string, Record<string, string>> {
+  const root: Record<string, Record<string, string>> = {};
+  for (const [key, entry] of Object.entries(entries)) {
+    const folder = /^node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(key)?.[1];
+    if (!folder || typeof entry !== "object" || entry === null) continue;
+    const { dev, version } = entry as { dev?: unknown; version?: unknown };
+    (root[dev === true ? "devDependencies" : "dependencies"] ??= {})[folder] = typeof version === "string" ? version : "*";
+  }
+  return root;
+}
+
 // Every fixture entry is honest unless a test says otherwise: its "resolved" is the feed tarball of the name the
-// policy judges it by (the "name" flag when it has one, otherwise the folder) and of its version (#2297).
-function packageLock(packages: Array<{ name: string; version: string; flags?: Record<string, unknown> }> = []): string {
+// policy judges it by (the "name" flag when it has one, otherwise the folder) and of its version (#2297), and the
+// root entry needs it the way honestRoot says (#2308). `root` replaces records of the root entry.
+function packageLock(
+  packages: Array<{ name: string; version: string; flags?: Record<string, unknown> }> = [],
+  root: Record<string, unknown> = {},
+): string {
   const entries = Object.fromEntries(packages.map(({ name, version, flags }) => {
     const judgedName = typeof flags?.name === "string" ? flags.name : name.split("node_modules/").pop() as string;
     return [`node_modules/${name}`, { version, resolved: feedTarball(judgedName, version), ...flags }];
@@ -56,10 +76,20 @@ function packageLock(packages: Array<{ name: string; version: string; flags?: Re
     lockfileVersion: 3,
     requires: true,
     packages: {
-      "": { name: "dependency-policy-fixture", version: "1.0.0" },
+      "": { name: "dependency-policy-fixture", version: "1.0.0", ...honestRoot(entries), ...root },
       ...entries,
     },
   });
+}
+
+// The package.json npm would have written a lock from: the lock's own root entry. A text that is no lock gets an
+// empty package.json, which the policy never reaches.
+function packageJsonFor(lock: string): string {
+  try {
+    return JSON.stringify((JSON.parse(lock) as { packages: Record<string, unknown> }).packages[""] ?? {});
+  } catch {
+    return "{}";
+  }
 }
 
 function auditJson(
@@ -112,11 +142,16 @@ function evaluate(lock: string, audit = auditJson(), exitCode: number | null = 0
   });
 }
 
-async function fixtureDirectory(lock = packageLock()): Promise<{ directory: string; lockPath: string; identity: string }> {
+// A folder with the lock and, unless a test says otherwise, the package.json that belongs to it (#2308).
+async function fixtureDirectory(
+  lock = packageLock(),
+  packageJson: string | null = packageJsonFor(lock),
+): Promise<{ directory: string; lockPath: string; identity: string }> {
   const directory = await fs.mkdtemp(path.join(tmpdir(), "markdoc-dependency-policy-"));
   temporaryDirectories.push(directory);
   const lockPath = path.join(directory, "package-lock.json");
   await fs.writeFile(lockPath, lock);
+  if (packageJson !== null) await fs.writeFile(path.join(directory, "package.json"), packageJson);
   return { directory, lockPath, identity: packageLockSha256(lock) };
 }
 
@@ -457,13 +492,30 @@ describe("locked tarballs (#2297)", () => {
       version: "1.0.0",
       lockfileVersion: 3,
       requires: true,
-      packages: { "": { name: "locked-tarball-fixture", version: "1.0.0", ...root }, ...entries },
+      packages: { "": { name: "locked-tarball-fixture", version: "1.0.0", ...honestRoot(entries), ...root }, ...entries },
     });
   }
 
   // An entry the way npm writes it for a registry package.
   function honest(name: string, version: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
     return { version, resolved: feedTarball(name, version), integrity: "sha1-AAAAAAAAAAAAAAAAAAAAAAAAAAA=", ...extra };
+  }
+
+  const lastFolder = (key: string) => `/${key}`.split("/node_modules/").pop() as string;
+
+  // What an honest lock has for an entry in a folder below another entry (#2308): an entry for every folder above
+  // it, each naming the folder below as a dependency.
+  function withParents(entries: Record<string, Record<string, unknown>>): Record<string, Record<string, unknown>> {
+    const all = { ...entries };
+    for (let child of Object.keys(entries)) {
+      for (let cut = child.lastIndexOf("/node_modules/"); cut > 0; cut = child.lastIndexOf("/node_modules/")) {
+        const parent = child.slice(0, cut);
+        const above = all[parent] ?? honest(lastFolder(parent), "1.0.0");
+        all[parent] = { ...above, dependencies: { ...(above.dependencies as Record<string, string>), [lastFolder(child)]: "*" } };
+        child = parent;
+      }
+    }
+    return all;
   }
 
   function expectRefused(lock: string, problems: string[]): void {
@@ -634,7 +686,9 @@ describe("locked tarballs (#2297)", () => {
     };
 
     it("is judged the way npm writes it: the tarball of the real name in the folder of the alias", () => {
-      const lock = rawLock({ [folder]: written });
+      // The entry above it, as the real lock has one: without it npm would not count the alias as its package.
+      const above = honest("@next/eslint-plugin-next", "16.3.6", { dev: true, dependencies: { "fast-glob": "3.3.1" } });
+      const lock = rawLock({ "node_modules/@next/eslint-plugin-next": above, [folder]: written });
       expectJudged(lock);
       const audit = JSON.parse(auditJson([{ name: "tinyglobby", severity: "high" }]));
       audit.vulnerabilities.tinyglobby.nodes = [folder];
@@ -895,8 +949,8 @@ describe("locked tarballs (#2297)", () => {
       // must be spelled the same way.
       ["node_modules/JSONStream", "JSONStream"],
     ])("judges the key %j by its last folder, %j", (key, name) => {
-      expectJudged(rawLock({ [key]: honest(name, "1.2.3") }));
-      const lock = rawLock({ [key]: honest(BLOCKED_DEPENDENCIES[0].name, BLOCKED_DEPENDENCIES[0].version) });
+      expectJudged(rawLock(withParents({ [key]: honest(name, "1.2.3") })));
+      const lock = rawLock(withParents({ [key]: honest(BLOCKED_DEPENDENCIES[0].name, BLOCKED_DEPENDENCIES[0].version) }));
       expect(evaluate(lock).status).toBe("invalid_lock");
     });
 
@@ -1048,7 +1102,8 @@ describe("locked tarballs (#2297)", () => {
       + "PACKAGE_FEED_REGISTRIES in scripts/lib/dependency-policy.ts and to docs/vm-hosting.md in the same pull request. "
       + "In every other case the entry was edited by hand, or it is a kind of dependency the preflight cannot judge "
       + "(a link, a workspace, a git or file: dependency, a package that brings bundled packages its entry does not "
-      + "name in \"bundleDependencies\" or that nests them): change the lock, not the rule.";
+      + "name in \"bundleDependencies\" or that nests them), or its \"dev\" mark does not say what production needs, or "
+      + "a package production needs has no entry: change the lock, not the rule.";
     const lock = await fs.readFile(new URL("../../package-lock.json", import.meta.url), "utf8");
     expect(packageLockProblems(lock), whatToDo).toEqual([]);
     expect(formatDependencyPolicyReport(evaluate(lock))).toBe(PASS_OUTPUT);
@@ -1062,8 +1117,7 @@ describe("locked tarballs (#2297)", () => {
     expect(keys.length).toBeGreaterThan(900);
     const written = /^node_modules\/(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:\/node_modules\/(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*)*$/;
     expect(keys.filter((key) => !written.test(key))).toEqual([]);
-    const lastFolder = (key: string) => `/${key}`.split("/node_modules/").pop() as string;
-    expectJudged(rawLock(Object.fromEntries(keys.map((key) => [key, honest(lastFolder(key), "1.2.3")]))));
+    expectJudged(rawLock(withParents(Object.fromEntries(keys.map((key) => [key, honest(lastFolder(key), "1.2.3")])))));
     // One wrong last folder anywhere is found: every key in turn gets the tarball of another package.
     const wrong = keys.filter((key) =>
       packageLockProblems(rawLock({ [key]: honest(`${lastFolder(key)}-other`, "1.2.3") })).join() !== `${key}: ${NOT_THE_TARBALL}`);
@@ -1772,9 +1826,11 @@ describe("accepted advisories (#2260)", () => {
     }],
     // The lock is checked directly: a braces node that npm left out of its report still counts.
     ["the lock has another braces node without a dev flag that npm does not report", ({ packages }) => {
+      packages.push({ name: "glob-parent", version: "5.1.2", flags: { dependencies: { braces: "3.0.3" } } });
       packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.3" });
     }],
     ["the lock has another braces node at a different version that npm does not report", ({ packages }) => {
+      packages.push({ name: "glob-parent", version: "5.1.2", flags: { dev: true, dependencies: { braces: "3.0.2" } } });
       packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.2", flags: { dev: true } });
     }],
     // An alias carries the real name in its lock entry (#2294): it is a braces node whatever its folder is called.
@@ -1786,9 +1842,11 @@ describe("accepted advisories (#2260)", () => {
     }],
     // The other direction: a braces folder stays a braces node whatever name its lock entry claims.
     ["the lock has a braces folder that claims another name, without a dev flag", ({ packages }) => {
+      packages.push({ name: "glob-parent", version: "5.1.2", flags: { dependencies: { braces: "3.0.3" } } });
       packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.3", flags: { name: "another-package" } });
     }],
     ["the lock has a braces folder that claims another name, at a different version", ({ packages }) => {
+      packages.push({ name: "glob-parent", version: "5.1.2", flags: { dev: true, dependencies: { braces: "3.0.2" } } });
       packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.2", flags: { name: "another-package", dev: true } });
     }],
     ["a dependent names a package that is not in the audit", ({ audit }) => {
@@ -2047,6 +2105,739 @@ describe("accepted advisories (#2260)", () => {
       // The only environment reads are the ones that start npm and taskkill.
       expect(text.match(/process\.env\b/g) ?? []).toHaveLength(file.endsWith(".mts") ? 0 : 3);
     }
+  });
+});
+
+// Measured with real npm 10.9.4, 10.9.9 and 11.12.1 (#2308). The image has npm 10, which leaves out of
+// `npm ci --omit=dev` exactly the entries marked "dev": true. npm 11 does not read the mark: it leaves out the entries
+// production does not need. Both take what the project itself needs from package.json, not from the lock's root
+// entry. So the policy works out what production needs, refuses a lock whose marks disagree with that in either
+// direction, and refuses a lock whose package.json needs something else.
+describe("what production needs (#2308)", () => {
+  type Entry = Record<string, unknown>;
+  const INVALID_LOCK = { status: "invalid_lock", counts: ZERO_REPORT_COUNTS, packages: [] };
+  const DEV = { dev: true };
+  const markedDev = (key: string) => `${key}: the entry is marked "dev": true, but production needs it`;
+  const notMarkedDev = (key: string) => `${key}: the entry is not marked "dev": true, but production does not need it`;
+  const noEntry = (from: string, name: string) => `${from}: needs ${name}, which has no entry`;
+  const BAD_ROOT = "the root entry has \"workspaces\", or one of its dependency records is not an object of texts";
+
+  // A lock written out entry by entry: unlike packageLock, nothing is added to the root or to an entry.
+  function lockOf(root: Entry, entries: Record<string, Entry>): string {
+    return JSON.stringify({
+      name: "fixture",
+      version: "1.0.0",
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        "": { name: "fixture", version: "1.0.0", ...root },
+        ...Object.fromEntries(Object.entries(entries).map(([key, entry]) => [`node_modules/${key}`, entry])),
+      },
+    });
+  }
+
+  // The entry of a registry package. `name` is the package, which for an alias is not the folder.
+  const pkg = (name: string, extra: Entry = {}, version = "1.0.0"): Entry => ({ version, resolved: feedTarball(name, version), ...extra });
+  const braces = (mark: Entry) => pkg("braces", mark, "3.0.3");
+
+  // npm audit's report of the listed advisory on the one braces node of a fixture.
+  function bracesAuditAt(node: string): string {
+    return JSON.stringify({
+      auditReportVersion: 2,
+      vulnerabilities: {
+        braces: {
+          name: "braces",
+          severity: "high",
+          isDirect: false,
+          via: [{ ...BRACES_ADVISORY }],
+          effects: [],
+          range: "*",
+          nodes: [`node_modules/${node}`],
+          fixAvailable: false,
+        },
+      },
+      metadata: {
+        vulnerabilities: { info: 0, low: 0, moderate: 0, high: 1, critical: 0, total: 1 },
+        dependencies: { prod: 1, dev: 1, optional: 0, peer: 0, peerOptional: 0, total: 2 },
+      },
+    });
+  }
+
+  // The policy with the test list, which accepts the advisory on braces 3.0.3 when every rule holds.
+  function judge(lock: string, node = "braces") {
+    return evaluateDependencyPolicy({
+      expectedLockSha256: packageLockSha256(lock),
+      packageLockText: lock,
+      execution: { exitCode: 1, stdout: bracesAuditAt(node) },
+      now: BEFORE_EXPIRY,
+      acceptedAdvisories: [{ ...TEST_ADVISORY }],
+    });
+  }
+
+  const SERVER = { dependencies: { server: "1.0.0" } };
+  const NEEDS_BRACES = { braces: "3.0.3" };
+  const OPTIONAL_BRACES = { braces: { optional: true } };
+
+  it("accepts a listed advisory on a package that only a devDependency leads to, as before", () => {
+    const lock = lockOf({ ...SERVER, devDependencies: { linter: "1.0.0" } }, {
+      server: pkg("server"),
+      linter: pkg("linter", { dev: true, dependencies: NEEDS_BRACES }),
+      braces: braces(DEV),
+    });
+    expect(packageLockProblems(lock)).toEqual([]);
+    expect(judge(lock)).toEqual({
+      status: "accepted",
+      counts: { ...ZERO_REPORT_COUNTS, high: 1, vulnerabilities: 1, reported: 1 },
+      packages: [{ name: "braces", version: "3.0.3", status: "accepted" }],
+      exceptions: [ACCEPTED_EXCEPTION],
+    });
+  });
+
+  // Each row is a way production reaches braces. `entries` gets the mark of the braces entry; `node` is its key.
+  const PRODUCTION_REACHES: Array<[string, Entry, (mark: Entry) => Record<string, Entry>, string]> = [
+    ["a dependency of the project", { dependencies: NEEDS_BRACES }, (mark) => ({ braces: braces(mark) }), "braces"],
+    ["an optionalDependency of the project", { optionalDependencies: NEEDS_BRACES }, (mark) => ({ braces: braces(mark) }), "braces"],
+    ["a peerDependency of the project", { peerDependencies: NEEDS_BRACES }, (mark) => ({ braces: braces(mark) }), "braces"],
+    ["an optional peerDependency of the project", { peerDependencies: NEEDS_BRACES, peerDependenciesMeta: OPTIONAL_BRACES },
+      (mark) => ({ braces: braces(mark) }), "braces"],
+    // Real npm 10 and 11 treat a name in both records as a devDependency and leave it out. The policy does not
+    // count on that: a dependency is in production.
+    ["both a dependency and a devDependency of the project", { dependencies: NEEDS_BRACES, devDependencies: NEEDS_BRACES },
+      (mark) => ({ braces: braces(mark) }), "braces"],
+    ["a dependency of a production package", SERVER,
+      (mark) => ({ server: pkg("server", { dependencies: NEEDS_BRACES }), braces: braces(mark) }), "braces"],
+    ["an optionalDependency of a production package", SERVER,
+      (mark) => ({ server: pkg("server", { optionalDependencies: NEEDS_BRACES }), braces: braces(mark) }), "braces"],
+    ["a peerDependency of a production package", SERVER,
+      (mark) => ({ server: pkg("server", { peerDependencies: NEEDS_BRACES }), braces: braces(mark) }), "braces"],
+    ["an optional peerDependency of a production package", SERVER,
+      (mark) => ({ server: pkg("server", { peerDependencies: NEEDS_BRACES, peerDependenciesMeta: OPTIONAL_BRACES }), braces: braces(mark) }), "braces"],
+    ["three packages away from the project", SERVER, (mark) => ({
+      server: pkg("server", { dependencies: { router: "1.0.0" } }),
+      router: pkg("router", { optionalDependencies: { matcher: "1.0.0" } }),
+      matcher: pkg("matcher", { peerDependencies: NEEDS_BRACES }),
+      braces: braces(mark),
+    }), "braces"],
+    ["bundled inside a production package", SERVER, (mark) => ({
+      server: pkg("server", { bundleDependencies: ["braces"] }),
+      "server/node_modules/braces": { version: "3.0.3", inBundle: true, ...mark },
+    }), "server/node_modules/braces"],
+    ["in a folder below the production package that needs it", SERVER, (mark) => ({
+      server: pkg("server", { dependencies: NEEDS_BRACES }),
+      "server/node_modules/braces": braces(mark),
+    }), "server/node_modules/braces"],
+    ["one folder up from the package that needs it, and not at the top", SERVER, (mark) => ({
+      server: pkg("server", { dependencies: { router: "1.0.0" } }),
+      "server/node_modules/router": pkg("router", { dependencies: NEEDS_BRACES }),
+      "server/node_modules/braces": braces(mark),
+    }), "server/node_modules/braces"],
+    ["behind an alias", { dependencies: { "harmless-alias": "npm:braces@3.0.3" } },
+      (mark) => ({ "harmless-alias": { name: "braces", ...braces(mark) } }), "harmless-alias"],
+    // npm keeps the packages of a folder in a map that ignores letter case, so "Braces" finds the folder braces.
+    ["needed under its name in another letter case", { optionalDependencies: { Braces: "3.0.3" }, devDependencies: NEEDS_BRACES },
+      (mark) => ({ braces: braces(mark) }), "braces"],
+  ];
+
+  it.each(PRODUCTION_REACHES)("never accepts a listed advisory on a package marked \"dev\": true that is %s", (_case, root, entries, node) => {
+    const lie = lockOf(root, entries(DEV));
+    expect(packageLockProblems(lie)).toEqual([markedDev(`node_modules/${node}`)]);
+    expect(judge(lie, node)).toEqual(INVALID_LOCK);
+    // With the mark taken off the lock is one npm would write. The package is in production, so the advisory
+    // stops the release although it is listed.
+    const truth = lockOf(root, entries({}));
+    expect(packageLockProblems(truth)).toEqual([]);
+    expect(judge(truth, node)).toEqual({
+      status: "rejected",
+      counts: { ...ZERO_REPORT_COUNTS, high: 1, vulnerabilities: 1, reported: 1 },
+      packages: [{ name: "braces", version: "3.0.3", status: "vulnerable" }],
+    });
+  });
+
+  // The other direction. npm 10 installs an entry without the mark, whatever leads to it.
+  it("refuses a lock that leaves the mark off a package only a devDependency leads to", () => {
+    const lock = lockOf({ devDependencies: { linter: "1.0.0" } }, {
+      linter: pkg("linter", { dev: true, dependencies: NEEDS_BRACES }),
+      braces: braces({}),
+    });
+    expect(packageLockProblems(lock)).toEqual([notMarkedDev("node_modules/braces")]);
+    expect(judge(lock)).toEqual(INVALID_LOCK);
+    expect(evaluate(lock)).toEqual(INVALID_LOCK);
+  });
+
+  it("refuses an entry that nothing leads to unless it is marked \"dev\": true", () => {
+    const stray = (mark: Entry) => lockOf(SERVER, { server: pkg("server"), stray: pkg("stray", mark) });
+    expect(packageLockProblems(stray({}))).toEqual([notMarkedDev("node_modules/stray")]);
+    expect(evaluate(stray({}))).toEqual(INVALID_LOCK);
+    // Marked, npm 10 leaves it out for the mark and npm 11 because nothing needs it.
+    expect(packageLockProblems(stray(DEV))).toEqual([]);
+    expect(formatDependencyPolicyReport(evaluate(stray(DEV)))).toBe(PASS_OUTPUT);
+  });
+
+  it("names every entry whose mark disagrees, in both directions at once", () => {
+    const lock = lockOf({ ...SERVER, devDependencies: { linter: "1.0.0" } }, { server: pkg("server", DEV), linter: pkg("linter") });
+    expect(packageLockProblems(lock)).toEqual([markedDev("node_modules/server"), notMarkedDev("node_modules/linter")]);
+    expect(evaluate(lock)).toEqual(INVALID_LOCK);
+  });
+
+  it.each([true, 1, "true", {}])("takes only the mark \"dev\": true for a mark, not %j", (dev) => {
+    const marked = lockOf({ devDependencies: { linter: "1.0.0" } }, { linter: pkg("linter", { dev }) });
+    expect(packageLockProblems(marked)).toEqual(dev === true ? [] : [notMarkedDev("node_modules/linter")]);
+  });
+
+  describe("the nearest folder going up", () => {
+    // Two copies of shared: the one below server is production's, the one at the top is the linter's.
+    const twoCopies = (below: Entry, top: Entry) => lockOf({ ...SERVER, devDependencies: { linter: "1.0.0" } }, {
+      server: pkg("server", { dependencies: { shared: "2.0.0" } }),
+      "server/node_modules/shared": pkg("shared", below, "2.0.0"),
+      linter: pkg("linter", { dev: true, dependencies: { shared: "1.0.0" } }),
+      shared: pkg("shared", top),
+    });
+
+    it("gives a package the copy in its own node_modules folder and leaves the copy at the top to the others", () => {
+      expect(packageLockProblems(twoCopies({}, DEV))).toEqual([]);
+      expect(formatDependencyPolicyReport(evaluate(twoCopies({}, DEV)))).toBe(PASS_OUTPUT);
+      expect(packageLockProblems(twoCopies(DEV, {}))).toEqual([
+        markedDev("node_modules/server/node_modules/shared"),
+        notMarkedDev("node_modules/shared"),
+      ]);
+    });
+
+    it("goes up one folder at a time, past folders that do not hold the name", () => {
+      const lock = (middle: Entry, top: Entry) => lockOf({ dependencies: { a: "1.0.0" }, devDependencies: { shared: "1.0.0" } }, {
+        a: pkg("a", { dependencies: { b: "1.0.0" } }),
+        "a/node_modules/b": pkg("b", { dependencies: { c: "1.0.0" } }),
+        "a/node_modules/b/node_modules/c": pkg("c", { dependencies: { shared: "2.0.0" } }),
+        "a/node_modules/shared": pkg("shared", middle, "2.0.0"),
+        shared: pkg("shared", top),
+      });
+      expect(packageLockProblems(lock({}, DEV))).toEqual([]);
+      expect(packageLockProblems(lock(DEV, {}))).toEqual([markedDev("node_modules/a/node_modules/shared"), notMarkedDev("node_modules/shared")]);
+    });
+
+    // A walk that went from an entry's own folder straight to the first folder under the top passed every other
+    // test and the real lock; it takes the copy further up for production's.
+    it("takes the nearer of two copies above an entry, not the one further up", () => {
+      const lock = (near: Entry, far: Entry) => lockOf({ dependencies: { a: "1.0.0" } }, {
+        a: pkg("a", { dependencies: { b: "1.0.0" } }),
+        "a/node_modules/b": pkg("b", { dependencies: { c: "1.0.0" } }),
+        "a/node_modules/b/node_modules/c": pkg("c", { dependencies: { shared: "2.0.0" } }),
+        "a/node_modules/b/node_modules/shared": pkg("shared", near, "2.0.0"),
+        "a/node_modules/shared": pkg("shared", far),
+      });
+      expect(packageLockProblems(lock({}, DEV))).toEqual([]);
+      expect(packageLockProblems(lock(DEV, {}))).toEqual([
+        markedDev("node_modules/a/node_modules/b/node_modules/shared"),
+        notMarkedDev("node_modules/a/node_modules/shared"),
+      ]);
+    });
+
+    it("finds a scoped package below a scoped package", () => {
+      const lock = (mark: Entry) => lockOf({ dependencies: { "@scope/server": "1.0.0" } }, {
+        "@scope/server": pkg("@scope/server", { dependencies: { "@scope/shared": "1.0.0" } }),
+        "@scope/server/node_modules/@scope/shared": pkg("@scope/shared", mark),
+      });
+      expect(packageLockProblems(lock({}))).toEqual([]);
+      expect(packageLockProblems(lock(DEV))).toEqual([markedDev("node_modules/@scope/server/node_modules/@scope/shared")]);
+    });
+
+    it("does not look in the folder of another package", () => {
+      const lock = lockOf({ dependencies: { server: "1.0.0", other: "1.0.0" } }, {
+        server: pkg("server", { dependencies: { shared: "1.0.0" } }),
+        other: pkg("other", { dependencies: { shared: "1.0.0" } }),
+        "other/node_modules/shared": pkg("shared"),
+      });
+      expect(packageLockProblems(lock)).toEqual([noEntry("node_modules/server", "shared")]);
+      expect(evaluate(lock)).toEqual(INVALID_LOCK);
+    });
+  });
+
+  describe("a name without an entry", () => {
+    it.each<[string, Entry, Record<string, Entry>, string]>([
+      ["a dependency of the project", { dependencies: { missing: "1.0.0" } }, {}, "the root entry"],
+      ["a peerDependency of the project", { peerDependencies: { missing: "1.0.0" } }, {}, "the root entry"],
+      ["a dependency of a production package", SERVER, { server: pkg("server", { dependencies: { missing: "1.0.0" } }) }, "node_modules/server"],
+      ["a peerDependency of a production package", SERVER, { server: pkg("server", { peerDependencies: { missing: "1.0.0" } }) }, "node_modules/server"],
+      ["a dependency that is also an optional peerDependency", SERVER, {
+        server: pkg("server", { dependencies: { missing: "1.0.0" }, peerDependencies: { missing: "1.0.0" }, peerDependenciesMeta: { missing: { optional: true } } }),
+      }, "node_modules/server"],
+      ["a peerDependency that peerDependenciesMeta calls optional with the text \"true\"", SERVER, {
+        server: pkg("server", { peerDependencies: { missing: "1.0.0" }, peerDependenciesMeta: { missing: { optional: "true" } } }),
+      }, "node_modules/server"],
+      ["a peerDependency whose peerDependenciesMeta is about another name", SERVER, {
+        server: pkg("server", { peerDependencies: { missing: "1.0.0" }, peerDependenciesMeta: { other: { optional: true } } }),
+      }, "node_modules/server"],
+    ])("refuses the lock when it is %s", (_case, root, entries, from) => {
+      const lock = lockOf(root, entries);
+      expect(packageLockProblems(lock)).toEqual([noEntry(from, "missing")]);
+      expect(evaluate(lock)).toEqual(INVALID_LOCK);
+    });
+
+    // npm leaves these out of a lock itself: an optional package for another platform, a peer nobody installed.
+    it.each<[string, Entry, Record<string, Entry>]>([
+      ["an optionalDependency of the project", { optionalDependencies: { missing: "1.0.0" } }, {}],
+      ["an optional peerDependency of the project", { peerDependencies: { missing: "1.0.0" }, peerDependenciesMeta: { missing: { optional: true } } }, {}],
+      ["an optionalDependency of a production package", SERVER, { server: pkg("server", { optionalDependencies: { missing: "1.0.0" } }) }],
+      ["an optional peerDependency of a production package", SERVER, {
+        server: pkg("server", { peerDependencies: { missing: "1.0.0" }, peerDependenciesMeta: { missing: { optional: true } } }),
+      }],
+      ["a name in both dependencies and optionalDependencies", SERVER, {
+        server: pkg("server", { dependencies: { missing: "1.0.0" }, optionalDependencies: { missing: "1.0.0" } }),
+      }],
+      ["a package named only in bundleDependencies", SERVER, { server: pkg("server", { bundleDependencies: ["missing"] }) }],
+      ["a devDependency of the project", { devDependencies: { missing: "1.0.0" } }, {}],
+      ["a dependency of a package production does not need", { devDependencies: { linter: "1.0.0" } }, {
+        linter: pkg("linter", { dev: true, dependencies: { missing: "1.0.0" } }),
+      }],
+    ])("judges the lock when it is %s", (_case, root, entries) => {
+      const lock = lockOf(root, entries);
+      expect(packageLockProblems(lock)).toEqual([]);
+      expect(formatDependencyPolicyReport(evaluate(lock))).toBe(PASS_OUTPUT);
+    });
+  });
+
+  describe("records that are not what npm writes", () => {
+    it.each(["peerDependencies", "dependencies", "optionalDependencies"].flatMap((field) =>
+      [[], ["braces"], "braces", null, 7, true].map((value): [string, unknown] => [field, value])))(
+      "refuses a production entry whose %s is %j", (field, value) => {
+        const lock = lockOf(SERVER, { server: pkg("server", { [field]: value }) });
+        expect(packageLockProblems(lock)).toEqual([`node_modules/server: "${field}" is not an object`]);
+        expect(evaluate(lock)).toEqual(INVALID_LOCK);
+      });
+
+    it.each(["braces", { braces: true }, null, true, 7])("refuses a production entry whose bundleDependencies is %j", (value) => {
+      const lock = lockOf(SERVER, { server: pkg("server", { bundleDependencies: value }) });
+      expect(packageLockProblems(lock)).toEqual(["node_modules/server: \"bundleDependencies\" is not a list"]);
+      expect(evaluate(lock)).toEqual(INVALID_LOCK);
+    });
+
+    const NOT_A_NAME = ["", ".", "..", "../braces", "braces/node_modules/other", "node_modules/braces", "@scope", "a b", "braces\n", "a".repeat(215)];
+    it.each(["peerDependencies", "dependencies", "optionalDependencies"].flatMap((field) =>
+      NOT_A_NAME.map((name): [string, string] => [field, name])))("refuses a name in %s that is %j", (field, name) => {
+      const lock = lockOf(SERVER, { server: pkg("server", { [field]: { [name]: "1.0.0" } }) });
+      expect(packageLockProblems(lock)).toEqual(["node_modules/server: a dependency is not called by a package name"]);
+      expect(evaluate(lock)).toEqual(INVALID_LOCK);
+    });
+
+    it.each([...NOT_A_NAME, 7, null, ["braces"]].map((name): [unknown] => [name]))("refuses a member of bundleDependencies that is %j", (name) => {
+      const lock = lockOf(SERVER, { server: pkg("server", { bundleDependencies: [name] }) });
+      expect(packageLockProblems(lock)).toEqual(["node_modules/server: a dependency is not called by a package name"]);
+    });
+
+    it("says so when the root entry's bundleDependencies is not a list", () => {
+      expect(packageLockProblems(lockOf({ bundleDependencies: "braces" }, {}))).toEqual(["the root entry: \"bundleDependencies\" is not a list"]);
+    });
+  });
+
+  describe("letter case", () => {
+    it("refuses two keys that differ only by letter case", () => {
+      const lock = lockOf({ dependencies: { JSONStream: "1.0.0", jsonstream: "1.0.0" } }, { JSONStream: pkg("JSONStream"), jsonstream: pkg("jsonstream") });
+      expect(packageLockProblems(lock)).toEqual(["node_modules/jsonstream: another key differs only by letter case"]);
+      expect(evaluate(lock)).toEqual(INVALID_LOCK);
+    });
+
+    it("refuses two keys whose folders above differ only by letter case", () => {
+      const lock = lockOf({ dependencies: { Server: "1.0.0" } }, {
+        Server: pkg("Server", { dependencies: { shared: "1.0.0" } }),
+        "Server/node_modules/shared": pkg("shared"),
+        "server/node_modules/shared": pkg("shared"),
+      });
+      expect(packageLockProblems(lock)).toEqual(["node_modules/server/node_modules/shared: another key differs only by letter case"]);
+    });
+
+    it("finds an entry for a dependency written in another letter case", () => {
+      const lock = lockOf({ dependencies: { jsonstream: "1.0.0" } }, { JSONStream: pkg("JSONStream") });
+      expect(packageLockProblems(lock)).toEqual([]);
+      const nested = lockOf(SERVER, { server: pkg("server", { dependencies: { JSONStream: "1.0.0" } }), "server/node_modules/jsonstream": pkg("jsonstream") });
+      expect(packageLockProblems(nested)).toEqual([]);
+    });
+  });
+
+  // npm makes an entry a package of the entry whose key is, letter for letter, the folder above it. Measured with
+  // real npm 10.9.4, 10.9.9 and 11.12.1: with the key node_modules/Server/node_modules/shared and no entry
+  // node_modules/Server, npm gives node_modules/server the copy of shared at the top. A walk that found the copy
+  // below "Server" instead called the top copy dev-only, and `npm ci --omit=dev` installed it.
+  describe("a key whose folder above has no entry", () => {
+    const noFolderAbove = (key: string) => `node_modules/${key}: the folder above it has no entry`;
+    // server needs shared. The top copy of shared needs braces, and both are marked as if only the linter needed
+    // them. `folder` is where a second copy of shared sits, which holds another package.
+    const withCopyBelow = (folder: string | null) => lockOf({ ...SERVER, devDependencies: { linter: "1.0.0" } }, {
+      server: pkg("server", { dependencies: { shared: "1.0.0" } }),
+      ...(folder === null ? {} : { [`${folder}/node_modules/shared`]: pkg("harmless", { name: "harmless" }) }),
+      linter: pkg("linter", { dev: true, dependencies: { shared: "1.0.0" } }),
+      shared: pkg("shared", { dev: true, dependencies: NEEDS_BRACES }),
+      braces: braces(DEV),
+    });
+
+    it.each(["Server", "SERVER", "sErver"])("never accepts a listed advisory behind a copy in the folder %s, which has no entry", (folder) => {
+      const lock = withCopyBelow(folder);
+      expect(packageLockProblems(lock)).toEqual([noFolderAbove(`${folder}/node_modules/shared`)]);
+      expect(judge(lock)).toEqual(INVALID_LOCK);
+      expect(evaluate(lock)).toEqual(INVALID_LOCK);
+    });
+
+    it("tells that lock from the two honest ones next to it", () => {
+      // The copy really is below server: production gets the copy, and the top shared and braces are the linter's.
+      expect(packageLockProblems(withCopyBelow("server"))).toEqual([]);
+      expect(judge(withCopyBelow("server")).status).toBe("accepted");
+      // No copy: production gets the top shared, so its mark and the mark of braces are false.
+      expect(packageLockProblems(withCopyBelow(null))).toEqual([markedDev("node_modules/shared"), markedDev("node_modules/braces")]);
+      expect(judge(withCopyBelow(null))).toEqual(INVALID_LOCK);
+    });
+
+    it.each([
+      "ghost/node_modules/stray",
+      "@ghost/package/node_modules/stray",
+      "server/node_modules/ghost/node_modules/stray",
+      "ghost/node_modules/server/node_modules/stray",
+      "SERVER/node_modules/stray",
+    ])("refuses the key node_modules/%s, with the mark and without it", (key) => {
+      for (const mark of [{}, DEV]) {
+        const lock = lockOf(SERVER, { server: pkg("server"), [key]: pkg("stray", mark) });
+        expect(packageLockProblems(lock)).toEqual([noFolderAbove(key)]);
+        expect(evaluate(lock)).toEqual(INVALID_LOCK);
+      }
+    });
+
+    it("judges an entry three folders down when every folder above it has an entry", () => {
+      const lock = lockOf({ dependencies: { a: "1.0.0" } }, {
+        a: pkg("a", { dependencies: { b: "1.0.0" } }),
+        "a/node_modules/b": pkg("b", { dependencies: { c: "1.0.0" } }),
+        "a/node_modules/b/node_modules/c": pkg("c"),
+      });
+      expect(packageLockProblems(lock)).toEqual([]);
+      expect(formatDependencyPolicyReport(evaluate(lock))).toBe(PASS_OUTPUT);
+    });
+  });
+
+  describe("package.json next to the lock", () => {
+    const ROOT: Record<string, Record<string, unknown>> = {
+      dependencies: { server: "^1.0.0", router: "^1.0.0" },
+      devDependencies: { linter: "^1.0.0" },
+      optionalDependencies: { extra: "^1.0.0" },
+      peerDependencies: { host: "^1.0.0", plugin: "^1.0.0" },
+      peerDependenciesMeta: { plugin: { optional: true } },
+    };
+    const ENTRIES = {
+      server: pkg("server"),
+      router: pkg("router"),
+      linter: pkg("linter", DEV),
+      extra: pkg("extra"),
+      host: pkg("host"),
+      plugin: pkg("plugin"),
+    };
+    const LOCK = lockOf(ROOT, ENTRIES);
+    const packageJson = (records: Entry, rest: Entry = { name: "fixture", version: "1.0.0" }) => JSON.stringify({ ...rest, ...records });
+
+    // Runs the audit in a folder that holds the lock and the given package.json (null: none).
+    async function auditBeside(file: string | null, lock = LOCK, duringAudit: (directory: string) => Promise<void> = async () => {}) {
+      const fixture = await fixtureDirectory(lock, file);
+      const executor = vi.fn<AuditExecutor>().mockImplementation(async ({ cwd }) => {
+        await duringAudit(cwd);
+        return { exitCode: 0, stdout: auditJson() };
+      });
+      const report = await runDependencyAudit({ cwd: fixture.directory, lockPath: fixture.lockPath, expectedLockSha256: fixture.identity, executor, retryDelayMs: 0 });
+      return { report, executor, fixture };
+    }
+
+    async function expectRefusedBeside(file: string | null, lock = LOCK): Promise<void> {
+      const { report, executor } = await auditBeside(file, lock);
+      expect(report).toEqual(INVALID_LOCK);
+      expect(executor).not.toHaveBeenCalled();
+    }
+
+    async function expectJudgedBeside(file: string, lock = LOCK): Promise<void> {
+      const { report, executor } = await auditBeside(file, lock);
+      expect(formatDependencyPolicyReport(report)).toBe(PASS_OUTPUT);
+      expect(executor).toHaveBeenCalledOnce();
+    }
+
+    it("judges the lock when package.json needs what the lock's root entry needs", async () => {
+      expect(packageLockProblems(LOCK)).toEqual([]);
+      await expectJudgedBeside(packageJson(ROOT));
+    });
+
+    it("does not mind what else package.json holds", async () => {
+      await expectJudgedBeside(packageJson(ROOT, {
+        name: "another-name",
+        version: "9.9.9",
+        private: true,
+        scripts: { build: "next build" },
+        engines: { node: ">=22" },
+        overrides: { router: "1.0.0" },
+        bundleDependencies: ["linter"],
+        bundledDependencies: ["linter"],
+        workspace: "not the field npm reads",
+      }));
+    });
+
+    it("does not mind the order of the names or of the records", async () => {
+      const reversed = Object.fromEntries(Object.entries(ROOT).reverse().map(([field, record]) => [field, Object.fromEntries(Object.entries(record).reverse())]));
+      expect(JSON.stringify(reversed)).not.toBe(JSON.stringify(ROOT));
+      await expectJudgedBeside(packageJson(reversed));
+    });
+
+    it("takes a missing record for an empty one, on either side", async () => {
+      const few = { dependencies: { server: "^1.0.0" } };
+      const lock = lockOf(few, { server: pkg("server") });
+      const empty = { devDependencies: {}, optionalDependencies: {}, peerDependencies: {}, peerDependenciesMeta: {} };
+      await expectJudgedBeside(packageJson({ ...few, ...empty }), lock);
+      await expectJudgedBeside(packageJson(few), lockOf({ ...few, ...empty }, { server: pkg("server") }));
+      await expectJudgedBeside(packageJson({}), lockOf({ dependencies: {} }, {}));
+      await expectJudgedBeside(packageJson({ dependencies: {} }), lockOf({}, {}));
+    });
+
+    // Measured with real npm 10.9.9 and 11.12.1: `npm install --save-optional extra@^1` writes extra into
+    // optionalDependencies of package.json, and into both dependencies (with the range from the command line) and
+    // optionalDependencies of the lock's root entry. npm reads a name in both records as optional only, in either
+    // file, and `npm ci` installs from that pair. The next plain `npm install` takes the name out of the root
+    // entry's dependencies again.
+    describe("a name in both dependencies and optionalDependencies", () => {
+      const inBoth = (range: unknown) => ({ ...ROOT, dependencies: { ...ROOT.dependencies, extra: range } });
+
+      it("judges the pair npm writes for --save-optional: the name in both records of the root entry only", async () => {
+        const lock = lockOf(inBoth("^1"), ENTRIES);
+        expect(packageLockProblems(lock)).toEqual([]);
+        await expectJudgedBeside(packageJson(ROOT), lock);
+      });
+
+      it("judges a package.json that has the name in both records, whatever range dependencies gives it", async () => {
+        await expectJudgedBeside(packageJson(inBoth("^1.0.0")));
+        await expectJudgedBeside(packageJson(inBoth("^99.0.0")));
+        await expectJudgedBeside(packageJson(inBoth("^2")), lockOf(inBoth("^1"), ENTRIES));
+      });
+
+      it("still compares the range optionalDependencies gives the name", async () => {
+        const other = { ...inBoth("^1.0.0"), optionalDependencies: { extra: "^2.0.0" } };
+        await expectRefusedBeside(packageJson(other));
+        await expectRefusedBeside(packageJson(ROOT), lockOf(other, ENTRIES));
+      });
+
+      it("refuses the lock when only one side has the name in optionalDependencies", async () => {
+        const dependencyOnly = { ...inBoth("^1.0.0"), optionalDependencies: {} };
+        await expectRefusedBeside(packageJson(dependencyOnly), lockOf(inBoth("^1.0.0"), ENTRIES));
+        await expectRefusedBeside(packageJson(inBoth("^1.0.0")), lockOf(dependencyOnly, ENTRIES));
+      });
+
+      it("still wants the value in dependencies to be a text", async () => {
+        const lock = lockOf(inBoth(7), ENTRIES);
+        expect(packageLockProblems(lock)).toEqual([BAD_ROOT]);
+        await expectRefusedBeside(packageJson(inBoth(7)), lock);
+        await expectRefusedBeside(packageJson(inBoth(7)));
+      });
+
+      // A name that devDependencies or peerDependencies also has stays a dependency: npm does not read those so.
+      it.each<[string, string]>([["devDependencies", "linter"], ["peerDependencies", "host"]])(
+        "does not do the same for a name in both dependencies and %s", async (_field, name) => {
+          const both = { ...ROOT, dependencies: { ...ROOT.dependencies, [name]: "^1.0.0" } };
+          const lock = lockOf(both, { ...ENTRIES, [name]: pkg(name) });
+          expect(packageLockProblems(lock)).toEqual([]);
+          await expectRefusedBeside(packageJson(ROOT), lock);
+          await expectJudgedBeside(packageJson(both), lock);
+        });
+    });
+
+    // Real npm 10 and 11: package.json moves a package from devDependencies to dependencies, the lock stays as it
+    // was, root entry and "dev": true included, and `npm ci --omit=dev` installs the package.
+    it("refuses a lock whose package.json has moved a devDependency to dependencies", async () => {
+      await expectRefusedBeside(packageJson({ ...ROOT, dependencies: { ...ROOT.dependencies, linter: "^1.0.0" }, devDependencies: {} }));
+    });
+
+    it.each(Object.keys(ROOT).flatMap((field): Array<[string, string, Entry | undefined]> => {
+      const record = ROOT[field];
+      const [first] = Object.keys(record);
+      const { [first]: removed, ...others } = record;
+      const changed = field === "peerDependenciesMeta" ? { optional: false } : `${removed as string} `;
+      return [
+        [field, "is missing", undefined],
+        [field, "is empty", {}],
+        [field, "lacks a name", others],
+        [field, "has one more name", { ...record, added: field === "peerDependenciesMeta" ? { optional: true } : "^1.0.0" }],
+        [field, "has another value for a name", { ...record, [first]: changed }],
+        [field, "has a name in another letter case", { ...others, [first.toUpperCase()]: removed }],
+      ];
+    }))("refuses the lock when %s in package.json %s", async (field, _case, record) => {
+      await expectRefusedBeside(packageJson({ ...ROOT, [field]: record }));
+    });
+
+    it.each<[string, unknown]>([
+      ["a list", []],
+      ["a list of names", ["server"]],
+      ["null", null],
+      ["a text", "server"],
+      ["a number", 7],
+    ])("refuses a record in package.json that is %s, also when it would be empty", async (_case, value) => {
+      const lock = lockOf({}, {});
+      for (const field of Object.keys(ROOT)) await expectRefusedBeside(packageJson({ [field]: value }), lock);
+      await expectJudgedBeside(packageJson({}), lock);
+    });
+
+    // The two sides hold the same record, so only its kind can refuse the lock.
+    it.each(Object.keys(ROOT).flatMap((field) => [[], null, "server", 7].map((value): [string, unknown] => [field, value])))(
+      "refuses the record %s when it is %j on both sides", async (field, value) => {
+        const lock = lockOf({ [field]: value }, {});
+        expect(packageLockProblems(lock)).toEqual([BAD_ROOT]);
+        expect(evaluate(lock)).toEqual(INVALID_LOCK);
+        await expectRefusedBeside(packageJson({ [field]: value }), lock);
+      });
+
+    // The two sides hold the same value, so only its kind can refuse the lock.
+    it.each<[string, string, unknown]>([
+      ["dependencies", "a number", 1],
+      ["dependencies", "null", null],
+      ["dependencies", "a list", ["^1.0.0"]],
+      ["dependencies", "an object", { version: "^1.0.0" }],
+      ["devDependencies", "true", true],
+      ["optionalDependencies", "a number", 1],
+      ["peerDependencies", "null", null],
+      ["peerDependenciesMeta", "a text", "optional"],
+      ["peerDependenciesMeta", "true", true],
+      ["peerDependenciesMeta", "an empty object", {}],
+      ["peerDependenciesMeta", "optional as a text", { optional: "true" }],
+      ["peerDependenciesMeta", "optional and something else", { optional: true, other: true }],
+    ])("refuses a value in %s that is %s on both sides", async (field, _case, value) => {
+      const root = { [field]: { strange: value } };
+      const lock = lockOf(root, {});
+      expect(packageLockProblems(lock)).toEqual([BAD_ROOT]);
+      expect(evaluate(lock)).toEqual(INVALID_LOCK);
+      await expectRefusedBeside(packageJson(root), lock);
+    });
+
+    it.each<[string, unknown]>([["a list of folders", ["packages/*"]], ["an empty list", []], ["an object", { packages: ["packages/*"] }], ["null", null]])(
+      "refuses \"workspaces\" that is %s, in package.json and in the lock's root entry", async (_case, workspaces) => {
+        await expectRefusedBeside(packageJson({ ...ROOT, workspaces }));
+        const lock = lockOf({ ...ROOT, workspaces }, ENTRIES);
+        expect(packageLockProblems(lock)).toEqual([BAD_ROOT]);
+        expect(evaluate(lock)).toEqual(INVALID_LOCK);
+        await expectRefusedBeside(packageJson(ROOT), lock);
+        await expectRefusedBeside(packageJson({ ...ROOT, workspaces }), lock);
+      });
+
+    it("refuses the lock when there is no package.json", async () => {
+      await expectRefusedBeside(null);
+      // Also when the lock's root entry needs nothing at all.
+      await expectRefusedBeside(null, lockOf({}, {}));
+    });
+
+    it.each<[string, string]>([
+      ["empty", ""],
+      ["cut off", packageJson(ROOT).slice(0, -1)],
+      ["a list", `[${packageJson(ROOT)}]`],
+      ["a text", JSON.stringify(packageJson(ROOT))],
+      ["null", "null"],
+      ["written with a byte order mark", `\uFEFF${packageJson(ROOT)}`],
+    ])("refuses the lock when package.json is %s", async (_case, file) => {
+      await expectRefusedBeside(file);
+    });
+
+    it("refuses the lock when package.json is a folder", async () => {
+      const fixture = await fixtureDirectory(LOCK, null);
+      await fs.mkdir(path.join(fixture.directory, "package.json"));
+      const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+      const report = await runDependencyAudit({ cwd: fixture.directory, lockPath: fixture.lockPath, expectedLockSha256: fixture.identity, executor });
+      expect(report).toEqual(INVALID_LOCK);
+      expect(executor).not.toHaveBeenCalled();
+    });
+
+    it("reads the package.json in the lock's folder, not one above or below it", async () => {
+      const fixture = await fixtureDirectory(LOCK, packageJson({}));
+      await fs.mkdir(path.join(fixture.directory, "nested"));
+      await fs.writeFile(path.join(fixture.directory, "nested", "package.json"), packageJson(ROOT));
+      const nestedLock = path.join(fixture.directory, "nested", "package-lock.json");
+      await fs.writeFile(nestedLock, LOCK);
+      const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+      const run = (lockPath: string) => runDependencyAudit({ cwd: path.dirname(lockPath), lockPath, expectedLockSha256: fixture.identity, executor });
+      expect(await run(fixture.lockPath)).toEqual(INVALID_LOCK);
+      expect(formatDependencyPolicyReport(await run(nestedLock))).toBe(PASS_OUTPUT);
+    });
+
+    it("refuses through the command line with the status alone, for an audit it runs and for an audit file", async () => {
+      const fixture = await fixtureDirectory(LOCK, null);
+      const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+      const printed: string[] = [];
+      const output = { log: (message: string) => printed.push(message), warn: (message: string) => printed.push(message) };
+      const auditPath = path.join(fixture.directory, "audit.json");
+      await fs.writeFile(auditPath, auditJson());
+      const both = async () => [
+        await runMain(["--lock-sha256", fixture.identity, "--run-audit"], { cwd: fixture.directory, executor, retryDelayMs: 0, output }),
+        await runMain(["--lock-sha256", fixture.identity, "--audit-json", auditPath], { cwd: fixture.directory, output }),
+      ];
+      expect(await both()).toEqual([1, 1]);
+      await fs.writeFile(path.join(fixture.directory, "package.json"), packageJson({ ...ROOT, devDependencies: {} }));
+      expect(await both()).toEqual([1, 1]);
+      expect(printed).toEqual(Array(4).fill(formatDependencyPolicyReport(INVALID_LOCK as ReturnType<typeof evaluate>)));
+      expect(executor).not.toHaveBeenCalled();
+      await fs.writeFile(path.join(fixture.directory, "package.json"), packageJson(ROOT));
+      expect(await both()).toEqual([0, 0]);
+      expect(printed.slice(4)).toEqual([PASS_OUTPUT, PASS_OUTPUT]);
+    });
+
+    describe("while the audit runs", () => {
+      const file = (directory: string) => path.join(directory, "package.json");
+
+      it.each<[string, (directory: string) => Promise<void>]>([
+        ["gets another record", (directory) => fs.writeFile(file(directory), packageJson({ ...ROOT, devDependencies: {} }))],
+        ["gets a field the policy does not compare", (directory) => fs.writeFile(file(directory), packageJson(ROOT, { name: "fixture", version: "1.0.0", overrides: { router: "1.0.0" } }))],
+        ["gets one more space", (directory) => fs.writeFile(file(directory), `${packageJson(ROOT)} `)],
+        ["is deleted", (directory) => fs.rm(file(directory))],
+      ])("stops with lock_mismatch when package.json %s, and does not retry", async (_case, duringAudit) => {
+        const { report, executor } = await auditBeside(packageJson(ROOT), LOCK, duringAudit);
+        expect(report).toEqual({ status: "lock_mismatch", counts: ZERO_REPORT_COUNTS, packages: [] });
+        expect(executor).toHaveBeenCalledOnce();
+      });
+
+      it("passes when package.json is written again with the same bytes", async () => {
+        const { report } = await auditBeside(packageJson(ROOT), LOCK, (directory) => fs.writeFile(file(directory), packageJson(ROOT)));
+        expect(formatDependencyPolicyReport(report)).toBe(PASS_OUTPUT);
+      });
+
+      it("stops with lock_mismatch when package.json changes during a failed attempt, before the second one", async () => {
+        const fixture = await fixtureDirectory(LOCK, packageJson(ROOT));
+        const executor = vi.fn<AuditExecutor>().mockImplementation(async ({ cwd }) => {
+          await fs.writeFile(file(cwd), `${packageJson(ROOT)}\n`);
+          return { exitCode: 1, stdout: "", stderr: "" };
+        });
+        const report = await runDependencyAudit({ cwd: fixture.directory, lockPath: fixture.lockPath, expectedLockSha256: fixture.identity, executor, retryDelayMs: 0 });
+        expect(report.status).toBe("lock_mismatch");
+        expect(executor).toHaveBeenCalledOnce();
+      });
+    });
+  });
+
+  describe("this repository", () => {
+    const repository = fileURLToPath(new URL("../../", import.meta.url));
+
+    // What the issue asks for: on the real lock the production set the policy works out equals npm's own marks,
+    // entry by entry. packageLockProblems lists every entry on which they differ.
+    it("works out, for every entry of package-lock.json, what its \"dev\" mark says", async () => {
+      const text = await fs.readFile(path.join(repository, "package-lock.json"), "utf8");
+      expect(packageLockProblems(text), "the \"dev\" marks of package-lock.json and what production needs differ; see docs/vm-hosting.md").toEqual([]);
+      const lock = JSON.parse(text) as { packages: Record<string, { dev?: boolean }> };
+      const keys = Object.keys(lock.packages).filter((key) => key !== "");
+      const marked = keys.filter((key) => lock.packages[key].dev === true);
+      expect(marked.length).toBeGreaterThan(300);
+      expect(keys.length - marked.length).toBeGreaterThan(300);
+      // The comparison has teeth on the real lock: one mark turned over, on every tenth entry in turn, is found,
+      // and nothing else is.
+      const wrong: string[] = [];
+      for (const key of keys.filter((_key, index) => index % 10 === 0)) {
+        const { dev, ...unmarked } = lock.packages[key];
+        const turned = { ...lock, packages: { ...lock.packages, [key]: dev === true ? unmarked : { ...unmarked, dev: true } } };
+        const expected = dev === true ? notMarkedDev(key) : markedDev(key);
+        if (packageLockProblems(JSON.stringify(turned)).join() !== expected) wrong.push(key);
+      }
+      expect(wrong).toEqual([]);
+    }, 60_000);
+
+    it("has a package.json that needs what the root entry of package-lock.json needs", async () => {
+      const lockPath = path.join(repository, "package-lock.json");
+      const text = await fs.readFile(lockPath, "utf8");
+      const executor = vi.fn<AuditExecutor>().mockResolvedValue({ exitCode: 0, stdout: auditJson() });
+      const report = await runDependencyAudit({ cwd: repository, lockPath, expectedLockSha256: packageLockSha256(text), executor });
+      expect(
+        formatDependencyPolicyReport(report),
+        "package.json and the root entry of package-lock.json do not need the same packages: run npm install and commit both files",
+      ).toBe(PASS_OUTPUT);
+    });
   });
 });
 

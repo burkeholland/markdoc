@@ -557,6 +557,8 @@ markdoc_review {
 
 Over REST the same body goes to `POST /api/documents/:id/reviews`. Afterwards `markdoc_watch` reports `suggestion.accepted` / `suggestion.rejected` (with the `threadId`, plus `replyId` when a reply carried the suggestion) as the person decides, and `comment.resolved` for each accepted root suggestion.
 
+A suggestion can be applied while the quoted text reads as it did when you posted it; otherwise its comment shows **Outdated** and the card says why in a sentence. Two things make it outdated: someone edited the quoted text, or a pending tracked suggestion (`markdoc_suggest`) changes words inside the quote. In the second case it applies again when that tracked suggestion is rejected, and stays outdated for good when it is accepted, so do not propose a tracked suggestion and a review suggestion for the same words. A quote that lies wholly inside a pending tracked insertion is not outdated: it can be applied before and after the insertion is accepted. When nothing on the card can be applied, the card offers **Resolve all** instead of **Accept all**: it resolves the review's comments and decides no suggestion (they list under Resolved as *outdated, not decided*, and return when the text reads as before again or a comment is reopened).
+
 ### Sit in a document
 
 Collaborate live from Copilot CLI: the agent is visible in the header's people stack and reacts when people write.
