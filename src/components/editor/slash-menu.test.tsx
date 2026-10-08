@@ -344,6 +344,22 @@ describe("slash menu: keys", () => {
     expect(ytext.toString()).toBe("Hello\n\n# World");
   });
 
+  it("when the list gets shorter under the highlight, the last row is the highlighted one", () => {
+    const mounted = mount();
+    typeAt(mounted.view, WORLD, "/");
+    press(mounted.view, "End");
+    expect(selected()).toEqual(["slash-item-agent"]);
+    // The person loses the right to comment: the Comment row goes, and the list is one row shorter.
+    act(() => {
+      mounted.session.canComment = false;
+      mounted.rerender(mounted.view);
+    });
+    expect(rowIds()).not.toContain("comment");
+    expect(selected()).toEqual(["slash-item-agent"]);
+    press(mounted.view, "Enter");
+    expect(mounted.onConnectAgent).toHaveBeenCalledTimes(1);
+  });
+
   it("Enter on No matches closes the menu, keeps the text and does not reach the editor", () => {
     const { view, ytext, editorKeys } = mount();
     typeAt(view, WORLD, "/zzz");
@@ -409,6 +425,18 @@ describe("slash menu: pointer", () => {
     expect(view.hasFocus()).toBe(true);
   });
 
+  it("a click that finds the focus outside the editor still applies and brings the caret back", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    const elsewhere = document.body.appendChild(document.createElement("button"));
+    elsewhere.focus();
+    expect(view.hasFocus()).toBe(false);
+    fireEvent.click(row("quote"));
+    elsewhere.remove();
+    expect(ytext.toString()).toBe("Hello\n\n> World");
+    expect(view.hasFocus()).toBe(true);
+  });
+
   it("cancels mousedown anywhere in the menu, so the editor does not blur and close it", () => {
     const { view } = mount();
     typeAt(view, WORLD, "/");
@@ -470,6 +498,8 @@ describe("slash menu: items that hand off to the shell", () => {
     expect(mounted[callback]).toHaveBeenCalledTimes(1);
     expect(mounted.ytext.toString()).toBe("Hello\n\nWorld");
     expect(menu()).toBeNull();
+    // The removal of the typed text is an undo step of its own.
+    expect(mounted.session.undoManager.stopCapturing).toHaveBeenCalledTimes(2);
     for (const other of ["onImage", "onLink", "onComment", "onConnectAgent"] as const) {
       if (other !== callback) expect(mounted[other], other).not.toHaveBeenCalled();
     }
