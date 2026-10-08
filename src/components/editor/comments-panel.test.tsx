@@ -2172,6 +2172,462 @@ describe("CommentsPanel", () => {
     await waitFor(() => expect(screen.getAllByTestId("review-card")).toHaveLength(1));
   });
 
+  describe("review card when suggestions cannot be applied (#2327)", () => {
+    const TEXT = "Alpha beta gamma delta epsilon zeta eta theta.";
+    const QUOTES = ["Alpha beta", "gamma delta", "epsilon zeta", "eta theta"] as const;
+    const agent = makeCollabUser("agent:alice:Copilot", "Copilot");
+    const tracker = makeCollabUser("agent:alice:Local", "Local");
+    const CHANGED = (count: number) => `None of the ${count} suggestions can be applied: the text they quote has changed.`;
+    const PENDING = (count: number) => `None of the ${count} suggestions can be applied: a pending suggestion changes the text they quote. They apply again if it is rejected.`;
+
+    afterEach(() => {
+      vi.mocked(api.documents.comment).mockReset().mockResolvedValue({ id: "via-api" } as never);
+      vi.mocked(api.documents.reviews).mockReset().mockResolvedValue({ reviews: [] } as ReviewsResponse);
+    });
+
+    function world(count: number, { role = "owner", viaApi = false, strict = false }: { role?: "owner" | "editor" | "commenter" | "viewer"; viaApi?: boolean; strict?: boolean } = {}) {
+      const user = makeCollabUser("alice", "Alice", null, "alice");
+      const next = new CollabSession({ docId: "doc", user, role, getToken: async () => "token", autoConnect: false });
+      next.keepAlive();
+      next.ytext.insert(0, TEXT);
+      const threadIds = QUOTES.slice(0, count).map((quote) =>
+        next.comments.add({ from: TEXT.indexOf(quote), to: TEXT.indexOf(quote) + quote.length, body: `Louder.\n\n\`\`\`suggestion\n${quote.toUpperCase()}\n\`\`\``, author: agent }),
+      );
+      if (viaApi) vi.spyOn(next, "commentsViaApi", "get").mockReturnValue(true);
+      const review = reviewDto("r1", threadIds);
+      vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
+      session = next;
+      const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      const panel = (toast: NonNullable<CommentsPanelProps["onToast"]>) => (
+        <TooltipProvider>
+          <CommentsPanel session={next} onClose={() => {}} onReveal={() => {}} onToast={toast} />
+        </TooltipProvider>
+      );
+      const view = render(strict ? <StrictMode>{panel(onToast)}</StrictMode> : panel(onToast));
+      /** Render the panel again with another toast handler: every review card publishes itself anew. */
+      const republish = (toast: NonNullable<CommentsPanelProps["onToast"]>) => view.rerender(panel(toast));
+      return { session: next, threadIds, review, onToast, republish };
+    }
+
+    /** A person types a letter into the second word of a quote: the suggestion on it is outdated until the letter is gone again. */
+    const mangle = (current: CollabSession, quote: string) =>
+      act(() => {
+        current.ytext.insert(current.ytext.toString().indexOf(quote.split(" ")[1]!) + 1, "x");
+      });
+    const unmangle = (current: CollabSession, quote: string) =>
+      act(() => {
+        const word = quote.split(" ")[1]!;
+        current.ytext.delete(current.ytext.toString().indexOf(`${word[0]}x${word.slice(1)}`) + 1, 1);
+      });
+    /** A pending tracked suggestion rewords the second word of a quote: the raw text then holds both wordings. */
+    const reword = (current: CollabSession, quote: string) =>
+      act(() => {
+        const word = quote.split(" ")[1]!;
+        const at = current.ytext.toString().indexOf(word);
+        current.suggestions.proposeEdits([{ from: at, to: at + word.length, insert: "REWORDED" }], tracker);
+      });
+    const card = () => screen.getByTestId("review-card");
+    const cardPart = (testId: string) => within(card()).queryByTestId(testId);
+    const note = () => cardPart("review-note")?.querySelector("span")?.textContent ?? null;
+    const tabText = (id: "open" | "resolved" | "suggestions") => screen.getByTestId(`comments-tab-${id}`).textContent;
+    const decisions = (current: CollabSession) => current.comments.list().map((thread) => thread.suggestionState ?? null);
+    const resolvedFlags = (current: CollabSession) => current.comments.list().map((thread) => thread.resolved);
+
+    it("all applicable: Accept all and Reject all, no sentence, no Resolve all", async () => {
+      world(4);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      expect(cardPart("review-accept-all")).toHaveTextContent(/^Accept all$/);
+      expect(cardPart("review-reject-all")).toBeEnabled();
+      expect(cardPart("review-note")).toBeNull();
+      expect(cardPart("review-resolve-all")).toBeNull();
+      expect(cardPart("review-open-suggestions")).toBeNull();
+      expect(cardPart("review-accept-all")).not.toHaveAttribute("aria-describedby");
+      expect(cardPart("review-counts")).toHaveTextContent(/^4 comments · 4 suggestions$/);
+    });
+
+    it("some outdated: the sentence gives the counts in words, the buttons stay, and both are described by the sentence", async () => {
+      const { session: current } = world(4);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      mangle(current, QUOTES[1]);
+      mangle(current, QUOTES[3]);
+      await waitFor(() => expect(note()).toBe("2 of 4 suggestions can be applied; 2 quote text that has changed."));
+      expect(cardPart("review-accept-all")).toBeEnabled();
+      expect(cardPart("review-accept-all")).toHaveTextContent("Accept all(2 of 4)");
+      expect(cardPart("review-reject-all")).toBeEnabled();
+      expect(cardPart("review-resolve-all")).toBeNull();
+      expect(cardPart("review-open-suggestions")).toBeNull();
+      expect(cardPart("review-accept-all")).toHaveAccessibleDescription("2 of 4 suggestions can be applied; 2 quote text that has changed.");
+      expect(cardPart("review-reject-all")).toHaveAccessibleDescription("2 of 4 suggestions can be applied; 2 quote text that has changed.");
+
+      // Accept all still applies the two that can be applied and skips the others.
+      fireEvent.click(cardPart("review-accept-all")!);
+      await waitFor(() => expect(current.ytext.toString()).toBe("ALPHA BETA gamma dxelta EPSILON ZETA eta txheta."));
+      expect(decisions(current)).toEqual(["accepted", null, "accepted", null]);
+      // Nothing is left that can be applied: the card now offers Resolve all for the two open comments.
+      await waitFor(() => expect(note()).toBe(CHANGED(2)));
+      expect(cardPart("review-accept-all")).toBeNull();
+      expect(cardPart("review-resolve-all")).toBeEnabled();
+    });
+
+    it("all outdated: the sentence says why, Resolve all leads beside Reject all, and there is no greyed Accept all", async () => {
+      const { session: current } = world(4);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      for (const quote of QUOTES) mangle(current, quote);
+      await waitFor(() => expect(note()).toBe(CHANGED(4)));
+      expect(cardPart("review-accept-all")).toBeNull();
+      expect(card()).not.toHaveTextContent("0 of 4");
+      const resolve = cardPart("review-resolve-all")!;
+      const reject = cardPart("review-reject-all")!;
+      expect(resolve).toBeEnabled();
+      expect(reject).toBeEnabled();
+      expect([...cardPart("review-actions")!.children]).toEqual([resolve, reject]);
+      expect(resolve).toHaveClass("btn-primary");
+      expect(reject).toHaveClass("btn-outline");
+      expect(resolve).toHaveAccessibleName("Resolve all");
+      expect(resolve).toHaveAccessibleDescription(CHANGED(4));
+      expect(reject).toHaveAccessibleDescription(CHANGED(4));
+      expect(cardPart("review-open-suggestions")).toBeNull();
+      expect(cardPart("review-counts")).toHaveTextContent(/^4 comments · 4 suggestions$/);
+    });
+
+    it.each([
+      [1, "The suggestion cannot be applied: the text it quotes has changed.", "The suggestion cannot be applied: a pending suggestion changes the text it quotes. It applies again if the pending suggestion is rejected."],
+      [2, CHANGED(2), PENDING(2)],
+    ] as const)("%i undecided: the sentence reads right for an edit and for a pending tracked suggestion", async (count, changed, pending) => {
+      const { session: current } = world(count);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      for (const quote of QUOTES.slice(0, count)) reword(current, quote);
+      await waitFor(() => expect(note()).toBe(pending));
+      act(() => {
+        current.reviewSuggestion("acceptAll");
+      });
+      await waitFor(() => expect(note()).toBe(changed));
+    });
+
+    it("all outdated because of a pending tracked suggestion: says so, Open Suggestions shows that tab and decides nothing, and rejecting it brings Accept all back", async () => {
+      const { session: current, onToast } = world(4);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      for (const quote of QUOTES) reword(current, quote);
+      await waitFor(() => expect(note()).toBe(PENDING(4)));
+      expect(cardPart("review-accept-all")).toBeNull();
+      expect(cardPart("review-resolve-all")).toBeEnabled();
+      expect(cardPart("review-reject-all")).toBeEnabled();
+      const link = cardPart("review-open-suggestions")!;
+      expect(link).toHaveAccessibleName("Open Suggestions");
+      expect(link).toHaveAttribute("type", "button");
+      expect(cardPart("review-resolve-all")).toHaveAccessibleDescription(PENDING(4));
+      // In the document: the link, then the toggle, then the two decisions (Tab order).
+      const order = [...card().querySelectorAll("button")].map((button) => button.getAttribute("data-testid"));
+      expect(order).toEqual(["review-open-suggestions", "review-toggle", "review-resolve-all", "review-reject-all"]);
+      expect(screen.getByRole("tab", { name: /Open/ })).toHaveAttribute("aria-selected", "true");
+
+      fireEvent.click(link);
+      expect(screen.getByRole("tab", { name: /Suggestions/ })).toHaveAttribute("aria-selected", "true");
+      expect(screen.getAllByTestId("suggestion-card")).toHaveLength(4);
+      expect(decisions(current)).toEqual([null, null, null, null]);
+      expect(resolvedFlags(current)).toEqual([false, false, false, false]);
+      expect(current.ytext.toString()).toContain("REWORDEDbeta");
+      expect(onToast).not.toHaveBeenCalled();
+
+      // Rejecting the pending suggestions gives the quotes back.
+      act(() => {
+        current.reviewSuggestion("rejectAll");
+      });
+      expect(current.ytext.toString()).toBe(TEXT);
+      fireEvent.click(screen.getByRole("tab", { name: /Open/ }));
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      expect(cardPart("review-accept-all")).toHaveTextContent(/^Accept all$/);
+      expect(note()).toBeNull();
+      expect(cardPart("review-resolve-all")).toBeNull();
+      expect(cardPart("review-open-suggestions")).toBeNull();
+    });
+
+    it("both causes on one card: the pending wording with its count, and the link", async () => {
+      const { session: current } = world(4);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      reword(current, QUOTES[0]);
+      mangle(current, QUOTES[1]);
+      await waitFor(() => expect(note()).toBe("2 of 4 suggestions can be applied; 2 quote text that has changed, 1 of them by a pending suggestion."));
+      expect(cardPart("review-open-suggestions")).not.toBeNull();
+      expect(cardPart("review-accept-all")).toBeEnabled();
+      mangle(current, QUOTES[2]);
+      mangle(current, QUOTES[3]);
+      await waitFor(() =>
+        expect(note()).toBe("None of the 4 suggestions can be applied: the text they quote has changed, for 1 of them by a pending suggestion. That one applies again if it is rejected."),
+      );
+      expect(cardPart("review-open-suggestions")).not.toBeNull();
+      expect(cardPart("review-resolve-all")).toBeEnabled();
+    });
+
+    it("all decided: 'all decided' on the counts line and Resolve all alone, as before", async () => {
+      const { session: current } = world(2);
+      await waitFor(() => expect(cardPart("review-reject-all")).toBeEnabled());
+      fireEvent.click(cardPart("review-reject-all")!);
+      await waitFor(() => expect(cardPart("review-resolve-all")).toBeEnabled());
+      expect(decisions(current)).toEqual(["rejected", "rejected"]);
+      expect(cardPart("review-counts")).toHaveTextContent(/^2 comments · 2 suggestions · all decided$/);
+      expect([...cardPart("review-actions")!.children]).toEqual([cardPart("review-resolve-all")]);
+      expect(cardPart("review-resolve-all")).toHaveClass("btn-outline");
+      expect(cardPart("review-resolve-all")).not.toHaveAttribute("aria-describedby");
+      expect(cardPart("review-reject-all")).toBeNull();
+      expect(note()).toBeNull();
+    });
+
+    it("busy: Resolve all sends resolve requests only, in order, and both buttons wait until it is done", async () => {
+      const requests = [deferred<CommentResponse>(), deferred<CommentResponse>()];
+      vi.mocked(api.documents.comment).mockReset().mockReturnValueOnce(requests[0].promise).mockReturnValueOnce(requests[1].promise);
+      const { session: current, threadIds, onToast } = world(2, { viaApi: true });
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      for (const quote of QUOTES.slice(0, 2)) mangle(current, quote);
+      await waitFor(() => expect(cardPart("review-resolve-all")).toBeEnabled());
+      const resolve = cardPart("review-resolve-all")!;
+      const reject = cardPart("review-reject-all")!;
+
+      act(() => {
+        resolve.click();
+        resolve.click();
+        reject.click();
+      });
+      expect(api.documents.comment).toHaveBeenCalledTimes(1);
+      expect(api.documents.comment).toHaveBeenLastCalledWith("doc", { action: "resolve", threadId: threadIds[0], resolved: true });
+      expect(resolve).toBeDisabled();
+      expect(resolve).toHaveTextContent("Resolving…");
+      expect(resolve).toHaveAttribute("aria-busy", "true");
+      expect(reject).toBeDisabled();
+      expect(reject).toHaveTextContent("Reject all");
+
+      await act(async () => {
+        requests[0].resolve({} as CommentResponse);
+        await requests[0].promise;
+      });
+      expect(api.documents.comment).toHaveBeenLastCalledWith("doc", { action: "resolve", threadId: threadIds[1], resolved: true });
+      await act(async () => {
+        requests[1].resolve({} as CommentResponse);
+        await requests[1].promise;
+      });
+      // Resolve all never asks the server to decide a suggestion.
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([, payload]) => payload.action)).toEqual(["resolve", "resolve"]);
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith("Resolved 2 comments from Copilot.", "success");
+    });
+
+    it("Resolve all resolves the comments and decides no suggestion; the review lists under Resolved as outdated, not decided, and comes back when asked", async () => {
+      const { session: current, threadIds, review, onToast } = world(2);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      for (const quote of QUOTES.slice(0, 2)) mangle(current, quote);
+      await waitFor(() => expect(cardPart("review-resolve-all")).toBeEnabled());
+      const before = current.ytext.toString();
+      expect(tabText("suggestions")).toBe("Suggestions2");
+
+      fireEvent.click(cardPart("review-resolve-all")!);
+      await waitFor(() => expect(screen.queryAllByTestId("review-card")).toHaveLength(0));
+      expect(onToast).toHaveBeenCalledWith("Resolved 2 comments from Copilot.", "success");
+      // Nothing applied, nothing rejected: the suggestions stay undecided.
+      expect(current.ytext.toString()).toBe(before);
+      expect(decisions(current)).toEqual([null, null]);
+      expect(resolvedFlags(current)).toEqual([true, true]);
+      expect(isReviewOpen(review, current.comments.list(), current.ytext.toString())).toBe(false);
+      // They no longer ask for a decision on the Suggestions tab either.
+      expect(tabText("suggestions")).toBe("Suggestions");
+      expect(tabText("open")).toBe("Open");
+
+      fireEvent.click(screen.getByRole("tab", { name: /Resolved/ }));
+      await waitFor(() => expect(screen.getAllByTestId("review-card")).toHaveLength(1));
+      expect(cardPart("review-counts")).toHaveTextContent(/^2 comments · 2 suggestions · 2 outdated, not decided$/);
+      expect(cardPart("review-actions")).toBeNull();
+      expect(note()).toBeNull();
+      const threads = screen.getAllByTestId("comment-thread");
+      expect(threads.map((thread) => thread.getAttribute("data-suggestion"))).toEqual(["outdated", "outdated"]);
+      expect(within(threads[0]!).getByTestId("suggestion-outdated")).toHaveTextContent("Outdated");
+      expect(within(threads[0]!).getByTestId("suggestion-reject-comment")).toBeEnabled();
+
+      // Reopening one comment brings its suggestion back as it was.
+      fireEvent.click(within(threads[0]!).getByTestId("comment-resolve"));
+      await waitFor(() => expect(resolvedFlags(current)).toEqual([false, true]));
+      fireEvent.click(screen.getByRole("tab", { name: /Open/ }));
+      await waitFor(() => expect(note()).toBe("The suggestion cannot be applied: the text it quotes has changed."));
+      expect(cardPart("review-resolve-all")).toBeEnabled();
+      expect(cardPart("review-reject-all")).toBeEnabled();
+      expect(tabText("suggestions")).toBe("Suggestions1");
+      expect(decisions(current)).toEqual([null, null]);
+
+      // Reject all here rejects the one that asks for a decision, not the one set aside with its resolved comment.
+      fireEvent.click(cardPart("review-reject-all")!);
+      await waitFor(() => expect(current.comments.get(threadIds[0]!)?.suggestionState).toBe("rejected"));
+      expect(current.comments.get(threadIds[1]!)?.suggestionState ?? null).toBeNull();
+    });
+
+    it("a resolved review returns to Open with Accept all when the quoted text reads as before again", async () => {
+      const { session: current, review } = world(2);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      for (const quote of QUOTES.slice(0, 2)) mangle(current, quote);
+      await waitFor(() => expect(cardPart("review-resolve-all")).toBeEnabled());
+      fireEvent.click(cardPart("review-resolve-all")!);
+      await waitFor(() => expect(screen.queryAllByTestId("review-card")).toHaveLength(0));
+
+      for (const quote of QUOTES.slice(0, 2)) unmangle(current, quote);
+      expect(current.ytext.toString()).toBe(TEXT);
+      expect(isReviewOpen(review, current.comments.list(), TEXT)).toBe(true);
+      // Suggestions that arrive while Open is empty show the Suggestions tab (#117); the card itself is back on Open.
+      await waitFor(() => expect(tabText("suggestions")).toBe("Suggestions2"));
+      fireEvent.click(screen.getByRole("tab", { name: /Open/ }));
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      expect(cardPart("review-accept-all")).toHaveTextContent(/^Accept all$/);
+      expect(note()).toBeNull();
+      expect(tabText("suggestions")).toBe("Suggestions2");
+      expect(resolvedFlags(current)).toEqual([true, true]);
+
+      // The same for a pending tracked suggestion: set aside while it is pending, back once it is rejected.
+      for (const quote of QUOTES.slice(0, 2)) reword(current, quote);
+      await waitFor(() => expect(screen.queryAllByTestId("review-card")).toHaveLength(0));
+      expect(isReviewOpen(review, current.comments.list(), current.ytext.toString())).toBe(false);
+      act(() => {
+        current.reviewSuggestion("rejectAll");
+      });
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      fireEvent.click(cardPart("review-accept-all")!);
+      await waitFor(() => expect(current.ytext.toString()).toBe("ALPHA BETA GAMMA DELTA epsilon zeta eta theta."));
+    });
+
+    it("Reject all beside Resolve all rejects every undecided suggestion and changes no text", async () => {
+      const { session: current } = world(2);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      for (const quote of QUOTES.slice(0, 2)) mangle(current, quote);
+      await waitFor(() => expect(cardPart("review-resolve-all")).toBeEnabled());
+      const before = current.ytext.toString();
+      fireEvent.click(cardPart("review-reject-all")!);
+      await waitFor(() => expect(decisions(current)).toEqual(["rejected", "rejected"]));
+      expect(current.ytext.toString()).toBe(before);
+      expect(resolvedFlags(current)).toEqual([false, false]);
+      await waitFor(() => expect(cardPart("review-reject-all")).toBeNull());
+      expect(cardPart("review-resolve-all")).toBeEnabled();
+      expect(cardPart("review-counts")).toHaveTextContent(/all decided$/);
+      expect(note()).toBeNull();
+    });
+
+    it("a commenter gets Resolve all alone when nothing can be applied and no button while something can; a viewer gets the sentence only", async () => {
+      const commenter = world(2, { role: "commenter" });
+      await waitFor(() => expect(screen.getAllByTestId("review-card")).toHaveLength(1));
+      expect(cardPart("review-actions")).toBeNull();
+      mangle(commenter.session, QUOTES[0]);
+      await waitFor(() => expect(note()).toBe("1 of 2 suggestions can be applied; 1 quotes text that has changed."));
+      expect(cardPart("review-actions")).toBeNull();
+      mangle(commenter.session, QUOTES[1]);
+      await waitFor(() => expect(note()).toBe(CHANGED(2)));
+      expect([...cardPart("review-actions")!.children]).toEqual([cardPart("review-resolve-all")]);
+      expect(cardPart("review-resolve-all")).toBeEnabled();
+      expect(cardPart("review-resolve-all")).toHaveAccessibleDescription(CHANGED(2));
+      // A commenter's decisions go through the server: two resolve requests and never a suggestion decision.
+      fireEvent.click(cardPart("review-resolve-all")!);
+      await waitFor(() => expect(api.documents.comment).toHaveBeenCalledTimes(2));
+      expect(vi.mocked(api.documents.comment).mock.calls.map(([, payload]) => [payload.action, payload.threadId])).toEqual(commenter.threadIds.map((id) => ["resolve", id]));
+      expect(decisions(commenter.session)).toEqual([null, null]);
+      cleanup();
+      commenter.session.destroy();
+
+      const viewer = world(2, { role: "viewer" });
+      await waitFor(() => expect(screen.getAllByTestId("review-card")).toHaveLength(1));
+      for (const quote of QUOTES.slice(0, 2)) reword(viewer.session, quote);
+      await waitFor(() => expect(note()).toBe(PENDING(2)));
+      expect(cardPart("review-actions")).toBeNull();
+      fireEvent.click(cardPart("review-open-suggestions")!);
+      expect(screen.getByRole("tab", { name: /Suggestions/ })).toHaveAttribute("aria-selected", "true");
+    });
+
+    it("Strict Mode: the link and Resolve all act once each", async () => {
+      const { session: current, onToast } = world(2, { strict: true });
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      // Strict Mode replays the mount; the card is published again in the render that follows it.
+      await act(async () => {});
+      for (const quote of QUOTES.slice(0, 2)) reword(current, quote);
+      await waitFor(() => expect(note()).toBe(PENDING(2)));
+      await act(async () => {});
+      fireEvent.click(cardPart("review-open-suggestions")!);
+      expect(screen.getByRole("tab", { name: /Suggestions/ })).toHaveAttribute("aria-selected", "true");
+      fireEvent.click(screen.getByRole("tab", { name: /Open/ }));
+      await waitFor(() => expect(cardPart("review-resolve-all")).toBeEnabled());
+      await act(async () => {});
+      fireEvent.click(cardPart("review-resolve-all")!);
+      await waitFor(() => expect(resolvedFlags(current)).toEqual([true, true]));
+      expect(decisions(current)).toEqual([null, null]);
+      expect(onToast).toHaveBeenCalledTimes(1);
+      expect(onToast).toHaveBeenCalledWith("Resolved 2 comments from Copilot.", "success");
+    });
+
+    it.each([
+      ["the sentence", '[data-testid="review-note"] span', "text"],
+      ["the link's words", '[data-testid="review-open-suggestions"]', "first"],
+      ["the Resolve all label", '[data-testid="review-resolve-all"]', "last"],
+      ["the description of Reject all", '[data-testid="review-reject-all"]', "description"],
+    ] as const)("a card whose page no longer shows %s as rendered refuses every click, also after it renders again", async (_what, selector, part) => {
+      const tamper = (root: HTMLElement): void => {
+        const target = root.querySelector(selector)!;
+        if (part === "description") target.removeAttribute("aria-describedby");
+        else (part === "text" ? target : part === "first" ? target.firstChild! : target.lastChild!).textContent = "Accept all 2";
+      };
+      const { session: current, onToast, republish } = world(2);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      for (const quote of QUOTES.slice(0, 2)) reword(current, quote);
+      await waitFor(() => expect(note()).toBe(PENDING(2)));
+      await act(async () => {
+        tamper(card());
+      });
+      const clickAll = async () => {
+        fireEvent.click(cardPart("review-open-suggestions")!);
+        fireEvent.click(cardPart("review-resolve-all")!);
+        fireEvent.click(cardPart("review-reject-all")!);
+        await act(async () => {});
+        expect(screen.getByRole("tab", { name: /Open/ })).toHaveAttribute("aria-selected", "true");
+        expect(resolvedFlags(current)).toEqual([false, false]);
+        expect(decisions(current)).toEqual([null, null]);
+      };
+      await clickAll();
+      // A new render changes nothing the page shows (React leaves the altered node alone), so the card that
+      // publishes itself now must compare what it shows with what it means, and refuse again.
+      const laterToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      await act(async () => {
+        republish(laterToast);
+      });
+      await clickAll();
+      expect(onToast).not.toHaveBeenCalled();
+      expect(laterToast).not.toHaveBeenCalled();
+    });
+
+    it("a card that renders again unaltered acts on the next click", async () => {
+      const { session: current, republish } = world(2);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      for (const quote of QUOTES.slice(0, 2)) reword(current, quote);
+      await waitFor(() => expect(note()).toBe(PENDING(2)));
+      const laterToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      await act(async () => {
+        republish(laterToast);
+      });
+      fireEvent.click(cardPart("review-resolve-all")!);
+      await waitFor(() => expect(resolvedFlags(current)).toEqual([true, true]));
+      expect(laterToast).toHaveBeenCalledWith("Resolved 2 comments from Copilot.", "success");
+    });
+
+    it("a single thread resolved with its own button: its outdated suggestion leaves Suggestions, an applicable one stays", async () => {
+      const { session: current, threadIds, review } = world(2);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      mangle(current, QUOTES[0]);
+      await waitFor(() => expect(tabText("suggestions")).toBe("Suggestions2"));
+      act(() => {
+        current.comments.setResolved(threadIds[0]!, true, current.user);
+      });
+      await waitFor(() => expect(tabText("suggestions")).toBe("Suggestions1"));
+      // The card counts only what still asks for a decision: one suggestion, and it can be applied.
+      await waitFor(() => expect(note()).toBeNull());
+      expect(cardPart("review-accept-all")).toHaveTextContent(/^Accept all$/);
+      act(() => {
+        current.comments.setResolved(threadIds[1]!, true, current.user);
+      });
+      // A resolved thread whose suggestion can still be applied keeps the review open, as before.
+      expect(isReviewOpen(review, current.comments.list(), current.ytext.toString())).toBe(true);
+      expect(tabText("suggestions")).toBe("Suggestions1");
+      expect(cardPart("review-accept-all")).toBeEnabled();
+    });
+  });
   describe("card reveal (#992)", () => {
     const mount = (opts: { removed?: boolean; reply?: boolean } = {}) => {
       // jsdom has no scrollIntoView; the active card scrolls itself into view with it.
