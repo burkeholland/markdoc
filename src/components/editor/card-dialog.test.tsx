@@ -49,12 +49,16 @@ describe("Insert: Video or post from a link (#2317)", () => {
   });
 
   it("a link on the list is handed over once, after the dialog has closed, with the spaces around it gone", async () => {
-    const { user, onSubmit, field } = await openDialog();
+    // What the page looked like at the moment the link was handed over.
+    const dialogsAtHandOver: number[] = [];
+    const { user, onSubmit, field } = await openDialog(vi.fn<(url: string) => void>(() => void dialogsAtHandOver.push(screen.queryAllByRole("dialog").length)));
     await user.type(field, `  ${VIDEO} `);
     await user.keyboard("{Enter}");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     expect(onSubmit).toHaveBeenCalledWith(VIDEO);
+    // The dialog was gone by then, so focus can go to the editor and stay there.
+    expect(dialogsAtHandOver).toEqual([0]);
   });
 
   it("the Insert button does the same as Enter", async () => {

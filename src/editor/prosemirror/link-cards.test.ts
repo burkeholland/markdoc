@@ -730,6 +730,22 @@ describe("link cards in the rich pane (#2317)", () => {
       expect(text()).toBe(`Intro\n\n${TWEET}`);
     });
 
+    it("what is typed right after that Enter is its own undo step: undoing it leaves the card", () => {
+      const { session, view, shape, text, key } = open("Intro");
+      view.dispatch(view.state.tr.insert(view.state.doc.content.size, schema.nodes.paragraph.create()));
+      typeAtEnd(view, VIDEO);
+      key("Enter");
+      // No pause: the next characters follow at once.
+      for (const char of "Next") view.dispatch(view.state.tr.insertText(char));
+      expect(text()).toBe(`Intro\n\n${VIDEO}\n\nNext`);
+      session.undo();
+      expect(shape()).toContain(`card(${VIDEO})`);
+      expect(text()).toBe(`Intro\n\n${VIDEO}`);
+      session.undo();
+      expect(shape()).not.toContain("card(");
+      expect(text()).toBe(`Intro\n\n<${VIDEO}>`);
+    });
+
     it("off: Enter after a typed link is an ordinary Enter", () => {
       off();
       const { view, shape, text, key } = open("");
@@ -825,6 +841,20 @@ describe("link cards in the rich pane (#2317)", () => {
       expect(inQuote.text()).toBe(`> quoted\n\n${VIDEO}`);
     });
 
+    it("an empty line inside a list is not the empty line of the document: the card goes under the list", () => {
+      const { view, shape, text, key } = open("- one");
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 3)));
+      key("Enter");
+      // A second, empty list item, with the caret in it.
+      expect(view.state.doc.firstChild!.childCount).toBe(2);
+      expect(view.state.selection.$from.parent.content.size).toBe(0);
+      expect(view.state.selection.$from.depth).toBeGreaterThan(1);
+      insertLinkCard(TWEET)(view.state, view.dispatch, view);
+      expect(shape()).toBe(`bullet_list | card(${TWEET}) | p()`);
+      expect(view.state.doc.firstChild!.childCount).toBe(2);
+      expect(text()).toContain(`\n\n${TWEET}`);
+    });
+
     it("with a card selected the new card goes under it", () => {
       const { view, shape, selectCard } = open(`${TWEET}\n\nOutro`);
       selectCard(0);
@@ -858,11 +888,43 @@ describe("link cards in the rich pane (#2317)", () => {
       expect(shape()).not.toContain("card(");
       expect(text()).toBe("Intro!");
 
+      // What is typed right after an inserted card is its own step too: undoing it leaves the card.
+      session.redo();
+      const again = open("Intro");
+      const againActions = new EditorActions(again.session, () => {});
+      againActions.setRichView(again.view);
+      again.view.dispatch(again.view.state.tr.setSelection(TextSelection.create(again.view.state.doc, 6)));
+      againActions.insertCard(VIDEO);
+      for (const char of "Next") again.view.dispatch(again.view.state.tr.insertText(char));
+      expect(again.text()).toBe(`Intro\n\n${VIDEO}\n\nNext`);
+      again.session.undo();
+      expect(again.shape()).toContain(`card(${VIDEO})`);
+      expect(again.text()).toBe(`Intro\n\n${VIDEO}`);
+
       const viewer = open("Intro", "viewer");
       const viewerActions = new EditorActions(viewer.session, () => {});
       viewerActions.setRichView(viewer.view);
       viewerActions.insertCard(TWEET);
       expect(viewer.shape()).toBe("p(Intro)");
+    });
+
+    it("with the Markdown pane active the link is written on a line of its own, and only a link on the list is", () => {
+      const { session } = open("Intro");
+      const insertBlock = vi.fn();
+      const codeView = {} as Parameters<EditorActions["setCodeView"]>[0];
+      const actions = new EditorActions(session, () => {});
+      actions.setCodeView(codeView, { commands: { insertBlock } } as unknown as Parameters<EditorActions["setCodeView"]>[1]);
+      actions.insertCard(VIDEO);
+      expect(insertBlock).toHaveBeenCalledExactlyOnceWith(codeView, VIDEO);
+      // The Markdown pane takes any text, so here the action is the only one who asks the list.
+      for (const link of ["https://evil.example/watch?v=dQw4w9WgXcQ", "# A heading\n\n<script>alert(1)</script>", "", `${VIDEO}\n\nmore text`]) actions.insertCard(link);
+      expect(insertBlock).toHaveBeenCalledTimes(1);
+
+      const viewer = open("Intro", "viewer");
+      const viewerActions = new EditorActions(viewer.session, () => {});
+      viewerActions.setCodeView(codeView, { commands: { insertBlock } } as unknown as Parameters<EditorActions["setCodeView"]>[1]);
+      viewerActions.insertCard(VIDEO);
+      expect(insertBlock).toHaveBeenCalledTimes(1);
     });
 
     it("while suggesting, the inserted card is a suggestion: the text keeps the link as a pending insertion", () => {

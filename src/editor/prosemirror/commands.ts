@@ -727,8 +727,9 @@ export function insertLinkCard(url: string): Command {
         pos = $to.before(1);
         tr.replaceWith(pos, pos + $to.parent.nodeSize, card);
       } else {
-        // Depth 0: a whole top-level block is selected (a card, a rule), and the selection ends right after it.
-        pos = $to.depth === 0 ? $to.pos : $to.after(1);
+        // After the top-level block the selection ends in. With a whole block selected (a card, a rule) the
+        // selection ends right after it, and that is the place.
+        pos = $to.after(1);
         tr.insert(pos, card);
       }
       tr.insert(pos + card.nodeSize, schema.nodes.paragraph.create());
@@ -741,17 +742,16 @@ export function insertLinkCard(url: string): Command {
 
 /**
  * Enter at the end of a top-level paragraph that is nothing but a known link (#2317): the line splits as
- * usual, then the link becomes a card. Two steps, so the first undo gives the text link back and the caret
- * stays on the new line. `isolate` ends the undo step before, between and after. Only with the setting on
- * and not while suggesting (the caller checks both).
+ * usual, then the link becomes a card. The card is an undo step of its own (`isolate` ends the step before
+ * it and after it), so the first undo gives the text link back and the caret stays on the new line. Only
+ * with the setting on and not while suggesting (the caller checks both).
  */
 export function cardOnEnter(enter: Command, isolate: () => void): Command {
   return (state, dispatch, view) => {
-    const { selection } = state;
-    const paragraph = selection.empty ? cardLinkParagraph(state) : null;
-    if (!paragraph || selection.$from.parentOffset !== paragraph.node.content.size) return false;
+    // A selection that is not a caret never starts at the end of the paragraph, so this is a caret at the end.
+    const paragraph = cardLinkParagraph(state);
+    if (!paragraph || state.selection.$from.parentOffset !== paragraph.node.content.size) return false;
     if (!dispatch || !view) return true;
-    isolate();
     if (!enter(view.state, view.dispatch, view)) return false;
     isolate();
     const typed = view.state.doc.nodeAt(paragraph.pos);
