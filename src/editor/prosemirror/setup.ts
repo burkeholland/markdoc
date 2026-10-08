@@ -8,6 +8,7 @@ import * as Y from "yjs";
 import { schema } from "../markdown/schema";
 import { markdownBindingKey, markdownBindingPlugin } from "../sync/markdown-binding";
 import type { CollabSession } from "../collab/session";
+import { readLinkCardsSetting } from "../../lib/link-cards-setting";
 import { markdownInputRules } from "./inputrules";
 import { codeHighlightPlugin } from "./code-highlight";
 import { remoteCursorsPlugin } from "./remote-cursors";
@@ -51,6 +52,7 @@ import {
   toggleTaskAtCaret,
   tableAt,
   focusSelectedCard,
+  cardOnEnter,
 } from "./commands";
 
 export interface RichEditorHandlers extends HighlightHandlers {
@@ -283,6 +285,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     headingToParagraphOnBackspace,
     baseKeymap.Backspace,
   );
+  const linkCardOnEnter = cardOnEnter(enter, () => session.undoManager.stopCapturing());
   const isolatedBackspace: Command = (state, dispatch, view) => {
     session.undoManager.stopCapturing();
     return backspace(state, dispatch, view);
@@ -322,7 +325,8 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     "Mod-Alt-ArrowLeft": guard(addColumnBefore),
     "Mod-Alt-Backspace": guard(deleteRow),
     "Mod-Alt-Shift-Backspace": guard(deleteColumn),
-    Enter: guard(chainCommands(addRowOnEnterAtEnd, enter)),
+    // A known link alone on its line becomes a card when Enter leaves the line (#2317): the person's setting, not while suggesting.
+    Enter: guard(chainCommands(addRowOnEnterAtEnd, (state, dispatch, view) => (readLinkCardsSetting() && session.mode !== "suggesting" ? linkCardOnEnter(state, dispatch, view) : false), enter)),
     "Shift-Enter": guard(lineBreak),
     "Mod-Enter": guard(chainCommands(exitCode, exitTableBelow, toggleTaskAtCaret, insertHardBreak())),
     // Not guarded: commenters get the selection bubble too, so Esc must collapse their selection as well.

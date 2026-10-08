@@ -405,7 +405,7 @@ describe("slash menu undo", () => {
 
   it("covers every editing item", () => {
     expect(commandItems.map((i) => i.id).sort()).toEqual(Object.keys(EXPECTED).sort());
-    expect(SLASH_ITEMS.filter((item) => item.run).map((i) => i.id).sort()).toEqual(["agent", "comment", "image", "link"]);
+    expect(SLASH_ITEMS.filter((item) => item.run).map((i) => i.id).sort()).toEqual(["agent", "card", "comment", "image", "link"]);
   });
 
   it.each(commandItems.map((item) => [item.id, item] as const))("%s is one undo step and leaves the typed query as its own", (id, item) => {
@@ -492,7 +492,7 @@ describe("slash menu undo", () => {
       view,
       () => {
         docWhenOpened = ytext.toString();
-        agent.run!({ view, where: { inTable: false, canComment: true }, openImage: () => {}, openLink: () => {}, startComment: () => {}, connectAgent: () => opened++ }, "");
+        agent.run!({ view, where: { inTable: false, canComment: true }, openImage: () => {}, openCard: () => {}, openLink: () => {}, startComment: () => {}, connectAgent: () => opened++ }, "");
       },
       undoManager,
     );

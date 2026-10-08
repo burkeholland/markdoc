@@ -708,6 +708,61 @@ export const showLinkAsCard: Command = (state, dispatch) => {
   return true;
 };
 
+/**
+ * Insert → "Video or post from a link": a card for `url` as a block of its own. An empty top-level
+ * paragraph (the line the slash menu was opened on) becomes the card; otherwise the card goes after the
+ * top-level block the selection ends in. Writing continues in a new paragraph below it. One step, so
+ * one undo. A link that is not on the list inserts nothing.
+ */
+export function insertLinkCard(url: string): Command {
+  return (state, dispatch) => {
+    if (!matchLinkCard(url)) return false;
+    if (dispatch) {
+      const { $to } = state.selection;
+      const tr = state.tr;
+      const card = schema.nodes.link_card.create({ url });
+      const atEmptyParagraph = $to.depth === 1 && $to.parent.type === schema.nodes.paragraph && $to.parent.content.size === 0;
+      let pos: number;
+      if (atEmptyParagraph) {
+        pos = $to.before(1);
+        tr.replaceWith(pos, pos + $to.parent.nodeSize, card);
+      } else {
+        // Depth 0: a whole top-level block is selected (a card, a rule), and the selection ends right after it.
+        pos = $to.depth === 0 ? $to.pos : $to.after(1);
+        tr.insert(pos, card);
+      }
+      tr.insert(pos + card.nodeSize, schema.nodes.paragraph.create());
+      tr.setSelection(TextSelection.create(tr.doc, pos + card.nodeSize + 1));
+      dispatch(tr.scrollIntoView());
+    }
+    return true;
+  };
+}
+
+/**
+ * Enter at the end of a top-level paragraph that is nothing but a known link (#2317): the line splits as
+ * usual, then the link becomes a card. Two steps, so the first undo gives the text link back and the caret
+ * stays on the new line. `isolate` ends the undo step before, between and after. Only with the setting on
+ * and not while suggesting (the caller checks both).
+ */
+export function cardOnEnter(enter: Command, isolate: () => void): Command {
+  return (state, dispatch, view) => {
+    const { selection } = state;
+    const paragraph = selection.empty ? cardLinkParagraph(state) : null;
+    if (!paragraph || selection.$from.parentOffset !== paragraph.node.content.size) return false;
+    if (!dispatch || !view) return true;
+    isolate();
+    if (!enter(view.state, view.dispatch, view)) return false;
+    isolate();
+    const typed = view.state.doc.nodeAt(paragraph.pos);
+    // The split left the link where it was. If anything else happened (another rule took the key), leave it.
+    if (!typed || cardLinkOf(typed) !== paragraph.url) return true;
+    view.dispatch(view.state.tr.replaceWith(paragraph.pos, paragraph.pos + typed.nodeSize, schema.nodes.link_card.create({ url: paragraph.url })).scrollIntoView());
+    isolate();
+    return true;
+  };
+}
+
 /** Tab with a card selected moves focus into the card: its link first, then "Show as text". Escape there comes back (`nodeviews.ts`). */
 export const focusSelectedCard: Command = (state, _dispatch, view) => {
   const card = selectedCard(state);

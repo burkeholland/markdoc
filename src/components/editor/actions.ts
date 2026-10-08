@@ -6,6 +6,7 @@ import { TextSelection } from "prosemirror-state";
 import type { CollabSession, Surface } from "@/editor/collab/session";
 import type { CodeApi } from "@/editor/codemirror/api";
 import { schema } from "@/editor/markdown/schema";
+import { matchLinkCard } from "@/editor/markdown/link-cards";
 import * as pm from "@/editor/prosemirror/commands";
 import { findParentNode } from "@/editor/prosemirror/utils";
 
@@ -46,7 +47,7 @@ export const EMPTY_FORMAT: FormatState = {
 
 export type TableCommand = "rowBefore" | "rowAfter" | "colBefore" | "colAfter" | "deleteRow" | "deleteColumn" | "deleteTable";
 
-export type DialogKind = "link" | "image" | "table" | "share" | "publish" | "shortcuts" | "versionName" | null;
+export type DialogKind = "link" | "image" | "card" | "table" | "share" | "publish" | "shortcuts" | "versionName" | null;
 
 /**
  * Toolbar and shortcut actions that apply to whichever surface the user is
@@ -124,6 +125,20 @@ export class EditorActions {
   showCard(as: "text" | "card") {
     if (!this.guard()) return;
     this.runPm(as === "text" ? pm.showSelectedCardAsText : pm.showLinkAsCard);
+    this.discrete();
+  }
+
+  /**
+   * Insert → "Video or post from a link" (#2317): a card for a link on the list, as a block of its own, in
+   * whichever pane is active. The Markdown pane gets the bare link on a line of its own, which is the card.
+   * A link that is not on the list inserts nothing. The person's setting does not apply: this is asked for.
+   */
+  insertCard(url: string) {
+    if (!this.guard() || !matchLinkCard(url)) return;
+    const a = this.active;
+    if (!a) return;
+    if (a.kind === "code") return void a.api.commands.insertBlock(a.view, url);
+    this.runPm(pm.insertLinkCard(url));
     this.discrete();
   }
 
