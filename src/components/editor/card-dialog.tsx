@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useId, useLayoutEffect, useRef, useState } from "react";
+import { memo, useId, useRef, useState } from "react";
 import { Dialog, DialogContent } from "@/components/ui/primitives";
 import { cardProviderList, matchLinkCard } from "@/editor/markdown/link-cards";
 
@@ -31,11 +31,8 @@ export const CardDialog = memo(function CardDialog({ open, onOpenChange, onSubmi
     draft = closedDraft(open);
     setDraft(draft);
   }
-  // The link the Insert button accepted, kept until the dialog has closed. A new opening starts with none.
+  // The link the Insert button accepted, kept until the dialog has closed (and taken out there, so it is used once).
   const accepted = useRef<string | null>(null);
-  useLayoutEffect(() => {
-    if (open) accepted.current = null;
-  }, [open]);
   const sites = cardProviderList();
   const link = draft.link.trim();
 
