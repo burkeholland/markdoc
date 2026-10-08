@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { devices, type Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
-import { codeText, createDocument, mintToken, openDocument, setTheme, shareWith, signIn, uniqueLogin, type MintedToken } from "./helpers";
+import { codeText, createDocument, mintToken, openDocument, setTheme, shareWith, signIn, uniqueLogin, waitForHydration, type MintedToken } from "./helpers";
 import { CARD_FRAME_SOURCES, expectOnlyCardFrames, frameAttempts, frameElements, standInForOtherSites, TWEET, TWEET_FRAME, VIDEO, VIDEO_FRAME } from "./link-card-helpers";
 
 /**
@@ -300,7 +300,56 @@ test.describe("link card frames (#2317)", () => {
     expect(sites.refused).toEqual([]);
   });
 
-  test("the browser refuses a frame to any other site on a document page, and every frame on other pages", async ({ browser, baseURL }) => {
+  test("a document opened from the dashboard without a page load loads its frames; so does the next one after going back", async ({ browser, baseURL }) => {
+    const user = await signIn(browser, uniqueLogin("frames-opened"));
+    const sites = await standInForOtherSites(user.context, baseURL!);
+    const { page } = user;
+    type Marked = { samePage?: boolean; refused?: string[] };
+    // What the browser refuses by policy is written down from the first script of the page.
+    await page.addInitScript(() => {
+      const marked = window as unknown as Marked;
+      marked.refused = [];
+      document.addEventListener("securitypolicyviolation", (event) => marked.refused!.push(`${event.effectiveDirective} ${event.blockedURI}`));
+    });
+    const first = await createDocument(page, DOC, "Opened from the dashboard");
+    const second = await createDocument(page, `# Second\n\n${MANY[0]}\n`, "Opened next");
+
+    // The dashboard is the page that is loaded. Its policy is the one the editor then runs under.
+    const response = await page.goto("/");
+    // The click must be the app's own navigation, so the page is hydrated first. A mark on this page's
+    // window then proves it: a page load would take the mark away.
+    await waitForHydration(page);
+    await page.evaluate(() => {
+      (window as unknown as Marked).samePage = true;
+    });
+    await page.locator(`a[href="/d/${first}"]`).first().click();
+    await page.waitForURL(`**/d/${first}`);
+    await expect(cards(page)).toHaveCount(2);
+    await expectOnlyCardFrames(page, [TWEET_FRAME, VIDEO_FRAME]);
+    // Loaded, not only made: the provider's page (here the stand-in) is in each frame.
+    await expect(page.frameLocator('.md-rich iframe[src^="https://platform.twitter.com/"]').locator("#address")).toHaveText(TWEET_FRAME);
+    await expect(page.frameLocator('.md-rich iframe[src^="https://www.youtube-nocookie.com/"]').locator("#address")).toHaveText(VIDEO_FRAME);
+    expect(new Set(sites.frames)).toEqual(new Set([TWEET_FRAME, VIDEO_FRAME]));
+
+    // Back to the documents and into another one, still without a page load.
+    await page.getByRole("link", { name: "Back to documents" }).click();
+    await page.waitForURL((url) => url.pathname === "/");
+    await expect(page.locator("iframe")).toHaveCount(0);
+    await page.locator(`a[href="/d/${second}"]`).first().click();
+    await page.waitForURL(`**/d/${second}`);
+    await expect(cards(page)).toHaveCount(1);
+    await expectOnlyCardFrames(page, [manyFrame(0)]);
+    await expect(page.frameLocator(".md-rich iframe").locator("#address")).toHaveText(manyFrame(0));
+    expect(sites.frames).toContain(manyFrame(0));
+
+    const marked = await page.evaluate(() => ({ samePage: (window as unknown as Marked).samePage, refused: (window as unknown as Marked).refused }));
+    expect(marked.samePage, "the same page all along: no page load").toBe(true);
+    expect(marked.refused).toEqual([]);
+    expect(response?.headers()["content-security-policy"]).toBe(`frame-ancestors 'none'; ${CARD_FRAME_SOURCES}`);
+    expect(sites.refused).toEqual([]);
+  });
+
+  test("the browser refuses a frame to any other site and to the app itself, on a document page and on every other page", async ({ browser, baseURL }) => {
     const user = await signIn(browser, uniqueLogin("frames-policy"));
     const sites = await standInForOtherSites(user.context, baseURL!);
     const { page } = user;
@@ -335,10 +384,13 @@ test.describe("link card frames (#2317)", () => {
       const result = await tryFrame(address);
       expect(result.directive, address).toBe("frame-src");
     }
-    for (const path of ["/", "/settings"]) {
+    // Every page has the same list (a document is opened from the dashboard without a page load), and the
+    // list holds the card hosts only: another site, an inline page and the app itself are refused everywhere.
+    for (const path of ["/", "/settings", `/d/${id}`, `/p/${id}`]) {
       const response = await page.goto(path);
-      expect(response?.headers()["content-security-policy"], path).toBe("frame-ancestors 'none'; frame-src 'none'");
-      expect((await tryFrame(VIDEO_FRAME)).directive, path).toBe("frame-src");
+      expect(response?.headers()["content-security-policy"], path).toBe(`frame-ancestors 'none'; ${CARD_FRAME_SOURCES}`);
+      expect((await tryFrame("https://evil.example/frame")).directive, path).toBe("frame-src");
+      expect((await tryFrame("data:text/html,<p>inline</p>")).directive, path).toBe("frame-src");
       expect((await tryFrame(`${new URL(baseURL!).origin}/login`)).directive, `${path}: the app itself`).toBe("frame-src");
     }
     // None of the refused frames was asked for.

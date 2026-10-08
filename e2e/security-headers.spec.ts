@@ -10,8 +10,8 @@ import { createDocument, signIn } from "./helpers";
  * `frame-ancestors <parentOrigin>` (asserted byte-for-byte in e2e/copilot-canvas.spec.ts). The e2e
  * server speaks plain HTTP, so HSTS must be absent here unless the ingress header is simulated.
  *
- * #2317: the same header says what a page may frame. A document's editor and published page may frame
- * the hosts on the link card list; every other page may frame nothing.
+ * #2317: the same header says what a page may frame: the hosts on the link card list and nothing else, on
+ * every page (a document is opened from the dashboard without a page load, under the dashboard's policy).
  */
 
 const BASELINE: Record<string, string> = {
@@ -20,7 +20,6 @@ const BASELINE: Record<string, string> = {
   "permissions-policy": "camera=(), microphone=(), geolocation=()",
 };
 const FRAME_NONE = "frame-ancestors 'none'";
-const NO_FRAMES = "frame-src 'none'";
 const CARD_FRAMES = "frame-src https://www.youtube-nocookie.com https://platform.twitter.com";
 const HSTS = "max-age=31536000";
 
@@ -30,9 +29,9 @@ function expectBaseline(res: APIResponse, label: string) {
   expect(headers["strict-transport-security"], `${label}: no HSTS over plain http`).toBeUndefined();
 }
 
-function expectPage(res: APIResponse, label: string, frames = NO_FRAMES) {
+function expectPage(res: APIResponse, label: string) {
   expectBaseline(res, label);
-  expect(res.headers()["content-security-policy"], `${label}: frame policy`).toBe(`${FRAME_NONE}; ${frames}`);
+  expect(res.headers()["content-security-policy"], `${label}: frame policy`).toBe(`${FRAME_NONE}; ${CARD_FRAMES}`);
 }
 
 function expectNotPage(res: APIResponse, label: string) {
@@ -115,13 +114,13 @@ test.describe("security response headers", () => {
       for (const path of ["/", `/d/${id}`, `/p/${id}`]) {
         const res = await user.page.request.get(path);
         expect(res.status(), path).toBe(200);
-        expectPage(res, path, path === "/" ? NO_FRAMES : CARD_FRAMES);
+        expectPage(res, path);
       }
       // `?embed=1` without a valid embed cookie is not the embedded document: the page (here, for the
       // signed-in owner, the normal editor) carries 'none' and a canvas frame that lost its cookie is blocked.
       const embedWithoutCookie = await user.page.request.get(`/d/${id}?embed=1`);
       expect(embedWithoutCookie.status()).toBe(200);
-      expectPage(embedWithoutCookie, `/d/${id}?embed=1 without the embed cookie`, CARD_FRAMES);
+      expectPage(embedWithoutCookie, `/d/${id}?embed=1 without the embed cookie`);
       // /api/assets sets nosniff itself and a sandboxing CSP on SVGs: the server's nosniff must not become a
       // second value (Playwright joins duplicates with ", ") and the proxy must not replace the route's CSP.
       const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>');
