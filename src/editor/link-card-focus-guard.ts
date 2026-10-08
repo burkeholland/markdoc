@@ -109,7 +109,6 @@ if (typeof document !== "undefined") seenIn(document);
 
 interface PageGuard {
   frames: Map<HTMLIFrameElement, Guarded>;
-  seen: Seen;
   /** Where focus was before it left the page: the last element of the page that had it. */
   focused: Element | null;
   /** The frame whose cover the person just pressed, and when: that move is the person's own. */
@@ -164,7 +163,7 @@ function pageGuard(doc: Document): PageGuard | null {
   const live = liveRegion(doc);
 
   const seen = seenIn(doc);
-  const guard: PageGuard = { frames: new Map(), seen, focused: doc.activeElement, entering: null, stop: () => {} };
+  const guard: PageGuard = { frames: new Map(), focused: doc.activeElement, entering: null, stop: () => {} };
 
   const onKeyDown = () => {
     // The person is typing in the page. A pointer that rests on a frame is now invisible to the page: cover that frame.
@@ -176,16 +175,16 @@ function pageGuard(doc: Document): PageGuard | null {
       cover.className = "md-link-card-cover";
       cover.setAttribute("data-card-cover", "");
       cover.setAttribute("aria-hidden", "true");
-      const seen = (moved: PointerEvent) => {
+      const pointerSeen = (moved: PointerEvent) => {
         guarded.pointerInside = true;
         guarded.pointerAt = moved.timeStamp;
         removeCover(guarded);
       };
-      cover.addEventListener("pointermove", seen);
+      cover.addEventListener("pointermove", pointerSeen);
       cover.addEventListener("pointerdown", (pressed) => {
         // A press the page sees itself: the person goes into the frame. The press is not passed on.
         pressed.preventDefault();
-        seen(pressed);
+        pointerSeen(pressed);
         guard.entering = { frame: guarded.frame, at: pressed.timeStamp };
         guarded.frame.focus();
       });
@@ -197,7 +196,6 @@ function pageGuard(doc: Document): PageGuard | null {
       box.appendChild(cover);
     }
   };
-
 
   const onFocusIn = (event: FocusEvent) => {
     if (event.target instanceof Element && !(event.target instanceof win.HTMLIFrameElement)) guard.focused = event.target;
