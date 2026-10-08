@@ -328,6 +328,158 @@ describe("the focus guard of a card's frame (#2338)", () => {
     });
   });
 
+  describe("a finger: the page gets no pointer event on a frame for a touch", () => {
+    const press = (target: Element, kind: string, ms: number) => target.dispatchEvent(at(new PointerEvent("pointerdown", { pointerType: kind, bubbles: true, cancelable: true }), ms));
+
+    it("after a touch press in the page, every move into a frame is given back, also long after the last key, and such a move never counts", () => {
+      const { frame, box, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      key(editor, "a", 1000);
+      for (let tap = 0; tap < CARD_FOCUS_TRIES * 3; tap++) {
+        grab(frame, 1000 + CARD_FOCUS_QUIET_MS + tap * 700);
+        expect(document.activeElement).toBe(editor);
+        expect(box.hasAttribute("data-has-keyboard")).toBe(false);
+      }
+      expect(turnOff).not.toHaveBeenCalled();
+      expect(live()!.textContent).toBe("");
+    });
+
+    it("nobody has typed at all: given back, not counted", () => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      for (let tap = 0; tap < CARD_FOCUS_TRIES + 1; tap++) grab(frame, 600 + tap * 10);
+      expect(document.activeElement).toBe(editor);
+      expect(turnOff).not.toHaveBeenCalled();
+    });
+
+    it("focus goes back without scrolling the page", () => {
+      const { frame } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      const focus = vi.spyOn(editor, "focus");
+      grab(frame, 5000);
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    });
+
+    it(`a move counts when a key was typed in the last ${CARD_FOCUS_QUIET_MS} ms: ${CARD_FOCUS_TRIES} in a row turn the card off`, () => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      for (let n = 0; n < CARD_FOCUS_TRIES; n++) {
+        key(editor, "a", 1000 + n * 100);
+        expect(turnOff).not.toHaveBeenCalled();
+        grab(frame, 1050 + n * 100);
+        expect(document.activeElement).toBe(editor);
+      }
+      expect(turnOff).toHaveBeenCalledTimes(1);
+      expect(live()!.textContent).toBe(CARD_TURNED_OFF_TEXT);
+    });
+
+    it("the window is the same second: one millisecond before its end a move counts, at its end it does not", () => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      key(editor, "a", 1000);
+      for (let n = 0; n < CARD_FOCUS_TRIES; n++) grab(frame, 1000 + CARD_FOCUS_QUIET_MS);
+      expect(turnOff).not.toHaveBeenCalled();
+      for (let n = 0; n < CARD_FOCUS_TRIES; n++) grab(frame, 1000 + CARD_FOCUS_QUIET_MS - 1);
+      expect(turnOff).toHaveBeenCalledTimes(1);
+    });
+
+    it("a move that does not count starts the count again: only moves in a row turn the card off", () => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      let now = 1000;
+      for (let round = 0; round < 4; round++) {
+        for (let n = 0; n < CARD_FOCUS_TRIES - 1; n++) {
+          key(editor, "a", now);
+          grab(frame, now + 50);
+          now += 100;
+        }
+        now += CARD_FOCUS_QUIET_MS;
+        grab(frame, now);
+        expect(document.activeElement).toBe(editor);
+      }
+      expect(turnOff).not.toHaveBeenCalled();
+    });
+
+    it("focus was not in a place where text is typed: the frame keeps the keyboard, as with a mouse", () => {
+      const { frame, box } = make();
+      button.focus();
+      press(button, "touch", 500);
+      grab(frame, 600);
+      expect(document.activeElement).toBe(frame);
+      expect(box.hasAttribute("data-has-keyboard")).toBe(true);
+    });
+
+    it("Tab from a keyboard that is attached still goes into the frame", () => {
+      const { frame } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      key(editor, "Tab", 1000);
+      grab(frame, 1010);
+      expect(document.activeElement).toBe(frame);
+    });
+
+    it("a touch press, then the mouse moves onto the frame: the rule follows the last press, so the move is still given back and not counted", () => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      key(editor, "a", 1000);
+      pointer(frame, "pointerenter", 1500);
+      for (let n = 0; n < CARD_FOCUS_TRIES + 1; n++) {
+        grab(frame, 3000 + n * 500);
+        expect(document.activeElement).toBe(editor);
+      }
+      expect(turnOff).not.toHaveBeenCalled();
+    });
+
+    it.each(["mouse", "pen"])("a touch press, then a %s press: the full rule is back (the pointer on the frame goes in; without it every move counts)", (kind) => {
+      const first = make();
+      const second = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      press(editor, kind, 600);
+      key(editor, "a", 1000);
+      pointer(first.frame, "pointerenter", 1500);
+      grab(first.frame, 3000);
+      expect(document.activeElement).toBe(first.frame);
+      editor.focus();
+      for (let n = 0; n < CARD_FOCUS_TRIES; n++) {
+        grab(second.frame, 9000 + n * 2000);
+        expect(document.activeElement).toBe(editor);
+      }
+      expect(second.turnOff).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["mouse", "pen"])("a %s press, then a touch press: the finger's rule holds (the pointer that was left on the frame no longer says the person went in, and nothing counts)", (kind) => {
+      const { frame, box, turnOff } = make();
+      editor.focus();
+      press(editor, kind, 400);
+      key(editor, "a", 1000);
+      pointer(frame, "pointerenter", 1500);
+      press(editor, "touch", 2000);
+      for (let n = 0; n < CARD_FOCUS_TRIES + 1; n++) {
+        grab(frame, 3000 + n * 500);
+        expect(document.activeElement).toBe(editor);
+        expect(box.hasAttribute("data-has-keyboard")).toBe(false);
+      }
+      expect(turnOff).not.toHaveBeenCalled();
+    });
+
+    it("the press is seen before anything in the page can keep it to itself", () => {
+      const { frame, turnOff } = make();
+      editor.addEventListener("pointerdown", (event) => event.stopPropagation());
+      editor.focus();
+      press(editor, "touch", 500);
+      for (let n = 0; n < CARD_FOCUS_TRIES; n++) grab(frame, 5000 + n);
+      expect(turnOff).not.toHaveBeenCalled();
+    });
+  });
+
   describe("the cover: the pointer rests on a frame while the person types", () => {
     it("a key typed in the page puts a see-through cover over that frame, and one only", () => {
       const { frame, box } = make();
@@ -464,11 +616,11 @@ describe("the focus guard of a card's frame (#2338)", () => {
       }
       const first = card();
       const second = card();
-      expect(added.sort()).toEqual(["document focusin", "document focusout", "document keydown", "window blur", "window focus"]);
+      expect(added.sort()).toEqual(["document focusin", "document focusout", "document keydown", "document pointerdown", "window blur", "window focus"]);
       first.stop();
       expect(removed).toEqual([]);
       second.stop();
-      expect(removed.sort()).toEqual(["document focusin", "document focusout", "document keydown", "window blur", "window focus"]);
+      expect(removed.sort()).toEqual(["document focusin", "document focusout", "document keydown", "document pointerdown", "window blur", "window focus"]);
       // A frame guarded after that starts the page's guard again.
       const third = make();
       editor.focus();
@@ -531,7 +683,7 @@ describe("the focus guard of a card's frame (#2338)", () => {
       box.remove();
       page.dispatchEvent(at(new FocusEvent("blur"), 1000));
       vi.runOnlyPendingTimers();
-      expect(removed.mock.calls.map((call) => call[0]).sort()).toEqual(["focusin", "focusout", "keydown"]);
+      expect(removed.mock.calls.map((call) => call[0]).sort()).toEqual(["focusin", "focusout", "keydown", "pointerdown"]);
       expect(frame.isConnected).toBe(false);
     });
 

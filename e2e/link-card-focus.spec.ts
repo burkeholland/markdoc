@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
-import type { Page } from "@playwright/test";
+import type { Browser, Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
-import { codeText, createDocument, focusCodeEnd, focusRichEnd, openDocument, setTheme, shareWith, signIn, uniqueLogin } from "./helpers";
+import { codeText, createDocument, devLogin, focusCodeEnd, focusRichEnd, openDocument, setTheme, shareWith, signIn, uniqueLogin } from "./helpers";
 import { TWEET, TWEET_FRAME, VIDEO, VIDEO_FRAME } from "./link-card-helpers";
 import { frameCounts, keyboardPlace, openByDashboardClick, standInWithKeyboard, takeFocusOnce } from "./link-card-focus-helpers";
 
@@ -22,6 +22,23 @@ const cover = (page: Page) => page.locator(".md-rich [data-card-cover]");
 /** The frame's stand-in has run its script (it shows its counts). */
 const frameReady = (page: Page, url: string, scope = ".md-rich") => expect(page.frameLocator(`${scope} iframe[src="${url}"]`).locator("#counts")).toContainText("keys", { timeout: 30_000 });
 const letters = (text: string, wanted: string) => Array.from(text).filter((character) => wanted.includes(character)).join("");
+/** A person on a device with a touch screen (emulated: Chromium sends touch events, there is no real finger). */
+async function signInWithTouch(browser: Browser, login: string) {
+  const context = await browser.newContext({ hasTouch: true });
+  const page = await context.newPage();
+  await devLogin(page, login);
+  await page.waitForLoadState("networkidle");
+  return { context, page, login };
+}
+/** Where the page is scrolled to and where the caret is: a tap in a player must change neither. */
+const scrollAndCaret = (page: Page) =>
+  page.evaluate(() => {
+    const selection = getSelection();
+    return {
+      scrolled: [`window ${Math.round(scrollY)}`, ...Array.from(document.querySelectorAll("*")).filter((element) => element.scrollTop > 0).map((element) => `${element.tagName}.${element.className} ${Math.round(element.scrollTop)}`)],
+      caret: selection ? `${selection.anchorNode?.textContent ?? ""} @${selection.anchorOffset}-${selection.focusOffset}` : "none",
+    };
+  });
 
 test.describe("link cards: the keyboard stays with the person (#2338)", () => {
   test("a frame that takes the keyboard by itself does not keep it: typing arrives in the document in both panes, the frame is turned off after three tries, and it can be loaded again", async ({ browser, baseURL }) => {
@@ -233,6 +250,162 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     expect(otherSites.refused).toEqual([]);
     await owner.context.close();
     await other.context.close();
+  });
+
+  test("a finger: every tap in a player lands and the keyboard, the caret and the scroll position stay with the document; only three taps in a row while typing turn the card off", async ({ browser, baseURL }) => {
+    const { page, context } = await signInWithTouch(browser, uniqueLogin("guard-touch"));
+    const sites = await standInWithKeyboard(context, baseURL!);
+    const id = await createDocument(page, DOC, "Touch");
+    await openDocument(page, id);
+    await frameReady(page, VIDEO_FRAME);
+    const play = page.frameLocator(`.md-rich iframe[src="${VIDEO_FRAME}"]`).locator("#play");
+    const inFrame = () => frameCounts(page, ".md-rich", VIDEO_FRAME);
+    await play.scrollIntoViewIfNeeded();
+    // For a touch the page is told nothing about the frame: that is why the rule for a finger is its own.
+    await page.evaluate(() => {
+      const seen: string[] = [];
+      (window as Window & { __seenOnFrame?: string[] }).__seenOnFrame = seen;
+      const element = document.querySelector('.md-rich iframe[src*="youtube"]')!;
+      for (const type of ["pointerenter", "pointerover", "pointerdown", "touchstart"]) element.addEventListener(type, () => seen.push(type));
+    });
+
+    // The person puts the caret into the document with a finger and types.
+    await page.locator(".md-rich p", { hasText: "Last paragraph" }).tap();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.type("abc", { delay: 60 });
+    // Taps on Play: right after a key, and after a pause. Never three in a row right after a key.
+    let taps = 0;
+    for (const pause of [100, 1300, 100, 100, 1300, 1300]) {
+      await page.keyboard.type("d");
+      await page.waitForTimeout(pause);
+      const before = await scrollAndCaret(page);
+      const box = (await play.boundingBox())!;
+      await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+      taps++;
+      await expect.poll(async () => (await inFrame()).clicks, { message: `tap ${taps} lands in the player` }).toBe(taps);
+      await expect.poll(() => keyboardPlace(page), { message: `tap ${taps}` }).toBe("preview");
+      expect(await scrollAndCaret(page), `tap ${taps}, ${pause} ms after a key`).toEqual(before);
+      await expect(ringed(page)).toHaveCount(0);
+      await expect(notice(page)).toHaveCount(0);
+    }
+    expect(await page.evaluate(() => (window as Window & { __seenOnFrame?: string[] }).__seenOnFrame)).toEqual([]);
+    // What is typed next is in the document, at the caret; the player got clicks and no key.
+    await page.keyboard.type("XYZ", { delay: 60 });
+    expect(await codeText(page)).toContain("Last paragraphabcddddddXYZ");
+    expect(await inFrame()).toMatchObject({ clicks: 6, keys: 0 });
+
+    // Three taps in a row, each right after a key: that is the pattern of a frame that fights for the keyboard.
+    for (let n = 0; n < 3; n++) {
+      await expect(notice(page)).toHaveCount(0);
+      await page.keyboard.type("e");
+      const box = (await play.boundingBox())!;
+      await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+      await expect.poll(() => keyboardPlace(page)).toBe("preview");
+      await page.waitForTimeout(100);
+    }
+    await expect(notice(page)).toHaveCount(1);
+    await expect(status(page)).toHaveText(TURNED_OFF);
+    expect(sites.keys).toEqual([]);
+    expect(sites.refused).toEqual([]);
+    await context.close();
+  });
+
+  test("a finger: a frame that takes the keyboard never keeps it, also when nobody types, and is turned off as soon as the person types", async ({ browser, baseURL }) => {
+    const { page, context } = await signInWithTouch(browser, uniqueLogin("guard-touch-grab"));
+    const sites = await standInWithKeyboard(context, baseURL!, (url) => (url === TWEET_FRAME ? 200 : 0));
+    const id = await createDocument(page, DOC, "Touch and a frame that grabs");
+    await openDocument(page, id);
+    await frameReady(page, TWEET_FRAME);
+    // The caret goes into the document with a finger and no key is pressed: a key would start the second in which a grab counts.
+    await page.locator(".md-rich p", { hasText: "Last paragraph" }).tap();
+    await expect.poll(() => keyboardPlace(page)).toBe("preview");
+    const textBefore = await codeText(page);
+    // Nobody types for two seconds. The frame tries five times a second; each time the keyboard comes back.
+    const grabsBefore = (await frameCounts(page, ".md-rich", TWEET_FRAME)).grabs;
+    let withFrame = 0;
+    for (let look = 0; look < 20; look++) {
+      await page.waitForTimeout(100);
+      if ((await keyboardPlace(page)).startsWith("frame")) withFrame++;
+    }
+    const idle = await frameCounts(page, ".md-rich", TWEET_FRAME);
+    expect(idle.grabs - grabsBefore).toBeGreaterThanOrEqual(5);
+    // A look can fall between a grab and the answer one task later; it must not stay there.
+    expect(withFrame, "looks that found the keyboard in the frame, of 20").toBeLessThanOrEqual(2);
+    // None of those counted: the card is still there.
+    await expect(notice(page)).toHaveCount(0);
+    await expect(frame(page, TWEET_FRAME)).toHaveCount(1);
+
+    // The person types: now each grab counts, and the third turns the frame off.
+    const typed = "abcdefghijklmnopqrstuvwxyz0123";
+    await page.keyboard.type(typed, { delay: 60 });
+    await expect(notice(page)).toHaveCount(1);
+    await expect(frame(page, TWEET_FRAME)).toHaveCount(0);
+    expect(await keyboardPlace(page)).toBe("preview");
+    const inDocument = (await codeText(page)).length - textBefore.length;
+    const inFrame = sites.keys.join("");
+    expect(inDocument + inFrame.length, `${inDocument} in the document, frame "${inFrame}"`).toBe(typed.length);
+    expect(inFrame.length, `keys that reached the frame: "${inFrame}"`).toBeLessThanOrEqual(3);
+    expect(sites.refused).toEqual([]);
+    await context.close();
+  });
+
+  test("a device with a finger and a mouse: the rule follows the last press the page saw, both ways", async ({ browser, baseURL }) => {
+    const { page, context } = await signInWithTouch(browser, uniqueLogin("guard-hybrid"));
+    const sites = await standInWithKeyboard(context, baseURL!);
+    const id = await createDocument(page, DOC, "Finger and mouse");
+    await openDocument(page, id);
+    await frameReady(page, VIDEO_FRAME);
+    const inFrame = () => frameCounts(page, ".md-rich", VIDEO_FRAME);
+    const last = page.locator(".md-rich p", { hasText: "Last paragraph" });
+    await frame(page, VIDEO_FRAME).scrollIntoViewIfNeeded();
+    const onFrame = async () => {
+      const box = (await frame(page, VIDEO_FRAME).boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height - 12, { steps: 4 });
+    };
+    const away = async () => {
+      const box = (await last.boundingBox())!;
+      await page.mouse.move(box.x + 4, box.y + box.height / 2, { steps: 2 });
+    };
+
+    // A mouse press, then the mouse comes to rest on the frame, more than a second after the last key:
+    // the full rule lets the frame have the keyboard.
+    await last.click();
+    await page.keyboard.type("a");
+    await onFrame();
+    await page.waitForTimeout(1200);
+    await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
+    await expect.poll(() => keyboardPlace(page)).toBe(`frame ${VIDEO_FRAME}`);
+    await expect(ringed(page)).toHaveCount(1);
+
+    // The same, but the last press was a finger: the page no longer trusts where the pointer is. Given back, never counted.
+    await away();
+    await last.tap();
+    await expect.poll(() => keyboardPlace(page)).toBe("preview");
+    await expect(ringed(page)).toHaveCount(0);
+    await onFrame();
+    await page.waitForTimeout(1200);
+    const grabs = (await inFrame()).grabs;
+    for (let n = 1; n <= 4; n++) {
+      await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
+      await expect.poll(async () => (await inFrame()).grabs).toBe(grabs + n);
+      await expect.poll(() => keyboardPlace(page)).toBe("preview");
+    }
+    await expect(ringed(page)).toHaveCount(0);
+    await expect(notice(page)).toHaveCount(0);
+    await expect(frame(page, VIDEO_FRAME)).toHaveCount(1);
+
+    // And back: a mouse press after the finger brings the full rule back.
+    await away();
+    await last.click();
+    await onFrame();
+    await page.waitForTimeout(1200);
+    await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
+    await expect.poll(() => keyboardPlace(page)).toBe(`frame ${VIDEO_FRAME}`);
+    await expect(ringed(page)).toHaveCount(1);
+    await expect(notice(page)).toHaveCount(0);
+    expect((await inFrame()).keys).toBe(0);
+    expect(sites.refused).toEqual([]);
+    await context.close();
   });
 
   test("where nothing is typed, a frame is left alone: the published page and a viewer's editor", async ({ browser, baseURL }) => {
