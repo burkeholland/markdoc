@@ -435,7 +435,7 @@ describe("agent events (watch)", () => {
     const long = lines(30_000, "same");
     const d = events.unifiedDiff(long, long.replace("same 15000\n", "changed 15000\n"));
     expect(d).toEqual({ diff: expect.stringContaining("-same 15000\n+changed 15000"), truncated: false });
-    expect(events.unifiedDiff(lines(20_000, "old"), lines(20_000, "new"))).toEqual({ diff: null, truncated: true });
+    expect(events.unifiedDiff(lines(3_000, "old"), lines(3_000, "new"))).toEqual({ diff: null, truncated: true });
   });
 
   it("times out with no events when nothing happens", async () => {

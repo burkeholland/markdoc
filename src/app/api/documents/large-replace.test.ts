@@ -193,8 +193,24 @@ describe("restoring a version: the same bound", () => {
   }, 120_000);
 });
 
+/**
+ * Run `fn` while `userId` holds `places` places among the large writes (the first runs, the others wait).
+ * The places are given back whatever `fn` does, so one failing test does not hold the queue for the next.
+ */
+async function whileHolding(userId: string, places: number, fn: () => Promise<void>) {
+  const turns = Array.from({ length: places }, () => largeWrites.enter(userId));
+  try {
+    await settle();
+    await fn();
+  } finally {
+    await Promise.all(turns.map(async (turn) => (await turn).release()));
+  }
+}
+
 describe("large writes take turns: two places per user, 503 with Retry-After for the third", () => {
   const large = prose(LARGE_WRITE_SIZE, 5);
+  const restore = (vid: string) =>
+    as(ana, () => version.POST(new Request(url(`versions/${vid}`), { method: "POST", body: JSON.stringify({ action: "restore" }), headers: { "Content-Type": "application/json" } }), { params: Promise.resolve({ id: docId, vid }) }));
 
   it("the numbers a client sees: a body of 200,000 bytes is large", () => {
     expect(LARGE_WRITE_SIZE).toBe(200_000);
@@ -202,19 +218,16 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
 
   it("while a user holds two places, a third large PUT is refused before anything is read or written; a small one goes through", async () => {
     await fresh("Start\n");
-    const running = await largeWrites.enter(ana.id);
-    const waiting = largeWrites.enter(ana.id);
-    await settle();
-    const refused = await put(ana, large);
-    expect(refused.status).toBe(503);
-    expect(refused.headers.get("Retry-After")).toBe("5");
-    expect(await refused.json()).toEqual({ error: "You already have 2 large document writes in progress (200,000 bytes or more each). Wait for one to finish, then try again", retryAfter: 5 });
-    expect((await read()).content).toBe("Start\n");
-    // A write below the size is not counted, queued or refused.
-    const small = await put(ana, "Start\n\nA small change.\n");
-    expect(small.status).toBe(200);
-    await running.release();
-    await (await waiting).release();
+    await whileHolding(ana.id, 2, async () => {
+      const refused = await put(ana, large);
+      expect(refused.status).toBe(503);
+      expect(refused.headers.get("Retry-After")).toBe("5");
+      expect(await refused.json()).toEqual({ error: "You already have 2 large document writes in progress (200,000 bytes or more each). Wait for one to finish, then try again", retryAfter: 5 });
+      expect((await read()).content).toBe("Start\n");
+      // A write below the size is not counted, queued or refused.
+      const small = await put(ana, "Start\n\nA small change.\n");
+      expect(small.status).toBe(200);
+    });
     // And with a place free again the same large write lands.
     const again = await put(ana, large);
     expect(again.status).toBe(200);
@@ -224,13 +237,11 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
   it("an API token of the user is the same caller as the user's session", async () => {
     await fresh("Start\n");
     const token = (await createApiToken(ana.id, "Writer")).token;
-    const running = await largeWrites.enter(ana.id);
-    const waiting = largeWrites.enter(ana.id);
-    await settle();
-    const refused = await put(ana, large, {}, {}, token);
-    expect(refused.status).toBe(503);
-    await running.release();
-    await (await waiting).release();
+    await whileHolding(ana.id, 2, async () => {
+      const refused = await put(ana, large, {}, {}, token);
+      expect(refused.status).toBe(503);
+      expect((await read()).content).toBe("Start\n");
+    });
     const landed = await put(ana, large, {}, {}, token);
     expect(landed.status).toBe(200);
   });
@@ -238,14 +249,15 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
   it("another user is not counted with this one: their large write waits its turn and lands", async () => {
     await fresh("Start\n");
     await upsertCollaborator(docId, ben.login, "editor", ana.id);
-    const running = await largeWrites.enter(ana.id);
-    const waiting = largeWrites.enter(ana.id);
-    await settle();
-    const bens = put(ben, large);
-    await settle();
-    expect(largeWrites.placesOf(ben.id)).toBe(1);
-    await running.release();
-    await (await waiting).release();
+    let bens!: Promise<Response>;
+    await whileHolding(ana.id, 2, async () => {
+      bens = put(ben, large);
+      await settle();
+      await settle();
+      // Not answered yet: it waits behind the write that runs.
+      expect(largeWrites.placesOf(ben.id)).toBe(1);
+      expect((await read()).content).toBe("Start\n");
+    });
     expect((await bens).status).toBe(200);
     expect((await read()).content === large).toBe(true);
   });
@@ -253,31 +265,27 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
   it("PATCH, suggest and restore are bounded the same way", async () => {
     await fresh("Start\n");
     const kept = await addVersion({ documentId: docId, content: large, kind: "named", title: "keep", createdBy: ana.id });
-    const running = await largeWrites.enter(ana.id);
-    const waiting = largeWrites.enter(ana.id);
-    await settle();
-    expect((await patch(ana, large)).status).toBe(503);
-    expect((await as(ana, () => (suggest.POST as Handler)(request("POST", { content: large }, "suggest"), params()))).status).toBe(503);
-    // A restore has a small body; it is sized by the version's text.
-    const restore = await as(ana, () =>
-      version.POST(new Request(url(`versions/${kept.id}`), { method: "POST", body: JSON.stringify({ action: "restore" }), headers: { "Content-Type": "application/json" } }), { params: Promise.resolve({ id: docId, vid: kept.id }) }),
-    );
-    expect(restore.status).toBe(503);
-    expect(restore.headers.get("Retry-After")).toBe("5");
-    expect((await read()).content).toBe("Start\n");
-    await running.release();
-    await (await waiting).release();
+    await whileHolding(ana.id, 2, async () => {
+      expect((await patch(ana, large)).status).toBe(503);
+      expect((await as(ana, () => (suggest.POST as Handler)(request("POST", { content: large }, "suggest"), params()))).status).toBe(503);
+      // A restore has a small body; it is sized by the version's text.
+      const refused = await restore(kept.id);
+      expect(refused.status).toBe(503);
+      expect(refused.headers.get("Retry-After")).toBe("5");
+      expect((await read()).content).toBe("Start\n");
+    });
+    // With the places free each of them lands.
+    expect((await patch(ana, large)).status).toBe(200);
+    expect((await restore(kept.id)).status).toBe(200);
+    expect((await read()).content === large).toBe(true);
   });
 
   it("a body that does not declare its size is sized by its text once it is parsed", async () => {
     await fresh("Start\n");
-    const running = await largeWrites.enter(ana.id);
-    const waiting = largeWrites.enter(ana.id);
-    await settle();
-    expect((await put(ana, large, {}, { declare: false })).status).toBe(503);
-    expect((await put(ana, "Start\n\nSmall.\n", {}, { declare: false })).status).toBe(200);
-    await running.release();
-    await (await waiting).release();
+    await whileHolding(ana.id, 2, async () => {
+      expect((await put(ana, large, {}, { declare: false })).status).toBe(503);
+      expect((await put(ana, "Start\n\nSmall.\n", {}, { declare: false })).status).toBe(200);
+    });
   });
 
   it("a caller without edit rights is refused by the access check and takes no place", async () => {
@@ -292,18 +300,19 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
   it("20 large replaces at once from one user: 2 land, 18 get the 503, the document holds one of the texts whole", async () => {
     await fresh("Start\n");
     const texts = Array.from({ length: 20 }, (_, i) => prose(LARGE_WRITE_SIZE, 100 + i));
-    // Another user's write holds the turn meanwhile, so that which of the 20 are refused does not depend on speed.
-    const other = await largeWrites.enter(ben.id);
     let answered = 0;
-    const pending = texts.map((text) =>
-      put(ana, text).then((res) => {
-        answered++;
-        return res;
-      }),
-    );
-    while (answered < 18) await settle();
-    expect(largeWrites.placesOf(ana.id)).toBe(2);
-    await other.release();
+    let pending: Promise<Response>[] = [];
+    // Another user's write holds the turn meanwhile, so that which of the 20 are refused does not depend on speed.
+    await whileHolding(ben.id, 1, async () => {
+      pending = texts.map((text) =>
+        put(ana, text).then((res) => {
+          answered++;
+          return res;
+        }),
+      );
+      while (answered < 18) await settle();
+      expect(largeWrites.placesOf(ana.id)).toBe(2);
+    });
     const answers = await Promise.all(pending);
     const statuses = answers.map((res) => res.status);
     expect(statuses.filter((s) => s === 200).length).toBe(2);
@@ -318,16 +327,17 @@ describe("a caller that goes away", () => {
 
   it("while its large write waits: 499, nothing is written, its place is free", async () => {
     await fresh("Start\n");
-    const running = await largeWrites.enter(ben.id);
-    const gone = new AbortController();
-    const pending = put(ana, large, {}, { signal: gone.signal });
-    await settle();
-    expect(largeWrites.waitingCount).toBe(1);
-    gone.abort();
-    const res = await pending;
-    expect(res.status).toBe(499);
-    expect(largeWrites.placesOf(ana.id)).toBe(0);
-    await running.release();
+    await whileHolding(ben.id, 1, async () => {
+      const gone = new AbortController();
+      const pending = put(ana, large, {}, { signal: gone.signal });
+      await settle();
+      await settle();
+      expect(largeWrites.placesOf(ana.id)).toBe(1);
+      gone.abort();
+      const res = await pending;
+      expect(res.status).toBe(499);
+      expect(largeWrites.placesOf(ana.id)).toBe(0);
+    });
     expect((await read()).content).toBe("Start\n");
   });
 
@@ -340,7 +350,6 @@ describe("a caller that goes away", () => {
     expect((await read()).content).toBe("Start\n");
   });
 });
-
 describe("PATCH /content: an append may not take the text past 2,000,000 characters", () => {
   it("exactly 2,000,000 is accepted; one more is the 400 that PUT gives a text that is too long, and nothing is appended", async () => {
     const base = prose(LARGEST - 12, 3);
