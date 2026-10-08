@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures";
 import { devices, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, devLogin, createDocument, openDocument, setTheme, focusRichEnd } from "./helpers";
+import { signIn, devLogin, createDocument, openDocument, setTheme, focusRichEnd, shareWith } from "./helpers";
 
 /**
  * Vertical rhythm of rendered Markdown (task #346, Burke #1057: "things run together in the preview").
@@ -445,6 +445,80 @@ test.describe("space below a picture (#2348)", () => {
     expect(gap.below, `"I asked" is ${gap.below?.toFixed(1)} px under the picture, a paragraph break is ${space.toFixed(1)} px`).toBeGreaterThanOrEqual(space - ROUNDING);
     expect(gap.below).toBeLessThanOrEqual(space + ROUNDING);
     await context.close();
+  });
+
+  test("visual pane: another person's caret right after a picture moves nothing", async ({ browser }) => {
+    const alice = await signIn(browser, "picture-gap-alice");
+    const bob = await signIn(browser, "picture-gap-bob");
+    const doc = [
+      "First paragraph.",
+      "",
+      "Second paragraph.",
+      "",
+      `![alone](${PICTURE})`,
+      "",
+      "After the picture.",
+      "",
+      `[![linked-alone](${PICTURE})](https://example.com/)`,
+      "",
+      "After the linked picture.",
+      "",
+      `![typed-after](${PICTURE})`,
+      "I asked",
+      "",
+      "The end.",
+      "",
+    ].join("\n");
+    const id = await createDocument(alice.page, doc, "Picture and a second caret");
+    await shareWith(alice.page, id, "picture-gap-bob", "editor");
+    await openDocument(alice.page, id);
+    await openDocument(bob.page, id);
+    await expect(alice.page.locator(".md-rich img[alt='typed-after']")).toBeVisible();
+    const space = await paragraphSpace(alice.page, ".md-rich");
+
+    // What Alice sees: the picture's bottom edge -> the top of the paragraph after the picture's paragraph.
+    const underPicture = (alt: string) =>
+      alice.page.locator(`.md-rich img[alt='${alt}']`).evaluate((img) => img.closest(".md-rich > p")!.nextElementSibling!.getBoundingClientRect().top - img.getBoundingClientRect().bottom);
+    const bobsCaretNextTo = (alt: string) => alice.page.locator(".md-rich > p", { has: alice.page.locator(`img[alt='${alt}']`) }).locator(".md-remote-caret");
+    /** Bob's caret to the end of the paragraph before `next`: the start of `next`, one step left. */
+    const bobStepsBackFrom = async (next: string) => {
+      await bob.page.locator(".md-rich > p", { hasText: next }).click({ position: { x: 4, y: 8 } });
+      await bob.page.keyboard.press("Home");
+      await bob.page.keyboard.press("ArrowLeft");
+    };
+
+    // A picture that ends its paragraph: Bob's caret right after it (between the picture and the trailing
+    // break) must not bring the picture's margin back, or everything below jumps for Alice.
+    for (const [alt, next] of [
+      ["alone", "After the picture."],
+      ["linked-alone", "After the linked picture."],
+    ] as const) {
+      const before = await underPicture(alt);
+      await bobStepsBackFrom(next);
+      await expect(bobsCaretNextTo(alt), `Bob's caret is right after "${alt}"`).toHaveCount(1);
+      const gap = (await pictureGaps(alice.page, ".md-rich"))[alt];
+      expect(gap.marginBottom, `"${alt}" ends its paragraph: Bob's caret after it adds no margin`).toBe(0);
+      const now = await underPicture(alt);
+      expect(Math.abs(now - before), `under "${alt}": ${before.toFixed(1)} px without Bob's caret, ${now.toFixed(1)} px with it`).toBeLessThan(ROUNDING);
+    }
+
+    // Words after the picture, and Bob's caret at the end of those words: the words keep their space.
+    await bobStepsBackFrom("The end.");
+    await expect(bobsCaretNextTo("typed-after"), "Bob's caret is at the end of the words after the picture").toHaveCount(1);
+    const typed = (await pictureGaps(alice.page, ".md-rich"))["typed-after"];
+    expect(typed.below, `"I asked" is ${typed.below?.toFixed(1)} px under the picture with Bob's caret after it, a paragraph break is ${space.toFixed(1)} px`).toBeGreaterThanOrEqual(space - ROUNDING);
+    expect(typed.below).toBeLessThanOrEqual(space + ROUNDING);
+
+    // The same with Bob's caret between the picture and the words (" I asked": the line break and 7 letters).
+    for (let i = 0; i < 8; i++) await bob.page.keyboard.press("ArrowLeft");
+    await expect
+      .poll(() => alice.page.locator(".md-rich img[alt='typed-after']").evaluate((img) => (img.nextSibling instanceof HTMLElement ? img.nextSibling.className : "words")), { message: "Bob's caret is the node right after the picture" })
+      .toContain("md-remote-caret");
+    const between = (await pictureGaps(alice.page, ".md-rich"))["typed-after"];
+    expect(Math.abs(between.marginBottom - space), `words follow the picture and Bob's caret: the picture keeps ${between.marginBottom.toFixed(1)} px, a paragraph break is ${space.toFixed(1)} px`).toBeLessThan(ROUNDING);
+
+    await alice.context.close();
+    await bob.context.close();
   });
 
   test("published page /p/<id>: the same space under a picture", async ({ browser }) => {

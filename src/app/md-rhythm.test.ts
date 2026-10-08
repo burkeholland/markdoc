@@ -112,6 +112,11 @@ describe("space below a picture (Burke #2348)", () => {
     expect(hasRule(".md-rich > p img:is(.ProseMirror-separator, :has(+ .ProseMirror-separator))", "margin-bottom", /^0$/)).toBe(true);
   });
 
+  it("gives the margin up when another person's caret sits right after a picture that ends its paragraph", () => {
+    expect(hasRule(".md-rich > p img:has(+ .md-remote-caret[data-after-picture])", "margin-bottom", /^0$/)).toBe(true);
+    expect(hasRule(".md-rich > p > a:has(+ .md-remote-caret[data-after-picture]) > img", "margin-bottom", /^0$/)).toBe(true);
+  });
+
   it("is the only margin-bottom on a picture: nothing for a picture in a list item, a quote or a table cell", () => {
     const others = selectorRules.filter((r) => declares(r.body, "margin-bottom") && subjects(r.prelude).some((s) => /(^|[\s>])img\b/.test(s) && /\.(md-rich|reader-body)\b/.test(s)));
     expect(others.flatMap((r) => subjects(r.prelude))).toEqual([
@@ -120,6 +125,8 @@ describe("space below a picture (Burke #2348)", () => {
       ":is(.md-rich, .reader-body) > p img:has(+ br)",
       ":is(.md-rich, .reader-body) > p > a:has(+ br) > img:last-child",
       ".md-rich > p img:is(.ProseMirror-separator, :has(+ .ProseMirror-separator))",
+      ".md-rich > p img:has(+ .md-remote-caret[data-after-picture])",
+      ".md-rich > p > a:has(+ .md-remote-caret[data-after-picture]) > img",
     ]);
   });
 });
