@@ -167,11 +167,10 @@ test.describe("slash command menu", () => {
  * in the three kinds of place a caret can be in. Each test opens its own document.
  */
 const PLACES = {
-  // The click that puts the caret into the empty document leaves the pointer where the menu then opens.
   "an empty document": {
     content: "",
     go: async (page: Page) => {
-      await page.locator(".md-rich").click({ position: { x: 60, y: 90 } });
+      await page.locator(".md-rich").click();
       await expect.poll(() => pmSelectionSynced(page)).toBe(true);
     },
     // "/" + two ArrowDown: Text, Heading 1, Heading 2.
@@ -245,9 +244,18 @@ for (const [place, at] of Object.entries(PLACES)) {
       const user = await open(browser);
       const { page } = user;
       const { query, first, downTwice, made } = at.arrows;
+      // Park the pointer where a row of the menu will be: open once to measure, close, remove the text, open again.
+      await page.keyboard.type(`/${query}`);
+      const rowBox = (await item(page, downTwice).boundingBox())!;
+      await page.keyboard.press("Escape");
+      await expect(menu(page)).toHaveCount(0);
+      for (let i = 0; i <= query.length; i++) await page.keyboard.press("Backspace");
+      await page.mouse.move(rowBox.x + rowBox.width / 2, rowBox.y + rowBox.height / 2);
       await page.keyboard.type(`/${query}`);
       await expect(menu(page)).toBeVisible();
-      // The first row, also when the pointer rests on another row of the menu that just opened.
+      // The browser tells the row under the resting pointer "mouseenter" a moment after the menu appears.
+      // That must not move the highlight: Enter right after "/" has to pick the first row.
+      await page.waitForTimeout(400);
       await expect(item(page, first)).toHaveAttribute("aria-selected", "true");
       await page.keyboard.press("ArrowDown");
       await expect(item(page, first)).toHaveAttribute("aria-selected", "false");
