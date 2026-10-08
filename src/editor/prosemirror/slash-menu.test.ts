@@ -12,89 +12,54 @@ import { editablePlugin, setEditable } from "./editable";
 import {
   applySlashCommand,
   applySlashItem,
-  closeSlashMenu,
+  SLASH_KEYS,
   slashMenuPlugin,
   slashMenuState,
   type SlashKey,
-  type SlashKeyAction,
+  type SlashMenuHandlers,
   type SlashState,
 } from "./slash-menu";
-
-function exposeJsdomNativeDefaultView(ownerDocument: Document): () => void {
-  const implementationSymbol = Object.getOwnPropertySymbols(
-    ownerDocument,
-  ).find((symbol) => String(symbol) === "Symbol(impl)");
-  if (!implementationSymbol) {
-    throw new Error("Document implementation slot was not available");
-  }
-  const nativeOwnerWindow = (
-    ownerDocument as unknown as Record<
-      symbol,
-      { _globalObject: Window & typeof globalThis }
-    >
-  )[implementationSymbol]._globalObject;
-  const previous = Object.getOwnPropertyDescriptor(ownerDocument, "defaultView");
-  Object.defineProperty(ownerDocument, "defaultView", {
-    configurable: true,
-    value: nativeOwnerWindow,
-  });
-  if (ownerDocument.defaultView !== nativeOwnerWindow) {
-    throw new Error("Unable to expose jsdom's native owner window");
-  }
-  return () => {
-    if (previous) {
-      Object.defineProperty(ownerDocument, "defaultView", previous);
-    } else if (!Reflect.deleteProperty(ownerDocument, "defaultView")) {
-      throw new Error("Unable to restore jsdom's public owner window");
-    }
-  };
-}
 
 describe("slashMenuPlugin", () => {
   let ytext: Y.Text;
   let binding: MarkdownBinding;
   let view: EditorView;
   let host: HTMLDivElement;
-  let restoreOwnerWindow: () => void;
   let states: (SlashState | null)[];
   let keys: SlashKey[];
-  let enterReached: number;
+  /** What the menu answers: true = "I took the key". */
+  let menuTakesKeys: boolean;
+  /** How often a key fell through to the editor's own keymap. */
+  let editorKeys: string[];
 
-  const setup = (markdown: string) => {
+  const setup = (markdown: string, onKey: SlashMenuHandlers["onKey"] | "none" = (k) => (keys.push(k), menuTakesKeys)) => {
     const ydoc = new Y.Doc();
     ytext = ydoc.getText("content");
     ytext.insert(0, markdown);
     binding = new MarkdownBinding(ytext);
     states = [];
     keys = [];
-    enterReached = 0;
+    menuTakesKeys = true;
+    editorKeys = [];
+    const reached = (name: string) => () => {
+      editorKeys.push(name);
+      return true;
+    };
     const state = EditorState.create({
       doc: binding.initialDoc(),
       plugins: [
         editablePlugin(true),
-        slashMenuPlugin({
-          onState: (s) => states.push(s),
-          onKey: (publication) => {
-            keys.push(publication.key);
-            const action: SlashKeyAction = Object.freeze({
-              identity: Symbol("slash-key-test-action"),
-              publication,
-              key: publication.key,
-              isCurrent: () => true,
-              commit: () => {
-                if (publication.key === "Escape") closeSlashMenu(view);
-              },
-              cancel: () => {},
-            });
-            return publication.claim(action);
-          },
-        }),
+        slashMenuPlugin({ onState: (s) => states.push(s), ...(onKey === "none" ? {} : { onKey }) }),
         markdownBindingPlugin(binding),
         keymap({
-          Enter: () => {
-            enterReached += 1;
-            return true;
-          },
+          Enter: reached("Enter"),
+          "Shift-Enter": reached("Shift-Enter"),
+          Tab: reached("Tab"),
+          ArrowDown: reached("ArrowDown"),
+          ArrowUp: reached("ArrowUp"),
+          Home: reached("Home"),
+          End: reached("End"),
+          Escape: reached("Escape"),
         }),
       ],
     });
@@ -102,55 +67,20 @@ describe("slashMenuPlugin", () => {
     document.body.append(host);
     view = new EditorView(host, { state });
   };
+  const teardown = () => {
+    view.destroy();
+    binding.destroy();
+    host.remove();
+  };
 
   const select = (pos: number) => view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, pos)));
   const type = (text: string) => {
     for (const ch of text) view.dispatch(view.state.tr.insertText(ch));
   };
-  const markJsdomEventTrusted = (event: Event) => {
-    const implementation = Object.getOwnPropertySymbols(event)
-      .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
-      .find(
-        (candidate): candidate is { isTrusted: boolean } =>
-          typeof candidate === "object" &&
-          candidate !== null &&
-          "isTrusted" in candidate &&
-          candidate.isTrusted === false,
-      );
-    const descriptor = implementation
-      ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
-      : undefined;
-    if (!implementation || !descriptor?.writable) {
-      throw new Error("Unable to set jsdom's internal event trust slot");
-    }
-    Object.defineProperty(implementation, "isTrusted", {
-      configurable: true,
-      enumerable: true,
-      get: () => true,
-      set: () => undefined,
-    });
-    if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
-  };
-  const keyboardEvent = (k: string, init: KeyboardEventInit = {}) => {
-    const ownerDocument = view.dom.ownerDocument;
-    const ownerWindow = ownerDocument.defaultView;
-    if (!ownerWindow) throw new Error("Editor owner window was unavailable");
-    const event = new ownerWindow.KeyboardEvent("keydown", {
-      key: k,
-      code: k,
-      bubbles: true,
-      cancelable: true,
-      ...init,
-      view: ownerWindow,
-    });
-    if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
-    return event;
-  };
-  const key = async (k: string, init: KeyboardEventInit = {}) => {
-    const event = keyboardEvent(k, init);
-    markJsdomEventTrusted(event);
+  /** A keydown on the editor, the way a browser delivers it: nothing is awaited before the result is read. */
+  const key = (k: string, init: KeyboardEventInit = {}) => {
+    const event = new KeyboardEvent("keydown", { key: k, code: k, bubbles: true, cancelable: true, ...init });
     view.dom.dispatchEvent(event);
-    await Promise.resolve();
     return event;
   };
   const tracked = () => slashMenuState(view.state);
@@ -158,16 +88,8 @@ describe("slashMenuPlugin", () => {
   // Doc: <p>Hello</p><p>World</p>; the second paragraph starts at 8.
   const WORLD = 8;
 
-  beforeEach(() => {
-    restoreOwnerWindow = exposeJsdomNativeDefaultView(document);
-    setup("Hello\n\nWorld");
-  });
-  afterEach(() => {
-    view.destroy();
-    binding.destroy();
-    host.remove();
-    restoreOwnerWindow();
-  });
+  beforeEach(() => setup("Hello\n\nWorld"));
+  afterEach(teardown);
 
   it("activates on / at the start of a paragraph and tracks the query", () => {
     select(WORLD);
@@ -189,9 +111,7 @@ describe("slashMenuPlugin", () => {
   });
 
   it("does not activate inside a code block", () => {
-    view.destroy();
-    binding.destroy();
-    host.remove();
+    teardown();
     setup("```\nabc\n```");
     select(4); // end of "abc"
     type("/");
@@ -206,16 +126,24 @@ describe("slashMenuPlugin", () => {
     expect(tracked()).toBeNull();
   });
 
-  it("deactivates on Escape", async () => {
-    view.dom.focus();
+  it("Escape closes the menu, keeps the typed text and does not reach the editor", () => {
     select(WORLD);
     type("/h");
     expect(tracked()).toMatchObject({ query: "h" });
-    const event = await key("Escape");
+    const event = key("Escape");
     expect(event.defaultPrevented).toBe(true);
     expect(tracked()).toBeNull();
     expect(states.at(-1)).toBeNull();
     expect(view.state.doc.textContent).toBe("Hello/hWorld");
+    expect(editorKeys).toEqual([]);
+    // The menu itself is not asked: Escape closes even when no menu is mounted.
+    expect(keys).toEqual([]);
+  });
+
+  it("Escape with the menu closed is the editor's key", () => {
+    select(WORLD);
+    key("Escape");
+    expect(editorKeys).toEqual(["Escape"]);
   });
 
   it("deactivates on double space", () => {
@@ -242,50 +170,100 @@ describe("slashMenuPlugin", () => {
     expect(tracked()).toBeNull();
   });
 
-  it("routes exact native menu keys to the handler and keeps them from other keymaps while open", async () => {
-    view.dom.focus();
+  it("hands the six menu keys to the menu while it is open, and keeps them from the editor", () => {
     select(WORLD);
-    await key("Enter");
-    expect(enterReached).toBe(1);
+    key("Enter");
+    expect(editorKeys).toEqual(["Enter"]);
     type("/");
-    for (const handled of ["ArrowDown", "ArrowUp", "Home", "End", "Enter", "Tab"] as const) {
-      expect((await key(handled)).defaultPrevented).toBe(true);
+    for (const handled of SLASH_KEYS) {
+      expect(key(handled).defaultPrevented, handled).toBe(true);
     }
-    expect(keys).toEqual(["ArrowDown", "ArrowUp", "Home", "End", "Enter", "Tab"]);
-    expect(enterReached).toBe(1);
-    expect((await key("a")).defaultPrevented).toBe(false);
+    expect(keys).toEqual(["ArrowUp", "ArrowDown", "Home", "End", "Enter", "Tab"]);
+    expect(editorKeys).toEqual(["Enter"]);
+    expect(key("a").defaultPrevented).toBe(false);
+    expect(keys).toHaveLength(6);
   });
 
-  it("rejects modified, repeated, composing, untrusted, and replayed menu keys", async () => {
-    view.dom.focus();
+  // #2334: the menu used to be asked in a microtask, after the browser had moved on. The menu must get
+  // the key while the keydown is still at the editor, so what it does is done when a later listener runs.
+  it("asks the menu during the keydown itself, before the event reaches the next listener", () => {
+    teardown();
+    const seen: { key: SlashKey; currentTarget: EventTarget | null; phase: number }[] = [];
+    setup("Hello\n\nWorld", (k) => {
+      const event = window.event as KeyboardEvent;
+      seen.push({ key: k, currentTarget: event.currentTarget, phase: event.eventPhase });
+      return true;
+    });
     select(WORLD);
     type("/");
-    const selection = view.state.selection;
-    for (const init of [
-      { altKey: true },
-      { ctrlKey: true },
-      { metaKey: true },
-      { shiftKey: true },
-      { repeat: true },
-      { isComposing: true },
-    ]) {
-      expect((await key("End", init)).defaultPrevented).toBe(false);
+    let seenAtDocument = -1;
+    const later = () => {
+      seenAtDocument = seen.length;
+    };
+    document.addEventListener("keydown", later);
+    try {
+      key("Enter");
+    } finally {
+      document.removeEventListener("keydown", later);
     }
-    const untrusted = keyboardEvent("End");
-    view.dom.dispatchEvent(untrusted);
-    await Promise.resolve();
-    expect(untrusted.defaultPrevented).toBe(false);
+    expect(seenAtDocument).toBe(1);
+    expect(seen).toEqual([{ key: "Enter", currentTarget: view.dom, phase: Event.AT_TARGET }]);
+  });
 
-    const accepted = keyboardEvent("End");
-    markJsdomEventTrusted(accepted);
-    view.dom.focus();
-    view.dom.dispatchEvent(accepted);
-    await Promise.resolve();
-    expect(accepted.defaultPrevented).toBe(true);
-    view.dom.dispatchEvent(accepted);
-    await Promise.resolve();
-    expect(view.state.selection).toBe(selection);
-    expect(keys).toEqual(["End"]);
+  it.each([{ altKey: true }, { ctrlKey: true }, { metaKey: true }, { shiftKey: true }])("leaves a key with %o to the editor", (modifier) => {
+    select(WORLD);
+    type("/");
+    for (const handled of [...SLASH_KEYS, "Escape"]) key(handled, modifier);
+    expect(keys).toEqual([]);
+    expect(tracked()).not.toBeNull();
+  });
+
+  it("Shift+Enter with the menu open reaches the editor's own Shift-Enter", () => {
+    select(WORLD);
+    type("/");
+    key("Enter", { shiftKey: true });
+    expect(editorKeys).toEqual(["Shift-Enter"]);
+    expect(keys).toEqual([]);
+  });
+
+  it("a key the menu does not take goes on to the editor", () => {
+    select(WORLD);
+    type("/");
+    menuTakesKeys = false;
+    for (const handled of SLASH_KEYS) key(handled);
+    expect(keys).toEqual([...SLASH_KEYS]);
+    expect(editorKeys).toEqual([...SLASH_KEYS]);
+  });
+
+  it("without a menu the keys stay with the editor, and Escape still closes", () => {
+    teardown();
+    setup("Hello\n\nWorld", "none");
+    select(WORLD);
+    type("/");
+    key("Enter");
+    key("ArrowDown");
+    expect(editorKeys).toEqual(["Enter", "ArrowDown"]);
+    expect(key("Escape").defaultPrevented).toBe(true);
+    expect(tracked()).toBeNull();
+  });
+
+  it("with the menu closed no key is handed to the menu", () => {
+    select(WORLD);
+    for (const handled of SLASH_KEYS) key(handled);
+    expect(keys).toEqual([]);
+    expect(editorKeys).toEqual([...SLASH_KEYS]);
+  });
+
+  it("tells the menu about each change of the query once, and null when the editor goes away", () => {
+    select(WORLD);
+    type("/he");
+    expect(states.map((s) => s?.query)).toEqual(["", "h", "he"]);
+    // A transaction that changes nothing for the menu is not announced again.
+    view.dispatch(view.state.tr.setMeta("noop", true));
+    expect(states).toHaveLength(3);
+    teardown();
+    expect(states.at(-1)).toBeNull();
+    setup("Hello\n\nWorld");
   });
 
   it("applying a command removes the /query text and runs it in the same transaction", () => {
