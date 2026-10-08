@@ -203,9 +203,10 @@ export function cachedCleanText(docId: string, hash: string): string | null {
 
 /**
  * Most changed lines (removed and added counted together) a diff is worked out for. The line diff's time
- * grows with the square of that count: two texts of 22,000 lines with no line in common kept the server's
- * one thread for minutes, and anybody who may write could ask for it with an old hash (#2341). Up to 1,000
- * it takes about 150 ms on a busy machine. A diff of more changed lines would be cut to `DIFF_MAX_LINES` anyway.
+ * grows with the square of that count: for two texts of 2,000,000 characters with no line in common the
+ * server's one thread gave no answer in 30 s (the run was stopped then), and anybody who may write could ask
+ * for it with an old hash, an agent's watch with a read token too (#2341). Up to 1,000 it took about 150 ms
+ * on a machine at full load. A diff of more changed lines would be cut to `DIFF_MAX_LINES` anyway.
  */
 export const DIFF_MAX_CHANGED_LINES = 1_000;
 

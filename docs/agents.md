@@ -346,7 +346,7 @@ So send back the text you read with only your changes in it, and pass `ifContent
 
 #### Large writes
 
-A write is large when its request body is 200,000 bytes or more (`PUT /content`, `PATCH /content`, `POST /suggest`), or when the version it restores has 200,000 characters or more. Smaller writes are never counted or refused.
+A write is large when its request body is 200,000 bytes or more (`PUT /content`, `PATCH /content`, `POST /suggest`), or when the version it restores has 200,000 characters or more. A body that does not declare its size (no `Content-Length`) is sized by its text instead: 200,000 characters of `content` or `append`. Smaller writes are never counted or refused.
 
 - One large write runs at a time on the server. Up to 8 more wait for their turn, at most 30 s.
 - One user holds at most 2 places, running and waiting together. A browser session and every API token of that user count as the same user.

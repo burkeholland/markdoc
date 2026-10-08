@@ -3,9 +3,9 @@
  *
  * A write of a whole document costs time in proportion to its size on the one thread that serves every
  * request: the body is parsed, the text hashed, the shared document changed and encoded, and all of it
- * stored. For 2,000,000 characters that is a few hundred milliseconds even when nothing goes wrong, and
- * 20 of them at once used to run back to back. So a write is LARGE from `LARGE_WRITE_SIZE` on, and large
- * writes are bounded three ways:
+ * stored. For 2,000,000 characters that was 0.5 to 2.7 s on a build with the embedded database even with
+ * the diff bounded, and 20 of them at once used to run back to back. So a write is LARGE from
+ * `LARGE_WRITE_SIZE` on, and large writes are bounded three ways:
  *
  * - One runs at a time. Between two of them the server steps aside (`stepAside`), so other requests are
  *   answered in between.
@@ -41,7 +41,7 @@ export const LARGE_WRITE_MAX_WAITING = 8;
 export const LARGE_WRITE_MAX_PER_CALLER = 2;
 /** Longest one large write waits for its turn before it is refused. */
 export const LARGE_WRITE_QUEUE_WAIT_MS = 30_000;
-/** `Retry-After`, in seconds, of a refusal. A large write takes about a second, so the queue is soon shorter. */
+/** `Retry-After`, in seconds, of a refusal. A large write took 0.5 to 2.7 s when measured, so the queue is soon shorter. */
 export const LARGE_WRITE_RETRY_AFTER_SECONDS = 5;
 /** Time after which a caller's past use of the turn counts half. */
 export const LARGE_WRITE_USAGE_HALF_LIFE_MS = 60_000;
