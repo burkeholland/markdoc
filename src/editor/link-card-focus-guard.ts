@@ -311,9 +311,9 @@ export function guardCardFrame(frame: HTMLIFrameElement, turnOff: () => void): (
     guarded.pointerInside = true;
     guarded.pointerAt = event.timeStamp;
   };
+  // (The cover going on under the pointer also fires this. Nothing depends on it: while the cover is on,
+  // the cover itself says where the pointer is.)
   const onLeave = () => {
-    // The cover going on under the pointer also counts as leaving the frame. The cover then says when the pointer has gone.
-    if (guarded.cover) return;
     guarded.pointerInside = false;
   };
   frame.addEventListener("pointerenter", onEnter);

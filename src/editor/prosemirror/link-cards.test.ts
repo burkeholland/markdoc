@@ -861,6 +861,21 @@ describe("link cards in the rich pane (#2317)", () => {
       expect(text()).toBe(`Intro\n\n${TWEET}\n\n${VIDEO}`);
     });
 
+    it("a frame that was turned off gives its place among the 20 back: the next card loads by itself", () => {
+      const links = Array.from({ length: MAX_CARD_FRAMES }, (_, i) => `https://x.com/jack/status/${i + 1}`);
+      const { view, cards, session } = open(links.join("\n\n"));
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      expect(view.dom.querySelectorAll("iframe")).toHaveLength(MAX_CARD_FRAMES);
+      typingPlace();
+      for (let n = 0; n < 3; n++) grab(cards()[0].querySelector("iframe")!);
+      expect(cards()[0].querySelector(".md-link-card-off")).not.toBeNull();
+      expect(view.dom.querySelectorAll("iframe")).toHaveLength(MAX_CARD_FRAMES - 1);
+      session.ytext.insert(session.ytext.length, `\n\n${VIDEO}`);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      expect(cards()[MAX_CARD_FRAMES].querySelector("iframe")).not.toBeNull();
+      expect(view.dom.querySelectorAll('[data-testid="link-card-load"]')).toHaveLength(0);
+    });
+
     it("the editor leaves the button's keys and clicks alone, and Escape on it goes back to the card", () => {
       const { view, cards, key } = open(`${TWEET}\n\nAfter`);
       vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);

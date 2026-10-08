@@ -153,6 +153,20 @@ describe("the focus guard of a card's frame (#2338)", () => {
       expect(document.activeElement).toBe(field);
     });
 
+    it("the window is asked to take the keyboard back, and then the place where the person was", () => {
+      const { frame } = make();
+      editor.focus();
+      const order: string[] = [];
+      vi.spyOn(page, "focus").mockImplementation(() => void order.push("window"));
+      const original = editor.focus.bind(editor);
+      vi.spyOn(editor, "focus").mockImplementation((options) => {
+        order.push("editor");
+        original(options);
+      });
+      grab(frame, 1000);
+      expect(order).toEqual(["window", "editor"]);
+    });
+
     it("the answer waits for the browser to finish the move: nothing happens inside the blur event itself", () => {
       const { frame } = make();
       editor.focus();
@@ -284,6 +298,7 @@ describe("the focus guard of a card's frame (#2338)", () => {
       ["a Tab that is too old", () => {}, "Tab", {}, 251],
       ["Ctrl+Tab", () => {}, "Tab", { ctrlKey: true }, 10],
       ["Alt+Tab", () => {}, "Tab", { altKey: true }, 10],
+      ["Meta+Tab (Cmd+Tab)", () => {}, "Tab", { metaKey: true }, 10],
       ["another key", () => {}, "Enter", {}, 10],
     ])("not: %s", (_name, prepare, name, init, later) => {
       const { frame } = make();
@@ -760,6 +775,34 @@ describe("the focus guard of a card's frame (#2338)", () => {
       vi.runOnlyPendingTimers();
       expect(document.activeElement).toBe(frame);
       expect(box.hasAttribute("data-has-keyboard")).toBe(true);
+    });
+
+    it("that press is used up by the move it made: the frame's script cannot use it a moment later", () => {
+      const { frame, box } = make();
+      editor.focus();
+      pointer(frame, "pointerenter", 1000);
+      key(editor, "a", 2000);
+      pointer(cover(box)!, "pointerdown", 2100);
+      page.dispatchEvent(at(new FocusEvent("blur"), 2101));
+      vi.runOnlyPendingTimers();
+      expect(document.activeElement).toBe(frame);
+      // The person is back in the editor at once, and the frame's script takes the keyboard 50 ms after the press.
+      editor.focus();
+      grab(frame, 2150);
+      expect(document.activeElement).toBe(editor);
+    });
+
+    it("a press on one frame's cover says nothing about another frame", () => {
+      const first = make();
+      const second = make();
+      editor.focus();
+      pointer(first.frame, "pointerenter", 1000);
+      key(editor, "a", 2000);
+      pointer(cover(first.box)!, "pointerdown", 2100);
+      // Before the browser has told the page about that move, the other frame's script takes the keyboard.
+      grab(second.frame, 2110);
+      expect(document.activeElement).toBe(editor);
+      expect(second.box.hasAttribute("data-has-keyboard")).toBe(false);
     });
 
     it("that press does not excuse a later move by the frame's script", () => {

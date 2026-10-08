@@ -213,6 +213,16 @@ describe("the published page's link cards get their frames in the browser (#2317
       }
     });
 
+    it("the guard of a frame that was turned off ends at that moment: with the only card off, the page stops listening", () => {
+      const body = show(card(TWEET, "post"));
+      const removed = vi.spyOn(page, "removeEventListener");
+      const field = document.body.appendChild(document.createElement("input"));
+      field.focus();
+      for (let n = 0; n < 3; n++) grab(body.querySelector("iframe")!);
+      expect(body.querySelector('[data-testid="link-card-off"]')).not.toBeNull();
+      expect(removed.mock.calls.filter((call) => call[0] === "blur")).toHaveLength(1);
+    });
+
     it("a run over a page it has been through guards the frames that are there (React runs effects twice in development)", () => {
       const body = show(card(TWEET, "post"), { strict: true });
       expect(frames(body)).toHaveLength(1);
