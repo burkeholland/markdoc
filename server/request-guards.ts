@@ -67,7 +67,7 @@ export type AttachRequestErrorGuardsOptions = {
  * (CLIENT_GONE_CODES) is swallowed silently; any other stream error writes one line and is swallowed
  * too — the request log's `close`/`finish` handling is untouched, so its line still appears exactly once.
  */
-export function attachRequestErrorGuards(req: GuardedRequest, res: GuardedResponse, options: AttachRequestErrorGuardsOptions = {}): void {
+export function attachRequestErrorGuards(req: GuardedRequest, res: GuardedResponse, options: AttachRequestErrorGuardsOptions & { requests?: RequestsInFlight } = {}): void {
   const write = options.write ?? ((line: string) => console.warn(line));
   req.on("error", (err: unknown) => {
     if (!isClientGone(err)) write(formatStreamErrorLine("request", req, err));
@@ -75,7 +75,47 @@ export function attachRequestErrorGuards(req: GuardedRequest, res: GuardedRespon
   res.on("error", (err: unknown) => {
     if (!isClientGone(err)) write(formatStreamErrorLine("response", req, err));
   });
+  (options.requests ?? requestsInFlight).add(res);
 }
+
+// Requests in flight. Node's `server.close()` closes the connections that are idle after a request. A
+// connection that has sent nothing yet, or only a part of a request (also of an upgrade), is not idle
+// for Node: it is waited for, and one of them made a normal stop run into its deadline and exit 1 with
+// the database still open, exactly as a left-open upgrade socket did (#2328). Shutdown may destroy such
+// a connection, but not one whose request is being answered. This counter tells the two apart: every
+// request passes through `attachRequestErrorGuards` before anything else touches it.
+
+/** Counts the requests whose response has not closed yet. */
+export function createRequestsInFlight() {
+  let count = 0;
+  const waiting: (() => void)[] = [];
+  return {
+    /** Counts the request of `res` until `res` closes (finished, or its client gone). */
+    add(res: GuardedResponse): void {
+      let counted = true;
+      count += 1;
+      res.on("close", () => {
+        if (!counted) return;
+        counted = false;
+        count -= 1;
+        if (count === 0) for (const run of waiting.splice(0)) run();
+      });
+    },
+    /** Runs `run` now when no request is in flight, else once the last one has closed. */
+    whenNone(run: () => void): void {
+      if (count === 0) run();
+      else waiting.push(run);
+    },
+    get count(): number {
+      return count;
+    },
+  };
+}
+
+export type RequestsInFlight = ReturnType<typeof createRequestsInFlight>;
+
+/** The process's counter: the request handler adds to it, shutdown waits for it. */
+export const requestsInFlight = createRequestsInFlight();
 
 /** The subset of the upgrade socket the guard uses. */
 export type GuardedUpgradeSocket = Pick<Duplex, "on">;
@@ -240,6 +280,8 @@ export function formatClosedUpgradeSocketsLine(count: number): string {
 export type CloseHttpIntakeOptions = {
   /** Test-only set; production uses `ownedUpgradeSockets`. */
   sockets?: OwnedUpgradeSockets;
+  /** Test-only counter; production uses `requestsInFlight`. */
+  requests?: RequestsInFlight;
   /** Where the line about destroyed sockets goes; defaults to stdout through console.log. */
   log?: (line: string) => void;
 };
@@ -249,6 +291,8 @@ export type CloseHttpIntakeOptions = {
  * closed. An upgrade that still arrives is destroyed, and so is every upgrade socket in the set, with
  * one line when there were any: `server.close()` would otherwise wait for them until the deadline.
  * Established collaboration sockets are never in the set; their own shutdown closes them.
+ * A connection that is not answering a request (nothing sent yet, or an unfinished request) is
+ * destroyed too, once no request is in flight; a request that is being answered is left to finish.
  */
 export function closeHttpIntake(server: Server | null, options: CloseHttpIntakeOptions = {}): Promise<void> {
   if (!server) return Promise.resolve();
@@ -266,6 +310,11 @@ export function closeHttpIntake(server: Server | null, options: CloseHttpIntakeO
       if (!error || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolve();
       else reject(new Error("HTTP intake did not close"));
     });
+    // close() has closed the connections that were idle after a request. What is left and is not
+    // answering a request would be waited for until the deadline: closeAllConnections() destroys it,
+    // at once when no request is in flight, else when the last one has closed. It never touches a
+    // socket that was upgraded, so a collaboration socket stays with its owner.
+    (options.requests ?? requestsInFlight).whenNone(() => server.closeAllConnections());
   });
 }
 

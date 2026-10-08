@@ -15,6 +15,7 @@ import {
   CLIENT_GONE_CODES,
   closeHttpIntake,
   createOwnedUpgradeSockets,
+  createRequestsInFlight,
   errorCode,
   formatClosedUpgradeSocketsLine,
   formatStreamErrorLine,
@@ -671,6 +672,21 @@ describe("the set of upgrade sockets the server owns", () => {
     expect(sockets.size).toBe(0);
   });
 
+  // A socket that was destroyed in this very loop turn is still in the set (its 'close' comes a turn
+  // later). The line says how many sockets were OPEN, so the sweep must not count that one.
+  it("does not count a socket that was destroyed a moment before the sweep", () => {
+    const sockets = createOwnedUpgradeSockets(60_000);
+    const open = new PassThrough({ autoDestroy: false }).resume();
+    const dying = new PassThrough({ autoDestroy: false }).resume();
+    sockets.end(open, "answer");
+    sockets.end(dying, "answer");
+    dying.destroy();
+    expect(sockets.size).toBe(2);
+    expect(sockets.destroyAll()).toBe(1);
+    expect(open.destroyed).toBe(true);
+    expect(sockets.size).toBe(0);
+  });
+
   it("writes the line about destroyed sockets with a count and nothing else", () => {
     expect(formatClosedUpgradeSocketsLine(1)).toBe("> [exit] shutdown closed websocket upgrade sockets that were still open: 1");
     expect(formatClosedUpgradeSocketsLine(2000)).toBe("> [exit] shutdown closed websocket upgrade sockets that were still open: 2000");
@@ -1099,6 +1115,146 @@ describe("websocket upgrades once the server is ready, on a real http server aro
       } finally {
         await site.close();
       }
+    });
+  });
+
+  // Found in the review of #2328: Node's `server.close()` closes only the connections that are idle
+  // after a request. A connection that has sent nothing yet, or only a part of a request or of an
+  // upgrade, was waited for, and ONE of them made a normal stop run into its deadline and exit 1 with
+  // the database still open. An upgrade that arrives while the server stops had no test either.
+  describe("shutdown: connections that are not answering a request, and upgrades that still arrive", () => {
+    /** A plain http server with the request guard, a slow route, and the 404 for upgrades of a ready production server. */
+    async function startPlain() {
+      const sockets = createOwnedUpgradeSockets(60_000);
+      const requests = createRequestsInFlight();
+      const server = http.createServer((req, res) => {
+        attachRequestErrorGuards(req, res, { requests });
+        if (req.url === "/slow") setTimeout(() => res.end("slow answer"), 400);
+        else res.end("page");
+      });
+      server.on("upgrade", (req: IncomingMessage, socket: Duplex) => answerUpgrade(req, socket, UNKNOWN_UPGRADE_ANSWER, { sockets }));
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      return { server, sockets, requests, port: (server.address() as AddressInfo).port };
+    }
+
+    /** A raw client that sends `text` (or nothing) and then only waits: what it gets, and whether the server let go of it. */
+    function waitingClient(port: number, text: string) {
+      return new Promise<{ socket: net.Socket; received: () => string; letGoByServer: () => boolean }>((resolve) => {
+        let received = "";
+        let letGo = false;
+        const socket = net.connect({ host: "127.0.0.1", port, allowHalfOpen: true }, () => {
+          if (text) socket.write(text);
+          resolve({ socket, received: () => received, letGoByServer: () => letGo });
+        });
+        socket.on("data", (chunk: Buffer) => (received += chunk.toString("latin1")));
+        socket.on("end", () => (letGo = true));
+        socket.on("close", () => (letGo = true));
+        socket.on("error", () => (letGo = true));
+      });
+    }
+    type Waiting = Awaited<ReturnType<typeof waitingClient>>;
+
+    const stopPlain = async (site: Awaited<ReturnType<typeof startPlain>>, clients: Waiting[]) => {
+      for (const client of clients) client.socket.destroy();
+      site.server.closeAllConnections();
+      if (site.server.listening) await new Promise<void>((resolve) => site.server.close(() => resolve()));
+    };
+
+    it("counts a request until its response closes, and runs what waits for none at that moment", () => {
+      const requests = createRequestsInFlight();
+      const ran: string[] = [];
+      requests.whenNone(() => void ran.push("at once"));
+      const first = new EventEmitter();
+      const second = new EventEmitter();
+      requests.add(first as unknown as GuardedResponse);
+      requests.add(second as unknown as GuardedResponse);
+      requests.whenNone(() => void ran.push("after the last one"));
+      first.emit("close");
+      first.emit("close");
+      expect({ count: requests.count, ran }).toEqual({ count: 1, ran: ["at once"] });
+      second.emit("close");
+      expect({ count: requests.count, ran }).toEqual({ count: 0, ran: ["at once", "after the last one"] });
+    });
+
+    it("does not wait for a connection that has sent nothing, or only a part of a request or of an upgrade", async () => {
+      const site = await startPlain();
+      const clients = [
+        await waitingClient(site.port, ""),
+        await waitingClient(site.port, "GET / HTTP/1.1\r\nHost: x\r\n"),
+        await waitingClient(site.port, upgradeRequest("/other", site.port).slice(0, -2)),
+      ];
+      try {
+        await sleep(50);
+        expect(await new Promise<number>((resolve) => site.server.getConnections((_error, n) => resolve(n)))).toBe(3);
+        expect(await settledWithin(closeHttpIntake(site.server, { sockets: site.sockets, requests: site.requests }), 500)).toBe("settled");
+        for (let i = 0; i < 50 && clients.some((client) => !client.letGoByServer()); i++) await sleep(10);
+        expect(clients.map((client) => ({ letGoByServer: client.letGoByServer(), received: client.received() }))).toEqual(Array(3).fill({ letGoByServer: true, received: "" }));
+        expect(site.server.listening).toBe(false);
+      } finally {
+        await stopPlain(site, clients);
+      }
+      expect(processErrors).toEqual([]);
+    });
+
+    it("lets a request that is being answered finish, and only then lets go of a connection that waits", async () => {
+      const site = await startPlain();
+      const slow = await waitingClient(site.port, "GET /slow HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+      const idle = await waitingClient(site.port, "");
+      try {
+        await sleep(50);
+        expect(site.requests.count).toBe(1);
+        const closing = closeHttpIntake(site.server, { sockets: site.sockets, requests: site.requests });
+        expect(await settledWithin(closing, 150)).toBe("pending");
+        expect(idle.letGoByServer()).toBe(false);
+        expect(await settledWithin(closing, 2_000)).toBe("settled");
+        // The answer is on its way to the client when the server has let go of the socket.
+        for (let i = 0; i < 100 && !(slow.letGoByServer() && idle.letGoByServer()); i++) await sleep(10);
+        expect(slow.received()).toMatch(/^HTTP\/1\.1 200 OK\r\n[\s\S]*slow answer$/);
+        expect(idle.letGoByServer()).toBe(true);
+        expect(site.requests.count).toBe(0);
+      } finally {
+        await stopPlain(site, [slow, idle]);
+      }
+      expect(processErrors).toEqual([]);
+    });
+
+    it("leaves an established collaboration socket alone when it lets go of a connection that waits", async () => {
+      const site = await startReady("production", 60_000);
+      const idle = await waitingClient(site.port, "");
+      try {
+        const collabClient = await opens(`ws://127.0.0.1:${site.port}${COLLAB_PATH}`);
+        await sleep(50);
+        const closing = closeHttpIntake(site.server, { sockets: site.sockets, requests: createRequestsInFlight(), log: () => {} });
+        expect(await settledWithin(closing, 300)).toBe("pending");
+        expect(idle.letGoByServer()).toBe(true);
+        expect(collabClient.readyState).toBe(WebSocket.OPEN);
+        for (const client of site.collab.clients) client.terminate();
+        expect(await settledWithin(closing, 2_000)).toBe("settled");
+      } finally {
+        idle.socket.destroy();
+        await site.close();
+      }
+      expect(processErrors).toEqual([]);
+    });
+
+    it("destroys an upgrade that arrives while the server stops: no answer, not kept, and the stop does not wait for it", async () => {
+      const site = await startPlain();
+      // A request that never finishes stands for work in flight, so the connections are left alone meanwhile.
+      const busy = createRequestsInFlight();
+      busy.add(new EventEmitter() as unknown as GuardedResponse);
+      const late = await waitingClient(site.port, "");
+      try {
+        await sleep(30);
+        const closing = closeHttpIntake(site.server, { sockets: site.sockets, requests: busy });
+        expect(late.letGoByServer()).toBe(false);
+        late.socket.write(upgradeRequest("/other", site.port));
+        for (let i = 0; i < 100 && !late.letGoByServer(); i++) await sleep(10);
+        expect({ answer: late.received(), letGoByServer: late.letGoByServer(), kept: site.sockets.size }).toEqual({ answer: "", letGoByServer: true, kept: 0 });
+        expect(await settledWithin(closing, 500)).toBe("settled");
+      } finally {
+        await stopPlain(site, [late]);
+      }
+      expect(processErrors).toEqual([]);
     });
   });
 
