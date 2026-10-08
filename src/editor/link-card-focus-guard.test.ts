@@ -737,6 +737,20 @@ describe("the focus guard of a card's frame (#2338)", () => {
       expect(cover(other.box)).toBeNull();
     });
 
+    it("the same in a browser that does not say that the pointer left the frame when the cover went on", () => {
+      const { frame, box, turnOff } = make();
+      editor.focus();
+      pointer(frame, "pointerenter", 1000);
+      key(editor, "a", 2000);
+      expect(cover(box)).not.toBeNull();
+      for (let n = 0; n < CARD_FOCUS_TRIES - 1; n++) {
+        grab(frame, 2000 + CARD_FOCUS_QUIET_MS * (n + 2));
+        expect(document.activeElement).toBe(editor);
+        expect(box.hasAttribute("data-has-keyboard")).toBe(false);
+      }
+      expect(turnOff).not.toHaveBeenCalled();
+    });
+
     it("under the cover a move of focus into the frame is not the person's, however long ago the last key was", () => {
       const { frame, box } = make();
       editor.focus();
