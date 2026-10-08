@@ -37,7 +37,7 @@ async function scan(page: Page, include: string, state: string) {
 }
 
 test.describe("link cards: the setting and Insert (#2317)", () => {
-  test("the switch is on by default, is kept by this browser, and decides what a pasted or typed link becomes", async ({ browser, baseURL }) => {
+  test("the switch is on by default, is kept by this browser, and decides what a pasted link becomes", async ({ browser, baseURL }) => {
     const user = await signIn(browser, uniqueLogin("cards-setting"));
     const sites = await standInForOtherSites(user.context, baseURL!);
     const { page } = user;
@@ -48,35 +48,23 @@ test.describe("link cards: the setting and Insert (#2317)", () => {
     await expect(toggle(page)).toHaveAttribute("aria-checked", "true");
     expect(await stored(page)).toBeNull();
     await expect(page.getByTestId("link-cards-description")).toHaveText(
-      "A link to YouTube or X that you paste or type on its own line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and Insert can still add one. The choice is saved in this browser.",
+      "A link to YouTube or X that you paste on its own line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and Insert can still add one. The choice is saved in this browser.",
     );
     // The row sits right under Theme.
     const order = await page.evaluate(() => Array.from(document.querySelectorAll('[data-testid="theme-row"], [data-testid="link-cards-row"]'), (row) => row.getAttribute("data-testid")));
     expect(order).toEqual(["theme-row", "link-cards-row"]);
 
-    // On: a pasted link is a card, and so is a typed one when Enter leaves its line.
+    // On: a pasted link is a card. A typed one stays a link, also when Enter leaves its line.
     await openDocument(page, id);
     await newLineAtEnd(page);
     await pasteInRich(page, TWEET);
     await expect(cards(page)).toHaveCount(1);
     await expect.poll(() => codeText(page)).toBe(`Intro\n\n${TWEET}`);
     await page.keyboard.type(VIDEO, { delay: 2 });
-    await expect(cards(page)).toHaveCount(1);
     await page.keyboard.press("Enter");
-    await expect(cards(page)).toHaveCount(2);
-    await expect.poll(() => codeText(page)).toContain(`${TWEET}\n\n${VIDEO}`);
-    // The caret is on the new line: typing goes on under the card.
     await page.keyboard.type("After");
-    await expect.poll(() => codeText(page)).toContain(`${VIDEO}\n\nAfter`);
-    // Undo the word, then the card: the link is text again, in angle brackets. Redo brings both back.
-    await page.keyboard.press("Control+z");
-    await page.keyboard.press("Control+z");
+    await expect.poll(() => codeText(page)).toBe(`Intro\n\n${TWEET}\n\n<${VIDEO}>\n\nAfter`);
     await expect(cards(page)).toHaveCount(1);
-    await expect.poll(() => codeText(page)).toContain(`<${VIDEO}>`);
-    await page.keyboard.press("Control+Shift+z");
-    await page.keyboard.press("Control+Shift+z");
-    await expect(cards(page)).toHaveCount(2);
-    await expect.poll(() => codeText(page)).toBe(`Intro\n\n${TWEET}\n\n${VIDEO}\n\nAfter`);
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
 
     // Off, with the keyboard, and kept across a reload.
@@ -88,9 +76,9 @@ test.describe("link cards: the setting and Insert (#2317)", () => {
     await reloadHydrated(page);
     await expect(toggle(page)).toHaveAttribute("aria-checked", "false");
 
-    // Off: the cards that are in the document stay cards; a new pasted or typed link stays a link.
+    // Off: the card that is in the document stays a card; a new pasted or typed link stays a link.
     await openDocument(page, id);
-    await expect(cards(page)).toHaveCount(2);
+    await expect(cards(page)).toHaveCount(1);
     await newLineAtEnd(page);
     await pasteInRich(page, "https://x.com/jack/status/21");
     await expect.poll(() => codeText(page)).toContain("<https://x.com/jack/status/21>");
@@ -99,7 +87,7 @@ test.describe("link cards: the setting and Insert (#2317)", () => {
     await page.keyboard.press("Enter");
     await page.keyboard.type("End");
     await expect.poll(() => codeText(page)).toContain("<https://youtu.be/dQw4w9WgXcQ>\n\nEnd");
-    await expect(cards(page)).toHaveCount(2);
+    await expect(cards(page)).toHaveCount(1);
     await expect(page.locator('.md-rich p a[href="https://x.com/jack/status/21"]')).toBeVisible();
 
     // On again with a click.
@@ -109,6 +97,41 @@ test.describe("link cards: the setting and Insert (#2317)", () => {
     expect(await stored(page)).toBe("on");
 
     expect(sites.refused).toEqual([]);
+  });
+
+  test("Show as text holds against the next Enter, and so does a document that says <link>", async ({ browser, baseURL }) => {
+    const user = await signIn(browser, uniqueLogin("cards-enter"));
+    const sites = await standInForOtherSites(user.context, baseURL!);
+    const { page } = user;
+    // The setting is on (the default): nothing is stored.
+    expect(await stored(page)).toBeNull();
+
+    // A card, "Show as text", then Enter, the next key a person presses: still a link, and one line added.
+    const shown = await createDocument(page, `Intro\n\n${VIDEO}\n\nOutro\n`, "Show as text, then Enter");
+    await openDocument(page, shown);
+    await expect(cards(page)).toHaveCount(1);
+    await page.getByTestId("link-card-as-text").click();
+    await expect(cards(page)).toHaveCount(0);
+    await expect.poll(() => codeText(page)).toBe(`Intro\n\n<${VIDEO}>\n\nOutro\n`);
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Next");
+    await expect.poll(() => codeText(page)).toBe(`Intro\n\n<${VIDEO}>\n\nNext\n\nOutro\n`);
+    await expect(cards(page)).toHaveCount(0);
+    await expect(page.locator(`.md-rich p a[href="${VIDEO}"]`)).toBeVisible();
+
+    // An old document that already says <link>: the caret at the end of that line, Enter.
+    const old = await createDocument(page, `Intro\n\n<${TWEET}>`, "An old link in angle brackets");
+    await openDocument(page, old);
+    await expect(cards(page)).toHaveCount(0);
+    await page.locator(".md-rich > p").first().click();
+    await page.keyboard.press("Control+End");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Next");
+    await expect.poll(() => codeText(page)).toBe(`Intro\n\n<${TWEET}>\n\nNext`);
+    await expect(cards(page)).toHaveCount(0);
+
+    expect(sites.refused).toEqual([]);
+    await user.context.close();
   });
 
   test("Insert: the toolbar and the palette open the dialog; a good link becomes a card, also with the setting off and from the Markdown pane", async ({ browser, baseURL }) => {

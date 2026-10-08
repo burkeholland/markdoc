@@ -2,7 +2,8 @@
  * "Turn links to known sites into cards" (#2317): on unless this browser has stored "off".
  *
  * The setting governs only what Markdoc writes for a person: a known link pasted on an empty line of the
- * preview, and Enter after typing one alone on its line. On: a card. Off: the link stays text. It never
+ * preview. On: a card. Off: the link stays text. A link that is typed stays a link either way, and so
+ * does one that somebody chose to "Show as text": Enter never makes a card. It never
  * changes how a document is shown (the document says card or text, and everyone sees the same), and the
  * Insert entry "Video or post from a link" makes a card whatever the setting says.
  *

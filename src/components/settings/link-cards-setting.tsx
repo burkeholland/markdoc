@@ -6,7 +6,7 @@ import { cardProviderList } from "@/editor/markdown/link-cards";
 
 /**
  * The Settings row for link cards (#2317), right under Theme. A switch, on by default; the choice is
- * saved in this browser like the theme. It governs what Markdoc writes for this person (paste, Enter);
+ * saved in this browser like the theme. It governs what Markdoc writes for this person (a pasted link);
  * it never changes how a document is shown to anyone.
  */
 export function LinkCardsSetting() {
@@ -19,7 +19,7 @@ export function LinkCardsSetting() {
           Turn links to known sites into cards
         </h2>
         <p id={`${id}-description`} className="mt-0.5 text-sm text-ink-3" data-testid="link-cards-description">
-          A link to {cardProviderList()} that you paste or type on its own line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and Insert can still add one. The choice is saved in this browser.
+          A link to {cardProviderList()} that you paste on its own line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and Insert can still add one. The choice is saved in this browser.
         </p>
       </div>
       <button

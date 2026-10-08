@@ -740,29 +740,6 @@ export function insertLinkCard(url: string): Command {
   };
 }
 
-/**
- * Enter at the end of a top-level paragraph that is nothing but a known link (#2317): the line splits as
- * usual, then the link becomes a card. The card is an undo step of its own (`isolate` ends the step before
- * it and after it), so the first undo gives the text link back and the caret stays on the new line. Only
- * with the setting on and not while suggesting (the caller checks both).
- */
-export function cardOnEnter(enter: Command, isolate: () => void): Command {
-  return (state, dispatch, view) => {
-    // A selection that is not a caret never starts at the end of the paragraph, so this is a caret at the end.
-    const paragraph = cardLinkParagraph(state);
-    if (!paragraph || state.selection.$from.parentOffset !== paragraph.node.content.size) return false;
-    if (!dispatch || !view) return true;
-    if (!enter(view.state, view.dispatch, view)) return false;
-    isolate();
-    const typed = view.state.doc.nodeAt(paragraph.pos);
-    // The split left the link where it was. If anything else happened (another rule took the key), leave it.
-    if (!typed || cardLinkOf(typed) !== paragraph.url) return true;
-    view.dispatch(view.state.tr.replaceWith(paragraph.pos, paragraph.pos + typed.nodeSize, schema.nodes.link_card.create({ url: paragraph.url })).scrollIntoView());
-    isolate();
-    return true;
-  };
-}
-
 /** Tab with a card selected moves focus into the card: its link first, then "Show as text". Escape there comes back (`nodeviews.ts`). */
 export const focusSelectedCard: Command = (state, _dispatch, view) => {
   const card = selectedCard(state);
