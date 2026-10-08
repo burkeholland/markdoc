@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "@testing-library/react";
 import { StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -158,5 +158,86 @@ describe("the published page's link cards get their frames in the browser (#2317
     root = createRoot(document.body.appendChild(document.createElement("div")));
     expect(() => act(() => root!.render(<ReaderLinkCards contentKey="x" />))).not.toThrow();
     expect(document.querySelectorAll("iframe")).toHaveLength(0);
+  });
+
+  describe("the keyboard stays with the person (#2338)", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+    const page = document.defaultView!;
+    const WORDS = "This card kept taking the keyboard away from your document, so it was turned off.";
+    /** The frame's own script takes the keyboard: nobody pressed or clicked anything. */
+    const grab = (frame: HTMLIFrameElement) => {
+      frame.focus();
+      page.dispatchEvent(new FocusEvent("blur"));
+      vi.advanceTimersByTime(0);
+    };
+
+    it("with nothing to type in, as on the published page, a frame may keep the keyboard, and its card shows it", () => {
+      const body = show(`${card(TWEET, "post")}${card(VIDEO)}`);
+      const [post] = frames(body);
+      for (let n = 0; n < 5; n++) grab(post);
+      expect(document.activeElement).toBe(post);
+      expect(post.parentElement!.hasAttribute("data-has-keyboard")).toBe(true);
+      expect(frames(body)).toHaveLength(2);
+      expect(body.querySelector('[data-testid="link-card-off"]')).toBeNull();
+    });
+
+    it("a frame that takes the keyboard from a text field three times is turned off, and can be loaded again", () => {
+      const body = show(`${card(TWEET, "post")}${card(VIDEO)}`);
+      const field = document.body.appendChild(document.createElement("input"));
+      const [post] = Array.from(body.querySelectorAll("figure"));
+      const frame = () => post.querySelector<HTMLIFrameElement>("iframe");
+      for (let round = 0; round < 2; round++) {
+        field.focus();
+        grab(frame()!);
+        grab(frame()!);
+        expect(document.activeElement).toBe(field);
+        expect(frame()).not.toBeNull();
+        grab(frame()!);
+        expect(frame()).toBeNull();
+        expect(document.activeElement).toBe(field);
+        expect(post.querySelector('[data-testid="link-card-off"] p')!.textContent).toBe(WORDS);
+        expect(document.querySelector("[data-card-focus-status]")!.textContent).toBe(WORDS);
+        // The other card keeps its frame.
+        expect(frames(body)).toHaveLength(1);
+        const again = post.querySelector<HTMLButtonElement>("button")!;
+        expect(again.textContent).toBe("Load it again");
+        again.click();
+        expect(frame()!.getAttribute("src")).toBe("https://platform.twitter.com/embed/Tweet.html?id=20&dnt=true");
+        expect(post.querySelector('[data-testid="link-card-off"]')).toBeNull();
+      }
+    });
+
+    it("a run over a page it has been through guards the frames that are there (React runs effects twice in development)", () => {
+      const body = show(card(TWEET, "post"), { strict: true });
+      expect(frames(body)).toHaveLength(1);
+      const field = document.body.appendChild(document.createElement("input"));
+      field.focus();
+      for (let n = 0; n < 3; n++) grab(body.querySelector("iframe")!);
+      expect(frames(body)).toHaveLength(0);
+      expect(body.querySelector('[data-testid="link-card-off"]')).not.toBeNull();
+      // And a run after that leaves the notice where it is.
+      act(() => root!.render(<StrictMode><ReaderLinkCards contentKey="hash-2" /></StrictMode>));
+      expect(frames(body)).toHaveLength(0);
+      expect(body.querySelectorAll('[data-testid="link-card-off"]')).toHaveLength(1);
+    });
+
+    it("the guards end with the page", () => {
+      const body = show(`${card(TWEET, "post")}${card(VIDEO)}`);
+      const removed = vi.spyOn(page, "removeEventListener");
+      const [post] = frames(body);
+      act(() => root?.unmount());
+      root = null;
+      expect(removed.mock.calls.filter((call) => call[0] === "blur")).toHaveLength(1);
+      const field = document.body.appendChild(document.createElement("input"));
+      field.focus();
+      for (let n = 0; n < 3; n++) grab(post);
+      expect(post.isConnected).toBe(true);
+    });
   });
 });

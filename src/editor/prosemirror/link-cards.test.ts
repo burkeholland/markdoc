@@ -796,4 +796,113 @@ describe("link cards in the rich pane (#2317)", () => {
       expect(cards()[0].getAttribute("data-card-highlight")).toBe("find-active");
     });
   });
+
+  describe("the keyboard stays with the person (#2338)", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+    const page = document.defaultView!;
+    const POST_FRAME = "https://platform.twitter.com/embed/Tweet.html?id=20&dnt=true";
+    const WORDS = "This card kept taking the keyboard away from your document, so it was turned off.";
+    /** The person is typing in a text field of the page. */
+    const typingPlace = () => {
+      const field = document.body.appendChild(document.createElement("textarea"));
+      field.focus();
+      return field;
+    };
+    /** The frame's own script takes the keyboard: nobody pressed or clicked anything. */
+    const grab = (frame: HTMLIFrameElement) => {
+      frame.focus();
+      page.dispatchEvent(new FocusEvent("blur"));
+      vi.advanceTimersByTime(0);
+    };
+
+    it("a frame that takes the keyboard three times is turned off: the card says so and offers to load it again", () => {
+      const { cards, text } = open(`Intro\n\n${TWEET}\n\n${VIDEO}`);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      const field = typingPlace();
+      const [post, video] = cards();
+      const box = post.querySelector<HTMLElement>(".md-link-card-frame")!;
+      const frame = () => post.querySelector<HTMLIFrameElement>("iframe");
+      grab(frame()!);
+      grab(frame()!);
+      expect(document.activeElement).toBe(field);
+      expect(frame()).not.toBeNull();
+      grab(frame()!);
+      // The frame is gone, the keyboard is where it was, and the card says why.
+      expect(frame()).toBeNull();
+      expect(document.activeElement).toBe(field);
+      expect(Array.from(box.children, (child) => child.className)).toEqual(["md-link-card-off"]);
+      expect(box.querySelector("p")!.textContent).toBe(WORDS);
+      expect(document.querySelector("[data-card-focus-status]")!.textContent).toBe(WORDS);
+      // The box keeps its size, the other card its frame, and the document is as it was.
+      expect(box.getAttribute("data-kind")).toBe("post");
+      expect(video.querySelector("iframe")).not.toBeNull();
+      expect(text()).toBe(`Intro\n\n${TWEET}\n\n${VIDEO}`);
+
+      // "Load it again" is a button of the card: it loads the same frame, guarded again with three new tries.
+      const again = box.querySelector<HTMLButtonElement>("button")!;
+      expect(again.textContent).toBe("Load it again");
+      expect(again.type).toBe("button");
+      again.click();
+      expect(frame()!.getAttribute("src")).toBe(POST_FRAME);
+      expect(box.querySelector(".md-link-card-off")).toBeNull();
+      field.focus();
+      grab(frame()!);
+      grab(frame()!);
+      expect(frame()).not.toBeNull();
+      grab(frame()!);
+      expect(frame()).toBeNull();
+      expect(box.querySelector(".md-link-card-off")).not.toBeNull();
+      expect(text()).toBe(`Intro\n\n${TWEET}\n\n${VIDEO}`);
+    });
+
+    it("the editor leaves the button's keys and clicks alone, and Escape on it goes back to the card", () => {
+      const { view, cards, key } = open(`${TWEET}\n\nAfter`);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      typingPlace();
+      for (let n = 0; n < 3; n++) grab(cards()[0].querySelector("iframe")!);
+      const again = cards()[0].querySelector<HTMLButtonElement>(".md-link-card-off button")!;
+      again.focus();
+      expect(key("Escape", again).defaultPrevented).toBe(true);
+      expect(view.state.selection instanceof NodeSelection).toBe(true);
+    });
+
+    it("a card that goes, and a link that changes, end the guard of the old frame", () => {
+      const { view, cards, cardPos, session } = open(`${TWEET}\n\nAfter`);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      const removed = vi.spyOn(page, "removeEventListener");
+      const ended = () => removed.mock.calls.filter((call) => call[0] === "blur").length;
+      // The link changes: the old frame goes with its guard, and the new frame gets its own.
+      session.ytext.insert(TWEET.length, "1");
+      expect(cards()[0].querySelector("iframe")).toBeNull();
+      expect(ended()).toBe(1);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      const field = typingPlace();
+      const frame = cards()[0].querySelector<HTMLIFrameElement>("iframe")!;
+      expect(frame.getAttribute("src")).toBe("https://platform.twitter.com/embed/Tweet.html?id=201&dnt=true");
+      grab(frame);
+      expect(document.activeElement).toBe(field);
+      // The card is deleted.
+      view.dispatch(view.state.tr.delete(cardPos(), cardPos() + 1));
+      expect(cards()).toHaveLength(0);
+      expect(ended()).toBe(2);
+    });
+
+    it("a card that was turned off and whose link changes starts again with the new link", () => {
+      const { cards, session } = open(`${TWEET}\n\nAfter`);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      typingPlace();
+      for (let n = 0; n < 3; n++) grab(cards()[0].querySelector("iframe")!);
+      expect(cards()[0].querySelector(".md-link-card-off")).not.toBeNull();
+      session.ytext.insert(TWEET.length, "1");
+      expect(cards()[0].querySelector(".md-link-card-off")).toBeNull();
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      expect(cards()[0].querySelector("iframe")!.getAttribute("src")).toBe("https://platform.twitter.com/embed/Tweet.html?id=201&dnt=true");
+    });
+  });
 });
