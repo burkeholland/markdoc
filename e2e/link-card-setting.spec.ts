@@ -2,7 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { devices, type Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
 import { codeText, createDocument, openDocument, reloadHydrated, setTheme, shareWith, signIn, uniqueLogin, waitForHydration } from "./helpers";
-import { expectOnlyCardFrames, pasteInRich, standInForOtherSites, TWEET, TWEET_FRAME, VIDEO, VIDEO_FRAME } from "./link-card-helpers";
+import { expectFrameLoaded, expectOnlyCardFrames, openFromDashboard, pasteInRich, standInForOtherSites, TWEET, TWEET_FRAME, VIDEO, VIDEO_FRAME } from "./link-card-helpers";
 
 /**
  * Link cards (#2317): the setting on the Settings page, and Insert → "Video or post from a link".
@@ -185,6 +185,35 @@ test.describe("link cards: the setting and Insert (#2317)", () => {
 
     await expectOnlyCardFrames(page, ["https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", VIDEO_FRAME, TWEET_FRAME]);
     expect(sites.refused).toEqual([]);
+  });
+
+  test("reached by a click from the dashboard (no page load): a pasted card and an inserted card both load their frames", async ({ browser, baseURL }) => {
+    const user = await signIn(browser, uniqueLogin("cards-from-dashboard"));
+    const sites = await standInForOtherSites(user.context, baseURL!);
+    const { page } = user;
+    const id = await createDocument(page, `Intro\n\n${VIDEO}\n\nOutro`, "From the dashboard");
+
+    await openFromDashboard(page, id);
+    // The card that was in the document shows its frame, and the frame's page really loaded.
+    await expect(cards(page)).toHaveCount(1);
+    await expectFrameLoaded(page, ".md-rich", VIDEO_FRAME);
+
+    // A card pasted here (the setting is on) loads its frame too.
+    await newLineAtEnd(page);
+    await pasteInRich(page, TWEET);
+    await expect(cards(page)).toHaveCount(2);
+    await expectFrameLoaded(page, ".md-rich", TWEET_FRAME);
+
+    // And one added with Insert.
+    await page.getByTestId("tb-card").click();
+    await dialog(page).getByRole("textbox", { name: "Link" }).fill("https://youtu.be/jNQXAC9IVRw");
+    await page.keyboard.press("Enter");
+    await expect(cards(page)).toHaveCount(3);
+    await expectFrameLoaded(page, ".md-rich", "https://www.youtube-nocookie.com/embed/jNQXAC9IVRw");
+
+    // The browser refused no frame on this page.
+    expect(sites.refused).toEqual([]);
+    expect(new Set(sites.frames)).toEqual(new Set([VIDEO_FRAME, TWEET_FRAME, "https://www.youtube-nocookie.com/embed/jNQXAC9IVRw"]));
   });
 
   test("the slash menu offers it: /video opens the dialog and the card takes the line the slash was typed on", async ({ browser, baseURL }) => {
