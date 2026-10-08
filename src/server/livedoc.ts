@@ -13,6 +13,9 @@ import { noteContentWrite, rememberCleanText, cachedCleanText, unifiedDiff, type
 import { contentHash } from "@/server/export/html";
 import type { AgentActivity } from "@/server/agents";
 
+/** The longest text a write through the API may leave in a document, in characters (`PUT` and `PATCH /content`). */
+export const MAX_TEXT_CHARS = 2_000_000;
+
 export interface LiveText {
   /** Full Markdown including pending suggested insertions. */
   text: string;

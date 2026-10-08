@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { handler, json, readJson, requireAccess, actorName } from "@/server/http";
-import { readLiveText, mutateLiveDoc, cleanTextOf, readPrecondition, assertContentUnchanged, ifContentHashSchema } from "@/server/livedoc";
+import { handler, json, readJson, requireAccess, actorName, ValidationError } from "@/server/http";
+import { readLiveText, mutateLiveDoc, cleanTextOf, readPrecondition, assertContentUnchanged, ifContentHashSchema, MAX_TEXT_CHARS } from "@/server/livedoc";
 import { addVersion } from "@/server/documents";
 import { replaceText } from "@/editor/sync/replace-plan";
 import { recordAgentActivity } from "@/server/agents";
@@ -36,7 +36,7 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
 });
 
 const putSchema = z.object({
-  content: z.string().max(2_000_000),
+  content: z.string().max(MAX_TEXT_CHARS),
   /** Optional version title recorded with the change. */
   message: z.string().trim().max(200).optional(),
   /** `contentHash` from `GET /content`; the write is refused with 409 when the document moved since (also as `If-Match`). */
@@ -44,10 +44,11 @@ const putSchema = z.object({
 });
 
 /**
- * Replace the whole document with new Markdown. The change is applied to the live
- * document as a minimal diff, so collaborators see it as a normal edit and keep their
- * carets and comments. With `ifContentHash` (or `If-Match`), the write only lands when the
- * clean text still hashes to that value; otherwise 409 with the current hash and a diff.
+ * Replace the whole document with new Markdown. The change is applied to the live document as
+ * edits that leave unchanged lines and words in place (`replaceText`), so collaborators see it as
+ * a normal edit and keep their carets and comments there; the edits are planned in bounded time
+ * whatever the two texts are (#2341). With `ifContentHash` (or `If-Match`), the write only lands
+ * when the clean text still hashes to that value; otherwise 409 with the current hash and a diff.
  */
 export const PUT = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
@@ -109,7 +110,8 @@ const patchSchema = z.object({
 
 /**
  * Append Markdown to the end of the document. With `ifContentHash` (or `If-Match`) the append only
- * lands when the clean text still hashes to that value — the same 409 as `PUT` otherwise.
+ * lands when the clean text still hashes to that value — the same 409 as `PUT` otherwise. The text may not
+ * grow past `MAX_TEXT_CHARS` this way: `400` with a `too_big` issue, as `PUT` answers a text that is too long.
  */
 export const PATCH = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
@@ -126,6 +128,10 @@ export const PATCH = handler(async (req: Request, { params }: Params) => {
       const ytext = doc.getText(TEXT_KEY);
       const current = ytext.toString();
       const separator = current.length === 0 ? "" : current.endsWith("\n\n") ? "" : current.endsWith("\n") ? "\n" : "\n\n";
+      // An append may not take the text past what `PUT` accepts for a whole text; the answer is the one `PUT` gives (#2341).
+      if (current.length + separator.length + body.append.length > MAX_TEXT_CHARS) {
+        throw new ValidationError([{ code: "too_big", path: ["append"], message: `Too big: expected the document to have <=${MAX_TEXT_CHARS} characters after the append` }]);
+      }
       ytext.insert(ytext.length, separator + body.append);
       recordAgentActivity(doc, user!, "edited", { from: ytext.length, to: ytext.length });
       hashAfter = contentHash(cleanTextOf(doc));

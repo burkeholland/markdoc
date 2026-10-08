@@ -422,6 +422,22 @@ describe("agent events (watch)", () => {
     expect(events.unifiedDiff("a\nb\n", "a\nc\n")).toEqual({ diff: expect.stringContaining("-b\n+c"), truncated: false });
   });
 
+  it("gives no diff when more than 1,000 lines changed, instead of working for minutes (#2341)", () => {
+    expect(events.DIFF_MAX_CHANGED_LINES).toBe(1_000);
+    const lines = (n: number, mark: string) => Array.from({ length: n }, (_, i) => `${mark} ${i}`).join("\n") + "\n";
+    // 500 lines removed and 500 added are 1,000 changed lines: still a diff (cut to 200 lines).
+    const at = events.unifiedDiff(lines(500, "old"), lines(500, "new"));
+    expect(at.diff).toContain("-old 0");
+    expect(at.truncated).toBe(true);
+    // One line more on each side: no diff, and `truncated` says that something is missing.
+    expect(events.unifiedDiff(lines(501, "old"), lines(501, "new"))).toEqual({ diff: null, truncated: true });
+    // The size of the texts does not matter, only how much of them changed.
+    const long = lines(30_000, "same");
+    const d = events.unifiedDiff(long, long.replace("same 15000\n", "changed 15000\n"));
+    expect(d).toEqual({ diff: expect.stringContaining("-same 15000\n+changed 15000"), truncated: false });
+    expect(events.unifiedDiff(lines(20_000, "old"), lines(20_000, "new"))).toEqual({ diff: null, truncated: true });
+  });
+
   it("times out with no events when nothing happens", async () => {
     const { cursor } = (await (await asAgent(() => GET_EVENTS(req(`/api/agent/documents/${docId}/events`), params(docId)))).json()) as { cursor: string };
     const t = Date.now();

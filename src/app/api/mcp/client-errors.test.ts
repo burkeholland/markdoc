@@ -50,6 +50,10 @@ const fakeFetch: typeof fetch = async (input, init) => {
     if (body.ifContentHash && body.ifContentHash !== "b".repeat(64)) return reply(409, { error: "Document changed since you read it", contentHash: "b".repeat(64), diff: null, truncated: false });
     return reply(200, { ok: true, suggestions: 2, suggestionIds: ["s1", "s2"], contentHash: "b".repeat(64) });
   }
+  // Large writes take turns (#2341): the server has no place for this one right now.
+  if (url.pathname === "/api/documents/busy-1/content" || url.pathname === "/api/documents/busy-1/suggest") {
+    return new Response(JSON.stringify({ error: "You already have 2 large document writes in progress (200,000 bytes or more each). Wait for one to finish, then try again", retryAfter: 5 }), { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "5" } });
+  }
   if (url.pathname === "/api/nope") return reply(404, "<!DOCTYPE html><html>not json</html>", "text/html");
   // A linked document whose GitHub file is over the 2 MB bound: sync, pull and a plain publish are 413s.
   if (url.pathname.startsWith("/api/documents/big-1/")) {
@@ -156,6 +160,20 @@ describe("tools over a real MCP client", () => {
     expect(fresh.isError).toBeFalsy();
     expect(text(fresh)).toContain(`updated (hash ${"c".repeat(64)})`);
     expect(fresh.structuredContent?.contentHash).toBe("c".repeat(64));
+  });
+
+  it("a large write that is refused because the server is busy says so plainly: nothing was written, wait, send it again (#2341)", async () => {
+    const want = "Nothing was written: You already have 2 large document writes in progress (200,000 bytes or more each). Wait for one to finish, then try again. Wait 5 seconds, then send the same call again.";
+    for (const [name, args] of [
+      ["markdoc_replace_content", { id: "busy-1", content: "# Large\n" }],
+      ["markdoc_append", { id: "busy-1", markdown: "more" }],
+      ["markdoc_suggest", { id: "busy-1", content: "# Large\n" }],
+    ] as const) {
+      const res = (await mcp.callTool({ name, arguments: args })) as Result;
+      expect(res.isError, name).toBe(true);
+      expect(text(res), name).toBe(want);
+      expect(res.structuredContent?.retryAfter, name).toBe(5);
+    }
   });
 
   it("markdoc_append with a stale ifContentHash is an error that says to re-read; a current one (or none) appends", async () => {

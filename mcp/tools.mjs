@@ -287,11 +287,16 @@ export function registerTools(server, client) {
   const IF_HASH = z.string().optional().describe("The contentHash from markdoc_read_document (header line `hash …`). When the document changed since, the call fails with what changed instead of writing; re-read and retry.");
 
   /**
+   * A write refused because the server is busy with large writes: tell the model to wait and send it again.
    * A conditional write refused because the document moved: tell the model to re-read and retry and
    * show it the diff (409 bodies carry `contentHash` and `diff`). Anything else rethrows.
    * @param {unknown} err
    */
   const staleOr = (err) => {
+    // Large writes take turns (503 with `retryAfter`): nothing is wrong with the call, it only came too soon.
+    if (err?.status === 503 && typeof err?.data?.retryAfter === "number") {
+      return { isError: true, content: [{ type: "text", text: `Nothing was written: ${err.data.error}. Wait ${err.data.retryAfter} seconds, then send the same call again.` }], structuredContent: err.data };
+    }
     const data = err?.status === 409 && err?.data && typeof err.data.contentHash === "string" ? err.data : null;
     if (!data) throw err;
     const what = data.diff ? `here is what changed:\n${data.diff}${data.truncated ? "\n… (diff truncated)" : ""}` : "what changed is not available, so re-read the document.";
@@ -303,7 +308,7 @@ export function registerTools(server, client) {
     {
       title: "Replace content",
       description:
-        "Replace the whole document with new Markdown. Applied live as a minimal edit (collaborators keep their cursors). Use for your own drafts, or when the user explicitly asks for an in-place rewrite; use markdoc_suggest for other people's text. Always pass `ifContentHash` from the markdoc_read_document you worked from: a person may be typing in the same document, and without it their words are silently overwritten.",
+        "Replace the whole document with new Markdown. Lines and words you did not change stay in place, with the cursors, comments and pending suggestions on them; a passage you rewrote loses the comments and suggestions inside it. Use for your own drafts, or when the user explicitly asks for an in-place rewrite; use markdoc_suggest for other people's text. Always pass `ifContentHash` from the markdoc_read_document you worked from: a person may be typing in the same document, and without it their words are silently overwritten.",
       inputSchema: { id: z.string(), content: z.string().describe("The complete new Markdown"), message: z.string().optional().describe("Short description saved in version history"), ifContentHash: IF_HASH },
       annotations: DESTRUCTIVE,
     },

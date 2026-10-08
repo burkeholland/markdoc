@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { planReplace, REPLACE_LIMITS, type ExactDiff } from "./replace-plan";
+import { planReplace, replaceText, REPLACE_LIMITS, type ExactDiff } from "./replace-plan";
 import { applyOps, diffOps, type TextOp } from "./text-diff";
 
 /** The largest text the content route accepts. */
@@ -145,7 +145,7 @@ describe("planReplace: never half a character", () => {
 describe("planReplace: a small change gets the edits it always got", () => {
   it("is diffOps of the two whole texts, edit for edit, while the changed part is small", () => {
     const r = rng(11);
-    for (let i = 0; i < 150; i++) {
+    for (let i = 0; i < 300; i++) {
       const base = prose(500 + Math.floor(r() * 60_000), i + 1, i % 3 ? ASCII : CJK);
       const at = Math.floor(r() * (base.length - 400));
       // One passage of up to 400 characters rewritten: at most 400 × 500 = 200,000, under the limit.
@@ -286,5 +286,64 @@ describe("planReplace: the work is bounded at the largest text the route accepts
       expect(ms, name).toBeLessThan(2_000);
       expect(plan.exactWork, name).toBeLessThanOrEqual(REPLACE_LIMITS.exactBudget);
     }
+  });
+});
+
+describe("replaceText: the shared text reads the new text afterwards, whatever the plan did", () => {
+  const shared = (text: string) => {
+    const doc = new Y.Doc();
+    const ytext = doc.getText("content");
+    ytext.insert(0, text);
+    return { doc, ytext };
+  };
+
+  it("applies the planned edits and returns them", () => {
+    const base = prose(20_000, 1);
+    const next = edited(base, 30, 2);
+    const { doc, ytext } = shared(base);
+    let ops: TextOp[] = [];
+    doc.transact(() => (ops = replaceText(ytext, next)));
+    expect(ytext.toString()).toBe(next);
+    expect(ops).toEqual(planReplace(base, next).ops);
+    expect(ops.length).toBeGreaterThan(0);
+  });
+
+  it("the same text again: no edit, and the shared document is not touched", () => {
+    const { doc, ytext } = shared("Nothing changes.\n");
+    const before = Y.encodeStateAsUpdate(doc);
+    let ops: TextOp[] = [{ index: 0, deleteCount: 0, insert: "x" }];
+    doc.transact(() => (ops = replaceText(ytext, "Nothing changes.\n")));
+    expect(ops).toEqual([]);
+    expect(Y.encodeStateAsUpdate(doc)).toEqual(before);
+  });
+
+  it.each([
+    ["edits that leave a wrong text", (): { ops: TextOp[] } => ({ ops: [{ index: 0, deleteCount: 3, insert: "WRONG" }] })],
+    ["no edits although the text changed", (): { ops: TextOp[] } => ({ ops: [] })],
+  ])("a plan with %s: the whole text is replaced instead, and the fault is logged", (_name, faulty) => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { doc, ytext } = shared("The old text of the document.\n");
+      let ops: TextOp[] = [];
+      doc.transact(() => (ops = replaceText(ytext, "What the caller sent.\n", faulty)));
+      expect(ytext.toString()).toBe("What the caller sent.\n");
+      expect(ops).toHaveLength(1);
+      expect(ops[0].insert).toBe("What the caller sent.\n");
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(String(error.mock.calls[0][0])).toContain("[replace] the planned edits did not make the new text");
+      // Sizes only: no text of the document goes to the log.
+      expect(String(error.mock.calls[0][0])).not.toContain("old text");
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("to an empty text and from an empty text", () => {
+    const a = shared("Some text.\n");
+    a.doc.transact(() => replaceText(a.ytext, ""));
+    expect(a.ytext.toString()).toBe("");
+    const b = shared("");
+    b.doc.transact(() => replaceText(b.ytext, "Some text.\n"));
+    expect(b.ytext.toString()).toBe("Some text.\n");
   });
 });
