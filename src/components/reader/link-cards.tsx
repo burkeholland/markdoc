@@ -20,22 +20,20 @@ export function ReaderLinkCards({ contentKey }: { contentKey: string }) {
   useEffect(() => {
     const root = document.querySelector<HTMLElement>(ROOT_SELECTOR);
     if (!root) return;
-    // Frames this page already loads by itself (none on a first run; all of them on a second run over the same HTML).
-    let loading = root.querySelectorAll("iframe.md-link-card-iframe:not([data-asked])").length;
+    // Frames this run has made. A run over HTML it has already been through finds every box filled.
+    let loading = 0;
     for (const figure of root.querySelectorAll<HTMLElement>("figure.md-link-card[data-link-card]")) {
       const link = figure.getAttribute("data-link-card") ?? "";
       const card = matchLinkCard(link);
       const box = figure.querySelector<HTMLElement>(":scope > .md-link-card-frame");
       if (!card || !box || box.childElementCount > 0) continue;
-      const add = (asked: boolean) => {
+      const add = () => {
         const frame = createCardFrame(card, link);
-        if (!frame) return;
-        if (asked) frame.setAttribute("data-asked", "");
-        box.replaceChildren(frame);
+        if (frame) box.replaceChildren(frame);
       };
       if (loading < MAX_CARD_FRAMES) {
         loading++;
-        add(false);
+        add();
         continue;
       }
       const load = document.createElement("button");
@@ -44,7 +42,7 @@ export function ReaderLinkCards({ contentKey }: { contentKey: string }) {
       load.textContent = cardLoadLabel(card);
       load.setAttribute("aria-label", `${cardLoadLabel(card)}: ${cardLinkText(link)}`);
       load.setAttribute("data-testid", "link-card-load");
-      load.addEventListener("click", () => add(true));
+      load.addEventListener("click", add);
       box.replaceChildren(load);
     }
   }, [contentKey]);

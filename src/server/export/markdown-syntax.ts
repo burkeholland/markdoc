@@ -68,9 +68,10 @@ function element(tagName: string, properties: Element["properties"], children: E
  * becomes the card, built here from that link and nothing else. The card is Markdoc's own markup: what it
  * is, the link, and an empty box of the frame's size. There is no frame in the HTML; the page adds it in
  * the browser (`src/components/reader/link-cards.tsx`), from the same list. Raw HTML never gets here (it is
- * dropped before the sanitizer), and the mark is taken off everything that is not a card.
+ * dropped before the sanitizer), and the mark is taken off everything that is not a card. Exported for
+ * its test, which hands it trees the steps before it never produce.
  */
-const rehypeLinkCards: Plugin<[], HastRoot> = function () {
+export const rehypeLinkCards: Plugin<[], HastRoot> = function () {
   const unmark = (node: HastRoot | Element) => {
     for (const child of node.children) {
       if (child.type !== "element") continue;

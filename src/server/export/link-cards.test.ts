@@ -4,6 +4,10 @@ import { schema } from "../../editor/markdown/schema";
 import { CARD_FRAME_HOSTS, matchLinkCard } from "../../editor/markdown/link-cards";
 import { previewText } from "../preview-text";
 import { renderMarkdownFragment } from "./render-markdown";
+import { readerHtml, rehypeLinkCards } from "./markdown-syntax";
+import rehypeStringify from "rehype-stringify";
+import { unified } from "unified";
+import type { Element, Root as HastRoot } from "hast";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 delete process.env.DATABASE_URL;
@@ -134,6 +138,40 @@ describe("link cards on the published page (#2317)", () => {
     expect(exported).not.toContain("md-link-card");
     expect(exported).not.toContain("<figure");
     expect(exported).not.toContain("<iframe");
+    // The processor itself, asked for nothing: no cards. Asked for them: cards.
+    expect(String(await readerHtml().use(rehypeStringify).process(TWEET))).toBe(plain);
+    expect(String(await readerHtml({}).use(rehypeStringify).process(TWEET))).toBe(plain);
+    expect(String(await readerHtml({ linkCards: true }).use(rehypeStringify).process(TWEET))).toBe(POST_CARD);
+  });
+
+  it("the step after the sanitizer makes a card of a marked top-level paragraph only, and takes every other mark off", async () => {
+    const el = (tagName: string, properties: Element["properties"], children: Element["children"] = []): Element => ({ type: "element", tagName, properties, children });
+    const say = (value: string) => ({ type: "text" as const, value });
+    const run = async (children: HastRoot["children"]) => {
+      const tree: HastRoot = { type: "root", children };
+      const processor = unified().use(rehypeLinkCards).use(rehypeStringify);
+      return processor.stringify(await processor.run(tree));
+    };
+    // What the step before it makes: the paragraph, marked with its link.
+    expect(await run([el("p", { dataLinkCard: TWEET }, [say(TWEET)])])).toBe(POST_CARD);
+    // A mark on anything that is not a top-level paragraph, or a mark that is not a link on the list: no card, no mark.
+    const forged = await run([
+      el("div", { dataLinkCard: TWEET }, [say("a marked div")]),
+      el("figure", { dataLinkCard: VIDEO, className: ["md-link-card"] }, [el("div", { className: ["md-link-card-frame"] })]),
+      el("blockquote", {}, [el("p", { dataLinkCard: TWEET }, [say("a marked paragraph in a quote")])]),
+      el("ul", {}, [el("li", { dataLinkCard: VIDEO }, [el("p", { dataLinkCard: VIDEO }, [say("in a list")])])]),
+      el("p", { dataLinkCard: "https://evil.example/x" }, [say("a paragraph marked with another site")]),
+      el("p", { dataLinkCard: `${TWEET}"><iframe src="https://evil.example/">` }, [say("a mark that tries to close the attribute")]),
+      el("p", { dataLinkCard: ["https://x.com/jack/status/20"] as unknown as string }, [say("a mark that is a list")]),
+      el("p", { dataLinkCard: true }, [say("a mark with no value")]),
+    ]);
+    expect(forged).not.toContain("data-link-card");
+    expect(forged).not.toContain("<figcaption");
+    expect(forged).not.toContain("md-link-card-header");
+    expectInert(forged, "forged marks");
+    expect(forged).toContain("<div>a marked div</div>");
+    expect(forged).toContain("<blockquote><p>a marked paragraph in a quote</p></blockquote>");
+    expect(forged).toContain("<p>a paragraph marked with another site</p>");
   });
 
   it("the render worker draws the same card (it loads the list straight from source)", async () => {

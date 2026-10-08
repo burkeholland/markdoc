@@ -174,7 +174,7 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
 
   it("frameSources: only a document's editor and published page draw cards", () => {
     for (const path of ["/d/doc-1", "/p/doc-1", "/d/a", "/p/Zz09"]) expect(frameSources(path), path).toBe(CARDS);
-    for (const path of ["/", "/login", "/settings", "/d", "/d/", "/p", "/p/", "/d/doc-1/x", "/p/doc-1/opengraph-image", "/dd/doc-1", "/D/doc-1", "/x/d/doc-1", "/api/documents/doc-1", "/embed/nonce"]) {
+    for (const path of ["/", "/login", "/settings", "/d", "/d/", "/p", "/p/", "/d/doc-1/x", "/p/doc-1/opengraph-image", "/dd/doc-1", "/D/doc-1", "/x/d/doc-1", "/x/doc-1", "/s/doc-1", "/e/doc-1", "/a/b", "/api/documents/doc-1", "/embed/nonce"]) {
       expect(frameSources(path), path).toBe(NO_FRAMES);
     }
   });

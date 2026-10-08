@@ -243,6 +243,19 @@ describe("link cards in the rich pane (#2317)", () => {
       vi.advanceTimersByTime(CARD_FRAME_DELAY_MS * 2);
       expect(frames(view.dom)).toEqual([frame]);
       expect(frame.isConnected).toBe(true);
+      // A comment on the card's link marks the card, and the editor asks the card to update: the same frame still.
+      const at = session.ytext.toString().indexOf(VIDEO);
+      const id = session.comments.add({ from: at + 8, to: at + 13, body: "This one?", author: session.user });
+      refreshRichHighlights(view);
+      expect(view.dom.querySelector(".md-link-card")!.classList.contains("md-card-comment")).toBe(true);
+      session.setActiveComment(id);
+      refreshRichHighlights(view);
+      session.comments.remove(id);
+      refreshRichHighlights(view);
+      expect(view.dom.querySelector(".md-link-card")!.classList.contains("md-card-comment")).toBe(false);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS * 2);
+      expect(frames(view.dom)).toEqual([frame]);
+      expect(frame.isConnected).toBe(true);
     });
 
     it("Show as text, deleting the card and closing the editor take the frame away and give its place back", () => {

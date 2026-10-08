@@ -110,9 +110,31 @@ describe("the published page's link cards get their frames in the browser (#2317
     const body = show(card(TWEET, "post") + card(VIDEO), { strict: true });
     const first = frames(body);
     expect(first).toHaveLength(2);
-    show(body.innerHTML, { strict: true });
-    act(() => root!.render(<ReaderLinkCards contentKey="hash-1" />));
-    expect(frames(body)).toHaveLength(2);
+    // The same HTML under a new key (the page asked again and nothing had changed): the same frames, not new ones.
+    act(() => root!.render(<StrictMode><ReaderLinkCards contentKey="hash-2" /></StrictMode>));
+    expect(frames(body)).toEqual(first);
+    for (const frame of first) expect(frame.isConnected).toBe(true);
+  });
+
+  it("a page past the limit keeps its buttons, and the frames loaded by them, when it runs again", () => {
+    const links = Array.from({ length: MAX_CARD_FRAMES + 2 }, (_, i) => `https://x.com/jack/status/${i + 1}`);
+    const body = show(links.map((link) => card(link, "post")).join(""), { strict: true });
+    expect(frames(body)).toHaveLength(MAX_CARD_FRAMES);
+    expect(body.querySelectorAll('[data-testid="link-card-load"]')).toHaveLength(2);
+    act(() => body.querySelector<HTMLButtonElement>('[data-testid="link-card-load"]')!.click());
+    const loaded = frames(body);
+    expect(loaded).toHaveLength(MAX_CARD_FRAMES + 1);
+    act(() => root!.render(<StrictMode><ReaderLinkCards contentKey="hash-2" /></StrictMode>));
+    expect(frames(body)).toEqual(loaded);
+    expect(body.querySelectorAll('[data-testid="link-card-load"]')).toHaveLength(1);
+  });
+
+  it("only the article is looked at: a card-shaped thing elsewhere on the page gets nothing", () => {
+    const outside = document.body.appendChild(document.createElement("aside"));
+    outside.innerHTML = card(VIDEO);
+    const body = show(card(TWEET, "post"));
+    expect(frames(body)).toHaveLength(1);
+    expect(frames(outside)).toHaveLength(0);
   });
 
   it("new content gets its frames, and the limit counts the new page only", () => {
