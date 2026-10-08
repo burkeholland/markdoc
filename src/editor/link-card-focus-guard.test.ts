@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CARD_FOCUS_QUIET_MS, CARD_FOCUS_TRIES, CARD_LOAD_AGAIN_LABEL, CARD_TURNED_OFF_TEXT } from "./link-card-focus-guard";
+import { CARD_FOCUS_QUIET_MS, CARD_FOCUS_TRIES, CARD_FOCUS_TRIES_IN_WINDOW, CARD_FOCUS_WINDOW_MS, CARD_LOAD_AGAIN_LABEL, CARD_TURNED_OFF_TEXT } from "./link-card-focus-guard";
 
 // The code keeps what the page saw (the last key, the last press) for the life of a page, from the moment
 // it is loaded. So each test loads it anew: a test starts on a page where nobody has typed or pressed yet.
@@ -486,6 +486,153 @@ describe("the focus guard of a card's frame (#2338)", () => {
       press(editor, "touch", 500);
       for (let n = 0; n < CARD_FOCUS_TRIES; n++) grab(frame, 5000 + n);
       expect(turnOff).not.toHaveBeenCalled();
+    });
+  });
+
+  describe(`a frame that takes the keyboard slowly: ${CARD_FOCUS_TRIES_IN_WINDOW} moves that count within ${CARD_FOCUS_WINDOW_MS / 1000} s turn it off, in a row or not`, () => {
+    const press = (target: Element, kind: string, ms: number) => target.dispatchEvent(at(new PointerEvent("pointerdown", { pointerType: kind, bubbles: true, cancelable: true }), ms));
+    /** With a finger: a move right after a key counts. */
+    const counted = (frame: HTMLIFrameElement, ms: number) => {
+      key(editor, "a", ms - 50);
+      grab(frame, ms);
+    };
+    /** With a finger: a move this long after the last key does not count, and starts "in a row" again. */
+    const notCounted = (frame: HTMLIFrameElement, afterCounted: number) => grab(frame, afterCounted + CARD_FOCUS_QUIET_MS);
+
+    it("the numbers: three in a row, or ten in a minute", () => {
+      expect(CARD_FOCUS_TRIES).toBe(3);
+      expect(CARD_FOCUS_TRIES_IN_WINDOW).toBe(10);
+      expect(CARD_FOCUS_WINDOW_MS).toBe(60_000);
+    });
+
+    it(`with a finger, never two in a row: ${CARD_FOCUS_TRIES_IN_WINDOW - 1} are not enough, the next one turns the card off, with the same words`, () => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      let now = 1000;
+      for (let n = 1; n <= CARD_FOCUS_TRIES_IN_WINDOW; n++) {
+        expect(turnOff, `before move ${n}`).not.toHaveBeenCalled();
+        counted(frame, now);
+        expect(document.activeElement).toBe(editor);
+        if (n < CARD_FOCUS_TRIES_IN_WINDOW) notCounted(frame, now);
+        now += 2000;
+      }
+      expect(turnOff).toHaveBeenCalledTimes(1);
+      expect(live()!.textContent).toBe(CARD_TURNED_OFF_TEXT);
+    });
+
+    it("moves that do not count are not among the ten, however many there are", () => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      key(editor, "a", 1000);
+      for (let n = 0; n < CARD_FOCUS_TRIES_IN_WINDOW * 3; n++) grab(frame, 1000 + CARD_FOCUS_QUIET_MS + n * 500);
+      expect(turnOff).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(editor);
+    });
+
+    /** Nine moves that count, none in a row, the first at `first` and the others five seconds apart after it. */
+    const nine = (frame: HTMLIFrameElement, first: number) => {
+      for (let n = 0; n < CARD_FOCUS_TRIES_IN_WINDOW - 1; n++) {
+        counted(frame, first + n * 5000);
+        notCounted(frame, first + n * 5000);
+      }
+    };
+
+    it("the edge of the minute: the tenth move one millisecond inside it turns the card off", () => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      nine(frame, 2000);
+      expect(turnOff).not.toHaveBeenCalled();
+      counted(frame, 2000 + CARD_FOCUS_WINDOW_MS - 1);
+      expect(turnOff).toHaveBeenCalledTimes(1);
+    });
+
+    it("the edge of the minute: a full minute after the first, that first one is forgotten; and the minute slides, it does not start again", () => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      nine(frame, 2000);
+      counted(frame, 2000 + CARD_FOCUS_WINDOW_MS);
+      // Nine in the last minute: the second to the tenth.
+      expect(turnOff).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(editor);
+      notCounted(frame, 2000 + CARD_FOCUS_WINDOW_MS);
+      // A minute of the clock that began at the tenth move would hold two moves now. The last sixty seconds hold ten.
+      counted(frame, 2000 + CARD_FOCUS_WINDOW_MS + 2000);
+      expect(turnOff).toHaveBeenCalledTimes(1);
+    });
+
+    it("a long time later the count is at nothing again", () => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      nine(frame, 2000);
+      nine(frame, 2000 + 8 * 5000 + CARD_FOCUS_WINDOW_MS);
+      expect(turnOff).not.toHaveBeenCalled();
+    });
+
+    it.each(["mouse", "pen"])("with a %s every move that was not meant counts; a move that was meant starts only the count in a row again", (kind) => {
+      const { frame, turnOff } = make();
+      editor.focus();
+      press(editor, kind, 500);
+      key(editor, "a", 1000);
+      let now = 1000;
+      const rounds = CARD_FOCUS_TRIES_IN_WINDOW / (CARD_FOCUS_TRIES - 1);
+      for (let round = 1; round <= rounds; round++) {
+        for (let n = 0; n < CARD_FOCUS_TRIES - 1; n++) {
+          expect(turnOff, `round ${round}`).not.toHaveBeenCalled();
+          grab(frame, (now += 100));
+          expect(document.activeElement).toBe(editor);
+        }
+        if (round === rounds) break;
+        // The person goes into the frame: the pointer is on it and the last key is old.
+        pointer(frame, "pointerenter", (now += 100));
+        grab(frame, (now += CARD_FOCUS_QUIET_MS));
+        expect(document.activeElement).toBe(frame);
+        pointer(frame, "pointerleave", (now += 100));
+        editor.focus();
+      }
+      expect(now).toBeLessThan(CARD_FOCUS_WINDOW_MS);
+      expect(turnOff).toHaveBeenCalledTimes(1);
+      expect(live()!.textContent).toBe(CARD_TURNED_OFF_TEXT);
+    });
+
+    it("a frame that is loaded again starts both counts at nothing", () => {
+      const first = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      nine(first.frame, 2000);
+      const then = 2000 + 8 * 5000 + 2000;
+      counted(first.frame, then);
+      expect(first.turnOff).toHaveBeenCalledTimes(1);
+      first.stop();
+      // "Load it again": a new frame, in the same minute. The first card was the only one: the page still knows the finger.
+      const second = make();
+      editor.focus();
+      for (let n = 0; n < CARD_FOCUS_TRIES - 1; n++) counted(second.frame, then + 1000 + n * 100);
+      notCounted(second.frame, then + 1100);
+      const more = CARD_FOCUS_TRIES_IN_WINDOW - 1 - (CARD_FOCUS_TRIES - 1);
+      for (let n = 0; n < more; n++) {
+        counted(second.frame, then + 3000 + n * 2000);
+        notCounted(second.frame, then + 3000 + n * 2000);
+      }
+      // Two in a row and nine in the minute: neither count came over from the frame before.
+      expect(second.turnOff).not.toHaveBeenCalled();
+      counted(second.frame, then + 3000 + more * 2000);
+      expect(second.turnOff).toHaveBeenCalledTimes(1);
+    });
+
+    it("each frame has its own count", () => {
+      const first = make();
+      const second = make();
+      editor.focus();
+      press(editor, "touch", 500);
+      nine(first.frame, 2000);
+      counted(second.frame, 2000 + 8 * 5000 + 2000);
+      expect(first.turnOff).not.toHaveBeenCalled();
+      expect(second.turnOff).not.toHaveBeenCalled();
     });
   });
 

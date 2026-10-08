@@ -446,6 +446,58 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await context.close();
   });
 
+  test("three in a row, or ten in a minute: a frame that takes the keyboard now and then, never twice in a row, is turned off at the tenth time; loaded again it starts from nothing", async ({ browser, baseURL }) => {
+    const { page, context } = await signInWithTouch(browser, uniqueLogin("guard-ten"));
+    const sites = await standInWithKeyboard(context, baseURL!);
+    const id = await createDocument(page, DOC, "Ten in a minute");
+    await openDocument(page, id);
+    await frameReady(page, VIDEO_FRAME);
+    const last = page.locator(".md-rich p", { hasText: "Last paragraph" });
+    const grabs = async () => (await frameCounts(page, ".md-rich", VIDEO_FRAME)).grabs;
+    await last.tap();
+    await page.keyboard.press("Control+End");
+    const started = Date.now();
+    for (let n = 1; n <= 10; n++) {
+      // Nine are not enough.
+      await expect(notice(page)).toHaveCount(0);
+      await expect(frame(page, VIDEO_FRAME)).toHaveCount(1);
+      // A key, and the frame takes the keyboard a moment later: that move counts.
+      await page.keyboard.type("a");
+      await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
+      if (n === 10) break;
+      await expect.poll(grabs).toBe(2 * n - 1);
+      await expect.poll(() => keyboardPlace(page)).toBe("preview");
+      // More than a second after the key it takes the keyboard again: given back, not counted, and "in a row" starts again.
+      await page.waitForTimeout(1100);
+      await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
+      await expect.poll(grabs).toBe(2 * n);
+      await expect.poll(() => keyboardPlace(page)).toBe("preview");
+    }
+    // The tenth move that counted, inside one minute: the same words and the same button as for three in a row.
+    await expect(notice(page)).toHaveCount(1);
+    await expect(notice(page)).toContainText(TURNED_OFF);
+    await expect(status(page)).toHaveText(TURNED_OFF);
+    expect(Date.now() - started, "all ten inside one minute").toBeLessThan(60_000);
+    expect(await keyboardPlace(page)).toBe("preview");
+    expect(await codeText(page)).toContain("Last paragraphaaaaaaaaaa");
+    expect(sites.keys).toEqual([]);
+
+    // Loaded again, the frame starts from nothing: one more such move does not turn it off.
+    await notice(page).getByRole("button", { name: "Load it again" }).tap();
+    await expect(frame(page, VIDEO_FRAME)).toHaveCount(1);
+    await frameReady(page, VIDEO_FRAME);
+    await last.tap();
+    await page.keyboard.type("b");
+    await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
+    await expect.poll(grabs).toBe(1);
+    await expect.poll(() => keyboardPlace(page)).toBe("preview");
+    await page.waitForTimeout(300);
+    await expect(notice(page)).toHaveCount(0);
+    await expect(frame(page, VIDEO_FRAME)).toHaveCount(1);
+    expect(sites.refused).toEqual([]);
+    await context.close();
+  });
+
   test("where nothing is typed, a frame is left alone: the published page and a viewer's editor", async ({ browser, baseURL }) => {
     const owner = await signIn(browser, uniqueLogin("guard-pub"));
     const sites = await standInWithKeyboard(owner.context, baseURL!, (url) => (url === TWEET_FRAME ? 200 : 0));

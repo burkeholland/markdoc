@@ -3,8 +3,9 @@
  * and no sandbox token stops that script from taking keyboard focus (`window.focus()` plus a field of its
  * own). Keys typed then go to the frame, not to the document. `inert` on the frame does not stop it either
  * (measured in Chromium: the frame still received every key). So this guard reacts: when focus moves into
- * a card's frame and the page did not see the person go there, it gives focus back to where it was, and
- * after `CARD_FOCUS_TRIES` such moves the frame is turned off.
+ * a card's frame and the page did not see the person go there, it gives focus back to where it was. A
+ * frame is turned off after `CARD_FOCUS_TRIES` such moves in a row, or after `CARD_FOCUS_TRIES_IN_WINDOW`
+ * of them within `CARD_FOCUS_WINDOW_MS`, in a row or not: three in a row, or ten in a minute.
  *
  * A move of focus into a frame is meant when one of these holds:
  *  - focus was not in a place where text is typed (nothing to protect: a viewer, the published page);
@@ -23,7 +24,10 @@
  * text is typed, every move of focus into a frame is given back, also a tap in a player: the tap itself
  * still lands in the frame, so Play and Pause work, and the keyboard stays with the document. Such a move
  * counts against the frame only when a key was typed in the page in the last `CARD_FOCUS_QUIET_MS`; one
- * that does not count starts the count again. Otherwise the third tap in a player would turn its card off.
+ * that does not count starts the count in a row again. Otherwise the third tap in a player would turn its
+ * card off. A frame that takes the keyboard slowly enough is never three in a row then (measured: every
+ * two seconds, while the person pauses five seconds between bursts of typing); the count per minute is
+ * for that frame. It is not started again by anything but a new frame.
  *
  * It only uses the page's own events. It never listens to a message from a frame. Where a browser does
  * not send these events as Chromium does, nothing here runs and the frame behaves as it did before.
@@ -31,8 +35,12 @@
 
 /** A pointer on the frame is a wish to go in only when the last key typed in the page is this old. */
 export const CARD_FOCUS_QUIET_MS = 1000;
-/** After this many moves of focus that were not meant, the frame is turned off. */
+/** After this many moves of focus in a row that were not meant, the frame is turned off. */
 export const CARD_FOCUS_TRIES = 3;
+/** Also after this many of them within `CARD_FOCUS_WINDOW_MS`, with moves that were meant or did not count in between. */
+export const CARD_FOCUS_TRIES_IN_WINDOW = 10;
+/** The window slides: it is the time before the move that is being judged, not a minute of the clock. */
+export const CARD_FOCUS_WINDOW_MS = 60_000;
 /** A Tab, or a press on the cover, moves focus into the frame at once; this is how fresh it must be to count. */
 const MOVE_FRESH_MS = 250;
 
@@ -47,6 +55,8 @@ interface Guarded {
   turnOff: () => void;
   /** Moves of focus into this frame that were not meant, since the person last really went in. */
   tries: number;
+  /** When each of the moves that counted happened, as far back as `CARD_FOCUS_WINDOW_MS`. Only a new frame starts this again. */
+  counted: number[];
   pointerInside: boolean;
   /** When the page last saw the pointer on this frame (the time of that event). */
   pointerAt: number;
@@ -228,8 +238,12 @@ function pageGuard(doc: Document): PageGuard | null {
     }
     // With a finger a tap in a player comes here too. It counts only while the person is typing.
     if (seen.touch && now - seen.lastKeyAt >= CARD_FOCUS_QUIET_MS) guarded.tries = 0;
-    else guarded.tries++;
-    const off = guarded.tries >= CARD_FOCUS_TRIES;
+    else {
+      guarded.tries++;
+      guarded.counted.push(now);
+    }
+    guarded.counted = guarded.counted.filter((at) => now - at < CARD_FOCUS_WINDOW_MS);
+    const off = guarded.tries >= CARD_FOCUS_TRIES || guarded.counted.length >= CARD_FOCUS_TRIES_IN_WINDOW;
     // Back to where the person was. An editor puts its own selection back when it gets focus again.
     win.focus();
     if (from instanceof win.HTMLElement && from.isConnected) from.focus({ preventScroll: true });
@@ -284,15 +298,17 @@ function pageGuard(doc: Document): PageGuard | null {
 }
 
 /**
- * Guard one card frame. `turnOff` is called when the frame took focus `CARD_FOCUS_TRIES` times without the
- * person: the owner then takes the frame out and shows the notice. Returns the function that ends the
- * guard for this frame (the card is gone, or its frame is replaced).
+ * Guard one card frame. `turnOff` is called when the frame took focus without the person
+ * `CARD_FOCUS_TRIES` times in a row, or `CARD_FOCUS_TRIES_IN_WINDOW` times within `CARD_FOCUS_WINDOW_MS`:
+ * the owner then takes the frame out and shows the notice. Returns the function that ends the guard for
+ * this frame (the card is gone, or its frame is replaced). A frame that is loaded again is a new frame
+ * and is guarded anew, so both counts start at nothing.
  */
 export function guardCardFrame(frame: HTMLIFrameElement, turnOff: () => void): () => void {
   const doc = frame.ownerDocument;
   const guard = pageGuard(doc);
   if (!guard) return () => {};
-  const guarded: Guarded = { frame, turnOff, tries: 0, pointerInside: false, pointerAt: -Infinity, cover: null, stop: () => {} };
+  const guarded: Guarded = { frame, turnOff, tries: 0, counted: [], pointerInside: false, pointerAt: -Infinity, cover: null, stop: () => {} };
   const onEnter = (event: PointerEvent) => {
     guarded.pointerInside = true;
     guarded.pointerAt = event.timeStamp;
