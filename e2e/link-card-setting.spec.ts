@@ -268,7 +268,7 @@ test.describe("link cards: the setting and Insert (#2317)", () => {
     expect(sites.refused).toEqual([]);
   });
 
-  test("accessibility: axe on Settings and on the open dialog, light and dark; the dialog on a phone", async ({ browser, baseURL }) => {
+  test("accessibility: axe on Settings and on the open dialog, light and dark; the switch at phone width", async ({ browser, baseURL }) => {
     const user = await signIn(browser, uniqueLogin("cards-setting-a11y"));
     const sites = await standInForOtherSites(user.context, baseURL!);
     const { page } = user;
@@ -294,7 +294,7 @@ test.describe("link cards: the setting and Insert (#2317)", () => {
       await expect(dialog(page)).toHaveCount(0);
     }
 
-    // A phone: the dialog fits the screen, and the switch on Settings is fully on screen.
+    // A phone: the switch on Settings is fully on screen and the page does not scroll sideways.
     const phone = await browser.newContext({ ...devices["iPhone 13"], storageState: await user.context.storageState() });
     const phoneSites = await standInForOtherSites(phone, baseURL!);
     const small = await phone.newPage();
