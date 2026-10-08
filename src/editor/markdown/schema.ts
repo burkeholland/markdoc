@@ -1,6 +1,7 @@
 import { Schema, type NodeSpec, type MarkSpec, type DOMOutputSpec } from "prosemirror-model";
 import { tableNodes } from "prosemirror-tables";
 import { safeLinkHref } from "../links";
+import { matchLinkCard } from "./link-cards";
 
 /**
  * ProseMirror schema for GitHub Flavored Markdown.
@@ -29,7 +30,8 @@ const tables = tableNodes({
 });
 
 const nodes: Record<string, NodeSpec> = {
-  doc: { content: "block+" },
+  // `link_card` is named here and is not in the `block` group: a card only exists at the top level.
+  doc: { content: "(block | link_card)+" },
 
   paragraph: {
     content: "inline*",
@@ -172,6 +174,28 @@ const nodes: Record<string, NodeSpec> = {
     atom: true,
     selectable: true,
     toDOM: () => ["div", { class: "md-unrenderable", contenteditable: "false", "data-testid": "unrenderable-block" }, "This section cannot be rendered"],
+  },
+
+  /**
+   * A link to a known site (`link-cards.ts`) written bare, alone on its line, as a top-level paragraph
+   * (#2317). The same link as `<link>` or `[text](link)` is an ordinary paragraph. `url` is the line
+   * exactly as written; the rich pane draws the card in a node view (`nodeviews.ts`).
+   */
+  link_card: {
+    attrs: { url: {} },
+    atom: true,
+    selectable: true,
+    leafText: (node) => String(node.attrs.url),
+    parseDOM: [
+      {
+        tag: "div[data-link-card]",
+        getAttrs: (dom) => {
+          const url = (dom as HTMLElement).getAttribute("data-link-card") ?? "";
+          return matchLinkCard(url) ? { url } : false;
+        },
+      },
+    ],
+    toDOM: (node) => ["div", { class: "md-link-card", "data-link-card": node.attrs.url, contenteditable: "false" }, String(node.attrs.url)],
   },
 
   /** `[label]: url "title"` reference definition. */

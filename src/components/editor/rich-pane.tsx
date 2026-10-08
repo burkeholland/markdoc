@@ -116,6 +116,7 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
           visit.host === host.current &&
           ((visit.installing && activeVisit.current === null) || isCurrent()) &&
           visit.session.canEdit,
+        { isolateUndo: () => visit.session.undoManager.stopCapturing() },
       ),
     });
     visit.view = view;

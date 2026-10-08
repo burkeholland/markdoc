@@ -9,6 +9,7 @@ import { UpdatePill } from "./update-pill";
 import { DownloadMenu } from "./download-menu";
 import { ReaderScrollableRegions } from "./scrollable-regions";
 import { ReaderCopyLink } from "./copy-link";
+import { ReaderLinkCards } from "./link-cards";
 
 export interface ReaderPageProps {
   docId: string;
@@ -110,6 +111,7 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
             dangerouslySetInnerHTML={{ __html: html }}
           />
           <ReaderScrollableRegions contentKey={initialHash} />
+          <ReaderLinkCards contentKey={initialHash} />
           <footer className="reader-footer mt-16 border-t border-line pt-5 text-xs text-ink-4">
             Made with{" "}
             <Link href={signedIn ? "/" : "/login"} className="font-medium text-ink-3 hover:text-accent">

@@ -930,6 +930,138 @@ body {
   font-style: italic;
   user-select: none;
 }
+/* ---------- Link cards (#2317) ----------
+   A link to a known site, alone on its line. The card is one block: a header with what it is, the
+   link and (in the editor) "Show as text", then the frame to the provider's own embed page. The same
+   markup in the editor (a node view), on the published page and in the editor's server-drawn stand-in,
+   so the three have the same box. Spacing comes from the prose rhythm above (margin-top only). */
+:is(.md-rich, .reader-body) .md-link-card {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-line-2);
+  border-radius: 10px;
+  padding: 8px 12px;
+  white-space: normal;
+}
+:is(.md-rich, .reader-body) .md-link-card-header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 14px;
+  gap: 4px 12px;
+  line-height: 1.4;
+  min-width: 0;
+}
+:is(.md-rich, .reader-body) .md-link-card-label {
+  color: var(--color-ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+:is(.md-rich, .reader-body) .md-link-card-link {
+  flex: 1 1 12ch;
+  /* 24 px with the padding: the smallest target WCAG 2.2 accepts. */
+  line-height: 20px;
+  min-width: 0;
+  overflow: hidden;
+  /* Room for the focus ring, which `overflow: hidden` would otherwise clip. */
+  padding: 2px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The frame's box has the frame's size before the frame is there, so the page does not move when it
+   arrives: 16 by 9 for a player, a tall box that scrolls inside for a post. */
+:is(.md-rich, .reader-body) .md-link-card-frame {
+  align-items: center;
+  background: var(--color-surface-3);
+  border-radius: 8px;
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+  max-width: 560px;
+  overflow: hidden;
+}
+:is(.md-rich, .reader-body) .md-link-card-frame[data-kind="video"] {
+  aspect-ratio: 16 / 9;
+}
+:is(.md-rich, .reader-body) .md-link-card-frame[data-kind="post"] {
+  height: 480px;
+  max-width: 550px;
+}
+:is(.md-rich, .reader-body) .md-link-card-frame:not([data-kind]) {
+  display: none;
+}
+:is(.md-rich, .reader-body) .md-link-card-iframe {
+  border: 0;
+  display: block;
+  height: 100%;
+  width: 100%;
+}
+:is(.md-rich, .reader-body) .md-link-card-load,
+.md-rich .md-link-card-as-text {
+  background: var(--color-surface);
+  border: 1px solid var(--color-line-2);
+  border-radius: 6px;
+  color: var(--color-ink-2);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  min-height: 28px;
+  padding: 2px 10px;
+  white-space: nowrap;
+}
+.md-rich .md-link-card-as-text {
+  margin-left: auto;
+}
+:is(.md-rich, .reader-body) .md-link-card-load:hover,
+.md-rich .md-link-card-as-text:hover {
+  border-color: var(--color-accent);
+  color: var(--color-ink);
+}
+/* "Show as text" is an edit. ProseMirror keeps `contenteditable` on the editor in step with the role,
+   and a node view is not redrawn when the role changes, so the button is hidden from here. */
+.md-rich[contenteditable="false"] .md-link-card-as-text {
+  display: none;
+}
+.md-rich .md-link-card.ProseMirror-selectednode {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+/* A comment, a suggestion or a find match on the characters of the card's link (highlights.ts): the
+   card has no text to underline, so the whole card carries the mark. */
+.md-rich .md-link-card.md-card-comment {
+  background: var(--md-comment-bg);
+  box-shadow: 0 0 0 2px var(--md-comment-line);
+}
+.md-rich .md-link-card.md-card-comment-resolved {
+  border-style: dotted;
+}
+.md-rich .md-link-card.md-card-suggest-insert {
+  background: var(--md-insert-bg);
+  box-shadow: 0 0 0 2px var(--color-success);
+}
+.md-rich .md-link-card.md-card-suggest-delete {
+  background: var(--md-delete-bg);
+  box-shadow: 0 0 0 2px var(--color-danger);
+}
+/* The link takes the deletion ink here: the accent colour on the deletion background is 4.48:1 in the light theme. */
+.md-rich .md-link-card.md-card-suggest-delete .md-link-card-link {
+  color: var(--md-delete-ink);
+  text-decoration: line-through;
+}
+.md-rich .md-link-card.md-card-find,
+.md-rich .md-link-card.md-card-find-active {
+  box-shadow: 0 0 0 2px rgba(234, 88, 12, 0.9);
+}
+.md-rich .md-link-card.md-card-active {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
+  outline-offset: 3px;
+}
+@media (max-width: 767.98px) {
+  .md-rich .md-link-card-as-text,
+  :is(.md-rich, .reader-body) .md-link-card-load {
+    min-height: 40px;
+  }
+}
 .md-rich .md-html-inline {
   color: var(--color-ink-4);
   font-family: var(--font-mono);
