@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, apiErrorText, uploadAsset } from "./api";
+import { api, ApiError, apiErrorText, UPLOAD_TOO_LARGE_MESSAGE, uploadAsset } from "./api";
 import { uploadImportBatch } from "./import-upload";
 
 const FALLBACK = "Could not add collaborator";
@@ -33,13 +33,15 @@ async function captureError(pending: Promise<unknown>): Promise<Error> {
   return error;
 }
 
-const requestPaths = [
+const requestPaths: { name: string; call: () => Promise<unknown>; apiError: boolean; context: string; tooLarge?: string }[] = [
   { name: "api request", call: () => api.documents.list(), apiError: true, context: "Request failed" },
   {
     name: "image upload",
     call: () => uploadAsset("document-one", new File(["image data"], "diagram.png", { type: "image/png" })),
     apiError: true,
     context: "Request failed",
+    // A 413 that is not the app's JSON is the proxy refusing the body (#2339): it gets words, not a status.
+    tooLarge: UPLOAD_TOO_LARGE_MESSAGE,
   },
   {
     name: "import upload",
@@ -49,7 +51,7 @@ const requestPaths = [
   },
 ];
 
-describe.each(requestPaths)("$name response boundary", ({ call, apiError, context }) => {
+describe.each(requestPaths)("$name response boundary", ({ call, apiError, context, tooLarge }) => {
   const failures = [
     { name: "HTML", text: "<html><body>Upload exceeds proxy limit</body></html>", status: 413, statusText: "Content Too Large" },
     { name: "plain text", text: "Upstream service unavailable", status: 502, statusText: "Bad Gateway" },
@@ -61,12 +63,13 @@ describe.each(requestPaths)("$name response boundary", ({ call, apiError, contex
   it.each(failures)("rejects $name HTTP failures without diagnostic content", async ({ text, status, statusText }) => {
     const read = respond(text, { status, statusText });
     const error = await captureError(call());
+    const words = status === 413 ? tooLarge : undefined;
 
     expect(error instanceof ApiError).toBe(apiError);
     expect(error instanceof SyntaxError).toBe(false);
-    expect(error.message === `${context} (${status})`).toBe(true);
+    expect(error.message === (words ?? `${context} (${status})`)).toBe(true);
     expect(error.message.trim().length > 0).toBe(true);
-    expect(error.message.includes(String(status))).toBe(true);
+    expect(error.message.includes(String(status))).toBe(words === undefined);
     if (text) expect(error.message.includes(text)).toBe(false);
     expect(error.message.includes("<html>")).toBe(false);
     expect(error.cause === undefined).toBe(true);
@@ -299,6 +302,36 @@ describe("uploadAsset", () => {
     expect(uploaded.type).toBe(file.type);
     expect(uploaded.size).toBe(file.size);
     expect(await uploaded.text() === await file.text()).toBe(true);
+  });
+
+  const picture = () => new File(["image data"], "holiday.png", { type: "image/png" });
+  const NGINX_413 = "<html>\r\n<head><title>413 Request Entity Too Large</title></head>\r\n<body>\r\n<center><h1>413 Request Entity Too Large</h1></center>\r\n<hr><center>nginx/1.24.0 (Ubuntu)</center>\r\n</body>\r\n</html>\r\n";
+
+  it("says the file is too large when the proxy refuses the body with its own 413 page (#2339)", async () => {
+    respond(NGINX_413, { status: 413, statusText: "Request Entity Too Large", headers: { "Content-Type": "text/html" } });
+    const error = await captureError(uploadAsset("document-one", picture()));
+    expect(error instanceof ApiError).toBe(true);
+    expect(error.message).toBe("The file is too large for the server to accept");
+    expect(error.message).toBe(UPLOAD_TOO_LARGE_MESSAGE);
+    expect(apiErrorText(error, "Upload failed")).toBe(UPLOAD_TOO_LARGE_MESSAGE);
+    if (error instanceof ApiError) expect(error.status).toBe(413);
+  });
+
+  it("keeps the app's own message for a 413 it answered itself", async () => {
+    respond(JSON.stringify({ error: "Images must be 5 MB or smaller" }), { status: 413 });
+    const error = await captureError(uploadAsset("document-one", picture()));
+    expect(error.message).toBe("Images must be 5 MB or smaller");
+    if (error instanceof ApiError) expect(error.status).toBe(413);
+  });
+
+  it("keeps the status fallback for every other failure that is not the app's JSON", async () => {
+    respond("<html><body>Bad Gateway</body></html>", { status: 502 });
+    expect((await captureError(uploadAsset("document-one", picture()))).message).toBe("Request failed (502)");
+  });
+
+  it("does not change what another request says for the same 413 page", async () => {
+    respond(NGINX_413, { status: 413 });
+    expect((await captureError(api.documents.list())).message).toBe("Request failed (413)");
   });
 });
 

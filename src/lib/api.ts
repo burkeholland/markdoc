@@ -46,9 +46,9 @@ export interface SyncStatusDto {
   remoteContent?: string;
 }
 
-async function readApiResponse<T>(res: Response): Promise<T> {
+async function readApiResponse<T>(res: Response, fallback = `Request failed (${res.status})`): Promise<T> {
   return await readJsonResponse(res, {
-    fallback: `Request failed (${res.status})`,
+    fallback,
     createError: (message, body) => new ApiError(res.status, message, body?.issues, body),
   }) as T;
 }
@@ -347,10 +347,17 @@ export interface UploadedAsset {
   alt: string;
 }
 
+/**
+ * What a person reads when an upload is refused with a `413` that is not the app's own JSON answer:
+ * the proxy in front of the app (nginx, `client_max_body_size`) refused the body and sent its HTML
+ * page, which would otherwise read "Request failed (413)" (#2339).
+ */
+export const UPLOAD_TOO_LARGE_MESSAGE = "The file is too large for the server to accept";
+
 /** Upload an image for a document; the returned `url` is what goes into `![alt](url)`. */
 export async function uploadAsset(documentId: string, file: File): Promise<UploadedAsset> {
   const form = new FormData();
   form.append("file", file, file.name);
   const res = await fetch(`/api/documents/${documentId}/assets`, { method: "POST", body: form, credentials: "same-origin" });
-  return readApiResponse<UploadedAsset>(res);
+  return readApiResponse<UploadedAsset>(res, res.status === 413 ? UPLOAD_TOO_LARGE_MESSAGE : undefined);
 }
