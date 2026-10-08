@@ -22,6 +22,11 @@ export interface InlineAssetsOptions {
    * reader's own browser opens.
    */
   verifyBytes?: boolean;
+  /**
+   * Aborts when the caller goes away. Nothing more is read for it then: the page is given up before the
+   * next asset (the signal's reason is thrown), and a wait that leaves room for other requests ends at once.
+   */
+  signal?: AbortSignal;
 }
 
 export interface RenderDocumentHtmlOptions {
@@ -158,6 +163,26 @@ function embeddableType(asset: AssetContent): string | null {
   }
 }
 
+/** How much time in reads that never let the event loop turn may add up before other requests get a turn. */
+export const MAX_UNBROKEN_WORK_MS = 50;
+/**
+ * How long they get. A real wait and not one turn of the event loop: a request needs several turns
+ * (accept, read, answer), and one turn between two 0.7 s reads would let it advance one step per picture.
+ */
+export const STEP_ASIDE_MS = 25;
+/** Wait `STEP_ASIDE_MS`, or until `signal` aborts: nobody waits on behalf of a caller that is gone. */
+const stepAside = (signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, STEP_ASIDE_MS);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+
 /** An `<img>` as rehype-stringify writes it: attribute values are double-quoted, with `"` and `&` escaped. */
 const IMG_TAG = /<img((?:\s+[^\s"'=<>/]+(?:="[^"]*")?)*)\s*\/?>/g;
 
@@ -185,22 +210,43 @@ function showAltText(html: string, prefix: string, ids: Set<string>): string {
  * each asset, so a foreign id in the Markdown keeps its URL (and `GET /api/assets/:id` decides for
  * the reader). Assets are loaded one at a time, in document order, and embedding stops at the byte
  * budget, so one export can never hold more than the budget plus a single asset in memory. Assets
- * that no longer exist keep their URL, as before.
+ * that no longer exist keep their URL, as before. The embedded database reads in this thread (0.7 s for a
+ * 4 MB picture), and ten such reads in a row kept every other request and the health probe waiting for
+ * 7 s. So a read that came back before the event loop could turn is timed, and whenever
+ * `MAX_UNBROKEN_WORK_MS` of such reads have added up, the loop steps aside for `STEP_ASIDE_MS`. A read
+ * over a socket (PostgreSQL) lets the loop turn by itself and is never followed by a wait (#2290).
+ * With `signal`, a caller that went away stops all of this before the next read, and ends a wait at once.
  *
  * With `verifyBytes` (the page for the server's Chromium) an asset is embedded only when the upload rule
  * accepts its bytes, under the type the bytes are; the `<img>` of any other becomes its alt text. One
  * warning per page counts both, with no document, file or user in it.
  */
-async function inlineAssetUrls(html: string, base: string, assetIds: string[], { documentId, maxBytes = MAX_INLINE_ASSET_BYTES, verifyBytes = false }: InlineAssetsOptions): Promise<string> {
+async function inlineAssetUrls(html: string, base: string, assetIds: string[], { documentId, maxBytes = MAX_INLINE_ASSET_BYTES, verifyBytes = false, signal }: InlineAssetsOptions): Promise<string> {
   if (assetIds.length === 0) return html;
   const prefix = base.replace(/\/+$/, "");
   const uris = new Map<string, string>();
   const leftOut = new Set<string>();
   let retyped = 0;
   let used = 0;
+  let unbroken = 0;
   for (const id of assetIds) {
     if (used >= maxBytes) break;
-    const asset = await getDocumentAsset(documentId, id);
+    // The caller is gone: its page is given up here, with the reason its signal carries.
+    signal?.throwIfAborted();
+    const startedAt = performance.now();
+    let turned = false;
+    const turn = setImmediate(() => (turned = true));
+    let asset: AssetContent | null;
+    try {
+      asset = await getDocumentAsset(documentId, id);
+    } finally {
+      clearImmediate(turn);
+    }
+    if (!turned) unbroken += performance.now() - startedAt;
+    if (unbroken >= MAX_UNBROKEN_WORK_MS) {
+      await stepAside(signal);
+      unbroken = 0;
+    }
     if (!asset) continue;
     if (used + asset.bytes.byteLength > maxBytes) break;
     let type = asset.mime;
