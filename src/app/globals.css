@@ -644,6 +644,33 @@ body {
 .reader-body > :first-child {
   margin-top: 0;
 }
+/* A picture is drawn as a block (Tailwind's preflight: img { display: block }), so words that follow it
+   in the same paragraph start on the line right under it, with no space at all (Burke #2348: a picture,
+   then "I asked" typed after it). The picture keeps one block space below itself. This is the one
+   bottom margin in the system: the words after the picture are a text node, which no selector can
+   reach from the child side. A picture that already has space under it must not gain anything:
+   - it ends its paragraph, in the reader: the margin collapses with the next block's margin-top, so
+     that gap stays the larger of the two;
+   - a line break follows it (the second rule): a hard break is already a whole empty line, and so is
+     the trailing break ProseMirror puts after a picture that ends its paragraph in the rich editor
+     (in Chromium and Safari with a separator image in front of it, which is not a picture);
+   - another person's caret sits right after a picture that ends its paragraph: the caret is then
+     between the picture and the trailing break. A selector cannot tell "picture, caret" from "picture,
+     words, caret" (selectors do not see text), so the caret says it itself with data-after-picture
+     (src/editor/prosemirror/remote-cursors.ts).
+   Top-level paragraphs only: in a list item, a quote or a table cell the margin could not collapse
+   away and would push the rows apart. */
+:is(.md-rich, .reader-body) > p > img,
+:is(.md-rich, .reader-body) > p > a > img {
+  margin-bottom: var(--md-space);
+}
+:is(.md-rich, .reader-body) > p img:has(+ br),
+:is(.md-rich, .reader-body) > p > a:has(+ br) > img:last-child,
+.md-rich > p img:is(.ProseMirror-separator, :has(+ .ProseMirror-separator)),
+.md-rich > p img:has(+ .md-remote-caret[data-after-picture]),
+.md-rich > p > a:has(+ .md-remote-caret[data-after-picture]) > img {
+  margin-bottom: 0;
+}
 
 .md-rich h1 {
   font-size: 2em;
