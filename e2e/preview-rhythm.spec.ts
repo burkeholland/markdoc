@@ -480,11 +480,32 @@ test.describe("space below a picture (#2348)", () => {
     const underPicture = (alt: string) =>
       alice.page.locator(`.md-rich img[alt='${alt}']`).evaluate((img) => img.closest(".md-rich > p")!.nextElementSibling!.getBoundingClientRect().top - img.getBoundingClientRect().bottom);
     const bobsCaretNextTo = (alt: string) => alice.page.locator(".md-rich > p", { has: alice.page.locator(`img[alt='${alt}']`) }).locator(".md-remote-caret");
-    /** Bob's caret to the end of the paragraph before `next`: the start of `next`, one step left. */
-    const bobStepsBackFrom = async (next: string) => {
-      await bob.page.locator(".md-rich > p", { hasText: next }).click({ position: { x: 4, y: 8 } });
-      await bob.page.keyboard.press("Home");
-      await bob.page.keyboard.press("ArrowLeft");
+    /**
+     * Bob's caret to the end of the paragraph that holds picture `alt`: a click at the start of the paragraph
+     * `next` after it, then one step left. Bob's pane scrolls to `next` for the click, and a click that
+     * arrives while it still moves lands on something else (a picture above, which it then selects). So
+     * each step is checked on Bob's own page and the whole move is tried again until it holds.
+     */
+    const bobsCaretIsIn = (text: string | null, alt: string | null) =>
+      bob.page.evaluate(
+        ({ text, alt }) => {
+          const selection = getSelection();
+          const at = selection?.anchorNode;
+          const block = (at instanceof Element ? at : at?.parentElement)?.closest(".md-rich > p");
+          if (!selection?.isCollapsed || !block) return false;
+          return alt === null ? (block.textContent ?? "").includes(text ?? "") : block.querySelector(`img[alt='${alt}']`) !== null;
+        },
+        { text, alt },
+      );
+    const bobStepsBackFrom = async (next: string, alt: string) => {
+      const start = bob.page.locator(".md-rich > p", { hasText: next });
+      await expect(async () => {
+        await start.click({ position: { x: 4, y: 8 } });
+        expect(await bobsCaretIsIn(next, null), `Bob's click landed in "${next}"`).toBe(true);
+        await bob.page.keyboard.press("Home");
+        await bob.page.keyboard.press("ArrowLeft");
+        expect(await bobsCaretIsIn(null, alt), `Bob's caret is in the paragraph of "${alt}"`).toBe(true);
+      }, `Bob's caret goes to the end of the paragraph of "${alt}"`).toPass({ timeout: 45_000 });
     };
 
     // A picture that ends its paragraph: Bob's caret right after it (between the picture and the trailing
@@ -494,7 +515,7 @@ test.describe("space below a picture (#2348)", () => {
       ["linked-alone", "After the linked picture."],
     ] as const) {
       const before = await underPicture(alt);
-      await bobStepsBackFrom(next);
+      await bobStepsBackFrom(next, alt);
       await expect(bobsCaretNextTo(alt), `Bob's caret is right after "${alt}"`).toHaveCount(1);
       const gap = (await pictureGaps(alice.page, ".md-rich"))[alt];
       expect(gap.marginBottom, `"${alt}" ends its paragraph: Bob's caret after it adds no margin`).toBe(0);
@@ -503,7 +524,7 @@ test.describe("space below a picture (#2348)", () => {
     }
 
     // Words after the picture, and Bob's caret at the end of those words: the words keep their space.
-    await bobStepsBackFrom("The end.");
+    await bobStepsBackFrom("The end.", "typed-after");
     await expect(bobsCaretNextTo("typed-after"), "Bob's caret is at the end of the words after the picture").toHaveCount(1);
     const typed = (await pictureGaps(alice.page, ".md-rich"))["typed-after"];
     expect(typed.below, `"I asked" is ${typed.below?.toFixed(1)} px under the picture with Bob's caret after it, a paragraph break is ${space.toFixed(1)} px`).toBeGreaterThanOrEqual(space - ROUNDING);
