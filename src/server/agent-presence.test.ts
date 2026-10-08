@@ -418,7 +418,7 @@ describe("agent events (watch)", () => {
     const after = Array.from({ length: 400 }, (_, i) => `line ${i} changed`).join("\n");
     const d = events.unifiedDiff(before, after);
     expect(d.truncated).toBe(true);
-    expect(d.diff.split("\n").length).toBeLessThanOrEqual(events.DIFF_MAX_LINES + 1);
+    expect(d.diff!.split("\n").length).toBeLessThanOrEqual(events.DIFF_MAX_LINES + 1);
     expect(events.unifiedDiff("a\nb\n", "a\nc\n")).toEqual({ diff: expect.stringContaining("-b\n+c"), truncated: false });
   });
 

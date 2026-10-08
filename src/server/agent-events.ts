@@ -201,9 +201,21 @@ export function cachedCleanText(docId: string, hash: string): string | null {
   return textCache.get(docId)?.get(hash) ?? null;
 }
 
-/** Unified diff of two texts, capped to `DIFF_MAX_LINES` lines. */
-export function unifiedDiff(before: string, after: string, title = "document.md"): { diff: string; truncated: boolean } {
-  const patch = createTwoFilesPatch(title, title, before, after, "before", "after", { context: 2 });
+/**
+ * Most changed lines (removed and added counted together) a diff is worked out for. The line diff's time
+ * grows with the square of that count: two texts of 22,000 lines with no line in common kept the server's
+ * one thread for minutes, and anybody who may write could ask for it with an old hash (#2341). Up to 1,000
+ * it takes about 150 ms on a busy machine. A diff of more changed lines would be cut to `DIFF_MAX_LINES` anyway.
+ */
+export const DIFF_MAX_CHANGED_LINES = 1_000;
+
+/**
+ * Unified diff of two texts, capped to `DIFF_MAX_LINES` lines. `diff` is null (and `truncated` true) when
+ * more than `DIFF_MAX_CHANGED_LINES` lines changed: the reader is better off reading the text again.
+ */
+export function unifiedDiff(before: string, after: string, title = "document.md"): { diff: string | null; truncated: boolean } {
+  const patch = createTwoFilesPatch(title, title, before, after, "before", "after", { context: 2, maxEditLength: DIFF_MAX_CHANGED_LINES });
+  if (patch === undefined) return { diff: null, truncated: true };
   const all = patch.split("\n");
   const firstHunk = all.findIndex((l) => l.startsWith("@@"));
   const lines = firstHunk === -1 ? [] : all.slice(firstHunk); // drop the Index/---/+++ file header

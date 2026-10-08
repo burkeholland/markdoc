@@ -8,6 +8,8 @@ interface FakePool {
 
 interface FakePglite {
   dataDir?: string;
+  /** What the embedded database was created with besides its folder (the bytea codec, #2341). */
+  options?: { serializers?: Record<number, unknown>; parsers?: Record<number, unknown> };
   waitReady: Promise<void>;
   close: ReturnType<typeof vi.fn<() => Promise<void>>>;
 }
@@ -46,7 +48,13 @@ vi.mock("@electric-sql/pglite", () => {
       readonly waitReady = Promise.resolve();
       readonly close = vi.fn(async () => undefined);
 
-      constructor(readonly dataDir?: string) {
+      readonly dataDir?: string;
+      readonly options?: FakePglite["options"];
+
+      // As the real one: a folder and options, or options alone for a database in memory.
+      constructor(first?: string | FakePglite["options"], second?: FakePglite["options"]) {
+        this.dataDir = typeof first === "string" ? first : undefined;
+        this.options = typeof first === "string" ? second : first;
         doubles.pglites.push(this);
       }
     },
@@ -201,6 +209,8 @@ describe("database configuration", () => {
 
     expect(doubles.pglites).toHaveLength(1);
     expect(doubles.pglites[0].dataDir).toBeUndefined();
+    expect(Object.keys(doubles.pglites[0].options?.serializers ?? {})).toEqual(["17"]);
+    expect(Object.keys(doubles.pglites[0].options?.parsers ?? {})).toEqual(["17"]);
     expect(doubles.pgliteMigrate).toHaveBeenCalledTimes(1);
     expect(doubles.pools).toHaveLength(0);
     expect(doubles.pgMigrate).not.toHaveBeenCalled();
@@ -222,6 +232,8 @@ describe("database configuration", () => {
 
     expect(doubles.pglites).toHaveLength(1);
     expect(doubles.pglites[0].dataDir).toBeUndefined();
+    expect(Object.keys(doubles.pglites[0].options?.serializers ?? {})).toEqual(["17"]);
+    expect(Object.keys(doubles.pglites[0].options?.parsers ?? {})).toEqual(["17"]);
     expect(doubles.pgliteMigrate).toHaveBeenCalledTimes(1);
     expect(doubles.pools).toHaveLength(0);
     expect(doubles.pgMigrate).not.toHaveBeenCalled();

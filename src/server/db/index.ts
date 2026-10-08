@@ -117,6 +117,20 @@ function migrationsFolder(): string {
   return process.env.DRIZZLE_MIGRATIONS_DIR ?? path.join(process.cwd(), "drizzle");
 }
 
+/** The type id of `bytea` in PostgreSQL. */
+const BYTEA_OID = 17;
+/**
+ * How the embedded database writes and reads `bytea` (a document's `ystate`, an image's bytes). Its own
+ * code builds the hex text one byte at a time: 2.1 to 2.4 s to store 5.4 MB and 1.5 to 1.8 s to read them
+ * back, in the thread that serves every request. `Buffer` does the same in 0.34 to 0.38 s and 0.07 s
+ * (#2341). The text is the same (`\x` and two hex digits a byte), so the stored bytes are too. PostgreSQL
+ * over a socket (production) does not come through here.
+ */
+export const PGLITE_BYTEA = {
+  serializers: { [BYTEA_OID]: (value: Uint8Array | string) => (typeof value === "string" ? value : `\\x${Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString("hex")}`) },
+  parsers: { [BYTEA_OID]: (text: string) => new Uint8Array(Buffer.from(text.slice(2), "hex")) },
+};
+
 async function create(): Promise<Db> {
   const url = process.env.DATABASE_URL?.trim();
   // Production PGlite is only for explicit local/image rehearsals; ambient container defaults must not enable it.
@@ -231,7 +245,7 @@ async function create(): Promise<Db> {
   const configured = process.env.PGLITE_DATA_DIR ?? ".data/pglite";
   const dataDir = configured === "memory://" ? configured : path.resolve(/* turbopackIgnore: true */ process.cwd(), configured);
   if (dataDir !== "memory://") fs.mkdirSync(dataDir, { recursive: true });
-  const client = dataDir === "memory://" ? new PGlite() : new PGlite(dataDir);
+  const client = dataDir === "memory://" ? new PGlite({ ...PGLITE_BYTEA }) : new PGlite(dataDir, { ...PGLITE_BYTEA });
   await client.waitReady;
   registry.close = () => client.close();
   const db = drizzle(client, { schema });
