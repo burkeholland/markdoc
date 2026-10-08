@@ -247,6 +247,7 @@ describe("link cards in the rich pane (#2317)", () => {
       ["a known link in a list item", `- <${TWEET}>`],
       ["a known link in a quote", `> <${TWEET}>`],
       ["a bold known link", `**<${TWEET}>**`],
+      ["a known link as the text of a link to another address", `[${TWEET}](https://example.com/a)`],
     ])("refuses %s", (_what, source) => {
       const { view, text } = open(source);
       view.dispatch(view.state.tr.setSelection(TextSelection.near(view.state.doc.resolve(4))));
