@@ -22,6 +22,12 @@ interface CaretFlags {
   idle: boolean;
   /** The caret of an agent (API token) published by the server. */
   agent: boolean;
+  /**
+   * The caret sits right after a picture that ends its block. globals.css keeps that picture's bottom
+   * margin off (#2348): a selector cannot tell "picture, caret" from "picture, words, caret", so the
+   * caret says it itself.
+   */
+  afterPicture: boolean;
 }
 
 /** lucide "bot" outline, inline so the label needs no React. */
@@ -37,6 +43,7 @@ function caretWidget(session: CollabSession, color: string, name: string, flags:
   if (flags.flash) caret.dataset.flash = "";
   if (flags.idle) caret.dataset.idle = "";
   if (flags.agent) caret.dataset.agent = "";
+  if (flags.afterPicture) caret.dataset.afterPicture = "";
   const label = document.createElement("span");
   label.className = "md-remote-caret-label";
   label.style.backgroundColor = color;
@@ -93,15 +100,17 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
     const colorLight = user?.colorLight ?? color + "33";
     const name = user?.name ?? "Anonymous";
     const userId = user?.id ?? String(clientId);
+    const head = clamp(map.srcToPm(headSrc));
+    const anchor = clamp(map.srcToPm(anchorSrc));
+    const $head = doc.resolve(head);
     const flags: CaretFlags = {
       userId,
       following: session.followUserId === userId,
       flash: session.flashUserId === userId,
       idle: isIdle(typeof state.lastActive === "number" ? state.lastActive : null, now),
       agent: user?.isAgent === true,
+      afterPicture: $head.nodeBefore?.type.name === "image" && $head.nodeAfter === null,
     };
-    const head = clamp(map.srcToPm(headSrc));
-    const anchor = clamp(map.srcToPm(anchorSrc));
     const from = Math.min(head, anchor);
     const to = Math.max(head, anchor);
     if (to > from) {
@@ -111,7 +120,7 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
     }
     decorations.push(
       Decoration.widget(head, () => caretWidget(session, color, name, flags), {
-        key: `caret-${clientId}-${color}-${name}-${flags.following ? "f" : ""}${flags.flash ? "x" : ""}${flags.idle ? "i" : ""}${flags.agent ? "a" : ""}`,
+        key: `caret-${clientId}-${color}-${name}-${flags.following ? "f" : ""}${flags.flash ? "x" : ""}${flags.idle ? "i" : ""}${flags.agent ? "a" : ""}${flags.afterPicture ? "p" : ""}`,
         side: 1,
         ignoreSelection: true,
       }),

@@ -9,6 +9,8 @@ import { parseRules } from "./css-layers.helpers";
  * system: `> * + *` gets `--md-space`, the first block after a heading gets `--md-space-heading-after`,
  * headings take their own margin-top per level. A `.md-rich p { margin: 0 }` beats the sibling rule on
  * specificity and glues headings, paragraphs and tables together again — that is what this test catches.
+ * The one exception is a picture inside a top-level paragraph, which keeps a margin-bottom (Burke #2348,
+ * see "space below a picture" below).
  * The HTML export (src/server/export/html.ts) mirrors the same system by hand and is checked below too.
  */
 
@@ -93,6 +95,39 @@ describe.each(SURFACES)("%s vertical rhythm", (surface) => {
   it("never sets margin on a block element outside the rhythm rules", () => {
     const offenders = blockMarginOffenders(surface);
     expect(offenders, `block elements with their own margin (spacing must come from the sibling rules):\n${offenders.join("\n")}`).toEqual([]);
+  });
+});
+
+describe("space below a picture (Burke #2348)", () => {
+  // The one bottom margin in the system: words after a picture in the same paragraph are a text node,
+  // out of reach of the child-side rules. e2e/preview-rhythm.spec.ts measures the result in a browser.
+  it("a picture in a top-level paragraph keeps one block space below itself, from the token, on both surfaces", () => {
+    expect(hasRule(":is(.md-rich, .reader-body) > p > img", "margin-bottom", /^var\(--md-space\)$/)).toBe(true);
+    expect(hasRule(":is(.md-rich, .reader-body) > p > a > img", "margin-bottom", /^var\(--md-space\)$/)).toBe(true);
+  });
+
+  it("gives the margin up when a line break already follows the picture, and never puts it on ProseMirror's separator", () => {
+    expect(hasRule(":is(.md-rich, .reader-body) > p img:has(+ br)", "margin-bottom", /^0$/)).toBe(true);
+    expect(hasRule(":is(.md-rich, .reader-body) > p > a:has(+ br) > img:last-child", "margin-bottom", /^0$/)).toBe(true);
+    expect(hasRule(".md-rich > p img:is(.ProseMirror-separator, :has(+ .ProseMirror-separator))", "margin-bottom", /^0$/)).toBe(true);
+  });
+
+  it("gives the margin up when another person's caret sits right after a picture that ends its paragraph", () => {
+    expect(hasRule(".md-rich > p img:has(+ .md-remote-caret[data-after-picture])", "margin-bottom", /^0$/)).toBe(true);
+    expect(hasRule(".md-rich > p > a:has(+ .md-remote-caret[data-after-picture]) > img", "margin-bottom", /^0$/)).toBe(true);
+  });
+
+  it("is the only margin-bottom on a picture: nothing for a picture in a list item, a quote or a table cell", () => {
+    const others = selectorRules.filter((r) => declares(r.body, "margin-bottom") && subjects(r.prelude).some((s) => /(^|[\s>])img\b/.test(s) && /\.(md-rich|reader-body)\b/.test(s)));
+    expect(others.flatMap((r) => subjects(r.prelude))).toEqual([
+      ":is(.md-rich, .reader-body) > p > img",
+      ":is(.md-rich, .reader-body) > p > a > img",
+      ":is(.md-rich, .reader-body) > p img:has(+ br)",
+      ":is(.md-rich, .reader-body) > p > a:has(+ br) > img:last-child",
+      ".md-rich > p img:is(.ProseMirror-separator, :has(+ .ProseMirror-separator))",
+      ".md-rich > p img:has(+ .md-remote-caret[data-after-picture])",
+      ".md-rich > p > a:has(+ .md-remote-caret[data-after-picture]) > img",
+    ]);
   });
 });
 
