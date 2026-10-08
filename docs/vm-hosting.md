@@ -868,7 +868,7 @@ HTTPS for it: the certificate must exist before anyone opens the site.
 | --- | --- |
 | DNS (Cloudflare, **DNS only**, grey cloud) | `A markdoc.app -> 20.62.106.80`, `CNAME www -> markdoc.app`. The Cloudflare proxy must stay off: certbot validates over plain HTTP on the VM, and nginx terminates TLS itself. |
 | Certificates | Let's Encrypt `markdoc.app` (covers `markdoc.app` and `www.markdoc.app`) plus the existing `markdoc-burkeholland.eastus2.cloudapp.azure.com`; both renew through `certbot.timer`. |
-| nginx | [`infra/nginx-markdoc.conf`](../infra/nginx-markdoc.conf) is the source for `/etc/nginx/sites-available/markdoc`. `markdoc.app` proxies to the app on `127.0.0.1:3000`; `www.markdoc.app`, the Azure name and plain HTTP redirect to `https://markdoc.app` with the same path and query (`301` for pages, `308` for `/api/*` so writes keep their method). |
+| nginx | [`infra/nginx-markdoc.conf`](../infra/nginx-markdoc.conf) is the source for `/etc/nginx/sites-available/markdoc`. `markdoc.app` proxies to the app on `127.0.0.1:3000`; `www.markdoc.app`, the Azure name and plain HTTP redirect to `https://markdoc.app` with the same path and query (`301` for pages, `308` for `/api/*` so writes keep their method). The three TLS server blocks set `client_max_body_size 10m`: see [Request body size](#request-body-size-nginx). |
 | App environment (`/etc/markdoc/markdoc.env`) | `AUTH_URL=https://markdoc.app`, `MARKDOC_URL=https://markdoc.app`, `MARKDOC_CANONICAL_HOST=markdoc.app`. |
 | GitHub OAuth app | Homepage URL `https://markdoc.app`, authorization callback URL `https://markdoc.app/api/auth/callback/github`. |
 
@@ -882,6 +882,148 @@ Cutover order (each step reversible until the OAuth change):
 6. Verify `https://markdoc.app/api/health` reports `ok`, `db`, `collab` true, that the old name answers `301` to `https://markdoc.app/...`, and that GitHub sign-in completes.
 
 Rollback before step 5: restore both backups, `nginx -t && systemctl reload nginx`, restart `markdoc-app.service`. After step 5, also set the OAuth callback back to the Azure name.
+
+## Request body size (nginx)
+
+nginx refuses a request whose body is larger than `client_max_body_size` with
+its own HTML `413 Request Entity Too Large` page, before the app sees the
+request. Its default is 1 MB, and until issue #2339 the file set no value. The
+lead measured production on 2026-10-08 at 05:00Z, without credentials: a POST
+of 2 MB to an API route answered `413`, `text/html`, from nginx; a POST of
+100 KB to the same route answered `401`, JSON, from the app. So picture
+uploads, imports, agent requests and saves over 1 MB failed, although the app
+allows them.
+
+[`infra/nginx-markdoc.conf`](../infra/nginx-markdoc.conf) now sets
+`client_max_body_size 10m;` (10 MiB, 10,485,760 bytes) in the `markdoc.app`
+server block and in the two TLS server blocks that redirect to it.
+**Merging that file changes nothing on production: a person must install it on
+the VM** (steps below). The release script does not touch nginx, and agents do
+not change the VM.
+
+### Why 10m
+
+10 MiB is the largest body the app can read. Every route except `/api/auth`
+passes `src/proxy.ts`, and Next keeps only the first 10 MiB of a body there
+(`next.config.ts` sets no `experimental.proxyClientMaxBodySize`). Next does not
+answer an error for a larger body: the route receives a cut one and fails on
+it. With `10m`, nginx passes everything the app can read and refuses the rest
+early, from the `Content-Length`, before any of the body is read.
+
+The app's own limits are all below that. Sizes are the request's
+`Content-Length`, measured on a development server with Chromium on 2026-10-08:
+
+| Route | Carries | The app's limit | Enforced | Largest body at the limit |
+| --- | --- | --- | --- | --- |
+| `POST /api/documents/:id/assets` | one picture, multipart `file` or a raw image body | 5 MiB (`MAX_ASSET_BYTES`) | the route, from `Content-Length`, then `src/server/assets.ts` on the bytes: `413 { error: "Images must be 5 MB or smaller" }` | 5,243,062 bytes for a 5 MiB `photo.png` (182 bytes of multipart frame); 5,243,256 with a 204-character file name |
+| `PUT /api/documents/:id/content`, `POST /api/documents`, `POST /api/documents/:id/suggest` | a document's text as JSON | 2,000,000 characters, not bytes | the route's schema, after the body is read: `400` | 2,000,014 bytes for ASCII; 6,000,014 bytes for 2,000,000 CJK characters (three bytes each), answered `200` |
+| `POST /api/mcp` | one JSON-RPC request | 4 MiB (4,194,304 bytes), the MCP SDK's default | the SDK, after the token is checked: `413` JSON-RPC | 4,194,304 bytes answered `200`; 4,194,305 answered `413` |
+| `POST /api/import/file`, JSON | one text | 2 MiB of UTF-8 (`MAX_IMPORT_BYTES`) | `src/server/import-file.ts`: `413 { error: "Content is larger than 2 MB" }` | 2,097,186 bytes |
+| `POST /api/import/file`, multipart | up to 20 files of 2 MiB each plus the pictures they reference, all in one request | 2 MiB a file (`MAX_IMPORT_BYTES`), 20 files (`MAX_IMPORT_FILES`) | the route | four full files are 8,389,224 bytes and answered `201`; 12,583,814 bytes (six files) and 10,486,291 bytes (one file with two 5 MiB pictures) are over what Next passes on and answered `400 { error: "Invalid multipart body" }` |
+| every other route with a body (comments, reviews, requests, tokens, webhooks, sharing) | small JSON | a few thousand characters a field | the route's schema | a few KB |
+
+The last import row is why the value is not `8m`: four full-size files in one
+request are 616 bytes over 8 MiB. An import larger than 10 MiB does not work on
+any host, with or without nginx; sending imports in smaller requests is issue
+#2340. `/collab` is a WebSocket and is not subject to `client_max_body_size`.
+
+`server/nginx-body-limit.test.ts` reads the nginx file and the app's limits and
+fails when the value is missing from one of the three server blocks, differs
+between them, is below a body the app accepts, or is above what Next passes on.
+Change a limit in the app and the value here together.
+
+A body over 10 MiB still gets nginx's HTML page. For a picture the editor shows
+"The file is too large for the server to accept" (it used to show "Request
+failed (413)"). An import shows "Import failed (413)".
+
+### In the redirecting server blocks too
+
+`www.markdoc.app` and the Azure name answer `/api/*` with `308` so that a
+write to an old origin keeps its method and body. nginx compares the body size
+with `client_max_body_size` when it has chosen the location, before it runs the
+`return` inside that location. With the 1 MB default a POST over 1 MB to an old
+origin would therefore get nginx's `413` instead of the `308`. This is from
+reading how nginx orders its request phases; **it was not run**. The plain
+HTTP block on port 80 is unchanged.
+
+### nginx defaults that were looked at and left alone
+
+| Directive | Default | Why it stays |
+| --- | --- | --- |
+| `client_body_timeout` | 60 s | The longest gap between two reads of the body, not a limit on the whole upload. A slow upload fails only when nothing arrives for 60 s. |
+| `client_body_buffer_size` | 16 KB on a 64-bit system | A larger body is written to a temporary file (`/var/lib/nginx/body` on Ubuntu) and removed after the request: at most 10 MiB for each upload in flight. Raising it would hold that in memory for each connection instead. |
+| `proxy_request_buffering` | on | nginx collects the whole upload and then hands it to the app at once, so a slow client does not hold a request open in the app. |
+| `send_timeout`, `large_client_header_buffers` | 60 s, 4 x 8 KB | About responses and request headers, not bodies. |
+| `proxy_send_timeout` | 60 s | The gap between two writes to the app on the loopback interface. |
+
+### Install on the VM (a person)
+
+`nginx -t` has not been run on this file: the machine it was written on has no
+nginx. The person on the VM runs it before the reload, as below.
+
+Copy `infra/nginx-markdoc.conf` from `main` to `/tmp/nginx-markdoc.conf` on the
+VM, then as root:
+
+```bash
+# 1. The live file must be the previous version of this one, and the one nginx loads.
+#    readlink: expect /etc/nginx/sites-available/markdoc.
+#    diff: expect only added lines, three `client_max_body_size 10m;` and the comments above
+#    them. If anything else differs, stop: the VM has a change the repository does not know,
+#    and installing would undo it.
+readlink -f /etc/nginx/sites-enabled/markdoc
+diff -u /etc/nginx/sites-available/markdoc /tmp/nginx-markdoc.conf
+
+# 2. Is a value already set? Expect no output. A line at the `http` level (nginx.conf or
+#    conf.d/) is harmless, because the server blocks override it: note it in the report.
+#    A line anywhere else: stop and report it.
+grep -rn client_max_body_size /etc/nginx/
+
+# 3. Back up outside /etc/nginx, then install.
+cp -p /etc/nginx/sites-available/markdoc /root/nginx-markdoc.before-2339
+install -m 644 -o root -g root /tmp/nginx-markdoc.conf /etc/nginx/sites-available/markdoc
+
+# 4. Test, and reload only when the test passes. A reload keeps open connections
+#    (people who are editing stay connected).
+nginx -t && systemctl reload nginx
+```
+
+If `nginx -t` fails, nothing was reloaded, but the new file is on disk and the
+next reload (a certificate renewal, for example) would fail on it. Restore the
+backup at once, with the rollback below, and report the error text.
+
+Rollback:
+
+```bash
+cp -p /root/nginx-markdoc.before-2339 /etc/nginx/sites-available/markdoc
+nginx -t && systemctl reload nginx
+```
+
+### Check afterwards
+
+From any machine, without credentials: a POST of 2 MB to `/api/mcp`.
+
+```bash
+head -c 2097152 /dev/zero | curl -sS -o /dev/null -w '%{http_code} %{content_type}\n' \
+  -H 'Content-Type: application/json' --data-binary @- https://markdoc.app/api/mcp
+```
+
+| Answer | Meaning |
+| --- | --- |
+| `401 application/json` | Expected after the install: nginx passed the body and the app refused the missing token. |
+| `413 text/html` | nginx refused the body: the file is not installed or nginx was not reloaded. This is the answer before the install. |
+
+Three more checks:
+
+- `https://markdoc.app/api/health` reports `ok`, `db` and `collab` true.
+- The same command with `head -c 11534336` (11 MiB) answers `413 text/html`:
+  nginx still refuses a body over the limit early.
+- A signed-in person uploads a picture of about 3 MB into a document and it
+  appears.
+
+The same 2 MB POST to `https://www.markdoc.app/api/mcp` should answer `308`.
+If it answers `413`, the reading in
+[the section above](#in-the-redirecting-server-blocks-too) was wrong; that
+harms nothing, and the lines in the two redirecting blocks can then be removed.
 
 ## Health and safe diagnostics
 
