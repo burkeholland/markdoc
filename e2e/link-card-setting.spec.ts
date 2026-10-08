@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { devices, type Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
-import { codeText, createDocument, openDocument, reloadHydrated, setTheme, shareWith, signIn, uniqueLogin, waitForHydration } from "./helpers";
+import { codeText, createDocument, focusRichEnd, openDocument, reloadHydrated, setTheme, shareWith, signIn, uniqueLogin, waitForHydration } from "./helpers";
 import { expectFrameLoaded, expectOnlyCardFrames, openFromDashboard, pasteInRich, standInForOtherSites, TWEET, TWEET_FRAME, VIDEO, VIDEO_FRAME } from "./link-card-helpers";
 
 /**
@@ -123,8 +123,9 @@ test.describe("link cards: the setting and Insert (#2317)", () => {
     const old = await createDocument(page, `Intro\n\n<${TWEET}>`, "An old link in angle brackets");
     await openDocument(page, old);
     await expect(cards(page)).toHaveCount(0);
-    await page.locator(".md-rich > p").first().click();
-    await page.keyboard.press("Control+End");
+    // The helper waits until the editor knows that the caret is at the end: Chromium tells it a task after Control+End,
+    // and an Enter pressed right behind the key would split the line the click was on.
+    await focusRichEnd(page);
     await page.keyboard.press("Enter");
     await page.keyboard.type("Next");
     await expect.poll(() => codeText(page)).toBe(`Intro\n\n<${TWEET}>\n\nNext`);
