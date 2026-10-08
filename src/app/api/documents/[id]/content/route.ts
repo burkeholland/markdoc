@@ -36,7 +36,7 @@ export const GET = handler(async (_req: Request, { params }: Params) => {
 });
 
 const putSchema = z.object({
-  content: z.string().max(MAX_TEXT_CHARS),
+  content: z.string().max(2_000_000),
   /** Optional version title recorded with the change. */
   message: z.string().trim().max(200).optional(),
   /** `contentHash` from `GET /content`; the write is refused with 409 when the document moved since (also as `If-Match`). */
