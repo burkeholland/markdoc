@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Y from "yjs";
 import { DOMParser as PMDOMParser } from "prosemirror-model";
 import { EditorState, NodeSelection, TextSelection } from "prosemirror-state";
@@ -24,9 +24,9 @@ import { makeCollabUser } from "../collab/shared";
 import { schema } from "../markdown/schema";
 import { parseMarkdown } from "../markdown/parse";
 import { serializeMarkdown } from "../markdown/serialize";
-import { CARD_FRAME_HOSTS } from "../markdown/link-cards";
+import { CARD_FRAME_HOSTS, MAX_CARD_FRAMES } from "../markdown/link-cards";
 import { EditorActions } from "@/components/editor/actions";
-import { createNodeViews } from "./nodeviews";
+import { CARD_FRAME_DELAY_MS, createNodeViews } from "./nodeviews";
 import { createRichEditorState, setEditable } from "./setup";
 import { refreshRichHighlights } from "./highlights";
 import { cardLinkParagraph, selectedCard, showCardAsText, showLinkAsCard, showSelectedCardAsText } from "./commands";
@@ -128,7 +128,7 @@ describe("link cards in the rich pane (#2317)", () => {
       expect(button.getAttribute("aria-label")).toBe("Show as text: Post on X");
       expect(video.querySelector("button")!.getAttribute("aria-label")).toBe("Show as text: YouTube video");
 
-      // No script, frame or other loaded thing anywhere in the editor, and nothing that points at a frame host.
+      // Until the frames are made (see "the frame" below) there is no loaded thing anywhere in the editor, and nothing that points at a frame host.
       expect(view.dom.querySelectorAll("script, iframe, frame, object, embed, img, video, audio, link, style, [src], [srcdoc], [srcset]")).toHaveLength(0);
       expect(document.querySelectorAll("script, iframe")).toHaveLength(0);
       for (const host of CARD_FRAME_HOSTS) expect(view.dom.innerHTML).not.toContain(host);
@@ -158,6 +158,155 @@ describe("link cards in the rich pane (#2317)", () => {
       expect(cards()).toHaveLength(1);
       expect(cards()[0].querySelector("a")!.getAttribute("href")).toBe("https://x.com/jack/status/1234");
       expect(cards()[0].getAttribute("aria-label")).toBe("Post on X: x.com/jack/status/1234");
+    });
+  });
+
+  describe("the frame", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+    const frames = (root: ParentNode) => Array.from(root.querySelectorAll<HTMLIFrameElement>("iframe"));
+    const sources = (root: ParentNode) => frames(root).map((frame) => frame.getAttribute("src"));
+    const POST_FRAME = "https://platform.twitter.com/embed/Tweet.html?id=20&dnt=true";
+    const VIDEO_FRAME = "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ";
+
+    it("is made once the link has been there for 800 ms, in a box that has its size from the start", () => {
+      const { view, cards } = open(`Intro\n\n${TWEET}\n\n${VIDEO}`);
+      const boxes = () => cards().map((card) => card.querySelector<HTMLElement>(".md-link-card-frame")!);
+      expect(CARD_FRAME_DELAY_MS).toBe(800);
+      expect(boxes().map((box) => box.getAttribute("data-kind"))).toEqual(["post", "video"]);
+      expect(frames(view.dom)).toHaveLength(0);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS - 1);
+      expect(frames(view.dom)).toHaveLength(0);
+      vi.advanceTimersByTime(1);
+      expect(sources(view.dom)).toEqual([POST_FRAME, VIDEO_FRAME]);
+      const [post] = frames(view.dom);
+      expect(post.parentElement).toBe(boxes()[0]);
+      expect(Object.fromEntries(Array.from(post.attributes, (attribute) => [attribute.name, attribute.value]))).toEqual({
+        sandbox: "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox",
+        allow: "fullscreen; picture-in-picture; encrypted-media",
+        referrerpolicy: "strict-origin-when-cross-origin",
+        loading: "lazy",
+        title: "Post on X: x.com/jack/status/20",
+        class: "md-link-card-iframe",
+        src: POST_FRAME,
+      });
+      // In the card, after the link and the button: the tab order is link, Show as text, frame.
+      expect(Array.from(cards()[0].querySelectorAll("a[href], button, iframe"), (el) => el.tagName)).toEqual(["A", "BUTTON", "IFRAME"]);
+      // Still no script anywhere, and the frames are the only things that load.
+      expect(document.querySelectorAll("script")).toHaveLength(0);
+      expect(view.dom.querySelectorAll("object, embed, img, video, audio, link, [srcdoc]")).toHaveLength(0);
+      for (const src of sources(view.dom)) expect(CARD_FRAME_HOSTS.some((host) => src!.startsWith(`${host}/`)), src!).toBe(true);
+    });
+
+    it("a reader of the document gets the frame too", () => {
+      const { view } = open(VIDEO, "viewer");
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      expect(sources(view.dom)).toEqual([VIDEO_FRAME]);
+    });
+
+    it("waits again whenever the link changes, so a link that is being typed never loads a frame for a shorter link", () => {
+      const { session, view } = open("https://x.com/jack/status/2");
+      const observer = new MutationObserver(() => {});
+      observer.observe(view.dom, { childList: true, subtree: true });
+      for (const digit of ["0", "2", "4"]) {
+        vi.advanceTimersByTime(CARD_FRAME_DELAY_MS - 100);
+        session.ytext.insert(session.ytext.length, digit);
+        expect(frames(view.dom)).toHaveLength(0);
+      }
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS - 1);
+      expect(frames(view.dom)).toHaveLength(0);
+      vi.advanceTimersByTime(1);
+      expect(sources(view.dom)).toEqual(["https://platform.twitter.com/embed/Tweet.html?id=2024&dnt=true"]);
+      // A change to a loaded card takes its frame away at once and makes the new one after the wait.
+      session.ytext.insert(session.ytext.length, "9");
+      expect(frames(view.dom)).toHaveLength(0);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      expect(sources(view.dom)).toEqual(["https://platform.twitter.com/embed/Tweet.html?id=20249&dnt=true"]);
+      // Every frame that was ever put into the editor during all of this: those two, and no other.
+      const made = observer.takeRecords().flatMap((record) => Array.from(record.addedNodes).filter((node) => node instanceof HTMLIFrameElement).map((node) => (node as HTMLIFrameElement).getAttribute("src")));
+      observer.disconnect();
+      expect(made).toEqual(["https://platform.twitter.com/embed/Tweet.html?id=2024&dnt=true", "https://platform.twitter.com/embed/Tweet.html?id=20249&dnt=true"]);
+    });
+
+    it("an edit somewhere else in the document leaves a loaded frame alone", () => {
+      const { session, view } = open(`Intro\n\n${VIDEO}\n\nOutro`);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      const [frame] = frames(view.dom);
+      // Typed in the preview, typed by someone else before the card and after it, and a block added above it.
+      view.dispatch(view.state.tr.insertText("!", 6));
+      session.ydoc.transact(() => session.ytext.insert(0, "New first paragraph\n\n"));
+      session.ydoc.transact(() => session.ytext.insert(session.ytext.length, " and more"));
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS * 2);
+      expect(frames(view.dom)).toEqual([frame]);
+      expect(frame.isConnected).toBe(true);
+    });
+
+    it("Show as text, deleting the card and closing the editor take the frame away and give its place back", () => {
+      const { session, view, cards, selectCard, key } = open(Array.from({ length: MAX_CARD_FRAMES }, (_, i) => `https://x.com/jack/status/${i + 1}`).join("\n\n"));
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      expect(frames(view.dom)).toHaveLength(MAX_CARD_FRAMES);
+      cards()[0].querySelector<HTMLButtonElement>('[data-testid="link-card-as-text"]')!.click();
+      expect(frames(view.dom)).toHaveLength(MAX_CARD_FRAMES - 1);
+      view.focus();
+      selectCard(0);
+      key("Backspace");
+      expect(frames(view.dom)).toHaveLength(MAX_CARD_FRAMES - 2);
+      // Two places are free again: two new cards load by themselves, a third gets the button.
+      session.ytext.insert(session.ytext.length, `\n\n${VIDEO}\n\nhttps://youtu.be/dQw4w9WgXcQ\n\nhttps://youtu.be/AAAAAAAAAAA`);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      expect(frames(view.dom)).toHaveLength(MAX_CARD_FRAMES);
+      expect(view.dom.querySelectorAll('[data-testid="link-card-load"]')).toHaveLength(1);
+      view.destroy();
+      expect(() => vi.advanceTimersByTime(CARD_FRAME_DELAY_MS * 2)).not.toThrow();
+    });
+
+    it("a page loads 20 frames by itself; the next card has a Load button, and pressing it loads that frame", () => {
+      const links = Array.from({ length: MAX_CARD_FRAMES + 2 }, (_, i) => (i === MAX_CARD_FRAMES ? VIDEO : `https://x.com/jack/status/${i + 1}`));
+      const { view, cards, text, key } = open(links.join("\n\n"));
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      expect(frames(view.dom)).toHaveLength(MAX_CARD_FRAMES);
+      const buttons = Array.from(view.dom.querySelectorAll<HTMLButtonElement>('[data-testid="link-card-load"]'));
+      expect(buttons.map((button) => [button.textContent, button.getAttribute("aria-label"), button.type])).toEqual([
+        ["Load video", "Load video: youtube.com/watch?v=dQw4w9WgXcQ", "button"],
+        ["Load post", `Load post: x.com/jack/status/${MAX_CARD_FRAMES + 2}`, "button"],
+      ]);
+      expect(buttons[0].closest('[data-testid="link-card"]')).toBe(cards()[MAX_CARD_FRAMES]);
+      // The button's keys are its own, and Escape on it returns to the editor like the other controls.
+      expect(key("Enter", buttons[0]).defaultPrevented).toBe(false);
+      buttons[0].click();
+      expect(frames(cards()[MAX_CARD_FRAMES])).toHaveLength(1);
+      expect(sources(cards()[MAX_CARD_FRAMES])).toEqual([VIDEO_FRAME]);
+      expect(cards()[MAX_CARD_FRAMES].querySelector('[data-testid="link-card-load"]')).toBeNull();
+      expect(view.dom.querySelectorAll('[data-testid="link-card-load"]')).toHaveLength(1);
+      expect(frames(view.dom)).toHaveLength(MAX_CARD_FRAMES + 1);
+      // Loading a frame changes nothing in the document.
+      expect(text()).toBe(links.join("\n\n"));
+    });
+
+    it("a card node whose link is not on the list has no frame and no box for one", () => {
+      const state = EditorState.create({ doc: schema.nodes.doc.create(null, [schema.nodes.link_card.create({ url: "https://evil.example/" })]) });
+      const view = new EditorView(document.body.appendChild(document.createElement("div")), { state, nodeViews: createNodeViews(() => true) });
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS * 2);
+      expect(frames(view.dom)).toHaveLength(0);
+      expect(view.dom.querySelector(".md-link-card-frame")!.hasAttribute("data-kind")).toBe(false);
+      expect(view.dom.querySelector('[data-testid="link-card-load"]')).toBeNull();
+      view.destroy();
+    });
+
+    it("the page never listens to a frame: no message listener is added by the editor or by a card", () => {
+      const added: string[] = [];
+      const listen = vi.spyOn(window, "addEventListener").mockImplementation((type: string) => void added.push(type));
+      const { view } = open(`${TWEET}\n\n${VIDEO}`);
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      expect(frames(view.dom)).toHaveLength(2);
+      listen.mockRestore();
+      expect(added).not.toContain("message");
+      expect(added).not.toContain("messageerror");
+      expect(window.onmessage).toBeNull();
     });
   });
 

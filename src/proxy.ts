@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { CARD_FRAME_HOSTS } from "@/editor/markdown/link-cards";
 import { clearingCookie, decodeEmbedSession, findStaleSessionCookie, hasSessionCookie, STALE_SESSION_MESSAGE, stripCookies } from "@/server/session-cookie";
 
 export const CANONICAL_HOST_ENV = "MARKDOC_CANONICAL_HOST";
@@ -73,6 +74,19 @@ export function canonicalRedirect(request: NextRequest, canonical: string | null
 export const FRAME_ANCESTORS_NONE = "frame-ancestors 'none'";
 
 /**
+ * What a page may put in a frame (#2317). A link card is a frame to the provider's own embed page, and
+ * only the editor (`/d/<id>`, the embedded canvas included) and the published page (`/p/<id>`) draw
+ * cards: those two may frame the hosts on the card list, generated from it, and nothing else. Every
+ * other page has no frame at all. The same directive governs where a frame may be navigated later, so
+ * a card's frame cannot be driven to a host that is not on the list.
+ */
+export const CARD_FRAME_SOURCES = `frame-src ${CARD_FRAME_HOSTS.join(" ")}`;
+export const NO_FRAME_SOURCES = "frame-src 'none'";
+
+export function frameSources(pathname: string): string {
+  return /^\/[dp]\/[^/]+$/.test(pathname) ? CARD_FRAME_SOURCES : NO_FRAME_SOURCES;
+}
+/**
  * Only pages get the frame policy. `/api/*` responses keep their own headers — `/api/assets/[id]` sets
  * a sandboxing CSP on SVGs that a header set here would replace — and the handoff route
  * (`/embed/<nonce>`, `src/app/embed/[nonce]/route.ts`) is loaded inside the canvas frame by design: its
@@ -102,8 +116,8 @@ export async function proxy(request: NextRequest) {
     && pathname === `/d/${embed.documentId}`
     && request.nextUrl.searchParams.get("embed") === "1";
   const withFramePolicy = (response: NextResponse) => {
-    if (isEmbeddedDocument) response.headers.set("Content-Security-Policy", `frame-ancestors ${embed.parentOrigin}`);
-    else if (framePolicyApplies(pathname)) response.headers.set("Content-Security-Policy", FRAME_ANCESTORS_NONE);
+    if (isEmbeddedDocument) response.headers.set("Content-Security-Policy", `frame-ancestors ${embed.parentOrigin}; ${CARD_FRAME_SOURCES}`);
+    else if (framePolicyApplies(pathname)) response.headers.set("Content-Security-Policy", `${FRAME_ANCESTORS_NONE}; ${frameSources(pathname)}`);
     return response;
   };
   if (!hasSessionCookie(cookieHeader)) return withFramePolicy(NextResponse.next());

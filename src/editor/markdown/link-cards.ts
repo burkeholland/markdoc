@@ -12,13 +12,42 @@
  */
 export type CardProviderId = "youtube" | "x";
 
+/** How the frame is sized: a 16 by 9 player, or a tall box that scrolls inside (a post has no fixed height). */
+export type CardKind = "video" | "post";
+
 export interface LinkCard {
   provider: CardProviderId;
   /** "YouTube video", "Post on X": what the card is called, on the card and in accessible names. */
   label: string;
+  kind: CardKind;
   /** Address of the provider's own embed page; always starts with one of `CARD_FRAME_HOSTS` and a `/`. */
   frameUrl: string;
+  /** The frame's `sandbox` attribute: one of the two values below, by provider. */
+  sandbox: string;
 }
+
+/**
+ * What every card frame may do: run its own page's scripts, and open a link in a new tab that is an
+ * ordinary tab ("Watch on YouTube"). Never granted: top navigation (the frame cannot move the Markdoc
+ * page), forms, modals, downloads, pointer lock, presentation, storage access.
+ */
+export const CARD_SANDBOX = "allow-scripts allow-popups allow-popups-to-escape-sandbox";
+
+/**
+ * The same plus the provider's own origin, for the providers whose embed page stays blank without it
+ * (measured: YouTube and X). That is safe only because the frame is never the app's own origin: with
+ * its own origin and scripts a frame could lift its sandbox. `link-card-frame.ts` refuses to make one.
+ */
+export const CARD_SANDBOX_OWN_ORIGIN = "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox";
+
+/** The frame's `allow` attribute. No autoplay: a card never starts playing by itself. */
+export const CARD_FRAME_ALLOW = "fullscreen; picture-in-picture; encrypted-media";
+
+/** The origin only, never the address of the document. YouTube refuses to play without any referrer. */
+export const CARD_FRAME_REFERRER_POLICY = "strict-origin-when-cross-origin";
+
+/** Frames are heavy. A page loads this many by itself; a card beyond that shows a button that loads it. */
+export const MAX_CARD_FRAMES = 20;
 
 /** Longest link that can be a card; a longer one stays a link. */
 export const MAX_CARD_URL_LENGTH = 512;
@@ -36,6 +65,7 @@ const SAFE_URL = /^https:\/\/[a-z0-9.-]+\/[A-Za-z0-9\-._~%/?&=+]*$/;
 export function hasCardLinkShape(url: string): boolean {
   return url.length <= MAX_CARD_URL_LENGTH && SAFE_URL.test(url);
 }
+
 /** Optional query string of plain `key=value` pairs. It is dropped unless a rule reads a key from it. */
 const QUERY = "(?:\\?([A-Za-z0-9\\-._~%&=+]*))?";
 
@@ -60,8 +90,11 @@ interface Rule {
 
 interface Provider {
   id: CardProviderId;
+  kind: CardKind;
   /** Origin of the provider's embed pages. A public `https` host, never the app's own. */
   frameHost: string;
+  /** The embed page stays blank unless it runs with its own origin. */
+  ownOrigin: boolean;
   rules: Rule[];
 }
 
@@ -79,8 +112,10 @@ const youtubeVideo = (id: string, query: string | undefined) => ({ label: "YouTu
 const PROVIDERS: readonly Provider[] = [
   {
     id: "youtube",
+    kind: "video",
     // The host that sets no cookies until the video is played.
     frameHost: "https://www.youtube-nocookie.com",
+    ownOrigin: true,
     rules: [
       {
         pattern: new RegExp(`^https://(?:www\\.|m\\.)?youtube\\.com/watch${QUERY}$`),
@@ -96,8 +131,10 @@ const PROVIDERS: readonly Provider[] = [
   },
   {
     id: "x",
+    kind: "post",
     // X does not document this address: it is the page X's own widgets.js puts in its frame.
     frameHost: "https://platform.twitter.com",
+    ownOrigin: true,
     rules: [
       {
         pattern: new RegExp(`^https://(?:www\\.|mobile\\.)?(?:x|twitter)\\.com/[A-Za-z0-9_]{1,15}/status/([0-9]{1,20})${QUERY}$`),
@@ -118,7 +155,14 @@ export function matchLinkCard(url: string): LinkCard | null {
       const match = rule.pattern.exec(url);
       if (!match) continue;
       const card = rule.card(match);
-      return card && card.framePath.startsWith("/") ? { provider: provider.id, label: card.label, frameUrl: provider.frameHost + card.framePath } : null;
+      if (!card || !card.framePath.startsWith("/")) return null;
+      return {
+        provider: provider.id,
+        label: card.label,
+        kind: provider.kind,
+        frameUrl: provider.frameHost + card.framePath,
+        sandbox: provider.ownOrigin ? CARD_SANDBOX_OWN_ORIGIN : CARD_SANDBOX,
+      };
     }
   }
   return null;
@@ -127,4 +171,9 @@ export function matchLinkCard(url: string): LinkCard | null {
 /** A card link as people read it: without the scheme and a leading `www.`. */
 export function cardLinkText(url: string): string {
   return url.replace(/^https:\/\/(?:www\.)?/, "");
+}
+
+/** The frame's title: what the card is and which link, for a screen reader's list of frames. */
+export function cardFrameTitle(card: LinkCard, url: string): string {
+  return `${card.label}: ${cardLinkText(url)}`;
 }

@@ -168,8 +168,9 @@ class RenderPool {
 const pool = new RenderPool();
 
 /** Render on the worker thread; rejects with `RenderTimeoutError` after `timeoutMs`. */
-export function renderOffThread(markdown: string, assetBaseUrl: string, timeoutMs = RENDER_TIMEOUT_MS): Promise<RenderedFragment> {
-  return pool.run({ markdown, assetBaseUrl }, timeoutMs) as Promise<RenderedFragment>;
+export function renderOffThread(markdown: string, assetBaseUrl: string, timeoutMs = RENDER_TIMEOUT_MS, linkCards = false): Promise<RenderedFragment> {
+  // The task keeps its old shape unless cards are asked for.
+  return pool.run(linkCards ? { markdown, assetBaseUrl, linkCards } : { markdown, assetBaseUrl }, timeoutMs) as Promise<RenderedFragment>;
 }
 
 /**
