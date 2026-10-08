@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 interface FakePool {
   options: Record<string, unknown>;
@@ -222,6 +225,24 @@ describe("database configuration", () => {
     for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled();
   });
 
+  it("gives the embedded database in a folder the same bytea option as the one in memory (#2341)", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    delete process.env.DATABASE_URL;
+    delete process.env.MARKDOC_PRODUCTION_PGLITE;
+    const folder = mkdtempSync(path.join(tmpdir(), "markdoc-config-"));
+    process.env.PGLITE_DATA_DIR = folder;
+    try {
+      await database.getDb();
+      expect(doubles.pglites).toHaveLength(1);
+      expect(doubles.pglites[0].dataDir).toBe(folder);
+      expect(Object.keys(doubles.pglites[0].options?.serializers ?? {})).toEqual(["17"]);
+      expect(Object.keys(doubles.pglites[0].options?.parsers ?? {})).toEqual(["17"]);
+      expect(doubles.pools).toHaveLength(0);
+      await database.closeDb();
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
   it.each(["development", "test"])("retains in-memory PGlite in %s", async (nodeEnv) => {
     vi.stubEnv("NODE_ENV", nodeEnv);
     delete process.env.DATABASE_URL;

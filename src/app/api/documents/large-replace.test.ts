@@ -280,6 +280,28 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
     expect((await read()).content === large).toBe(true);
   });
 
+  it("the turn is taken by the declared size, before the body is read: 80,000 Chinese characters are more than 200,000 bytes", async () => {
+    await fresh("Start\n");
+    const cjk = prose(80_000, 9, CJK);
+    expect(cjk.length).toBeLessThan(LARGE_WRITE_SIZE);
+    expect(Buffer.byteLength(JSON.stringify({ content: cjk }))).toBeGreaterThanOrEqual(LARGE_WRITE_SIZE);
+    await whileHolding(ana.id, 2, async () => {
+      expect((await put(ana, cjk)).status).toBe(503);
+      expect((await as(ana, () => (suggest.POST as Handler)(request("POST", { content: cjk }, "suggest"), params()))).status).toBe(503);
+      expect((await patch(ana, cjk)).status).toBe(503);
+      // The same text in a body that does not say its size is sized by its characters, and is not large.
+      expect((await put(ana, cjk, {}, { declare: false })).status).toBe(200);
+    });
+  });
+
+  it("suggest and PATCH size a body that does not declare its size by its text, as PUT does", async () => {
+    await fresh("Start\n");
+    await whileHolding(ana.id, 2, async () => {
+      expect((await as(ana, () => (suggest.POST as Handler)(request("POST", { content: large }, "suggest", { declare: false }), params()))).status).toBe(503);
+      expect((await patch(ana, large, { declare: false })).status).toBe(503);
+      expect((await read()).content).toBe("Start\n");
+    });
+  });
   it("a body that does not declare its size is sized by its text once it is parsed", async () => {
     await fresh("Start\n");
     await whileHolding(ana.id, 2, async () => {
@@ -341,6 +363,25 @@ describe("a caller that goes away", () => {
     expect((await read()).content).toBe("Start\n");
   });
 
+  it("right when its turn comes, before the document is changed: 499, nothing is written, the turn is handed on", async () => {
+    await fresh("Start\n");
+    const gone = new AbortController();
+    const enter = largeWrites.enter.bind(largeWrites);
+    // The caller closes the connection at the moment its write gets the turn.
+    const spy = vi.spyOn(largeWrites, "enter").mockImplementationOnce(async (userId, signal) => {
+      const turn = await enter(userId, signal);
+      gone.abort();
+      return turn;
+    });
+    try {
+      const res = await put(ana, large, {}, { signal: gone.signal });
+      expect(res.status).toBe(499);
+    } finally {
+      spy.mockRestore();
+    }
+    expect((await read()).content).toBe("Start\n");
+    expect(largeWrites.placesOf(ana.id)).toBe(0);
+  });
   it("before its large write began: 499, nothing is written", async () => {
     await fresh("Start\n");
     const gone = new AbortController();

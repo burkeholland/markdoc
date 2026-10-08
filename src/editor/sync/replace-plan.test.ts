@@ -118,12 +118,19 @@ describe("planReplace: the edits turn the old text into the new one", () => {
 });
 
 describe("planReplace: never half a character", () => {
-  // 😀 and 😁 share their first half (U+D83D); 😀 and 🤀 share their second half (U+DE00).
+  // 😀 (U+1F600) and 😁 share their first half (D83D); 😀 and U+1FA00 share their second half (DE00).
+  const SAME_END = "\u{1FA00}";
+  it("the two characters of the cases really share a half", () => {
+    expect("😀".charCodeAt(0)).toBe("😁".charCodeAt(0));
+    expect("😀".charCodeAt(1)).toBe(SAME_END.charCodeAt(1));
+    expect("😀".charCodeAt(0)).not.toBe(SAME_END.charCodeAt(0));
+  });
   const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
   const cases: [string, string, string][] = [
     ["the first halves are the same", "before 😀 after", "before 😁 after"],
-    ["the second halves are the same", "before 😀 after", "before 🤀 after"],
-    ["a long text, emoji changed at both ends of the change", "😀" + prose(3_000, 1) + "😀", "😁" + prose(3_000, 2) + "🤀"],
+    ["the second halves are the same", "before 😀 after", `before ${SAME_END} after`],
+    ["a long text, emoji changed at both ends of the change", "😀" + prose(3_000, 1) + "😀", "😁" + prose(3_000, 2) + SAME_END],
+    ["a long text, the second halves the same at the start and the first halves at the end", "😀" + prose(3_000, 3) + "😀", SAME_END + prose(3_000, 4) + "😁"],
     ["a text of emoji only", "😀😁".repeat(2_000), "😁😀".repeat(2_000)],
   ];
   it.each(cases)("%s", (_name, oldText, newText) => {
@@ -223,6 +230,18 @@ describe("planReplace: anchors keep what did not change", () => {
     expect(plan.ops.reduce((n, op) => n + op.deleteCount + op.insert.length, 0)).toBeLessThan(4 * 2 * 22);
   });
 
+  it("a word is cut with the white space after it: a run of spaces does not make pieces of its own", () => {
+    // 1 line each (2 pieces), then 3 words each (6 pieces): 8 pieces looked at in all.
+    const plan = planReplace("one   two   three", "uno   two   tres", { maxExactProduct: 1, exactBudget: 100, maxPieces: 100 });
+    expect(plan.pieces).toBe(8);
+    expect(applied("one   two   three", plan.ops)).toBe("uno   two   tres");
+    // "two" and its spaces are the anchor: only the words around it are replaced.
+    expect(plan.ops).toEqual([
+      { index: 0, deleteCount: 3, insert: "uno" },
+      // "three" and "tres" both start with t: that letter stays too.
+      { index: 13, deleteCount: 4, insert: "res" },
+    ]);
+  });
   it("a passage too large for the character diff is replaced whole: one delete and one insert", () => {
     const head = "# Title\n\n";
     const tail = "\n\nThe end.\n";
