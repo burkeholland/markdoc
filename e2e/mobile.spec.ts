@@ -128,8 +128,13 @@ async function openDoc(page: Page, id: string) {
   await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
 }
 
-/** Wait for the drawer/sheet slide-in to finish before measuring. */
-const settled = (locator: Locator) => locator.evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)).then(() => undefined));
+/**
+ * Wait for the drawer/sheet slide-in to finish before measuring. An animation whose element goes away while
+ * we wait (the panel's loading spinner, removed when its content arrives) is cancelled: its `finished` promise
+ * rejects with AbortError. A cancelled animation moves nothing any more, so it counts as over (#2334).
+ */
+const settled = (locator: Locator) =>
+  locator.evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => undefined))).then(() => undefined));
 
 const noHorizontalScroll = (page: Page) =>
   page.evaluate(() => {
@@ -614,20 +619,27 @@ test.describe("phone", () => {
   // The ⋯ trigger's `aria-label` comes from `compact`, which is false until hydration, and its visible "Markdown" text is
   // `max-md:hidden` — so for about a second the phone's server markup had a button with no name (#1531 left it). A
   // `sr-only md:hidden` span names it from the first byte (#1562); after hydration `aria-label` wins, and from `md` the
-  // span is hidden so the visible text stays the only name. Scripts are blocked for the first load so the assertion
-  // really runs against un-hydrated markup rather than racing React.
-  test("status bar ⋯ trigger has its name before hydration on phones, and only one name after", async ({ browser }) => {
+  // span is hidden so the visible text stays the only name.
+  // Since #1545 (PR 649, 2026-09-02) the server sends no status bar at all: the page starts as a placeholder (the
+  // shell's boxes, an empty footer, the preview of the text) and the trigger arrives with the editor. So what a person
+  // on a phone gets before the scripts run is the preview and no control; the first half of this test checks exactly
+  // that (no button without a name can exist there), the second half that the trigger has one name once it is there.
+  // Scripts are blocked for the first load so the assertion really runs against un-hydrated markup rather than racing React.
+  test("status bar ⋯ trigger: no control before the editor loads on phones, and exactly one name after", async ({ browser }) => {
     const { context, page } = await signInOn(browser, "phone-menu-name", { ...phone });
     const id = await createDocument(page, DOC, "Mobile menu name");
     const isScript = (url: URL) => url.pathname.startsWith("/_next/") && /\.m?js$/.test(url.pathname);
     await page.route(isScript, (route) => route.abort());
     await page.goto(`/d/${id}`);
     const trigger = page.getByTestId("layout-menu");
-    await expect(trigger).toBeAttached();
+    const placeholder = page.getByTestId("editor-loading");
+    await expect(placeholder).toBeAttached();
     expect(await page.locator("html[data-hydrated]").count(), "React must not have run").toBe(0);
-    await expect(trigger).not.toHaveAttribute("aria-label");
-    await expect(trigger).toHaveAccessibleName("View options");
-    await expect(page.getByRole("button", { name: "View options", exact: true })).toHaveCount(1);
+    // The server's markup: the status bar's box is there (an empty footer), the preview is there, no control is.
+    await expect(placeholder.locator("footer")).toHaveCount(1);
+    await expect(page.getByTestId("rich-placeholder")).toContainText("Mobile");
+    await expect(trigger).toHaveCount(0);
+    await expect(placeholder.locator("button, a[href], input, select, textarea, [tabindex]")).toHaveCount(0);
     await page.unroute(isScript);
     await openDoc(page, id);
     await expect(page.getByTestId("status-bar")).toHaveAttribute("data-compact", "true");
