@@ -136,4 +136,45 @@ test.describe("image upload", () => {
     await expect(page.locator('.md-rich img[src^="/api/assets/"]')).toHaveCount(1);
     await user.context.close();
   });
+
+  test("says the file is too large when the proxy in front of the app refuses an upload with its own 413 page", async ({ browser }) => {
+    const user = await signIn(browser, "too-large");
+    const id = await createDocument(user.page, "Big picture\n");
+    await openDocument(user.page, id);
+    const { page } = user;
+    const TOO_LARGE = "The file is too large for the server to accept";
+    // nginx answers a body over its client_max_body_size itself, with this HTML page instead of the app's JSON (#2339).
+    const nginxPage = "<html>\r\n<head><title>413 Request Entity Too Large</title></head>\r\n<body>\r\n<center><h1>413 Request Entity Too Large</h1></center>\r\n<hr><center>nginx/1.24.0 (Ubuntu)</center>\r\n</body>\r\n</html>\r\n";
+    let refused = 0;
+    await page.route("**/api/documents/*/assets", (route) => {
+      refused++;
+      return route.fulfill({ status: 413, contentType: "text/html", body: nginxPage });
+    });
+
+    // The Insert image dialog shows the message under the address field.
+    await page.getByTestId("tb-image").click();
+    await page.getByTestId("image-file").setInputFiles({ name: "holiday.png", mimeType: "image/png", buffer: PNG });
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("alert")).toHaveText(TOO_LARGE);
+    await expect(dialog).not.toContainText("413");
+    await expect(page.getByTestId("image-url")).toHaveValue("");
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    // A pasted picture reports it in a toast and leaves nothing behind in the document.
+    await focusRichEnd(page);
+    await page.evaluate((bytes) => {
+      const file = new File([new Uint8Array(bytes)], "pasted.png", { type: "image/png" });
+      const data = new DataTransfer();
+      data.items.add(file);
+      const event = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true });
+      document.querySelector(".md-rich")!.dispatchEvent(event);
+    }, Array.from(PNG));
+    await expect(page.getByTestId("toast").filter({ hasText: "Image upload failed" })).toHaveText(`Image upload failed: ${TOO_LARGE}`);
+    await expect(page.getByTestId("image-upload-placeholder")).toHaveCount(0);
+    await expect(page.locator(".md-rich img")).toHaveCount(0);
+    expect(refused).toBe(2);
+    expect(await codeText(page)).not.toContain("![");
+    await user.context.close();
+  });
 });
