@@ -1036,7 +1036,9 @@ body {
   background: var(--md-delete-bg);
   box-shadow: 0 0 0 2px var(--color-danger);
 }
+/* The link takes the deletion ink here: the accent colour on the deletion background is 4.48:1 in the light theme. */
 .md-rich .md-link-card.md-card-suggest-delete .md-link-card-link {
+  color: var(--md-delete-ink);
   text-decoration: line-through;
 }
 .md-rich .md-link-card.md-card-find,
