@@ -21,7 +21,7 @@ describe("the Settings row for link cards (#2317)", () => {
     expect(screen.getByRole("heading", { level: 2, name: "Turn links to known sites into cards" })).toBeTruthy();
     const description = document.getElementById(toggle.getAttribute("aria-describedby")!)!;
     expect(description.textContent).toBe(
-      "A link to YouTube or X that you paste on its own line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and Insert can still add one. The choice is saved in this browser.",
+      'A link to YouTube or X that you paste on an empty line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and the toolbar button "Video or post from a link" can still add one. The choice is saved in this browser.',
     );
     // Nothing is written until the person chooses.
     expect(localStorage.getItem(LINK_CARDS_STORAGE_KEY)).toBeNull();

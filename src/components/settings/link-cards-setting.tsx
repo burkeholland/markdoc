@@ -19,7 +19,7 @@ export function LinkCardsSetting() {
           Turn links to known sites into cards
         </h2>
         <p id={`${id}-description`} className="mt-0.5 text-sm text-ink-3" data-testid="link-cards-description">
-          A link to {cardProviderList()} that you paste on its own line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and Insert can still add one. The choice is saved in this browser.
+          A link to {cardProviderList()} that you paste on an empty line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and the toolbar button &quot;Video or post from a link&quot; can still add one. The choice is saved in this browser.
         </p>
       </div>
       <button

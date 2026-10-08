@@ -48,7 +48,7 @@ test.describe("link cards: the setting and Insert (#2317)", () => {
     await expect(toggle(page)).toHaveAttribute("aria-checked", "true");
     expect(await stored(page)).toBeNull();
     await expect(page.getByTestId("link-cards-description")).toHaveText(
-      "A link to YouTube or X that you paste on its own line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and Insert can still add one. The choice is saved in this browser.",
+      'A link to YouTube or X that you paste on an empty line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and the toolbar button "Video or post from a link" can still add one. The choice is saved in this browser.',
     );
     // The row sits right under Theme.
     const order = await page.evaluate(() => Array.from(document.querySelectorAll('[data-testid="theme-row"], [data-testid="link-cards-row"]'), (row) => row.getAttribute("data-testid")));
