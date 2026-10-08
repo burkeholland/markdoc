@@ -203,6 +203,27 @@ describe("link cards in the rich pane (#2317)", () => {
       for (const src of sources(view.dom)) expect(CARD_FRAME_HOSTS.some((host) => src!.startsWith(`${host}/`)), src!).toBe(true);
     });
 
+    it("the editor ignores what happens inside a card: the frame arriving, and a selection inside the card", () => {
+      const { view, cards, text } = open(`Intro\n\n${VIDEO}`);
+      const card = cards()[0];
+      // What ProseMirror asks before it reads a change in the page back into the document.
+      const desc = (card as HTMLElement & { pmViewDesc?: { ignoreMutation(mutation: { type: string; target: Node }): boolean } }).pmViewDesc!;
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      const [frame] = frames(view.dom);
+      expect(desc.ignoreMutation({ type: "childList", target: frame.parentElement! })).toBe(true);
+      expect(desc.ignoreMutation({ type: "attributes", target: frame })).toBe(true);
+      // A selection inside the card (a person drags over the link's text to copy it) is not the editor's selection.
+      // Without the card's own answer the editor would take this one for its own.
+      expect(desc.ignoreMutation({ type: "selection", target: card.querySelector("a")! })).toBe(true);
+      // And when the editor does look at the page again, the document and the card are what they were.
+      const before = view.state.doc;
+      (view as unknown as { domObserver: { flush(): void } }).domObserver.flush();
+      expect(view.state.doc).toBe(before);
+      expect(cards()[0]).toBe(card);
+      expect(frame.isConnected).toBe(true);
+      expect(text()).toBe(`Intro\n\n${VIDEO}`);
+    });
+
     it("a reader of the document gets the frame too", () => {
       const { view } = open(VIDEO, "viewer");
       vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
