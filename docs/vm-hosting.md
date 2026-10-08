@@ -347,10 +347,12 @@ are. The lock says it twice, with the mark `"dev": true` on an entry and with
 what each entry depends on, and npm itself does not always read the same one.
 Measured with real npm (#2308):
 
-- npm 10 (`10.9.4` and `10.9.9`; the image has npm 10) believes the mark. It
+- npm 10 (`10.9.4` and `10.9.9`; the image has npm 10) believes the mark
+  as long as `package.json` needs what the lock's root entry needs. It then
   leaves out exactly the entries marked `"dev": true`. A production package
   with the mark added by hand was not installed, and a linter package with
-  the mark taken off was installed.
+  the mark taken off was installed. When the two do not need the same, npm 10
+  works it out from what each entry depends on, as npm 11 does.
 - npm 11 (`11.12.1`) does not read the mark. It leaves out the entries
   production does not need, which it works out from what each entry depends
   on. A production package with the mark added by hand was installed.
@@ -389,7 +391,13 @@ before any audit runs, unless all of these hold:
    lock's root entry: `dependencies`, `devDependencies`,
    `optionalDependencies`, `peerDependencies` and `peerDependenciesMeta`. A
    record that is missing equals an empty one, and the order of the names
-   does not matter. Every value is a text, compared character for character;
+   does not matter. A name that is in both `dependencies` and
+   `optionalDependencies` counts in `optionalDependencies` only, on either
+   side, as it does for npm: `npm install --save-optional` writes the name
+   into both records of the lock's root entry and into
+   `optionalDependencies` alone in `package.json`, and the next plain
+   `npm install` takes it out of the root entry's `dependencies` again.
+   Every value is a text, compared character for character;
    in `peerDependenciesMeta` it is `{"optional": true}` or
    `{"optional": false}`. A record or a value of any other kind refuses the
    lock, on either side, and so does a `"workspaces"` field on either side. A
@@ -399,14 +407,22 @@ before any audit runs, unless all of these hold:
    dependency records are objects, `bundleDependencies` is a list, and every
    name in them is a package name. npm ignores letter case when it looks a
    name up in a folder, so the preflight does too, and it refuses two keys
-   that differ only in letter case.
+   that differ only in letter case. npm counts an entry as a package of the
+   entry whose key is, letter for letter, the folder above it. So the
+   preflight also refuses a key whose folder above has no entry, such as
+   `node_modules/A/node_modules/x` in a lock without `node_modules/A`: npm
+   never writes one, and with one in the lock real npm 10 and 11 gave
+   `node_modules/a` the copy of `x` at the top and installed it, while a
+   walk that ignores letter case would have found the copy below `A`.
 
 When in doubt the preflight counts an entry as production's: it may refuse a
 lock that npm would install correctly, and it never calls a production package
-dev-only. One case of that is known. A package named in both `dependencies`
-and `devDependencies` is a devDependency to real npm 10 and 11, which leave
-it out; the preflight counts it as a dependency, so the lock npm writes for it
-is refused by rule 2. Keep a package in one of the two.
+dev-only. Two cases of that are known. A package named in `devDependencies`
+and also in `dependencies` or `peerDependencies` is a devDependency to real
+npm 10 and 11, which leave it out; the preflight counts it as production's,
+so the lock npm writes for it is refused by rule 2. Keep a package that is in
+`devDependencies` out of the other records. And a `package.json` that
+starts with a byte order mark is refused by rule 3, although npm reads it.
 
 Today's lock has 1,006 entries; production needs 477 of them and the other 529
 are marked `"dev": true`. Rules 1 and 2 hold for it and for all 29 versions of
@@ -414,9 +430,12 @@ the lock in `main`'s history without a single entry of difference, and rule 3
 holds for each with the `package.json` of the same commit.
 
 Two things in `package.json` are left out of rule 3 on purpose, each measured
-with real npm 10 and 11. An `overrides` entry that the lock does not already
-carry makes `npm ci` stop with an error and install nothing, so an override
-cannot bring in a package the lock does not hold. `bundleDependencies` of the
+with real npm 10 and 11. An `overrides` entry either changes nothing or
+stops `npm ci`: when the lock already satisfies it, and also when it names
+another package of the same version, `npm ci` installs what the lock holds;
+when it asks for another version or for a tarball address, `npm ci` stops
+with an error and installs nothing. In no case measured did an override bring
+in a package or a version the lock does not hold. `bundleDependencies` of the
 project itself changes nothing about what `npm ci` installs.
 
 If `package.json` changes in any byte while the audit runs, the status is

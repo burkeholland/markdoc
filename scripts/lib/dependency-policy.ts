@@ -298,7 +298,8 @@ const ROOT_RECORDS = ["dependencies", "devDependencies", "optionalDependencies",
 
 // The five records of a root (package.json, or the lock's "" entry) as one text, so two roots are equal exactly
 // when their texts are. A record that is missing counts as an empty one, and the order of the names does not
-// matter. Every value must be a text and is compared character for character; in peerDependenciesMeta it must be
+// matter. A name in both dependencies and optionalDependencies counts in optionalDependencies only, as it does for
+// npm. Every value must be a text and is compared character for character; in peerDependenciesMeta it must be
 // {"optional": true} or {"optional": false}. Anything else, and any "workspaces", has no text: this repository has
 // no workspace, and a workspace is installed from a folder that nothing here judges.
 function rootRecordsText(root: unknown): string | null {
@@ -313,6 +314,10 @@ function rootRecordsText(root: unknown): string | null {
         ? value
         : isRecord(value) && Object.keys(value).length === 1 && typeof value.optional === "boolean" ? String(value.optional) : null;
       if (typeof text !== "string") return null;
+      // npm reads a name in both dependencies and optionalDependencies as optional only, in package.json and in
+      // the lock's root entry alike. `npm install --save-optional` writes such a root entry: the name in both
+      // records, under dependencies with the range from the command line, while package.json has it in one.
+      if (field === "dependencies" && isRecord(root.optionalDependencies) && Object.hasOwn(root.optionalDependencies, name)) continue;
       pairs.push([name, text]);
     }
     records.push(pairs.sort(([left], [right]) => (left < right ? -1 : 1)));
@@ -347,12 +352,18 @@ function neededNames(entry: Record<string, unknown>): Map<string, boolean> | str
 // finds each name the way npm and Node do, in the nearest node_modules folder going up from the entry that needs
 // it, and goes on from every entry it finds. An alias is found by its folder, like any other entry. npm keeps the
 // packages of a folder in a map that ignores letter case, so the walk does too, and it refuses two keys that
-// differ only by case. The answer is the set, or the reason the lock cannot be walked.
+// differ only by case. npm puts an entry into the map of the entry whose key is, letter for letter, the folder
+// above it, so a key whose folder above has no entry is refused as well: npm would never find that entry from the
+// folder the walk finds it from, and real npm 10 and 11 then install the copy further up that the walk never
+// reached. The answer is the set, or the reason the lock cannot be walked.
 function productionPaths(entries: Record<string, unknown>): Set<string> | string {
   const pathByFoldedKey = new Map<string, string>();
   for (const lockPath of Object.keys(entries)) {
     if (pathByFoldedKey.has(lockPath.toLowerCase())) return `${lockPath}: another key differs only by letter case`;
     pathByFoldedKey.set(lockPath.toLowerCase(), lockPath);
+    if (!Object.hasOwn(entries, lockPath.slice(0, Math.max(0, lockPath.lastIndexOf("/node_modules/"))))) {
+      return `${lockPath}: the folder above it has no entry`;
+    }
   }
   const production = new Set<string>();
   const queue = [""];

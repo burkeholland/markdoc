@@ -686,7 +686,9 @@ describe("locked tarballs (#2297)", () => {
     };
 
     it("is judged the way npm writes it: the tarball of the real name in the folder of the alias", () => {
-      const lock = rawLock({ [folder]: written });
+      // The entry above it, as the real lock has one: without it npm would not count the alias as its package.
+      const above = honest("@next/eslint-plugin-next", "16.3.6", { dev: true, dependencies: { "fast-glob": "3.3.1" } });
+      const lock = rawLock({ "node_modules/@next/eslint-plugin-next": above, [folder]: written });
       expectJudged(lock);
       const audit = JSON.parse(auditJson([{ name: "tinyglobby", severity: "high" }]));
       audit.vulnerabilities.tinyglobby.nodes = [folder];
@@ -1828,6 +1830,7 @@ describe("accepted advisories (#2260)", () => {
       packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.3" });
     }],
     ["the lock has another braces node at a different version that npm does not report", ({ packages }) => {
+      packages.push({ name: "glob-parent", version: "5.1.2", flags: { dev: true, dependencies: { braces: "3.0.2" } } });
       packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.2", flags: { dev: true } });
     }],
     // An alias carries the real name in its lock entry (#2294): it is a braces node whatever its folder is called.
@@ -1843,6 +1846,7 @@ describe("accepted advisories (#2260)", () => {
       packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.3", flags: { name: "another-package" } });
     }],
     ["the lock has a braces folder that claims another name, at a different version", ({ packages }) => {
+      packages.push({ name: "glob-parent", version: "5.1.2", flags: { dev: true, dependencies: { braces: "3.0.2" } } });
       packages.push({ name: "glob-parent/node_modules/braces", version: "3.0.2", flags: { name: "another-package", dev: true } });
     }],
     ["a dependent names a package that is not in the audit", ({ audit }) => {
@@ -2310,6 +2314,23 @@ describe("what production needs (#2308)", () => {
       expect(packageLockProblems(lock(DEV, {}))).toEqual([markedDev("node_modules/a/node_modules/shared"), notMarkedDev("node_modules/shared")]);
     });
 
+    // A walk that went from an entry's own folder straight to the first folder under the top passed every other
+    // test and the real lock; it takes the copy further up for production's.
+    it("takes the nearer of two copies above an entry, not the one further up", () => {
+      const lock = (near: Entry, far: Entry) => lockOf({ dependencies: { a: "1.0.0" } }, {
+        a: pkg("a", { dependencies: { b: "1.0.0" } }),
+        "a/node_modules/b": pkg("b", { dependencies: { c: "1.0.0" } }),
+        "a/node_modules/b/node_modules/c": pkg("c", { dependencies: { shared: "2.0.0" } }),
+        "a/node_modules/b/node_modules/shared": pkg("shared", near, "2.0.0"),
+        "a/node_modules/shared": pkg("shared", far),
+      });
+      expect(packageLockProblems(lock({}, DEV))).toEqual([]);
+      expect(packageLockProblems(lock(DEV, {}))).toEqual([
+        markedDev("node_modules/a/node_modules/b/node_modules/shared"),
+        notMarkedDev("node_modules/a/node_modules/shared"),
+      ]);
+    });
+
     it("finds a scoped package below a scoped package", () => {
       const lock = (mark: Entry) => lockOf({ dependencies: { "@scope/server": "1.0.0" } }, {
         "@scope/server": pkg("@scope/server", { dependencies: { "@scope/shared": "1.0.0" } }),
@@ -2426,8 +2447,65 @@ describe("what production needs (#2308)", () => {
     it("finds an entry for a dependency written in another letter case", () => {
       const lock = lockOf({ dependencies: { jsonstream: "1.0.0" } }, { JSONStream: pkg("JSONStream") });
       expect(packageLockProblems(lock)).toEqual([]);
-      const nested = lockOf(SERVER, { server: pkg("server", { dependencies: { JSONStream: "1.0.0" } }), "SERVER/node_modules/jsonstream": pkg("jsonstream") });
+      const nested = lockOf(SERVER, { server: pkg("server", { dependencies: { JSONStream: "1.0.0" } }), "server/node_modules/jsonstream": pkg("jsonstream") });
       expect(packageLockProblems(nested)).toEqual([]);
+    });
+  });
+
+  // npm makes an entry a package of the entry whose key is, letter for letter, the folder above it. Measured with
+  // real npm 10.9.4, 10.9.9 and 11.12.1: with the key node_modules/Server/node_modules/shared and no entry
+  // node_modules/Server, npm gives node_modules/server the copy of shared at the top. A walk that found the copy
+  // below "Server" instead called the top copy dev-only, and `npm ci --omit=dev` installed it.
+  describe("a key whose folder above has no entry", () => {
+    const noFolderAbove = (key: string) => `node_modules/${key}: the folder above it has no entry`;
+    // server needs shared. The top copy of shared needs braces, and both are marked as if only the linter needed
+    // them. `folder` is where a second copy of shared sits, which holds another package.
+    const withCopyBelow = (folder: string | null) => lockOf({ ...SERVER, devDependencies: { linter: "1.0.0" } }, {
+      server: pkg("server", { dependencies: { shared: "1.0.0" } }),
+      ...(folder === null ? {} : { [`${folder}/node_modules/shared`]: pkg("harmless", { name: "harmless" }) }),
+      linter: pkg("linter", { dev: true, dependencies: { shared: "1.0.0" } }),
+      shared: pkg("shared", { dev: true, dependencies: NEEDS_BRACES }),
+      braces: braces(DEV),
+    });
+
+    it.each(["Server", "SERVER", "sErver"])("never accepts a listed advisory behind a copy in the folder %s, which has no entry", (folder) => {
+      const lock = withCopyBelow(folder);
+      expect(packageLockProblems(lock)).toEqual([noFolderAbove(`${folder}/node_modules/shared`)]);
+      expect(judge(lock)).toEqual(INVALID_LOCK);
+      expect(evaluate(lock)).toEqual(INVALID_LOCK);
+    });
+
+    it("tells that lock from the two honest ones next to it", () => {
+      // The copy really is below server: production gets the copy, and the top shared and braces are the linter's.
+      expect(packageLockProblems(withCopyBelow("server"))).toEqual([]);
+      expect(judge(withCopyBelow("server")).status).toBe("accepted");
+      // No copy: production gets the top shared, so its mark and the mark of braces are false.
+      expect(packageLockProblems(withCopyBelow(null))).toEqual([markedDev("node_modules/shared"), markedDev("node_modules/braces")]);
+      expect(judge(withCopyBelow(null))).toEqual(INVALID_LOCK);
+    });
+
+    it.each([
+      "ghost/node_modules/stray",
+      "@ghost/package/node_modules/stray",
+      "server/node_modules/ghost/node_modules/stray",
+      "ghost/node_modules/server/node_modules/stray",
+      "SERVER/node_modules/stray",
+    ])("refuses the key node_modules/%s, with the mark and without it", (key) => {
+      for (const mark of [{}, DEV]) {
+        const lock = lockOf(SERVER, { server: pkg("server"), [key]: pkg("stray", mark) });
+        expect(packageLockProblems(lock)).toEqual([noFolderAbove(key)]);
+        expect(evaluate(lock)).toEqual(INVALID_LOCK);
+      }
+    });
+
+    it("judges an entry three folders down when every folder above it has an entry", () => {
+      const lock = lockOf({ dependencies: { a: "1.0.0" } }, {
+        a: pkg("a", { dependencies: { b: "1.0.0" } }),
+        "a/node_modules/b": pkg("b", { dependencies: { c: "1.0.0" } }),
+        "a/node_modules/b/node_modules/c": pkg("c"),
+      });
+      expect(packageLockProblems(lock)).toEqual([]);
+      expect(formatDependencyPolicyReport(evaluate(lock))).toBe(PASS_OUTPUT);
     });
   });
 
@@ -2506,6 +2584,56 @@ describe("what production needs (#2308)", () => {
       await expectJudgedBeside(packageJson(few), lockOf({ ...few, ...empty }, { server: pkg("server") }));
       await expectJudgedBeside(packageJson({}), lockOf({ dependencies: {} }, {}));
       await expectJudgedBeside(packageJson({ dependencies: {} }), lockOf({}, {}));
+    });
+
+    // Measured with real npm 10.9.9 and 11.12.1: `npm install --save-optional extra@^1` writes extra into
+    // optionalDependencies of package.json, and into both dependencies (with the range from the command line) and
+    // optionalDependencies of the lock's root entry. npm reads a name in both records as optional only, in either
+    // file, and `npm ci` installs from that pair. The next plain `npm install` takes the name out of the root
+    // entry's dependencies again.
+    describe("a name in both dependencies and optionalDependencies", () => {
+      const inBoth = (range: unknown) => ({ ...ROOT, dependencies: { ...ROOT.dependencies, extra: range } });
+
+      it("judges the pair npm writes for --save-optional: the name in both records of the root entry only", async () => {
+        const lock = lockOf(inBoth("^1"), ENTRIES);
+        expect(packageLockProblems(lock)).toEqual([]);
+        await expectJudgedBeside(packageJson(ROOT), lock);
+      });
+
+      it("judges a package.json that has the name in both records, whatever range dependencies gives it", async () => {
+        await expectJudgedBeside(packageJson(inBoth("^1.0.0")));
+        await expectJudgedBeside(packageJson(inBoth("^99.0.0")));
+        await expectJudgedBeside(packageJson(inBoth("^2")), lockOf(inBoth("^1"), ENTRIES));
+      });
+
+      it("still compares the range optionalDependencies gives the name", async () => {
+        const other = { ...inBoth("^1.0.0"), optionalDependencies: { extra: "^2.0.0" } };
+        await expectRefusedBeside(packageJson(other));
+        await expectRefusedBeside(packageJson(ROOT), lockOf(other, ENTRIES));
+      });
+
+      it("refuses the lock when only one side has the name in optionalDependencies", async () => {
+        const dependencyOnly = { ...inBoth("^1.0.0"), optionalDependencies: {} };
+        await expectRefusedBeside(packageJson(dependencyOnly), lockOf(inBoth("^1.0.0"), ENTRIES));
+        await expectRefusedBeside(packageJson(inBoth("^1.0.0")), lockOf(dependencyOnly, ENTRIES));
+      });
+
+      it("still wants the value in dependencies to be a text", async () => {
+        const lock = lockOf(inBoth(7), ENTRIES);
+        expect(packageLockProblems(lock)).toEqual([BAD_ROOT]);
+        await expectRefusedBeside(packageJson(inBoth(7)), lock);
+        await expectRefusedBeside(packageJson(inBoth(7)));
+      });
+
+      // A name that devDependencies or peerDependencies also has stays a dependency: npm does not read those so.
+      it.each<[string, string]>([["devDependencies", "linter"], ["peerDependencies", "host"]])(
+        "does not do the same for a name in both dependencies and %s", async (_field, name) => {
+          const both = { ...ROOT, dependencies: { ...ROOT.dependencies, [name]: "^1.0.0" } };
+          const lock = lockOf(both, { ...ENTRIES, [name]: pkg(name) });
+          expect(packageLockProblems(lock)).toEqual([]);
+          await expectRefusedBeside(packageJson(ROOT), lock);
+          await expectJudgedBeside(packageJson(both), lock);
+        });
     });
 
     // Real npm 10 and 11: package.json moves a package from devDependencies to dependencies, the lock stays as it
