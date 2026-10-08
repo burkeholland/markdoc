@@ -125,3 +125,12 @@ export async function expectOnlyCardFrames(page: Page, expected: string[]) {
   });
   expect(foreign).toEqual({ scripts: [], others: [] });
 }
+
+/** Paste plain text into the preview, as the clipboard would hand it over. */
+export async function pasteInRich(page: Page, text: string) {
+  await page.evaluate((value) => {
+    const data = new DataTransfer();
+    data.setData("text/plain", value);
+    document.querySelector(".md-rich")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+  }, text);
+}
