@@ -942,9 +942,11 @@ failed (413)"). An import shows "Import failed (413)".
 write to an old origin keeps its method and body. nginx compares the body size
 with `client_max_body_size` when it has chosen the location, before it runs the
 `return` inside that location. With the 1 MB default a POST over 1 MB to an old
-origin would therefore get nginx's `413` instead of the `308`. This is from
-reading how nginx orders its request phases; **it was not run**. The plain
-HTTP block on port 80 is unchanged.
+origin would therefore get nginx's `413` instead of the `308`. This was run in
+the review of pull request 2343 with nginx 1.24.0 (the Ubuntu 24.04 package):
+with the 1 MB default a POST of 2 MB to `/api/mcp` on either name answered
+`413`, and with this file it answered `308`. The plain HTTP block on port 80 is
+unchanged.
 
 ### nginx defaults that were looked at and left alone
 
@@ -958,11 +960,14 @@ HTTP block on port 80 is unchanged.
 
 ### Install on the VM (a person)
 
-`nginx -t` has not been run on this file: the machine it was written on has no
-nginx. The person on the VM runs it before the reload, as below.
+`nginx -t` passed on this file in the review of pull request 2343, with nginx
+1.24.0 (the Ubuntu 24.04 package) and a copy in which only the listen
+addresses, the certificate paths and the port of the app were changed. The
+VM's own nginx and its `nginx.conf` were not checked, so the person on the VM
+still runs `nginx -t` before the reload, as below.
 
 Copy `infra/nginx-markdoc.conf` from `main` to `/tmp/nginx-markdoc.conf` on the
-VM, then as root:
+VM. Then, as root, look first. These three commands change nothing:
 
 ```bash
 # 1. The live file must be the previous version of this one, and the one nginx loads.
@@ -977,19 +982,39 @@ diff -u /etc/nginx/sites-available/markdoc /tmp/nginx-markdoc.conf
 #    conf.d/) is harmless, because the server blocks override it: note it in the report.
 #    A line anywhere else: stop and report it.
 grep -rn client_max_body_size /etc/nginx/
-
-# 3. Back up outside /etc/nginx, then install.
-cp -p /etc/nginx/sites-available/markdoc /root/nginx-markdoc.before-2339
-install -m 644 -o root -g root /tmp/nginx-markdoc.conf /etc/nginx/sites-available/markdoc
-
-# 4. Test, and reload only when the test passes. A reload keeps open connections
-#    (people who are editing stay connected).
-nginx -t && systemctl reload nginx
 ```
 
-If `nginx -t` fails, nothing was reloaded, but the new file is on disk and the
-next reload (a certificate renewal, for example) would fail on it. Restore the
-backup at once, with the rollback below, and report the error text.
+Go on only when both answers are as expected. (When the diff shows nothing and
+the grep shows the three new lines, the file is installed already: stop, there
+is nothing to do.) Then install. This block may be run again without harm: it
+keeps a backup that is there already, and it puts the previous file back by
+itself when `nginx -t` fails.
+
+```bash
+# 3. Back up outside /etc/nginx, once. A second run must not replace the backup with the
+#    new file (the rollback would then restore nothing), so a backup that exists is kept.
+[ -e /root/nginx-markdoc.before-2339 ] || cp -p /etc/nginx/sites-available/markdoc /root/nginx-markdoc.before-2339
+
+# 4. Install, test, and reload only when the test passes. A reload keeps open connections
+#    (people who are editing stay connected). When the test fails, the previous file goes
+#    back at once, so the file on disk is always one that nginx can load.
+install -m 644 -o root -g root /tmp/nginx-markdoc.conf /etc/nginx/sites-available/markdoc
+if nginx -t; then
+  systemctl reload nginx && echo "INSTALLED: nginx reloaded"
+else
+  cp -p /root/nginx-markdoc.before-2339 /etc/nginx/sites-available/markdoc
+  nginx -t && echo "NOT INSTALLED: the previous file is back in place"
+fi
+```
+
+`NOT INSTALLED` means that nginx was not reloaded and runs as before, and that
+the file on disk is the previous one again. Report the error text of the first
+`nginx -t`. When neither line is printed, either the reload itself failed or
+`nginx -t` fails with the previous file too (the fault is then not in this
+file): report everything that was printed and change nothing more. A file that
+fails `nginx -t` must never stay on disk: nginx keeps running with what it has
+loaded, but its next reload (a certificate renewal, for example) fails, and it
+does not start again after a restart of the VM.
 
 Rollback:
 
@@ -1020,10 +1045,11 @@ Three more checks:
 - A signed-in person uploads a picture of about 3 MB into a document and it
   appears.
 
-The same 2 MB POST to `https://www.markdoc.app/api/mcp` should answer `308`.
-If it answers `413`, the reading in
-[the section above](#in-the-redirecting-server-blocks-too) was wrong; that
-harms nothing, and the lines in the two redirecting blocks can then be removed.
+The same 2 MB POST to `https://www.markdoc.app/api/mcp` should answer `308`, as
+it did on the nginx of the review (see
+[the section above](#in-the-redirecting-server-blocks-too)). If it answers
+`413`, the VM's nginx behaves differently from that one: report it. It harms
+nothing.
 
 ## Health and safe diagnostics
 
