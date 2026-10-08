@@ -69,6 +69,61 @@ export function isSuggestionOutdated(thread: { quote: string; range: { from: num
   return text.slice(thread.range.from, thread.range.to) !== thread.quote;
 }
 
+export type SuggestionOutdatedCause = "pending-suggestion" | "changed";
+
+/**
+ * Why a suggestion is outdated; null when it is not. "pending-suggestion": the quoted range reads as the
+ * quote again once the text of pending tracked insertions is taken out of it, so rejecting those tracked
+ * suggestions makes this one applicable again (accepting them leaves it outdated). "changed": the text
+ * was edited, or the anchor is gone; no pending decision brings it back (#2327).
+ */
+export function suggestionOutdatedCause(
+  thread: { quote: string; range: { from: number; to: number } | null },
+  text: string,
+  pendingInsertions: readonly { from: number; to: number }[],
+): SuggestionOutdatedCause | null {
+  if (!isSuggestionOutdated(thread, text)) return null;
+  const range = thread.range;
+  if (!range) return "changed";
+  let rest = "";
+  let at = range.from;
+  for (const insertion of [...pendingInsertions].sort((a, b) => a.from - b.from)) {
+    const from = Math.max(insertion.from, at);
+    const to = Math.min(insertion.to, range.to);
+    if (to <= from) continue;
+    rest += text.slice(at, from);
+    at = to;
+  }
+  if (at === range.from) return "changed";
+  return rest + text.slice(at, range.to) === thread.quote ? "pending-suggestion" : "changed";
+}
+
+/**
+ * The sentence a review card shows when some of its undecided suggestions cannot be applied; null when all
+ * of them can. `waiting` counts the outdated ones whose cause is a pending tracked suggestion: that wording
+ * wins when both causes occur, because it is the one a person can act on.
+ */
+export function reviewSuggestionNote({ undecided, applicable, waiting }: { undecided: number; applicable: number; waiting: number }): string | null {
+  const outdated = undecided - applicable;
+  if (outdated <= 0) return null;
+  const quote = (count: number) => (count === 1 ? "quotes" : "quote");
+  if (applicable > 0) {
+    const head = `${applicable} of ${undecided} suggestions can be applied; `;
+    if (waiting === 0) return `${head}${outdated} ${quote(outdated)} text that has changed.`;
+    if (waiting >= outdated) return `${head}${outdated} ${quote(outdated)} text that a pending suggestion changes.`;
+    return `${head}${outdated} quote text that has changed, ${waiting} of them by a pending suggestion.`;
+  }
+  if (undecided === 1) {
+    return waiting === 0
+      ? "The suggestion cannot be applied: the text it quotes has changed."
+      : "The suggestion cannot be applied: a pending suggestion changes the text it quotes. It applies again if the pending suggestion is rejected.";
+  }
+  const head = `None of the ${undecided} suggestions can be applied: `;
+  if (waiting === 0) return `${head}the text they quote has changed.`;
+  if (waiting >= outdated) return `${head}a pending suggestion changes the text they quote. They apply again if it is rejected.`;
+  return `${head}the text they quote has changed, for ${waiting} of them by a pending suggestion. ${waiting === 1 ? "That one applies" : "Those apply"} again if it is rejected.`;
+}
+
 /** Pluralised summary for a review card: "3 comments · 2 suggestions". */
 export function reviewSummaryLabel(comments: number, suggestions: number): string {
   const c = `${comments} ${comments === 1 ? "comment" : "comments"}`;

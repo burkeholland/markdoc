@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import { CommentsModel, DecidedSuggestionEditError } from "./comments";
-import { hasSuggestionBlock, isSuggestionOutdated, parseSuggestionBlock, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor } from "./suggestion-block";
+import { hasSuggestionBlock, isSuggestionOutdated, parseSuggestionBlock, reviewSuggestionNote, reviewSummaryLabel, reviewVerdictLabel, suggestionBlockFor, suggestionOutdatedCause } from "./suggestion-block";
+import { SuggestionsModel } from "./suggestions";
 
 const alice = { id: "alice", name: "Alice", color: "#000", colorLight: "#fff", login: "alice" };
 const bob = { id: "bob", name: "Bob", color: "#000", colorLight: "#fff", login: "bob" };
@@ -211,5 +212,129 @@ describe("CommentsModel suggestions", () => {
 
     expect(() => reply.model.editBody(threadId, "Changed after the decision.", replyId)).toThrow(new DecidedSuggestionEditError(state));
     expect(reply.model.get(threadId)?.replies[0].body).toBe(replyBody);
+  });
+});
+
+describe("suggestionOutdatedCause (#2327)", () => {
+  const agent = { id: "agent:alice:Copilot", name: "Copilot", color: "#000", colorLight: "#fff", login: "alice" };
+  function world(text: string, quote: string) {
+    const doc = new Y.Doc();
+    const ytext = doc.getText("content");
+    ytext.insert(0, text);
+    const comments = new CommentsModel(doc, ytext);
+    const tracked = new SuggestionsModel(doc, ytext);
+    const from = text.indexOf(quote);
+    const id = comments.add({ from, to: from + quote.length, body: "```suggestion\nnew words\n```", author: alice });
+    const insertions = () => tracked.list().filter((s) => s.type === "insert");
+    const cause = () => suggestionOutdatedCause(comments.get(id)!, ytext.toString(), insertions());
+    const replace = (find: string, insert: string) => {
+      const at = ytext.toString().indexOf(find);
+      return tracked.proposeEdits([{ from: at, to: at + find.length, insert }], agent);
+    };
+    return { ytext, comments, tracked, id, cause, replace };
+  }
+
+  it("is null while the quoted text reads as it did, also inside a pending tracked insertion", () => {
+    const plain = world("The plan is strong today.", "is strong");
+    expect(plain.cause()).toBeNull();
+
+    // The quote sits in text that only a pending tracked suggestion put there: applicable, before and after it is accepted.
+    const doc = new Y.Doc();
+    const ytext = doc.getText("content");
+    ytext.insert(0, "Intro. Draft goes here. End.");
+    const tracked = new SuggestionsModel(doc, ytext);
+    const ids = tracked.proposeEdits([{ from: 7, to: 23, insert: "The new draft is strong." }], agent);
+    const comments = new CommentsModel(doc, ytext);
+    const at = ytext.toString().indexOf("is strong");
+    const id = comments.add({ from: at, to: at + 9, body: "```suggestion\nis solid\n```", author: alice });
+    const cause = () => suggestionOutdatedCause(comments.get(id)!, ytext.toString(), tracked.list().filter((s) => s.type === "insert"));
+    expect(cause()).toBeNull();
+    for (const suggestion of ids) tracked.accept(suggestion);
+    expect(ytext.toString()).toBe("Intro. The new draft is strong. End.");
+    expect(cause()).toBeNull();
+  });
+
+  it("names a pending tracked suggestion as the cause, and only while rejecting it would give the quote back", () => {
+    const pending = world("The plan is strong today.", "is strong");
+    const ids = pending.replace("strong", "solid");
+    expect(pending.ytext.toString()).toBe("The plan is solidstrong today.");
+    expect(isSuggestionOutdated(pending.comments.get(pending.id)!, pending.ytext.toString())).toBe(true);
+    expect(pending.cause()).toBe("pending-suggestion");
+    // Without the pending insertions the same text is simply changed.
+    expect(suggestionOutdatedCause(pending.comments.get(pending.id)!, pending.ytext.toString(), [])).toBe("changed");
+
+    // Rejected: the quote reads as before, the suggestion applies again.
+    for (const id of ids) pending.tracked.reject(id);
+    expect(pending.ytext.toString()).toBe("The plan is strong today.");
+    expect(pending.cause()).toBeNull();
+
+    // Accepted: the words are gone for good.
+    const accepted = world("The plan is strong today.", "is strong");
+    for (const id of accepted.replace("strong", "solid")) accepted.tracked.accept(id);
+    expect(accepted.ytext.toString()).toBe("The plan is solid today.");
+    expect(accepted.cause()).toBe("changed");
+  });
+
+  it("is 'changed' when the text was edited, the anchor is gone, or a pending insertion is not what differs", () => {
+    const edited = world("The plan is strong today.", "is strong");
+    const at = edited.ytext.toString().indexOf("strong");
+    edited.ytext.delete(at, 6);
+    edited.ytext.insert(at, "weak");
+    expect(edited.cause()).toBe("changed");
+
+    // A pending insertion in the range AND a real edit: rejecting the insertion would not give the quote back.
+    const both = world("The plan is strong today.", "is strong");
+    both.replace("strong", "solid");
+    const is = both.ytext.toString().indexOf("is ");
+    both.ytext.delete(is, 2);
+    both.ytext.insert(is, "was");
+    expect(both.cause()).toBe("changed");
+
+    // A pending insertion somewhere else does not explain an edit here.
+    const elsewhere = world("The plan is strong today.", "is strong");
+    elsewhere.replace("today", "now");
+    const strong = elsewhere.ytext.toString().indexOf("strong");
+    elsewhere.ytext.delete(strong, 6);
+    elsewhere.ytext.insert(strong, "weak");
+    expect(elsewhere.cause()).toBe("changed");
+
+    expect(suggestionOutdatedCause({ quote: "is strong", range: null }, "anything", [{ from: 0, to: 3 }])).toBe("changed");
+  });
+
+  it("takes several pending insertions out of one quoted range, in any order", () => {
+    const quote = "one two three";
+    const text = "one ONEtwo TWOthree";
+    const thread = { quote, range: { from: 0, to: text.length } };
+    const first = { from: 4, to: 7 };
+    const second = { from: 11, to: 14 };
+    expect(suggestionOutdatedCause(thread, text, [first, second])).toBe("pending-suggestion");
+    expect(suggestionOutdatedCause(thread, text, [second, first])).toBe("pending-suggestion");
+    expect(suggestionOutdatedCause(thread, text, [first])).toBe("changed");
+    // An insertion that only partly lies in the range is cut at the range's edge.
+    expect(suggestionOutdatedCause({ quote: "two", range: { from: 5, to: 10 } }, "one ONEtwo TWOthree", [{ from: 4, to: 7 }])).toBe("pending-suggestion");
+  });
+});
+
+describe("reviewSuggestionNote (#2327)", () => {
+  it.each([
+    // undecided, applicable, waiting, sentence
+    [4, 4, 0, null],
+    [1, 1, 0, null],
+    [0, 0, 0, null],
+    [4, 0, 0, "None of the 4 suggestions can be applied: the text they quote has changed."],
+    [2, 0, 0, "None of the 2 suggestions can be applied: the text they quote has changed."],
+    [1, 0, 0, "The suggestion cannot be applied: the text it quotes has changed."],
+    [4, 0, 4, "None of the 4 suggestions can be applied: a pending suggestion changes the text they quote. They apply again if it is rejected."],
+    [1, 0, 1, "The suggestion cannot be applied: a pending suggestion changes the text it quotes. It applies again if the pending suggestion is rejected."],
+    [4, 0, 2, "None of the 4 suggestions can be applied: the text they quote has changed, for 2 of them by a pending suggestion. Those apply again if it is rejected."],
+    [4, 0, 1, "None of the 4 suggestions can be applied: the text they quote has changed, for 1 of them by a pending suggestion. That one applies again if it is rejected."],
+    [4, 2, 0, "2 of 4 suggestions can be applied; 2 quote text that has changed."],
+    [3, 2, 0, "2 of 3 suggestions can be applied; 1 quotes text that has changed."],
+    [3, 1, 0, "1 of 3 suggestions can be applied; 2 quote text that has changed."],
+    [4, 2, 2, "2 of 4 suggestions can be applied; 2 quote text that a pending suggestion changes."],
+    [2, 1, 1, "1 of 2 suggestions can be applied; 1 quotes text that a pending suggestion changes."],
+    [4, 1, 1, "1 of 4 suggestions can be applied; 3 quote text that has changed, 1 of them by a pending suggestion."],
+  ] as const)("%i undecided, %i applicable, %i waiting", (undecided, applicable, waiting, sentence) => {
+    expect(reviewSuggestionNote({ undecided, applicable, waiting })).toBe(sentence);
   });
 });
