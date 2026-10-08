@@ -75,6 +75,11 @@ async function setPanelWidth(page: Page, width: number) {
   await expect.poll(async () => Math.round((await page.getByTestId("comments-panel").boundingBox())!.width), { message: `panel width ${width}` }).toBe(width);
 }
 
+/** Screenshots of the panel for the pull request, only when REVIEW_SHOTS names a folder. */
+async function shot(page: Page, name: string) {
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/${name}.png`, clip: (await page.getByTestId("comments-panel").boundingBox())! });
+}
+
 const boxOf = (locator: Locator) =>
   locator.evaluate((el) => {
     const r = el.getBoundingClientRect();
@@ -181,6 +186,7 @@ test.describe("review card when suggestions cannot be applied (#2327)", () => {
     await expect(card.getByTestId("review-open-suggestions")).toHaveCount(0);
     await expect(card.getByTestId("review-accept-all")).toHaveCount(0);
     await expect(card.getByTestId("review-reject-all")).toBeEnabled();
+    await shot(page, "changed-open");
     const before = await codeText(page);
 
     await card.getByTestId("review-resolve-all").click();
@@ -204,6 +210,7 @@ test.describe("review card when suggestions cannot be applied (#2327)", () => {
     await expect(page.locator('[data-testid="comment-thread"][data-suggestion="outdated"]')).toHaveCount(4);
     await expect(threads.first().getByTestId("suggestion-outdated")).toBeVisible();
     await expect(threads.first().getByTestId("suggestion-reject-comment")).toBeEnabled();
+    await shot(page, "changed-resolved");
 
     // Reopening a comment brings its suggestion back as it was: the card returns to Open for that one.
     await threads.first().getByTestId("comment-resolve").click();
@@ -226,6 +233,7 @@ test.describe("review card when suggestions cannot be applied (#2327)", () => {
     await expect(card.getByTestId("review-accept-all")).toBeEnabled();
     await expect(card.getByTestId("review-accept-all")).toHaveAccessibleName(/Accept all suggestions \(1 of 2/);
     await expect(card.getByTestId("review-resolve-all")).toHaveCount(0);
+    await shot(page, "partial-open");
     await selectTextInRich(page, "weak");
     await page.keyboard.type("y");
     await expect(card.getByTestId("review-note").locator("span")).toHaveText("None of the 2 suggestions can be applied: the text they quote has changed.");
@@ -276,7 +284,7 @@ test.describe("review card when suggestions cannot be applied (#2327)", () => {
           expect(Math.abs(resolve.top - reject.top), `${where}: Resolve all and Reject all share a row`).toBeLessThanOrEqual(1);
           expect(link.height, `${where}: Open Suggestions is one line`).toBeLessThanOrEqual(20);
           expect(link.bottom, `${where}: the link sits above the buttons`).toBeLessThanOrEqual(resolve.top);
-          if (SHOTS) await page.screenshot({ path: `${SHOTS}/pending-${theme}-${width}.png`, clip: (await page.getByTestId("comments-panel").boundingBox())! });
+          await shot(page, `pending-${theme}-${width}`);
         }
         const axe = await new AxeBuilder({ page }).include('[data-testid="comments-panel"]').withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
         expect(axe.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`), `${theme}: axe`).toEqual([]);

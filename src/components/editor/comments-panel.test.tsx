@@ -2198,13 +2198,15 @@ describe("CommentsPanel", () => {
       vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
       session = next;
       const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
-      const panel = (
+      const panel = (toast: NonNullable<CommentsPanelProps["onToast"]>) => (
         <TooltipProvider>
-          <CommentsPanel session={next} onClose={() => {}} onReveal={() => {}} onToast={onToast} />
+          <CommentsPanel session={next} onClose={() => {}} onReveal={() => {}} onToast={toast} />
         </TooltipProvider>
       );
-      render(strict ? <StrictMode>{panel}</StrictMode> : panel);
-      return { session: next, threadIds, review, onToast };
+      const view = render(strict ? <StrictMode>{panel(onToast)}</StrictMode> : panel(onToast));
+      /** Render the panel again with another toast handler: every review card publishes itself anew. */
+      const republish = (toast: NonNullable<CommentsPanelProps["onToast"]>) => view.rerender(panel(toast));
+      return { session: next, threadIds, review, onToast, republish };
     }
 
     /** A person types a letter into the second word of a quote: the suggestion on it is outdated until the letter is gone again. */
@@ -2557,27 +2559,52 @@ describe("CommentsPanel", () => {
       ["the link's words", '[data-testid="review-open-suggestions"]', "first"],
       ["the Resolve all label", '[data-testid="review-resolve-all"]', "last"],
       ["the description of Reject all", '[data-testid="review-reject-all"]', "description"],
-    ] as const)("a card whose page no longer shows %s as rendered refuses every click", async (_what, selector, part) => {
+    ] as const)("a card whose page no longer shows %s as rendered refuses every click, also after it renders again", async (_what, selector, part) => {
       const tamper = (root: HTMLElement): void => {
         const target = root.querySelector(selector)!;
         if (part === "description") target.removeAttribute("aria-describedby");
         else (part === "text" ? target : part === "first" ? target.firstChild! : target.lastChild!).textContent = "Accept all 2";
       };
-      const { session: current, onToast } = world(2);
+      const { session: current, onToast, republish } = world(2);
       await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
       for (const quote of QUOTES.slice(0, 2)) reword(current, quote);
       await waitFor(() => expect(note()).toBe(PENDING(2)));
       await act(async () => {
         tamper(card());
       });
-      fireEvent.click(cardPart("review-open-suggestions")!);
-      fireEvent.click(cardPart("review-resolve-all")!);
-      fireEvent.click(cardPart("review-reject-all")!);
-      await act(async () => {});
-      expect(screen.getByRole("tab", { name: /Open/ })).toHaveAttribute("aria-selected", "true");
-      expect(resolvedFlags(current)).toEqual([false, false]);
-      expect(decisions(current)).toEqual([null, null]);
+      const clickAll = async () => {
+        fireEvent.click(cardPart("review-open-suggestions")!);
+        fireEvent.click(cardPart("review-resolve-all")!);
+        fireEvent.click(cardPart("review-reject-all")!);
+        await act(async () => {});
+        expect(screen.getByRole("tab", { name: /Open/ })).toHaveAttribute("aria-selected", "true");
+        expect(resolvedFlags(current)).toEqual([false, false]);
+        expect(decisions(current)).toEqual([null, null]);
+      };
+      await clickAll();
+      // A new render changes nothing the page shows (React leaves the altered node alone), so the card that
+      // publishes itself now must compare what it shows with what it means, and refuse again.
+      const laterToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      await act(async () => {
+        republish(laterToast);
+      });
+      await clickAll();
       expect(onToast).not.toHaveBeenCalled();
+      expect(laterToast).not.toHaveBeenCalled();
+    });
+
+    it("a card that renders again unaltered acts on the next click", async () => {
+      const { session: current, republish } = world(2);
+      await waitFor(() => expect(cardPart("review-accept-all")).toBeEnabled());
+      for (const quote of QUOTES.slice(0, 2)) reword(current, quote);
+      await waitFor(() => expect(note()).toBe(PENDING(2)));
+      const laterToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
+      await act(async () => {
+        republish(laterToast);
+      });
+      fireEvent.click(cardPart("review-resolve-all")!);
+      await waitFor(() => expect(resolvedFlags(current)).toEqual([true, true]));
+      expect(laterToast).toHaveBeenCalledWith("Resolved 2 comments from Copilot.", "success");
     });
 
     it("a single thread resolved with its own button: its outdated suggestion leaves Suggestions, an applicable one stays", async () => {
