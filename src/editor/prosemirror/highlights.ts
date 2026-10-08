@@ -3,6 +3,7 @@ import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import type { CollabSession } from "../collab/session";
 import { markdownBindingKey } from "../sync/markdown-binding";
+import { schema } from "../markdown/schema";
 import { SUGGESTIONS_ORIGIN } from "../collab/suggestions";
 import type { TextOp } from "../sync/text-diff";
 import type { SourceHighlight } from "../codemirror/highlights";
@@ -86,7 +87,8 @@ function build(session: CollabSession, doc: PMNode, getFocus: () => number | nul
   const max = doc.content.size;
   const clamp = (n: number) => Math.min(max, Math.max(0, n));
   const decorations: Decoration[] = [];
-  for (const h of collectHighlights(session, null)) {
+  const highlights = collectHighlights(session, null);
+  for (const h of highlights) {
     const from = clamp(map.srcToPm(h.from));
     const to = clamp(map.srcToPm(h.to));
     if (to <= from) continue;
@@ -101,12 +103,37 @@ function build(session: CollabSession, doc: PMNode, getFocus: () => number | nul
       }),
     );
   }
+  // A link card (#2317) is one block without text of its own, so a highlight on the characters of its
+  // link has nothing inline to paint. The card itself is marked instead, with the same kind.
+  if (highlights.length > 0) {
+    doc.forEach((node, offset, index) => {
+      if (node.type !== schema.nodes.link_card) return;
+      const block = map.blocks[index];
+      if (!block) return;
+      const kinds = new Set(highlights.filter((h) => h.to > h.from && h.from < block.to && h.to > block.from).map((h) => h.kind));
+      if (kinds.size === 0) return;
+      const active = highlights.some((h) => h.active && h.from < block.to && h.to > block.from);
+      decorations.push(
+        Decoration.node(offset, offset + node.nodeSize, {
+          class: [...kinds].map((kind) => `md-card-${kind}`).join(" ") + (active ? " md-card-active" : ""),
+          "data-card-highlight": [...kinds].join(" "),
+        }),
+      );
+    });
+  }
   // Block focused from the other pane.
   const focusSrc = getFocus();
   if (focusSrc !== null) {
     const pos = clamp(map.srcToPm(focusSrc));
     const $pos = doc.resolve(pos);
-    if ($pos.depth >= 1) {
+    // A card has no text to map the cursor to, so its own line is looked up among the blocks.
+    let card = -1;
+    doc.forEach((node, offset, index) => {
+      const block = map.blocks[index];
+      if (node.type === schema.nodes.link_card && block && block.from <= focusSrc && focusSrc <= block.to) card = offset;
+    });
+    if (card >= 0) decorations.push(Decoration.node(card, card + 1, { class: "md-focus-block" }));
+    else if ($pos.depth >= 1) {
       const start = $pos.before(1);
       const node = doc.nodeAt(start);
       if (node) decorations.push(Decoration.node(start, start + node.nodeSize, { class: "md-focus-block" }));

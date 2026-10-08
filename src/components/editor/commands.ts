@@ -43,6 +43,10 @@ export interface EditorCommandContext {
     undo: () => void;
     redo: () => void;
     revealSource: (offset: number, opts?: { focus?: boolean }) => void;
+    /** A link card is selected ("card"), or the caret is in a paragraph that is only a known link ("link"). */
+    cardState?: () => "card" | "link" | null;
+    /** Turn the selected card into its plain link, or such a paragraph into a card (#2317). */
+    showCard?: (as: "text" | "card") => void;
   };
   session: {
     canEdit: boolean;
@@ -227,6 +231,25 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
     { id: "format:code", title: "Inline code", keywords: ["mono", "monospace", "tt"], group: "Formatting", icon: "Code", shortcut: "Mod-`", when: canEdit, run: () => ctx.actions.toggleMark("code") },
     { id: "format:undo", title: "Undo", keywords: ["revert", "back"], group: "Formatting", icon: "Undo2", shortcut: "Mod-Z", when: canEdit, run: () => ctx.actions.undo() },
     { id: "format:redo", title: "Redo", keywords: ["again", "forward"], group: "Formatting", icon: "Redo2", shortcut: "Mod-Shift-Z", when: canEdit, run: () => ctx.actions.redo() },
+    // Link cards (#2317): each shows only where it applies, so the palette lists at most one of the two.
+    {
+      id: "card:as-text",
+      title: "Show card as text",
+      keywords: ["link", "embed", "preview", "plain", "url", "tweet", "video", "card"],
+      group: "Formatting",
+      icon: "Link",
+      when: () => canEdit() && ctx.actions.cardState?.() === "card",
+      run: () => ctx.actions.showCard?.("text"),
+    },
+    {
+      id: "card:as-card",
+      title: "Show link as card",
+      keywords: ["link", "embed", "preview", "rich", "url", "tweet", "video", "card"],
+      group: "Formatting",
+      icon: "LayoutTemplate",
+      when: () => canEdit() && ctx.actions.cardState?.() === "link",
+      run: () => ctx.actions.showCard?.("card"),
+    },
   ];
 
   const document: Command[] = [

@@ -6,6 +6,7 @@ import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import { Bold, Italic, Code, Link as LinkIcon, MessageSquarePlus, Strikethrough } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { createAnchor, resolveAnchor, type TextAnchor } from "@/editor/collab/shared";
+import { selectedCard } from "@/editor/prosemirror/commands";
 import type { EditorActions, FormatState } from "./actions";
 import { cn } from "@/lib/utils";
 import type { Box, Insets } from "@/lib/viewport";
@@ -215,7 +216,8 @@ export function SelectionBubble({
       const { from, to, empty } = view.state.selection;
       const ownsFocus = view.hasFocus() || Boolean(document.activeElement && layer.contains(document.activeElement));
       if (dismissed && !stillDismissed()) dismissed = null;
-      if (dismissed || empty || !ownsFocus || pointerDown || session.activeSurface !== "rich" || !(session.canEdit || session.canComment)) {
+      // A selected link card (#2317) has its own controls, and none of the bubble's formats apply to it.
+      if (dismissed || empty || selectedCard(view.state) || !ownsFocus || pointerDown || session.activeSurface !== "rich" || !(session.canEdit || session.canComment)) {
         hide();
         return;
       }
