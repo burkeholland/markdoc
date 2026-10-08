@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures";
 import { devices, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { signIn, devLogin, createDocument, openDocument, setTheme } from "./helpers";
+import { signIn, devLogin, createDocument, openDocument, setTheme, focusRichEnd } from "./helpers";
 
 /**
  * Vertical rhythm of rendered Markdown (task #346, Burke #1057: "things run together in the preview").
@@ -232,5 +232,234 @@ test.describe("preview vertical rhythm", () => {
     const dark = await scan(true);
     expect(dark.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`)).toEqual([]);
     await context.close();
+  });
+});
+
+/**
+ * Space below a picture (Burke #2348). A picture is drawn as a block, so words that follow it in the
+ * same paragraph (a picture, then "I asked" typed right after it) start a new line under it. That line
+ * used to touch the picture: 0 px. It now sits one paragraph space below, in the visual pane and on
+ * the published page. A picture that ends its paragraph was never too close to the next block (the
+ * next block brings its own margin-top), and must not gain anything from the rule.
+ *
+ * Gaps are measured to the line box of the words (the glyph box plus half the leading), the same edge
+ * a paragraph's own box has, so "picture -> words" and "paragraph -> paragraph" compare like for like.
+ */
+const PICTURE = "/brand/og.png";
+const PICTURE_DOC = [
+  "# Picture fixture",
+  "",
+  "First paragraph.",
+  "",
+  "Second paragraph.",
+  "",
+  `![typed-after](${PICTURE})`,
+  "Words typed after the picture, in the same paragraph.",
+  "",
+  "A paragraph after the typed words.",
+  "",
+  `[![linked](${PICTURE})](https://example.com/) words after a picture that is a link.`,
+  "",
+  `![then-line-break](${PICTURE})\\`,
+  "Words after a hard line break, which is already an empty line under the picture.",
+  "",
+  "Before a picture alone in its paragraph.",
+  "",
+  `![then-paragraph](${PICTURE})`,
+  "",
+  "A paragraph of its own after the picture.",
+  "",
+  `![then-heading](${PICTURE})`,
+  "",
+  "## A heading after the picture",
+  "",
+  "- A list item with a picture",
+  "",
+  `  ![in-list](${PICTURE})`,
+  "",
+  "  and words after it.",
+  "- The next item",
+  "",
+  `> ![in-quote](${PICTURE})`,
+  ">",
+  "> Words in the same quote.",
+  "",
+  "| Picture | Words |",
+  "| --- | --- |",
+  `| ![in-table](${PICTURE}) | beside it |`,
+  "",
+  "Before the last picture.",
+  "",
+  `![at-end](${PICTURE})`,
+  "",
+].join("\n");
+
+interface PictureGap {
+  /** Picture bottom -> top of the next thing a person sees: the line box of the next words, or the next box. */
+  below: number | null;
+  /** Bottom of the previous words' line box (or box) -> picture top. */
+  above: number | null;
+  /** The picture's own computed margin-bottom. */
+  marginBottom: number;
+  /** Bottom of the block that holds the picture -> top of the next block, and that block's margin-top (top-level pictures). */
+  blockGap: number | null;
+  nextMarginTop: number | null;
+  /** Bottom of the surface's content box -> picture bottom: what a picture leaves under itself at the end of the document. */
+  toEnd: number;
+  radius: string;
+  display: string;
+}
+
+/** The gaps around every picture with an alt text inside `root`, keyed by alt. */
+async function pictureGaps(page: Page, root: string): Promise<Record<string, PictureGap>> {
+  const surface = page.locator(root);
+  await surface.evaluate((el) =>
+    Promise.all([...el.querySelectorAll<HTMLImageElement>("img[alt]:not([alt=''])")].map((img) => img.complete || new Promise((r) => img.addEventListener("load", r, { once: true })))),
+  );
+  return surface.evaluate((el) => {
+    const BOXES = new Set(["IMG", "PRE", "FIGURE", "TABLE", "HR"]);
+    // Everything a person sees, in document order: text with words in it, and boxes. ProseMirror's own
+    // nodes after a picture (a separator image, the trailing break) hold no words and are not boxes here.
+    const drawn: (Text | HTMLElement)[] = [];
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (n instanceof Text ? n.data.trim() !== "" : n instanceof HTMLElement && BOXES.has(n.tagName) && !n.classList.contains("ProseMirror-separator")) drawn.push(n as Text | HTMLElement);
+    }
+    const edges = (n: Text | HTMLElement, lastWord: boolean) => {
+      if (n instanceof HTMLElement) return n.getBoundingClientRect();
+      const at = lastWord ? n.data.trimEnd().length - 1 : n.data.length - n.data.trimStart().length;
+      const range = document.createRange();
+      range.setStart(n, at);
+      range.setEnd(n, at + 1);
+      const glyphs = range.getBoundingClientRect();
+      const halfLeading = (parseFloat(getComputedStyle(n.parentElement!).lineHeight) - glyphs.height) / 2;
+      return { top: glyphs.top - halfLeading, bottom: glyphs.bottom + halfLeading };
+    };
+    const style = getComputedStyle(el);
+    const contentBottom = el.getBoundingClientRect().bottom - parseFloat(style.paddingBottom) - parseFloat(style.borderBottomWidth);
+    const out: Record<string, PictureGap> = {};
+    drawn.forEach((n, i) => {
+      if (!(n instanceof HTMLImageElement) || !n.alt) return;
+      const box = n.getBoundingClientRect();
+      const own = getComputedStyle(n);
+      const block = [...el.children].find((child) => child.contains(n));
+      const nextBlock = block?.nextElementSibling ?? null;
+      out[n.alt] = {
+        below: drawn[i + 1] ? edges(drawn[i + 1], false).top - box.bottom : null,
+        above: drawn[i - 1] ? box.top - edges(drawn[i - 1], true).bottom : null,
+        marginBottom: parseFloat(own.marginBottom),
+        blockGap: block && nextBlock ? nextBlock.getBoundingClientRect().top - block.getBoundingClientRect().bottom : null,
+        nextMarginTop: nextBlock ? parseFloat(getComputedStyle(nextBlock).marginTop) : null,
+        toEnd: contentBottom - box.bottom,
+        radius: own.borderRadius,
+        display: own.display,
+      };
+    });
+    return out;
+  });
+}
+
+/** Paragraph -> paragraph on this surface: the space the rule must give the words under a picture. */
+async function paragraphSpace(page: Page, root: string): Promise<number> {
+  const gap = pair(await measure(page, root), "p", "p");
+  expect(gap.gap, "the fixture's first two paragraphs are one block space apart").toBeGreaterThanOrEqual(BLOCK.min);
+  return gap.gap;
+}
+
+/** The line-box edge is computed from the glyph box, which the browser rounds: allow 1 px. */
+const ROUNDING = 1;
+
+function assertPictureSpacing(gaps: Record<string, PictureGap>, space: number, surface: "editor" | "reader") {
+  const px = (n: number | null) => (n === null ? "none" : `${n.toFixed(1)} px`);
+  const at = (alt: string) => {
+    const gap = gaps[alt];
+    if (!gap) throw new Error(`${surface}: no picture "${alt}" in ${Object.keys(gaps).join(", ")}`);
+    return gap;
+  };
+
+  // The reported case, and the same with a picture that is a link: words in the picture's own paragraph.
+  for (const alt of ["typed-after", "linked"]) {
+    const gap = at(alt);
+    expect(gap.below, `${surface}: words after "${alt}" are ${px(gap.below)} under the picture, a paragraph break is ${px(space)}`).toBeGreaterThanOrEqual(space - ROUNDING);
+    expect(gap.below, `${surface}: words after "${alt}" are ${px(gap.below)} under the picture, a paragraph break is ${px(space)}`).toBeLessThanOrEqual(space + ROUNDING);
+  }
+  // Not smaller than the space above the picture (a paragraph break here).
+  expect(at("typed-after").below! + ROUNDING, `${surface}: below ${px(at("typed-after").below)}, above ${px(at("typed-after").above)}`).toBeGreaterThanOrEqual(at("typed-after").above!);
+
+  // A hard line break after the picture is already a whole empty line: the rule adds nothing to it.
+  expect(at("then-line-break").marginBottom, `${surface}: a line break follows "then-line-break"`).toBe(0);
+  expect(at("then-line-break").below, `${surface}: words after "then-line-break"`).toBeGreaterThanOrEqual(space - ROUNDING);
+
+  // A picture that ends its paragraph, then a paragraph or a heading: never closer than a paragraph break, and
+  // nothing added by the rule (the block gap is still exactly the next block's margin-top).
+  for (const alt of ["then-paragraph", "then-heading"]) {
+    const gap = at(alt);
+    expect(gap.below, `${surface}: the block after "${alt}" is ${px(gap.below)} under the picture`).toBeGreaterThanOrEqual(space - ROUNDING);
+    expect(gap.below! + ROUNDING, `${surface}: "${alt}" below ${px(gap.below)}, above ${px(gap.above)}`).toBeGreaterThanOrEqual(gap.above!);
+    expect(Math.abs(gap.blockGap! - gap.nextMarginTop!), `${surface}: after "${alt}" the block gap ${px(gap.blockGap)} is the next block's margin-top ${px(gap.nextMarginTop)}`).toBeLessThan(ROUNDING);
+    // In the editor ProseMirror's trailing break already leaves a line under such a picture; the margin is off there.
+    if (surface === "editor") expect(gap.marginBottom, `${surface}: "${alt}" ends its paragraph`).toBe(0);
+  }
+  // The same in a list item, a quote and a table cell: the row is not pushed apart.
+  for (const alt of ["in-list", "in-quote", "in-table"]) expect(at(alt).marginBottom, `${surface}: "${alt}" keeps no margin of its own`).toBe(0);
+
+  // The end of the document: the picture leaves no band under itself beyond what the surface had (the
+  // editor's trailing-break line; nothing in the reader, where the margin collapses through).
+  const end = at("at-end");
+  if (surface === "editor") expect(end.marginBottom, "editor: the last picture ends its paragraph").toBe(0);
+  else expect(Math.abs(end.toEnd), `reader: ${px(end.toEnd)} under the last picture`).toBeLessThan(ROUNDING);
+
+  // The picture itself is untouched.
+  for (const gap of Object.values(gaps)) {
+    expect(gap.radius).toBe("8px");
+    expect(gap.display).toBe("block");
+  }
+}
+
+test.describe("space below a picture (#2348)", () => {
+  test("visual pane: words after a picture sit one paragraph space under it; a picture that ends its paragraph gains nothing", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "picture-gap-editor");
+    const id = await createDocument(page, PICTURE_DOC, "Picture fixture");
+    await openDocument(page, id);
+    await expect(page.locator(".md-rich img[alt='at-end']")).toBeVisible();
+
+    assertPictureSpacing(await pictureGaps(page, ".md-rich"), await paragraphSpace(page, ".md-rich"), "editor");
+    await context.close();
+  });
+
+  test("visual pane: typing right after a picture, the way the report was made", async ({ browser }) => {
+    const { page, context } = await signIn(browser, "picture-gap-typing");
+    const id = await createDocument(page, `First paragraph.\n\nSecond paragraph.\n\n![typed-after](${PICTURE})\n`, "Picture typing");
+    await openDocument(page, id);
+    await expect(page.locator(".md-rich img[alt='typed-after']")).toBeVisible();
+
+    // The caret after the picture is in the picture's paragraph: the words land there, on a line of their own.
+    await focusRichEnd(page);
+    await page.keyboard.type("I asked");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("A new paragraph after the words.");
+    await expect(page.locator(".md-rich > p", { hasText: "I asked" }).locator("img[alt='typed-after']")).toHaveCount(1);
+
+    const space = await paragraphSpace(page, ".md-rich");
+    const gap = (await pictureGaps(page, ".md-rich"))["typed-after"];
+    expect(gap.below, `"I asked" is ${gap.below?.toFixed(1)} px under the picture, a paragraph break is ${space.toFixed(1)} px`).toBeGreaterThanOrEqual(space - ROUNDING);
+    expect(gap.below).toBeLessThanOrEqual(space + ROUNDING);
+    await context.close();
+  });
+
+  test("published page /p/<id>: the same space under a picture", async ({ browser }) => {
+    const owner = await signIn(browser, "picture-gap-reader");
+    const id = await createDocument(owner.page, PICTURE_DOC, "Picture fixture");
+    expect((await owner.page.request.patch(`/api/documents/${id}`, { data: { linkAccess: "view" } })).ok()).toBeTruthy();
+
+    const anon = await browser.newContext();
+    const page = await anon.newPage();
+    await page.goto(`/p/${id}`);
+    await expect(page.getByTestId("reader-body").locator("img[alt='at-end']")).toBeVisible();
+
+    const root = '[data-testid="reader-body"]';
+    assertPictureSpacing(await pictureGaps(page, root), await paragraphSpace(page, root), "reader");
+    await anon.close();
+    await owner.context.close();
   });
 });
