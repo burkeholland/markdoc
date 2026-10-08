@@ -350,6 +350,43 @@ test.describe("link cards in the editor (#2317)", () => {
     expect(sites.refused).toEqual([]);
   });
 
+  test("accessibility: a card with a suggested deletion keeps its contrast in light and dark", async ({ browser, baseURL }) => {
+    const user = await signIn(browser, uniqueLogin("cards-a11y-deleted"));
+    const sites = await standInForOtherSites(user.context, baseURL!);
+    const { page } = user;
+    const id = await createDocument(page, DOC, "A deleted card");
+    await openDocument(page, id);
+
+    // Suggesting, select the first card, Delete: the card stays and carries the deletion colour.
+    await page.getByTestId("mode-switcher").click();
+    await page.getByRole("menuitemradio", { name: /Suggesting/ }).click();
+    await expect(page.getByTestId("mode-switcher")).toContainText("Suggesting");
+    await cards(page).first().locator(".md-link-card-label").click();
+    await expect(cards(page).first()).toHaveClass(/ProseMirror-selectednode/);
+    await page.keyboard.press("Delete");
+    await expect(cards(page)).toHaveCount(2);
+    await expect(cards(page).first()).toHaveAttribute("data-card-highlight", "suggest-delete");
+    expect(await codeText(page)).toBe(DOC);
+
+    for (const theme of ["light", "dark"] as const) {
+      await setTheme(page, theme);
+      await waitForEditor(page);
+      await expect(cards(page).first()).toHaveAttribute("data-card-highlight", "suggest-delete");
+      // The cards only. The Markdown pane shows the same link on the same background, and that pair is not this change's.
+      const results = await new AxeBuilder({ page }).include(".md-link-card").withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
+      const lines = results.violations.map((v) => `  ${v.id} [${v.impact ?? "n/a"}] ${v.help}\n${v.nodes.map((n) => `      ${n.target.join(" ")}`).join("\n")}`);
+      expect(results.violations, `${theme}: a card with a suggested deletion\n${lines.join("\n")}`).toHaveLength(0);
+      // The scan did judge the contrast of both cards' links, the deleted one included.
+      const judged = results.passes.filter((rule) => rule.id === "color-contrast").flatMap((rule) => rule.nodes.map((node) => node.html));
+      expect(judged.filter((html) => html.includes("md-link-card-link")), `${theme}: links whose contrast axe judged`).toHaveLength(2);
+      // The deleted card's link is struck through and has the colour of deleted text, not the link colour.
+      const [deleted, kept] = await Promise.all([0, 1].map((i) => cards(page).nth(i).locator(".md-link-card-link").evaluate((el) => [getComputedStyle(el).color, getComputedStyle(el).textDecorationLine])));
+      expect(deleted[1]).toBe("line-through");
+      expect(deleted[0]).not.toBe(kept[0]);
+    }
+    expect(sites.refused).toEqual([]);
+  });
+
   test("phone width: the card fits the column and Show as text is a finger-sized target", async ({ browser, baseURL }) => {
     const phone = devices["iPhone 13"];
     const context = await browser.newContext({ viewport: phone.viewport, deviceScaleFactor: phone.deviceScaleFactor, isMobile: true, hasTouch: true, userAgent: phone.userAgent });
