@@ -411,6 +411,16 @@ describe("sharing the PDF renderer between callers (#2290)", () => {
       for (let n = 0; n < 500; n++) await use(`made-up-${n}`, 10);
       expect(queue.accountCount).toBe(3);
     });
+
+    it("keeps to 1,024 callers when no limit is given, as the renderer gives none", async () => {
+      queue = newQueue();
+      // 110 s in all: nobody's use has decayed to nothing yet, so only the limit can make the queue forget.
+      for (let n = 0; n < 1_100; n++) await use(`user:${n}`, 100);
+
+      expect(queue.accountCount).toBe(1_024);
+      expect(queue.usage("user:75"), "the 76 charged longest ago are forgotten").toBe(0);
+      expect(queue.usage("user:76")).toBeGreaterThan(1);
+    });
   });
 
   describe("random interleavings", () => {

@@ -34,6 +34,8 @@ const { eq } = await import("drizzle-orm");
 const { getDb, schema } = await import("@/server/db");
 const { createDocument, setDocumentText } = await import("@/server/documents");
 const { REMOTE_ADDR_HEADER } = await import("@/server/rate-limit");
+const { createApiToken } = await import("@/server/tokens");
+const { mintSessionCookie } = await import("@/server/session-cookie");
 const { putAsset } = await import("@/server/assets");
 const { PdfBusyError, PdfCancelledError, PdfUnavailableError, PDF_RETRY_AFTER_SECONDS } = await import("@/server/export/pdf");
 const { renderDocumentHtml } = await import("@/server/export/html");
@@ -357,6 +359,61 @@ describe("GET /api/documents/[id]/export", () => {
     expect(signal?.aborted, "the renderer's signal follows the request").toBe(true);
   });
 
+  describe("a caller that goes away while its pictures are embedded (#2290)", () => {
+    let picturesId: string;
+    const PICTURE_B64 = Buffer.from(distinctPng("a-picture-of-a-caller-that-leaves")).toString("base64");
+    const ask = (query: string, signal?: AbortSignal) => GET(new Request(`http://localhost:3700/api/documents/${picturesId}/export${query}`, { signal }), { params: Promise.resolve({ id: picturesId }) });
+
+    beforeAll(async () => {
+      picturesId = (await createDocument({ ownerId: actor!.id, title: "Pictures", content: "# Pictures\n" })).id;
+      const stored = await putAsset({ documentId: picturesId, userId: actor!.id, name: "a.png", mime: "image/png", bytes: Uint8Array.from(Buffer.from(PICTURE_B64, "base64")) });
+      await setDocumentText(picturesId, `![a](/api/assets/${stored.id})\n`);
+    });
+
+    it("hands the request's signal to the page builder too: nothing is read for a PDF whose caller is gone", async () => {
+      const caller = new AbortController();
+      let built: unknown = "the builder was not asked";
+      // The renderer as it is when the caller leaves right after it got its turn: the page is asked for, then the caller is answered as gone.
+      renderPdf.mockImplementationOnce(async (source) => {
+        caller.abort();
+        built = await (source as () => Promise<string>)().then(() => "a page was built for nobody", (error: unknown) => error);
+        throw new PdfCancelledError();
+      });
+
+      const res = await ask("?format=pdf", caller.signal);
+
+      expect(res.status).toBe(499);
+      expect(built, "the builder stopped with the reason the request's signal carries").toBe(caller.signal.reason);
+    });
+
+    it("builds the same page as before for a caller that stays", async () => {
+      renderPdf.mockResolvedValueOnce(PDF_BYTES);
+      const caller = new AbortController();
+
+      expect((await ask("?format=pdf", caller.signal)).status).toBe(200);
+
+      expect(await pageOf()).toContain(`<img src="data:image/png;base64,${PICTURE_B64}" alt="a">`);
+      const download = await ask("?format=html&download=1", caller.signal);
+      expect(download.status).toBe(200);
+      expect(await download.text()).toContain(`<img src="data:image/png;base64,${PICTURE_B64}" alt="a">`);
+    });
+
+    it("answers an HTML download quietly when its caller is gone, and logs no error for it", async () => {
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const caller = new AbortController();
+      caller.abort();
+
+      const res = await ask("?format=html&download=1", caller.signal);
+
+      expect(res.status).toBe(499);
+      expect(await res.json()).toEqual({ error: "The request was cancelled" });
+      expect(error).not.toHaveBeenCalled();
+      // The page in the browser embeds nothing, so it reads nothing and has nothing to give up.
+      expect((await ask("?format=html", caller.signal)).status).toBe(200);
+      error.mockRestore();
+    });
+  });
+
   describe("who the renderer is shared between (#2290)", () => {
     let sharedId: string;
     const anonymously = async (headers: Record<string, string> = {}) => {
@@ -411,6 +468,58 @@ describe("GET /api/documents/[id]/export", () => {
       }
 
       expect(renderPdf.mock.calls.map((args) => args[1])).toEqual(attempts.map(() => ({ signal: expect.any(AbortSignal), userId: undefined })));
+    });
+
+    it("counts every API token of a user, and an embedded session that rests on one, as that user", async () => {
+      // Real tokens through the real lookup: nothing here stands in for the access check but the absent browser session.
+      const first = await createApiToken(actor!.id, "First script");
+      const second = await createApiToken(actor!.id, "Second script");
+      const readOnly = await createApiToken(actor!.id, "Reader", { scope: "read" });
+      const oneDocument = await createApiToken(actor!.id, "One document", { documentIds: [sharedId] });
+      const embed = await mintSessionCookie({ id: actor!.id, login: actor!.login, name: actor!.name, image: null, embedTokenId: first.id, embedDocumentId: sharedId, embedParentOrigin: "http://127.0.0.1:4100" }, false);
+      const attempts: Array<Record<string, string>> = [
+        { authorization: `Bearer ${first.token}` },
+        { authorization: `Bearer ${second.token}` },
+        { authorization: `Bearer ${readOnly.token}` },
+        { authorization: `Bearer ${oneDocument.token}` },
+        { cookie: `${embed.name}=${embed.value}` },
+      ];
+      for (const headers of attempts) {
+        renderPdf.mockResolvedValueOnce(PDF_BYTES);
+        expect((await anonymously(headers)).status, Object.keys(headers)[0]).toBe(200);
+      }
+
+      // One user is one caller however it asks: minting tokens does not multiply a share of the renderer,
+      // and a token does not turn its user into one of the callers without a session.
+      expect(renderPdf.mock.calls.map((args) => args[1]?.userId)).toEqual(attempts.map(() => actor!.id));
+    });
+
+    it("takes the caller from the access check alone: with a made-up value in every header a request can carry, nobody is still nobody and a user is still that user", async () => {
+      const madeUp = (name: string) => `made-up ${name}`;
+      const ask = async () => {
+        const request = new Request(`http://localhost:3700/api/documents/${sharedId}/export?format=pdf`);
+        vi.spyOn(request.headers, "get").mockImplementation(madeUp);
+        const all = new Headers();
+        vi.spyOn(all, "get").mockImplementation(madeUp);
+        requestHeaders = all;
+        renderPdf.mockResolvedValueOnce(PDF_BYTES);
+        try {
+          return await GET(request, { params: Promise.resolve({ id: sharedId }) });
+        } finally {
+          requestHeaders = new Headers();
+        }
+      };
+      const user = actor!;
+
+      expect((await ask()).status).toBe(200);
+      actor = null;
+      try {
+        expect((await ask()).status).toBe(200);
+      } finally {
+        actor = user;
+      }
+
+      expect(renderPdf.mock.calls.map((args) => args[1]?.userId)).toEqual([user.id, undefined]);
     });
   });
 

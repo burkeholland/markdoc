@@ -44,15 +44,22 @@ export const GET = handler(async (req: Request, { params }: Params) => {
     body = markdown;
   } else if (format === "html") {
     // Inlining is scoped to this document's own assets: the access check above covers the document, not every id its Markdown names.
-    body = await renderDocumentHtml({ title, markdown, assetBaseUrl: url.origin, inlineAssets: download ? { documentId: id } : false });
+    try {
+      body = await renderDocumentHtml({ title, markdown, assetBaseUrl: url.origin, inlineAssets: download ? { documentId: id, signal: req.signal } : false });
+    } catch (err) {
+      // The caller went away while its pictures were being embedded; nobody reads this answer.
+      if (download && req.signal.aborted) return json({ error: "The request was cancelled" }, { status: 499 });
+      throw err;
+    }
   } else {
     // What the renderer refuses outright is refused now: such a document does not wait for a turn first.
     const unrenderable = findUnrenderable(markdown);
     if (unrenderable) throw new UnrenderableDocumentError(unrenderable);
     // PDF rendering happens in a headless browser with no session, so its images must be inlined, and only
     // bytes that are an allowed image go in (`verifyBytes`). The page is built once this request has the
-    // renderer: while it waits it holds no embedded pictures.
-    const page = () => renderDocumentHtml({ title, markdown, assetBaseUrl: url.origin, inlineAssets: { documentId: id, verifyBytes: true } });
+    // renderer: while it waits it holds no embedded pictures. The builder follows the request's signal too:
+    // a caller that goes away while its pictures are read does not keep the renderer until the last one.
+    const page = () => renderDocumentHtml({ title, markdown, assetBaseUrl: url.origin, inlineAssets: { documentId: id, verifyBytes: true, signal: req.signal } });
     try {
       // The renderer is shared between callers: the user the access check has verified, or nobody (anonymous).
       body = new Uint8Array(await renderPdf(page, { signal: req.signal, userId: user?.id }));

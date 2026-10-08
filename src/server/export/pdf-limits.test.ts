@@ -593,6 +593,33 @@ describe("PDF renderer limits (#2290)", () => {
       expect(Array.from(await pdf.renderPdf("<p>next</p>"))).toEqual(PDF_MAGIC);
     });
 
+    it("hands the renderer on at once when its page builder stops for it, still charges it for the time it held the renderer, and logs nothing", async () => {
+      vi.useFakeTimers();
+      const A = fakeBrowser("A");
+      launch.mockResolvedValue(A);
+      const gone = new AbortController();
+      // A page builder that follows the caller's signal, as the export route's does: it stops with the signal's reason.
+      const stopsWhenTheCallerLeaves = () => new Promise<string>((_, reject) => gone.signal.addEventListener("abort", () => reject(gone.signal.reason), { once: true }));
+
+      const leaving = failure(pdf.renderPdf(stopsWhenTheCallerLeaves, { signal: gone.signal, userId: "heavy" }));
+      // The same user asks again, and only then somebody else: by arrival the user's second request would be next.
+      const again = pdf.renderPdf("<p>heavy again</p>", { userId: "heavy" });
+      const small = pdf.renderPdf("<p>small</p>", { userId: "small" });
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(A.pages, "the page is still being built: nobody else has the renderer").toEqual([]);
+
+      gone.abort();
+      const leftAt = Date.now();
+      expect(await leaving).toBeInstanceOf(pdf.PdfCancelledError);
+      await Promise.all([again, small]);
+
+      // Both pages are printed without the clock having moved since the caller left: the renderer was handed on at once.
+      // The other user's page went first: the 12 s count against the user whose caller left.
+      expect(Date.now()).toBe(leftAt);
+      expect(A.pages).toEqual(["<p>small</p>", "<p>heavy again</p>"]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
     it("is not printed when it goes away while Chromium is starting", async () => {
       const A = fakeBrowser("A");
       const starting = deferred<FakeBrowser>();
