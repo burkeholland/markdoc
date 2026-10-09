@@ -493,14 +493,35 @@ The entrypoint performs one bounded attempt:
    Health is necessary evidence, not a substitute for the requested feature
    checks.
 
-The local deadline is 35 minutes. A timeout leaves unverified remote work; it is
-not cancellation. Cloud build or VM work may outlive the command; reconcile the
-printed submission/run and guest invocation identifiers before any further
-action, and do not retry the release. A failure before local readiness makes
-the guest script attempt to restore the previous environment, unit and
-application image. A public-health failure after guest readiness does not
-trigger that rollback automatically. Image/configuration rollback is not
-schema or data rollback: migrations already applied remain in place.
+The release uses these distinct boundaries:
+
+| Boundary | Kind | Anchor and value | What is actually controlled |
+| --- | --- | --- | --- |
+| Pre-submission | Outer phase watchdog | Release orchestration entry, 900 seconds | Native commands use the remaining time and the phase is checked before the build. Synchronous PowerShell, .NET and file work is not forcibly terminated. |
+| ACR submission | Native-command timeout | One local CLI child, up to 90 seconds within the build watchdog | Killing the local child does not cancel accepted cloud work. |
+| ACR service run | Service timeout | The one build requests 900 seconds | This is the ACR service limit, not a reserved portion of the local build clock. |
+| Build evidence | Outer phase watchdog plus polling bound | Before unique-tag creation, 1,140 seconds; at most 132 reconciliation polls | Submission setup, wrapper overhead, the one submission, tag reconciliation and completion polling all share this clock. No fixed reconciliation reserve is guaranteed. |
+| Post-build proof | Outer phase watchdog | After terminal build evidence, 180 seconds | Digest lookup/retry and final source checks share the clock; synchronous validation runs between elapsed checks. |
+| VM/result | CLI invocation cap plus post-return elapsed assertion | Immediately before the one VM invocation, 2,400 seconds | The local CLI child is capped by remaining time. Result parsing is checked after return, and guest work may continue beyond the local process. |
+| Public health | HTTP request timeout plus post-return elapsed assertion | After exact guest proof, 20-second request within a 30-second elapsed check | `Invoke-RestMethod -TimeoutSec` limits the HTTP request. Synchronous JSON and health validation is checked afterward, not forcibly terminated. |
+| Failure report | Synchronous writes | Terminal catch | A few fixed safe lines are written without an independent termination cap. |
+| Local cleanup | Native-command timeout | Removal child, 30 seconds | Only the child that removes the invocation archive is capped. Context checks, path escaping, command resolution and process setup occur outside that child timeout. |
+
+The workflow's checkout, Node setup and Azure login steps each have five-minute
+caps, the release step has a 79-minute outer cap, and the job has a 99-minute
+outer cap. Their differences are workflow/job headroom, not guaranteed time
+reserved for post-release steps or teardown.
+
+The ACR service timeout is based on the 602-second successful `ch2g` build and
+the 602-604-second `ch2h`/`ch2j` timeouts at the old ten-minute boundary. A
+timeout leaves unverified remote work; it is not cancellation. Cloud build or
+VM work may outlive the command; reconcile the printed submission/run and guest
+invocation identifiers before any further action, and do not retry the release.
+A failure before local readiness makes the guest script attempt to restore the
+previous environment, unit and application image. A public-health failure after
+guest readiness does not trigger that rollback automatically.
+Image/configuration rollback is not schema or data rollback: migrations already
+applied remain in place.
 
 Retain the prior immutable image and protected
 [same-host rollback bundle](docs/vm-hosting.md#rollback), but do not treat that
