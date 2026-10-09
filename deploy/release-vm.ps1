@@ -9,7 +9,17 @@
 param([string]$ExpectedCommit = $env:RELEASE_SHA)
 
 $ErrorActionPreference = 'Stop'
-$ReleaseDeadlineSeconds = 2100
+# Cooperative outer phase watchdogs. Native calls and sleeps consume their
+# remaining time, but synchronous PowerShell/.NET work is checked, not killed.
+$PreSubmissionDeadlineSeconds = 900
+$BuildPhaseDeadlineSeconds = 1140
+$PostBuildVerificationDeadlineSeconds = 180
+$VmPhaseDeadlineSeconds = 2400
+$PublicHealthDeadlineSeconds = 30
+# Native/service boundaries within those watchdogs.
+$AcrBuildSubmissionTimeoutSeconds = 90
+$AcrBuildTimeoutSeconds = 900
+$CleanupChildTimeoutSeconds = 30
 
 . (Join-Path $PSScriptRoot 'release-vm-evidence.ps1')
 
@@ -17,6 +27,23 @@ function Stop-VmRelease([string]$Message, [int]$ExitCode = 1) {
   $failure = [InvalidOperationException]::new($Message)
   $failure.Data['ReleaseExitCode'] = $ExitCode
   throw $failure
+}
+
+function Get-ReleaseRemainingSeconds($Clock, [int]$BudgetSeconds, [string]$Message) {
+  $remaining = [math]::Floor($BudgetSeconds - $Clock.Elapsed.TotalSeconds)
+  if ($remaining -lt 1) { Stop-VmRelease $Message 124 }
+  return $remaining
+}
+
+function Assert-ReleaseDeadline($Clock, [int]$BudgetSeconds, [string]$Message) {
+  [void](Get-ReleaseRemainingSeconds $Clock $BudgetSeconds $Message)
+}
+
+function Start-ReleaseBoundedSleep($Clock, [int]$BudgetSeconds, [int]$Seconds, [string]$Message) {
+  $remaining = Get-ReleaseRemainingSeconds $Clock $BudgetSeconds $Message
+  if ($remaining -lt $Seconds) { Stop-VmRelease $Message 124 }
+  Start-Sleep -Seconds $Seconds
+  Assert-ReleaseDeadline $Clock $BudgetSeconds $Message
 }
 
 function Get-ReleaseDigestLookupFailure([string]$ErrorText) {
@@ -133,15 +160,29 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
   }
 }
 
-function Invoke-ReleaseStep([string]$Command, [string[]]$Arguments, [int]$Limit = 30, [switch]$KeepFailureOutput, [switch]$ClassifyDigestFailure) {
-  $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
-  if ($remaining -lt 1) { Stop-VmRelease 'Release deadline exceeded; remote work may still be running. Do not retry.' 124 }
+function Invoke-ReleaseStep(
+  [string]$Command,
+  [string[]]$Arguments,
+  [int]$Limit = 30,
+  [switch]$KeepFailureOutput,
+  [switch]$ClassifyDigestFailure,
+  $DeadlineClock = $releaseClock,
+  [int]$DeadlineSeconds = $PreSubmissionDeadlineSeconds,
+  [string]$DeadlineMessage = 'Pre-submission deadline exceeded; no build was submitted.'
+) {
+  $remaining = Get-ReleaseRemainingSeconds $DeadlineClock $DeadlineSeconds $DeadlineMessage
   Invoke-ReleaseNative $Command $Arguments $sourceRoot ([math]::Min($Limit, $remaining)) -KeepFailureOutput:$KeepFailureOutput -ClassifyDigestFailure:$ClassifyDigestFailure
 }
 
-function Invoke-ReleaseStepBytes([string]$Command, [string[]]$Arguments, [int]$Limit = 30) {
-  $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
-  if ($remaining -lt 1) { Stop-VmRelease 'Release deadline exceeded; remote work may still be running. Do not retry.' 124 }
+function Invoke-ReleaseStepBytes(
+  [string]$Command,
+  [string[]]$Arguments,
+  [int]$Limit = 30,
+  $DeadlineClock = $releaseClock,
+  [int]$DeadlineSeconds = $PreSubmissionDeadlineSeconds,
+  [string]$DeadlineMessage = 'Pre-submission deadline exceeded; no build was submitted.'
+) {
+  $remaining = Get-ReleaseRemainingSeconds $DeadlineClock $DeadlineSeconds $DeadlineMessage
   $timeoutSeconds = [math]::Min($Limit, $remaining)
   $executable = (Get-Command $Command -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
   $start = [Diagnostics.ProcessStartInfo]::new($executable)
@@ -180,33 +221,40 @@ function Invoke-ReleaseStepBytes([string]$Command, [string[]]$Arguments, [int]$L
   }
 }
 
-function Invoke-ReleaseAz([string[]]$Arguments, [int]$Limit = 30) {
-  Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) $Limit
+function Invoke-ReleaseAz(
+  [string[]]$Arguments,
+  [int]$Limit = 30,
+  $DeadlineClock = $releaseClock,
+  [int]$DeadlineSeconds = $PreSubmissionDeadlineSeconds,
+  [string]$DeadlineMessage = 'Pre-submission deadline exceeded; no build was submitted.'
+) {
+  Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) $Limit `
+    -DeadlineClock $DeadlineClock -DeadlineSeconds $DeadlineSeconds -DeadlineMessage $DeadlineMessage
 }
 
-function Invoke-ReleaseAcrPoll([string[]]$Arguments, [ref]$MissedPolls, [int]$BudgetSeconds = $ReleaseDeadlineSeconds, [int]$Limit = 30) {
-  $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
-  if ($remaining -lt 1) { Stop-VmRelease 'Release deadline exceeded; remote work may still be running. Do not retry.' 124 }
-  $budgetRemaining = [math]::Floor($BudgetSeconds - $releaseClock.Elapsed.TotalSeconds)
-  if ($budgetRemaining -lt 1) { Stop-VmRelease 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' 124 }
+function Invoke-ReleaseAcrPoll(
+  [string[]]$Arguments,
+  [ref]$MissedPolls,
+  $DeadlineClock,
+  [int]$DeadlineSeconds,
+  [string]$DeadlineMessage,
+  [int]$Limit = 30
+) {
+  $budgetRemaining = Get-ReleaseRemainingSeconds $DeadlineClock $DeadlineSeconds $DeadlineMessage
   $clock = [Diagnostics.Stopwatch]::StartNew()
   $failure = $null
   $output = $null
   try {
-    $output = Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) ([math]::Min($Limit, $budgetRemaining)) -ClassifyDigestFailure
+    $output = Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) ([math]::Min($Limit, $budgetRemaining)) `
+      -ClassifyDigestFailure -DeadlineClock $DeadlineClock -DeadlineSeconds $DeadlineSeconds -DeadlineMessage $DeadlineMessage
   } catch [InvalidOperationException] {
     if ($_.Exception.Data['ReleaseNativeCallFailure'] -ne $true) { throw }
     $diagnostic = Get-ReleaseSafeAzFailure $_.Exception
     if ($diagnostic.Category -cnotin @('transport', 'timeout', 'throttled', 'server_error')) { throw }
     $failure = $_
   }
-  # Check terminal budgets outside the per-call catch, even when the last poll succeeded.
-  if ($releaseClock.Elapsed.TotalSeconds -ge $ReleaseDeadlineSeconds) {
-    Stop-VmRelease 'Release deadline exceeded; remote work may still be running. Do not retry.' 124
-  }
-  if ($releaseClock.Elapsed.TotalSeconds -ge $BudgetSeconds) {
-    Stop-VmRelease 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' 124
-  }
+  # Check the phase deadline outside the per-call catch, even when the last poll succeeded.
+  Assert-ReleaseDeadline $DeadlineClock $DeadlineSeconds $DeadlineMessage
   if ($failure) {
     $MissedPolls.Value++
     $elapsed = [math]::Floor($clock.Elapsed.TotalSeconds)
@@ -218,22 +266,23 @@ function Invoke-ReleaseAcrPoll([string[]]$Arguments, [ref]$MissedPolls, [int]$Bu
   return $output
 }
 
-function Invoke-ReleaseDigestLookup([string[]]$Arguments) {
+function Invoke-ReleaseDigestLookup([string[]]$Arguments, $DeadlineClock, [int]$DeadlineSeconds, [string]$DeadlineMessage) {
   for ($attempt = 0; $attempt -le 1; $attempt++) {
     try {
-      return Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) -ClassifyDigestFailure
+      return Invoke-ReleaseStep 'az' ($Arguments + @('--only-show-errors', '--output', 'json')) -ClassifyDigestFailure `
+        -DeadlineClock $DeadlineClock -DeadlineSeconds $DeadlineSeconds -DeadlineMessage $DeadlineMessage
     } catch {
       $diagnostic = Get-ReleaseSafeAzFailure $_.Exception
       $category = $diagnostic.Category
       $status = $diagnostic.HttpStatus
       Write-Host "Release: ACR digest lookup failed; category=$category; HTTP status=$status."
       if ($attempt -eq 1 -or $category -cnotin @('transport', 'timeout', 'throttled', 'server_error')) { throw }
-      $remaining = [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds)
+      $remaining = Get-ReleaseRemainingSeconds $DeadlineClock $DeadlineSeconds $DeadlineMessage
       if ($remaining -lt 3) {
         Stop-VmRelease 'No time remains for the ACR digest lookup retry; no VM command was sent.' 124
       }
       Write-Host 'Release: ACR digest lookup retry 1/1 in 2 seconds; read-only lookup only.'
-      Start-Sleep -Seconds 2
+      Start-ReleaseBoundedSleep $DeadlineClock $DeadlineSeconds 2 $DeadlineMessage
     }
   }
 }
@@ -246,13 +295,30 @@ function ConvertFrom-ReleaseJson([string]$Text) {
   }
 }
 
-function Assert-ReleaseSource([string]$Commit) {
-  $branch = Invoke-ReleaseStep 'git' @('rev-parse', '--abbrev-ref', 'HEAD')
+function Assert-ReleaseSource(
+  [string]$Commit,
+  $DeadlineClock = $releaseClock,
+  [int]$DeadlineSeconds = $PreSubmissionDeadlineSeconds,
+  [string]$DeadlineMessage = 'Pre-submission deadline exceeded; no build was submitted.'
+) {
+  $branch = Invoke-ReleaseStep 'git' @('rev-parse', '--abbrev-ref', 'HEAD') `
+    -DeadlineClock $DeadlineClock -DeadlineSeconds $DeadlineSeconds -DeadlineMessage $DeadlineMessage
   if ($branch -cne 'main') { Stop-VmRelease 'Wrong branch: a release requires the clean main checkout (not a feature branch or detached HEAD).' }
-  $head = Invoke-ReleaseStep 'git' @('rev-parse', '--verify', 'HEAD')
+  $head = Invoke-ReleaseStep 'git' @('rev-parse', '--verify', 'HEAD') `
+    -DeadlineClock $DeadlineClock -DeadlineSeconds $DeadlineSeconds -DeadlineMessage $DeadlineMessage
   if ($head -cne $Commit) { Stop-VmRelease 'Wrong HEAD: checked-out source does not match the expected full commit.' }
-  $dirty = Invoke-ReleaseStep 'git' @('status', '--porcelain=v1', '--untracked-files=all')
+  $dirty = Invoke-ReleaseStep 'git' @('status', '--porcelain=v1', '--untracked-files=all') `
+    -DeadlineClock $DeadlineClock -DeadlineSeconds $DeadlineSeconds -DeadlineMessage $DeadlineMessage
   if ($dirty) { Stop-VmRelease 'Dirty checkout: commit or remove source changes before releasing.' }
+}
+
+function Remove-ReleaseContext([string]$Context, [string]$Directory) {
+  if (-not $Context -or -not (Test-Path -LiteralPath $Context)) { return }
+  $escaped = $Context.Replace("'", "''")
+  [void](Invoke-ReleaseNative 'pwsh' @(
+    '-NoProfile', '-NonInteractive', '-Command',
+    "Remove-Item -LiteralPath '$escaped' -Recurse -Force -ErrorAction Stop"
+  ) $Directory $CleanupChildTimeoutSeconds)
 }
 
 function Get-ReleaseSha256([byte[]]$Bytes) {
@@ -445,6 +511,11 @@ function Get-ReleasePublicHealth([string]$Origin, [int]$TimeoutSeconds) {
 
 function Invoke-MarkdocVmRelease([string]$Commit) {
   $releaseClock = [Diagnostics.Stopwatch]::StartNew()
+  $preSubmissionDeadlineMessage = 'Pre-submission deadline exceeded; no build was submitted.'
+  $buildDeadlineMessage = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.'
+  $postBuildDeadlineMessage = 'Post-build verification deadline exceeded; no VM command was sent.'
+  $vmDeadlineMessage = 'VM/result verification deadline exceeded; guest work may continue and public health was not accepted.'
+  $healthDeadlineMessage = 'Public health deadline exceeded; guest deployment may be active.'
   $sourceRoot = (Get-Item -LiteralPath (Join-Path $PSScriptRoot '..')).FullName
   $subscription = '332d0c98-694c-48a0-91f3-465de6ac30a5'
   $tenant = 'f1fde69f-c8d3-4b94-adeb-02d045b37f6a'
@@ -464,6 +535,8 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
   $releaseStage = 'source validation'
   $buildRun = $null
   $operation = $null
+  $releaseVerified = $false
+  $terminalFailure = $null
   try {
     if ($Commit -cnotmatch '^[0-9a-fA-F]{40}$') { Stop-VmRelease 'ExpectedCommit or RELEASE_SHA must be a full 40-hex Git commit.' }
     $Commit = $Commit.ToLowerInvariant()
@@ -506,6 +579,9 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
       Stop-VmRelease 'Selected source archive lacks the Dockerfile or release guest scripts.'
     }
     Assert-ReleaseSource $Commit
+    Assert-ReleaseDeadline $releaseClock $PreSubmissionDeadlineSeconds $preSubmissionDeadlineMessage
+
+    $buildClock = [Diagnostics.Stopwatch]::StartNew()
     $releaseStage = 'ACR build submission'
     # A unique additional tag can identify a submission even if the run-ID response is lost.
     $submissionTag = "release-$([guid]::NewGuid().ToString('N'))"
@@ -514,9 +590,9 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     [void](Invoke-ReleaseAz (@(
       'acr', 'build', '--registry', $acr, '--image', "markdoc:$Commit", '--image', "markdoc:$($Commit.Substring(0, 12))",
       '--image', "markdoc:$submissionTag", '--build-arg', "APP_VERSION=$Commit",
-      '--file', (Join-Path $context 'Dockerfile'), $context, '--timeout', '600',
+      '--file', (Join-Path $context 'Dockerfile'), $context, '--timeout', "$AcrBuildTimeoutSeconds",
       '--no-wait', '--no-logs'
-    ) + $nativeScope) 90)
+    ) + $nativeScope) $AcrBuildSubmissionTimeoutSeconds $buildClock $BuildPhaseDeadlineSeconds $buildDeadlineMessage)
 
     $releaseStage = 'ACR build reconciliation'
     $missedPolls = 0
@@ -524,9 +600,11 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
       $poll = Invoke-ReleaseAcrPoll (@(
         'acr', 'task', 'list-runs', '--registry', $acr, '--top', '50',
         '--query', '[].{runId:runId,runType:runType,status:status,outputImages:outputImages}'
-      ) + $nativeScope) ([ref]$missedPolls)
+      ) + $nativeScope) ([ref]$missedPolls) $buildClock $BuildPhaseDeadlineSeconds $buildDeadlineMessage
       if ($null -eq $poll) {
-        if ($attempt -lt 132) { Start-Sleep -Seconds 5 }
+        if ($attempt -lt 132) {
+          Start-ReleaseBoundedSleep $buildClock $BuildPhaseDeadlineSeconds 5 $buildDeadlineMessage
+        }
         continue
       }
       $runs = ConvertFrom-ReleaseJson $poll
@@ -552,7 +630,9 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
         }
         break
       }
-      if ($attempt -lt 132) { Start-Sleep -Seconds 5 }
+      if ($attempt -lt 132) {
+        Start-ReleaseBoundedSleep $buildClock $BuildPhaseDeadlineSeconds 5 $buildDeadlineMessage
+      }
     }
     if (-not $buildRun) {
       Stop-VmRelease 'ACR submission acceptance is unknown after unique-tag reconciliation. Do not retry.'
@@ -561,22 +641,25 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     $releaseStage = 'ACR build completion'
     $missedPolls = 0
     do {
-      if ($releaseClock.Elapsed.TotalSeconds -ge 750) { Stop-VmRelease 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' 124 }
-      $poll = Invoke-ReleaseAcrPoll (@('acr', 'task', 'show-run', '--registry', $acr, '--run-id', $buildRun, '--query', '{runId:runId,status:status,outputImages:outputImages}') + $nativeScope) ([ref]$missedPolls) 750
+      $poll = Invoke-ReleaseAcrPoll (@('acr', 'task', 'show-run', '--registry', $acr, '--run-id', $buildRun, '--query', '{runId:runId,status:status,outputImages:outputImages}') + $nativeScope) `
+        ([ref]$missedPolls) $buildClock $BuildPhaseDeadlineSeconds $buildDeadlineMessage
       if ($null -eq $poll) {
-        Start-Sleep -Seconds 5
+        Start-ReleaseBoundedSleep $buildClock $BuildPhaseDeadlineSeconds 5 $buildDeadlineMessage
         continue
       }
       $run = ConvertFrom-ReleaseJson $poll
       if ($run.runId -cne $buildRun) { Stop-VmRelease 'ACR returned a different run identity.' }
       if ($run.status -ceq 'Succeeded') { break }
       if ($run.status -cnotin @('Queued', 'Started', 'Running')) { Stop-VmRelease 'ACR build failed or returned an unknown status.' }
-      Start-Sleep -Seconds 5
+      Start-ReleaseBoundedSleep $buildClock $BuildPhaseDeadlineSeconds 5 $buildDeadlineMessage
     } while ($true)
+    Assert-ReleaseDeadline $buildClock $BuildPhaseDeadlineSeconds $buildDeadlineMessage
 
+    $postBuildClock = [Diagnostics.Stopwatch]::StartNew()
     $releaseStage = 'immutable image identity'
     $digests = ConvertFrom-ReleaseJson (Invoke-ReleaseDigestLookup (@('acr', 'manifest', 'list-metadata', '--registry', $acr, '--name', 'markdoc',
-      '--query', "[?tags != null && contains(tags, '$Commit')].digest") + $subscriptionScope))
+      '--query', "[?tags != null && contains(tags, '$Commit')].digest") + $subscriptionScope) `
+      $postBuildClock $PostBuildVerificationDeadlineSeconds $postBuildDeadlineMessage)
     if ($digests -isnot [array] -or $digests.Count -ne 1 -or $digests[0] -isnot [string] -or $digests[0] -cnotmatch '^sha256:[0-9a-f]{64}$') {
       Stop-VmRelease 'The exact commit tag has an absent, ambiguous or malformed digest.'
     }
@@ -584,17 +667,20 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     $builtImages = @($run.outputImages | Where-Object { $_.registry -ceq $registry -and $_.repository -ceq 'markdoc' -and $_.tag -ceq $Commit })
     if ($builtImages.Count -ne 1 -or $builtImages[0].digest -cne $digest) { Stop-VmRelease 'The exact tag digest does not match this successful build run.' }
     $image = "$registry/markdoc@$digest"
-    Assert-ReleaseSource $Commit
+    Assert-ReleaseSource $Commit $postBuildClock $PostBuildVerificationDeadlineSeconds $postBuildDeadlineMessage
+    Assert-ReleaseDeadline $postBuildClock $PostBuildVerificationDeadlineSeconds $postBuildDeadlineMessage
+
+    $vmClock = [Diagnostics.Stopwatch]::StartNew()
     $releaseStage = 'VM guest deployment'
     $operation = [guid]::NewGuid().ToString()
     Write-Host "Release: image $image"
     Write-Host "Release: guest invocation $operation; VM $vmId; started $([DateTime]::UtcNow.ToString('o'))."
     Write-Host 'ARM operation ID is not exposed by invoke. The guest ID is recorded in the submitted script parameters and guest output.'
     Write-Host 'Timeout/failure is unverified, not cancellation or automatic rollback. Do not submit another release.'
-    $vmLimit = [math]::Floor(($ReleaseDeadlineSeconds - 30) - $releaseClock.Elapsed.TotalSeconds)
-    if ($vmLimit -lt 1) { Stop-VmRelease 'No time remains for a VM invocation and public health.' 124 }
+    $vmLimit = Get-ReleaseRemainingSeconds $vmClock $VmPhaseDeadlineSeconds $vmDeadlineMessage
     $result = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@('vm', 'run-command', 'invoke', '--name', $vm, '--command-id', 'RunShellScript',
-      '--scripts', "@$walScript", "@$vmScript", '--parameters', $registry, $image, $Commit, $tenant, $operation) + $nativeScope) $vmLimit)
+      '--scripts', "@$walScript", "@$vmScript", '--parameters', $registry, $image, $Commit, $tenant, $operation) + $nativeScope) `
+      $vmLimit $vmClock $VmPhaseDeadlineSeconds $vmDeadlineMessage)
     $messages = @($result.value)
     if ($messages.Count -ne 1 -or $messages[0].code -cne 'ProvisioningState/succeeded' -or $messages[0].message -isnot [string]) {
       Stop-VmRelease 'VM transport did not return the expected completed result.'
@@ -624,13 +710,16 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     if ($retentionWarnings.Count -gt 0) {
       Write-Host 'Release warning: old-image retention failed; the healthy application was not rolled back. Reconcile disk capacity before another release.'
     }
+    Assert-ReleaseDeadline $vmClock $VmPhaseDeadlineSeconds $vmDeadlineMessage
+
+    $healthClock = [Diagnostics.Stopwatch]::StartNew()
     $releaseStage = 'public health after guest ready (no automatic rollback)'
     Write-Host 'Release: guest ready; waiting for exact public health.'
-    $healthLimit = [math]::Min(20, [math]::Floor($ReleaseDeadlineSeconds - $releaseClock.Elapsed.TotalSeconds))
-    if ($healthLimit -lt 1) { Stop-VmRelease 'No time remains to verify public health; guest deployment may be active.' 124 }
+    $healthLimit = [math]::Min(20, (Get-ReleaseRemainingSeconds $healthClock $PublicHealthDeadlineSeconds $healthDeadlineMessage))
     $health = ConvertFrom-ReleaseJson (Get-ReleasePublicHealth $origin $healthLimit)
     Assert-ReleaseHealth $health $Commit 'Public'
-    Write-Host "Release complete: $origin reports ok/db/collab true and version $Commit."
+    Assert-ReleaseDeadline $healthClock $PublicHealthDeadlineSeconds $healthDeadlineMessage
+    $releaseVerified = $true
   } catch {
     # Fail closed at the terminal boundary without leaking a CLI/HTTP error body.
     $code = 1
@@ -642,10 +731,24 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     Write-Host "Release failed/unverified at ${releaseStage}: $reason"
     if ($buildRun) { Write-Host "ACR run: $buildRun; registry: $acr." }
     if ($operation) { Write-Host "Guest invocation: $operation; VM: $vmId. Cloud work may outlive this command; no retry was submitted." }
-    Stop-VmRelease 'Release did not reach verified completion.' $code
+    $terminalFailure = [InvalidOperationException]::new('Release did not reach verified completion.')
+    $terminalFailure.Data['ReleaseExitCode'] = $code
   } finally {
-    if ($context -and (Test-Path -LiteralPath $context)) { Remove-Item -LiteralPath $context -Recurse -Force }
+    try {
+      Remove-ReleaseContext $context $sourceRoot
+    } catch {
+      $cleanupCode = 1
+      if ($_.Exception.Data.Contains('ReleaseExitCode')) { $cleanupCode = $_.Exception.Data['ReleaseExitCode'] }
+      Write-Host 'Release failed/unverified at local cleanup: source-archive removal child did not complete within its native timeout.'
+      if (-not $terminalFailure) {
+        $terminalFailure = [InvalidOperationException]::new('Release did not reach verified completion.')
+        $terminalFailure.Data['ReleaseExitCode'] = $cleanupCode
+      }
+    }
   }
+  if ($terminalFailure) { throw $terminalFailure }
+  if (-not $releaseVerified) { Stop-VmRelease 'Release did not reach verified completion.' }
+  Write-Host "Release complete: $origin reports ok/db/collab true and version $Commit."
 }
 
 try {

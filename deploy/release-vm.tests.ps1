@@ -173,7 +173,10 @@ function Assert-Equal($Expected, $Actual, [string]$Message) {
 }
 
 function New-TestReleaseClock {
-  if ($script:scenario.StartsWith('poll-') -or $script:scenario -in @('digest-deadline-two-seconds', 'digest-deadline-three-seconds')) {
+  $script:clockCount++
+  if ($script:scenario.StartsWith('poll-') -or $script:scenario.StartsWith('deadline-') -or
+      $script:scenario -in @('digest-deadline', 'digest-deadline-two-seconds', 'digest-deadline-three-seconds',
+        'pre-submit-elapsed', 'cleanup-child-timeout')) {
     return [pscustomobject]@{ Elapsed = [pscustomobject]@{ TotalSeconds = 0 } }
   }
   return [Diagnostics.Stopwatch]::StartNew()
@@ -333,7 +336,14 @@ cleanup
 
 $script:sha = '0123456789abcdef0123456789abcdef01234567'
 $script:digest = 'sha256:' + ('a' * 64)
-$script:ReleaseDeadlineSeconds = 2100
+$script:PreSubmissionDeadlineSeconds = 900
+$script:AcrBuildSubmissionTimeoutSeconds = 90
+$script:AcrBuildTimeoutSeconds = 900
+$script:BuildPhaseDeadlineSeconds = 1140
+$script:PostBuildVerificationDeadlineSeconds = 180
+$script:VmPhaseDeadlineSeconds = 2400
+$script:PublicHealthDeadlineSeconds = 30
+$script:CleanupChildTimeoutSeconds = 30
 $script:subscription = '332d0c98-694c-48a0-91f3-465de6ac30a5'
 $script:tenant = 'f1fde69f-c8d3-4b94-adeb-02d045b37f6a'
 $script:registry = 'markdocacrmnd542unepl56.azurecr.io'
@@ -347,19 +357,33 @@ $script:reconcileCount = 0
 $script:sourceChecks = 0
 $script:submissionTag = ''
 $script:sleeps = [Collections.Generic.List[int]]::new()
+$script:clockCount = 0
+$script:cleanupCount = 0
 $env:MARKDOC_DIGEST_VALUE = $script:digest
 
 function New-Item { param($ItemType, $Path) }
 function Remove-Item { param($LiteralPath, [switch]$Recurse, [switch]$Force) }
 function Test-Path { param($LiteralPath) return $true }
+function Remove-ReleaseContext {
+  param($Context, $Directory)
+  if (-not $Context) { return }
+  $script:cleanupCount++
+  if ($script:scenario -eq 'cleanup-child-timeout') {
+    Stop-VmRelease 'Local command deadline exceeded; remote work may still be running. Do not retry the release.' 124
+  }
+}
 function Start-Sleep {
   param($Seconds)
   $script:sleeps.Add($Seconds)
   if ($script:scenario.StartsWith('poll-') -or $script:scenario -in @('digest-deadline-two-seconds', 'digest-deadline-three-seconds')) {
-    $releaseClock.Elapsed.TotalSeconds += $Seconds
+    if ($script:scenario.StartsWith('poll-')) {
+      $buildClock.Elapsed.TotalSeconds += $Seconds
+    } else {
+      $postBuildClock.Elapsed.TotalSeconds += $Seconds
+    }
   }
   if ($pollCase.AfterMiss -and $script:messages.Count -gt 0 -and $script:messages[-1] -match '^Release: ACR read-only poll missed;') {
-    $releaseClock.Elapsed.TotalSeconds = $pollCase.AfterMiss
+    $buildClock.Elapsed.TotalSeconds = $pollCase.AfterMiss
   }
 }
 function Write-Host {
@@ -378,7 +402,7 @@ function Get-TestHealth {
 
 function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds, [switch]$KeepFailureOutput, [switch]$ClassifyDigestFailure) {
   $script:calls.Add(@{ Command = $Command; Arguments = $Arguments; Directory = $Directory; Timeout = $TimeoutSeconds })
-  Assert-True ($TimeoutSeconds -gt 0 -and $TimeoutSeconds -le $script:ReleaseDeadlineSeconds) 'Every native call must be bounded.'
+  Assert-True ($TimeoutSeconds -gt 0 -and $TimeoutSeconds -le $script:VmPhaseDeadlineSeconds) 'Every native call must be bounded.'
   Assert-True (-not $KeepFailureOutput) 'Only the dependency preflight may keep native failure output.'
   $isDigestLookup = $Command -ceq 'az' -and (($Arguments | Select-Object -First 3) -join ' ' -ceq 'acr manifest list-metadata')
   $commandKey = ($Arguments | Select-Object -First 3) -join ' '
@@ -404,12 +428,12 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
       if ($nativeLimit -eq 8 -and $_.Exception.Data['ReleaseExitCode'] -eq 124) {
         Assert-True ($null -ne $script:slowPollClock -and $script:slowPollClock.Elapsed.TotalSeconds -ge 8) 'Slow fixture must run for eight wall-clock seconds after recording its call before the native timeout.'
       }
-      if ($isTarget -and $pollCase.EndAt) { $releaseClock.Elapsed.TotalSeconds = $pollCase.EndAt }
+      if ($isTarget -and $pollCase.EndAt) { $buildClock.Elapsed.TotalSeconds = $pollCase.EndAt }
       throw
     }
-    if ($isTarget -and $pollCase.EndAt) { $releaseClock.Elapsed.TotalSeconds = $pollCase.EndAt }
+    if ($isTarget -and $pollCase.EndAt) { $buildClock.Elapsed.TotalSeconds = $pollCase.EndAt }
     if ($commandKey -ceq 'acr task list-runs' -and $pollCase.Command -ceq 'acr task show-run' -and $pollCase.StartAt) {
-      $releaseClock.Elapsed.TotalSeconds = $pollCase.StartAt
+      $buildClock.Elapsed.TotalSeconds = $pollCase.StartAt
     }
     if ($isTarget -and $script:scenario -cin @('poll-list-foreign-exception', 'poll-list-terminal-exception')) {
       $counts = [IO.File]::ReadAllText($env:MARKDOC_POLL_COUNT) | ConvertFrom-Json -AsHashtable
@@ -439,7 +463,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
       $count++
       [IO.File]::WriteAllText($env:MARKDOC_DIGEST_COUNT, [string]$count)
       if ($count -eq 1) {
-        $script:ReleaseDeadlineSeconds = $digestCase.Remaining
+        $postBuildClock.Elapsed.TotalSeconds = $script:PostBuildVerificationDeadlineSeconds - $digestCase.Remaining
         $failure = [InvalidOperationException]::new('Native command failed (exit 1); raw output withheld.')
         $failure.Data['ReleaseExitCode'] = 1
         $diagnostic = Get-ReleaseDigestLookupFailure 'ERROR: HTTP status: 503'
@@ -448,6 +472,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
         throw $failure
       }
       Assert-Equal 1 $TimeoutSeconds 'Exactly three seconds permits a two-second delay and a one-second lookup.'
+      $postBuildClock.Elapsed.TotalSeconds = $script:PostBuildVerificationDeadlineSeconds
       return ConvertTo-Json -InputObject @($script:digest) -Compress
     }
     try {
@@ -458,7 +483,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     } catch [InvalidOperationException] {
       Assert-True (($_.Exception.Message + ($_.Exception.Data.Values -join ' ')) -notmatch 'FAKE_DIGEST_SECRET_2211|private\.example\.test|response body') 'Raw native failure output must not survive in the exception.'
       if ($script:scenario -eq 'digest-deadline') {
-        $script:ReleaseDeadlineSeconds = [math]::Floor($releaseClock.Elapsed.TotalSeconds) + 1
+        $postBuildClock.Elapsed.TotalSeconds = $script:PostBuildVerificationDeadlineSeconds - 1
       }
       throw
     }
@@ -526,21 +551,28 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     }
     if ($script:scenario -eq 'old-origin') { $info.fqdn = 'retired.azurecontainerapps.io' }
     if ($script:scenario -eq 'wrong-ip-association') { $info.configuration = 'different' }
+    if ($script:scenario -eq 'pre-submit-elapsed') { $releaseClock.Elapsed.TotalSeconds = 600 }
+    if ($script:scenario -eq 'deadline-pre-submit') { $releaseClock.Elapsed.TotalSeconds = $script:PreSubmissionDeadlineSeconds }
     return ConvertTo-Json -InputObject $info -Compress
   }
   if ($commandKey.StartsWith('acr build ')) {
     Assert-True ($Arguments -contains "APP_VERSION=$script:sha") 'Build must embed the exact commit.'
     Assert-True ($Arguments -contains "markdoc:$script:sha" -and $Arguments -contains "markdoc:$($script:sha.Substring(0, 12))") 'Existing full and short tags must be retained.'
     Assert-True ($Arguments -contains '--no-wait' -and $Arguments -contains '--no-logs') 'Submission must be asynchronous without streaming build logs.'
-    Assert-Equal '600' $Arguments[[array]::IndexOf($Arguments, '--timeout') + 1] 'ACR must have enough time for the measured production build.'
+    Assert-Equal ([string]$script:AcrBuildTimeoutSeconds) $Arguments[[array]::IndexOf($Arguments, '--timeout') + 1] 'The one ACR build must retain its 900-second service timeout.'
     Assert-True (@($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' }).Count -eq 1) 'A lost submission response must have one unique tag for reconciliation.'
+    Assert-True ($TimeoutSeconds -le $script:AcrBuildSubmissionTimeoutSeconds) 'Build submission must use the bounded submission timeout inside the build phase.'
     $script:submissionTag = @($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' })[0].Substring(8)
     $dockerfile = $Arguments[[array]::IndexOf($Arguments, '--file') + 1]
     Assert-True ($dockerfile -match 'markdoc-release-[0-9a-f]+\\Dockerfile$') 'Build must use only the isolated exact archive.'
     if ($script:scenario.StartsWith('poll-')) {
       $env:MARKDOC_POLL_TAG = $script:submissionTag
-      if ($pollCase.StartAt -and $pollCase.Command -ceq 'acr task list-runs') { $releaseClock.Elapsed.TotalSeconds = $pollCase.StartAt }
+      if ($pollCase.StartAt -and $pollCase.Command -ceq 'acr task list-runs') { $buildClock.Elapsed.TotalSeconds = $pollCase.StartAt }
       return & $native $Command $Arguments $Directory $TimeoutSeconds
+    }
+    if ($script:scenario -eq 'pre-submit-elapsed') {
+      Assert-True ($releaseClock.Elapsed.TotalSeconds -eq 600) 'Nonzero pre-submission elapsed time must remain on the pre-submission clock.'
+      Assert-True ($buildClock.Elapsed.TotalSeconds -eq 0) 'The build phase must start immediately before its one submission.'
     }
     if ($script:scenario -eq 'build-submit-failed') { Stop-VmRelease 'Build submission failed.' 32 }
     if ($script:scenario -eq 'build-submit-timeout') { Stop-VmRelease 'Submission acceptance unknown.' 124 }
@@ -565,7 +597,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
   if ($commandKey -ceq 'acr task show-run') {
     $script:pollCount++
     $status = 'Succeeded'
-    if ($script:scenario -eq 'build-failed') { $status = 'Failed' }
+    if ($script:scenario -in @('build-failed', 'report-write')) { $status = 'Failed' }
     if ($script:scenario -eq 'build-timeout') { $status = 'Timeout' }
     if ($script:scenario -eq 'build-unknown-status') { $status = 'Unexpected' }
     if ($script:scenario -eq 'pending-then-success' -and $script:pollCount -eq 1) { $status = 'Running' }
@@ -584,7 +616,11 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     if ($script:scenario -eq 'null-digest') { return 'null' }
     if ($script:scenario -eq 'malformed-digest') { return '["sha256:bad"]' }
     if ($script:scenario -eq 'scalar-digest') { return ConvertTo-Json -InputObject $script:digest -Compress }
-    return ConvertTo-Json -InputObject @($script:digest) -Compress
+    $result = ConvertTo-Json -InputObject @($script:digest) -Compress
+    if ($script:scenario -eq 'deadline-post-build-source') {
+      $postBuildClock.Elapsed.TotalSeconds = $script:PostBuildVerificationDeadlineSeconds
+    }
+    return $result
   }
   if ($commandKey -ceq 'vm run-command invoke') {
     Assert-True ($Arguments -contains 'RunShellScript' -and $Arguments -notcontains '--no-wait') 'VM command must wait for terminal guest evidence.'
@@ -597,6 +633,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     $operation = $parameters[4]
     Assert-True ($operation -cmatch '^[0-9a-f-]{36}$') 'Guest invocation must have its own UUID.'
     Assert-True (($script:messages -join "`n").Contains($operation)) 'Guest identity must be printed before the command is sent.'
+    Assert-True ($TimeoutSeconds -le $script:VmPhaseDeadlineSeconds) 'VM invocation must be capped by the independent VM/result phase.'
     if ($script:scenario -eq 'vm-timeout') { Stop-VmRelease 'VM command timed out.' 124 }
     if ($script:scenario -eq 'vm-native-failed') { Stop-VmRelease 'VM command failed.' 33 }
     $health = Get-TestHealth
@@ -639,7 +676,9 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     if ($script:scenario -eq 'stderr-marker') { $message = "Enable succeeded:`n[stdout]`n`n[stderr]`n$stdout" }
     $code = 'ProvisioningState/succeeded'
     if ($script:scenario -eq 'transport-failed') { $code = 'ProvisioningState/failed' }
-    return ConvertTo-Json -InputObject @{ value = @(@{ code = $code; message = $message }) } -Depth 5 -Compress
+    $result = ConvertTo-Json -InputObject @{ value = @(@{ code = $code; message = $message }) } -Depth 5 -Compress
+    if ($script:scenario -eq 'deadline-vm-result') { $vmClock.Elapsed.TotalSeconds = $script:VmPhaseDeadlineSeconds }
+    return $result
   }
   throw 'Unexpected Azure command: tests permit only the existing release route.'
 }
@@ -659,6 +698,7 @@ function Get-ReleasePublicHealth([string]$Origin, [int]$TimeoutSeconds) {
   foreach ($field in @('ok', 'db', 'collab')) {
     if ($script:scenario -eq "public-$field-false") { $health[$field] = $false }
   }
+  if ($script:scenario -eq 'deadline-health') { $healthClock.Elapsed.TotalSeconds = $script:PublicHealthDeadlineSeconds }
   return ConvertTo-Json -InputObject $health -Compress
 }
 
@@ -672,7 +712,8 @@ $cases = @(
   'vm-timeout', 'vm-native-failed', 'transport-failed', 'transport-only', 'missing-ready-marker', 'missing-local-health', 'image-space', 'wal-diagnostic',
   'wrong-operation', 'nonterminal-marker', 'stderr-marker', 'wrong-local-version', 'local-health-false', 'local-health-string', 'malformed-local-json',
   'wrong-public-version', 'public-ok-false', 'public-db-false', 'public-collab-false', 'public-health-string', 'public-array',
-  'public-request-failed', 'malformed-public-json', 'success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning'
+  'public-request-failed', 'malformed-public-json', 'success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning',
+  'pre-submit-elapsed', 'deadline-pre-submit', 'deadline-post-build-source', 'deadline-vm-result', 'deadline-health', 'report-write', 'cleanup-child-timeout'
 )
 $pollCases = @()
 foreach ($stage in @('list', 'show')) {
@@ -714,13 +755,13 @@ $pollCases += @(
   @{ Name = 'poll-show-wrong-digest-after-miss'; Command = 'acr task show-run'; Stage = 'immutable image identity'; Calls = 2; Misses = @(1); Category = 'server_error'; Status = '503'; ExitCode = 1; Reason = 'The exact tag digest does not match this successful build run.' },
   @{ Name = 'poll-list-foreign-exception'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'Unexpected IOException; raw output withheld.' },
   @{ Name = 'poll-list-terminal-exception'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 124; Reason = 'Terminal poll failure.' },
-  @{ Name = 'poll-list-deadline-before'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 0; Misses = @(); StartAt = 2100; Budget = 2100; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
-  @{ Name = 'poll-list-deadline-during'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 2098; EndAt = 2100; Budget = 2100; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
-  @{ Name = 'poll-list-deadline-after-miss'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(1); StartAt = 2094; AfterMiss = 2100; Budget = 2100; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
-  @{ Name = 'poll-show-budget-during'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 748; EndAt = 750; Budget = 750; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-show-budget-after-miss'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(1); StartAt = 744; AfterMiss = 750; Budget = 750; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-show-success-at-budget'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 740; EndAt = 750; Budget = 750; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-list-success-at-budget'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 2090; EndAt = 2100; Budget = 2100; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' }
+  @{ Name = 'poll-list-deadline-before'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 0; Misses = @(); StartAt = 1140; Budget = 1140; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-list-deadline-during'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 1138; EndAt = 1140; Budget = 1140; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-list-deadline-after-miss'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(1); StartAt = 1134; AfterMiss = 1140; Budget = 1140; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-show-budget-during'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 1138; EndAt = 1140; Budget = 1140; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-show-budget-after-miss'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(1); StartAt = 1134; AfterMiss = 1140; Budget = 1140; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-show-success-at-budget'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 1130; EndAt = 1140; Budget = 1140; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-list-success-at-budget'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 1130; EndAt = 1140; Budget = 1140; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' }
 )
 $digestCases = @(
   @{ Name = 'digest-server-success'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Success = $true },
@@ -804,7 +845,7 @@ foreach ($wording in $cliWordings) {
 $digestCases += $cliWordings + @(
   @{ Name = 'digest-secret-all-streams'; Category = 'unknown'; Status = 'none'; Calls = 1; Retry = 0 },
   @{ Name = 'digest-deadline-two-seconds'; Category = 'server_error'; Status = '503'; Calls = 1; Retry = 0; Remaining = 2; Reason = 'No time remains for the ACR digest lookup retry; no VM command was sent' },
-  @{ Name = 'digest-deadline-three-seconds'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Remaining = 3; Reason = 'No time remains for a VM invocation and public health' }
+  @{ Name = 'digest-deadline-three-seconds'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Remaining = 3; Reason = 'Post-build verification deadline exceeded; no VM command was sent' }
 )
 if ($DigestLookupCase.Count -gt 0) {
   Assert-True ([bool]$DigestLookupOnly) 'Selecting digest cases requires -DigestLookupOnly.'
@@ -841,7 +882,14 @@ try {
     $script:sourceChecks = 0
     $script:submissionTag = ''
     $script:sleeps.Clear()
-    $script:ReleaseDeadlineSeconds = 2100
+    $script:clockCount = 0
+    $script:cleanupCount = 0
+    $script:PreSubmissionDeadlineSeconds = 900
+    $script:BuildPhaseDeadlineSeconds = 1140
+    $script:PostBuildVerificationDeadlineSeconds = 180
+    $script:VmPhaseDeadlineSeconds = 2400
+    $script:PublicHealthDeadlineSeconds = 30
+    $script:CleanupChildTimeoutSeconds = 30
     $digestCase = @($digestCases | Where-Object { $_.Name -ceq $case }) | Select-Object -First 1
     $pollCase = @($pollCases | Where-Object { $_.Name -ceq $case }) | Select-Object -First 1
     $env:MARKDOC_DIGEST_CASE = $case
@@ -874,7 +922,7 @@ try {
       }
     } *>&1)
     $streamText = ($capturedStreams | ForEach-Object { $_.ToString() }) -join "`n"
-    $success = $case -in @('success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning') -or
+    $success = $case -in @('success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning', 'pre-submit-elapsed') -or
       ($digestCase -and $digestCase.Success -eq $true) -or ($pollCase -and $pollCase.Success -eq $true)
     $log = $script:messages -join "`n"
     try {
@@ -909,9 +957,39 @@ try {
     if ($cases.IndexOf($case) -lt $cases.IndexOf('wrong-public-version')) {
       Assert-Equal 0 $script:publicCount "Guest failure must not reach public health: $case."
     }
+    if ($case -in @('deadline-post-build-source', 'report-write')) {
+      Assert-Equal 0 $invocations.Count "Post-build/report failure must not reach the VM: $case."
+    }
+    if ($case -eq 'deadline-pre-submit') {
+      Assert-Equal 0 $builds.Count 'Expired pre-submission work must stop before the ACR write.'
+      Assert-Equal 0 $invocations.Count 'Expired pre-submission work must stop before the VM write.'
+    }
+    if ($case -eq 'deadline-vm-result') {
+      Assert-Equal 1 $invocations.Count 'VM/result deadline must permit only the one already-started VM write.'
+      Assert-Equal 0 $script:publicCount 'Expired VM/result verification must not reach public health.'
+    }
+    if ($case -eq 'deadline-health') {
+      Assert-Equal 1 $invocations.Count 'Health deadline must follow exactly one VM invocation.'
+      Assert-Equal 1 $script:publicCount 'Health deadline must exercise exactly one bounded public request.'
+    }
+    if ($case -eq 'cleanup-child-timeout') {
+      Assert-Equal 1 $invocations.Count 'Cleanup timeout must not repeat the completed VM write.'
+      Assert-Equal 1 $script:publicCount 'Cleanup timeout must happen after one verified public request.'
+      Assert-Equal 1 $script:cleanupCount 'Cleanup removal child must be attempted once.'
+      Assert-True ($log -match 'source-archive removal child did not complete within its native timeout') 'Cleanup failure must describe only the bounded removal child.'
+    }
+    if ($case -eq 'report-write') {
+      Assert-Equal 1 $code 'Synchronous failure reporting must preserve the original failure code.'
+      Assert-True ($log -match '^Release failed/unverified at ACR build completion:' -or
+        $log -match '(?m)^Release failed/unverified at ACR build completion:') 'Failure reporting must retain the fixed stage line.'
+    }
     $expectedNativeCodes = @{ 'account-failed' = 19; 'archive-failed' = 31; 'build-submit-failed' = 32; 'vm-native-failed' = 33; 'build-submit-timeout' = 124; 'vm-timeout' = 124 }
     if ($expectedNativeCodes.ContainsKey($case)) {
       Assert-Equal $expectedNativeCodes[$case] $code "Exact native error code must survive for $case. Log: $log"
+    }
+    if ($case -in @('deadline-pre-submit', 'deadline-post-build-source', 'deadline-vm-result', 'deadline-health', 'cleanup-child-timeout')) {
+      Assert-Equal 124 $code "Deadline failure must retain timeout exit code for $case."
+      Assert-True ($log -notmatch 'Release complete:') "Deadline failure must not report completion for $case."
     }
     if ($digestCase) {
       $diagnostic = "Release: ACR digest lookup failed; category=$($digestCase.Category); HTTP status=$($digestCase.Status)."
