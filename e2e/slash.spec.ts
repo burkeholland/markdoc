@@ -136,6 +136,45 @@ test.describe("slash command menu", () => {
     await user.context.close();
   });
 
+  test("a second slash at the same place starts at the first row; a code block has no menu", async ({ browser }) => {
+    const user = await signIn(browser, "slasher");
+    const { page } = user;
+    const id = await createDocument(page, "Intro paragraph.\n\n```\nlet a = 1;\n```\n");
+    await openDocument(page, id);
+    await emptyParagraph(page);
+    const menu = page.getByTestId("slash-menu");
+
+    await page.keyboard.type("/");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByTestId("slash-item-heading2")).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("/");
+    await expect(page.getByTestId("slash-item-text")).toHaveAttribute("aria-selected", "true");
+
+    // The same after a choice: Heading 2 is made, and the next menu in that block starts at Text again.
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".md-rich h2")).toHaveCount(1);
+    await page.keyboard.type("/");
+    await expect(page.getByTestId("slash-item-text")).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Enter");
+    await expect(menu).toHaveCount(0);
+    await expect(page.locator(".md-rich h2")).toHaveCount(0);
+
+    // Inside a code block a slash is just a slash, also after a space.
+    await page.locator(".md-rich pre code").click();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" /");
+    await expect.poll(() => codeText(page)).toContain("let a = 1; /");
+    await expect(menu).toHaveCount(0);
+
+    await user.context.close();
+  });
+
   test("the menu is disabled in viewing mode", async ({ browser }) => {
     const user = await signIn(browser, "slasher");
     const { page } = user;

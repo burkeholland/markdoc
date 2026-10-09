@@ -116,7 +116,64 @@ describe("slashMenuPlugin", () => {
     select(4); // end of "abc"
     type("/");
     expect(tracked()).toBeNull();
+    // After a space and at the start too: right after "abc" it is the mid-word rule that keeps the menu closed.
+    type(" /");
+    expect(tracked()).toBeNull();
+    select(1);
+    type("/");
+    expect(tracked()).toBeNull();
     expect(view.state.doc.firstChild!.type).toBe(schema.nodes.code_block);
+  });
+
+  it("a slash that was not typed here does not open the menu: another person's, or a pasted one", () => {
+    select(WORLD);
+    view.dispatch(view.state.tr.insertText("/").setMeta("addToHistory", false));
+    expect(tracked()).toBeNull();
+    view.dispatch(view.state.tr.delete(WORLD, WORLD + 1));
+    view.dispatch(view.state.tr.insertText("/").setMeta("paste", true));
+    expect(tracked()).toBeNull();
+    view.dispatch(view.state.tr.delete(WORLD, WORLD + 1));
+    type("/");
+    expect(tracked()).toEqual({ from: WORLD, to: WORLD + 1, query: "" });
+  });
+
+  it("closes when the editor loses the focus, and stays open when the focus never left", async () => {
+    const nextTask = () => new Promise((resolve) => setTimeout(resolve, 0));
+    view.focus();
+    select(WORLD);
+    type("/");
+    // A blur event while the editor still has the focus (it came back in the same task) closes nothing.
+    view.dom.dispatchEvent(new FocusEvent("blur"));
+    await nextTask();
+    expect(tracked()).not.toBeNull();
+    const elsewhere = document.body.appendChild(document.createElement("button"));
+    elsewhere.focus();
+    await nextTask();
+    elsewhere.remove();
+    expect(tracked()).toBeNull();
+    expect(states.at(-1)).toBeNull();
+  });
+
+  // The plugin has no check of its own for this: ProseMirror hands no keydown to a plugin while a composition
+  // is open. This test holds the two together, so the Enter that confirms Japanese, Chinese or Korean text
+  // never picks an item.
+  it("a key pressed while an input method is composing is not the menu's", () => {
+    select(WORLD);
+    type("/h");
+    view.dom.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    for (const handled of [...SLASH_KEYS, "Escape"]) expect(key(handled, { isComposing: true }).defaultPrevented, handled).toBe(false);
+    expect(keys).toEqual([]);
+    expect(editorKeys).toEqual([]);
+    expect(tracked()).toMatchObject({ query: "h" });
+    view.dom.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    // Safari sends the confirming Enter right after compositionend, and ProseMirror drops that one key as well.
+    // jsdom gives Apple as its vendor, so that is the path taken here.
+    if (/Apple Computer/.test(navigator.vendor)) {
+      expect(key("Enter").defaultPrevented).toBe(false);
+      expect(keys).toEqual([]);
+    }
+    expect(key("Enter").defaultPrevented).toBe(true);
+    expect(keys).toEqual(["Enter"]);
   });
 
   it("does not activate while not editable", () => {

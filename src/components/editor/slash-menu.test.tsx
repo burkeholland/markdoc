@@ -225,6 +225,17 @@ describe("slash menu: what it shows", () => {
     }
   });
 
+  it("opens under the slash, and above it when there is no room below", () => {
+    const { controller } = mount();
+    const slashAt = (top: number) => act(() => controller.handlers.onState({ from: WORLD, to: WORLD + 1, query: "", coords: { left: 100, top, bottom: top + 20 } }));
+    slashAt(100);
+    expect(menu()!.style.left).toBe("100px");
+    expect(menu()!.style.top).toBe("126px");
+    // 16 rows are more than the 8 the menu shows: it is 296 px high and does not fit under a line near the bottom.
+    slashAt(window.innerHeight - 60);
+    expect(menu()!.style.top).toBe(`${window.innerHeight - 60 - 6 - 296}px`);
+  });
+
   it("hides Comment from a person who may not comment", () => {
     const { view } = mount({ canComment: false });
     typeAt(view, WORLD, "/");
@@ -342,6 +353,67 @@ describe("slash menu: keys", () => {
       keydown(view, "Enter");
     });
     expect(ytext.toString()).toBe("Hello\n\n# World");
+  });
+
+  // The row belongs to one opening of the menu. Before this test the row was remembered for a place and a
+  // query, so "/" + ArrowDown + Enter three times in one empty block made Heading 1, Heading 2, Heading 3.
+  it("a menu that opens again at the same place starts at the first row", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    press(view, "ArrowDown");
+    press(view, "ArrowDown");
+    expect(selected()).toEqual(["slash-item-heading2"]);
+    press(view, "Escape");
+    expect(menu()).toBeNull();
+    act(() => view.dispatch(view.state.tr.delete(WORLD, WORLD + 1)));
+    typeAt(view, WORLD, "/");
+    expect(selected()).toEqual(["slash-item-text"]);
+    // The same after a choice: Heading 2 is made, and the next menu in that block starts at Text.
+    press(view, "ArrowDown");
+    press(view, "ArrowDown");
+    press(view, "Enter");
+    expect(ytext.toString()).toBe("Hello\n\n## World");
+    act(() => {
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, WORLD)));
+      view.dispatch(view.state.tr.insertText("/"));
+      keydown(view, "Enter");
+    });
+    expect(ytext.toString()).toBe("Hello\n\nWorld");
+  });
+
+  it("the highlighted row stays when text arrives above the slash, as when another person types there", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    press(view, "ArrowDown");
+    press(view, "ArrowDown");
+    act(() => view.dispatch(view.state.tr.insertText("They say ", 1)));
+    expect(slashMenuState(view.state)).toMatchObject({ from: WORLD + 9, query: "" });
+    expect(selected()).toEqual(["slash-item-heading2"]);
+    press(view, "Enter");
+    expect(ytext.toString()).toBe("They say Hello\n\n## World");
+  });
+
+  it("inside a table cell the keys pick from the list that is drawn", () => {
+    const { view, onLink } = mount({ markdown: "| a | b |\n| --- | --- |\n| 1 | 2 |\n" });
+    let cell = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (cell < 0 && node.isTextblock && node.textContent === "1") cell = pos + 1;
+    });
+    // Outside a table "/h" starts with Heading 1. In a cell the headings are hidden and Link ("href") is first.
+    typeAt(view, cell + 1, " /h");
+    expect(rowIds()).toEqual(["link"]);
+    press(view, "Enter");
+    expect(onLink).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the highlighted row in view", () => {
+    const { view } = mount();
+    typeAt(view, WORLD, "/");
+    const scrolled = vi.mocked(Element.prototype.scrollIntoView);
+    scrolled.mockClear();
+    press(view, "End");
+    expect(scrolled).toHaveBeenLastCalledWith({ block: "nearest" });
+    expect(scrolled.mock.contexts.at(-1)).toBe(row("agent"));
   });
 
   it("when the list gets shorter under the highlight, the last row is the highlighted one", () => {

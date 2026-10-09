@@ -79,13 +79,6 @@ function selectCurrentBlock(view: EditorView) {
   if (end > start) view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, start, end)));
 }
 
-/** The highlighted row belongs to one `/query`: a new query starts at the first row again. */
-interface Highlight {
-  query: string;
-  index: number;
-}
-
-const queryId = (state: SlashState | null) => (state ? `${state.from}:${state.query}` : "");
 const noServerState = () => null;
 
 /**
@@ -113,9 +106,9 @@ export function SlashMenu({
   onConnectAgent: () => void;
 }) {
   const state = useSyncExternalStore(controller.subscribe, controller.getState, noServerState);
-  const [highlight, setHighlight] = useState<Highlight>({ query: "", index: 0 });
+  const [highlight, setHighlight] = useState(0);
   // What the key handler reads: two arrow presses can arrive before React has rendered the first.
-  const highlightRef = useRef(highlight);
+  const highlightRef = useRef(0);
   const [pos, setPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
@@ -124,13 +117,26 @@ export function SlashMenu({
   const where: SlashWhere = useMemo(() => ({ inTable: !!(view && state && tableAt(view.state)), canComment }), [view, state, canComment]);
   const items = useMemo(() => (state ? filterSlashItems(state.query, SLASH_ITEMS, where) : []), [state, where]);
   const open = !!state && canEdit && !!view;
-  const query = queryId(state);
-  const index = highlight.query === query ? Math.min(highlight.index, Math.max(0, items.length - 1)) : 0;
+  const index = Math.min(highlight, Math.max(0, items.length - 1));
 
-  const moveHighlight = (next: Highlight) => {
+  const moveHighlight = (next: number) => {
     highlightRef.current = next;
     setHighlight(next);
   };
+
+  // The highlighted row lasts while the menu stays open on one query. A new query starts at the first row, and
+  // so does a menu that opens again, also at the same place. The row stays when only the place of the "/"
+  // moves: that is what another person's typing above it does.
+  useLayoutEffect(() => {
+    let shown = controller.getState()?.query ?? null;
+    return controller.subscribe((next) => {
+      const query = next ? next.query : null;
+      if (query === shown) return;
+      shown = query;
+      highlightRef.current = 0;
+      setHighlight(0);
+    });
+  }, [controller]);
 
   const pick = (item: SlashItem | undefined) => {
     if (!view) return;
@@ -166,9 +172,8 @@ export function SlashMenu({
     const current = controller.getState();
     if (!view || !current || !session.canEdit) return false;
     const live = filterSlashItems(current.query, SLASH_ITEMS, { inTable: !!tableAt(view.state), canComment: session.canComment });
-    const id = queryId(current);
     const last = Math.max(0, live.length - 1);
-    const at = highlightRef.current.query === id ? Math.min(highlightRef.current.index, last) : 0;
+    const at = Math.min(highlightRef.current, last);
     if (key === "Enter" || key === "Tab") {
       pick(live[at]);
       return true;
@@ -179,7 +184,7 @@ export function SlashMenu({
     else if (key === "ArrowUp") next = count ? (at - 1 + count) % count : 0;
     else if (key === "Home") next = 0;
     else next = last;
-    moveHighlight({ query: id, index: next });
+    moveHighlight(next);
     return true;
   };
 
@@ -257,7 +262,7 @@ export function SlashMenu({
                 // mousemove, not mouseenter: when the menu opens (or scrolls) under a pointer that rests,
                 // the browser sends mouseenter but no mousemove, and the row under it must not be picked by Enter.
                 onMouseMove={() => {
-                  if (i !== index) moveHighlight({ query, index: i });
+                  if (i !== index) moveHighlight(i);
                 }}
                 onClick={() => pick(item)}
               >
