@@ -131,6 +131,22 @@ describe("space below a picture (Burke #2348)", () => {
   });
 });
 
+describe("the gap cursor does not move the blocks around it", () => {
+  // ProseMirror puts the gap cursor's element among the document's blocks (before a table that starts
+  // the document, for one). As a block of its own it pushed that table down by one block space on a
+  // click beside it; e2e/table-layout.spec.ts measures the table in a browser.
+  it("is out of the flow, and shown only while the editor has the focus", () => {
+    expect(hasRule(".md-rich .ProseMirror-gapcursor", "position", /^absolute$/)).toBe(true);
+    expect(hasRule(".md-rich .ProseMirror-gapcursor", "display", /^none$/)).toBe(true);
+    expect(hasRule(".md-rich.ProseMirror-focused .ProseMirror-gapcursor", "display", /^block$/)).toBe(true);
+  });
+
+  it("leaves the block after it the space that block has without the cursor", () => {
+    expect(hasRule(".md-rich > .ProseMirror-gapcursor:first-child + *", "margin-top", /^0$/)).toBe(true);
+    expect(hasRule(".md-rich > hr + .ProseMirror-gapcursor + *", "margin-top", /^calc\(var\(--md-space\) \* 1\.75\)$/)).toBe(true);
+  });
+});
+
 describe("HTML export mirrors the rhythm", () => {
   const styles = exportTs.slice(exportTs.indexOf("const STYLES = `") + "const STYLES = `".length, exportTs.indexOf("`;", exportTs.indexOf("const STYLES = `")));
 
