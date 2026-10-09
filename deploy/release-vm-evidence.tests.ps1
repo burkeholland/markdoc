@@ -230,8 +230,7 @@ function Test-ReleaseBoundaryInvariants([hashtable]$Sources) {
   foreach ($claimPattern in @(
       '(?i)\bscript start\b',
       '(?i)\bnative request timeout\b',
-      '(?i)\b(?:bounded )?sleeps?.{0,40}\b(?:refuse(?:d|s)?|cap(?:ped|s)?)\b.{0,40}\b(?:cross|crossing)\b',
-      '(?i)\bpoll delays?.{0,40}\brefuse(?:d|s)?\b.{0,40}\b(?:cross|crossing)\b')) {
+      '(?i)\b(?:bounded )?(?:sleeps?|delays?).{0,40}\b(?:refuse(?:d|s)?|cap(?:ped|s)?)\b.{0,40}\b(?:cross|crossing)\b')) {
     if ($documentation -match $claimPattern) { return $false }
   }
   foreach ($claim in @('at least 150 seconds', '365 seconds above', '4,710 seconds',
@@ -287,6 +286,7 @@ $boundaryMutations = @(
   @{ Name = 'hosting-script-start-language'; Change = { param($s) $s.Hosting = $s.Hosting.Replace('Release orchestration entry, 900 seconds', 'Script start, 900 seconds') } },
   @{ Name = 'poll-sleep-crossing-language'; Change = { param($s) $s.Hosting = $s.Hosting.Replace('A requested five-second poll delay starts only', 'Every five-second poll delay is refused') } },
   @{ Name = 'bounded-sleep-crossing-language'; Change = { param($s) $s.Hosting = $s.Hosting.Replace('A requested sleep starts only', 'A bounded sleep is refused') } },
+  @{ Name = 'digest-delay-crossing-language'; Change = { param($s) $s.Hosting += "`nThe delay is refused if it would cross the watchdog." } },
   @{ Name = 'readme-native-health-language'; Change = { param($s) $s.Readme = $s.Readme.Replace('HTTP request timeout plus', 'Native request timeout plus') } },
   @{ Name = 'hosting-native-health-language'; Change = { param($s) $s.Hosting = $s.Hosting.Replace('HTTP request timeout and', 'Native request timeout and') } }
 )

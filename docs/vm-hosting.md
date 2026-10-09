@@ -701,10 +701,11 @@ permitted two-second delay and retry, and the final three-command source recheck
 share an independent 180-second post-build watchdog. The two lookup calls and
 three source commands retain their per-call maxima, but those maxima are not
 reserved slices of the outer clock. Local parsing and validation also consume
-elapsed time and are checked rather than forcibly terminated. The delay is
-refused if it would cross the watchdog. No ACR build submission or VM command
-is retried. A successful retry must still return exactly one well-formed digest
-matching the completed build run.
+elapsed time and are checked rather than forcibly terminated. The requested
+two-second delay starts only when it fits the floored remaining time; any
+deadline overrun is rejected immediately afterward. No ACR build submission or
+VM command is retried. A successful retry must still return exactly one
+well-formed digest matching the completed build run.
 
 The following digest-lookup log lines print before `Release: guest invocation`.
 Both **can appear in a successful release**, for example when a 503 lookup fails
