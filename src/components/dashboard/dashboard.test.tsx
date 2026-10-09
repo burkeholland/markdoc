@@ -2,7 +2,6 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import {
   StrictMode,
-  createElement,
   startTransition,
   useEffect,
   useLayoutEffect,
@@ -10,9 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
-import { flushSync } from "react-dom";
-import { createRoot, hydrateRoot } from "react-dom/client";
-import { renderToString } from "react-dom/server";
+import { createRoot } from "react-dom/client";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { compile } from "tailwindcss";
@@ -68,13 +65,6 @@ import { Dashboard, TemplateGrid, TrashView, type DashboardProps } from "./dashb
 
 const SEARCH_DEBOUNCE_MS = 250;
 const USER = { id: "owner", name: "Owner", login: "owner", image: null };
-const TEST_EVENT_CURRENT_TARGET_DESCRIPTOR =
-  Object.getOwnPropertyDescriptor(Event.prototype, "currentTarget");
-const TEST_EVENT_CURRENT_TARGET = TEST_EVENT_CURRENT_TARGET_DESCRIPTOR?.get
-  ? (Function.prototype.call.bind(
-      TEST_EVENT_CURRENT_TARGET_DESCRIPTOR.get,
-    ) as (event: Event) => EventTarget | null)
-  : null;
 
 function doc(id: string, title: string, excerpt = ""): DocumentSummaryDto {
   return {
@@ -146,61 +136,6 @@ function TrashLayoutProbe({
 }) {
   useLayoutEffect(capture);
   return children;
-}
-
-function TemplateGridBoundary({
-  onPick,
-  busy,
-  compact,
-  present = true,
-  mountKey = "grid",
-  boundary = 0,
-  onBoundary,
-  onPassiveCleanup,
-}: {
-  onPick: (template: Template) => void;
-  busy: string | null;
-  compact?: boolean;
-  present?: boolean;
-  mountKey?: string;
-  boundary?: number;
-  onBoundary?: () => void;
-  onPassiveCleanup: () => void;
-}) {
-  useLayoutEffect(() => {
-    if (boundary > 0) onBoundary?.();
-  }, [boundary, onBoundary]);
-  return present ? (
-    <>
-      <TemplateGrid key={mountKey} onPick={onPick} busy={busy} compact={compact} />
-      <PassiveCleanupProbe key={`${mountKey}:${boundary}`} onCleanup={onPassiveCleanup} />
-    </>
-  ) : (
-    <button type="button" data-testid="grid-replacement">Replacement control</button>
-  );
-}
-
-function TemplateGridLayoutTamper({ tamper }: { tamper: () => void }) {
-  useLayoutEffect(tamper, [tamper]);
-  return null;
-}
-
-function TemplateGridCaptureAttack({
-  attack,
-  children,
-}: {
-  attack: (event: MouseEvent) => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      onClickCapture={(event) => {
-        attack(event.nativeEvent);
-      }}
-    >
-      {children}
-    </div>
-  );
 }
 
 function DashboardBoundary({
@@ -410,24 +345,6 @@ function captureReactClick(element: HTMLButtonElement): CapturedReactClick {
   return onClick;
 }
 
-function captureTemplateActivation(
-  element: HTMLButtonElement,
-): CapturedReactClick {
-  const onClick = reactProps(element).onClick;
-  if (!onClick) {
-    throw new Error("The template button did not have an activation handler");
-  }
-  return onClick;
-}
-
-function captureTemplateTraversal(element: Element): CapturedReactClick {
-  const onClickCapture = reactProps(element).onClickCapture;
-  if (!onClickCapture) {
-    throw new Error("The template traversal stage was not attached");
-  }
-  return onClickCapture;
-}
-
 function captureReactRef(element: Element): CapturedReactRef {
   const ref = reactProps(element).ref;
   if (!ref) throw new Error("The element did not have a callback ref");
@@ -464,25 +381,6 @@ function interceptMangledReactClick(element: HTMLButtonElement): () => void {
     expect(Object.getPrototypeOf(mangled).constructor.name).toBe("a");
     original(mangled);
   });
-}
-
-function interceptTemplateActivation(
-  element: HTMLButtonElement,
-  invoke: (original: CapturedReactClick, event: unknown) => void,
-): () => void {
-  const { key, record, props } = reactPropsEntry(element);
-  const original = props.onClick;
-  if (!original) {
-    throw new Error("The template button did not have an activation handler");
-  }
-  const intercepted = {
-    ...props,
-    onClick: (event: unknown) => invoke(original, event),
-  };
-  record[key] = intercepted;
-  return () => {
-    if (record[key] === intercepted) record[key] = props;
-  };
 }
 
 function directTrashCard(host: HTMLElement, title: string): HTMLLIElement {
@@ -1121,115 +1019,6 @@ function fabricatedTemplateClick(
   };
 }
 
-function fabricatedTemplateBubble(
-  button: HTMLButtonElement,
-  nativeEvent: MouseEvent,
-) {
-  return {
-    type: "click",
-    button: nativeEvent.button,
-    buttons: nativeEvent.buttons,
-    detail: nativeEvent.detail,
-    eventPhase: nativeEvent.BUBBLING_PHASE,
-    bubbles: nativeEvent.bubbles,
-    defaultPrevented: false,
-    currentTarget: button,
-    target: nativeEvent.target,
-    nativeEvent,
-  };
-}
-
-function shadowTemplateCurrentTarget(
-  event: MouseEvent,
-  grid: HTMLUListElement,
-  ownerDocument: Document,
-  documentRoot: boolean,
-) {
-  const ownerWindow = ownerDocument.defaultView;
-  if (!ownerWindow || !TEST_EVENT_CURRENT_TARGET) {
-    throw new Error("The native currentTarget getter is unavailable");
-  }
-  let documentReads = 0;
-  Object.defineProperty(event, "currentTarget", {
-    configurable: true,
-    get() {
-      const actual = TEST_EVENT_CURRENT_TARGET(event);
-      if (actual instanceof ownerWindow.HTMLButtonElement) return actual;
-      if (actual !== ownerDocument) return grid;
-      documentReads += 1;
-      return documentRoot && documentReads > 1 ? grid : ownerDocument;
-    },
-  });
-}
-
-function invokePlainTemplateTraversal(
-  grid: HTMLUListElement,
-  button: HTMLButtonElement,
-  nativeEvent: MouseEvent,
-) {
-  const card = button.parentElement;
-  if (!(card instanceof button.ownerDocument.defaultView!.HTMLLIElement)) {
-    throw new Error("The template button has no card");
-  }
-  const wrapper = {
-    type: "click",
-    button: nativeEvent.button,
-    buttons: nativeEvent.buttons,
-    detail: nativeEvent.detail,
-    eventPhase: nativeEvent.eventPhase,
-    bubbles: nativeEvent.bubbles,
-    defaultPrevented: nativeEvent.defaultPrevented,
-    currentTarget: grid as EventTarget,
-    target: nativeEvent.target,
-    nativeEvent,
-  };
-  captureTemplateTraversal(grid)(wrapper);
-  wrapper.currentTarget = card;
-  captureTemplateTraversal(card)(wrapper);
-  wrapper.currentTarget = button;
-  captureTemplateTraversal(button)(wrapper);
-  captureTemplateActivation(button)(wrapper);
-}
-
-function dispatchTemplateClick(
-  button: HTMLButtonElement,
-  target: Element = button,
-  beforeOriginal?: (
-    original: CapturedReactClick,
-    event: unknown,
-  ) => void,
-): {
-  handler: CapturedReactClick;
-  reactEvent: unknown;
-  nativeEvent: MouseEvent;
-} {
-  let handler: CapturedReactClick | null = null;
-  let reactEvent: unknown = null;
-  const restore = interceptTemplateActivation(button, (original, event) => {
-    handler = original;
-    reactEvent = event;
-    beforeOriginal?.(original, event);
-    original(event);
-  });
-  const MouseEventConstructor = button.ownerDocument.defaultView!.MouseEvent;
-  const nativeEvent = new MouseEventConstructor("click", {
-    bubbles: true,
-    cancelable: true,
-    button: 0,
-    buttons: 0,
-    detail: 1,
-  });
-  try {
-    target.dispatchEvent(nativeEvent);
-  } finally {
-    restore();
-  }
-  if (!handler || !reactEvent) {
-    throw new Error("The dispatched template click did not reach React");
-  }
-  return { handler, reactEvent, nativeEvent };
-}
-
 function expectInertTemplateCall(
   callback: CapturedReactClick,
   event: unknown,
@@ -1240,28 +1029,6 @@ function expectInertTemplateCall(
   callback(event);
   expect(document.activeElement).toBe(activeElement);
   expect(host.innerHTML).toBe(markup);
-}
-
-function templateRefBindings(host: HTMLElement) {
-  const grid = templateGrid(host);
-  const elements: Element[] = [grid];
-  for (const card of grid.children) {
-    const button = card.firstElementChild;
-    if (!(button instanceof HTMLButtonElement)) {
-      throw new Error("Template card did not contain a button");
-    }
-    const icon = button.children.item(0)?.firstElementChild;
-    const name = button.children.item(1);
-    const description = button.children.item(2);
-    if (!icon || !name || !description) {
-      throw new Error("Template button refs were incomplete");
-    }
-    elements.push(card, button, icon, name, description);
-  }
-  return elements.map((element) => ({
-    element,
-    ref: captureReactRef(element),
-  }));
 }
 
 function searchResultLinks(host: ParentNode = document) {
@@ -3209,2229 +2976,232 @@ describe("dashboard Account menu directional publication", () => {
   });
 });
 
-describe("TemplateGrid publication ownership", () => {
-  it("publishes a distinct exact successor after direct-root Strict Mode replay and preserves every card", async () => {
-    const host = document.createElement("div");
-    const focusOwner = document.createElement("button");
-    document.body.append(focusOwner, host);
-    const root = createRoot(host);
+/** A click, then one turn of the page, so a handler that answers a moment later still counts. */
+async function click(element: Element) {
+  await act(async () => {
+    fireEvent.click(element);
+    await Promise.resolve();
+  });
+}
+
+describe("TemplateGrid", () => {
+  function renderGrid(props: Partial<Parameters<typeof TemplateGrid>[0]> = {}) {
     const onPick = vi.fn<(template: Template) => void>();
-    const first = PICKER_TEMPLATES[0];
+    const view = render(<TemplateGrid onPick={onPick} busy={null} {...props} />);
+    return { onPick, ...view };
+  }
+
+  function button(id: string) {
+    return screen.getByTestId(`template-${id}`) as HTMLButtonElement;
+  }
+
+  it("shows every template once, in order, with its name and description", async () => {
+    renderGrid();
+    const cards = Array.from(screen.getByTestId("template-grid").children);
+    expect(cards.map((card) => card.firstElementChild?.getAttribute("data-testid"))).toEqual(
+      PICKER_TEMPLATES.map((template) => `template-${template.id}`),
+    );
+    for (const template of PICKER_TEMPLATES) {
+      expect(within(button(template.id)).getByText(template.name)).toBeInTheDocument();
+      expect(within(button(template.id)).getByText(template.description)).toBeInTheDocument();
+    }
+  });
+
+  it.each(PICKER_TEMPLATES.map((template) => [template.id, template] as const))(
+    "picks %s on a click, once",
+    async (id, template) => {
+      const { onPick } = renderGrid();
+      await click(button(id));
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenLastCalledWith(template);
+    },
+  );
+
+  it("picks the card under a click on its icon, name or description", async () => {
+    const { onPick } = renderGrid();
     const second = PICKER_TEMPLATES[1];
-    const passiveCleanup = vi.fn();
-    let firstSetupHandler: CapturedReactClick | null = null;
-    let layoutSetups = 0;
+    await click(within(button(second.id)).getByText(second.name));
+    await click(within(button(second.id)).getByText(second.description));
+    await click(button(second.id).querySelector("svg")!);
+    expect(onPick.mock.calls).toEqual([[second], [second], [second]]);
+  });
 
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGridBoundary
-              onPick={onPick}
-              busy={null}
-              boundary={1}
-              onPassiveCleanup={passiveCleanup}
-              onBoundary={() => {
-                layoutSetups += 1;
-                firstSetupHandler ??= captureTemplateActivation(
-                  templateButton(host, first.id),
-                );
-              }}
-            />
-          </StrictMode>,
-        );
-      });
-
-      const grid = templateGrid(host);
-      const currentFirst = templateButton(host, first.id);
-      const currentHandler = captureTemplateActivation(currentFirst);
-      expect(layoutSetups).toBeGreaterThanOrEqual(2);
-      expect(passiveCleanup).toHaveBeenCalled();
-      expect(currentHandler).not.toBe(firstSetupHandler);
-      expect(grid).toHaveClass("grid", "gap-3", "sm:grid-cols-2", "lg:grid-cols-3");
-      expect(grid).not.toHaveClass("grid-cols-2", "sm:grid-cols-3", "lg:grid-cols-4");
-      expect(Array.from(grid.children, (card) => card.firstElementChild?.getAttribute("data-testid"))).toEqual(
-        PICKER_TEMPLATES.map((template) => `template-${template.id}`),
-      );
-      for (const template of PICKER_TEMPLATES) {
-        const button = templateButton(host, template.id);
-        const iconClass = `lucide-${template.icon.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase()}`;
-        expect(button).toHaveTextContent(template.name);
-        expect(button).toHaveTextContent(template.description);
-        expect(button.querySelector("svg")).toHaveClass(iconClass);
-        expect(button).toBeEnabled();
-        expect(button).not.toHaveAttribute("aria-busy");
-      }
-
-      focusOwner.focus();
-      expectInertTemplateCall(
-        firstSetupHandler!,
-        fabricatedTemplateClick(currentFirst),
-        host,
-      );
-      expect(onPick).not.toHaveBeenCalled();
-      await act(async () => {
-        currentFirst.click();
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(first);
-      expect(document.activeElement).toBe(focusOwner);
-      await act(async () => {
-        currentFirst.click();
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGridBoundary
-              onPick={onPick}
-              busy={null}
-              boundary={2}
-              onPassiveCleanup={passiveCleanup}
-            />
-          </StrictMode>,
-        );
-      });
-      const currentSecond = templateButton(host, second.id);
-      expect(captureTemplateActivation(currentSecond)).not.toBe(currentHandler);
-      expectInertTemplateCall(
-        firstSetupHandler!,
-        fabricatedTemplateClick(currentSecond),
-        host,
-      );
-      await act(async () => {
-        dispatchTemplateClick(
-          currentSecond,
-          currentSecond.children.item(2) as Element,
-        );
-      });
-      expect(onPick).toHaveBeenCalledTimes(2);
-      expect(onPick).toHaveBeenLastCalledWith(second);
-      expect(document.activeElement).toBe(focusOwner);
-    } finally {
-      await act(async () => root.unmount());
-      focusOwner.remove();
-      host.remove();
+  it("makes each card a real button, so Enter and Space work without any key handler", async () => {
+    renderGrid();
+    for (const template of PICKER_TEMPLATES) {
+      expect(button(template.id).tagName).toBe("BUTTON");
+      expect(button(template.id).type).toBe("button");
+      expect(button(template.id)).toBeEnabled();
     }
   });
 
-  it("rejects partial ref replay and late old refs without poisoning a fresh successor", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid key="initial" onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const bindings = templateRefBindings(host);
-      const staleButton = templateButton(host, template.id);
-      const staleHandler = captureTemplateActivation(staleButton);
-      const partial = bindings.find(
-        ({ element }) => element === staleButton,
-      )!;
-      await act(async () => {
-        partial.ref(null);
-        partial.ref(partial.element);
-      });
-      await act(async () => {
-        dispatchTemplateClick(staleButton);
-      });
-      expect(onPick).not.toHaveBeenCalled();
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid key="fresh" onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const currentButton = templateButton(host, template.id);
-      expect(currentButton).not.toBe(staleButton);
-      const late = bindings[0];
-      await act(async () => {
-        late.ref(currentButton);
-        late.ref(null);
-      });
-      expectInertTemplateCall(
-        staleHandler,
-        fabricatedTemplateClick(currentButton),
-        host,
-      );
-      await act(async () => {
-        dispatchTemplateClick(currentButton);
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
+  // Issue 2362. The dialog adds two "focus guard" spans to the page right after the grid
+  // appears; browser extensions and translators change attributes and wrap text. None of
+  // that may stop a click.
   it.each([
-    {
-      name: "a forged ARIA attribute",
-      tamper: (button: HTMLButtonElement) => {
-        button.setAttribute("aria-label", "Forged template");
+    [
+      "a new element next to the dialog (the focus guard)",
+      (host: HTMLElement) => {
+        const guard = document.createElement("span");
+        guard.setAttribute("data-radix-focus-guard", "");
+        host.after(guard);
+        host.before(guard.cloneNode());
       },
-    },
-    {
-      name: "altered icon content",
-      tamper: (button: HTMLButtonElement) => {
-        button.querySelector("svg > *")?.setAttribute("d", "M0 0");
+    ],
+    [
+      "a new attribute on the button",
+      () => button(PICKER_TEMPLATES[1].id).setAttribute("data-extension", "1"),
+    ],
+    [
+      "a new attribute on the list",
+      () => screen.getByTestId("template-grid").setAttribute("data-extension", "1"),
+    ],
+    [
+      "the name wrapped in another element (a translator)",
+      () => {
+        const name = screen.getByText(PICKER_TEMPLATES[1].name);
+        const font = document.createElement("font");
+        font.append(...name.childNodes);
+        name.append(font);
       },
-    },
-    {
-      name: "an identical icon attribute in a forged namespace",
-      tamper: (button: HTMLButtonElement) => {
-        const path = button.querySelector("svg > [d]");
-        const value = path?.getAttribute("d");
-        if (!path || value == null) {
-          throw new Error("The template icon path was not rendered");
-        }
-        path.removeAttribute("d");
-        path.setAttributeNS("urn:forged-template-icon", "d", value);
+    ],
+    [
+      "the grid moved into a new wrapper",
+      (host: HTMLElement) => {
+        const wrapper = document.createElement("div");
+        host.replaceWith(wrapper);
+        wrapper.append(host);
       },
-    },
-  ])("rejects $name before publication instead of making it canonical", async ({ tamper }) => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGridLayoutTamper
-              tamper={() => tamper(templateButton(host, template.id))}
-            />
-            <TemplateGrid key="tainted" onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      await act(async () => {
-        templateButton(host, template.id).click();
-      });
-      expect(onPick).not.toHaveBeenCalled();
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid key="fresh" onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      await act(async () => {
-        templateButton(host, template.id).click();
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
+    ],
+  ])("still picks after the page changes around it: %s", async (_name, change) => {
+    const { onPick, container } = renderGrid();
+    const second = PICKER_TEMPLATES[1];
+    await act(async () => {
+      change(container);
+      await Promise.resolve();
+    });
+    await click(button(second.id));
+    expect(onPick).toHaveBeenCalledTimes(1);
+    expect(onPick).toHaveBeenLastCalledWith(second);
   });
 
-  it("rejects a plain full-hop wrapper during container-root document capture", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
+  it("picks once per click in Strict Mode, where React runs every effect twice", async () => {
     const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-    let callsDuringAttack = -1;
-    let grid!: HTMLUListElement;
-    let button!: HTMLButtonElement;
-    const attack = (event: MouseEvent) => {
-      flushSync(() => {
-        invokePlainTemplateTraversal(grid, button, event);
-      });
-      callsDuringAttack = onPick.mock.calls.length;
-    };
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      grid = templateGrid(host);
-      button = templateButton(host, template.id);
-      document.addEventListener("click", attack, true);
-      const nativeEvent = new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-        buttons: 0,
-        detail: 1,
-      });
-      await act(async () => {
-        button.dispatchEvent(nativeEvent);
-      });
-      expect(callsDuringAttack).toBe(0);
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      document.removeEventListener("click", attack, true);
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("rejects a plain full-hop wrapper before document-root React capture", async () => {
-    const frame = document.createElement("iframe");
-    document.body.append(frame);
-    const ownerDocument = frame.contentDocument;
-    if (!ownerDocument) throw new Error("The test frame has no document");
-    ownerDocument.open();
-    ownerDocument.write(
-      "<!doctype html><html><head></head><body></body></html>",
-    );
-    ownerDocument.close();
-    const ownerWindow = ownerDocument.defaultView;
-    if (!ownerWindow) throw new Error("The test frame has no window");
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-    let callsDuringAttack = -1;
-    let grid: HTMLUListElement | null = null;
-    let button: HTMLButtonElement | null = null;
-    const attack = (event: Event) => {
-      if (
-        grid &&
-        button &&
-        event instanceof ownerWindow.MouseEvent
-      ) {
-        flushSync(() => {
-          invokePlainTemplateTraversal(grid!, button!, event);
-        });
-        callsDuringAttack = onPick.mock.calls.length;
-      }
-    };
-    ownerDocument.addEventListener("click", attack, true);
-    const root = createRoot(ownerDocument);
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <html>
-              {createElement("head")}
-              <body>
-                <TemplateGrid onPick={onPick} busy={null} />
-              </body>
-            </html>
-          </StrictMode>,
-        );
-      });
-      grid = ownerDocument.querySelector<HTMLUListElement>(
-        '[data-testid="template-grid"]',
-      );
-      button = ownerDocument.querySelector<HTMLButtonElement>(
-        `[data-testid="template-${template.id}"]`,
-      );
-      if (!grid || !button) {
-        throw new Error("The document-root template grid was not rendered");
-      }
-      const nativeEvent = new ownerWindow.MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-        buttons: 0,
-        detail: 1,
-      });
-      await act(async () => {
-        button!.dispatchEvent(nativeEvent);
-      });
-      expect(callsDuringAttack).toBe(0);
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      ownerDocument.removeEventListener("click", attack, true);
-      await act(async () => root.unmount());
-      frame.remove();
-    }
-  });
-
-  it("rejects a full-hop forged wrapper from an ancestor React capture", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-    let callsDuringAttack = -1;
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGridCaptureAttack
-              attack={(event) => {
-                invokePlainTemplateTraversal(
-                  templateGrid(host),
-                  templateButton(host, template.id),
-                  event,
-                );
-                callsDuringAttack = onPick.mock.calls.length;
-              }}
-            >
-              <TemplateGrid onPick={onPick} busy={null} />
-            </TemplateGridCaptureAttack>
-          </StrictMode>,
-        );
-      });
-      await act(async () => {
-        templateButton(host, template.id).click();
-      });
-      expect(callsDuringAttack).toBe(0);
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("waits for genuine delegated React bubble after an inner native bubble forgery", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-    let callsDuringAttack = -1;
-    let button!: HTMLButtonElement;
-    const attack = (event: MouseEvent) => {
-      captureTemplateActivation(button)(
-        fabricatedTemplateBubble(button, event),
-      );
-      callsDuringAttack = onPick.mock.calls.length;
-    };
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const grid = templateGrid(host);
-      button = templateButton(host, template.id);
-      grid.addEventListener("click", attack);
-      await act(async () => {
-        button.click();
-      });
-      expect(callsDuringAttack).toBe(0);
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-      grid.removeEventListener("click", attack);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it.each(["container", "document"] as const)(
-    "uses the trusted native currentTarget for a shadowed %s-root event",
-    async (rootKind) => {
-      const frame =
-        rootKind === "document" ? document.createElement("iframe") : null;
-      if (frame) document.body.append(frame);
-      const ownerDocument = frame?.contentDocument ?? document;
-      if (!ownerDocument) throw new Error("The test frame has no document");
-      if (frame) {
-        ownerDocument.open();
-        ownerDocument.write(
-          "<!doctype html><html><head></head><body></body></html>",
-        );
-        ownerDocument.close();
-      }
-      const ownerWindow = ownerDocument.defaultView;
-      if (!ownerWindow) throw new Error("The test document has no window");
-      const host =
-        rootKind === "container"
-          ? ownerDocument.createElement("div")
-          : ownerDocument;
-      if (host instanceof ownerWindow.HTMLDivElement) {
-        ownerDocument.body.append(host);
-      }
-      const onPick = vi.fn<(template: Template) => void>();
-      const template = PICKER_TEMPLATES[0];
-      let grid: HTMLUListElement | null = null;
-      let button: HTMLButtonElement | null = null;
-      const captureAttack = (event: Event) => {
-        if (
-          grid &&
-          button &&
-          event instanceof ownerWindow.MouseEvent
-        ) {
-          invokePlainTemplateTraversal(grid, button, event);
-        }
-      };
-      ownerDocument.addEventListener("click", captureAttack, true);
-      const root = createRoot(host);
-      const attack = (event: Event) => {
-        if (
-          !button ||
-          !(event instanceof ownerWindow.MouseEvent)
-        ) {
-          return;
-        }
-        captureTemplateActivation(button)(
-          fabricatedTemplateBubble(button, event),
-        );
-        event.stopPropagation();
-      };
-
-      try {
-        await act(async () => {
-          root.render(
-            rootKind === "document" ? (
-              <StrictMode>
-                <html>
-                  {createElement("head")}
-                  <body>
-                    <TemplateGrid onPick={onPick} busy={null} />
-                  </body>
-                </html>
-              </StrictMode>
-            ) : (
-              <StrictMode>
-                <TemplateGrid onPick={onPick} busy={null} />
-              </StrictMode>
-            ),
-          );
-        });
-        grid = ownerDocument.querySelector<HTMLUListElement>(
-          '[data-testid="template-grid"]',
-        );
-        button = ownerDocument.querySelector<HTMLButtonElement>(
-          `[data-testid="template-${template.id}"]`,
-        )!;
-        if (!grid || !button) {
-          throw new Error("The shadow-currentTarget grid was not rendered");
-        }
-        grid.addEventListener("click", attack);
-        const nativeEvent = new ownerWindow.MouseEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          button: 0,
-          buttons: 0,
-          detail: 1,
-        });
-        shadowTemplateCurrentTarget(
-          nativeEvent,
-          grid,
-          ownerDocument,
-          rootKind === "document",
-        );
-        await act(async () => {
-          button!.dispatchEvent(nativeEvent);
-        });
-        expect(onPick).not.toHaveBeenCalled();
-
-        grid.removeEventListener("click", attack);
-        ownerDocument.removeEventListener("click", captureAttack, true);
-        await act(async () => {
-          button!.click();
-        });
-        expect(onPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenLastCalledWith(template);
-      } finally {
-        ownerDocument.removeEventListener("click", captureAttack, true);
-        grid?.removeEventListener("click", attack);
-        await act(async () => root.unmount());
-        if (host instanceof ownerWindow.HTMLDivElement) host.remove();
-        frame?.remove();
-      }
-    },
-  );
-
-  it.each(["descriptor", "call"] as const)(
-    "uses the module-captured native getter after %s poisoning",
-    async (poisonKind) => {
-      const descriptor = TEST_EVENT_CURRENT_TARGET_DESCRIPTOR;
-      const trustedCurrentTarget = TEST_EVENT_CURRENT_TARGET;
-      if (!descriptor?.get || !trustedCurrentTarget) {
-        throw new Error("The native currentTarget getter is unavailable");
-      }
-      const host = document.createElement("div");
-      document.body.append(host);
-      const onPick = vi.fn<(template: Template) => void>();
-      const template = PICKER_TEMPLATES[0];
-      host.innerHTML = renderToString(
-        <StrictMode>
-          <TemplateGrid onPick={onPick} busy={null} />
-        </StrictMode>,
-      );
-      const grid = templateGrid(host);
-      const button = templateButton(host, template.id);
-      const getterCallDescriptor = Object.getOwnPropertyDescriptor(
-        descriptor.get,
-        "call",
-      );
-      const poisonedCurrentTarget = (event: Event) => {
-        const actual = trustedCurrentTarget(event);
-        if (
-          actual === document ||
-          actual instanceof HTMLButtonElement
-        ) {
-          return actual;
-        }
-        return grid;
-      };
-      const restoreDescriptor = () => {
-        Object.defineProperty(
-          Event.prototype,
-          "currentTarget",
-          descriptor,
-        );
-      };
-      const restoreCall = () => {
-        if (getterCallDescriptor) {
-          Object.defineProperty(
-            descriptor.get!,
-            "call",
-            getterCallDescriptor,
-          );
-        } else {
-          Reflect.deleteProperty(descriptor.get!, "call");
-        }
-      };
-      if (poisonKind === "descriptor") {
-        Object.defineProperty(Event.prototype, "currentTarget", {
-          ...descriptor,
-          get(this: Event) {
-            return poisonedCurrentTarget(this);
-          },
-        });
-      }
-      let root: ReturnType<typeof hydrateRoot> | null = null;
-      const attack = (event: MouseEvent) => {
-        captureTemplateActivation(button)(
-          fabricatedTemplateBubble(button, event),
-        );
-        event.stopPropagation();
-      };
-      grid.addEventListener("click", attack);
-
-      try {
-        await act(async () => {
-          root = hydrateRoot(
-            host,
-            <StrictMode>
-              <TemplateGrid onPick={onPick} busy={null} />
-            </StrictMode>,
-          );
-        });
-        restoreDescriptor();
-        if (poisonKind === "call") {
-          Object.defineProperty(descriptor.get, "call", {
-            configurable: true,
-            value: (_event: Event) => poisonedCurrentTarget(_event),
-          });
-        }
-        await act(async () => {
-          button.click();
-        });
-        expect(onPick).not.toHaveBeenCalled();
-
-        restoreCall();
-        grid.removeEventListener("click", attack);
-        await act(async () => {
-          button.click();
-        });
-        expect(onPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenLastCalledWith(template);
-      } finally {
-        restoreDescriptor();
-        restoreCall();
-        grid.removeEventListener("click", attack);
-        if (root) await act(async () => root?.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it.each([
-    ["container", "grid"],
-    ["document", "grid"],
-    ["container", "wrapper"],
-    ["document", "wrapper"],
-  ] as const)(
-    "rejects React capture relocated onto the %s-root %s",
-    async (rootKind, relocationKind) => {
-      const frame = document.createElement("iframe");
-      document.body.append(frame);
-      const ownerDocument = frame.contentDocument;
-      const ownerWindow = frame.contentWindow;
-      if (!ownerDocument || !ownerWindow) {
-        throw new Error("The test frame has no document");
-      }
-      const onPick = vi.fn<(template: Template) => void>();
-      const template = PICKER_TEMPLATES[0];
-      const tree =
-        rootKind === "document" ? (
-          <StrictMode>
-            <html>
-              {createElement("head")}
-              <body>
-                <div data-testid="template-root-wrapper">
-                  <TemplateGrid onPick={onPick} busy={null} />
-                </div>
-              </body>
-            </html>
-          </StrictMode>
-        ) : (
-          <StrictMode>
-            <div data-testid="template-root-wrapper">
-              <TemplateGrid onPick={onPick} busy={null} />
-            </div>
-          </StrictMode>
-        );
-      const markup = renderToString(tree);
-      ownerDocument.open();
-      ownerDocument.write(
-        rootKind === "document"
-          ? `<!doctype html>${markup}`
-          : "<!doctype html><html><head></head><body><div id=\"root\"></div></body></html>",
-      );
-      ownerDocument.close();
-      const container =
-        rootKind === "container"
-          ? ownerDocument.querySelector<HTMLDivElement>("#root")
-          : null;
-      if (rootKind === "container" && !container) {
-        throw new Error("The hydration container was not rendered");
-      }
-      const host = container ?? ownerDocument;
-      if (container) container.innerHTML = markup;
-      const grid = ownerDocument.querySelector<HTMLUListElement>(
-        '[data-testid="template-grid"]',
-      );
-      const button = ownerDocument.querySelector<HTMLButtonElement>(
-        `[data-testid="template-${template.id}"]`,
-      );
-      if (!grid || !button) {
-        throw new Error("The server template grid was not rendered");
-      }
-      const wrapper = ownerDocument.querySelector<HTMLDivElement>(
-        '[data-testid="template-root-wrapper"]',
-      );
-      if (!wrapper) {
-        throw new Error("The server template wrapper was not rendered");
-      }
-      const relocatedTarget: HTMLElement =
-        relocationKind === "grid" ? grid : wrapper;
-      const rootTarget: EventTarget = host;
-      const ownAddDescriptor = Object.getOwnPropertyDescriptor(
-        rootTarget,
-        "addEventListener",
-      );
-      const rootAdd = rootTarget.addEventListener.bind(rootTarget);
-      const restoreRootAdd = () => {
-        if (ownAddDescriptor) {
-          Object.defineProperty(
-            rootTarget,
-            "addEventListener",
-            ownAddDescriptor,
-          );
-        } else {
-          Reflect.deleteProperty(rootTarget, "addEventListener");
-        }
-      };
-      Object.defineProperty(rootTarget, "addEventListener", {
-        configurable: true,
-        value: (
-          type: string,
-          listener: EventListenerOrEventListenerObject | null,
-          options?: boolean | AddEventListenerOptions,
-        ) => {
-          if (!listener) return;
-          const capture =
-            options === true ||
-            (typeof options === "object" && options.capture === true);
-          if (type === "click" && capture) {
-            relocatedTarget.addEventListener(type, listener, options);
-          } else {
-            rootAdd(type, listener, options);
-          }
-        },
-      });
-      const attack = (event: MouseEvent) => {
-        captureTemplateActivation(button)(
-          fabricatedTemplateBubble(button, event),
-        );
-        event.stopPropagation();
-      };
-      relocatedTarget.addEventListener("click", attack);
-      let root: ReturnType<typeof hydrateRoot> | null = null;
-
-      try {
-        await act(async () => {
-          root = hydrateRoot(host, tree);
-          restoreRootAdd();
-        });
-        await act(async () => {
-          button.click();
-        });
-        expect(onPick).not.toHaveBeenCalled();
-      } finally {
-        restoreRootAdd();
-        relocatedTarget.removeEventListener("click", attack);
-        if (root) await act(async () => root?.unmount());
-        frame.remove();
-      }
-
-      const freshFrame = document.createElement("iframe");
-      document.body.append(freshFrame);
-      const freshDocument = freshFrame.contentDocument;
-      const freshWindow = freshFrame.contentWindow;
-      if (!freshDocument || !freshWindow) {
-        throw new Error("The fresh test frame has no document");
-      }
-      freshDocument.open();
-      freshDocument.write(
-        "<!doctype html><html><head></head><body></body></html>",
-      );
-      freshDocument.close();
-      const freshHost =
-        rootKind === "document"
-          ? freshDocument
-          : freshDocument.body.appendChild(
-              freshDocument.createElement("div"),
-            );
-      const freshRoot = createRoot(freshHost);
-      try {
-        await act(async () => {
-          freshRoot.render(
-            rootKind === "document" ? (
-              <StrictMode>
-                <html>
-                  {createElement("head")}
-                  <body>
-                    <TemplateGrid onPick={onPick} busy={null} />
-                  </body>
-                </html>
-              </StrictMode>
-            ) : (
-              <StrictMode>
-                <TemplateGrid onPick={onPick} busy={null} />
-              </StrictMode>
-            ),
-          );
-        });
-        const freshButton =
-          freshDocument.querySelector<HTMLButtonElement>(
-            `[data-testid="template-${template.id}"]`,
-          );
-        if (!freshButton) {
-          throw new Error("The fresh template button was not rendered");
-        }
-        await act(async () => {
-          freshButton.click();
-        });
-        expect(onPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenLastCalledWith(template);
-      } finally {
-        await act(async () => freshRoot.unmount());
-        freshFrame.remove();
-      }
-    },
-  );
-
-  it.each(["container", "document"] as const)(
-    "binds native proof to each %s-root dispatch of the same event",
-    async (rootKind) => {
-      const frame = document.createElement("iframe");
-      document.body.append(frame);
-      const ownerDocument = frame.contentDocument;
-      if (!ownerDocument) throw new Error("The test frame has no document");
-      ownerDocument.open();
-      ownerDocument.write(
-        "<!doctype html><html><head></head><body></body></html>",
-      );
-      ownerDocument.close();
-      const ownerWindow = ownerDocument.defaultView;
-      if (!ownerWindow) throw new Error("The test frame has no window");
-      const host =
-        rootKind === "document"
-          ? ownerDocument
-          : ownerDocument.body.appendChild(
-              ownerDocument.createElement("div"),
-            );
-      const root = createRoot(host);
-      const firstPick = vi.fn<(template: Template) => void>();
-      const secondPick = vi.fn<(template: Template) => void>();
-      const template = PICKER_TEMPLATES[0];
-      let firstButton: HTMLButtonElement | null = null;
-      let interruptFirstDispatch = true;
-      const interrupt: EventListener = (event) => {
-        if (
-          interruptFirstDispatch &&
-          event.target === firstButton
-        ) {
-          event.stopImmediatePropagation();
-        }
-      };
-      host.addEventListener("click", interrupt);
-      const tree =
-        rootKind === "document" ? (
-          <StrictMode>
-            <html>
-              {createElement("head")}
-              <body>
-                <button type="button" data-testid="unrelated-dispatch">
-                  Unrelated
-                </button>
-                <section data-testid="first-template-grid">
-                  <TemplateGrid onPick={firstPick} busy={null} />
-                </section>
-                <section data-testid="second-template-grid">
-                  <TemplateGrid onPick={secondPick} busy={null} />
-                </section>
-              </body>
-            </html>
-          </StrictMode>
-        ) : (
-          <StrictMode>
-            <button type="button" data-testid="unrelated-dispatch">
-              Unrelated
-            </button>
-            <section data-testid="first-template-grid">
-              <TemplateGrid onPick={firstPick} busy={null} />
-            </section>
-            <section data-testid="second-template-grid">
-              <TemplateGrid onPick={secondPick} busy={null} />
-            </section>
-          </StrictMode>
-        );
-
-      try {
-        await act(async () => {
-          root.render(tree);
-        });
-        const firstGrid = ownerDocument.querySelector<HTMLElement>(
-          '[data-testid="first-template-grid"]',
-        );
-        const secondGrid = ownerDocument.querySelector<HTMLElement>(
-          '[data-testid="second-template-grid"]',
-        );
-        const unrelated = ownerDocument.querySelector<HTMLButtonElement>(
-          '[data-testid="unrelated-dispatch"]',
-        );
-        firstButton = firstGrid?.querySelector<HTMLButtonElement>(
-          `[data-testid="template-${template.id}"]`,
-        ) ?? null;
-        const secondButton =
-          secondGrid?.querySelector<HTMLButtonElement>(
-            `[data-testid="template-${template.id}"]`,
-          ) ?? null;
-        if (!firstButton || !secondButton || !unrelated) {
-          throw new Error("The dispatch-attempt controls were not rendered");
-        }
-        const reusedEvent = new ownerWindow.MouseEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          button: 0,
-          buttons: 0,
-          detail: 1,
-        });
-        await act(async () => {
-          firstButton!.dispatchEvent(reusedEvent);
-        });
-        expect(firstPick).not.toHaveBeenCalled();
-        expect(secondPick).not.toHaveBeenCalled();
-
-        interruptFirstDispatch = false;
-        await act(async () => {
-          unrelated.dispatchEvent(reusedEvent);
-        });
-        expect(firstPick).not.toHaveBeenCalled();
-        expect(secondPick).not.toHaveBeenCalled();
-
-        await act(async () => {
-          secondButton.dispatchEvent(reusedEvent);
-        });
-        expect(firstPick).not.toHaveBeenCalled();
-        expect(secondPick).toHaveBeenCalledTimes(1);
-        expect(secondPick).toHaveBeenLastCalledWith(template);
-
-        await act(async () => {
-          firstButton!.dispatchEvent(
-            new ownerWindow.MouseEvent("click", {
-              bubbles: true,
-              cancelable: true,
-              button: 0,
-              buttons: 0,
-              detail: 1,
-            }),
-          );
-        });
-        expect(firstPick).toHaveBeenCalledTimes(1);
-        expect(firstPick).toHaveBeenLastCalledWith(template);
-        expect(secondPick).toHaveBeenCalledTimes(1);
-      } finally {
-        host.removeEventListener("click", interrupt);
-        await act(async () => root.unmount());
-        frame.remove();
-      }
-    },
-  );
-
-  it.each(["container", "document"] as const)(
-    "claims one %s-root traversal when the same event reaches the same button twice and releases every barrier on unmount",
-    async (rootKind) => {
-      const frame = document.createElement("iframe");
-      document.body.append(frame);
-      const ownerDocument = frame.contentDocument;
-      if (!ownerDocument) throw new Error("The test frame has no document");
-      ownerDocument.open();
-      ownerDocument.write(
-        "<!doctype html><html><head></head><body></body></html>",
-      );
-      ownerDocument.close();
-      const ownerWindow = ownerDocument.defaultView;
-      if (!ownerWindow) throw new Error("The test frame has no window");
-      const host =
-        rootKind === "document"
-          ? ownerDocument
-          : ownerDocument.body.appendChild(
-              ownerDocument.createElement("div"),
-            );
-      const root = createRoot(host);
-      const onPick = vi.fn<(template: Template) => void>();
-      const template = PICKER_TEMPLATES[0];
-      const renderGrid = (key: string) =>
-        rootKind === "document" ? (
-          <StrictMode>
-            <html>
-              {createElement("head")}
-              <body>
-                <TemplateGrid key={key} onPick={onPick} busy={null} />
-              </body>
-            </html>
-          </StrictMode>
-        ) : (
-          <StrictMode>
-            <TemplateGrid key={key} onPick={onPick} busy={null} />
-          </StrictMode>
-        );
-      let mounted = true;
-
-      try {
-        await act(async () => {
-          root.render(renderGrid("repeated"));
-        });
-        const repeatedButton =
-          ownerDocument.querySelector<HTMLButtonElement>(
-            `[data-testid="template-${template.id}"]`,
-          );
-        if (!repeatedButton) {
-          throw new Error("The repeated-dispatch button was not rendered");
-        }
-        const repeatedEvent = new ownerWindow.MouseEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          button: 0,
-          buttons: 0,
-          detail: 1,
-        });
-        await act(async () => {
-          repeatedButton.dispatchEvent(repeatedEvent);
-          repeatedButton.dispatchEvent(repeatedEvent);
-        });
-        expect(onPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenLastCalledWith(template);
-
-        await act(async () => {
-          root.render(renderGrid("pending-unmount"));
-        });
-        const pendingButton =
-          ownerDocument.querySelector<HTMLButtonElement>(
-            `[data-testid="template-${template.id}"]`,
-          );
-        if (!pendingButton) {
-          throw new Error("The pending-unmount button was not rendered");
-        }
-        const pendingEvent = new ownerWindow.MouseEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          button: 0,
-          buttons: 0,
-          detail: 1,
-        });
-        const unrelatedPick = vi.fn();
-        act(() => {
-          pendingButton.dispatchEvent(pendingEvent);
-          root.unmount();
-          mounted = false;
-          const unrelated = ownerDocument.createElement("button");
-          unrelated.addEventListener("click", unrelatedPick);
-          ownerDocument.body.append(unrelated);
-          unrelated.click();
-        });
-        await act(async () => {});
-        expect(unrelatedPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenCalledTimes(1);
-      } finally {
-        if (mounted) await act(async () => root.unmount());
-        frame.remove();
-      }
-    },
-  );
-
-  it.each(["container", "document"] as const)(
-    "preserves the pending %s-root attempt when a fresh same-stack event is rejected",
-    async (rootKind) => {
-      const frame = document.createElement("iframe");
-      document.body.append(frame);
-      const ownerDocument = frame.contentDocument;
-      if (!ownerDocument) throw new Error("The test frame has no document");
-      ownerDocument.open();
-      ownerDocument.write(
-        "<!doctype html><html><head></head><body></body></html>",
-      );
-      ownerDocument.close();
-      const ownerWindow = ownerDocument.defaultView;
-      if (!ownerWindow) throw new Error("The test frame has no window");
-      const host =
-        rootKind === "document"
-          ? ownerDocument
-          : ownerDocument.body.appendChild(
-              ownerDocument.createElement("div"),
-            );
-      const root = createRoot(host);
-      const onPick = vi.fn<(template: Template) => void>();
-      const first = PICKER_TEMPLATES[0];
-      const second = PICKER_TEMPLATES[1];
-      const renderGrid = (key: string) =>
-        rootKind === "document" ? (
-          <StrictMode>
-            <html>
-              {createElement("head")}
-              <body>
-                <TemplateGrid key={key} onPick={onPick} busy={null} />
-              </body>
-            </html>
-          </StrictMode>
-        ) : (
-          <StrictMode>
-            <TemplateGrid key={key} onPick={onPick} busy={null} />
-          </StrictMode>
-        );
-
-      try {
-        await act(async () => {
-          root.render(renderGrid("pending"));
-        });
-        const firstButton =
-          ownerDocument.querySelector<HTMLButtonElement>(
-            `[data-testid="template-${first.id}"]`,
-          );
-        const secondButton =
-          ownerDocument.querySelector<HTMLButtonElement>(
-            `[data-testid="template-${second.id}"]`,
-          );
-        if (!firstButton || !secondButton) {
-          throw new Error("The pending-attempt buttons were not rendered");
-        }
-        const repeatedEvent = new ownerWindow.MouseEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          button: 0,
-          buttons: 0,
-          detail: 1,
-        });
-        const freshSameStackEvent = new ownerWindow.MouseEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          button: 0,
-          buttons: 0,
-          detail: 1,
-        });
-        let freshDispatched = true;
-        await act(async () => {
-          firstButton.dispatchEvent(repeatedEvent);
-          firstButton.dispatchEvent(repeatedEvent);
-          freshDispatched = secondButton.dispatchEvent(freshSameStackEvent);
-        });
-        expect(freshDispatched).toBe(false);
-        expect(onPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenLastCalledWith(first);
-
-        await act(async () => {
-          root.render(renderGrid("recovery"));
-        });
-        await act(async () => {
-          const recoveryButton =
-            ownerDocument.querySelector<HTMLButtonElement>(
-              `[data-testid="template-${second.id}"]`,
-            );
-          if (!recoveryButton) {
-            throw new Error("The recovery button was not rendered");
-          }
-          recoveryButton.click();
-        });
-        expect(onPick).toHaveBeenCalledTimes(2);
-        expect(onPick).toHaveBeenLastCalledWith(second);
-      } finally {
-        await act(async () => root.unmount());
-        frame.remove();
-      }
-    },
-  );
-
-  it.each(["container", "document"] as const)(
-    "preserves a completed %s-root attempt when its button handler is replayed before finalization",
-    async (rootKind) => {
-      const frame = document.createElement("iframe");
-      document.body.append(frame);
-      const ownerDocument = frame.contentDocument;
-      if (!ownerDocument) throw new Error("The test frame has no document");
-      ownerDocument.open();
-      ownerDocument.write(
-        "<!doctype html><html><head></head><body></body></html>",
-      );
-      ownerDocument.close();
-      const host =
-        rootKind === "document"
-          ? ownerDocument
-          : ownerDocument.body.appendChild(
-              ownerDocument.createElement("div"),
-            );
-      const root = createRoot(host);
-      const onPick = vi.fn<(template: Template) => void>();
-      const first = PICKER_TEMPLATES[0];
-      const second = PICKER_TEMPLATES[1];
-      const renderGrid = (key: string) =>
-        rootKind === "document" ? (
-          <StrictMode>
-            <html>
-              {createElement("head")}
-              <body>
-                <TemplateGrid key={key} onPick={onPick} busy={null} />
-              </body>
-            </html>
-          </StrictMode>
-        ) : (
-          <StrictMode>
-            <TemplateGrid key={key} onPick={onPick} busy={null} />
-          </StrictMode>
-        );
-
-      try {
-        await act(async () => {
-          root.render(renderGrid("replay"));
-        });
-        const button = ownerDocument.querySelector<HTMLButtonElement>(
-          `[data-testid="template-${first.id}"]`,
-        );
-        if (!button) {
-          throw new Error("The handler-replay button was not rendered");
-        }
-        act(() => {
-          const completed = dispatchTemplateClick(button);
-          completed.handler(completed.reactEvent);
-        });
-        await act(async () => {});
-        expect(onPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenLastCalledWith(first);
-
-        await act(async () => {
-          root.render(renderGrid("recovery"));
-        });
-        await act(async () => {
-          const recoveryButton =
-            ownerDocument.querySelector<HTMLButtonElement>(
-              `[data-testid="template-${second.id}"]`,
-            );
-          if (!recoveryButton) {
-            throw new Error("The recovery button was not rendered");
-          }
-          recoveryButton.click();
-        });
-        expect(onPick).toHaveBeenCalledTimes(2);
-        expect(onPick).toHaveBeenLastCalledWith(second);
-      } finally {
-        await act(async () => root.unmount());
-        frame.remove();
-      }
-    },
-  );
-
-  it.each([
-    ["container", "owner window"],
-    ["container", "disconnected node"],
-    ["container", "another document"],
-    ["document", "owner window"],
-    ["document", "disconnected node"],
-    ["document", "another document"],
-  ] as const)(
-    "rejects a completed %s-root traversal when its event is dispatched to %s before finalization",
-    async (rootKind, foreignKind) => {
-      const frame = document.createElement("iframe");
-      const foreignFrame = document.createElement("iframe");
-      document.body.append(frame, foreignFrame);
-      const ownerDocument = frame.contentDocument;
-      const foreignDocument = foreignFrame.contentDocument;
-      if (!ownerDocument || !foreignDocument) {
-        throw new Error("The test frames have no documents");
-      }
-      ownerDocument.open();
-      ownerDocument.write(
-        "<!doctype html><html><head></head><body></body></html>",
-      );
-      ownerDocument.close();
-      foreignDocument.open();
-      foreignDocument.write(
-        "<!doctype html><html><head></head><body></body></html>",
-      );
-      foreignDocument.close();
-      const ownerWindow = ownerDocument.defaultView;
-      if (!ownerWindow) throw new Error("The test frame has no window");
-      const host =
-        rootKind === "document"
-          ? ownerDocument
-          : ownerDocument.body.appendChild(
-              ownerDocument.createElement("div"),
-            );
-      const root = createRoot(host);
-      const onPick = vi.fn<(template: Template) => void>();
-      const foreignPick = vi.fn();
-      const template = PICKER_TEMPLATES[0];
-      const foreignTarget =
-        foreignKind === "owner window"
-          ? ownerWindow
-          : foreignKind === "disconnected node"
-            ? ownerDocument.createElement("button")
-            : foreignDocument.body.appendChild(
-                foreignDocument.createElement("button"),
-              );
-      const recordForeignPick = (event: Event) => {
-        if (event.target === foreignTarget) foreignPick();
-      };
-      foreignTarget.addEventListener("click", recordForeignPick);
-      const tree =
-        rootKind === "document" ? (
-          <StrictMode>
-            <html>
-              {createElement("head")}
-              <body>
-                <TemplateGrid onPick={onPick} busy={null} />
-              </body>
-            </html>
-          </StrictMode>
-        ) : (
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
-          </StrictMode>
-        );
-
-      try {
-        await act(async () => {
-          root.render(tree);
-        });
-        const button = ownerDocument.querySelector<HTMLButtonElement>(
-          `[data-testid="template-${template.id}"]`,
-        );
-        if (!button) {
-          throw new Error("The foreign-dispatch button was not rendered");
-        }
-        const reusedEvent = new ownerWindow.MouseEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          button: 0,
-          buttons: 0,
-          detail: 1,
-        });
-        await act(async () => {
-          button.dispatchEvent(reusedEvent);
-          foreignTarget.dispatchEvent(reusedEvent);
-        });
-        expect(foreignPick).toHaveBeenCalledTimes(1);
-        expect(onPick).not.toHaveBeenCalled();
-
-        await act(async () => {
-          button.dispatchEvent(
-            new ownerWindow.MouseEvent("click", {
-              bubbles: true,
-              cancelable: true,
-              button: 0,
-              buttons: 0,
-              detail: 1,
-            }),
-          );
-        });
-        expect(onPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenLastCalledWith(template);
-      } finally {
-        foreignTarget.removeEventListener("click", recordForeignPick);
-        await act(async () => root.unmount());
-        frame.remove();
-        foreignFrame.remove();
-      }
-    },
-  );
-
-  it.each([
-    ["container", "document"],
-    ["container", "window"],
-    ["document", "document"],
-    ["document", "window"],
-  ] as const)(
-    "finalizes %s-root selection after a later %s cancellation",
-    async (rootKind, cancellationKind) => {
-      const frame = document.createElement("iframe");
-      document.body.append(frame);
-      const ownerDocument = frame.contentDocument;
-      if (!ownerDocument) throw new Error("The test frame has no document");
-      ownerDocument.open();
-      ownerDocument.write(
-        "<!doctype html><html><head></head><body></body></html>",
-      );
-      ownerDocument.close();
-      const ownerWindow = ownerDocument.defaultView;
-      if (!ownerWindow) throw new Error("The test frame has no window");
-      const host =
-        rootKind === "document"
-          ? ownerDocument
-          : ownerDocument.body.appendChild(
-              ownerDocument.createElement("div"),
-            );
-      const root = createRoot(host);
-      const onPick = vi.fn<(template: Template) => void>();
-      const template = PICKER_TEMPLATES[0];
-      const renderGrid = (key: string) =>
-        rootKind === "document" ? (
-          <StrictMode>
-            <html>
-              {createElement("head")}
-              <body>
-                <TemplateGrid
-                  key={key}
-                  onPick={onPick}
-                  busy={null}
-                />
-              </body>
-            </html>
-          </StrictMode>
-        ) : (
-          <StrictMode>
-            <TemplateGrid
-              key={key}
-              onPick={onPick}
-              busy={null}
-            />
-          </StrictMode>
-        );
-      const cancellationTarget: EventTarget =
-        cancellationKind === "document"
-          ? ownerDocument
-          : ownerWindow;
-      const cancel: EventListener = (event) => {
-        event.preventDefault();
-      };
-
-      try {
-        await act(async () => {
-          root.render(renderGrid("cancelled"));
-        });
-        cancellationTarget.addEventListener("click", cancel);
-        let dispatched = true;
-        await act(async () => {
-          const button =
-            ownerDocument.querySelector<HTMLButtonElement>(
-              `[data-testid="template-${template.id}"]`,
-            );
-          if (!button) {
-            throw new Error("The cancelled template button was not rendered");
-          }
-          dispatched = button.dispatchEvent(
-            new ownerWindow.MouseEvent("click", {
-              bubbles: true,
-              cancelable: true,
-              button: 0,
-              buttons: 0,
-              detail: 1,
-            }),
-          );
-        });
-        expect(dispatched).toBe(false);
-        expect(onPick).not.toHaveBeenCalled();
-
-        cancellationTarget.removeEventListener("click", cancel);
-        await act(async () => {
-          const button =
-            ownerDocument.querySelector<HTMLButtonElement>(
-              `[data-testid="template-${template.id}"]`,
-            );
-          if (!button) {
-            throw new Error("The mouse recovery button was not rendered");
-          }
-          button.dispatchEvent(
-            new ownerWindow.MouseEvent("click", {
-              bubbles: true,
-              cancelable: true,
-              button: 0,
-              buttons: 0,
-              detail: 1,
-            }),
-          );
-        });
-        expect(onPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenLastCalledWith(template);
-
-        await act(async () => {
-          root.render(renderGrid("keyboard"));
-        });
-        await act(async () => {
-          const button =
-            ownerDocument.querySelector<HTMLButtonElement>(
-              `[data-testid="template-${template.id}"]`,
-            );
-          if (!button) {
-            throw new Error("The keyboard recovery button was not rendered");
-          }
-          button.dispatchEvent(
-            new ownerWindow.MouseEvent("click", {
-              bubbles: true,
-              cancelable: true,
-              button: 0,
-              buttons: 0,
-              detail: 0,
-            }),
-          );
-        });
-        expect(onPick).toHaveBeenCalledTimes(2);
-        expect(onPick).toHaveBeenLastCalledWith(template);
-      } finally {
-        cancellationTarget.removeEventListener("click", cancel);
-        await act(async () => root.unmount());
-        frame.remove();
-      }
-    },
-  );
-
-  it("uses the trusted native cancellation flag when an own getter reports false", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-    let button!: HTMLButtonElement;
-    const attack = (event: MouseEvent) => {
-      event.preventDefault();
-      captureTemplateActivation(button)(
-        fabricatedTemplateBubble(button, event),
-      );
-    };
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const grid = templateGrid(host);
-      button = templateButton(host, template.id);
-      grid.addEventListener("click", attack);
-      const nativeEvent = new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-        buttons: 0,
-        detail: 1,
-      });
-      Object.defineProperty(nativeEvent, "defaultPrevented", {
-        configurable: true,
-        get: () => false,
-      });
-      let dispatched = true;
-      await act(async () => {
-        dispatched = button.dispatchEvent(nativeEvent);
-      });
-      expect(dispatched).toBe(false);
-      expect(onPick).not.toHaveBeenCalled();
-
-      grid.removeEventListener("click", attack);
-      await act(async () => {
-        button.click();
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("authenticates the exact native event when React owns the owner document", async () => {
-    const frame = document.createElement("iframe");
-    document.body.append(frame);
-    const ownerDocument = frame.contentDocument;
-    if (!ownerDocument) throw new Error("The test frame has no document");
-    ownerDocument.open();
-    ownerDocument.write(
-      "<!doctype html><html><head></head><body></body></html>",
-    );
-    ownerDocument.close();
-    const root = createRoot(ownerDocument);
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <html>
-              {createElement("head")}
-              <body>
-                <TemplateGrid onPick={onPick} busy={null} />
-              </body>
-            </html>
-          </StrictMode>,
-        );
-      });
-      const button = ownerDocument.querySelector<HTMLButtonElement>(
-        `[data-testid="template-${template.id}"]`,
-      );
-      if (!button) throw new Error("The document-root card was not rendered");
-      await act(async () => {
-        button.click();
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      await act(async () => root.unmount());
-      frame.remove();
-    }
-  });
-
-  it("publishes parser-canonical SVG namespaces after server rendering and hydration", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-    host.innerHTML = renderToString(
+    render(
       <StrictMode>
         <TemplateGrid onPick={onPick} busy={null} />
       </StrictMode>,
     );
-    const serverIcon = templateButton(host, template.id).querySelector("svg");
-    expect(serverIcon?.getAttributeNode("xmlns")?.namespaceURI).toBe(
-      "http://www.w3.org/2000/xmlns/",
-    );
-    let root!: ReturnType<typeof hydrateRoot>;
-
-    try {
-      await act(async () => {
-        root = hydrateRoot(
-          host,
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      await act(async () => {
-        templateButton(host, template.id).click();
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
+    await click(button(PICKER_TEMPLATES[0].id));
+    await click(button(PICKER_TEMPLATES[2].id));
+    expect(onPick.mock.calls).toEqual([[PICKER_TEMPLATES[0]], [PICKER_TEMPLATES[2]]]);
   });
 
-  it("retires callback, busy and compact generations while preserving busy presentation", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const stalePick = vi.fn<(template: Template) => void>();
-    const currentPick = vi.fn<(template: Template) => void>();
-    const first = PICKER_TEMPLATES[0];
-    const second = PICKER_TEMPLATES[1];
+  it("calls the newest onPick after the parent renders again", async () => {
+    const stale = vi.fn<(template: Template) => void>();
+    const current = vi.fn<(template: Template) => void>();
+    const { rerender } = render(<TemplateGrid onPick={stale} busy={null} />);
+    rerender(<TemplateGrid onPick={current} busy={null} />);
+    await click(button(PICKER_TEMPLATES[0].id));
+    expect(stale).not.toHaveBeenCalled();
+    expect(current).toHaveBeenCalledTimes(1);
+  });
 
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={stalePick} busy={null} compact={false} />
-          </StrictMode>,
-        );
-      });
-      const reusedButton = templateButton(host, first.id);
-      const staleHandler = captureTemplateActivation(reusedButton);
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid
-              onPick={currentPick}
-              busy={second.id}
-              compact
-            />
-          </StrictMode>,
-        );
-      });
-      expect(templateButton(host, first.id)).toBe(reusedButton);
-      expect(templateGrid(host)).toHaveClass(
-        "grid-cols-2",
-        "sm:grid-cols-3",
-        "lg:grid-cols-4",
-      );
-      for (const template of PICKER_TEMPLATES) {
-        expect(templateButton(host, template.id)).toBeDisabled();
+  it("while one template is being created: every card is disabled, only that one is busy and spins, and a click does nothing", async () => {
+    const busy = PICKER_TEMPLATES[1];
+    const { onPick } = renderGrid({ busy: busy.id });
+    for (const template of PICKER_TEMPLATES) {
+      expect(button(template.id)).toBeDisabled();
+      const spinning = button(template.id).querySelector("svg.animate-spin") !== null;
+      if (template.id === busy.id) {
+        expect(button(template.id)).toHaveAttribute("aria-busy", "true");
+        expect(spinning).toBe(true);
+      } else {
+        expect(button(template.id)).not.toHaveAttribute("aria-busy");
+        expect(spinning).toBe(false);
       }
-      const busyButton = templateButton(host, second.id);
-      expect(busyButton).toHaveAttribute("aria-busy", "true");
-      expect(busyButton.querySelector("svg")).toHaveClass("animate-spin");
-      expectInertTemplateCall(
-        staleHandler,
-        fabricatedTemplateClick(reusedButton),
-        host,
-      );
-      await act(async () => {
-        busyButton.click();
-      });
-      expectInertTemplateCall(
-        captureTemplateActivation(busyButton),
-        fabricatedTemplateClick(busyButton),
-        host,
-      );
-      expect(stalePick).not.toHaveBeenCalled();
-      expect(currentPick).not.toHaveBeenCalled();
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={currentPick} busy={null} compact />
-          </StrictMode>,
-        );
-      });
-      const idleButton = templateButton(host, second.id);
-      expect(idleButton).toBeEnabled();
-      expect(idleButton).not.toHaveAttribute("aria-busy");
-      expect(idleButton.querySelector("svg")).not.toHaveClass(
-        "animate-spin",
-      );
-      await act(async () => {
-        dispatchTemplateClick(idleButton);
-      });
-      expect(stalePick).not.toHaveBeenCalled();
-      expect(currentPick).toHaveBeenCalledTimes(1);
-      expect(currentPick).toHaveBeenLastCalledWith(second);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
+      await click(button(template.id));
     }
+    expect(onPick).not.toHaveBeenCalled();
   });
 
-  it.each(["id", "name", "description", "icon"] as const)(
-    "latches template %s primitive drift and restoration",
-    async (field) => {
-      const host = document.createElement("div");
-      document.body.append(host);
-      const root = createRoot(host);
-      const onPick = vi.fn<(template: Template) => void>();
-      const template = PICKER_TEMPLATES[0];
-      const original = {
-        id: template.id,
-        name: template.name,
-        description: template.description,
-        icon: template.icon,
-      };
-
-      try {
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <TemplateGrid onPick={onPick} busy={null} />
-            </StrictMode>,
-          );
-        });
-        const button = templateButton(host, original.id);
-        if (field === "id") template.id = `${original.id}-changed`;
-        else if (field === "name") {
-          template.name = `${original.name} changed`;
-        } else if (field === "description") {
-          template.description = `${original.description} changed`;
-        } else {
-          template.icon = original.icon === "Scale" ? "File" : "Scale";
-        }
-        await act(async () => {
-          dispatchTemplateClick(button);
-        });
-        Object.assign(template, original);
-        await act(async () => {
-          dispatchTemplateClick(button);
-        });
-        expect(onPick).not.toHaveBeenCalled();
-
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <TemplateGrid
-                key={`recovered-${field}`}
-                onPick={onPick}
-                busy={null}
-              />
-            </StrictMode>,
-          );
-        });
-        await act(async () => {
-          dispatchTemplateClick(templateButton(host, original.id));
-        });
-        expect(onPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenLastCalledWith(template);
-      } finally {
-        Object.assign(template, original);
-        await act(async () => root.unmount());
-        host.remove();
-      }
-    },
-  );
-
-  it("latches exact template object and ordered identity drift until a fresh render", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const originals = [...PICKER_TEMPLATES];
-    const first = originals[0];
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const identityButton = templateButton(host, first.id);
-      const equalTemplate = { ...first };
-      PICKER_TEMPLATES.splice(
-        0,
-        PICKER_TEMPLATES.length,
-        equalTemplate,
-        ...originals.slice(1),
-      );
-      await act(async () => {
-        dispatchTemplateClick(identityButton);
-      });
-      PICKER_TEMPLATES.splice(0, PICKER_TEMPLATES.length, ...originals);
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const reorderedButton = templateButton(host, first.id);
-      PICKER_TEMPLATES.splice(
-        0,
-        PICKER_TEMPLATES.length,
-        ...originals.slice(1),
-        originals[0],
-      );
-      await act(async () => {
-        dispatchTemplateClick(reorderedButton);
-      });
-      PICKER_TEMPLATES.splice(0, PICKER_TEMPLATES.length, ...originals);
-      expect(onPick).not.toHaveBeenCalled();
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid key="recovered" onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      await act(async () => {
-        dispatchTemplateClick(templateButton(host, first.id));
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(first);
-    } finally {
-      PICKER_TEMPLATES.splice(0, PICKER_TEMPLATES.length, ...originals);
-      await act(async () => root.unmount());
-      host.remove();
-    }
+  it("is usable again when the create is over", async () => {
+    const { onPick, rerender } = renderGrid({ busy: PICKER_TEMPLATES[1].id });
+    rerender(<TemplateGrid onPick={onPick} busy={null} />);
+    expect(button(PICKER_TEMPLATES[1].id)).toBeEnabled();
+    expect(button(PICKER_TEMPLATES[1].id).querySelector("svg.animate-spin")).toBeNull();
+    await click(button(PICKER_TEMPLATES[1].id));
+    expect(onPick).toHaveBeenCalledTimes(1);
   });
 
-  it.each([
-    "subtree mutation",
-    "card reorder",
-    "grid detach",
-    "higher ancestor detach",
-    "higher ancestor disabled state",
-  ] as const)(
-    "latches %s and restoration, then permits a fresh exact successor",
-    async (scenario) => {
-      const outer = document.createElement("section");
-      const host = document.createElement("div");
-      outer.append(host);
-      document.body.append(outer);
-      const root = createRoot(host);
-      const onPick = vi.fn<(template: Template) => void>();
-      const template = PICKER_TEMPLATES[0];
+  it("uses the narrow column layout when compact and the wide one otherwise", async () => {
+    const { rerender, onPick } = renderGrid({ compact: true });
+    expect(screen.getByTestId("template-grid")).toHaveClass("grid", "gap-3", "grid-cols-2", "sm:grid-cols-3", "lg:grid-cols-4");
+    rerender(<TemplateGrid onPick={onPick} busy={null} />);
+    expect(screen.getByTestId("template-grid")).toHaveClass("grid", "gap-3", "sm:grid-cols-2", "lg:grid-cols-3");
+    expect(screen.getByTestId("template-grid")).not.toHaveClass("grid-cols-2");
+  });
+});
 
-      try {
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <TemplateGrid onPick={onPick} busy={null} />
-            </StrictMode>,
-          );
-        });
-        const grid = templateGrid(host);
-        const button = templateButton(host, template.id);
-        const originalMarkup = host.innerHTML;
-        if (scenario === "subtree mutation") {
-          const name = button.children.item(1)!;
-          const text = name.textContent;
-          name.textContent = "Changed and restored";
-          name.textContent = text;
-        } else if (scenario === "card reorder") {
-          const firstCard = grid.children.item(0)!;
-          const secondCard = grid.children.item(1)!;
-          grid.append(firstCard);
-          grid.insertBefore(firstCard, secondCard);
-        } else if (scenario === "grid detach") {
-          const parent = grid.parentNode!;
-          const next = grid.nextSibling;
-          grid.remove();
-          parent.insertBefore(grid, next);
-        } else if (scenario === "higher ancestor detach") {
-          const parent = outer.parentNode!;
-          const next = outer.nextSibling;
-          outer.remove();
-          parent.insertBefore(outer, next);
-        } else {
-          outer.setAttribute("inert", "");
-          outer.removeAttribute("inert");
-        }
-        expect(host.innerHTML).toBe(originalMarkup);
-        await act(async () => {
-          dispatchTemplateClick(button);
-        });
-        expect(onPick).not.toHaveBeenCalled();
+describe("dashboard New from template dialog (issue 2362)", () => {
+  async function openDialog() {
+    await click(screen.getByTestId("new-from-template"));
+    return within(screen.getByRole("dialog"));
+  }
 
-        await act(async () => {
-          root.render(
-            <StrictMode>
-              <TemplateGrid
-                key={`recovered-${scenario}`}
-                onPick={onPick}
-                busy={null}
-              />
-            </StrictMode>,
-          );
-        });
-        await act(async () => {
-          dispatchTemplateClick(templateButton(host, template.id));
-        });
-        expect(onPick).toHaveBeenCalledTimes(1);
-        expect(onPick).toHaveBeenLastCalledWith(template);
-      } finally {
-        await act(async () => root.unmount());
-        outer.remove();
-      }
-    },
-  );
+  it("creates the picked template from the dialog and goes to the new document", async () => {
+    const pending = deferred<CreateResponse>();
+    createDocument.mockReturnValueOnce(pending.promise);
+    renderDashboard();
+    const dialog = await openDialog();
 
-  it("ignores genuinely nonadjacent ancestor churn", async () => {
-    const outer = document.createElement("section");
-    const firstFarSibling = document.createElement("div");
-    const secondFarSibling = document.createElement("div");
-    const host = document.createElement("div");
-    outer.append(firstFarSibling, secondFarSibling, host);
-    document.body.append(outer);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const nonadjacent = document.createElement("aside");
-      outer.prepend(nonadjacent);
-      nonadjacent.remove();
-      await act(async () => {
-        dispatchTemplateClick(templateButton(host, template.id));
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      await act(async () => root.unmount());
-      outer.remove();
-    }
+    await click(dialog.getByTestId("template-meeting-notes"));
+    expect(createDocument).toHaveBeenCalledTimes(1);
+    expect(createDocument).toHaveBeenLastCalledWith({ template: "meeting-notes" });
+    expect(dialog.getByTestId("template-meeting-notes")).toHaveAttribute("aria-busy", "true");
+    await act(async () => {
+      pending.resolve({ document: { id: "from-template", title: "Meeting notes" } });
+      await pending.promise;
+    });
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenLastCalledWith("/d/from-template");
   });
 
-  it("keeps an equal-looking remount distinct from stale handlers and late refs", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const template = PICKER_TEMPLATES[0];
+  it("still creates when the page gains an element next to the dialog after it opened", async () => {
+    createDocument.mockReturnValueOnce(new Promise(() => {}));
+    renderDashboard();
+    const dialog = await openDialog();
+    await act(async () => {
+      const guard = document.createElement("span");
+      guard.setAttribute("data-radix-focus-guard", "");
+      screen.getByRole("dialog").after(guard);
+      await Promise.resolve();
+    });
 
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid key="a" onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const oldMarkup = host.innerHTML;
-      const oldButton = templateButton(host, template.id);
-      const staleHandler = captureTemplateActivation(oldButton);
-      const staleRefs = templateRefBindings(host);
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid key="b" onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const currentButton = templateButton(host, template.id);
-      expect(currentButton).not.toBe(oldButton);
-      expect(oldButton.isConnected).toBe(false);
-      expect(host.innerHTML).toBe(oldMarkup);
-      await act(async () => {
-        staleRefs[1].ref(currentButton.parentElement);
-        staleRefs[1].ref(null);
-      });
-      await act(async () => {
-        dispatchTemplateClick(currentButton, currentButton, (_original, event) => {
-          staleHandler(event);
-        });
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(template);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
+    await click(dialog.getByTestId("template-design-doc"));
+    expect(createDocument).toHaveBeenCalledTimes(1);
+    expect(createDocument).toHaveBeenLastCalledWith({ template: "design-doc" });
   });
 
-  it("rejects crossed rows and event wrappers without poisoning either current card", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const first = PICKER_TEMPLATES[0];
-    const second = PICKER_TEMPLATES[1];
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const firstButton = templateButton(host, first.id);
-      const firstHandler = captureTemplateActivation(firstButton);
-      let firstEvent: unknown;
-      await act(async () => {
-        firstEvent = dispatchTemplateClick(
-          templateButton(host, second.id),
-          templateButton(host, second.id),
-          (_original, event) => {
-            firstHandler(event);
-          },
-        ).reactEvent;
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(second);
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} compact={false} />
-          </StrictMode>,
-        );
-      });
-      const currentFirst = templateButton(host, first.id);
-      const currentHandler = captureTemplateActivation(currentFirst);
-      expectInertTemplateCall(currentHandler, firstEvent, host);
-      expectInertTemplateCall(
-        currentHandler,
-        fabricatedTemplateClick(
-          currentFirst,
-          templateButton(host, second.id),
-        ),
-        host,
-      );
-      await act(async () => {
-        dispatchTemplateClick(currentFirst);
-      });
-      expect(onPick).toHaveBeenCalledTimes(2);
-      expect(onPick).toHaveBeenLastCalledWith(first);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
+  it("shows the narrow grid on the empty page and the wide grid in the dialog", async () => {
+    renderDashboard(undefined, []);
+    expect(within(screen.getByTestId("empty-state")).getByTestId("template-grid")).toHaveClass("grid-cols-2", "lg:grid-cols-4");
+    const dialog = await openDialog();
+    expect(dialog.getByTestId("template-grid")).toHaveClass("sm:grid-cols-2", "lg:grid-cols-3");
+    expect(dialog.getByTestId("template-grid")).not.toHaveClass("grid-cols-2");
   });
 
-  it("claims publication, row, wrapper and native event before reentrant or repeated activation", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const first = PICKER_TEMPLATES[0];
-    const second = PICKER_TEMPLATES[1];
-    let liveHandler: CapturedReactClick | null = null;
-    let liveEvent: unknown = null;
-
-    try {
-      onPick.mockImplementationOnce(() => {
-        liveHandler?.(liveEvent);
-      });
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid onPick={onPick} busy={null} />
-          </StrictMode>,
-        );
-      });
-      const button = templateButton(host, first.id);
-      const handler = captureTemplateActivation(button);
-      expectInertTemplateCall(
-        handler,
-        fabricatedTemplateClick(button),
-        host,
-      );
-      let accepted!: ReturnType<typeof dispatchTemplateClick>;
-      await act(async () => {
-        accepted = dispatchTemplateClick(
-          button,
-          button,
-          (original, event) => {
-            liveHandler = original;
-            liveEvent = event;
-          },
-        );
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(first);
-      expectInertTemplateCall(accepted.handler, accepted.reactEvent, host);
-      await act(async () => {
-        button.click();
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <TemplateGrid
-              key="successor"
-              onPick={onPick}
-              busy={null}
-            />
-          </StrictMode>,
-        );
-      });
-      const successor = templateButton(host, second.id);
-      expectInertTemplateCall(
-        accepted.handler,
-        fabricatedTemplateClick(successor),
-        host,
-      );
-      const secondary = new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        button: 1,
-        buttons: 0,
-        detail: 1,
-      });
-      await act(async () => {
-        successor.dispatchEvent(secondary);
-      });
-      expect(onPick).toHaveBeenCalledTimes(1);
-      await act(async () => {
-        dispatchTemplateClick(successor);
-      });
-      expect(onPick).toHaveBeenCalledTimes(2);
-      expect(onPick).toHaveBeenLastCalledWith(second);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
-  it("holds mount-wide delivery while a callback synchronously publishes and clicks successor B", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onPick = vi.fn<(template: Template) => void>();
-    const nestedClick = vi.fn();
-    const first = PICKER_TEMPLATES[0];
-    const second = PICKER_TEMPLATES[1];
-
-    function ReentrantGrid() {
-      const [compact, setCompact] = useState(false);
-      return (
-        <TemplateGrid
-          onPick={(template) => {
-            onPick(template);
-            if (!compact) {
-              flushSync(() => setCompact(true));
-              nestedClick();
-              templateButton(host, second.id).click();
-            }
-          }}
-          busy={null}
-          compact={compact}
-        />
-      );
-    }
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <ReentrantGrid />
-          </StrictMode>,
-        );
-      });
-      await act(async () => {
-        templateButton(host, first.id).click();
-      });
-      expect(nestedClick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenCalledTimes(1);
-      expect(onPick).toHaveBeenLastCalledWith(first);
-
-      await act(async () => {
-        templateButton(host, second.id).click();
-      });
-      expect(onPick).toHaveBeenCalledTimes(2);
-      expect(onPick).toHaveBeenLastCalledWith(second);
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
+  it("makes one document for a double click", async () => {
+    createDocument.mockReturnValueOnce(new Promise(() => {}));
+    renderDashboard();
+    const dialog = await openDialog();
+    const card = dialog.getByTestId("template-meeting-notes");
+    await act(async () => {
+      card.click();
+      card.click();
+      await Promise.resolve();
+    });
+    expect(createDocument).toHaveBeenCalledTimes(1);
   });
 });
 
