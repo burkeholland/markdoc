@@ -9,7 +9,6 @@ import { TEXT_KEY } from "@/server/collab/hocuspocus";
 import { contentHash } from "@/server/export/html";
 import { rememberCleanText } from "@/server/agent-events";
 import { computeStats } from "@/editor/stats";
-import { warnTail } from "@/server/warnings";
 import { WriteTurn } from "@/server/large-write";
 
 type Params = { params: Promise<{ id: string }> };
@@ -53,11 +52,11 @@ const putSchema = z.object({
 export const PUT = handler(async (req: Request, { params }: Params) => {
   const { id } = await params;
   const { user } = await requireAccess(id, "edit");
-  // A large body takes its turn before it is read (one large write at a time, two per user: see large-write.ts).
+  // Every whole-document replacement takes a turn, regardless of size.
   const write = await WriteTurn.begin(req, user!.id);
   try {
+    await write.force();
     const body = await readJson(req, (d) => putSchema.parse(d));
-    await write.sized(body.content.length);
     const expected = readPrecondition(req, body);
     let changed = false;
     let chars = 0;
@@ -78,24 +77,19 @@ export const PUT = handler(async (req: Request, { params }: Params) => {
       hashAfter = contentHash(cleanTextOf(doc));
     });
     if (changed) void recordEdit(id, activityActor(user!), chars).catch((err) => console.error("[activity] edit failed", err));
-    const { tail, answer } = warnTail("content");
     if (changed && (body.message || user!.agent)) {
-      // The text is already live (broadcast to every editor, irrevocable) and its hash known, so a version that
-      // cannot be saved — e.g. `(document_id, number)` colliding with the collab auto-version or another agent's
-      // write — is logged and reported as a warning on the 200; a 500 would hide the hash and make the agent's
-      // same-content retry answer 409.
-      await tail("version-not-saved", () =>
-        addVersion({
-          documentId: id,
-          content: body.content,
-          kind: body.message ? "named" : "auto",
-          title: body.message ?? (user!.agent ? `Edited by ${user!.agent}` : null),
-          createdBy: user!.id,
-          createdByName: actorName(user),
-        }),
-      );
+      // A 200 acknowledges both the live text and its audit version. Keep the turn until the version is durable;
+      // if it cannot be recorded, fail the request explicitly instead of returning success for an incomplete write.
+      await addVersion({
+        documentId: id,
+        content: body.content,
+        kind: body.message ? "named" : "auto",
+        title: body.message ?? (user!.agent ? `Edited by ${user!.agent}` : null),
+        createdBy: user!.id,
+        createdByName: actorName(user),
+      });
     }
-    return json(answer({ ok: true, changed, contentHash: hashAfter }));
+    return json({ ok: true, changed, contentHash: hashAfter });
   } finally {
     await write.end();
   }

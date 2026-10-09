@@ -17,6 +17,7 @@ vi.mock("@/server/documents", async (importOriginal) => {
 
 const { getDb, schema } = await import("@/server/db");
 const { createDocument, addVersion, listVersions } = await import("@/server/documents");
+const { largeWrites } = await import("@/server/large-write");
 const content = await import("@/app/api/documents/[id]/content/route");
 const suggest = await import("@/app/api/documents/[id]/suggest/route");
 const suggestions = await import("@/app/api/documents/[id]/suggestions/route");
@@ -101,12 +102,7 @@ describe("ifContentHash / If-Match on PUT /content, PATCH /content and POST /sug
     expect(again.status).toBe(200);
   });
 
-  /**
-   * The text is live the moment the diff is applied, so a version row that cannot be written afterwards
-   * (a `(document_id, number)` collision with the collab auto-version or another agent) must not turn into a
-   * 500: the agent would have no hash, and its same-content retry with the hash it read would be a 409.
-   */
-  it("a version that cannot be saved is a warning on the 200, not a 500: the text is live, the hash is returned and the same-hash retry is a no-op", async () => {
+  it("a version that cannot be saved fails the request instead of acknowledging an incomplete write", async () => {
     await freshDoc();
     actor = agent;
     const { contentHash: h1, clean } = await read();
@@ -116,35 +112,62 @@ describe("ifContentHash / If-Match on PUT /content, PATCH /content and POST /sug
     vi.mocked(addVersion).mockRejectedValueOnce(new Error('duplicate key value violates unique constraint "versions_document_id_number_idx"'));
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     let res: Response;
-    let logged: unknown[][];
     try {
       res = await call(content.PUT, "PUT", { content: next, message: "Agent rewrite", ifContentHash: h1 });
-      logged = errors.mock.calls.filter((c) => typeof c[0] === "string" && c[0].startsWith("[content]"));
     } finally {
       errors.mockRestore();
     }
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; changed: boolean; contentHash: string; warnings?: string[] };
-    expect(body).toEqual({ ok: true, changed: true, contentHash: expect.stringMatching(/^[0-9a-f]{64}$/), warnings: ["version-not-saved"] });
-    expect(body.contentHash).not.toBe(h1);
-    expect(logged).toEqual([["[content] version-not-saved", expect.any(Error)]]);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Unexpected error" });
 
     const after = await read();
     expect(after.clean).toBe(next);
-    expect(after.contentHash).toBe(body.contentHash);
+    expect(after.contentHash).not.toBe(h1);
     expect((await listVersions(docId)).length).toBe(versionsBefore);
 
-    // The retry an agent makes with the hash it was given lands as a no-op — not the 409 a 500 would have led to.
-    const retry = await call(content.PUT, "PUT", { content: next, message: "Agent rewrite", ifContentHash: body.contentHash });
+    // A failed versioned write returns no success hash. The caller must re-read before retrying.
+    const staleRetry = await call(content.PUT, "PUT", { content: next, message: "Agent rewrite", ifContentHash: h1 });
+    expect(staleRetry.status).toBe(409);
+    const retry = await call(content.PUT, "PUT", { content: next, message: "Agent rewrite", ifContentHash: after.contentHash });
     expect(retry.status).toBe(200);
-    expect(await retry.json()).toEqual({ ok: true, changed: false, contentHash: body.contentHash });
+    expect(await retry.json()).toEqual({ ok: true, changed: false, contentHash: after.contentHash });
     expect((await listVersions(docId)).length).toBe(versionsBefore);
 
     // A version that saves normally still does, without warnings.
-    const named = await call(content.PUT, "PUT", { content: next + "\nClosing line.\n", message: "Second rewrite", ifContentHash: body.contentHash });
+    const named = await call(content.PUT, "PUT", { content: next + "\nClosing line.\n", message: "Second rewrite", ifContentHash: after.contentHash });
     expect(named.status).toBe(200);
     expect(await named.json()).toEqual({ ok: true, changed: true, contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect((await listVersions(docId)).map((v) => v.title)).toContain("Second rewrite");
+  });
+
+  it("holds the write turn until the version has been saved", async () => {
+    await freshDoc();
+    actor = agent;
+    const { contentHash, clean } = await read();
+    const actual = await vi.importActual<typeof import("@/server/documents")>("@/server/documents");
+    let started!: () => void;
+    let finish!: () => void;
+    const saving = new Promise<void>((resolve) => (finish = resolve));
+    const saveStarted = new Promise<void>((resolve) => (started = resolve));
+    vi.mocked(addVersion).mockImplementationOnce(async (input, tx) => {
+      started();
+      await saving;
+      return actual.addVersion(input, tx);
+    });
+    let answered = false;
+    const pending = call(content.PUT, "PUT", { content: clean + "\nVersioned line.\n", message: "Held version", ifContentHash: contentHash }).then((response) => {
+      answered = true;
+      return response;
+    });
+    await saveStarted;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(answered).toBe(false);
+    expect(largeWrites.placesOf(agent.id)).toBe(1);
+    expect(largeWrites.runningCount).toBe(1);
+    finish();
+    expect((await pending).status).toBe(200);
+    expect(largeWrites.placesOf(agent.id)).toBe(0);
+    expect(largeWrites.runningCount).toBe(0);
   });
 
   it("If-Match header (quoted) works like the body field; a weak W/ tag never matches (RFC 9110)", async () => {

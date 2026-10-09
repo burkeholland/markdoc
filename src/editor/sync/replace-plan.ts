@@ -18,7 +18,8 @@ import { applyOps, diffOps, type TextOp } from "./text-diff";
  *
  * Everything but the character diff is linear in the two texts: the scan for what both ends have in
  * common, cutting into at most `maxPieces` pieces, one hash lookup per piece, and the longest run of
- * anchors in order (n log n in the number of anchors).
+ * anchors in order (n log n in the number of anchors). When there are more natural pieces than the
+ * bound, adjacent lines or words are grouped before anchor discovery instead of abandoning anchors.
  *
  * The edits always turn the old text into the new one exactly; only how finely they are cut differs. A
  * replace whose changed part is small (product at most `maxExactProduct`) gets `diffOps` of the two whole
@@ -92,25 +93,47 @@ function endsWord(code: number): boolean {
 }
 
 /**
- * Where the pieces of `text[from, to)` begin, plus `to` at the end: lines (tier 0, a piece ends after its
- * line feed) or words (tier 1, a piece is a word with the white space after it). `null` as soon as there
- * are more than `most` pieces.
+ * Number of natural pieces in `text[from, to)`: lines (tier 0, a piece ends after its line feed) or words
+ * (tier 1, a piece is a word with the white space after it).
  */
-function cut(text: string, from: number, to: number, tier: number, most: number): number[] | null {
+function countPieces(text: string, from: number, to: number, tier: number): number {
+  let count = 1;
+  if (tier === 0) {
+    for (let at = text.indexOf("\n", from); at !== -1 && at + 1 < to; at = text.indexOf("\n", at + 1)) count++;
+  } else {
+    let ended = false;
+    for (let at = from; at < to; at++) {
+      const ends = endsWord(text.charCodeAt(at));
+      if (ended && !ends) count++;
+      ended = ends;
+    }
+  }
+  return count;
+}
+
+/**
+ * Where grouped pieces begin, plus `to` at the end. `stride` adjacent natural pieces become one bounded
+ * piece, preserving anchor discovery when the natural line or word count is above `maxPieces`.
+ */
+function cut(text: string, from: number, to: number, tier: number, stride: number, most: number): number[] | null {
   const starts = [from];
+  let piece = 0;
+  const boundary = (at: number) => {
+    piece++;
+    if (piece % stride !== 0) return true;
+    if (starts.length >= most) return false;
+    starts.push(at);
+    return true;
+  };
   if (tier === 0) {
     for (let at = text.indexOf("\n", from); at !== -1 && at + 1 < to; at = text.indexOf("\n", at + 1)) {
-      if (starts.length >= most) return null;
-      starts.push(at + 1);
+      if (!boundary(at + 1)) return null;
     }
   } else {
     let ended = false;
     for (let at = from; at < to; at++) {
       const ends = endsWord(text.charCodeAt(at));
-      if (ended && !ends) {
-        if (starts.length >= most) return null;
-        starts.push(at);
-      }
+      if (ended && !ends && !boundary(at)) return null;
       ended = ends;
     }
   }
@@ -190,10 +213,15 @@ function passage(plan: Planning, oldText: string, a: number, b: number, newText:
   }
   for (let t = tier; t <= 1; t++) {
     const left = plan.limits.maxPieces - plan.pieces;
-    const oldCuts = cut(oldText, a, b, t, left);
-    const newCuts = oldCuts && cut(newText, c, d, t, left - (oldCuts.length - 1));
+    if (left < 2) break;
+    const oldNatural = countPieces(oldText, a, b, t);
+    const newNatural = countPieces(newText, c, d, t);
     plan.scanned += removed + added;
-    // Too many pieces for what is left: finer pieces would be more still.
+    let stride = Math.max(1, Math.ceil((oldNatural + newNatural) / left));
+    while (Math.ceil(oldNatural / stride) + Math.ceil(newNatural / stride) > left) stride++;
+    const oldCuts = cut(oldText, a, b, t, stride, left);
+    const newCuts = oldCuts && cut(newText, c, d, t, stride, left - (oldCuts.length - 1));
+    plan.scanned += removed + added;
     if (!oldCuts || !newCuts) break;
     plan.pieces += oldCuts.length - 1 + newCuts.length - 1;
     const anchors = findAnchors(oldText, oldCuts, newText, newCuts);

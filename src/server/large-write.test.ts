@@ -126,7 +126,7 @@ describe("large writes: a bound per caller", () => {
     expect(busy.status).toBe(503);
     expect(busy.headers).toEqual({ "Retry-After": "5" });
     expect(busy.details).toEqual({ retryAfter: 5 });
-    expect(busy.message).toBe("You already have 2 large document writes in progress (200,000 bytes or more each). Wait for one to finish, then try again");
+    expect(busy.message).toBe("You already have 2 document writes in progress. Wait for one to finish, then try again");
     // The refusal took no place and nobody else's turn.
     expect(w.placesOf("ana")).toBe(2);
     expect(w.waitingCount).toBe(1);
@@ -196,7 +196,7 @@ describe("large writes: the queue is bounded for everybody together", () => {
     expect(err).toBeInstanceOf(LargeWriteBusyError);
     expect(err.reason).toBe("queue-full");
     expect(err.status).toBe(503);
-    expect(err.message).toBe("The server is busy with large document writes. Try again in a few seconds");
+    expect(err.message).toBe("The server is busy with document writes. Try again in a few seconds");
     expect(err.headers).toEqual({ "Retry-After": "5" });
     expect(w.placesOf("u1")).toBe(1);
     await finishAll(turns);
@@ -333,6 +333,18 @@ describe("WriteTurn: one request's place", () => {
     expect(w.runningCount).toBe(0);
   });
 
+  it("force takes one turn regardless of size and is idempotent", async () => {
+    const { w } = writes();
+    const turn = await WriteTurn.begin(request({ "Content-Length": "100" }), "ana", w);
+    expect(turn.large).toBe(false);
+    await turn.force();
+    await turn.force();
+    expect(turn.large).toBe(true);
+    expect(w.placesOf("ana")).toBe(1);
+    await turn.end();
+    expect(w.placesOf("ana")).toBe(0);
+  });
+
   it("the third large request of one user is refused before its body is read", async () => {
     const { w } = writes();
     const a = await WriteTurn.begin(request({ "Content-Length": "6000014" }), "ana", w);
@@ -368,7 +380,7 @@ describe("WriteTurn: one request's place", () => {
     const res = await route(request({ "Content-Length": "250000", Authorization: "Bearer mdk_test" }));
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("5");
-    expect(await res.json()).toEqual({ error: "You already have 2 large document writes in progress (200,000 bytes or more each). Wait for one to finish, then try again", retryAfter: 5 });
+    expect(await res.json()).toEqual({ error: "You already have 2 document writes in progress. Wait for one to finish, then try again", retryAfter: 5 });
     await a.release();
     await (await b).release();
     expect(new LargeWriteBusyError("queue-full")).toBeInstanceOf(HttpError);

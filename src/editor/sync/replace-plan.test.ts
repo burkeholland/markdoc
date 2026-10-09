@@ -193,6 +193,21 @@ describe("planReplace: anchors keep what did not change", () => {
     for (const op of plan.ops) expect(op.deleteCount + op.insert.length).toBeLessThan(40);
   });
 
+  it("two distant changes stay local when the natural line count is above maxPieces", () => {
+    const lines = Array.from({ length: 110_000 }, (_, i) => `line ${i}\n`);
+    const changed = [...lines];
+    changed[500] = `changed A ${"x".repeat(1_200)}\n`;
+    changed[109_000] = `changed B ${"y".repeat(1_200)}\n`;
+    const base = lines.join("");
+    const next = changed.join("");
+    const plan = planReplace(base, next);
+    expect(applied(base, plan.ops)).toBe(next);
+    expect(plan.pieces).toBeLessThanOrEqual(REPLACE_LIMITS.maxPieces);
+    expect(plan.blocks).toBe(0);
+    expect(plan.ops.reduce((n, op) => n + op.deleteCount + op.insert.length, 0)).toBeLessThan(5_000);
+    expect(plan.ops.every((op) => op.deleteCount < 2_000 && op.insert.length < 2_000)).toBe(true);
+  });
+
   it("a line that moved does not cost the lines around it", () => {
     const lines = Array.from({ length: 2_000 }, (_, i) => `Line ${i} ${prose(600, i + 1).replace(/\n/g, " ")}\n`);
     const base = lines.join("");
@@ -279,7 +294,7 @@ describe("planReplace: the work is bounded at the largest text the route accepts
     expect(plan.exactWork).toBe(calls.reduce((n, call) => n + call.product, 0));
     // Everything else is counted too: pieces hashed, characters looked at.
     expect(plan.pieces).toBeLessThanOrEqual(REPLACE_LIMITS.maxPieces);
-    expect(plan.scanned).toBeLessThanOrEqual(3 * (oldText.length + newText.length) + 16);
+    expect(plan.scanned).toBeLessThanOrEqual(5 * (oldText.length + newText.length) + 16);
     // And the stand-in's edits (a passage replaced whole) still make the new text.
     let text = oldText;
     const out: string[] = [];

@@ -216,16 +216,17 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
     expect(LARGE_WRITE_SIZE).toBe(200_000);
   });
 
-  it("while a user holds two places, a third large PUT is refused before anything is read or written; a small one goes through", async () => {
+  it("while a user holds two places, every whole-document PUT is refused; a small append goes through", async () => {
     await fresh("Start\n");
     await whileHolding(ana.id, 2, async () => {
       const refused = await put(ana, large);
       expect(refused.status).toBe(503);
       expect(refused.headers.get("Retry-After")).toBe("5");
-      expect(await refused.json()).toEqual({ error: "You already have 2 large document writes in progress (200,000 bytes or more each). Wait for one to finish, then try again", retryAfter: 5 });
+      expect(await refused.json()).toEqual({ error: "You already have 2 document writes in progress. Wait for one to finish, then try again", retryAfter: 5 });
       expect((await read()).content).toBe("Start\n");
-      // A write below the size is not counted, queued or refused.
-      const small = await put(ana, "Start\n\nA small change.\n");
+      expect((await put(ana, "A small replacement.\n")).status).toBe(503);
+      // A small append remains outside the queue.
+      const small = await patch(ana, "A small append.\n");
       expect(small.status).toBe(200);
     });
     // And with a place free again the same large write lands.
@@ -280,6 +281,18 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
     expect((await read()).content === large).toBe(true);
   });
 
+  it("full-content suggest and restore take a turn even when their text is small", async () => {
+    await fresh("Start\n");
+    const kept = await addVersion({ documentId: docId, content: "A small restored version.\n", kind: "named", title: "small", createdBy: ana.id });
+    await whileHolding(ana.id, 2, async () => {
+      expect((await as(ana, () => (suggest.POST as Handler)(request("POST", { content: "A small full-content suggestion.\n" }, "suggest"), params()))).status).toBe(503);
+      expect((await restore(kept.id)).status).toBe(503);
+      expect((await as(ana, () => (suggest.POST as Handler)(request("POST", { edits: [{ find: "Start", replace: "Beginning" }] }, "suggest"), params()))).status).toBe(200);
+    });
+    expect((await restore(kept.id)).status).toBe(200);
+    expect((await read()).content).toBe("A small restored version.\n");
+  });
+
   it("the turn is taken by the declared size, before the body is read: 80,000 Chinese characters are more than 200,000 bytes", async () => {
     await fresh("Start\n");
     const cjk = prose(80_000, 9, CJK);
@@ -289,8 +302,8 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
       expect((await put(ana, cjk)).status).toBe(503);
       expect((await as(ana, () => (suggest.POST as Handler)(request("POST", { content: cjk }, "suggest"), params()))).status).toBe(503);
       expect((await patch(ana, cjk)).status).toBe(503);
-      // The same text in a body that does not say its size is sized by its characters, and is not large.
-      expect((await put(ana, cjk, {}, { declare: false })).status).toBe(200);
+      // A whole replacement still takes a turn when the body does not say its size.
+      expect((await put(ana, cjk, {}, { declare: false })).status).toBe(503);
     });
   });
 
@@ -302,11 +315,12 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
       expect((await read()).content).toBe("Start\n");
     });
   });
-  it("a body that does not declare its size is sized by its text once it is parsed", async () => {
+  it("whole replacements take a turn without a declared size; small appends still do not", async () => {
     await fresh("Start\n");
     await whileHolding(ana.id, 2, async () => {
       expect((await put(ana, large, {}, { declare: false })).status).toBe(503);
-      expect((await put(ana, "Start\n\nSmall.\n", {}, { declare: false })).status).toBe(200);
+      expect((await put(ana, "Start\n\nSmall.\n", {}, { declare: false })).status).toBe(503);
+      expect((await patch(ana, "Small.\n", { declare: false })).status).toBe(200);
     });
   });
 
@@ -319,9 +333,9 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
     expect(nobody.status).toBe(401);
   });
 
-  it("20 large replaces at once from one user: 2 land, 18 get the 503, the document holds one of the texts whole", async () => {
+  it("30 medium replaces below the byte threshold: 2 land, 28 get the 503, the document holds one submitted text whole", async () => {
     await fresh("Start\n");
-    const texts = Array.from({ length: 20 }, (_, i) => prose(LARGE_WRITE_SIZE, 100 + i));
+    const texts = Array.from({ length: 30 }, (_, i) => prose(196_000, 100 + i));
     let answered = 0;
     let pending: Promise<Response>[] = [];
     // Another user's write holds the turn meanwhile, so that which of the 20 are refused does not depend on speed.
@@ -332,13 +346,13 @@ describe("large writes take turns: two places per user, 503 with Retry-After for
           return res;
         }),
       );
-      while (answered < 18) await settle();
+      while (answered < 28) await settle();
       expect(largeWrites.placesOf(ana.id)).toBe(2);
     });
     const answers = await Promise.all(pending);
     const statuses = answers.map((res) => res.status);
     expect(statuses.filter((s) => s === 200).length).toBe(2);
-    expect(statuses.filter((s) => s === 503).length).toBe(18);
+    expect(statuses.filter((s) => s === 503).length).toBe(28);
     const stored = (await read()).content;
     expect(texts.filter((_, i) => statuses[i] === 200).some((text) => text === stored)).toBe(true);
   }, 120_000);

@@ -56,7 +56,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   const write = await WriteTurn.begin(req, user!.id);
   try {
     const body = await readJson(req, (d) => schema.parse(d));
-    if ("content" in body) await write.sized(body.content.length);
+    if ("content" in body) await write.force();
     const expected = readPrecondition(req, body);
     const author = collabIdentity(user!);
     let count = 0;

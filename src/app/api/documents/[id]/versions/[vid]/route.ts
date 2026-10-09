@@ -43,7 +43,7 @@ export const POST = handler(async (req: Request, { params }: Params) => {
   // before the snapshot below, so that a refused restore leaves nothing behind.
   const write = await WriteTurn.begin(req, user!.id);
   try {
-    await write.sized(version.content.length);
+    await write.force();
     write.assertWanted();
     // Restore: snapshot the current text first so nothing is lost, then replace. Both stay fatal: until the
     // replace lands nothing has changed, so a 500 here is honest.
@@ -70,23 +70,19 @@ export const POST = handler(async (req: Request, { params }: Params) => {
       },
       version.content,
     );
-    // The restored text is live (broadcast to every editor, irrevocable): the "Restored version n" row or the activity
-    // row failing here is logged and reported as a warning code on the 200 — `version` is null when the row could not
-    // be saved — never a 500 while everyone already sees the restored text.
+    // A 200 acknowledges both the restored text and its version row. Keep the turn until that row is durable;
+    // activity remains a warning because it is secondary bookkeeping after the restore has been recorded.
     const { tail, answer } = warnTail("version");
-    let restored: Awaited<ReturnType<typeof addVersion>> | undefined;
-    await tail("version-not-saved", async () => {
-      restored = await addVersion({
-        documentId: id,
-        content: version.content,
-        kind: "restore",
-        title: `Restored version ${version.number}`,
-        createdBy: user?.id,
-        createdByName: actorName(user),
-      });
+    const restored = await addVersion({
+      documentId: id,
+      content: version.content,
+      kind: "restore",
+      title: `Restored version ${version.number}`,
+      createdBy: user?.id,
+      createdByName: actorName(user),
     });
     await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "version.restore", { number: version.number, title: version.title }));
-    return json(answer({ ok: true, version: restored ? { ...restored, createdAt: restored.createdAt.toISOString() } : null }));
+    return json(answer({ ok: true, version: { ...restored, createdAt: restored.createdAt.toISOString() } }));
   } finally {
     await write.end();
   }
@@ -103,4 +99,3 @@ export const DELETE = handler(async (_req: Request, { params }: Params) => {
   if (deleted.length === 0) throw new HttpError(404, "Version not found");
   return json({ ok: true });
 });
-

@@ -4,8 +4,8 @@
  * A write of a whole document costs time in proportion to its size on the one thread that serves every
  * request: the body is parsed, the text hashed, the shared document changed and encoded, and all of it
  * stored. For 2,000,000 characters that was 0.5 to 2.7 s on a build with the embedded database even with
- * the diff bounded, and 20 of them at once used to run back to back. So a write is LARGE from
- * `LARGE_WRITE_SIZE` on, and large writes are bounded three ways:
+ * the diff bounded, and many smaller replacements at once also stalled the server. Every whole-document
+ * replacement takes this turn; other writes take it from `LARGE_WRITE_SIZE` on. They are bounded three ways:
  *
  * - One runs at a time. Between two of them the server steps aside (`stepAside`), so other requests are
  *   answered in between.
@@ -21,7 +21,8 @@
  * limit bucket and comes with `X-RateLimit-*` headers; this bound is about work in progress, not a rate.)
  * A caller that went away while it waited leaves the queue and writes nothing.
  *
- * Writes below `LARGE_WRITE_SIZE` never come here: they are not counted, queued or refused.
+ * Appends and targeted suggestions below `LARGE_WRITE_SIZE` never come here: they are not counted, queued
+ * or refused.
  */
 import { FairQueue, QueueCancelled, QueueRefusal, type RefusalReason, type Turn } from "@/server/export/fair-queue";
 import { HttpError } from "@/server/http";
@@ -48,14 +49,14 @@ export const LARGE_WRITE_USAGE_HALF_LIFE_MS = 60_000;
 
 export type LargeWriteRefusal = RefusalReason | "caller-full";
 
-/** `503 { error, retryAfter }` with `Retry-After`: the caller has too many large writes in progress, or the server has. */
+/** `503 { error, retryAfter }` with `Retry-After`: the caller has too many writes in progress, or the server has. */
 export class LargeWriteBusyError extends HttpError {
   constructor(readonly reason: LargeWriteRefusal) {
     super(
       503,
       reason === "caller-full"
-        ? `You already have ${LARGE_WRITE_MAX_PER_CALLER} large document writes in progress (${LARGE_WRITE_SIZE.toLocaleString("en-US")} bytes or more each). Wait for one to finish, then try again`
-        : "The server is busy with large document writes. Try again in a few seconds",
+        ? `You already have ${LARGE_WRITE_MAX_PER_CALLER} document writes in progress. Wait for one to finish, then try again`
+        : "The server is busy with document writes. Try again in a few seconds",
       { retryAfter: LARGE_WRITE_RETRY_AFTER_SECONDS },
       { "Retry-After": String(LARGE_WRITE_RETRY_AFTER_SECONDS) },
     );
@@ -178,9 +179,9 @@ export function declaredSize(req: Request): number {
 }
 
 /**
- * One request's place among the large writes. `begin` takes the turn at once when the body the request
- * declares is large, before the body is read; `sized` takes it later for a text whose size is only known
- * then; `end` (always, in a `finally`) hands it on. For a write that is not large none of them waits.
+ * One request's place among bounded writes. `begin` takes the turn at once when the body the request
+ * declares is large, before the body is read; `force` takes it regardless of size; `sized` takes it later
+ * for a text whose size is only known then; `end` (always, in a `finally`) hands it on.
  */
 export class WriteTurn {
   private turn: { release: () => Promise<void> } | null = null;
@@ -197,19 +198,25 @@ export class WriteTurn {
     return write;
   }
 
-  /** True once this write holds the turn of a large write. */
+  /** True once this write holds the bounded-write turn. */
   get large(): boolean {
     return this.turn !== null;
+  }
+
+  /** Take a turn even when the body is below the large-write threshold. */
+  async force(): Promise<void> {
+    if (this.turn) return;
+    this.turn = await this.writes.enter(this.userId, this.signal);
   }
 
   /** `size` is now known (characters of a text, bytes of a body): take the turn if that makes this write large. */
   async sized(size: number): Promise<void> {
     if (this.turn || size < LARGE_WRITE_SIZE) return;
-    this.turn = await this.writes.enter(this.userId, this.signal);
+    await this.force();
   }
 
   /**
-   * Call right before the document is changed. A large write whose caller went away while it waited or was
+   * Call right before the document is changed. A bounded write whose caller went away while it waited or was
    * read stops here, with nothing written.
    */
   assertWanted(): void {

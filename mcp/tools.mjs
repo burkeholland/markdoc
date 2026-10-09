@@ -287,13 +287,13 @@ export function registerTools(server, client) {
   const IF_HASH = z.string().optional().describe("The contentHash from markdoc_read_document (header line `hash …`). When the document changed since, the call fails with what changed instead of writing; re-read and retry.");
 
   /**
-   * A write refused because the server is busy with large writes: tell the model to wait and send it again.
+   * A write refused because the server is busy with bounded writes: tell the model to wait and send it again.
    * A conditional write refused because the document moved: tell the model to re-read and retry and
    * show it the diff (409 bodies carry `contentHash` and `diff`). Anything else rethrows.
    * @param {unknown} err
    */
   const staleOr = (err) => {
-    // Large writes take turns (503 with `retryAfter`): nothing is wrong with the call, it only came too soon.
+    // Bounded writes take turns (503 with `retryAfter`): nothing is wrong with the call, it only came too soon.
     if (err?.status === 503 && typeof err?.data?.retryAfter === "number") {
       return { isError: true, content: [{ type: "text", text: `Nothing was written: ${err.data.error}. Wait ${err.data.retryAfter} seconds, then send the same call again.` }], structuredContent: err.data };
     }
