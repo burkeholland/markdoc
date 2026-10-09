@@ -26,6 +26,7 @@ const TEXT = "The cat sat. The cat ran. A dog barked at the cat.";
 function makeSession(role: "owner" | "viewer" = "owner"): CollabSession {
   const session = new CollabSession({ docId: "doc", user: makeCollabUser("a", "Alice"), role, getToken: async () => "token" });
   session.ytext.insert(0, TEXT);
+  Object.defineProperty(session, "contentReady", { configurable: true, get: () => true });
   return session;
 }
 

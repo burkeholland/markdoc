@@ -145,6 +145,7 @@ export function SlashMenu({
     if (!view) return;
     // "No matches" + Enter: the menu closes and the typed text stays.
     if (!item) return closeSlashMenu(view);
+    if (!session.contentReady || !(item.id === "comment" ? session.canComment : session.canEdit)) return;
     const arg = splitSlashQuery(controller.getState()?.query ?? "").arg;
     if (item.command) {
       // One transaction for the /query removal and the edit: a single undo step.

@@ -65,6 +65,8 @@ describe("link cards in the rich pane (#2317)", () => {
       deferLocal: true,
     });
     session.keepAlive();
+    session.synced = true;
+    vi.spyOn(session.binding, "hasHeldSync", "get").mockReturnValue(false);
     session.ytext.insert(0, text);
     const state: EditorState = createRichEditorState(session);
     session.binding.releaseRemoteSync();

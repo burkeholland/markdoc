@@ -33,7 +33,7 @@ interface Mounted {
   controller: SlashMenuController;
   view: EditorView;
   ytext: Y.Text;
-  session: { canEdit: boolean; canComment: boolean; undoManager: { stopCapturing: Mock<() => void> } };
+  session: { contentReady: boolean; canEdit: boolean; canComment: boolean; undoManager: { stopCapturing: Mock<() => void> } };
   onImage: Mock<() => void>;
   onCard: Mock<() => void>;
   onLink: Mock<() => void>;
@@ -84,7 +84,7 @@ function makeEditor(markdown: string, controller: SlashMenuController) {
 function mount({ markdown = "Hello\n\nWorld", strict = false, canEdit = true, canComment = true }: { markdown?: string; strict?: boolean; canEdit?: boolean; canComment?: boolean } = {}): Mounted {
   const controller = createSlashMenuController();
   const { view, ytext, editorKeys } = makeEditor(markdown, controller);
-  const session = { canEdit, canComment, undoManager: { stopCapturing: vi.fn<() => void>() } };
+  const session = { contentReady: true, canEdit, canComment, undoManager: { stopCapturing: vi.fn<() => void>() } };
   const callbacks = { onImage: vi.fn<() => void>(), onCard: vi.fn<() => void>(), onLink: vi.fn<() => void>(), onComment: vi.fn<() => void>(), onConnectAgent: vi.fn<() => void>() };
   const ui = (current: EditorView | null) => {
     const menu = <SlashMenu view={current} session={session as unknown as CollabSession} controller={controller} containerRef={containerRef} {...callbacks} />;
@@ -290,6 +290,16 @@ describe("slash menu: keys", () => {
     typeAt(view, WORLD, "/quote");
     expect(press(view, "Tab").defaultPrevented).toBe(true);
     expect(ytext.toString()).toBe("Hello\n\n> World");
+  });
+
+  it("re-checks content readiness when a visible row is picked after the pane was blocked", () => {
+    const { view, ytext, session } = mount();
+    typeAt(view, WORLD, "/quote");
+    expect(menu()).not.toBeNull();
+    session.contentReady = false;
+    fireEvent.click(row("quote"));
+    expect(ytext.toString()).toBe("Hello\n\n/quoteWorld");
+    expect(menu()).not.toBeNull();
   });
 
   it("the arrow keys wrap, Home and End jump, and Enter picks the highlighted row", () => {

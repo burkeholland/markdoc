@@ -85,6 +85,7 @@ function createSession(
   });
   session.keepAlive();
   session.localLoaded = true;
+  session.synced = true;
   sessions.push(session);
   return session;
 }

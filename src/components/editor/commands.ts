@@ -49,6 +49,7 @@ export interface EditorCommandContext {
     showCard?: (as: "text" | "card") => void;
   };
   session: {
+    contentReady: boolean;
     canEdit: boolean;
     canComment: boolean;
     mode: EditMode;
@@ -126,8 +127,9 @@ function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = 
       group: item.group,
       icon: item.icon,
       shortcut: SLASH_SHORTCUTS[item.id],
-      when: () => (item.id === "comment" ? ctx.session.canComment : ctx.session.canEdit),
+      when: () => ctx.session.contentReady && (item.id === "comment" ? ctx.session.canComment : ctx.session.canEdit),
       run: () => {
+        if (!ctx.session.contentReady || !(item.id === "comment" ? ctx.session.canComment : ctx.session.canEdit)) return;
         const view = ctx.actions.rich;
         if (!view) return;
         if (item.command) {

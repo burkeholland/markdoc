@@ -45,6 +45,7 @@ describe("CollabSession pending comment under edits (#2258)", () => {
     session = new CollabSession({ docId: "doc", user: alice, role: "owner", getToken: async () => "token", autoConnect: false });
     session.keepAlive();
     session.ytext.insert(0, TEXT);
+    Object.defineProperty(session, "contentReady", { configurable: true, get: () => true });
     resolves.count = 0;
   });
   afterEach(() => {

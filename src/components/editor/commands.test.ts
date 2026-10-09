@@ -26,7 +26,15 @@ function stubCtx(overrides: Partial<EditorCommandContext> = {}, session: Partial
       redo: () => calls.push("redo"),
       revealSource: (offset) => calls.push(`reveal:${offset}`),
     },
-    session: { canEdit: true, canComment: true, mode: "editing", canChangeMode: true, setMode: (m) => calls.push(`mode:${m}`), ...session },
+    session: {
+      contentReady: true,
+      canEdit: true,
+      canComment: true,
+      mode: "editing",
+      canChangeMode: true,
+      setMode: (m) => calls.push(`mode:${m}`),
+      ...session,
+    },
     doc: { id: "d1", title: "Doc", storage: "local" },
     isOwner: true,
     slashWhere: { inTable: false, canComment: true },
@@ -80,6 +88,25 @@ describe("the palette's Insert entry for a card (#2317)", () => {
     const readOnly = buildCommands(stubCtx({}, { canEdit: false })).find((c) => c.id === "block:card")!;
     expect(readOnly.when?.()).toBe(false);
     expect(buildCommands(stubCtx({ slashWhere: { inTable: true, canComment: true } })).map((c) => c.id)).not.toContain("block:card");
+  });
+
+  it("re-checks edit readiness when a previously visible insert command runs", () => {
+    const ctx = stubCtx();
+    ctx.actions = { ...ctx.actions, rich: {} as NonNullable<EditorCommandContext["actions"]["rich"]> };
+    const entry = buildCommands(ctx).find((command) => command.id === "block:card")!;
+    expect(entry.when?.()).toBe(true);
+    ctx.session.contentReady = false;
+    void entry.run();
+    expect((ctx as unknown as { calls: string[] }).calls).toEqual([]);
+  });
+
+  it("uses comment permission after readiness instead of requiring text-edit permission", () => {
+    const ctx = stubCtx({}, { canEdit: false, canComment: true });
+    ctx.actions = { ...ctx.actions, rich: {} as NonNullable<EditorCommandContext["actions"]["rich"]> };
+    const entry = buildCommands(ctx).find((command) => command.id === "block:comment")!;
+    expect(entry.when?.()).toBe(true);
+    void entry.run();
+    expect((ctx as unknown as { calls: string[] }).calls).toEqual(["comment"]);
   });
 });
 const ids = (cmds: Command[]) => cmds.map((c) => c.id);

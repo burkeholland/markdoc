@@ -88,7 +88,7 @@ vi.mock("@/lib/notifications-store", () => ({
 
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate, removeAwarenessStates } from "y-protocols/awareness";
-import { CollabSession } from "@/editor/collab/session";
+import { CollabSession as BaseCollabSession } from "@/editor/collab/session";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { api } from "@/lib/api";
 import { AGENT_CONNECT_DISMISSED_KEY } from "@/lib/mcp";
@@ -98,6 +98,12 @@ import type { ReviewDto } from "@/server/reviews";
 import { TooltipProvider } from "@/components/ui/primitives";
 import { claimerName, requestInstruction, waitForSynced, type AgentRequestMode } from "./agent-requests";
 import { CommentsPanel, isReviewOpen, mentionedAgents, type CommentsPanelProps } from "./comments-panel";
+
+class CollabSession extends BaseCollabSession {
+  override get contentReady() {
+    return true;
+  }
+}
 
 /** The mocked provider of the session under test (see the `@hocuspocus/provider` mock above). */
 type FakeProvider = { opts: { onAwarenessChange?: (e: { states: unknown[] }) => void } };

@@ -73,6 +73,37 @@ describe("the session learns that its own access changed (#2269)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("latches readiness to rendered content across reconnects but not across document sessions or permissions", () => {
+    const first = open("editor");
+    expect(first.session.contentReady).toBe(false);
+    expect(first.session.canEdit).toBe(false);
+
+    first.live();
+    expect(first.session.contentReady).toBe(true);
+    expect(first.session.canEdit).toBe(true);
+    first.session.replaceSource([{ from: 0, to: 0, text: "loaded" }]);
+    first.provider.opts.onStatus({ status: "disconnected" });
+    expect(first.session.synced).toBe(false);
+    expect(first.session.contentReady).toBe(true);
+    expect(first.session.canEdit).toBe(true);
+
+    const next = open("editor");
+    expect(next.session.contentReady).toBe(false);
+    expect(next.session.canEdit).toBe(false);
+    next.live();
+    expect(next.session.contentReady).toBe(true);
+    expect(next.session.canEdit).toBe(true);
+
+    const viewer = open("viewer");
+    viewer.live();
+    expect(viewer.session.contentReady).toBe(true);
+    expect(viewer.session.canEdit).toBe(false);
+
+    first.session.destroy();
+    next.session.destroy();
+    viewer.session.destroy();
+  });
+
   describe("the server's message", () => {
     it.each([
       ["editor", "viewer"],
@@ -422,7 +453,9 @@ describe("the session learns that its own access changed (#2269)", () => {
       await expect(provider.opts.token()).rejects.toBe(failure);
       provider.opts.onAuthenticationFailed({ reason: `Failed to get token during sendToken(): ${failure}` });
       expect(session.accessChange).toBeNull();
-      expect(session.canEdit).toBe(true);
+      expect(session.accessBlocked).toBe(false);
+      expect(session.contentReady).toBe(false);
+      expect(session.canEdit).toBe(false);
       session.destroy();
     });
   });
@@ -535,6 +568,19 @@ describe("the session learns that its own access changed (#2269)", () => {
         expect(blocked.state()).toBe(before);
         blocked.session.destroy();
       }
+    });
+
+    it.each(PATHS.slice(2))("%s: does nothing while authoritative text is still held from the live pane", (_what, path, scene) => {
+      const loading = written(scene);
+      vi.spyOn(loading.session.binding, "hasHeldSync", "get").mockReturnValue(true);
+      expect(loading.session.canEdit).toBe(false);
+      expect(loading.session.canUndo).toBe(false);
+      expect(loading.session.canRedo).toBe(false);
+      const before = loading.state();
+      path(loading);
+      expect(loading.updates()).toBe(0);
+      expect(loading.state()).toBe(before);
+      loading.session.destroy();
     });
 
     it.each([

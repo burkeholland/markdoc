@@ -786,6 +786,23 @@ describe("save state and reconnect feedback", () => {
     expect(session.recovered).toBe(false);
   });
 
+  it("does not report saved before the held rich-pane rebuild represents the synced text", () => {
+    const p = lastProvider().opts;
+    const held = vi.spyOn(session.binding, "hasHeldSync", "get").mockReturnValue(true);
+    p.onStatus({ status: "connected" });
+    p.onSynced({ state: true });
+    p.onUnsyncedChanges({ number: 0 });
+    acknowledgePersistence(session);
+    expect(session.contentReady).toBe(false);
+    expect(session.canEdit).toBe(false);
+    expect(session.saveState).toBe("saving");
+
+    held.mockReturnValue(false);
+    expect(session.contentReady).toBe(true);
+    expect(session.canEdit).toBe(true);
+    expect(session.saveState).toBe("saved");
+  });
+
   it("labels", () => {
     expect(saveStateLabel("offline", 0)).toBe("Offline — changes will sync");
     expect(saveStateLabel("offline", 1)).toBe("Offline — 1 unsaved change");

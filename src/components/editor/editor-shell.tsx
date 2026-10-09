@@ -2051,6 +2051,7 @@ export function EditorShell({
   }, [panelWidth, panelMax, setPanelWidth]);
 
   const openNameVersion = useCallback(() => {
+    if (!session.canEdit) return;
     const editor = currentEditorRef.current;
     if (!editor) return;
     const visit = {
@@ -2062,11 +2063,12 @@ export function EditorShell({
     currentNameVersionVisitRef.current = visit;
     setNameVersionVisit(visit);
     setDialog("versionName");
-  }, []);
+  }, [session]);
   const setEditorDialog = useCallback((kind: DialogKind) => {
+    if (kind && kind !== "share" && kind !== "publish" && kind !== "shortcuts" && !session.canEdit) return;
     if (kind === "versionName") openNameVersion();
     else setDialog(kind);
-  }, [openNameVersion]);
+  }, [openNameVersion, session]);
   const actions = useMemo(() => new EditorActions(session, setEditorDialog), [session, setEditorDialog]);
   // Transfer the live selection before changing surfaces, including while Comments owns focus.
   useEffect(() => {
@@ -2262,9 +2264,10 @@ export function EditorShell({
   }, [actions, session, startDocumentComment]);
 
   const openLink = useCallback(() => {
+    if (!session.canEdit) return;
     setLinkInitial(actions.currentLink());
     setDialog("link");
-  }, [actions]);
+  }, [actions, session]);
 
   const reveal = useCallback((offset: number) => actions.revealSource(offset, { focus: true }), [actions]);
 
@@ -2846,9 +2849,15 @@ export function EditorShell({
   const openPublish = useCallback(() => setDialog("publish"), []);
   const openShortcuts = useCallback(() => setDialog("shortcuts"), []);
   const openPalette = useCallback(() => setPaletteOpen(true), []);
-  const openImage = useCallback(() => setDialog("image"), []);
-  const openTable = useCallback(() => setDialog("table"), []);
-  const openCard = useCallback(() => setDialog("card"), []);
+  const openImage = useCallback(() => {
+    if (session.canEdit) setDialog("image");
+  }, [session]);
+  const openTable = useCallback(() => {
+    if (session.canEdit) setDialog("table");
+  }, [session]);
+  const openCard = useCallback(() => {
+    if (session.canEdit) setDialog("card");
+  }, [session]);
   const openVersionName = openNameVersion;
   const openStorage = useCallback(() => (isOwner ? setDialog("publish") : undefined), [isOwner]);
   const publishFromHeader = useCallback(() => {
@@ -2911,6 +2920,7 @@ export function EditorShell({
       const key = isMac && e.altKey && /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
       if (mod && !e.altKey && !e.shiftKey && key === "s") {
         e.preventDefault();
+        if (!session.canEdit) return;
         void session.flushSave().then(
           () => session.dirty
             ? toast("Requested changes saved; newer edits are still pending.", "info")
@@ -2953,7 +2963,22 @@ export function EditorShell({
   const canChangeMode = role === "owner" || role === "editor";
   const paletteCtx: EditorCommandContext = {
     actions,
-    session: { canEdit: session.canEdit, canComment: session.canComment, mode: session.mode, canChangeMode, setMode: (m) => session.setMode(m) },
+    session: {
+      get contentReady() {
+        return session.contentReady;
+      },
+      get canEdit() {
+        return session.canEdit;
+      },
+      get canComment() {
+        return session.canComment;
+      },
+      get mode() {
+        return session.mode;
+      },
+      canChangeMode,
+      setMode: (m) => session.setMode(m),
+    },
     doc,
     isOwner,
     embed,
@@ -3039,7 +3064,7 @@ export function EditorShell({
   // it and the binding has rebuilt the ProseMirror document from it (the rebuild is coalesced
   // while the document loads and its parse runs in a task of its own, see MarkdownBinding.holdRemoteSync)
   // or the server confirmed the document really is empty.
-  const richHasContent = useSessionValue(session, (s) => (s.synced || s.ytext.length > 0) && !s.binding.hasHeldSync);
+  const richHasContent = useSessionValue(session, (s) => s.contentReady);
   // Until then the server-rendered preview stands in for the rich pane; the server and the
   // hydrating client both render it (the session has no content on either), so markup matches.
   const showRichPlaceholder = initialHtml !== null && !richHasContent;

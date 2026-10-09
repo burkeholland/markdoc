@@ -874,9 +874,23 @@ export class CollabSession {
     return this.accessChange !== null && this.accessChange.kind !== "raised";
   }
 
+  /**
+   * The live rich pane represents the shared text. A non-empty local mirror may make the document
+   * available before the server sync; an empty document is authoritative only after that sync.
+   * In both cases the held Markdown rebuild must finish before a caret or action can target the pane.
+   */
+  get contentReady(): boolean {
+    return (this.synced || this.ytext.length > 0) && !this.binding.hasHeldSync;
+  }
+
+  /** The user's role may change this document, and its authoritative text is represented in the pane. */
+  get canWrite(): boolean {
+    if (this.accessBlocked || !this.contentReady) return false;
+    return this.role === "owner" || this.role === "editor";
+  }
+
   get canEdit(): boolean {
-    if (this.accessBlocked) return false;
-    return (this.role === "owner" || this.role === "editor") && this.mode !== "viewing";
+    return this.canWrite && this.mode !== "viewing";
   }
 
   get canComment(): boolean {
@@ -893,6 +907,7 @@ export class CollabSession {
     if (this.status === "connecting") return this.everConnected ? "reconnecting" : "connecting";
     if (this.status !== "connected") return "offline";
     if (!this.synced) return "saving";
+    if (!this.contentReady) return "saving";
     if (this.persistence.state !== "saved") return this.persistence.state;
     if (this.unsyncedChanges > 0) return "pending";
     if (!this.savedMarked) {
@@ -1015,7 +1030,7 @@ export class CollabSession {
   }
 
   setTitle(title: string) {
-    if (this.accessBlocked) return;
+    if (!this.canWrite) return;
     this.ydoc.transact(() => this.meta.set("title", title), COMMENTS_ORIGIN);
   }
 
@@ -1067,7 +1082,7 @@ export class CollabSession {
 
   /** Text and annotation decisions share one history step, isolated from nearby typing. */
   reviewSuggestion(action: "accept" | "reject" | "acceptAll" | "rejectAll", id?: string): number {
-    if (this.accessBlocked) return 0;
+    if (!this.canWrite) return 0;
     this.undoManager.stopCapturing();
     try {
       if (action === "acceptAll" || action === "rejectAll") return this.suggestions[action]();
@@ -1342,7 +1357,7 @@ export class CollabSession {
 
   /** Accept a root or reply suggestion as one text-and-comment undo step. */
   acceptCommentSuggestion(threadId: string, proposed: string, replyId?: string): boolean {
-    if (this.accessBlocked) return false;
+    if (!this.canWrite) return false;
     const target: CommentSuggestionTarget = replyId ? { kind: "reply", replyId } : { kind: "root" };
     const before = this.comments.snapshotSuggestion(threadId, target);
     if (!before) return false;
@@ -1421,10 +1436,10 @@ export class CollabSession {
   // last *edit*, and undo/redo do not reset that clock: an edit typed right after an undo would be
   // folded into the step below the one just undone, so the next undo removed both (task #437).
   // Closing the capture window makes whatever comes after an undo/redo its own step.
-  // Neither does anything on a page whose access was lowered or removed (#2269): an accepted comment
-  // suggestion is undone from the document itself, with no step on the stack.
+  // Neither does anything before the live pane represents the document, or on a page whose access was
+  // lowered or removed (#2269): an accepted comment suggestion is undone from the document itself.
   undo() {
-    if (this.accessBlocked) return;
+    if (this.accessBlocked || !this.contentReady) return;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.undoStack, "applied");
     if (this.undoManager.canUndo()) this.undoManager.undo();
     else this.replayCommentSuggestionTransition("applied");
@@ -1432,7 +1447,7 @@ export class CollabSession {
   }
 
   redo() {
-    if (this.accessBlocked) return;
+    if (this.accessBlocked || !this.contentReady) return;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.redoStack, "undone");
     const stored = this.readStoredCommentSuggestionTransition();
     const hasMatchingTransient =
@@ -1447,11 +1462,13 @@ export class CollabSession {
   }
 
   get canUndo(): boolean {
+    if (this.accessBlocked || !this.contentReady) return false;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.undoStack, "applied");
     return this.undoManager.canUndo() || !!this.readCurrentCommentSuggestionTransition("applied");
   }
 
   get canRedo(): boolean {
+    if (this.accessBlocked || !this.contentReady) return false;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.redoStack, "undone");
     const stored = this.readStoredCommentSuggestionTransition();
     const hasMatchingTransient =
