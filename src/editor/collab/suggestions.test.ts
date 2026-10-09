@@ -3,7 +3,7 @@ import * as Y from "yjs";
 import { SuggestionsModel, SuggestionConflictError, SUGGESTIONS_ORIGIN } from "./suggestions";
 import { CommentsModel } from "./comments";
 import { makeCollabUser } from "./shared";
-import { diffSuggestionEdits } from "../sync/suggestion-diff";
+import { diffSuggestionEdits, targetedSuggestionEdits } from "../sync/suggestion-diff";
 import { LONG_PASSAGE_PREFIX, LONG_PASSAGE_SUFFIX, REWRITE_AFTER, REWRITE_AUTHOR, REWRITE_BEFORE, REWRITE_DOCUMENT, REWRITE_PREFIX, REWRITE_RESULT, REWRITE_SUFFIX } from "./rewrite.test-fixture";
 
 const agent = makeCollabUser("agent:owner:synthetic-run", REWRITE_AUTHOR);
@@ -241,5 +241,51 @@ describe("coherent tracked replacements", () => {
       expect(model.list()).toEqual([independent]);
       undo.destroy();
     }
+  });
+});
+
+describe("a suggestion on a table row and the table's padding", () => {
+  const TABLE = "| Name | Owner |\n| --- | --- |\n| Alpha | Ann |\n| Beta | Bob |\n";
+  /** One find and replace of a whole row: one suggestion, the new row above the old one. */
+  const rowEdit = () => targetedSuggestionEdits(TABLE, [{ find: "| Beta | Bob |", replace: "| Beta program | Robert |" }]);
+
+  /** What the rich editor does to the text when a cell is edited: every row is written with its columns lined up. */
+  function pad(ytext: Y.Text) {
+    const rows = ytext.toString().split("\n");
+    for (let index = rows.length - 1; index >= 0; index--) {
+      const row = rows[index];
+      if (!row.includes("|")) continue;
+      const at = rows.slice(0, index).reduce((sum, line) => sum + line.length + 1, 0);
+      // Before each closing pipe: spaces in a row of cells, dashes in the delimiter row.
+      for (let pipe = row.lastIndexOf("|"); pipe > 0; pipe = row.lastIndexOf("|", pipe - 1)) {
+        ytext.insert(at + pipe - 1, row.includes("---") ? "----" : "    ");
+      }
+    }
+  }
+
+  it.each(["accept", "reject"] as const)("is not outdated by padding alone: %s still decides it", (action) => {
+    const { ytext, model } = setup(TABLE);
+    const [id] = model.proposeEdits(rowEdit(), agent);
+    pad(ytext);
+    expect(ytext.toString()).toContain("| Beta program     | Robert     |\n| Beta     | Bob     |");
+    expect(model.groups()).toHaveLength(1);
+    expect(model.groups()[0]).toMatchObject({ id, type: "replace", outdated: false });
+    expect(model[action](id)).toBe(1);
+    expect(ytext.toString()).toBe(
+      `| Name     | Owner     |\n| ------- | ------- |\n| Alpha     | Ann     |\n${action === "accept" ? "| Beta program     | Robert     |" : "| Beta     | Bob     |"}\n`,
+    );
+  });
+
+  it("is outdated by a change to the words of its rows, and by one to text that is not a table", () => {
+    const { ytext, model } = setup(TABLE);
+    model.proposeEdits(rowEdit(), agent);
+    ytext.insert(ytext.toString().indexOf("program"), "pilot ");
+    expect(model.groups()[0].outdated).toBe(true);
+    expect(() => model.acceptAll()).toThrow(SuggestionConflictError);
+
+    const prose = setup("one  two | three");
+    const [id] = prose.model.proposeEdits([{ from: 0, to: 8, insert: "uno dos" }], agent);
+    prose.ytext.insert(prose.ytext.toString().indexOf("one") + 3, "  ");
+    expect(prose.model.groups().find((group) => group.id === id)?.outdated).toBe(true);
   });
 });

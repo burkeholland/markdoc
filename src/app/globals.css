@@ -1143,8 +1143,40 @@ body {
   font-size: 0.85em;
   margin-right: 0.5em;
 }
-.md-rich .ProseMirror-gapcursor:after {
+/* The gap cursor: the caret where there is no text to put one, such as before a table that starts
+   the document, after one that ends it, or between two tables. ProseMirror draws it as an element
+   among the document's blocks, and prosemirror-gapcursor's own stylesheet (not loaded here) is what
+   takes that element out of the flow. Without these rules it was an invisible block: a click beside
+   such a table moved the table down by one block space, and the next click in a cell moved it back. */
+.md-rich .ProseMirror-gapcursor {
+  display: none;
+  pointer-events: none;
+  position: absolute;
+}
+.md-rich.ProseMirror-focused .ProseMirror-gapcursor {
+  display: block;
+}
+.md-rich .ProseMirror-gapcursor::after {
+  animation: md-gapcursor-blink 1.1s steps(2, start) infinite;
   border-top: 1px solid var(--color-ink);
+  content: "";
+  display: block;
+  position: absolute;
+  top: -2px;
+  width: 20px;
+}
+@keyframes md-gapcursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+/* The rhythm rules above space a block by the element before it, and the gap cursor is that element
+   while it shows: the block after it keeps the space it has without the cursor. */
+.md-rich > .ProseMirror-gapcursor:first-child + * {
+  margin-top: 0;
+}
+.md-rich > hr + .ProseMirror-gapcursor + * {
+  margin-top: calc(var(--md-space) * 1.75);
 }
 .md-rich[data-placeholder]:not(.md-has-content)::before {
   content: attr(data-placeholder);
@@ -1422,6 +1454,7 @@ body {
   .drawer,
   .sheet,
   .md-rich .md-image-upload-spinner,
+  .md-rich .ProseMirror-gapcursor::after,
   .animate-spin {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
