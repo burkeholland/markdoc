@@ -708,6 +708,38 @@ export const showLinkAsCard: Command = (state, dispatch) => {
   return true;
 };
 
+/**
+ * Insert → "Video or post from a link": a card for `url` as a block of its own. An empty top-level
+ * paragraph (the line the slash menu was opened on) becomes the card; otherwise the card goes after the
+ * top-level block the selection ends in. Writing continues in a new paragraph below it. One step, so
+ * one undo. A link that is not on the list inserts nothing.
+ */
+export function insertLinkCard(url: string): Command {
+  return (state, dispatch) => {
+    if (!matchLinkCard(url)) return false;
+    if (dispatch) {
+      const { $to } = state.selection;
+      const tr = state.tr;
+      const card = schema.nodes.link_card.create({ url });
+      const atEmptyParagraph = $to.depth === 1 && $to.parent.type === schema.nodes.paragraph && $to.parent.content.size === 0;
+      let pos: number;
+      if (atEmptyParagraph) {
+        pos = $to.before(1);
+        tr.replaceWith(pos, pos + $to.parent.nodeSize, card);
+      } else {
+        // After the top-level block the selection ends in. With a whole block selected (a card, a rule) the
+        // selection ends right after it, and that is the place.
+        pos = $to.after(1);
+        tr.insert(pos, card);
+      }
+      tr.insert(pos + card.nodeSize, schema.nodes.paragraph.create());
+      tr.setSelection(TextSelection.create(tr.doc, pos + card.nodeSize + 1));
+      dispatch(tr.scrollIntoView());
+    }
+    return true;
+  };
+}
+
 /** Tab with a card selected moves focus into the card: its link first, then "Show as text". Escape there comes back (`nodeviews.ts`). */
 export const focusSelectedCard: Command = (state, _dispatch, view) => {
   const card = selectedCard(state);

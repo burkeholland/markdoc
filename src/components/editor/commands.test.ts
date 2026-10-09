@@ -62,6 +62,26 @@ function stubCtx(overrides: Partial<EditorCommandContext> = {}, session: Partial
 }
 
 const visible = (cmds: Command[]) => cmds.filter((c) => !c.when || c.when());
+
+describe("the palette's Insert entry for a card (#2317)", () => {
+  it("'Video or post from a link' opens the card dialog, for people who can edit, and not in a table", () => {
+    const ctx = stubCtx();
+    ctx.actions = { ...ctx.actions, rich: {} as NonNullable<EditorCommandContext["actions"]["rich"]> };
+    const entry = buildCommands(ctx).find((c) => c.id === "block:card")!;
+    expect(entry.title).toBe("Video or post from a link");
+    expect(entry.group).toBe("Insert");
+    expect(entry.icon).toBe("SquarePlay");
+    expect(entry.when?.()).toBe(true);
+    void entry.run();
+    expect((ctx as unknown as { calls: string[] }).calls).toEqual(["dialog:card"]);
+    expect(filterCommands("video", buildCommands(ctx)).map((c) => c.id)).toContain("block:card");
+    expect(filterCommands("youtube", buildCommands(ctx)).map((c) => c.id)).toContain("block:card");
+
+    const readOnly = buildCommands(stubCtx({}, { canEdit: false })).find((c) => c.id === "block:card")!;
+    expect(readOnly.when?.()).toBe(false);
+    expect(buildCommands(stubCtx({ slashWhere: { inTable: true, canComment: true } })).map((c) => c.id)).not.toContain("block:card");
+  });
+});
 const ids = (cmds: Command[]) => cmds.map((c) => c.id);
 
 describe("buildCommands", () => {

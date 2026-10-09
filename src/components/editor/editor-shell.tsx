@@ -95,6 +95,7 @@ const loadGitHubDialog = () => import("./github-dialog");
 const loadSyncDialog = () => import("./sync-dialog");
 const loadDialogs = () => import("./dialogs");
 const loadFileDropDialog = () => import("./file-drop-dialog");
+const loadCardDialog = () => import("./card-dialog");
 const loadCommandPalette = () => import("./command-palette");
 const CommentsPanel = lazyOnFirstUse(loadCommentsPanel, (m) => m.CommentsPanel, () => <SidePanelPlaceholder title="Comments" />);
 const VersionsPanel = lazyOnFirstUse(loadVersionsPanel, (m) => m.VersionsPanel, () => <SidePanelPlaceholder title="Version history" />);
@@ -111,6 +112,7 @@ const SyncDialog = lazyOnFirstUse(loadSyncDialog, (m) => m.SyncDialog);
 const LinkDialog = lazyOnFirstUse(loadDialogs, (m) => m.LinkDialog);
 const ImageDialog = lazyOnFirstUse(loadDialogs, (m) => m.ImageDialog);
 const TableDialog = lazyOnFirstUse(loadDialogs, (m) => m.TableDialog);
+const CardDialog = lazyOnFirstUse(loadCardDialog, (m) => m.CardDialog);
 const NameVersionDialog = lazyOnFirstUse(loadDialogs, (m) => m.NameVersionDialog);
 const ShortcutsDialog = lazyOnFirstUse(loadDialogs, (m) => m.ShortcutsDialog);
 const FileDropDialog = lazyOnFirstUse(loadFileDropDialog, (m) => m.FileDropDialog);
@@ -2846,6 +2848,7 @@ export function EditorShell({
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   const openImage = useCallback(() => setDialog("image"), []);
   const openTable = useCallback(() => setDialog("table"), []);
+  const openCard = useCallback(() => setDialog("card"), []);
   const openVersionName = openNameVersion;
   const openStorage = useCallback(() => (isOwner ? setDialog("publish") : undefined), [isOwner]);
   const publishFromHeader = useCallback(() => {
@@ -3107,7 +3110,7 @@ export function EditorShell({
   // format change) does not re-render the closed ones.
   const dialogOpenChange = useMemo(() => {
     const make = (kind: Exclude<DialogKind, null>) => (open: boolean) => setDialog(open ? kind : null);
-    return { share: make("share"), publish: make("publish"), link: make("link"), image: make("image"), table: make("table"), shortcuts: make("shortcuts") };
+    return { share: make("share"), publish: make("publish"), link: make("link"), image: make("image"), card: make("card"), table: make("table"), shortcuts: make("shortcuts") };
   }, []);
   const onPublishDocChange = useCallback((d: DocumentDto) => {
     setDoc(d);
@@ -3117,6 +3120,7 @@ export function EditorShell({
   const removeLink = useCallback(() => actions.removeLink(), [actions]);
   const insertImage = useCallback((src: string, alt: string) => actions.insertImage(src, alt), [actions]);
   const insertTable = useCallback((rows: number, cols: number) => actions.insertTable(rows, cols), [actions]);
+  const insertCard = useCallback((url: string) => actions.insertCard(url), [actions]);
   const closeFileDrop = useCallback(() => setFileDrop(null), []);
   const fileDropError = useCallback((m: string) => toast(m, "error"), [toast]);
   const ownsNamedVersion = useCallback(
@@ -3181,6 +3185,7 @@ export function EditorShell({
     link: useEverTrue(dialog === "link"),
     image: useEverTrue(dialog === "image"),
     table: useEverTrue(dialog === "table"),
+    card: useEverTrue(dialog === "card"),
     versionName: useEverTrue(dialog === "versionName"),
     shortcuts: useEverTrue(dialog === "shortcuts"),
     palette: useEverTrue(paletteOpen),
@@ -3258,7 +3263,7 @@ export function EditorShell({
           connectAgentNonce={connectAgentNonce}
           embed={embed}
         />
-        <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onTable={openTable} />
+        <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onCard={openCard} onTable={openTable} />
         {!isPhone && <HintBar session={session} actions={actions} onConnectAgent={openConnectAgent} onComment={startMentionComment} />}
         {findOpen && (
           <FindBar
@@ -3382,7 +3387,7 @@ export function EditorShell({
                     )}
                     <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onLink={openLink} />
                     <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />
-                    <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onLink={openLink} onComment={startComment} onConnectAgent={openConnectAgent} />
+                    <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onCard={openCard} onLink={openLink} onComment={startComment} onConnectAgent={openConnectAgent} />
                     <RichPane
                       session={session}
                       hidden={showRichPlaceholder}
@@ -3468,6 +3473,7 @@ export function EditorShell({
         {everOpened.image && <ImageDialog open={dialog === "image"} onOpenChange={dialogOpenChange.image} onSubmit={insertImage} onUpload={uploadImage} />}
         {everOpened.fileDrop && <FileDropDialog pending={fileDrop} onClose={closeFileDrop} canEdit={canEdit} onReplace={replaceAll} onInsert={insertAt} onError={fileDropError} />}
         {everOpened.table && <TableDialog open={dialog === "table"} onOpenChange={dialogOpenChange.table} onSubmit={insertTable} />}
+        {everOpened.card && <CardDialog open={dialog === "card"} onOpenChange={dialogOpenChange.card} onSubmit={insertCard} />}
         {everOpened.versionName && nameVersionVisit && (
           <NameVersionDialog
             key={`version-name:${operationDialogKey}`}
