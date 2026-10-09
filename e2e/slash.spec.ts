@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
-import { signIn, createDocument, openDocument, codeText } from "./helpers";
+import { signIn, createDocument, openDocument, codeText, richText, clickEdgeOf, pmSelectionSynced } from "./helpers";
 
 const mod = process.platform === "darwin" ? "Meta" : "Control";
 
@@ -136,6 +136,45 @@ test.describe("slash command menu", () => {
     await user.context.close();
   });
 
+  test("a second slash at the same place starts at the first row; a code block has no menu", async ({ browser }) => {
+    const user = await signIn(browser, "slasher");
+    const { page } = user;
+    const id = await createDocument(page, "Intro paragraph.\n\n```\nlet a = 1;\n```\n");
+    await openDocument(page, id);
+    await emptyParagraph(page);
+    const menu = page.getByTestId("slash-menu");
+
+    await page.keyboard.type("/");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByTestId("slash-item-heading2")).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await page.keyboard.press("Backspace");
+    await page.keyboard.type("/");
+    await expect(page.getByTestId("slash-item-text")).toHaveAttribute("aria-selected", "true");
+
+    // The same after a choice: Heading 2 is made, and the next menu in that block starts at Text again.
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".md-rich h2")).toHaveCount(1);
+    await page.keyboard.type("/");
+    await expect(page.getByTestId("slash-item-text")).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("Enter");
+    await expect(menu).toHaveCount(0);
+    await expect(page.locator(".md-rich h2")).toHaveCount(0);
+
+    // Inside a code block a slash is just a slash, also after a space.
+    await page.locator(".md-rich pre code").click();
+    await page.keyboard.press("End");
+    await page.keyboard.type(" /");
+    await expect.poll(() => codeText(page)).toContain("let a = 1; /");
+    await expect(menu).toHaveCount(0);
+
+    await user.context.close();
+  });
+
   test("the menu is disabled in viewing mode", async ({ browser }) => {
     const user = await signIn(browser, "slasher");
     const { page } = user;
@@ -160,3 +199,135 @@ test.describe("slash command menu", () => {
     await user.context.close();
   });
 });
+
+/**
+ * #2334: from 2026-09-09 to 2026-10-08 the menu took no key and almost no click in a real browser, while its
+ * jsdom unit tests passed. Every way a person picks an item is driven here with real keys and a real pointer,
+ * in the three kinds of place a caret can be in. Each test opens its own document.
+ */
+const PLACES = {
+  "an empty document": {
+    content: "",
+    go: async (page: Page) => {
+      await page.locator(".md-rich").click();
+      await expect.poll(() => pmSelectionSynced(page)).toBe(true);
+    },
+    // "/" + two ArrowDown: Text, Heading 1, Heading 2.
+    arrows: { query: "", first: "text", downTwice: "heading2", made: "h2" },
+    pointer: { item: "quote", made: "blockquote" },
+  },
+  // After a space in the middle of a line. Here the menu's left edge is not a whole number of pixels.
+  "the middle of a paragraph": {
+    content: "Intro **bold** paragraph here.\n",
+    go: async (page: Page) => {
+      await clickEdgeOf(page, "strong", "end");
+      await page.keyboard.type(" ");
+    },
+    arrows: { query: "", first: "text", downTwice: "heading2", made: "h2" },
+    pointer: { item: "quote", made: "blockquote" },
+  },
+  // A new, empty list item. Headings and quotes do not fit inside a list item, so other items are picked.
+  "a list item": {
+    content: "- one\n- two\n",
+    go: async (page: Page) => {
+      await clickEdgeOf(page, "li:last-child", "end");
+      await page.keyboard.press("Enter");
+      await expect(page.locator(".md-rich li")).toHaveCount(3);
+    },
+    // "/li" lists Bullet list, Numbered list, Task list, Divider, Link.
+    arrows: { query: "li", first: "bullet", downTwice: "task", made: "li.md-task-item" },
+    pointer: { item: "date", made: null },
+  },
+} as const;
+
+for (const [place, at] of Object.entries(PLACES)) {
+  test.describe(`slash menu in ${place} (#2334)`, () => {
+    const open = async (browser: import("@playwright/test").Browser) => {
+      const user = await signIn(browser, "slasher");
+      const id = await createDocument(user.page, at.content);
+      await openDocument(user.page, id);
+      await at.go(user.page);
+      return user;
+    };
+    const menu = (page: Page) => page.getByTestId("slash-menu");
+    const item = (page: Page, id: string) => page.getByTestId(`slash-item-${id}`);
+
+    test("a name and Enter insert the item and remove the typed text", async ({ browser }) => {
+      const user = await open(browser);
+      const { page } = user;
+      await page.keyboard.type("/divider");
+      await expect(item(page, "divider")).toHaveAttribute("aria-selected", "true");
+      await page.keyboard.press("Enter");
+      await expect(page.locator(".md-rich hr")).toHaveCount(1);
+      await expect(menu(page)).toHaveCount(0);
+      expect(await richText(page)).not.toContain("/");
+      await expect.poll(() => codeText(page)).toContain("---");
+      expect(await codeText(page)).not.toContain("/divider");
+      await user.context.close();
+    });
+
+    test("Escape closes the menu, keeps the slash and leaves the caret in the editor", async ({ browser }) => {
+      const user = await open(browser);
+      const { page } = user;
+      await page.keyboard.type("/");
+      await expect(menu(page)).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(menu(page)).toHaveCount(0);
+      await page.keyboard.type("x");
+      await expect.poll(() => richText(page)).toContain("/x");
+      await expect(menu(page)).toHaveCount(0);
+      await user.context.close();
+    });
+
+    test("the arrow keys move the highlight and Enter picks the highlighted item", async ({ browser }) => {
+      const user = await open(browser);
+      const { page } = user;
+      const { query, first, downTwice, made } = at.arrows;
+      // Park the pointer where a row of the menu will be: open once to measure, close, remove the text, open again.
+      await page.keyboard.type(`/${query}`);
+      const rowBox = (await item(page, downTwice).boundingBox())!;
+      await page.keyboard.press("Escape");
+      await expect(menu(page)).toHaveCount(0);
+      for (let i = 0; i <= query.length; i++) await page.keyboard.press("Backspace");
+      await page.mouse.move(rowBox.x + rowBox.width / 2, rowBox.y + rowBox.height / 2);
+      await page.keyboard.type(`/${query}`);
+      await expect(menu(page)).toBeVisible();
+      // The browser tells the row under the resting pointer "mouseenter" a moment after the menu appears.
+      // That must not move the highlight: Enter right after "/" has to pick the first row.
+      await page.waitForTimeout(400);
+      await expect(item(page, first)).toHaveAttribute("aria-selected", "true");
+      await page.keyboard.press("ArrowDown");
+      await expect(item(page, first)).toHaveAttribute("aria-selected", "false");
+      await page.keyboard.press("ArrowDown");
+      await expect(item(page, downTwice)).toHaveAttribute("aria-selected", "true");
+      await page.keyboard.press("ArrowUp");
+      await expect(item(page, downTwice)).toHaveAttribute("aria-selected", "false");
+      await page.keyboard.press("ArrowDown");
+      await expect(item(page, downTwice)).toHaveAttribute("aria-selected", "true");
+      await page.keyboard.press("Enter");
+      await expect(menu(page)).toHaveCount(0);
+      await expect(page.locator(`.md-rich ${made}`).first()).toBeAttached();
+      expect(await richText(page)).not.toContain("/");
+      await user.context.close();
+    });
+
+    test("hover highlights a row, a click picks it, and typing goes on in the editor", async ({ browser }) => {
+      const user = await open(browser);
+      const { page } = user;
+      const { item: id, made } = at.pointer;
+      await page.keyboard.type("/");
+      await expect(menu(page)).toBeVisible();
+      await item(page, id).hover();
+      await expect(item(page, id)).toHaveAttribute("aria-selected", "true");
+      await item(page, id).click();
+      await expect(menu(page)).toHaveCount(0);
+      if (made) await expect(page.locator(`.md-rich ${made}`)).toHaveCount(1);
+      else await expect.poll(() => richText(page)).toMatch(/\d{4}-\d{2}-\d{2}/);
+      expect(await richText(page)).not.toContain("/");
+      // The click did not take the focus out of the editor.
+      await page.keyboard.type("Zq");
+      await expect.poll(() => richText(page)).toContain("Zq");
+      await user.context.close();
+    });
+  });
+}

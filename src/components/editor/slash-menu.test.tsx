@@ -1,40 +1,17 @@
 // @vitest-environment jsdom
-import { StrictMode, useEffect, useLayoutEffect, type MouseEvent as ReactMouseEvent, type RefCallback } from "react";
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import * as Y from "yjs";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
+import { keymap } from "prosemirror-keymap";
 import type { CollabSession } from "@/editor/collab/session";
-import type {
-  SlashKeyPublication,
-  SlashMenuHandlers,
-  SlashState,
-} from "@/editor/prosemirror/slash-menu";
-import { slashMenuPlugin } from "@/editor/prosemirror/slash-menu";
+import { MarkdownBinding, markdownBindingPlugin } from "@/editor/sync/markdown-binding";
 import { editablePlugin } from "@/editor/prosemirror/editable";
-import { schema } from "@/editor/markdown/schema";
-import { SLASH_GROUPS, SLASH_ITEMS, filterSlashItems } from "@/editor/slash-items";
-
-const slashActions = vi.hoisted(() => ({
-  applyCommand: vi.fn(),
-  applyItem: vi.fn(),
-  close: vi.fn(),
-}));
-
-vi.mock("@/editor/prosemirror/slash-menu", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/editor/prosemirror/slash-menu")>();
-  return {
-    ...actual,
-    applySlashCommand: slashActions.applyCommand,
-    applySlashItem: slashActions.applyItem,
-    closeSlashMenu: slashActions.close,
-  };
-});
-
-vi.mock("@/editor/prosemirror/commands", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/editor/prosemirror/commands")>();
-  return { ...actual, tableAt: () => null };
-});
+import { slashMenuPlugin, slashMenuState, type SlashState } from "@/editor/prosemirror/slash-menu";
+import { SLASH_ITEMS } from "@/editor/slash-items";
 
 vi.mock("./use-session", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./use-session")>();
@@ -46,1583 +23,609 @@ vi.mock("./use-session", async (importOriginal) => {
 
 import { createSlashMenuController, SlashMenu, type SlashMenuController } from "./slash-menu";
 
-class TrackingController implements SlashMenuController {
-  state: SlashState | null = null;
-  keyOwner: {
-    handler: (publication: SlashKeyPublication) => boolean;
-  } | null = null;
-  readonly listeners = new Set<(state: SlashState | null) => void>();
-  readonly capturedListeners: ((state: SlashState | null) => void)[] = [];
-  readonly capturedKeyHandlers: ((
-    publication: SlashKeyPublication,
-  ) => boolean)[] = [];
-  subscriptions = 0;
-  unsubscriptions = 0;
-  peakListeners = 0;
-
-  readonly handlers: SlashMenuHandlers = {
-    onState: (state) => this.emit(state),
-    onKey: (publication) => this.keyHandler?.(publication) ?? false,
-  };
-
-  readonly subscribe = (listener: (state: SlashState | null) => void) => {
-    this.subscriptions += 1;
-    this.listeners.add(listener);
-    this.capturedListeners.push(listener);
-    this.peakListeners = Math.max(this.peakListeners, this.listeners.size);
-    let active = true;
-    return () => {
-      if (!active) return;
-      active = false;
-      this.unsubscriptions += 1;
-      this.listeners.delete(listener);
-    };
-  };
-
-  readonly getState = () => this.state;
-
-  get keyHandler() {
-    return this.keyOwner?.handler ?? null;
-  }
-
-  readonly setKeyHandler = (
-    handler: (publication: SlashKeyPublication) => boolean,
-  ) => {
-    const owner = { handler };
-    this.keyOwner = owner;
-    this.capturedKeyHandlers.push(handler);
-    let active = true;
-    return () => {
-      if (!active) return;
-      active = false;
-      if (this.keyOwner === owner) this.keyOwner = null;
-    };
-  };
-
-  emit(state: SlashState | null) {
-    this.state = state;
-    for (const listener of this.listeners) listener(state);
-  }
-
-  key(publication: SlashKeyPublication) {
-    return this.handlers.onKey?.(publication) ?? false;
-  }
-}
-
-type MenuVisit = {
+/**
+ * The real plugin in a real ProseMirror view, the real menu next to it, and keydown events dispatched on
+ * the editor the way a browser does. Nothing in these tests waits for a timer or a microtask between a key
+ * and its result: that wait is what hid #2334 (the old menu acted one microtask late, which a browser never
+ * allows and jsdom always did).
+ */
+interface Mounted {
   controller: SlashMenuController;
   view: EditorView;
-  session: CollabSession;
+  ytext: Y.Text;
+  session: { canEdit: boolean; canComment: boolean; undoManager: { stopCapturing: Mock<() => void> } };
   onImage: Mock<() => void>;
   onCard: Mock<() => void>;
   onLink: Mock<() => void>;
   onComment: Mock<() => void>;
   onConnectAgent: Mock<() => void>;
-};
-
-type Visit = Omit<MenuVisit, "controller"> & {
-  controller: TrackingController;
-};
-
-type IntegratedVisit = MenuVisit & {
-  host: HTMLDivElement;
-  restoreOwnerWindow: () => void;
-};
+  /** Keys that fell through the menu to the editor's own keymap. */
+  editorKeys: string[];
+  rerender: (view: EditorView | null) => void;
+  unmount: () => void;
+}
 
 const container = document.createElement("div");
 container.getBoundingClientRect = () =>
   ({ left: 0, top: 0, right: 1200, bottom: 800, width: 1200, height: 800, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
 const containerRef = { current: container };
 
-function makeView(): EditorView {
-  const dom = document.createElement("div");
-  dom.contentEditable = "true";
-  document.body.append(dom);
-  const transaction = {
-    setSelection: vi.fn(),
+const cleanups: (() => void)[] = [];
+
+function makeEditor(markdown: string, controller: SlashMenuController) {
+  const ytext = new Y.Doc().getText("content");
+  ytext.insert(0, markdown);
+  const binding = new MarkdownBinding(ytext);
+  const editorKeys: string[] = [];
+  const reached = (name: string) => () => {
+    editorKeys.push(name);
+    return true;
   };
-  transaction.setSelection.mockReturnValue(transaction);
-  return {
-    state: {
-      selection: {
-        $from: {
-          start: () => 1,
-          end: () => 2,
-        },
-      },
-      doc: {},
-      tr: transaction,
-    },
-    dispatch: vi.fn(),
-    focus: vi.fn(),
-    dom,
-    isDestroyed: false,
-    composing: false,
-  } as unknown as EditorView;
-}
-
-function unpublishedKey(): SlashKeyPublication {
-  return {} as SlashKeyPublication;
-}
-
-function markJsdomEventTrusted(event: Event) {
-  const implementation = Object.getOwnPropertySymbols(event)
-    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
-    .find(
-      (candidate): candidate is { isTrusted: boolean } =>
-        typeof candidate === "object" &&
-        candidate !== null &&
-        "isTrusted" in candidate &&
-        candidate.isTrusted === false,
-    );
-  const descriptor = implementation
-    ? Object.getOwnPropertyDescriptor(implementation, "isTrusted")
-    : undefined;
-  if (!implementation || !descriptor?.writable) {
-    throw new Error("Unable to set jsdom's internal event trust slot");
-  }
-  Object.defineProperty(implementation, "isTrusted", {
-    configurable: true,
-    enumerable: true,
-    get: () => true,
-    set: () => undefined,
-  });
-  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
-}
-
-type JsdomKeyboardEventImplementation = {
-  isTrusted: boolean;
-  view: Window | null;
-};
-
-function jsdomKeyboardEventImplementation(
-  event: KeyboardEvent,
-): JsdomKeyboardEventImplementation {
-  const implementation = Object.getOwnPropertySymbols(event)
-    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
-    .find(
-      (candidate): candidate is JsdomKeyboardEventImplementation =>
-        typeof candidate === "object" &&
-        candidate !== null &&
-        "isTrusted" in candidate &&
-        "view" in candidate,
-    );
-  if (!implementation) throw new Error("jsdom keyboard event implementation was unavailable");
-  return implementation;
-}
-
-function exposeJsdomNativeDefaultView(ownerDocument: Document): () => void {
-  const implementationSymbol = Object.getOwnPropertySymbols(
-    ownerDocument,
-  ).find((symbol) => String(symbol) === "Symbol(impl)");
-  if (!implementationSymbol) {
-    throw new Error("Document implementation slot was not available");
-  }
-  const nativeOwnerWindow = (
-    ownerDocument as unknown as Record<
-      symbol,
-      { _globalObject: Window & typeof globalThis }
-    >
-  )[implementationSymbol]._globalObject;
-  const previous = Object.getOwnPropertyDescriptor(ownerDocument, "defaultView");
-  Object.defineProperty(ownerDocument, "defaultView", {
-    configurable: true,
-    value: nativeOwnerWindow,
-  });
-  if (ownerDocument.defaultView !== nativeOwnerWindow) {
-    throw new Error("Unable to expose jsdom's native owner window");
-  }
-  return () => {
-    if (previous) {
-      Object.defineProperty(ownerDocument, "defaultView", previous);
-    } else if (!Reflect.deleteProperty(ownerDocument, "defaultView")) {
-      throw new Error("Unable to restore jsdom's public owner window");
-    }
-  };
-}
-
-function makeIntegratedVisit(): IntegratedVisit {
-  const restoreOwnerWindow = exposeJsdomNativeDefaultView(document);
-  const controller = createSlashMenuController();
   const state = EditorState.create({
-    schema,
-    plugins: [editablePlugin(true), slashMenuPlugin(controller.handlers)],
+    doc: binding.initialDoc(),
+    plugins: [
+      editablePlugin(true),
+      slashMenuPlugin(controller.handlers),
+      markdownBindingPlugin(binding),
+      keymap({ Enter: reached("Enter"), Tab: reached("Tab"), ArrowDown: reached("ArrowDown"), ArrowUp: reached("ArrowUp"), Home: reached("Home"), End: reached("End") }),
+    ],
   });
   const host = document.createElement("div");
   document.body.append(host);
   const view = new EditorView(host, { state });
-  const dispatch = view.dispatch.bind(view);
-  view.dispatch = vi.fn((transaction) => dispatch(transaction));
-  const focus = view.focus.bind(view);
-  view.focus = vi.fn(() => focus());
-  return {
-    controller,
-    view,
-    session: makeSession(),
-    onImage: vi.fn<() => void>(),
-    onCard: vi.fn<() => void>(),
-    onLink: vi.fn<() => void>(),
-    onComment: vi.fn<() => void>(),
-    onConnectAgent: vi.fn<() => void>(),
-    host,
-    restoreOwnerWindow,
+  cleanups.push(() => {
+    if (!view.isDestroyed) view.destroy();
+    binding.destroy();
+    host.remove();
+  });
+  return { view, ytext, editorKeys };
+}
+
+function mount({ markdown = "Hello\n\nWorld", strict = false, canEdit = true, canComment = true }: { markdown?: string; strict?: boolean; canEdit?: boolean; canComment?: boolean } = {}): Mounted {
+  const controller = createSlashMenuController();
+  const { view, ytext, editorKeys } = makeEditor(markdown, controller);
+  const session = { canEdit, canComment, undoManager: { stopCapturing: vi.fn<() => void>() } };
+  const callbacks = { onImage: vi.fn<() => void>(), onCard: vi.fn<() => void>(), onLink: vi.fn<() => void>(), onComment: vi.fn<() => void>(), onConnectAgent: vi.fn<() => void>() };
+  const ui = (current: EditorView | null) => {
+    const menu = <SlashMenu view={current} session={session as unknown as CollabSession} controller={controller} containerRef={containerRef} {...callbacks} />;
+    return strict ? <StrictMode>{menu}</StrictMode> : menu;
   };
+  const rendered = render(ui(view), { container: document.body.appendChild(container) });
+  return { controller, view, ytext, session, ...callbacks, editorKeys, rerender: (next) => rendered.rerender(ui(next)), unmount: rendered.unmount };
 }
 
-async function openIntegrated(visit: IntegratedVisit) {
-  await act(async () => {
-    visit.view.dom.focus();
-    visit.view.dispatch(
-      visit.view.state.tr
-        .setSelection(TextSelection.create(visit.view.state.doc, 1))
-        .insertText("/"),
-    );
-    await Promise.resolve();
+// Doc "Hello\n\nWorld": <p>Hello</p><p>World</p>; the second paragraph starts at 8.
+const WORLD = 8;
+
+/** Caret to `pos`, then the text typed one character per transaction, as the keyboard does. */
+function typeAt(view: EditorView, pos: number, text: string) {
+  act(() => {
+    view.focus();
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, pos)));
+    for (const ch of text) view.dispatch(view.state.tr.insertText(ch));
   });
-  expect(screen.getByTestId("slash-menu")).toBeInTheDocument();
 }
 
-async function dispatchIntegratedKey(
-  view: EditorView,
-  key: string,
-  init: KeyboardEventInit = {},
-) {
-  const ownerDocument = view.dom.ownerDocument;
-  const ownerWindow = ownerDocument.defaultView;
-  if (!ownerWindow) throw new Error("Editor owner window was unavailable");
-  const event = new ownerWindow.KeyboardEvent("keydown", {
-    key,
-    code: key,
-    bubbles: true,
-    cancelable: true,
-    ...init,
-    view: ownerWindow,
-  });
-  if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
-  markJsdomEventTrusted(event);
-  await act(async () => {
-    view.dom.dispatchEvent(event);
-    await Promise.resolve();
-    await Promise.resolve();
+function keydown(view: EditorView, key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+  const event = new KeyboardEvent("keydown", { key, code: key, bubbles: true, cancelable: true, ...init });
+  view.dom.dispatchEvent(event);
+  return event;
+}
+/** One key, then React renders. */
+function press(view: EditorView, key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+  let event!: KeyboardEvent;
+  act(() => {
+    event = keydown(view, key, init);
   });
   return event;
 }
 
-async function dispatchRejectedNativeViewKey(
-  view: EditorView,
-  nativeView: Window | null,
-) {
-  const ownerWindow = view.dom.ownerDocument.defaultView;
-  if (!ownerWindow) throw new Error("Editor owner window was unavailable");
-  const event = new ownerWindow.KeyboardEvent("keydown", {
-    key: "End",
-    code: "End",
-    bubbles: true,
-    cancelable: true,
-    view: nativeView,
-  });
-  if (event.view !== nativeView) throw new Error("Rejected keyboard event lost its requested public view");
-  markJsdomEventTrusted(event);
-  await act(async () => {
-    view.dom.dispatchEvent(event);
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  return event;
-}
+const menu = () => screen.queryByTestId("slash-menu");
+const row = (id: string) => screen.getByTestId(`slash-item-${id}`);
+const selected = () => screen.getAllByRole("option").filter((option) => option.getAttribute("aria-selected") === "true").map((option) => option.getAttribute("data-testid"));
+const rowIds = () => screen.getAllByRole("option").map((option) => option.getAttribute("data-testid")!.replace("slash-item-", ""));
 
-async function dispatchStructuralWindowLookalikeKey(
-  view: EditorView,
-  key: string,
-) {
-  const ownerDocument = view.dom.ownerDocument;
-  const ownerWindow = ownerDocument.defaultView;
-  if (!ownerWindow) throw new Error("Editor owner window was unavailable");
-  const event = new ownerWindow.KeyboardEvent("keydown", {
-    key,
-    code: key,
-    bubbles: true,
-    cancelable: true,
-    view: ownerWindow,
-  });
-  if (event.view !== ownerWindow) throw new Error("Keyboard event lost its exact public owner window");
-  markJsdomEventTrusted(event);
-  const implementation = jsdomKeyboardEventImplementation(event);
-  const lookalike = new Proxy(
-    Object.create(Object.getPrototypeOf(ownerWindow), {
-      document: { configurable: true, value: ownerDocument },
-      Event: { configurable: true, value: ownerWindow.Event },
-      UIEvent: { configurable: true, value: ownerWindow.UIEvent },
-      KeyboardEvent: { configurable: true, value: ownerWindow.KeyboardEvent },
-      Document: { configurable: true, value: ownerWindow.Document },
-      MutationObserver: {
-        configurable: true,
-        value: ownerWindow.MutationObserver,
-      },
-    }),
-    {},
-  );
-  implementation.view = lookalike;
-  expect(event.isTrusted).toBe(true);
-  expect(event.view).toBe(lookalike);
-  expect(lookalike).not.toBe(ownerWindow);
-  expect(Object.getPrototypeOf(lookalike)).toBe(
-    Object.getPrototypeOf(ownerWindow),
-  );
-  expect(lookalike.document).toBe(ownerDocument);
-  expect(lookalike.Event).toBe(ownerWindow.Event);
-  expect(lookalike.UIEvent).toBe(ownerWindow.UIEvent);
-  expect(lookalike.KeyboardEvent).toBe(ownerWindow.KeyboardEvent);
-  expect(lookalike.Document).toBe(ownerWindow.Document);
-  expect(lookalike.MutationObserver).toBe(ownerWindow.MutationObserver);
-  await act(async () => {
-    view.dom.dispatchEvent(event);
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  return event;
-}
-
-function makeSession(): CollabSession {
-  return {
-    canEdit: true,
-    canComment: true,
-    undoManager: { stopCapturing: vi.fn() },
-  } as unknown as CollabSession;
-}
-
-function makeVisit(controller = new TrackingController()): Visit {
-  return {
-    controller,
-    view: makeView(),
-    session: makeSession(),
-    onImage: vi.fn<() => void>(),
-    onCard: vi.fn<() => void>(),
-    onLink: vi.fn<() => void>(),
-    onComment: vi.fn<() => void>(),
-    onConnectAgent: vi.fn<() => void>(),
-  };
-}
-
-function slashState(query = "", left = 100): SlashState {
-  return { from: 1, to: query.length + 2, query, coords: { left, top: 100, bottom: 120 } };
-}
-
-function BoundaryHarness({
-  visit,
-  view = visit.view,
-  present = true,
-  boundary = 0,
-  onBoundary,
-}: {
-  visit: MenuVisit;
-  view?: EditorView | null;
-  present?: boolean;
-  boundary?: number;
-  onBoundary?: () => void;
-}) {
-  useLayoutEffect(() => {
-    if (boundary > 0) onBoundary?.();
-  }, [boundary, onBoundary]);
-
-  if (!present) return null;
-  return (
-    <SlashMenu
-      view={view}
-      session={visit.session}
-      controller={visit.controller}
-      containerRef={containerRef}
-      onImage={visit.onImage}
-      onCard={visit.onCard}
-      onLink={visit.onLink}
-      onComment={visit.onComment}
-      onConnectAgent={visit.onConnectAgent}
-    />
-  );
-}
-
-function open(visit: Visit, state = slashState()) {
-  act(() => visit.controller.emit(state));
-  expect(screen.getByTestId("slash-menu")).toBeInTheDocument();
-}
-
-function expectNativeTitles(query = "") {
-  const items = filterSlashItems(query, SLASH_ITEMS, { inTable: false, canComment: true });
-  const root = screen.getByTestId("slash-menu");
-  const groups = SLASH_GROUPS.filter((group) => items.some((item) => item.group === group));
-  expect(root).toHaveAttribute("role", "listbox");
-  expect(root).toHaveAttribute("aria-label", "Insert block");
-  expect(root).toHaveAttribute("class", "touch-target scrollbar-thin absolute z-40 overflow-y-auto rounded-lg border border-line bg-surface py-1 shadow-xl animate-fade-in");
-  expect(root.style.width).toBe("288px");
-  expect(Number.parseFloat(root.style.maxHeight)).toBeLessThanOrEqual(36 * 8 + 8);
-  expect(root.querySelectorAll("button")).toHaveLength(items.length);
-  expect(root.querySelectorAll('[role="option"]')).toHaveLength(items.length || 1);
-  expect(root.querySelectorAll("svg")).toHaveLength(items.length);
-  expect(root.querySelectorAll("[title]")).toHaveLength(
-    items.length + items.filter((item) => item.description).length,
-  );
-  expect(root.querySelectorAll("span")).toHaveLength(
-    items.length * 2 + items.filter((item) => item.description).length + items.filter((item) => item.hint).length,
-  );
-  expect(root.children).toHaveLength(groups.length || 1);
-  for (const [groupIndex, group] of groups.entries()) {
-    const element = root.children[groupIndex];
-    const heading = element.firstElementChild!;
-    expect(element.tagName).toBe("DIV");
-    expect(element.getAttributeNames()).toEqual([]);
-    expect(element.children).toHaveLength(items.filter((item) => item.group === group).length + 1);
-    expect(heading.tagName).toBe("DIV");
-    expect(heading.getAttributeNames()).toEqual(["class"]);
-    expect(heading).toHaveAttribute("class", "px-3 pb-0.5 pt-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-3");
-    expect(heading.textContent).toBe(group);
-  }
-  for (const [index, item] of items.entries()) {
-    const row = screen.getByTestId(`slash-item-${item.id}`);
-    const [icon, body, hint] = Array.from(row.children);
-    const [title, description] = Array.from(body.children);
-    expect(row).toHaveAttribute("type", "button");
-    expect(row).toHaveAttribute("role", "option");
-    expect(row).toHaveAttribute("data-index", String(index));
-    expect(row).toHaveAttribute("aria-selected", String(index === 0));
-    expect(row.style.height).toBe(item.description ? "52px" : "36px");
-    expect(row).toHaveAttribute("class", `flex w-full items-center gap-3 px-3 text-left text-sm text-ink-2${index === 0 ? " bg-accent-soft text-ink" : ""}`);
-    expect(row.parentElement?.firstElementChild?.textContent).toBe(item.group);
-    expect(row.children).toHaveLength(item.hint ? 3 : 2);
-    expect(icon.tagName).toBe("svg");
-    expect(icon).toHaveAttribute("width", "16");
-    expect(icon).toHaveAttribute("height", "16");
-    expect(icon).toHaveClass("shrink-0", "text-ink-3");
-    expect(body.tagName).toBe("SPAN");
-    expect(body.getAttributeNames()).toEqual(["class"]);
-    expect(body).toHaveAttribute("class", "flex min-w-0 flex-1 flex-col");
-    expect(body.children).toHaveLength(item.description ? 2 : 1);
-    expect(title.tagName).toBe("SPAN");
-    expect(title.getAttributeNames().sort()).toEqual(["class", "title"]);
-    expect(title).toHaveAttribute("class", "truncate");
-    expect(title.textContent).toBe(item.title);
-    expect(title.getAttribute("title")).toBe(title.textContent);
-    expect(title.childNodes).toHaveLength(1);
-    if (item.description) {
-      expect(description.tagName).toBe("SPAN");
-      expect(description.getAttributeNames().sort()).toEqual(["class", "title"]);
-      expect(description).toHaveAttribute("class", "truncate text-xs text-ink-3");
-      expect(description.textContent).toBe(item.description);
-      expect(description.getAttribute("title")).toBe(description.textContent);
-      expect(description.childNodes).toHaveLength(1);
-    } else {
-      expect(description).toBeUndefined();
-    }
-    if (item.hint) {
-      expect(hint.tagName).toBe("SPAN");
-      expect(hint.getAttributeNames()).toEqual(["class"]);
-      expect(hint).toHaveAttribute("class", "text-xs text-ink-3");
-      expect(hint.textContent).toBe(item.hint);
-    } else {
-      expect(hint).toBeUndefined();
-    }
-  }
-  return root;
-}
-
-type DirectMouseEvent<T extends HTMLElement> = Pick<
-  ReactMouseEvent<T>,
-  "type" | "currentTarget" | "target" | "nativeEvent" | "preventDefault"
->;
-
-type DirectMouseHandler<T extends HTMLElement> = (event: DirectMouseEvent<T>) => void;
-
-interface CapturedRow {
-  element: HTMLButtonElement;
-  enter: DirectMouseHandler<HTMLButtonElement>;
-  click: DirectMouseHandler<HTMLButtonElement>;
-  ref: RefCallback<HTMLButtonElement>;
-}
-
-interface CapturedRoot {
-  element: HTMLDivElement;
-  down: DirectMouseHandler<HTMLDivElement>;
-  ref: RefCallback<HTMLDivElement>;
-}
-
-function reactProp<T>(element: HTMLElement, name: string): T {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
-  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  const value = props?.[name];
-  if (typeof value !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
-  return value as T;
-}
-
-function reactRef<T extends HTMLElement>(element: T): RefCallback<T> {
-  const fiberKey = Object.keys(element).find((key) => key.startsWith("__reactFiber$"));
-  if (!fiberKey) throw new Error(`React fiber was not attached to ${element.tagName}`);
-  const fiber = (element as unknown as Record<string, { ref?: unknown } | undefined>)[fiberKey];
-  if (typeof fiber?.ref !== "function") throw new Error(`A callback ref was not attached to ${element.tagName}`);
-  return fiber.ref as RefCallback<T>;
-}
-
-function captureRow(id: string): CapturedRow {
-  const element = screen.getByTestId(`slash-item-${id}`) as HTMLButtonElement;
-  return {
-    element,
-    enter: reactProp<DirectMouseHandler<HTMLButtonElement>>(element, "onMouseEnter"),
-    click: reactProp<DirectMouseHandler<HTMLButtonElement>>(element, "onClick"),
-    ref: reactRef(element),
-  };
-}
-
-function captureRoot(): CapturedRoot {
-  const element = screen.getByTestId("slash-menu") as HTMLDivElement;
-  return {
-    element,
-    down: reactProp<DirectMouseHandler<HTMLDivElement>>(element, "onMouseDown"),
-    ref: reactRef(element),
-  };
-}
-
-interface MouseOverrides {
-  type?: string;
-  target?: EventTarget;
-  nativeEvent?: Event;
-  nativeType?: string;
-  nativeTarget?: EventTarget;
-}
-
-function ownerMouseEvent(target: EventTarget, type: string): MouseEvent {
-  const node = target as Node;
-  const MouseEventConstructor = node.ownerDocument?.defaultView?.MouseEvent;
-  if (!MouseEventConstructor) throw new Error("Pointer target has no owner-document MouseEvent");
-  const event = new MouseEventConstructor(type, { bubbles: true, cancelable: true });
-  Object.defineProperty(event, "target", { configurable: true, value: target });
-  return event;
-}
-
-function invokeMouse<T extends HTMLElement>(
-  handler: DirectMouseHandler<T>,
-  currentTarget: T,
-  syntheticType: "mouseenter" | "click" | "mousedown",
-  overrides: MouseOverrides = {},
-) {
-  const nativeType = overrides.nativeType ?? (syntheticType === "mouseenter" ? "mouseover" : syntheticType);
-  const target = overrides.target ?? currentTarget;
-  const nativeEvent = overrides.nativeEvent ?? ownerMouseEvent(overrides.nativeTarget ?? target, nativeType);
-  const preventDefault = vi.fn(() => nativeEvent.preventDefault());
-  const event: DirectMouseEvent<T> = {
-    type: overrides.type ?? syntheticType,
-    currentTarget,
-    target,
-    nativeEvent: nativeEvent as ReactMouseEvent<T>["nativeEvent"],
-    preventDefault,
-  };
-  handler(event);
-  return { event, nativeEvent, preventDefault };
-}
-
-function clickRow(row: CapturedRow, target: EventTarget = row.element) {
-  return invokeMouse(row.click, row.element, "click", { target, nativeTarget: target });
-}
-
-function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
-  useEffect(() => onCleanup, [onCleanup]);
-  return null;
-}
-
-let originalScrollIntoView: typeof Element.prototype.scrollIntoView;
-
+// jsdom has no layout: the three methods ProseMirror and the menu ask for exist only for these tests.
+const layoutStubs = [
+  [Element.prototype, "scrollIntoView", () => undefined],
+  [Range.prototype, "getClientRects", () => Object.assign([], { item: () => null })],
+  [Range.prototype, "getBoundingClientRect", () => new DOMRect(0, 0, 0, 0)],
+] as const;
+const layoutOriginals = layoutStubs.map(([target, name]) => Object.getOwnPropertyDescriptor(target, name));
 beforeEach(() => {
-  slashActions.applyCommand.mockReset();
-  slashActions.applyItem.mockReset().mockImplementation((_view: EditorView, action: () => void) => action());
-  slashActions.close.mockReset();
-  originalScrollIntoView = Element.prototype.scrollIntoView;
-  Element.prototype.scrollIntoView = vi.fn();
-  Object.defineProperty(container, "scrollTop", { configurable: true, value: 0, writable: true });
-  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
-  Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
+  for (const [target, name, value] of layoutStubs) Object.defineProperty(target, name, { configurable: true, writable: true, value: vi.fn(value) });
 });
-
 afterEach(() => {
   cleanup();
-  document
-    .querySelectorAll<HTMLElement>('[contenteditable="true"]')
-    .forEach((element) => element.remove());
-  Element.prototype.scrollIntoView = originalScrollIntoView;
+  for (const undo of cleanups.splice(0)) undo();
+  container.remove();
+  layoutStubs.forEach(([target, name], i) => {
+    const original = layoutOriginals[i];
+    if (original) Object.defineProperty(target, name, original);
+    else Reflect.deleteProperty(target, name);
+  });
 });
 
-describe("slash-menu visit authority", () => {
-  it.each([
-    ["A before B", false],
-    ["B before A", true],
-  ])("retires A before the parent layout boundary when events settle %s", (_label, bFirst) => {
-    const a = makeVisit();
-    const b = makeVisit();
-    const mounted = render(<BoundaryHarness visit={a} />);
-    open(a, slashState("text", 700));
-    const staleListener = a.controller.capturedListeners[0];
-    const staleKeyHandler = a.controller.capturedKeyHandlers[0];
+describe("createSlashMenuController", () => {
+  const state: SlashState = { from: 1, to: 2, query: "", coords: { left: 0, top: 0, bottom: 0 } };
 
-    act(() => {
-      mounted.rerender(
-        <BoundaryHarness
-          visit={b}
-          boundary={1}
-          onBoundary={() => {
-            expect(a.controller.listeners.size).toBe(0);
-            expect(a.controller.keyHandler).toBeNull();
-            expect(b.controller.listeners.size).toBe(1);
-            expect(screen.queryByTestId("slash-menu")).toBeNull();
+  it("keeps the last state and tells every subscriber until it leaves", () => {
+    const controller = createSlashMenuController();
+    const seen: (SlashState | null)[] = [];
+    const leave = controller.subscribe((next) => seen.push(next));
+    expect(controller.getState()).toBeNull();
+    controller.handlers.onState(state);
+    expect(controller.getState()).toBe(state);
+    leave();
+    controller.handlers.onState(null);
+    expect(seen).toEqual([state]);
+    expect(controller.getState()).toBeNull();
+  });
 
-            if (bFirst) b.controller.emit(slashState("", 222));
-            staleListener(slashState("text", 900));
-            expect(staleKeyHandler(unpublishedKey())).toBe(false);
-            expect(staleKeyHandler(unpublishedKey())).toBe(false);
-            if (!bFirst) b.controller.emit(slashState("", 222));
-          }}
-        />,
-      );
-    });
+  it("does not take a key while no menu is mounted", () => {
+    const controller = createSlashMenuController();
+    expect(controller.handlers.onKey?.("Enter")).toBe(false);
+  });
 
-    expect(screen.getByTestId("slash-menu")).toHaveStyle({ left: "222px" });
-    expect(screen.getByTestId("slash-item-text")).toHaveAttribute("aria-selected", "true");
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    expect(a.view.focus).not.toHaveBeenCalled();
-    expect(b.view.focus).not.toHaveBeenCalled();
+  it("hands the key to the mounted menu and gives back its answer", () => {
+    const controller = createSlashMenuController();
+    const handler = vi.fn((key: string) => key === "Enter");
+    controller.setKeyHandler(handler);
+    expect(controller.handlers.onKey?.("Enter")).toBe(true);
+    expect(controller.handlers.onKey?.("Tab")).toBe(false);
+    expect(handler.mock.calls).toEqual([["Enter"], ["Tab"]]);
+  });
 
-    clickRow(captureRow("text"));
-    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-    expect(slashActions.applyCommand.mock.calls[0][0]).toBe(b.view);
-    expect(slashActions.applyCommand.mock.calls[0][2]).toBe(b.session.undoManager);
-    expect(b.view.focus).toHaveBeenCalledOnce();
-    expect(a.view.focus).not.toHaveBeenCalled();
+  it("a menu that leaves late does not remove the handler of its replacement", () => {
+    const controller = createSlashMenuController();
+    const removeFirst = controller.setKeyHandler(() => false);
+    const removeSecond = controller.setKeyHandler(() => true);
+    removeFirst();
+    expect(controller.handlers.onKey?.("Enter")).toBe(true);
+    removeSecond();
+    expect(controller.handlers.onKey?.("Enter")).toBe(false);
+  });
+});
 
-    act(() => b.controller.emit(slashState("no-such-item", 333)));
+describe("slash menu: what it shows", () => {
+  it("opens on / with every item, the first one highlighted, and closes when the slash goes", () => {
+    const { view } = mount();
+    expect(menu()).toBeNull();
+    typeAt(view, WORLD, "/");
+    expect(menu()).toHaveAttribute("role", "listbox");
+    expect(menu()).toHaveAccessibleName("Insert block");
+    expect(rowIds()).toEqual(SLASH_ITEMS.map((item) => item.id));
+    expect(selected()).toEqual(["slash-item-text"]);
+    act(() => view.dispatch(view.state.tr.delete(WORLD, WORLD + 1)));
+    expect(menu()).toBeNull();
+  });
+
+  it("filters while typing and starts again at the first row", () => {
+    const { view } = mount();
+    typeAt(view, WORLD, "/");
+    press(view, "ArrowDown");
+    expect(selected()).toEqual(["slash-item-heading1"]);
+    typeAt(view, view.state.selection.head, "li");
+    expect(rowIds()).toEqual(["bullet", "numbered", "task", "divider", "link", "card"]);
+    expect(selected()).toEqual(["slash-item-bullet"]);
+  });
+
+  it("shows No matches for a query nothing fits", () => {
+    const { view } = mount();
+    typeAt(view, WORLD, "/zzz");
     expect(screen.getByTestId("slash-empty")).toHaveTextContent("No matches");
-
-    act(() => b.controller.emit(null));
-    expect(screen.queryByTestId("slash-menu")).toBeNull();
-    expect(b.controller.keyHandler).toBeNull();
-    expect(a.controller.peakListeners).toBe(1);
-    expect(b.controller.peakListeners).toBe(1);
-
-    mounted.unmount();
-    expect(a.controller.subscriptions).toBe(a.controller.unsubscriptions);
-    expect(b.controller.subscriptions).toBe(b.controller.unsubscriptions);
+    expect(screen.queryAllByRole("option")).toHaveLength(1);
   });
 
-  it("retires a same-controller visit when its view and session change", () => {
-    const controller = new TrackingController();
-    const a = makeVisit(controller);
-    const b = makeVisit(controller);
-    const mounted = render(<BoundaryHarness visit={a} />);
-    open(a, slashState("text", 700));
-    const staleListener = controller.capturedListeners[0];
-    const staleKeyHandler = controller.capturedKeyHandlers[0];
-
-    act(() => {
-      mounted.rerender(
-        <BoundaryHarness
-          visit={b}
-          boundary={1}
-          onBoundary={() => {
-            expect(controller.listeners.size).toBe(1);
-            expect(controller.subscriptions).toBe(2);
-            expect(controller.unsubscriptions).toBe(1);
-            expect(controller.keyHandler).toBeNull();
-            expect(screen.queryByTestId("slash-menu")).toBeNull();
-
-            controller.emit(slashState("image", 333));
-            staleListener(slashState("text", 900));
-            expect(staleKeyHandler(unpublishedKey())).toBe(false);
-          }}
-        />,
-      );
-    });
-
-    expect(screen.getByTestId("slash-menu")).toHaveStyle({ left: "333px" });
-    expect(screen.getByTestId("slash-item-image")).toHaveAttribute("aria-selected", "true");
-    clickRow(captureRow("image"));
-    expect(slashActions.applyItem).toHaveBeenCalledOnce();
-    expect(slashActions.applyItem.mock.calls[0][0]).toBe(b.view);
-    expect(slashActions.applyItem.mock.calls[0][2]).toBe(b.session.undoManager);
-    expect(b.onImage).toHaveBeenCalledOnce();
-    expect(a.onImage).not.toHaveBeenCalled();
-    expect(a.view.focus).not.toHaveBeenCalled();
-    expect(controller.peakListeners).toBe(1);
-
-    mounted.unmount();
-    expect(controller.listeners.size).toBe(0);
-    expect(controller.keyHandler).toBeNull();
-    expect(controller.subscriptions).toBe(controller.unsubscriptions);
-  });
-
-  it("does not restore a retired controller state after a null-view gap", () => {
-    const controller = new TrackingController();
-    const a = makeVisit(controller);
-    const b = makeVisit(controller);
-    const mounted = render(<BoundaryHarness visit={a} />);
-    open(a, slashState("text", 700));
-    const staleListener = controller.capturedListeners[0];
-
-    act(() => mounted.rerender(<BoundaryHarness visit={a} view={null} />));
-    expect(screen.queryByTestId("slash-menu")).toBeNull();
-    expect(controller.listeners.size).toBe(0);
-    expect(controller.keyHandler).toBeNull();
-
-    act(() => {
-      mounted.rerender(
-        <BoundaryHarness
-          visit={b}
-          boundary={1}
-          onBoundary={() => {
-            expect(controller.listeners.size).toBe(1);
-            expect(controller.keyHandler).toBeNull();
-            expect(screen.queryByTestId("slash-menu")).toBeNull();
-            staleListener(slashState("text", 900));
-          }}
-        />,
-      );
-    });
-    expect(screen.queryByTestId("slash-menu")).toBeNull();
-
-    act(() => controller.emit(slashState("image", 333)));
-    expect(screen.getByTestId("slash-menu")).toHaveStyle({ left: "333px" });
-    expect(screen.getByTestId("slash-item-image")).toHaveAttribute("aria-selected", "true");
-    mounted.unmount();
-    expect(controller.subscriptions).toBe(controller.unsubscriptions);
-  });
-
-  it("retires subscription, handler, and captured callbacks before a removal boundary", () => {
-    const a = makeVisit();
-    const mounted = render(<BoundaryHarness visit={a} />);
-    open(a, slashState("text"));
-    const staleListener = a.controller.capturedListeners[0];
-    const staleKeyHandler = a.controller.capturedKeyHandlers[0];
-
-    act(() => {
-      mounted.rerender(
-        <BoundaryHarness
-          visit={a}
-          present={false}
-          boundary={1}
-          onBoundary={() => {
-            expect(a.controller.listeners.size).toBe(0);
-            expect(a.controller.keyHandler).toBeNull();
-            staleListener(slashState("text", 900));
-            expect(staleKeyHandler(unpublishedKey())).toBe(false);
-            expect(staleKeyHandler(unpublishedKey())).toBe(false);
-          }}
-        />,
-      );
-    });
-
-    expect(screen.queryByTestId("slash-menu")).toBeNull();
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    expect(a.view.focus).not.toHaveBeenCalled();
-    expect(a.controller.subscriptions).toBe(a.controller.unsubscriptions);
-  });
-
-});
-
-describe("slash-menu native title metadata", () => {
-  it("exposes every actual catalog label without adding nodes or changing controls", () => {
-    const visit = makeVisit();
-    render(
-      <StrictMode>
-        <BoundaryHarness visit={visit} />
-      </StrictMode>,
-    );
-    open(visit);
-    expectNativeTitles();
-    expect(screen.getAllByRole("option")).toHaveLength(SLASH_ITEMS.length);
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    expect(slashActions.applyItem).not.toHaveBeenCalled();
-    expect(visit.view.dispatch).not.toHaveBeenCalled();
-  });
-
-  it("removes old titles through filtering, group changes, close-reopen, and session replacement", () => {
-    const a = makeVisit();
-    const b = makeVisit(a.controller);
-    const mounted = render(
-      <StrictMode>
-        <BoundaryHarness visit={a} />
-      </StrictMode>,
-    );
-    open(a, slashState("agent"));
-    expectNativeTitles("agent");
-    const oldAgent = captureRow("agent");
-    const oldDescription = screen.getByText(SLASH_ITEMS.find((item) => item.id === "agent")!.description!);
-
-    open(a, slashState("code ts"));
-    expectNativeTitles("code ts");
-    expect(oldAgent.element).not.toBeInTheDocument();
-    expect(oldDescription).not.toBeInTheDocument();
-    const oldCode = captureRow("code");
-    open(a, slashState("no-such-item"));
-    expectNativeTitles("no-such-item");
-    expect(screen.getByTestId("slash-empty").textContent).toBe("No matches");
-    expect(oldCode.element).not.toBeInTheDocument();
-
-    act(() => a.controller.emit(null));
-    expect(screen.queryByTestId("slash-menu")).toBeNull();
-    open(a, slashState("image"));
-    expectNativeTitles("image");
-    const oldImage = captureRow("image");
-    mounted.rerender(
-      <StrictMode>
-        <BoundaryHarness visit={b} />
-      </StrictMode>,
-    );
-    expect(screen.queryByTestId("slash-menu")).toBeNull();
-    expect(oldImage.element).not.toBeInTheDocument();
-    open(b, slashState("keep"));
-    expectNativeTitles("keep");
-    const current = captureRow("agent");
-    for (const retired of [oldAgent, oldCode, oldImage]) {
-      clickRow(retired);
-      clickRow({ ...retired, element: current.element });
+  it("gives every label and description a hover title with its full text", () => {
+    const { view } = mount();
+    typeAt(view, WORLD, "/");
+    for (const item of SLASH_ITEMS) {
+      const titles = [...row(item.id).querySelectorAll("[title]")].map((element) => [element.getAttribute("title"), element.textContent]);
+      expect(titles, item.id).toEqual([[item.title, item.title], ...(item.description ? [[item.description, item.description]] : [])]);
     }
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    expect(slashActions.applyItem).not.toHaveBeenCalled();
-    expect(a.view.focus).not.toHaveBeenCalled();
-    expect(b.view.focus).not.toHaveBeenCalled();
-    const accepted = clickRow(current, current.element.querySelector("[title]")!);
-    current.click(accepted.event);
-    expect(slashActions.applyItem).toHaveBeenCalledOnce();
-    expect(slashActions.applyItem.mock.calls[0][0]).toBe(b.view);
-    expect(slashActions.applyItem.mock.calls[0][2]).toBe(b.session.undoManager);
-    expect(b.onConnectAgent).toHaveBeenCalledOnce();
-    expect(a.onConnectAgent).not.toHaveBeenCalled();
   });
 
-  it.each(["title", "description"] as const)("allows native hover on the agent %s without applying an editor command", (field) => {
-    const visit = makeVisit();
-    render(
-      <StrictMode>
-        <BoundaryHarness visit={visit} />
-      </StrictMode>,
-    );
-    open(visit);
-    const agent = SLASH_ITEMS.find((item) => item.id === "agent")!;
-    const target = screen.getByText(agent[field]!);
-    const before = captureRow("agent");
-    const bodyMarkup = before.element.children[1].outerHTML;
-    const iconMarkup = before.element.children[0].outerHTML;
-    const controls = screen.getAllByRole("option");
-    const activeElement = document.activeElement;
-    fireEvent.mouseOver(target);
-    expect(screen.getByTestId("slash-item-agent")).toHaveAttribute("aria-selected", "true");
-    expect(target.getAttribute("title")).toBe(target.textContent);
-    expect(screen.getAllByRole("option")).toEqual(controls);
-    expect(before.element.children[1].outerHTML).toBe(bodyMarkup);
-    expect(before.element.children[0].outerHTML).toBe(iconMarkup);
-    expect(document.activeElement).toBe(activeElement);
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    expect(slashActions.applyItem).not.toHaveBeenCalled();
-    expect(slashActions.close).not.toHaveBeenCalled();
-    expect(visit.view.dispatch).not.toHaveBeenCalled();
-    expect(visit.view.focus).not.toHaveBeenCalled();
-    expect(visit.session.undoManager.stopCapturing).not.toHaveBeenCalled();
-    expect(visit.onConnectAgent).not.toHaveBeenCalled();
+  it("opens under the slash, and above it when there is no room below", () => {
+    const { controller } = mount();
+    const slashAt = (top: number) => act(() => controller.handlers.onState({ from: WORLD, to: WORLD + 1, query: "", coords: { left: 100, top, bottom: top + 20 } }));
+    slashAt(100);
+    expect(menu()!.style.left).toBe("100px");
+    expect(menu()!.style.top).toBe("126px");
+    // 16 rows are more than the 8 the menu shows: it is 296 px high and does not fit under a line near the bottom.
+    slashAt(window.innerHeight - 60);
+    expect(menu()!.style.top).toBe(`${window.innerHeight - 60 - 6 - 296}px`);
+  });
 
-    clickRow(before, target);
-    expect(slashActions.applyItem).not.toHaveBeenCalled();
-    const current = captureRow("agent");
-    const accepted = clickRow(current, target);
-    current.click(accepted.event);
-    expect(slashActions.applyItem).toHaveBeenCalledOnce();
-    expect(visit.onConnectAgent).toHaveBeenCalledOnce();
+  it("hides Comment from a person who may not comment", () => {
+    const { view } = mount({ canComment: false });
+    typeAt(view, WORLD, "/");
+    expect(rowIds()).not.toContain("comment");
+    expect(rowIds()).toContain("image");
+  });
+
+  it("offers no block items inside a table cell", () => {
+    const { view } = mount({ markdown: "| a | b |\n| --- | --- |\n| 1 | 2 |\n" });
+    let cell = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (cell < 0 && node.isTextblock && node.textContent === "1") cell = pos + 1;
+    });
+    typeAt(view, cell + 1, " /");
+    expect(rowIds()).toEqual(["text", "image", "link", "comment", "date", "agent"]);
+  });
+
+  it("stays closed for a person who may not edit, and leaves the keys to the editor", () => {
+    const { view, editorKeys } = mount({ canEdit: false });
+    typeAt(view, WORLD, "/");
+    expect(slashMenuState(view.state)).not.toBeNull();
+    expect(menu()).toBeNull();
+    press(view, "Enter");
+    expect(editorKeys).toEqual(["Enter"]);
   });
 });
 
-describe("slash-menu native keyboard publication", () => {
-  it("moves Home and End to exact filtered boundaries without moving editor focus or selection", async () => {
-    const visit = makeIntegratedVisit();
-    try {
-      render(
-        <StrictMode>
-          <BoundaryHarness visit={visit} />
-        </StrictMode>,
-      );
-      await openIntegrated(visit);
-      await act(async () => {
-        visit.view.dispatch(visit.view.state.tr.setMeta("slash-key-probe", true));
-        await Promise.resolve();
-      });
-      const dispatch = vi.mocked(visit.view.dispatch);
-      const focus = vi.mocked(visit.view.focus);
-      dispatch.mockClear();
-      focus.mockClear();
-      vi.mocked(Element.prototype.scrollIntoView).mockClear();
-      const editorState = visit.view.state;
-      const selection = visit.view.state.selection;
-
-      const end = await dispatchIntegratedKey(visit.view, "End");
-      expect(end.defaultPrevented).toBe(true);
-      expect(screen.getByTestId("slash-item-agent")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      );
-      expect(
-        screen
-          .getAllByRole("option")
-          .filter((row) => row.getAttribute("aria-selected") === "true"),
-      ).toHaveLength(1);
-      expect(visit.view.state).toBe(editorState);
-      expect(visit.view.state.selection).toBe(selection);
-      expect(visit.view.dom).toHaveFocus();
-      expect(dispatch).not.toHaveBeenCalled();
-      expect(focus).not.toHaveBeenCalled();
-      expect(slashActions.applyCommand).not.toHaveBeenCalled();
-      expect(slashActions.applyItem).not.toHaveBeenCalled();
-
-      vi.mocked(Element.prototype.scrollIntoView).mockClear();
-      const inertEnd = await dispatchIntegratedKey(visit.view, "End");
-      expect(inertEnd.defaultPrevented).toBe(true);
-      expect(screen.getByTestId("slash-item-agent")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      );
-      expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
-      expect(dispatch).not.toHaveBeenCalled();
-
-      const home = await dispatchIntegratedKey(visit.view, "Home");
-      expect(home.defaultPrevented).toBe(true);
-      expect(screen.getByTestId("slash-item-text")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      );
-      expect(visit.view.state).toBe(editorState);
-      expect(visit.view.state.selection).toBe(selection);
-
-      await act(async () => {
-        visit.view.dispatch(visit.view.state.tr.insertText("hea"));
-        await Promise.resolve();
-      });
-      expect(screen.getByTestId("slash-item-heading1")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      );
-      dispatch.mockClear();
-      const filteredSelection = visit.view.state.selection;
-      const filteredEnd = await dispatchIntegratedKey(visit.view, "End");
-      expect(filteredEnd.defaultPrevented).toBe(true);
-      expect(screen.getByTestId("slash-item-heading3")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      );
-      expect(visit.view.state.selection).toBe(filteredSelection);
-      expect(dispatch).not.toHaveBeenCalled();
-      expect(focus).not.toHaveBeenCalled();
-    } finally {
-      visit.view.destroy();
-      visit.host.remove();
-      visit.restoreOwnerWindow();
-    }
+describe("slash menu: keys", () => {
+  // The regression test for cause A of #2334. A listener further up the page stands for "the browser
+  // moved on": by then the choice must already be in the document.
+  it("Enter applies the highlighted item during the keydown itself", () => {
+    const { view, ytext, editorKeys } = mount();
+    typeAt(view, WORLD, "/head");
+    let markdownWhenTheEventLeftTheEditor = "";
+    const later = () => {
+      markdownWhenTheEventLeftTheEditor = ytext.toString();
+    };
+    document.addEventListener("keydown", later);
+    const event = press(view, "Enter");
+    document.removeEventListener("keydown", later);
+    expect(markdownWhenTheEventLeftTheEditor).toBe("Hello\n\n# World");
+    expect(event.defaultPrevented).toBe(true);
+    expect(editorKeys).toEqual([]);
+    expect(menu()).toBeNull();
+    expect(slashMenuState(view.state)).toBeNull();
+    expect(view.hasFocus()).toBe(true);
   });
 
-  it("retains wrapping arrows and exact Enter behavior", async () => {
-    const visit = makeIntegratedVisit();
-    try {
-      render(
-        <StrictMode>
-          <BoundaryHarness visit={visit} />
-        </StrictMode>,
-      );
-      await openIntegrated(visit);
-
-      expect((await dispatchIntegratedKey(visit.view, "ArrowUp")).defaultPrevented).toBe(true);
-      expect(screen.getByTestId("slash-item-agent")).toHaveAttribute("aria-selected", "true");
-      expect((await dispatchIntegratedKey(visit.view, "ArrowDown")).defaultPrevented).toBe(true);
-      expect(screen.getByTestId("slash-item-text")).toHaveAttribute("aria-selected", "true");
-
-      expect((await dispatchIntegratedKey(visit.view, "Enter")).defaultPrevented).toBe(true);
-      expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-      expect(visit.view.focus).toHaveBeenCalledOnce();
-    } finally {
-      visit.view.destroy();
-      visit.host.remove();
-      visit.restoreOwnerWindow();
-    }
+  it("Tab picks like Enter", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/quote");
+    expect(press(view, "Tab").defaultPrevented).toBe(true);
+    expect(ytext.toString()).toBe("Hello\n\n> World");
   });
 
-  it("rejects null, foreign, and structural owner-window views without menu or editor work", async () => {
-    const visit = makeIntegratedVisit();
-    const foreignFrame = document.createElement("iframe");
-    document.body.append(foreignFrame);
-    try {
-      render(
-        <StrictMode>
-          <BoundaryHarness visit={visit} />
-        </StrictMode>,
-      );
-      await openIntegrated(visit);
-      await act(async () => {
-        visit.view.dispatch(visit.view.state.tr.setMeta("slash-key-probe", true));
-        await Promise.resolve();
-      });
-      const dispatch = vi.mocked(visit.view.dispatch);
-      const focus = vi.mocked(visit.view.focus);
-      dispatch.mockClear();
-      focus.mockClear();
-      vi.mocked(Element.prototype.scrollIntoView).mockClear();
-      const editorState = visit.view.state;
-      const selection = visit.view.state.selection;
-
-      const nullView = await dispatchRejectedNativeViewKey(visit.view, null);
-      const foreignWindow = foreignFrame.contentWindow;
-      if (!foreignWindow) throw new Error("Foreign frame has no window");
-      const foreignView = await dispatchRejectedNativeViewKey(
-        visit.view,
-        foreignWindow,
-      );
-      const rejected = await dispatchStructuralWindowLookalikeKey(
-        visit.view,
-        "End",
-      );
-
-      expect(nullView.isTrusted).toBe(true);
-      expect(nullView.view).toBeNull();
-      expect(nullView.defaultPrevented).toBe(false);
-      expect(foreignView.isTrusted).toBe(true);
-      expect(foreignView.view).toBe(foreignWindow);
-      expect(foreignView.view).not.toBe(visit.view.dom.ownerDocument.defaultView);
-      expect(foreignView.defaultPrevented).toBe(false);
-      expect(rejected.isTrusted).toBe(true);
-      expect(rejected.defaultPrevented).toBe(false);
-      expect(screen.getByTestId("slash-item-text")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      );
-      expect(
-        screen
-          .getAllByRole("option")
-          .filter((row) => row.getAttribute("aria-selected") === "true"),
-      ).toHaveLength(1);
-      expect(visit.view.state).toBe(editorState);
-      expect(visit.view.state.selection).toBe(selection);
-      expect(visit.view.dom).toHaveFocus();
-      expect(dispatch).not.toHaveBeenCalled();
-      expect(focus).not.toHaveBeenCalled();
-      expect(slashActions.applyCommand).not.toHaveBeenCalled();
-      expect(slashActions.applyItem).not.toHaveBeenCalled();
-      expect(slashActions.close).not.toHaveBeenCalled();
-      expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
-    } finally {
-      visit.view.destroy();
-      visit.host.remove();
-      visit.restoreOwnerWindow();
-      foreignFrame.remove();
-    }
-  });
-
-  it.each(["Tab", "Escape"] as const)("retains exact %s behavior", async (key) => {
-    const visit = makeIntegratedVisit();
-    try {
-      render(
-        <StrictMode>
-          <BoundaryHarness visit={visit} />
-        </StrictMode>,
-      );
-      await openIntegrated(visit);
-      expect((await dispatchIntegratedKey(visit.view, key)).defaultPrevented).toBe(true);
-      if (key === "Tab") {
-        expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-        expect(visit.view.focus).toHaveBeenCalledOnce();
-        expect(slashActions.close).not.toHaveBeenCalled();
-      } else {
-        expect(slashActions.close).toHaveBeenCalledOnce();
-        expect(slashActions.close).toHaveBeenCalledWith(visit.view);
-        expect(slashActions.applyCommand).not.toHaveBeenCalled();
-      }
-    } finally {
-      visit.view.destroy();
-      visit.host.remove();
-      visit.restoreOwnerWindow();
-    }
-  });
-
-  it.each(["root", "title", "description"] as const)("rejects mutate-restored menu DOM and lets a complete query successor recover (%s)", async (field) => {
-    const visit = makeIntegratedVisit();
-    try {
-      render(
-        <StrictMode>
-          <BoundaryHarness visit={visit} />
-        </StrictMode>,
-      );
-      await openIntegrated(visit);
-      const root = screen.getByTestId("slash-menu");
-      const agent = SLASH_ITEMS.find((item) => item.id === "agent")!;
-      const target = field === "root" ? root : screen.getByText(agent[field]!);
-      const attribute = field === "root" ? "data-history-probe" : "title";
-      const original = target.getAttribute(attribute);
-      target.setAttribute(attribute, "changed");
-      if (original === null) target.removeAttribute(attribute);
-      else target.setAttribute(attribute, original);
-
-      const rejected = await dispatchIntegratedKey(visit.view, "End");
-      expect(rejected.defaultPrevented).toBe(false);
-      expect((await dispatchIntegratedKey(visit.view, "Enter")).defaultPrevented).toBe(false);
-      expect(screen.getByTestId("slash-item-text")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      );
-      expect(slashActions.applyCommand).not.toHaveBeenCalled();
-      expect(slashActions.applyItem).not.toHaveBeenCalled();
-      expect(visit.view.focus).not.toHaveBeenCalled();
-
-      await act(async () => {
-        visit.view.dispatch(visit.view.state.tr.insertText("hea"));
-        await Promise.resolve();
-      });
-      const recovered = await dispatchIntegratedKey(visit.view, "End");
-      expect(recovered.defaultPrevented).toBe(true);
-      expect(screen.getByTestId("slash-item-heading3")).toHaveAttribute(
-        "aria-selected",
-        "true",
-      );
-      expect((await dispatchIntegratedKey(visit.view, "Enter")).defaultPrevented).toBe(true);
-      expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-      expect(slashActions.applyCommand.mock.calls[0][0]).toBe(visit.view);
-      expect(slashActions.applyCommand.mock.calls[0][2]).toBe(visit.session.undoManager);
-    } finally {
-      visit.view.destroy();
-      visit.host.remove();
-      visit.restoreOwnerWindow();
-    }
-  });
-});
-
-describe("slash-menu pointer presentation", () => {
-  it.each([
-    ["title", false],
-    ["title", true],
-    ["description", false],
-    ["description", true],
-  ] as const)("guards the exact %s attribute, including restoration=%s", (field, restoreBeforeClick) => {
-    const visit = makeVisit();
-    render(
-      <StrictMode>
-        <BoundaryHarness visit={visit} />
-      </StrictMode>,
-    );
-    open(visit, slashState("keep"));
-    const row = captureRow("agent");
-    const root = captureRoot();
-    const agent = SLASH_ITEMS.find((item) => item.id === "agent")!;
-    const target = screen.getByText(agent[field]!);
-    const original = target.getAttribute("title")!;
-    target.setAttribute("title", "changed");
-    if (restoreBeforeClick) target.setAttribute("title", original);
-    const rejectedDown = invokeMouse(root.down, root.element, "mousedown", { target });
-    clickRow(row, target);
-    expect(rejectedDown.preventDefault).not.toHaveBeenCalled();
-    expect(slashActions.applyItem).not.toHaveBeenCalled();
-    expect(visit.onConnectAgent).not.toHaveBeenCalled();
-    expect(visit.view.focus).not.toHaveBeenCalled();
-    if (!restoreBeforeClick) target.setAttribute("title", original);
-    clickRow(row, target);
-    expect(slashActions.applyItem).not.toHaveBeenCalled();
-
-    open(visit, slashState("keep"));
-    expectNativeTitles("keep");
-    const current = captureRow("agent");
-    const currentTarget = screen.getByText(agent[field]!);
-    clickRow(current, target);
-    clickRow({ ...row, element: current.element }, currentTarget);
-    expect(slashActions.applyItem).not.toHaveBeenCalled();
-    const accepted = clickRow(current, currentTarget);
-    current.click(accepted.event);
-    expect(slashActions.applyItem).toHaveBeenCalledOnce();
-    expect(slashActions.applyItem.mock.calls[0][0]).toBe(visit.view);
-    expect(slashActions.applyItem.mock.calls[0][2]).toBe(visit.session.undoManager);
-    expect(visit.onConnectAgent).toHaveBeenCalledOnce();
-  });
-
-  it("keeps the exact current controls usable after Strict Mode replays layout effects", () => {
-    const a = makeVisit();
-    const b = makeVisit();
-    a.controller.state = slashState();
-    b.controller.state = slashState();
-    const mounted = render(
-      <StrictMode>
-        <BoundaryHarness visit={a} />
-      </StrictMode>,
-    );
-
-    const headingBeforeHover = captureRow("heading1");
-    act(() => {
-      invokeMouse(headingBeforeHover.enter, headingBeforeHover.element, "mouseenter");
-    });
-    const heading = captureRow("heading1");
-    expect(heading.element).toHaveAttribute("aria-selected", "true");
-
-    const root = captureRoot();
-    const title = heading.element.querySelector(".truncate");
-    expect(title).toBeInstanceOf(HTMLSpanElement);
-    const down = invokeMouse(root.down, root.element, "mousedown", {
-      target: title!,
-      nativeTarget: title!,
-    });
-    root.down(down.event);
-    expect(down.preventDefault).toHaveBeenCalledOnce();
-
-    const click = clickRow(heading, title!);
-    heading.click(click.event);
-    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-    expect(a.view.focus).toHaveBeenCalledOnce();
-
-    act(() => a.controller.emit(slashState()));
-    const staleRow = captureRow("heading1");
-    const staleRoot = captureRoot();
-    mounted.rerender(
-      <StrictMode>
-        <BoundaryHarness visit={b} />
-      </StrictMode>,
-    );
-    const currentRow = captureRow("heading1");
-    const currentRoot = captureRoot();
-
-    act(() => {
-      staleRow.ref(currentRow.element);
-      staleRoot.ref(currentRoot.element);
-      staleRow.ref(null);
-      staleRoot.ref(null);
-    });
-    act(() => {
-      invokeMouse(staleRow.enter, currentRow.element, "mouseenter");
-    });
-    const staleDown = invokeMouse(staleRoot.down, currentRoot.element, "mousedown", {
-      target: currentRow.element,
-      nativeTarget: currentRow.element,
-    });
-    clickRow({ ...staleRow, element: currentRow.element });
-    expect(currentRow.element).toHaveAttribute("aria-selected", "false");
-    expect(staleDown.preventDefault).not.toHaveBeenCalled();
-    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-    expect(b.view.focus).not.toHaveBeenCalled();
-
-    act(() => {
-      invokeMouse(currentRow.enter, currentRow.element, "mouseenter");
-    });
-    const acceptedRow = captureRow("heading1");
-    const acceptedRoot = captureRoot();
-    const acceptedTitle = acceptedRow.element.querySelector(".truncate");
-    expect(acceptedTitle).toBeInstanceOf(HTMLSpanElement);
-    const acceptedDown = invokeMouse(acceptedRoot.down, acceptedRoot.element, "mousedown", {
-      target: acceptedTitle!,
-      nativeTarget: acceptedTitle!,
-    });
-    acceptedRoot.down(acceptedDown.event);
-    expect(acceptedDown.preventDefault).toHaveBeenCalledOnce();
-    const acceptedClick = clickRow(acceptedRow, acceptedTitle!);
-    acceptedRow.click(acceptedClick.event);
-    expect(slashActions.applyCommand).toHaveBeenCalledTimes(2);
-    expect(b.view.focus).toHaveBeenCalledOnce();
-  });
-
-  it("binds hover, root prevention, and command application to one exact native interaction", () => {
-    const visit = makeVisit();
-    render(<BoundaryHarness visit={visit} />);
-    open(visit);
-
-    expect(screen.getByText("Basic")).toBeInTheDocument();
-    expect(screen.getByText("Connect an AI agent")).toBeInTheDocument();
-    expect(screen.getByText("Set up Copilot, Claude or Cursor, or invite your agent here")).toBeInTheDocument();
-    const initialText = captureRow("text");
-    expect(initialText.element).toHaveAttribute("aria-selected", "true");
-    expect(initialText.element).toHaveClass("bg-accent-soft", "text-ink");
-
-    fireEvent.mouseEnter(screen.getByTestId("slash-item-heading1"));
-    const heading = captureRow("heading1");
-    expect(heading.element).toHaveAttribute("aria-selected", "true");
-    expect(heading.element).toHaveClass("bg-accent-soft", "text-ink");
-    expect(screen.getByTestId("slash-item-text")).toHaveAttribute("aria-selected", "false");
-
-    const root = captureRoot();
-    const title = heading.element.querySelector(".truncate");
-    expect(title).toBeInstanceOf(HTMLSpanElement);
-    const down = invokeMouse(root.down, root.element, "mousedown", {
-      target: title!,
-      nativeTarget: title!,
-    });
-    expect(down.preventDefault).toHaveBeenCalledOnce();
-    root.down(down.event);
-    expect(down.preventDefault).toHaveBeenCalledOnce();
-
-    const click = clickRow(heading, title!);
-    heading.click(click.event);
-    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-    expect(slashActions.applyCommand.mock.calls[0][0]).toBe(visit.view);
-    expect(slashActions.applyCommand.mock.calls[0][2]).toBe(visit.session.undoManager);
-    expect(visit.view.focus).toHaveBeenCalledOnce();
-    expect(click.preventDefault).not.toHaveBeenCalled();
-  });
-
-  it("rejects fabricated, mismatched, sibling, foreign, detached, unpublished, and disabled click sources", () => {
-    const visit = makeVisit();
-    render(<BoundaryHarness visit={visit} />);
-    open(visit, slashState("text"));
-    const current = captureRow("text");
-    const foreign = document.createElement("button");
-    const detached = document.createElement("button");
-    const unpublished = document.createElement("span");
-    document.body.append(foreign);
-    current.element.append(unpublished);
-    const focusOwner = document.createElement("button");
-    document.body.append(focusOwner);
-    focusOwner.focus();
-    const activeElement = document.activeElement;
-    const markup = document.body.innerHTML;
-
-    const attempts = [
-      invokeMouse(current.click, current.element, "click", {
-        nativeEvent: new Event("click"),
-      }),
-      invokeMouse(current.click, current.element, "click", {
-        type: "mousedown",
-      }),
-      invokeMouse(current.click, current.element, "click", {
-        nativeType: "mousedown",
-      }),
-      invokeMouse(current.click, current.element, "click", {
-        target: current.element,
-        nativeTarget: unpublished,
-      }),
-      invokeMouse(current.click, foreign, "click"),
-      invokeMouse(current.click, detached, "click"),
-      invokeMouse(current.click, current.element, "click", {
-        target: unpublished,
-        nativeTarget: unpublished,
-      }),
+  it("the arrow keys wrap, Home and End jump, and Enter picks the highlighted row", () => {
+    const { view, ytext, editorKeys } = mount();
+    typeAt(view, WORLD, "/h");
+    // "h" also fits the keywords "hr" (Divider) and "href" (Link).
+    expect(rowIds()).toEqual(["heading1", "heading2", "heading3", "divider", "link"]);
+    const walk: [string, string][] = [
+      ["ArrowDown", "heading2"],
+      ["ArrowDown", "heading3"],
+      ["ArrowDown", "divider"],
+      ["ArrowDown", "link"],
+      ["ArrowDown", "heading1"],
+      ["ArrowUp", "link"],
+      ["Home", "heading1"],
+      ["Home", "heading1"],
+      ["End", "link"],
+      ["End", "link"],
+      ["ArrowUp", "divider"],
+      ["ArrowUp", "heading3"],
     ];
-    for (const attempt of attempts) expect(attempt.preventDefault).not.toHaveBeenCalled();
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    expect(visit.view.focus).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(activeElement);
-    expect(document.body.innerHTML).toBe(markup);
-
-    unpublished.remove();
-    current.element.disabled = true;
-    clickRow(current);
-    current.element.disabled = false;
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-
-    act(() => visit.controller.emit(slashState("text")));
-    const successor = captureRow("text");
-    clickRow(successor);
-    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-    expect(visit.view.focus).toHaveBeenCalledOnce();
-    foreign.remove();
-    focusOwner.remove();
+    for (const [key, expected] of walk) {
+      expect(press(view, key).defaultPrevented, key).toBe(true);
+      expect(selected(), `${key} -> ${expected}`).toEqual([`slash-item-${expected}`]);
+    }
+    expect(editorKeys).toEqual([]);
+    expect(view.state.selection.head).toBe(WORLD + 2);
+    press(view, "Enter");
+    expect(ytext.toString()).toBe("Hello\n\n### World");
   });
 
-  it.each([
-    ["stale before current", false],
-    ["current before stale", true],
-  ] as const)("keeps an equal-looking successor usable %s, including after late old refs", (_label, currentFirst) => {
-    const visit = makeVisit();
-    const mounted = render(<BoundaryHarness visit={visit} />);
-    open(visit, slashState("text"));
-    const staleRow = captureRow("text");
-    const staleRoot = captureRoot();
-
-    mounted.rerender(<BoundaryHarness visit={{ ...visit }} boundary={1} />);
-    const currentRow = captureRow("text");
-    const currentRoot = captureRoot();
-    expect(currentRow.element).toBe(staleRow.element);
-    expect(currentRoot.element).toBe(staleRoot.element);
-
+  it("two arrow presses that arrive before React renders both count", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
     act(() => {
-      staleRow.ref(currentRow.element);
-      staleRoot.ref(currentRoot.element);
-      staleRow.ref(null);
-      staleRoot.ref(null);
+      keydown(view, "ArrowDown");
+      keydown(view, "ArrowDown");
+      keydown(view, "Enter");
     });
-
-    const staleClick = () => clickRow({ ...staleRow, element: currentRow.element });
-    const currentClick = () => clickRow(currentRow);
-    if (currentFirst) {
-      currentClick();
-      staleClick();
-    } else {
-      staleClick();
-      currentClick();
-    }
-    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-
-    const staleDown = () =>
-      invokeMouse(staleRoot.down, currentRoot.element, "mousedown", {
-        target: currentRow.element,
-        nativeTarget: currentRow.element,
-      });
-    const currentDown = () =>
-      invokeMouse(currentRoot.down, currentRoot.element, "mousedown", {
-        target: currentRow.element,
-        nativeTarget: currentRow.element,
-      });
-    const downs = currentFirst ? [currentDown(), staleDown()] : [staleDown(), currentDown()];
-    expect(downs.filter((attempt) => attempt.preventDefault.mock.calls.length === 1)).toHaveLength(1);
+    expect(ytext.toString()).toBe("Hello\n\n## World");
   });
 
-  it("retires stale handlers across state scalars, permissions, callbacks, highlight, and geometry", () => {
-    const visit = makeVisit();
-    const mounted = render(<BoundaryHarness visit={visit} />);
-    const state = slashState("text", 100);
-    open(visit, state);
-    const stateHandler = captureRow("text");
-
-    state.to += 1;
-    clickRow(stateHandler);
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    state.to -= 1;
-    act(() => visit.controller.emit(state));
-
-    const permissionHandler = captureRow("text");
-    Object.defineProperty(visit.session, "canEdit", { configurable: true, value: false, writable: true });
-    clickRow(permissionHandler);
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    Object.defineProperty(visit.session, "canEdit", { configurable: true, value: true, writable: true });
-    mounted.rerender(<BoundaryHarness visit={visit} boundary={1} />);
-
-    const callbackHandler = captureRow("text");
-    const replacementImage = vi.fn();
-    const callbackVisit = { ...visit, onImage: replacementImage };
-    mounted.rerender(<BoundaryHarness visit={callbackVisit} boundary={2} />);
-    clickRow({ ...callbackHandler, element: screen.getByTestId("slash-item-text") as HTMLButtonElement });
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-
-    act(() => visit.controller.emit(slashState()));
-    const beforeHighlight = captureRow("text");
-    fireEvent.mouseEnter(screen.getByTestId("slash-item-heading1"));
-    const highlighted = captureRow("heading1");
-    clickRow({ ...beforeHighlight, element: screen.getByTestId("slash-item-text") as HTMLButtonElement });
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-
-    act(() => visit.controller.emit(slashState("h1", 640)));
-    clickRow(highlighted);
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    const geometrySuccessor = captureRow("heading1");
-    clickRow(geometrySuccessor);
-    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-    expect(screen.getByTestId("slash-menu")).toHaveStyle({ left: "640px" });
-  });
-
-  it("rejects row replacement, row reorder, and group crossing before accepting a fresh publication", () => {
-    const visit = makeVisit();
-    render(<BoundaryHarness visit={visit} />);
-    open(visit);
-    let text = captureRow("text");
-    let root = captureRoot().element;
-    let basic = text.element.parentElement as HTMLDivElement;
-    let lists = screen.getByTestId("slash-item-bullet").parentElement as HTMLDivElement;
-    const refresh = () => {
-      text = captureRow("text");
-      root = captureRoot().element;
-      basic = text.element.parentElement as HTMLDivElement;
-      lists = screen.getByTestId("slash-item-bullet").parentElement as HTMLDivElement;
-    };
-    const replacement = text.element.cloneNode(true) as HTMLButtonElement;
-
-    text.element.replaceWith(replacement);
-    invokeMouse(text.click, replacement, "click");
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    replacement.replaceWith(text.element);
-
-    basic.append(text.element);
-    clickRow(text);
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    basic.insertBefore(text.element, basic.children[1] ?? null);
-    act(() => visit.controller.emit(slashState()));
-    refresh();
-
-    lists.append(text.element);
-    clickRow(text);
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    basic.insertBefore(text.element, basic.children[1] ?? null);
-    act(() => visit.controller.emit(slashState()));
-    refresh();
-
-    root.insertBefore(lists, basic);
-    clickRow(text);
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    root.insertBefore(basic, lists);
-    act(() => visit.controller.emit(slashState()));
-    refresh();
-    clickRow(text);
-    expect(slashActions.applyCommand).toHaveBeenCalledOnce();
-  });
-
-  it("does no stale pointer or scroll work after removal before passive cleanup", () => {
-    const visit = makeVisit();
-    let staleClick: (() => void) | null = null;
-    let staleDown: (() => void) | null = null;
-    const onCleanup = vi.fn(() => {
-      staleClick?.();
-      staleDown?.();
+  it("a query and Enter typed in one burst pick the item for that query, not for what was last drawn", () => {
+    const { view, ytext } = mount();
+    act(() => {
+      view.focus();
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, WORLD)));
+      for (const ch of "/quote") view.dispatch(view.state.tr.insertText(ch));
+      keydown(view, "Enter");
     });
-    const mounted = render(
-      <>
-        <BoundaryHarness visit={visit} />
-        <PassiveCleanupProbe onCleanup={onCleanup} />
-      </>,
-    );
-    open(visit, slashState("text"));
-    const row = captureRow("text");
-    const root = captureRoot();
-    staleClick = () => {
-      clickRow(row);
-    };
-    staleDown = () => {
-      invokeMouse(root.down, root.element, "mousedown");
-    };
-    vi.mocked(Element.prototype.scrollIntoView).mockClear();
-
-    mounted.rerender(
-      <>
-        <BoundaryHarness visit={visit} present={false} />
-        <PassiveCleanupProbe onCleanup={vi.fn()} />
-      </>,
-    );
-    expect(onCleanup).toHaveBeenCalledOnce();
-    expect(slashActions.applyCommand).not.toHaveBeenCalled();
-    expect(visit.view.focus).not.toHaveBeenCalled();
-    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+    expect(ytext.toString()).toBe("Hello\n\n> World");
+    expect(menu()).toBeNull();
   });
 
+  it("the highlight of an older query does not carry over to a new one", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    press(view, "End");
+    expect(selected()).toEqual(["slash-item-agent"]);
+    act(() => {
+      for (const ch of "h") view.dispatch(view.state.tr.insertText(ch));
+      keydown(view, "Enter");
+    });
+    expect(ytext.toString()).toBe("Hello\n\n# World");
+  });
+
+  // The row belongs to one opening of the menu. Before this test the row was remembered for a place and a
+  // query, so "/" + ArrowDown + Enter three times in one empty block made Heading 1, Heading 2, Heading 3.
+  it("a menu that opens again at the same place starts at the first row", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    press(view, "ArrowDown");
+    press(view, "ArrowDown");
+    expect(selected()).toEqual(["slash-item-heading2"]);
+    press(view, "Escape");
+    expect(menu()).toBeNull();
+    act(() => view.dispatch(view.state.tr.delete(WORLD, WORLD + 1)));
+    typeAt(view, WORLD, "/");
+    expect(selected()).toEqual(["slash-item-text"]);
+    // The same after a choice: Heading 2 is made, and the next menu in that block starts at Text.
+    press(view, "ArrowDown");
+    press(view, "ArrowDown");
+    press(view, "Enter");
+    expect(ytext.toString()).toBe("Hello\n\n## World");
+    act(() => {
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, WORLD)));
+      view.dispatch(view.state.tr.insertText("/"));
+      keydown(view, "Enter");
+    });
+    expect(ytext.toString()).toBe("Hello\n\nWorld");
+  });
+
+  it("the highlighted row stays when text arrives above the slash, as when another person types there", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    press(view, "ArrowDown");
+    press(view, "ArrowDown");
+    act(() => view.dispatch(view.state.tr.insertText("They say ", 1)));
+    expect(slashMenuState(view.state)).toMatchObject({ from: WORLD + 9, query: "" });
+    expect(selected()).toEqual(["slash-item-heading2"]);
+    press(view, "Enter");
+    expect(ytext.toString()).toBe("They say Hello\n\n## World");
+  });
+
+  it("inside a table cell the keys pick from the list that is drawn", () => {
+    const { view, onLink } = mount({ markdown: "| a | b |\n| --- | --- |\n| 1 | 2 |\n" });
+    let cell = -1;
+    view.state.doc.descendants((node, pos) => {
+      if (cell < 0 && node.isTextblock && node.textContent === "1") cell = pos + 1;
+    });
+    // Outside a table "/h" starts with Heading 1. In a cell the headings are hidden and Link ("href") is first.
+    typeAt(view, cell + 1, " /h");
+    expect(rowIds()).toEqual(["link"]);
+    press(view, "Enter");
+    expect(onLink).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the highlighted row in view", () => {
+    const { view } = mount();
+    typeAt(view, WORLD, "/");
+    const scrolled = vi.mocked(Element.prototype.scrollIntoView);
+    scrolled.mockClear();
+    press(view, "End");
+    expect(scrolled).toHaveBeenLastCalledWith({ block: "nearest" });
+    expect(scrolled.mock.contexts.at(-1)).toBe(row("agent"));
+  });
+
+  it("when the list gets shorter under the highlight, the last row is the highlighted one", () => {
+    const mounted = mount();
+    typeAt(mounted.view, WORLD, "/");
+    press(mounted.view, "End");
+    expect(selected()).toEqual(["slash-item-agent"]);
+    // The person loses the right to comment: the Comment row goes, and the list is one row shorter.
+    act(() => {
+      mounted.session.canComment = false;
+      mounted.rerender(mounted.view);
+    });
+    expect(rowIds()).not.toContain("comment");
+    expect(selected()).toEqual(["slash-item-agent"]);
+    press(mounted.view, "Enter");
+    expect(mounted.onConnectAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it("Enter on No matches closes the menu, keeps the text and does not reach the editor", () => {
+    const { view, ytext, editorKeys } = mount();
+    typeAt(view, WORLD, "/zzz");
+    for (const key of ["ArrowDown", "ArrowUp", "Home", "End"]) expect(press(view, key).defaultPrevented, key).toBe(true);
+    expect(screen.getByTestId("slash-empty")).toBeInTheDocument();
+    expect(press(view, "Enter").defaultPrevented).toBe(true);
+    expect(menu()).toBeNull();
+    expect(ytext.toString()).toBe("Hello\n\n/zzzWorld");
+    expect(editorKeys).toEqual([]);
+  });
+
+  it("Escape closes the menu and keeps the slash", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    expect(press(view, "Escape").defaultPrevented).toBe(true);
+    expect(menu()).toBeNull();
+    expect(ytext.toString()).toBe("Hello\n\n/World");
+  });
+
+  it("passes the text after the item name on as its argument", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/code ts");
+    expect(rowIds()).toEqual(["code"]);
+    press(view, "Enter");
+    expect(ytext.toString()).toBe("Hello\n\n```ts\nWorld\n```");
+  });
+
+  it("once the choice is made the keys belong to the editor again", () => {
+    const { view, editorKeys } = mount();
+    typeAt(view, WORLD, "/h1");
+    press(view, "Enter");
+    press(view, "Enter");
+    press(view, "ArrowDown");
+    expect(editorKeys).toEqual(["Enter", "ArrowDown"]);
+  });
+
+  it("works the same when React runs every effect twice (Strict Mode)", () => {
+    const { view, ytext } = mount({ strict: true });
+    typeAt(view, WORLD, "/");
+    press(view, "ArrowDown");
+    expect(selected()).toEqual(["slash-item-heading1"]);
+    press(view, "Enter");
+    expect(ytext.toString()).toBe("Hello\n\n# World");
+  });
+
+  it("puts an undo boundary before and after the choice", () => {
+    const { view, session } = mount();
+    typeAt(view, WORLD, "/h1");
+    press(view, "Enter");
+    expect(session.undoManager.stopCapturing).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("slash menu: pointer", () => {
+  it("a click on a row applies it and the editor keeps the focus", async () => {
+    const user = userEvent.setup();
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    expect(view.hasFocus()).toBe(true);
+    await user.click(row("quote"));
+    expect(ytext.toString()).toBe("Hello\n\n> World");
+    expect(menu()).toBeNull();
+    expect(view.hasFocus()).toBe(true);
+  });
+
+  it("a click that finds the focus outside the editor still applies and brings the caret back", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    const elsewhere = document.body.appendChild(document.createElement("button"));
+    elsewhere.focus();
+    expect(view.hasFocus()).toBe(false);
+    fireEvent.click(row("quote"));
+    elsewhere.remove();
+    expect(ytext.toString()).toBe("Hello\n\n> World");
+    expect(view.hasFocus()).toBe(true);
+  });
+
+  it("cancels mousedown anywhere in the menu, so the editor does not blur and close it", () => {
+    const { view } = mount();
+    typeAt(view, WORLD, "/");
+    expect(fireEvent.mouseDown(row("quote"))).toBe(false);
+    expect(fireEvent.mouseDown(menu()!)).toBe(false);
+    typeAt(view, view.state.selection.head, "zzz");
+    expect(fireEvent.mouseDown(screen.getByTestId("slash-empty"))).toBe(false);
+  });
+
+  it("hover moves the highlight, and the keyboard goes on from the hovered row", async () => {
+    const user = userEvent.setup();
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    await user.hover(row("quote"));
+    expect(selected()).toEqual(["slash-item-quote"]);
+    await user.hover(row("bullet"));
+    expect(selected()).toEqual(["slash-item-bullet"]);
+    press(view, "ArrowDown");
+    expect(selected()).toEqual(["slash-item-numbered"]);
+    press(view, "Enter");
+    expect(ytext.toString()).toBe("Hello\n\n1. World");
+  });
+
+  // The pointer often rests where the menu opens (the person just clicked there). The browser then sends
+  // mouseover and mouseenter for the row under it, but no mousemove. Enter must still pick the first row.
+  it("a menu that opens under a resting pointer keeps its first row", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    fireEvent.mouseOver(row("quote"));
+    fireEvent.mouseEnter(row("quote"));
+    expect(selected()).toEqual(["slash-item-text"]);
+    fireEvent.mouseMove(row("quote"));
+    expect(selected()).toEqual(["slash-item-quote"]);
+    press(view, "Enter");
+    expect(ytext.toString()).toBe("Hello\n\n> World");
+  });
+
+  it("a click applies the clicked row, not the highlighted one", () => {
+    const { view, ytext } = mount();
+    typeAt(view, WORLD, "/");
+    press(view, "ArrowDown");
+    expect(selected()).toEqual(["slash-item-heading1"]);
+    fireEvent.click(row("divider"));
+    expect(ytext.toString()).toBe("Hello\n\nWorld\n\n---");
+  });
+});
+
+describe("slash menu: items that hand off to the shell", () => {
   it.each([
-    ["image", "onImage"],
-    ["card", "onCard"],
-    ["link", "onLink"],
-    ["agent", "onConnectAgent"],
-  ] as const)("applies the frozen %s item context and callback once", (id, callback) => {
-    const visit = makeVisit();
-    render(<BoundaryHarness visit={visit} />);
-    open(visit, slashState(id));
-    const row = captureRow(id);
-
-    const accepted = clickRow(row);
-    row.click(accepted.event);
-    expect(slashActions.applyItem).toHaveBeenCalledOnce();
-    expect(slashActions.applyItem.mock.calls[0][0]).toBe(visit.view);
-    expect(slashActions.applyItem.mock.calls[0][2]).toBe(visit.session.undoManager);
-    expect(visit[callback]).toHaveBeenCalledOnce();
+    ["image", "image", "onImage"],
+    ["video", "card", "onCard"],
+    ["link", "link", "onLink"],
+    // "/agent" lists Comment first (asking an agent is a comment); "/connect" names the agent dialog.
+    ["connect", "agent", "onConnectAgent"],
+  ] as const)("/%s picks %s, removes the typed text and calls %s once", (typed, id, callback) => {
+    const mounted = mount();
+    typeAt(mounted.view, WORLD, `/${typed}`);
+    expect(selected()).toEqual([`slash-item-${id}`]);
+    press(mounted.view, "Enter");
+    expect(mounted[callback]).toHaveBeenCalledTimes(1);
+    expect(mounted.ytext.toString()).toBe("Hello\n\nWorld");
+    expect(menu()).toBeNull();
+    // The removal of the typed text is an undo step of its own.
+    expect(mounted.session.undoManager.stopCapturing).toHaveBeenCalledTimes(2);
+    for (const other of ["onImage", "onCard", "onLink", "onComment", "onConnectAgent"] as const) {
+      if (other !== callback) expect(mounted[other], other).not.toHaveBeenCalled();
+    }
   });
 
-  it("preserves the comment selection, callback, and exact one-shot application", () => {
-    const createSelection = vi.spyOn(TextSelection, "create").mockReturnValue({} as TextSelection);
-    const visit = makeVisit();
-    try {
-      render(<BoundaryHarness visit={visit} />);
-      open(visit, slashState("comment"));
-      const row = captureRow("comment");
-      const accepted = clickRow(row);
-      row.click(accepted.event);
+  it("/comment selects the block around the caret and then starts the comment", () => {
+    const mounted = mount();
+    typeAt(mounted.view, WORLD, "/comment");
+    let selectionAtCallback = "";
+    mounted.onComment.mockImplementation(() => {
+      const { from, to } = mounted.view.state.selection;
+      selectionAtCallback = mounted.view.state.doc.textBetween(from, to);
+    });
+    fireEvent.click(row("comment"));
+    expect(mounted.onComment).toHaveBeenCalledTimes(1);
+    expect(selectionAtCallback).toBe("World");
+    expect(mounted.ytext.toString()).toBe("Hello\n\nWorld");
+  });
+});
 
-      expect(slashActions.applyItem).toHaveBeenCalledOnce();
-      expect(createSelection).toHaveBeenCalledOnce();
-      expect(visit.view.dispatch).toHaveBeenCalledOnce();
-      expect(visit.onComment).toHaveBeenCalledOnce();
-    } finally {
-      createSelection.mockRestore();
-    }
+describe("slash menu: coming and going", () => {
+  it("after the menu unmounts the keys go to the editor", () => {
+    const { view, editorKeys, unmount } = mount();
+    typeAt(view, WORLD, "/");
+    unmount();
+    keydown(view, "Enter");
+    expect(editorKeys).toEqual(["Enter"]);
+  });
+
+  it("a new editor on the same controller starts closed and gets its own keys", () => {
+    const first = mount();
+    typeAt(first.view, WORLD, "/h1");
+    expect(menu()).not.toBeNull();
+    const second = makeEditor("Second", first.controller);
+    act(() => {
+      first.view.destroy();
+      first.rerender(second.view);
+    });
+    expect(menu()).toBeNull();
+    typeAt(second.view, 1, "/h1");
+    expect(rowIds()).toEqual(["heading1"]);
+    press(second.view, "Enter");
+    expect(second.ytext.toString()).toBe("# Second");
+    expect(first.ytext.toString()).toBe("Hello\n\n/h1World");
+  });
+
+  it("with no editor there is no menu and no key is taken", () => {
+    const first = mount();
+    typeAt(first.view, WORLD, "/");
+    act(() => first.rerender(null));
+    expect(menu()).toBeNull();
+    keydown(first.view, "Enter");
+    expect(first.editorKeys).toEqual(["Enter"]);
   });
 });

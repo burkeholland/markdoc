@@ -1,4 +1,4 @@
-import { Plugin, PluginKey } from "prosemirror-state";
+import { Plugin, PluginKey, Selection } from "prosemirror-state";
 import { Decoration, DecorationSet } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import * as Y from "yjs";
@@ -81,6 +81,24 @@ function resolve(session: CollabSession, rel: unknown): number | null {
   }
 }
 
+/**
+ * Where a caret can be drawn for `pos`: in text. Between two blocks, or between the rows or the cells
+ * of a table, there is no line for it to stand on and its element becomes a box of its own; in a table
+ * row that box is one more cell, which pushes the row's real cells out of their columns. The nearest
+ * text position is used instead, null when the document has none.
+ */
+export function caretPosition(doc: PMNode, pos: number): number | null {
+  const $pos = doc.resolve(pos);
+  if ($pos.parent.inlineContent) return pos;
+  return (Selection.findFrom($pos, -1, true) ?? Selection.findFrom($pos, 1, true))?.head ?? null;
+}
+
+/** The carets a document change left outside text are not drawn until the refresh puts them back in place. */
+function withoutStrayCarets(set: DecorationSet, doc: PMNode): DecorationSet {
+  const stray = set.find(undefined, undefined, (spec) => spec.caret === true).filter((caret) => !doc.resolve(caret.from).parent.inlineContent);
+  return stray.length ? set.remove(stray) : set;
+}
+
 function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
   const map = session.binding.getSourceMap();
   const decorations: Decoration[] = [];
@@ -100,7 +118,8 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
     const colorLight = user?.colorLight ?? color + "33";
     const name = user?.name ?? "Anonymous";
     const userId = user?.id ?? String(clientId);
-    const head = clamp(map.srcToPm(headSrc));
+    const head = caretPosition(doc, clamp(map.srcToPm(headSrc)));
+    if (head === null) return;
     const anchor = clamp(map.srcToPm(anchorSrc));
     const $head = doc.resolve(head);
     const flags: CaretFlags = {
@@ -123,6 +142,7 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
         key: `caret-${clientId}-${color}-${name}-${flags.following ? "f" : ""}${flags.flash ? "x" : ""}${flags.idle ? "i" : ""}${flags.agent ? "a" : ""}${flags.afterPicture ? "p" : ""}`,
         side: 1,
         ignoreSelection: true,
+        caret: true,
       }),
     );
   });
@@ -154,7 +174,7 @@ export function remoteCursorsPlugin(session: CollabSession): Plugin<DecorationSe
       apply(tr, old, _oldState, newState) {
         if (isRefresh(tr)) return buildDecorations(session, newState.doc);
         // The source map catches up with the text after this transaction; rebuild on refresh.
-        if (tr.docChanged) return old.map(tr.mapping, tr.doc);
+        if (tr.docChanged) return withoutStrayCarets(old.map(tr.mapping, tr.doc), tr.doc);
         return old;
       },
     },

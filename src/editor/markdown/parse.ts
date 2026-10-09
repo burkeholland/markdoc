@@ -8,6 +8,7 @@ import type * as Md from "mdast";
 import { schema } from "./schema";
 import { buildSourceMap, type BlockRange, type Segment, type SourceMap } from "./sourcemap";
 import { findUnrenderableRanges, type UnrenderableRange } from "./renderable";
+import { CELL_END_SPACE } from "./cell-space";
 import { matchLinkCard, MAX_CARD_URL_LENGTH } from "./link-cards";
 
 export interface HeadingInfo {
@@ -422,7 +423,9 @@ class Converter {
     const cols = node.children[0]?.children.length ?? 0;
     this.inTableCell = true;
     const rows = node.children.map((row, rowIndex) => {
-      const cells = row.children.map((cell, colIndex) => {
+      // GFM ignores the cells a row has beyond the header's, and so do the reader and the export.
+      // Kept, one long row would make prosemirror-tables pad every other row with empty columns.
+      const cells = row.children.slice(0, cols).map((cell, colIndex) => {
         const type = rowIndex === 0 ? schema.nodes.table_header : schema.nodes.table_cell;
         return type.create({ align: align[colIndex] ?? null }, this.inlineContent(cell, false));
       });
@@ -471,9 +474,14 @@ class Converter {
   private inline(node: Md.PhrasingContent | Md.Node, marks: readonly Mark[], b: InlineBuilder, siblings?: Md.Node[], index = 0) {
     const range = offsets(node);
     switch (node.type) {
-      case "text":
-        b.text((node as Md.Text).value.replace(/\n/g, " "), marks, range);
+      case "text": {
+        let value = (node as Md.Text).value.replace(/\n/g, " ");
+        // The no-break space that ends a cell's text is a space typed there (see `cell-space.ts`).
+        const endsCell = this.inTableCell && siblings && index === siblings.length - 1 && (index > 0 || value.length > 1);
+        if (endsCell && value.endsWith(CELL_END_SPACE) && this.src[range.to - 1] === CELL_END_SPACE) value = value.slice(0, -1) + " ";
+        b.text(value, marks, range);
         return;
+      }
       case "emphasis":
         this.inlineChildren(node as Md.Emphasis, schema.marks.em.create().addToSet(marks), b);
         return;
