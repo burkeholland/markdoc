@@ -115,14 +115,26 @@ function countPieces(text: string, from: number, to: number, tier: number): numb
  * Where grouped pieces begin, plus `to` at the end. `stride` adjacent natural pieces become one bounded
  * piece, preserving anchor discovery when the natural line or word count is above `maxPieces`.
  */
+function pieceHash(text: string, from: number, to: number): number {
+  let hash = 2166136261;
+  for (let at = from; at < to; at++) hash = Math.imul(hash ^ text.charCodeAt(at), 16777619);
+  return hash >>> 0;
+}
+
 function cut(text: string, from: number, to: number, tier: number, stride: number, most: number): number[] | null {
   const starts = [from];
-  let piece = 0;
+  const least = Math.max(1, Math.floor(stride / 2));
+  const greatest = Math.max(least, stride * 2);
+  let naturalStart = from;
+  let grouped = 0;
   const boundary = (at: number) => {
-    piece++;
-    if (piece % stride !== 0) return true;
+    const hash = pieceHash(text, naturalStart, at);
+    naturalStart = at;
+    grouped++;
+    if (grouped < least || (grouped < greatest && hash % stride !== 0)) return true;
     if (starts.length >= most) return false;
     starts.push(at);
+    grouped = 0;
     return true;
   };
   if (tier === 0) {
@@ -218,9 +230,15 @@ function passage(plan: Planning, oldText: string, a: number, b: number, newText:
     const newNatural = countPieces(newText, c, d, t);
     plan.scanned += removed + added;
     let stride = Math.max(1, Math.ceil((oldNatural + newNatural) / left));
-    while (Math.ceil(oldNatural / stride) + Math.ceil(newNatural / stride) > left) stride++;
-    const oldCuts = cut(oldText, a, b, t, stride, left);
-    const newCuts = oldCuts && cut(newText, c, d, t, stride, left - (oldCuts.length - 1));
+    let oldCuts: number[] | null = null;
+    let newCuts: number[] | null = null;
+    for (;;) {
+      oldCuts = cut(oldText, a, b, t, stride, left);
+      newCuts = oldCuts && cut(newText, c, d, t, stride, left - (oldCuts.length - 1));
+      if (oldCuts && newCuts) break;
+      if (stride >= Math.max(oldNatural, newNatural)) break;
+      stride = Math.min(Math.max(oldNatural, newNatural), stride * 2);
+    }
     plan.scanned += removed + added;
     if (!oldCuts || !newCuts) break;
     plan.pieces += oldCuts.length - 1 + newCuts.length - 1;

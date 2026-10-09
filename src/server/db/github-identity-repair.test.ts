@@ -60,7 +60,7 @@ describe("GitHub identity repair", () => {
         mode: "dry-run",
         committed: false,
         verified: true,
-        schema: { tables: 19, userForeignKeys: 10 },
+        schema: { tables: 20, userForeignKeys: 10 },
         selection: {
           normalizedLoginUsers: 2,
           targetGithubAccounts: 1,
@@ -677,6 +677,15 @@ async function seedAllApplicationTables(database: PGlite): Promise<void> {
   await database.query(
     `INSERT INTO version (id, document_id, number, content, created_by)
      VALUES ('preserved-version', 'preserved-document', 1, 'private-content', $1)`,
+    [LEGACY_ID],
+  );
+  await database.query(
+    `INSERT INTO required_version_intent (
+       document_id, version_id, content, content_hash, kind, created_by, created_by_name, applied
+     ) VALUES (
+       'preserved-document', 'pending-version', 'pending-content', 'pending-hash',
+       'auto', $1, 'private author', true
+     )`,
     [LEGACY_ID],
   );
   await database.query(

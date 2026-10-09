@@ -40,6 +40,14 @@ const fakeFetch: typeof fetch = async (input, init) => {
     }
     return reply(200, { ok: true, changed: true, contentHash: "c".repeat(64) });
   }
+  if (url.pathname === "/api/documents/pending-version/content" && method === "PUT") {
+    return reply(500, {
+      error: "The content was written, but its required version was not saved",
+      contentApplied: true,
+      contentHash: "d".repeat(64),
+      versionPending: true,
+    });
+  }
   if (url.pathname === "/api/documents/doc-1/content" && method === "PATCH") {
     const body = JSON.parse(String(init?.body)) as { append: string; ifContentHash?: string };
     if (body.ifContentHash && body.ifContentHash !== "b".repeat(64)) return reply(409, { error: "Document changed since you read it", contentHash: "b".repeat(64), diff: null, truncated: false });
@@ -160,6 +168,16 @@ describe("tools over a real MCP client", () => {
     expect(fresh.isError).toBeFalsy();
     expect(text(fresh)).toContain(`updated (hash ${"c".repeat(64)})`);
     expect(fresh.structuredContent?.contentHash).toBe("c".repeat(64));
+  });
+
+  it("markdoc_replace_content reports that content may be live when required version history is pending", async () => {
+    const res = (await mcp.callTool({ name: "markdoc_replace_content", arguments: { id: "pending-version", content: "# Written\n", message: "Required version" } })) as Result;
+    expect(res.isError).toBe(true);
+    expect(text(res)).toContain("content may already be live");
+    expect(text(res)).toContain("Re-read");
+    expect(text(res)).toContain("same content and message");
+    expect(text(res)).not.toContain("Nothing was written");
+    expect(res.structuredContent?.versionPending).toBe(true);
   });
 
   it("a large write that is refused because the server is busy says so plainly: nothing was written, wait, send it again (#2341)", async () => {

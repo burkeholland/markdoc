@@ -1,7 +1,6 @@
 import { z } from "zod";
-import { handler, json, readJson, requireAccess, actorName, ValidationError } from "@/server/http";
+import { handler, json, readJson, requireAccess, actorName, HttpError, ValidationError } from "@/server/http";
 import { readLiveText, mutateLiveDoc, cleanTextOf, readPrecondition, assertContentUnchanged, ifContentHashSchema, MAX_TEXT_CHARS } from "@/server/livedoc";
-import { addVersion } from "@/server/documents";
 import { replaceText } from "@/editor/sync/replace-plan";
 import { recordAgentActivity } from "@/server/agents";
 import { activityActor, recordEdit } from "@/server/activity";
@@ -10,6 +9,12 @@ import { contentHash } from "@/server/export/html";
 import { rememberCleanText } from "@/server/agent-events";
 import { computeStats } from "@/editor/stats";
 import { WriteTurn } from "@/server/large-write";
+import {
+  createRequiredVersionIntent,
+  discardRequiredVersionIntent,
+  finalizeRequiredVersionIntent,
+  markRequiredVersionApplied,
+} from "@/server/required-version";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -58,36 +63,65 @@ export const PUT = handler(async (req: Request, { params }: Params) => {
     await write.force();
     const body = await readJson(req, (d) => putSchema.parse(d));
     const expected = readPrecondition(req, body);
+    const before = await readLiveText(id);
+    const beforeHash = contentHash(before.clean);
+    await finalizeRequiredVersionIntent(id, beforeHash);
+    const requiresVersion = Boolean(body.message || user!.agent);
+    const targetHash = contentHash(body.content);
+    let intentId: string | null = null;
+    if (requiresVersion) {
+      intentId = await createRequiredVersionIntent({
+        documentId: id,
+        content: body.content,
+        contentHash: targetHash,
+        kind: body.message ? "named" : "auto",
+        title: body.message ?? (user!.agent ? `Edited by ${user!.agent}` : null),
+        createdBy: user!.id,
+        createdByName: actorName(user),
+      });
+    }
     let changed = false;
     let chars = 0;
     let at: { from: number; to: number } | undefined;
     let hashAfter = "";
     // A caller that left while its large write waited or was read: nothing is written for it.
     write.assertWanted();
-    await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
-      assertContentUnchanged(id, doc, expected);
-      const ops = replaceText(doc.getText(TEXT_KEY), body.content);
-      if (ops.length) {
-        changed = true;
-        chars = ops.reduce((n, op) => n + op.deleteCount + (op.insert?.length ?? 0), 0);
-        const end = ops[0].index + (ops[0].insert?.length ?? 0);
-        at = { from: end, to: end };
-      }
-      recordAgentActivity(doc, user!, "edited", at);
-      hashAfter = contentHash(cleanTextOf(doc));
-    });
+    try {
+      await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
+        assertContentUnchanged(id, doc, expected);
+        const ops = replaceText(doc.getText(TEXT_KEY), body.content);
+        if (ops.length) {
+          changed = true;
+          chars = ops.reduce((n, op) => n + op.deleteCount + (op.insert?.length ?? 0), 0);
+          const end = ops[0].index + (ops[0].insert?.length ?? 0);
+          at = { from: end, to: end };
+        }
+        recordAgentActivity(doc, user!, "edited", at);
+        hashAfter = contentHash(cleanTextOf(doc));
+      });
+    } catch (err) {
+      if (intentId) await discardRequiredVersionIntent(id, intentId);
+      throw err;
+    }
     if (changed) void recordEdit(id, activityActor(user!), chars).catch((err) => console.error("[activity] edit failed", err));
-    if (changed && (body.message || user!.agent)) {
+    if (intentId && !changed) {
+      await discardRequiredVersionIntent(id, intentId);
+      intentId = null;
+    }
+    if (intentId) {
       // A 200 acknowledges both the live text and its audit version. Keep the turn until the version is durable;
       // if it cannot be recorded, fail the request explicitly instead of returning success for an incomplete write.
-      await addVersion({
-        documentId: id,
-        content: body.content,
-        kind: body.message ? "named" : "auto",
-        title: body.message ?? (user!.agent ? `Edited by ${user!.agent}` : null),
-        createdBy: user!.id,
-        createdByName: actorName(user),
-      });
+      try {
+        await markRequiredVersionApplied(id, intentId);
+        await finalizeRequiredVersionIntent(id, hashAfter);
+      } catch (err) {
+        if (err instanceof HttpError && err.details?.versionPending === true) throw err;
+        throw new HttpError(500, "The content was written, but its required version was not saved", {
+          contentApplied: true,
+          contentHash: hashAfter,
+          versionPending: true,
+        });
+      }
     }
     return json({ ok: true, changed, contentHash: hashAfter });
   } finally {

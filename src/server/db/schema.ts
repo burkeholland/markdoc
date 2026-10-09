@@ -185,6 +185,25 @@ export const versions = pgTable(
   (t) => [uniqueIndex("version_doc_number_idx").on(t.documentId, t.number)],
 );
 
+/**
+ * Server-only outbox for a whole-document PUT whose required audit version must become durable.
+ * One row per document serializes recovery; no route exposes this table to connected clients.
+ */
+export const requiredVersionIntents = pgTable("required_version_intent", {
+  documentId: text("document_id")
+    .primaryKey()
+    .references(() => documents.id, { onDelete: "cascade" }),
+  versionId: text("version_id").notNull().unique(),
+  content: text("content").notNull(),
+  contentHash: text("content_hash").notNull(),
+  kind: text("kind").$type<VersionKind>().notNull(),
+  title: text("title"),
+  createdBy: text("created_by"),
+  createdByName: text("created_by_name"),
+  applied: boolean("applied").notNull().default(false),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+});
+
 export const stars = pgTable(
   "star",
   {

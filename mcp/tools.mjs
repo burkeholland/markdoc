@@ -297,6 +297,14 @@ export function registerTools(server, client) {
     if (err?.status === 503 && typeof err?.data?.retryAfter === "number") {
       return { isError: true, content: [{ type: "text", text: `Nothing was written: ${err.data.error}. Wait ${err.data.retryAfter} seconds, then send the same call again.` }], structuredContent: err.data };
     }
+    if (err?.status === 500 && err?.data?.versionPending === true) {
+      const hash = typeof err.data.contentHash === "string" ? ` (current hash ${err.data.contentHash})` : "";
+      const applied = err.data.contentApplied === true;
+      const text = applied
+        ? `The content may already be live${hash}, but its required version history is still pending. Re-read the document, then retry the same content and message to repair the version before doing anything else.`
+        : `A previous content write has unresolved version history${hash}. Re-read the document and retry the same content and message; do not assume either that nothing was written or that the version is durable.`;
+      return { isError: true, content: [{ type: "text", text }], structuredContent: err.data };
+    }
     const data = err?.status === 409 && err?.data && typeof err.data.contentHash === "string" ? err.data : null;
     if (!data) throw err;
     const what = data.diff ? `here is what changed:\n${data.diff}${data.truncated ? "\n… (diff truncated)" : ""}` : "what changed is not available, so re-read the document.";

@@ -193,4 +193,48 @@ describe("a whole-document replace and the marks of the people in the document (
     for (const outcome of untouched) expect(outcome.kept, `${outcome.name}: ${outcome.detail}`).toBe(true);
     expect(now.touched).toBeLessThanOrEqual(4 * 7_600);
   });
+
+  it.each([
+    ["insertion", (lines: string[]) => lines.splice(500, 0, "inserted near the start\n")],
+    ["deletion", (lines: string[]) => lines.splice(500, 1)],
+  ] as const)("above maxPieces an %s and distant edit preserve unchanged Yjs metadata", (_name, changeStart) => {
+    const lines = Array.from({ length: 110_000 }, (_, i) => `line ${i} stable words here\n`);
+    const doc = new Y.Doc();
+    const ytext = doc.getText("content");
+    ytext.insert(0, lines.join(""));
+    const comments = new CommentsModel(doc, ytext);
+    const suggestions = new SuggestionsModel(doc, ytext);
+    const person = makeCollabUser("u-person", "Person");
+    const reviewer = makeCollabUser("u-reviewer", "Reviewer");
+    const middle = ytext.toString().indexOf("line 55000 stable words here");
+    const quoteFrom = middle + "line 55000 ".length;
+    const quoteTo = quoteFrom + "stable words".length;
+    const commentId = comments.add({ from: quoteFrom, to: quoteTo, body: "Keep this.", author: person });
+    const suggestFrom = quoteTo + 1;
+    const suggestTo = suggestFrom + "here".length;
+    const [suggestionId] = suggestions.proposeEdits([{ from: suggestFrom, to: suggestTo, insert: "there" }], reviewer);
+    const current = ytext.toString();
+    const caretAt = current.indexOf("line 56000 stable words here") + "line 56000 stable ".length;
+    const caret = Y.createRelativePositionFromTypeIndex(ytext, caretAt);
+    const around = current.slice(caretAt - 12, caretAt + 12);
+    const changed = current.split(/(?<=\n)/);
+    changeStart(changed);
+    changed[109_000] = `changed near the end ${"z".repeat(1_200)}\n`;
+    const target = changed.join("");
+
+    doc.transact(() => replaceText(ytext, target));
+
+    expect(ytext.toString()).toBe(target);
+    const thread = comments.list().find((item) => item.id === commentId);
+    expect(thread?.range && ytext.toString().slice(thread.range.from, thread.range.to)).toBe("stable words");
+    const members = suggestions.list().filter((item) => item.id === suggestionId || item.groupId === suggestionId);
+    expect(members).toHaveLength(2);
+    expect(members.find((item) => item.type === "insert")).toMatchObject({ text: "there" });
+    const absolute = Y.createAbsolutePositionFromRelativePosition(caret, doc);
+    expect(absolute).not.toBeNull();
+    expect(ytext.toString().slice(absolute!.index - 12, absolute!.index + 12)).toBe(around);
+    comments.destroy();
+    suggestions.destroy();
+    doc.destroy();
+  });
 });

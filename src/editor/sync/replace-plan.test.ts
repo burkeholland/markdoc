@@ -208,6 +208,26 @@ describe("planReplace: anchors keep what did not change", () => {
     expect(plan.ops.every((op) => op.deleteCount < 2_000 && op.insert.length < 2_000)).toBe(true);
   });
 
+  it.each([
+    ["insertion", (lines: string[]) => lines.splice(500, 0, "inserted near the start\n")],
+    ["deletion", (lines: string[]) => lines.splice(500, 1)],
+  ] as const)("an %s before a distant edit stays local above maxPieces", (_name, changeStart) => {
+    const lines = Array.from({ length: 110_000 }, (_, i) => `line ${i}\n`);
+    const changed = [...lines];
+    changeStart(changed);
+    changed[109_000] = `changed near the end ${"z".repeat(1_200)}\n`;
+    const base = lines.join("");
+    const next = changed.join("");
+    const plan = planReplace(base, next);
+    expect(applied(base, plan.ops)).toBe(next);
+    expect(plan.pieces).toBeLessThanOrEqual(REPLACE_LIMITS.maxPieces);
+    expect(plan.blocks).toBe(0);
+    expect(plan.ops.reduce((n, op) => n + op.deleteCount + op.insert.length, 0)).toBeLessThan(5_000);
+    const middleStart = base.indexOf("line 50,000\n");
+    const middleEnd = base.indexOf("line 60,000\n");
+    expect(plan.ops.every((op) => op.index + op.deleteCount <= middleStart || op.index >= middleEnd)).toBe(true);
+  });
+
   it("a line that moved does not cost the lines around it", () => {
     const lines = Array.from({ length: 2_000 }, (_, i) => `Line ${i} ${prose(600, i + 1).replace(/\n/g, " ")}\n`);
     const base = lines.join("");

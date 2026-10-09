@@ -102,7 +102,7 @@ describe("ifContentHash / If-Match on PUT /content, PATCH /content and POST /sug
     expect(again.status).toBe(200);
   });
 
-  it("a version that cannot be saved fails the request instead of acknowledging an incomplete write", async () => {
+  it("an identical retry repairs a required version after its first insert failed", async () => {
     await freshDoc();
     actor = agent;
     const { contentHash: h1, clean } = await read();
@@ -118,7 +118,12 @@ describe("ifContentHash / If-Match on PUT /content, PATCH /content and POST /sug
       errors.mockRestore();
     }
     expect(res.status).toBe(500);
-    expect(await res.json()).toEqual({ error: "Unexpected error" });
+    expect(await res.json()).toEqual({
+      error: "The content was written, but its required version was not saved",
+      contentApplied: true,
+      contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      versionPending: true,
+    });
 
     const after = await read();
     expect(after.clean).toBe(next);
@@ -131,7 +136,9 @@ describe("ifContentHash / If-Match on PUT /content, PATCH /content and POST /sug
     const retry = await call(content.PUT, "PUT", { content: next, message: "Agent rewrite", ifContentHash: after.contentHash });
     expect(retry.status).toBe(200);
     expect(await retry.json()).toEqual({ ok: true, changed: false, contentHash: after.contentHash });
-    expect((await listVersions(docId)).length).toBe(versionsBefore);
+    const repaired = await listVersions(docId);
+    expect(repaired).toHaveLength(versionsBefore + 1);
+    expect(repaired[0].title).toBe("Agent rewrite");
 
     // A version that saves normally still does, without warnings.
     const named = await call(content.PUT, "PUT", { content: next + "\nClosing line.\n", message: "Second rewrite", ifContentHash: after.contentHash });
