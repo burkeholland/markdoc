@@ -33,7 +33,7 @@ interface Mounted {
   controller: SlashMenuController;
   view: EditorView;
   ytext: Y.Text;
-  session: { contentReady: boolean; canEdit: boolean; canComment: boolean; undoManager: { stopCapturing: Mock<() => void> } };
+  session: { contentReady: boolean; canEdit: boolean; canComment: boolean; canCreateComment: boolean; undoManager: { stopCapturing: Mock<() => void> } };
   onImage: Mock<() => void>;
   onCard: Mock<() => void>;
   onLink: Mock<() => void>;
@@ -84,7 +84,7 @@ function makeEditor(markdown: string, controller: SlashMenuController) {
 function mount({ markdown = "Hello\n\nWorld", strict = false, canEdit = true, canComment = true }: { markdown?: string; strict?: boolean; canEdit?: boolean; canComment?: boolean } = {}): Mounted {
   const controller = createSlashMenuController();
   const { view, ytext, editorKeys } = makeEditor(markdown, controller);
-  const session = { contentReady: true, canEdit, canComment, undoManager: { stopCapturing: vi.fn<() => void>() } };
+  const session = { contentReady: true, canEdit, canComment, canCreateComment: canComment, undoManager: { stopCapturing: vi.fn<() => void>() } };
   const callbacks = { onImage: vi.fn<() => void>(), onCard: vi.fn<() => void>(), onLink: vi.fn<() => void>(), onComment: vi.fn<() => void>(), onConnectAgent: vi.fn<() => void>() };
   const ui = (current: EditorView | null) => {
     const menu = <SlashMenu view={current} session={session as unknown as CollabSession} controller={controller} containerRef={containerRef} {...callbacks} />;
@@ -435,6 +435,7 @@ describe("slash menu: keys", () => {
     // The person loses the right to comment: the Comment row goes, and the list is one row shorter.
     act(() => {
       mounted.session.canComment = false;
+      mounted.session.canCreateComment = false;
       mounted.rerender(mounted.view);
     });
     expect(rowIds()).not.toContain("comment");
@@ -600,6 +601,23 @@ describe("slash menu: items that hand off to the shell", () => {
     fireEvent.click(row("comment"));
     expect(mounted.onComment).toHaveBeenCalledTimes(1);
     expect(selectionAtCallback).toBe("World");
+    expect(mounted.ytext.toString()).toBe("Hello\n\nWorld");
+  });
+
+  it("/comment and palette-style comment execution both stop cleanly when live creation readiness is revoked", () => {
+    const mounted = mount();
+    typeAt(mounted.view, WORLD, "/comment");
+    const comment = row("comment");
+    mounted.session.contentReady = false;
+    mounted.session.canCreateComment = false;
+    fireEvent.click(comment);
+    expect(mounted.onComment).not.toHaveBeenCalled();
+    expect(mounted.ytext.toString()).toBe("Hello\n\n/commentWorld");
+
+    mounted.session.contentReady = true;
+    mounted.session.canCreateComment = true;
+    fireEvent.click(comment);
+    expect(mounted.onComment).toHaveBeenCalledTimes(1);
     expect(mounted.ytext.toString()).toBe("Hello\n\nWorld");
   });
 });

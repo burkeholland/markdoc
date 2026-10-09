@@ -2086,6 +2086,28 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
     }
   });
 
+  it("re-checks an externally supplied command's live predicate after capture and before delayed execution", async () => {
+    vi.useFakeTimers();
+    let allowed = true;
+    const run = vi.fn();
+    const guarded = { ...command("guarded", "Guarded", run), when: () => allowed };
+    const mounted = await renderStrictRoot(
+      <Harness items={[guarded]} initiallyOpen={false} />,
+    );
+
+    try {
+      await act(async () =>
+        fireEvent.click(screen.getByRole("button", { name: "Open palette" })),
+      );
+      fireEvent.click(screen.getByTestId("palette-item-guarded"));
+      allowed = false;
+      await act(async () => vi.runAllTimersAsync());
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
   it("accepts one genuine form submission from the fresh presentation", async () => {
     vi.useFakeTimers();
     const run = vi.fn();

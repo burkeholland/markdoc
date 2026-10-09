@@ -44,6 +44,22 @@ const COMMENT_SUGGESTION_TRANSITION_VERSION = 1;
 const MAX_COMMENT_SUGGESTION_TRANSITIONS = 20;
 const COMMENT_SUGGESTION_HISTORY_ORIGIN = { name: "comment-suggestion-history" };
 const COMMENT_SUGGESTION_REPLAY_ORIGIN = { name: "comment-suggestion-replay" };
+const COMMENT_CREATION_UNAVAILABLE = "A new comment cannot be created until the document is ready and access allows comments.";
+
+class SessionCommentsModel extends CommentsModel {
+  constructor(
+    ydoc: Y.Doc,
+    ytext: Y.Text,
+    private readonly assertCanAdd: () => void,
+  ) {
+    super(ydoc, ytext);
+  }
+
+  override add(input: Parameters<CommentsModel["add"]>[0]): ReturnType<CommentsModel["add"]> {
+    this.assertCanAdd();
+    return super.add(input);
+  }
+}
 
 interface CommentSuggestionTransitionSnapshot {
   text: string;
@@ -404,6 +420,8 @@ export class CollabSession {
 
   status: WebSocketStatus | "connecting" = "connecting";
   synced = false;
+  /** Once this session has received authoritative content, a connection drop cannot make an empty document unknown again. */
+  private authoritativeContentReady = false;
   authError: string | null = null;
   /** Set when the server told us the document was moved to the trash; the editor navigates away. */
   trashed = false;
@@ -584,6 +602,7 @@ export class CollabSession {
           // The first sync ends the coalesced initial load: one rebuild of the rich pane, before
           // the UI learns it is synced (so the stand-in is never swapped for an empty editor).
           this.binding.releaseRemoteSync();
+          this.authoritativeContentReady = true;
           this.persistence.synced();
         }
         this.updateRecovery();
@@ -692,7 +711,7 @@ export class CollabSession {
       captureTimeout: 400,
       trackedOrigins: new Set([SUGGESTIONS_ORIGIN, COMMENTS_ORIGIN]),
     });
-    this.comments = new CommentsModel(this.ydoc, this.ytext);
+    this.comments = new SessionCommentsModel(this.ydoc, this.ytext, () => this.assertCanCreateComment());
     this.suggestions = new SuggestionsModel(this.ydoc, this.ytext);
     this.undoManager.addToScope(this.suggestions.ymap);
     this.binding = new MarkdownBinding(this.ytext, {
@@ -880,7 +899,7 @@ export class CollabSession {
    * In both cases the held Markdown rebuild must finish before a caret or action can target the pane.
    */
   get contentReady(): boolean {
-    return (this.synced || this.ytext.length > 0) && !this.binding.hasHeldSync;
+    return (this.authoritativeContentReady || this.synced || this.ytext.length > 0) && !this.binding.hasHeldSync;
   }
 
   /** The user's role may change this document, and its authoritative text is represented in the pane. */
@@ -895,6 +914,15 @@ export class CollabSession {
 
   get canComment(): boolean {
     return this.role !== "viewer";
+  }
+
+  /** New threads require authoritative rendered content; existing-thread operations keep role-only comment semantics. */
+  get canCreateComment(): boolean {
+    return this.contentReady && !this.accessBlocked && this.canComment;
+  }
+
+  assertCanCreateComment(): void {
+    if (!this.canCreateComment) throw new Error(COMMENT_CREATION_UNAVAILABLE);
   }
 
   /** Whether comment changes must go through the REST API (read-only connections). */
@@ -1120,10 +1148,15 @@ export class CollabSession {
   }
 
   setPendingComment(range: { from: number; to: number } | null) {
+    if (!range) {
+      this.pending = null;
+      this.notify();
+      return;
+    }
+    this.assertCanCreateComment();
     const current = this.pendingComment;
-    if (!range) this.pending = null;
     // Comment pressed again on the range that is already pending is still the same comment.
-    else if (!current || current.from !== range.from || current.to !== range.to) {
+    if (!current || current.from !== range.from || current.to !== range.to) {
       this.pending = {
         id: ++this.pendingSeq,
         anchor: isDocumentRange(range) ? null : createAnchor(this.ytext, range.from, range.to),

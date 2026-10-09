@@ -274,6 +274,7 @@ export function HintBar({
           threads: 0,
           role: s.role,
           canEdit: s.canEdit,
+          canCreateComment: s.canCreateComment,
         };
       }
       const presence = s.presence();
@@ -283,6 +284,7 @@ export function HintBar({
         threads: s.comments.list().length,
         role: s.role,
         canEdit: s.canEdit,
+        canCreateComment: s.canCreateComment,
       };
     },
     shallowEqual,
@@ -577,7 +579,8 @@ export function HintBar({
   const shown =
     pinned?.key === discoveryKey &&
     !record.dismissed.includes(pinned.id) &&
-    active
+    active &&
+    (pinned.id !== "mention-copilot" || live.canCreateComment)
       ? pinned.id
       : null;
 

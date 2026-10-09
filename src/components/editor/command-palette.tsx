@@ -2037,6 +2037,7 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                 committed.placeholder === execution.placeholder;
               if (!exact || !commandTimersRef.current.delete(execution)) return;
               execution.timer = null;
+              if (execution.command.when && !execution.command.when()) return;
               void execution.command.run();
             }, 0);
           }}

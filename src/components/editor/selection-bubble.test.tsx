@@ -238,7 +238,7 @@ function fixture() {
   const ytext = new Y.Doc().getText("content");
   ytext.insert(0, paragraph.textContent);
   const binding = { getSourceMap: () => ({ pmToSrc: (pos: number) => pos - 1, srcToPm: (offset: number) => offset + 1 }) };
-  const session = { activeSurface: "rich", canEdit: true, canComment: true, undoManager: { stopCapturing: vi.fn() }, ytext, binding } as unknown as CollabSession;
+  const session = { activeSurface: "rich", canEdit: true, canComment: true, canCreateComment: true, undoManager: { stopCapturing: vi.fn() }, ytext, binding } as unknown as CollabSession;
   const actions = new EditorActions(session, vi.fn());
   actions.setRichView(view);
   const onLink = vi.fn();
@@ -849,7 +849,7 @@ describe("SelectionBubble keyboard and permissions", () => {
   it("skips disabled buttons and keeps a moved tab stop when permissions return", async () => {
     const env = environment();
     const f = fixture();
-    const session = f.session as unknown as { canEdit: boolean; canComment: boolean };
+    const session = f.session as unknown as { canEdit: boolean; canComment: boolean; canCreateComment: boolean };
     session.canEdit = false;
     const rendered = render(<SelectionBubble {...f.props} />);
     env.flush();
@@ -865,6 +865,7 @@ describe("SelectionBubble keyboard and permissions", () => {
     expect(tabStops()).toEqual(["Bold"]);
 
     session.canComment = false;
+    session.canCreateComment = false;
     rendered.rerender(<SelectionBubble {...f.props} />);
     expect(button("Comment")).toBeDisabled();
     focusButton("Link");
@@ -878,15 +879,17 @@ describe("SelectionBubble keyboard and permissions", () => {
     const env = environment();
     const f = fixture();
     const user = userEvent.setup();
-    const session = f.session as unknown as { canEdit: boolean; canComment: boolean; activeSurface: string };
+    const session = f.session as unknown as { canEdit: boolean; canComment: boolean; canCreateComment: boolean; activeSurface: string };
     render(<SelectionBubble {...f.props} />);
     env.flush();
 
     session.canEdit = false;
     session.canComment = false;
+    session.canCreateComment = false;
     for (const label of LABELS) await user.click(button(label));
     session.canEdit = true;
     session.canComment = true;
+    session.canCreateComment = true;
     session.activeSurface = "code";
     for (const label of LABELS) await user.click(button(label));
     expect(f.view.state.doc.rangeHasMark(1, 9, schema.marks.strong)).toBe(false);
@@ -1009,12 +1012,14 @@ describe("SelectionBubble keyboard and permissions", () => {
     const env = environment();
     const f = fixture();
     const user = userEvent.setup();
-    const session = f.session as unknown as { canComment: boolean; activeSurface: string };
+    const session = f.session as unknown as { canComment: boolean; canCreateComment: boolean; activeSurface: string };
     render(<SelectionBubble {...f.props} />);
     env.flush();
     session.canComment = false;
+    session.canCreateComment = false;
     await user.click(button("Comment"));
     session.canComment = true;
+    session.canCreateComment = true;
     session.activeSurface = "code";
     await user.click(button("Comment"));
     expect(f.onComment).not.toHaveBeenCalled();

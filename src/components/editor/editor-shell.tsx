@@ -2244,7 +2244,7 @@ export function EditorShell({
   /** Comment on the whole document: opens Comments with a zero-width composer at {0,0}; `mention` types `@` for the agent picker. */
   const startDocumentComment = useCallback(
     (opts?: { mention?: boolean }) => {
-      if (!session.canComment) return;
+      if (!session.canCreateComment) return;
       setSidePanel("comments");
       setDocumentComposer((prev) => ({ mention: !!opts?.mention, nonce: (prev?.nonce ?? 0) + 1 }));
     },
@@ -2252,7 +2252,7 @@ export function EditorShell({
   );
 
   const startComment = useCallback(() => {
-    if (!session.canComment) return;
+    if (!session.canCreateComment) return;
     const range = actions.selectionSourceRange();
     // No selection is no longer an error: the comment is about the document (#1025).
     if (!range) {
@@ -2960,7 +2960,6 @@ export function EditorShell({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [paletteOpen, session]);
 
-  const canChangeMode = role === "owner" || role === "editor";
   const paletteCtx: EditorCommandContext = {
     actions,
     session: {
@@ -2973,16 +2972,23 @@ export function EditorShell({
       get canComment() {
         return session.canComment;
       },
+      get canCreateComment() {
+        return session.canCreateComment;
+      },
       get mode() {
         return session.mode;
       },
-      canChangeMode,
+      get canChangeMode() {
+        return session.canWrite;
+      },
       setMode: (m) => session.setMode(m),
     },
     doc,
-    isOwner,
+    get isOwner() {
+      return session.role === "owner" && !session.accessBlocked;
+    },
     embed,
-    slashWhere: { inTable: format.tablePos >= 0, canComment: session.canComment },
+    slashWhere: { inTable: format.tablePos >= 0, canComment: session.canCreateComment },
     setDialog: setEditorDialog,
     openLink,
     openImage,

@@ -21,6 +21,7 @@ vi.mock("@hocuspocus/provider", async () => {
 });
 
 import { CollabSession } from "../collab/session";
+import { CommentsModel } from "../collab/comments";
 import { createAnchor, makeCollabUser } from "../collab/shared";
 import { markdownBindingPlugin } from "../sync/markdown-binding";
 import { richHighlightsPlugin } from "./highlights";
@@ -89,6 +90,18 @@ describe("collaborative relative-position decorations", () => {
     const remote = { doc, text: doc.getText("content"), awareness: new Awareness(doc) };
     remotes.push(remote);
     return remote;
+  }
+
+  function addRemoteComment(session: CollabSession, from: number, to: number, body: string): string {
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(session.ydoc));
+    const vector = Y.encodeStateVector(session.ydoc);
+    const comments = new CommentsModel(remote, remote.getText("content"));
+    const id = comments.add({ from, to, body, author: localUser });
+    Y.applyUpdate(session.ydoc, Y.encodeStateAsUpdate(remote, vector));
+    comments.destroy();
+    remote.destroy();
+    return id;
   }
 
   function applyRemoteText(session: CollabSession, remote: RemoteClient, edit: () => void) {
@@ -225,7 +238,7 @@ describe("collaborative relative-position decorations", () => {
 
   it("restores loaded comment highlights after held initial text is rebuilt", async () => {
     const session = openSession(true);
-    session.comments.add({ from: 6, to: 10, body: "Loaded comment", author: localUser });
+    addRemoteComment(session, 6, 10, "Loaded comment");
     const { view, refreshes } = createView(session, [richHighlightsPlugin(session)]);
     await flushRefreshes();
     expect(session.binding.hasHeldSync).toBe(true);

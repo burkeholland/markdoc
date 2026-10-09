@@ -52,6 +52,7 @@ export interface EditorCommandContext {
     contentReady: boolean;
     canEdit: boolean;
     canComment: boolean;
+    canCreateComment: boolean;
     mode: EditMode;
     /** Whether the user's role allows switching to editing or suggesting. */
     canChangeMode: boolean;
@@ -116,6 +117,19 @@ const SLASH_SHORTCUTS: Record<string, string> = {
 
 const SLASH_GROUP_SET = new Set<string>(SLASH_GROUPS);
 
+function withLiveWhen(command: Command): Command {
+  const when = command.when;
+  if (!when) return command;
+  const run = command.run;
+  return {
+    ...command,
+    run: () => {
+      if (!when()) return;
+      return run();
+    },
+  };
+}
+
 /** Block items reused from the slash menu (template items, other extensions and `/agent` - the palette has `doc:connect-agent` - are skipped). */
 function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = SLASH_ITEMS): Command[] {
   return items
@@ -127,9 +141,9 @@ function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = 
       group: item.group,
       icon: item.icon,
       shortcut: SLASH_SHORTCUTS[item.id],
-      when: () => ctx.session.contentReady && (item.id === "comment" ? ctx.session.canComment : ctx.session.canEdit),
+      when: () => ctx.session.contentReady && (item.id === "comment" ? ctx.session.canCreateComment : ctx.session.canEdit),
       run: () => {
-        if (!ctx.session.contentReady || !(item.id === "comment" ? ctx.session.canComment : ctx.session.canEdit)) return;
+        if (!ctx.session.contentReady || !(item.id === "comment" ? ctx.session.canCreateComment : ctx.session.canEdit)) return;
         const view = ctx.actions.rich;
         if (!view) return;
         if (item.command) {
@@ -282,7 +296,7 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
       keywords: ["comment", "whole", "document", "overall", "feedback", "agent", "mention", "review"],
       group: "Document",
       icon: "MessageSquarePlus",
-      when: () => ctx.session.canComment && !!ctx.commentDocument,
+      when: () => ctx.session.canCreateComment && !!ctx.commentDocument,
       run: () => ctx.commentDocument?.(),
     },
     {
@@ -337,13 +351,13 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
 
   const help: Command[] = [{ id: "help:shortcuts", title: "Keyboard shortcuts", keywords: ["help", "keys", "hotkeys", "cheatsheet"], group: "Help", icon: "Keyboard", shortcut: "Mod-/", run: () => ctx.setDialog("shortcuts") }];
 
-  if (!ctx.embed) return [...navigation, ...formatting, ...slashCommands(ctx), ...document, ...view, ...help];
+  if (!ctx.embed) return [...navigation, ...formatting, ...slashCommands(ctx), ...document, ...view, ...help].map(withLiveWhen);
   const canvasNavigation = navigation.filter((command) => command.id !== "nav:recent" && command.id !== "nav:dashboard");
   const canvasDocument = document.filter(
     (command) =>
       !["doc:share", "doc:publish", "doc:download-md", "doc:download-html", "doc:download-pdf", "doc:copy-markdown", "doc:reader", "doc:duplicate", "doc:trash"].includes(command.id),
   );
-  return [...canvasNavigation, ...formatting, ...slashCommands(ctx), ...canvasDocument, ...view, ...help];
+  return [...canvasNavigation, ...formatting, ...slashCommands(ctx), ...canvasDocument, ...view, ...help].map(withLiveWhen);
 }
 
 export interface DashboardCommandContext {

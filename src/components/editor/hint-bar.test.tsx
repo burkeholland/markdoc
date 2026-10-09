@@ -91,6 +91,7 @@ function fakeSession(
     docId,
     role: "editor",
     canEdit: true,
+    canCreateComment: true,
     synced: true,
     authError: null,
     trashed: false,
@@ -367,6 +368,14 @@ describe("HintBar controls", () => {
       "title",
       HINTS["mention-copilot"].message,
     );
+  });
+
+  it("does not offer the comment hint before new threads can be created", () => {
+    const session = fakeSession("doc-1", { threads: 1 });
+    (session as { canCreateComment: boolean }).canCreateComment = false;
+    mount(session);
+    expect(screen.queryByTestId("hint-bar")).not.toBeInTheDocument();
+    expect(onComment).not.toHaveBeenCalled();
   });
 
   it("Write a comment opens a comment, hides the bar, and remembers the dismissal", () => {
