@@ -84,11 +84,14 @@ export const PUT = handler(async (req: Request, { params }: Params) => {
     let chars = 0;
     let at: { from: number; to: number } | undefined;
     let hashAfter = "";
+    let mutationStarted = false;
+    let mutationCompleted = false;
     // A caller that left while its large write waited or was read: nothing is written for it.
-    write.assertWanted();
     try {
+      write.assertWanted();
       await mutateLiveDoc(id, { userId: user!.id, docId: id, role: "editor", name: actorName(user) ?? "User", login: user!.login, avatar: user!.image ?? null }, (doc) => {
         assertContentUnchanged(id, doc, expected);
+        mutationStarted = true;
         const ops = replaceText(doc.getText(TEXT_KEY), body.content);
         if (ops.length) {
           changed = true;
@@ -98,9 +101,29 @@ export const PUT = handler(async (req: Request, { params }: Params) => {
         }
         recordAgentActivity(doc, user!, "edited", at);
         hashAfter = contentHash(cleanTextOf(doc));
+        mutationCompleted = true;
       });
     } catch (err) {
-      if (intentId) await discardRequiredVersionIntent(id, intentId);
+      const provenNoOp = mutationCompleted && !changed && hashAfter === beforeHash;
+      if (intentId && (!mutationStarted || provenNoOp)) {
+        await discardRequiredVersionIntent(id, intentId);
+        intentId = null;
+      }
+      if (intentId && mutationStarted) {
+        if (err instanceof HttpError && err.details?.versionPending === true) throw err;
+        console.error("[required-version] content mutation failed after it started", err);
+        throw new HttpError(
+          500,
+          mutationCompleted
+            ? "The content may have been written, but its required version was not saved"
+            : "The content mutation failed after it started and its required version state is unresolved",
+          {
+            contentApplied: mutationCompleted,
+            ...(mutationCompleted ? { contentHash: hashAfter } : {}),
+            versionPending: true,
+          },
+        );
+      }
       throw err;
     }
     if (changed) void recordEdit(id, activityActor(user!), chars).catch((err) => console.error("[activity] edit failed", err));
