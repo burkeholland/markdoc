@@ -149,6 +149,8 @@ $releaseSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'release-vm.p
 $deploySource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'deploy-vm-image.sh')) -Raw
 $gateSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'infra', 'release-wal-gate.sh')) -Raw
 $workflowSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', '.github', 'workflows', 'deploy.yml')) -Raw
+$readmeSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'README.md')) -Raw
+$hostingSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..', 'docs', 'vm-hosting.md')) -Raw
 
 Assert-True ([regex]::Matches($releaseSource, "'vm', 'run-command', 'invoke'").Count -eq 1) 'Terminal release must retain one VM invocation.'
 Assert-True ([regex]::Matches($releaseSource, "'acr', 'build'").Count -eq 1) 'Terminal release must retain one ACR submission.'
@@ -159,86 +161,105 @@ Assert-True ($workflowSource -match '(?m)^\s+runs-on: windows-latest\s*$' -and
 Assert-True ($workflowSource -notmatch '\baz\s+acr\s+build\b' -and
   $workflowSource -notmatch '\baz\s+vm\s+run-command\b') 'The workflow must not duplicate either Azure write owned by the release entrypoint.'
 Assert-True ($releaseSource -match '--scripts'', "@\$walScript", "@\$vmScript"') 'The configured release must send the WAL gate before deployment in one VM invocation.'
-function Get-ReleaseConstant([string]$Name) {
-  $match = [regex]::Match($releaseSource, "(?m)^\`$$Name = (?<seconds>[0-9]+)\s*$")
-  Assert-True $match.Success "Release deadline constant $Name must remain statically identifiable."
-  return [int]$match.Groups['seconds'].Value
+function Get-SourceConstant([string]$Source, [string]$Name) {
+  $match = [regex]::Match($Source, "(?m)^\`$$Name = (?<value>[0-9]+)\s*$")
+  if (-not $match.Success) { return $null }
+  return [int]$match.Groups['value'].Value
 }
-function Test-ReleaseDeadlinePlan([hashtable]$Plan) {
-  $nativePreSubmissionMaximum = 780
-  $digestMaximum = 62
-  $finalSourceMaximum = 90
-  $guestPhaseMaximum = 2035
-  return $Plan.PreSubmission -ge $nativePreSubmissionMaximum -and
-    $Plan.BuildSubmission -eq 90 -and
-    $Plan.AcrService -eq 900 -and
-    $Plan.BuildReserve -ge 150 -and
-    $Plan.BuildPhase -ge ($Plan.BuildSubmission + $Plan.AcrService + $Plan.BuildReserve) -and
-    $Plan.PostBuild -ge ($digestMaximum + $finalSourceMaximum) -and
-    $Plan.Vm -ge $guestPhaseMaximum -and
-    $Plan.Health -ge 20 -and
-    $Plan.Report -ge 1 -and
-    $Plan.Cleanup -ge 1 -and
-    $Plan.Terminal -eq ($Plan.PreSubmission + $Plan.BuildPhase + $Plan.PostBuild + $Plan.Vm + $Plan.Health + $Plan.Report + $Plan.Cleanup) -and
-    ($Plan.ReleaseStepMinutes * 60) -ge $Plan.Terminal -and
-    (($Plan.JobMinutes * 60) - (($Plan.SetupMinutes | Measure-Object -Sum).Sum * 60) - ($Plan.ReleaseStepMinutes * 60)) -ge 300
+function Test-ReleaseBoundaryInvariants([hashtable]$Sources) {
+  $release = $Sources.Release
+  $workflow = $Sources.Workflow
+  $documentation = "$($Sources.Readme)`n$($Sources.Hosting)`n$workflow"
+  $timeouts = @([regex]::Matches($workflow, '(?m)^\s+timeout-minutes: (?<minutes>[0-9]+)\s*$') |
+    ForEach-Object { [int]$_.Groups['minutes'].Value })
+  if ((Get-SourceConstant $release 'PreSubmissionDeadlineSeconds') -ne 900 -or
+      (Get-SourceConstant $release 'AcrBuildSubmissionTimeoutSeconds') -ne 90 -or
+      (Get-SourceConstant $release 'AcrBuildTimeoutSeconds') -ne 900 -or
+      (Get-SourceConstant $release 'BuildPhaseDeadlineSeconds') -ne 1140 -or
+      (Get-SourceConstant $release 'PostBuildVerificationDeadlineSeconds') -ne 180 -or
+      (Get-SourceConstant $release 'VmPhaseDeadlineSeconds') -ne 2400 -or
+      (Get-SourceConstant $release 'PublicHealthDeadlineSeconds') -ne 30 -or
+      (Get-SourceConstant $release 'CleanupChildTimeoutSeconds') -ne 30 -or
+      $null -ne (Get-SourceConstant $release 'BuildReconciliationReserveSeconds') -or
+      $null -ne (Get-SourceConstant $release 'ReportDeadlineSeconds') -or
+      $null -ne (Get-SourceConstant $release 'ReleaseTerminalDeadlineSeconds')) {
+    return $false
+  }
+  if ($timeouts.Count -ne 5 -or ($timeouts -join ',') -cne '99,5,5,5,79') { return $false }
+  if ([regex]::Matches($release, "'acr', 'build'").Count -ne 1 -or
+      [regex]::Matches($release, "'vm', 'run-command', 'invoke'").Count -ne 1 -or
+      [regex]::Matches($release, 'Invoke-ReleaseAcrPoll[\s\S]{0,500}\$buildClock \$BuildPhaseDeadlineSeconds \$buildDeadlineMessage').Count -ne 2 -or
+      [regex]::Matches($release, 'Start-ReleaseBoundedSleep \$buildClock \$BuildPhaseDeadlineSeconds 5 \$buildDeadlineMessage').Count -ne 4 -or
+      $release -notmatch 'for \(\$attempt = 1; \$attempt -le 132; \$attempt\+\+\)' -or
+      $release -notmatch '(?ms)^\s+\$digests = ConvertFrom-ReleaseJson \(Invoke-ReleaseDigestLookup.*?^\s+\$postBuildClock \$PostBuildVerificationDeadlineSeconds \$postBuildDeadlineMessage\)' -or
+      $release -notmatch 'Assert-ReleaseSource \$Commit \$postBuildClock \$PostBuildVerificationDeadlineSeconds \$postBuildDeadlineMessage' -or
+      $release -notmatch '\$vmLimit = Get-ReleaseRemainingSeconds \$vmClock \$VmPhaseDeadlineSeconds \$vmDeadlineMessage' -or
+      $release -notmatch 'Assert-ReleaseDeadline \$vmClock \$VmPhaseDeadlineSeconds \$vmDeadlineMessage' -or
+      $release -notmatch 'Get-ReleaseRemainingSeconds \$healthClock \$PublicHealthDeadlineSeconds \$healthDeadlineMessage' -or
+      $release -notmatch 'Assert-ReleaseDeadline \$healthClock \$PublicHealthDeadlineSeconds \$healthDeadlineMessage' -or
+      $release -notmatch 'Invoke-ReleaseNative ''pwsh''[\s\S]+?\) \$Directory \$CleanupChildTimeoutSeconds\)' -or
+      $release -match '\$reportClock|ReportDeadlineSeconds|ReleaseTerminalDeadlineSeconds') {
+    return $false
+  }
+  if ($workflow -notmatch '(?ms)^concurrency:\s*\r?\n\s+group: markdoc-production\s*\r?\n\s+cancel-in-progress: false\s*$' -or
+      [regex]::Matches($workflow, 'deploy/release-vm\.ps1').Count -ne 1) {
+    return $false
+  }
+  foreach ($term in @('outer phase watchdog', 'native-command timeout', 'service timeout', 'polling bound',
+      'CLI invocation cap', 'post-return elapsed assertion', 'workflow/job headroom')) {
+    if ($documentation -notmatch [regex]::Escape($term)) { return $false }
+  }
+  foreach ($claim in @('at least 150 seconds', '365 seconds above', '4,710 seconds',
+      'leaving 28 seconds',
+      'enforced five-minute', 'five minutes remain for runner', 'independent worst-case phase deadlines',
+      'worst-case timing plan', "No phase borrows another phase's reserve",
+      'Failure reporting | 30 seconds', 'Local archive cleanup | 30 seconds',
+      'guaranteed post-release-step reserve', 'cleanup phase is guaranteed to terminate in 30 seconds')) {
+    if ($documentation -match [regex]::Escape($claim)) { return $false }
+  }
+  return $true
 }
-$timeouts = @([regex]::Matches($workflowSource, '(?m)^\s+timeout-minutes: (?<minutes>[0-9]+)\s*$') |
-  ForEach-Object { [int]$_.Groups['minutes'].Value })
-Assert-True ($timeouts.Count -eq 5) 'The workflow must retain one job, three setup-step and one release-step timeout.'
-$deadlinePlan = @{
-  PreSubmission = Get-ReleaseConstant 'PreSubmissionDeadlineSeconds'
-  BuildSubmission = Get-ReleaseConstant 'AcrBuildSubmissionTimeoutSeconds'
-  AcrService = Get-ReleaseConstant 'AcrBuildTimeoutSeconds'
-  BuildReserve = Get-ReleaseConstant 'BuildReconciliationReserveSeconds'
-  BuildPhase = Get-ReleaseConstant 'BuildPhaseDeadlineSeconds'
-  PostBuild = Get-ReleaseConstant 'PostBuildVerificationDeadlineSeconds'
-  Vm = Get-ReleaseConstant 'VmPhaseDeadlineSeconds'
-  Health = Get-ReleaseConstant 'PublicHealthDeadlineSeconds'
-  Report = Get-ReleaseConstant 'ReportDeadlineSeconds'
-  Cleanup = Get-ReleaseConstant 'CleanupDeadlineSeconds'
-  Terminal = Get-ReleaseConstant 'ReleaseTerminalDeadlineSeconds'
-  JobMinutes = $timeouts[0]
-  SetupMinutes = @($timeouts[1], $timeouts[2], $timeouts[3])
-  ReleaseStepMinutes = $timeouts[4]
-}
-Assert-True (Test-ReleaseDeadlinePlan $deadlinePlan) 'Release phase and workflow deadlines must satisfy every worst-case inequality.'
-Assert-True ($deadlinePlan.PreSubmission -eq 900 -and $deadlinePlan.BuildPhase -eq 1140 -and
-  $deadlinePlan.PostBuild -eq 180 -and $deadlinePlan.Vm -eq 2400 -and
-  $deadlinePlan.Health -eq 30 -and $deadlinePlan.Report -eq 30 -and $deadlinePlan.Cleanup -eq 30 -and
-  $deadlinePlan.Terminal -eq 4710 -and $deadlinePlan.ReleaseStepMinutes -eq 79 -and
-  $deadlinePlan.JobMinutes -eq 99 -and ($deadlinePlan.SetupMinutes -join ',') -ceq '5,5,5') 'The reviewed release deadline table changed unexpectedly.'
-$deadlineMutations = @(
-  @{ Name = 'pre-submission-native'; Change = { param($p) $p.PreSubmission = 779 } },
-  @{ Name = 'build-submission'; Change = { param($p) $p.BuildSubmission = 91 } },
-  @{ Name = 'acr-service'; Change = { param($p) $p.AcrService = 901 } },
-  @{ Name = 'reconciliation-reserve'; Change = { param($p) $p.BuildReserve = 149 } },
-  @{ Name = 'build-phase'; Change = { param($p) $p.BuildPhase = 1139 } },
-  @{ Name = 'digest-and-source'; Change = { param($p) $p.PostBuild = 151 } },
-  @{ Name = 'vm-and-result'; Change = { param($p) $p.Vm = 2034 } },
-  @{ Name = 'public-health'; Change = { param($p) $p.Health = 19 } },
-  @{ Name = 'report'; Change = { param($p) $p.Report = 0 } },
-  @{ Name = 'cleanup'; Change = { param($p) $p.Cleanup = 0 } },
-  @{ Name = 'release-step'; Change = { param($p) $p.ReleaseStepMinutes = 78 } },
-  @{ Name = 'runner-margin'; Change = { param($p) $p.JobMinutes = 98 } }
+
+$boundarySources = @{ Release = $releaseSource; Workflow = $workflowSource; Readme = $readmeSource; Hosting = $hostingSource }
+Assert-True (Test-ReleaseBoundaryInvariants $boundarySources) 'Release boundary implementation and documentation must describe only enforced behavior.'
+$boundaryMutations = @(
+  @{ Name = 'pre-submission-watchdog'; Change = { param($s) $s.Release = $s.Release.Replace('$PreSubmissionDeadlineSeconds = 900', '$PreSubmissionDeadlineSeconds = 899') } },
+  @{ Name = 'build-submission-timeout'; Change = { param($s) $s.Release = $s.Release.Replace('$AcrBuildSubmissionTimeoutSeconds = 90', '$AcrBuildSubmissionTimeoutSeconds = 91') } },
+  @{ Name = 'acr-service-timeout'; Change = { param($s) $s.Release = $s.Release.Replace('$AcrBuildTimeoutSeconds = 900', '$AcrBuildTimeoutSeconds = 901') } },
+  @{ Name = 'build-watchdog'; Change = { param($s) $s.Release = $s.Release.Replace('$BuildPhaseDeadlineSeconds = 1140', '$BuildPhaseDeadlineSeconds = 1139') } },
+  @{ Name = 'post-build-watchdog'; Change = { param($s) $s.Release = $s.Release.Replace('$PostBuildVerificationDeadlineSeconds = 180', '$PostBuildVerificationDeadlineSeconds = 179') } },
+  @{ Name = 'vm-cli-cap'; Change = { param($s) $s.Release = $s.Release.Replace('$VmPhaseDeadlineSeconds = 2400', '$VmPhaseDeadlineSeconds = 2399') } },
+  @{ Name = 'public-health-elapsed-check'; Change = { param($s) $s.Release = $s.Release.Replace('$PublicHealthDeadlineSeconds = 30', '$PublicHealthDeadlineSeconds = 29') } },
+  @{ Name = 'cleanup-child-timeout'; Change = { param($s) $s.Release = $s.Release.Replace('$CleanupChildTimeoutSeconds = 30', '$CleanupChildTimeoutSeconds = 29') } },
+  @{ Name = 'release-step-cap'; Change = { param($s) $s.Workflow = $s.Workflow.Replace('timeout-minutes: 79', 'timeout-minutes: 78') } },
+  @{ Name = 'job-cap'; Change = { param($s) $s.Workflow = $s.Workflow.Replace('timeout-minutes: 99', 'timeout-minutes: 98') } },
+  @{ Name = 'build-clock-alias'; Change = { param($s) $s.Release = [regex]::Replace($s.Release, '(\[ref\]\$missedPolls\) )\$buildClock( \$BuildPhaseDeadlineSeconds)', '$1$releaseClock$2', 1) } },
+  @{ Name = 'build-poll-sleep-removed'; Change = { param($s) $s.Release = [regex]::Replace($s.Release, '(?m)^\s*Start-ReleaseBoundedSleep \$buildClock \$BuildPhaseDeadlineSeconds 5 \$buildDeadlineMessage\s*$', '', 1) } },
+  @{ Name = 'reconciliation-poll-bound'; Change = { param($s) $s.Release = $s.Release.Replace('$attempt -le 132', '$attempt -le 133') } },
+  @{ Name = 'post-build-digest-clock-alias'; Change = { param($s) $s.Release = $s.Release.Replace('$postBuildClock $PostBuildVerificationDeadlineSeconds $postBuildDeadlineMessage)', '$releaseClock $PostBuildVerificationDeadlineSeconds $postBuildDeadlineMessage)') } },
+  @{ Name = 'post-build-source-clock-alias'; Change = { param($s) $s.Release = $s.Release.Replace('Assert-ReleaseSource $Commit $postBuildClock $PostBuildVerificationDeadlineSeconds $postBuildDeadlineMessage', 'Assert-ReleaseSource $Commit $releaseClock $PostBuildVerificationDeadlineSeconds $postBuildDeadlineMessage') } },
+  @{ Name = 'vm-clock-alias'; Change = { param($s) $s.Release = $s.Release.Replace('$vmLimit = Get-ReleaseRemainingSeconds $vmClock', '$vmLimit = Get-ReleaseRemainingSeconds $releaseClock') } },
+  @{ Name = 'health-clock-alias'; Change = { param($s) $s.Release = $s.Release.Replace('Get-ReleaseRemainingSeconds $healthClock', 'Get-ReleaseRemainingSeconds $releaseClock') } },
+  @{ Name = 'cleanup-child-uncapped'; Change = { param($s) $s.Release = $s.Release.Replace(') $Directory $CleanupChildTimeoutSeconds)', ') $Directory 31)') } },
+  @{ Name = 'duplicate-acr-write'; Change = { param($s) $s.Release += "`n'acr', 'build'" } },
+  @{ Name = 'duplicate-vm-write'; Change = { param($s) $s.Release += "`n'vm', 'run-command', 'invoke'" } },
+  @{ Name = 'cancelling-workflow'; Change = { param($s) $s.Workflow = $s.Workflow.Replace('cancel-in-progress: false', 'cancel-in-progress: true') } },
+  @{ Name = 'unused-build-reserve'; Change = { param($s) $s.Release += "`n`$BuildReconciliationReserveSeconds = 150" } },
+  @{ Name = 'uncapped-report-claimed'; Change = { param($s) $s.Release += "`n`$ReportDeadlineSeconds = 30" } },
+  @{ Name = 'nonindependent-terminal-cap'; Change = { param($s) $s.Release += "`n`$ReleaseTerminalDeadlineSeconds = 4710" } },
+  @{ Name = 'build-reserve-language'; Change = { param($s) $s.Readme += "`nThe build guarantees at least 150 seconds for reconciliation." } },
+  @{ Name = 'guest-margin-language'; Change = { param($s) $s.Hosting += "`nThe VM cap provides 365 seconds above guest work." } },
+  @{ Name = 'post-build-reserve-language'; Change = { param($s) $s.Hosting += "`nThe post-build checks are leaving 28 seconds for validation." } },
+  @{ Name = 'terminal-total-language'; Change = { param($s) $s.Readme += "`nThe phase maxima total 4,710 seconds." } },
+  @{ Name = 'workflow-reserve-language'; Change = { param($s) $s.Workflow += "`n# guaranteed post-release-step reserve" } },
+  @{ Name = 'report-cap-language'; Change = { param($s) $s.Readme += "`n| Failure reporting | 30 seconds |" } },
+  @{ Name = 'cleanup-cap-language'; Change = { param($s) $s.Hosting += "`nThe cleanup phase is guaranteed to terminate in 30 seconds." } }
 )
-foreach ($mutation in $deadlineMutations) {
-  $mutated = $deadlinePlan.Clone()
-  if ($mutated.SetupMinutes -is [array]) { $mutated.SetupMinutes = @($mutated.SetupMinutes) }
+foreach ($mutation in $boundaryMutations) {
+  $mutated = $boundarySources.Clone()
   & $mutation.Change $mutated
-  Assert-True (-not (Test-ReleaseDeadlinePlan $mutated)) "Deadline mutation survived: $($mutation.Name)."
+  Assert-True (-not (Test-ReleaseBoundaryInvariants $mutated)) "Boundary mutation survived: $($mutation.Name)."
 }
-Assert-True ([regex]::Matches($releaseSource, 'Invoke-ReleaseAcrPoll[\s\S]{0,500}\$buildClock \$BuildPhaseDeadlineSeconds \$buildDeadlineMessage').Count -eq 2) 'Both tag reconciliation and normal completion must use the same build-phase clock and deadline.'
-Assert-True ($releaseSource -match 'Start-ReleaseBoundedSleep \$buildClock \$BuildPhaseDeadlineSeconds 5 \$buildDeadlineMessage') 'Build poll sleeps must not overshoot the build phase.'
-Assert-True ($releaseSource -match 'Invoke-ReleaseDigestLookup[\s\S]+?\$postBuildClock \$PostBuildVerificationDeadlineSeconds \$postBuildDeadlineMessage' -and
-  $releaseSource -match 'Assert-ReleaseSource \$Commit \$postBuildClock \$PostBuildVerificationDeadlineSeconds \$postBuildDeadlineMessage') 'Digest verification and final source recheck must share the post-build proof deadline.'
-Assert-True ($releaseSource -match '\$vmLimit = Get-ReleaseRemainingSeconds \$vmClock \$VmPhaseDeadlineSeconds \$vmDeadlineMessage' -and
-  $releaseSource -match 'Assert-ReleaseDeadline \$vmClock \$VmPhaseDeadlineSeconds \$vmDeadlineMessage') 'VM transport and result verification must share one enforced phase.'
-Assert-True ($releaseSource -match 'Get-ReleaseRemainingSeconds \$healthClock \$PublicHealthDeadlineSeconds \$healthDeadlineMessage' -and
-  $releaseSource -match 'Assert-ReleaseDeadline \$healthClock \$PublicHealthDeadlineSeconds \$healthDeadlineMessage') 'Public health must retain its independent enforced deadline.'
-Assert-True ($releaseSource -match '\$reportClock = \[Diagnostics\.Stopwatch\]::StartNew\(\)' -and
-  $releaseSource -match '\$reportClock\.Elapsed\.TotalSeconds -ge \$ReportDeadlineSeconds' -and
-  $releaseSource -match 'Invoke-ReleaseNative ''pwsh''[\s\S]+?\$CleanupDeadlineSeconds') 'Reporting and cleanup must have explicit termination bounds.'
 Assert-True ($releaseSource -notmatch 'Local command deadline exceeded; remote work was cancel') 'The revised deadline must not claim cancellation.'
 $workflowTriggers = [regex]::Match($workflowSource, '(?ms)^on:\s*\r?\n(?<body>.*?)(?=^[a-zA-Z][a-zA-Z-]*:)')
 Assert-True ($workflowTriggers.Success -and
@@ -273,4 +294,4 @@ Assert-True ($gateSource -notmatch '(?i)pg_basebackup|systemctl\s+(restart|stop)
   $gateSource -notmatch '(?i)-c\s+[''"]checkpoint') 'Gate must not copy WAL or alter/restart the primary.'
 Assert-True ($gateSource -notmatch 'markdoc-restore-check\.lock|markdoc-restore-check\.XXXXXX') 'Release cleanup must not claim the long-term restore-check instance.'
 
-Write-Host "release VM evidence tests passed: $script:Passed assertions; $($deadlineMutations.Count) deadline mutations rejected"
+Write-Host "release VM evidence tests passed: $script:Passed assertions; $($boundaryMutations.Count) boundary mutations rejected"

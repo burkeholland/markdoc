@@ -493,27 +493,24 @@ The entrypoint performs one bounded attempt:
    Health is necessary evidence, not a substitute for the requested feature
    checks.
 
-The release uses independent worst-case phase deadlines instead of one shared
-clock:
+The release uses these distinct boundaries:
 
-| Phase | Enforced maximum |
-| --- | ---: |
-| Pre-submission validation, preflight, target reads and archive | 900 seconds |
-| ACR submission, service run and terminal evidence | 1,140 seconds |
-| Digest verification and final source recheck | 180 seconds |
-| VM/WAL invocation and guest-result verification | 2,400 seconds |
-| Exact public health | 30 seconds |
-| Failure reporting | 30 seconds |
-| Local archive cleanup | 30 seconds |
+| Boundary | Kind | Anchor and value | What is actually controlled |
+| --- | --- | --- | --- |
+| Pre-submission | Outer phase watchdog | Script start, 900 seconds | Native commands use the remaining time and the phase is checked before the build. Synchronous PowerShell, .NET and file work is not forcibly terminated. |
+| ACR submission | Native-command timeout | One local CLI child, up to 90 seconds within the build watchdog | Killing the local child does not cancel accepted cloud work. |
+| ACR service run | Service timeout | The one build requests 900 seconds | This is the ACR service limit, not a reserved portion of the local build clock. |
+| Build evidence | Outer phase watchdog plus polling bound | Before unique-tag creation, 1,140 seconds; at most 132 reconciliation polls | Submission setup, wrapper overhead, the one submission, tag reconciliation and completion polling all share this clock. No fixed reconciliation reserve is guaranteed. |
+| Post-build proof | Outer phase watchdog | After terminal build evidence, 180 seconds | Digest lookup/retry and final source checks share the clock; synchronous validation runs between elapsed checks. |
+| VM/result | CLI invocation cap plus post-return elapsed assertion | Immediately before the one VM invocation, 2,400 seconds | The local CLI child is capped by remaining time. Result parsing is checked after return, and guest work may continue beyond the local process. |
+| Public health | Native request timeout plus post-return elapsed assertion | After exact guest proof, 20-second request within a 30-second elapsed check | The request is terminated by its own timeout. Synchronous JSON and health validation is checked afterward, not forcibly terminated. |
+| Failure report | Synchronous writes | Terminal catch | A few fixed safe lines are written without an independent termination cap. |
+| Local cleanup | Native-command timeout | Removal child, 30 seconds | Only the child that removes the invocation archive is capped. Context checks, path escaping, command resolution and process setup occur outside that child timeout. |
 
-The 1,140-second build phase starts immediately before the one ACR submission:
-at most 90 seconds for submission, the 900-second ACR service timeout, then at
-least 150 seconds for unique-tag reconciliation and terminal run evidence. Both
-the 132-poll reconciliation bound and normal completion polling use that same
-clock. The script's phase maxima total 4,710 seconds. The release workflow caps
-checkout, Node setup and Azure login at five minutes each, caps the release step
-at 79 minutes, and caps the job at 99 minutes, leaving an enforced five-minute
-runner margin after every preceding step reaches its own limit.
+The workflow's checkout, Node setup and Azure login steps each have five-minute
+caps, the release step has a 79-minute outer cap, and the job has a 99-minute
+outer cap. Their differences are workflow/job headroom, not guaranteed time
+reserved for post-release steps or teardown.
 
 The ACR service timeout is based on the 602-second successful `ch2g` build and
 the 602-604-second `ch2h`/`ch2j` timeouts at the old ten-minute boundary. A

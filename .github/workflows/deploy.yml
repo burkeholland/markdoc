@@ -26,7 +26,7 @@ jobs:
   deploy:
     if: inputs.confirm == 'deploy'
     runs-on: windows-latest
-    # Three five-minute setup caps plus the 79-minute release step leave five minutes for runner post-steps.
+    # Outer job cap. Step-cap differences are scheduling headroom, not reserved post-release time.
     timeout-minutes: 99
     environment: production
     steps:

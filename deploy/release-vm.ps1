@@ -9,17 +9,17 @@
 param([string]$ExpectedCommit = $env:RELEASE_SHA)
 
 $ErrorActionPreference = 'Stop'
+# Cooperative outer phase watchdogs. Native calls and sleeps consume their
+# remaining time, but synchronous PowerShell/.NET work is checked, not killed.
 $PreSubmissionDeadlineSeconds = 900
-$AcrBuildSubmissionTimeoutSeconds = 90
-$AcrBuildTimeoutSeconds = 900
-$BuildReconciliationReserveSeconds = 150
 $BuildPhaseDeadlineSeconds = 1140
 $PostBuildVerificationDeadlineSeconds = 180
 $VmPhaseDeadlineSeconds = 2400
 $PublicHealthDeadlineSeconds = 30
-$ReportDeadlineSeconds = 30
-$CleanupDeadlineSeconds = 30
-$ReleaseTerminalDeadlineSeconds = 4710
+# Native/service boundaries within those watchdogs.
+$AcrBuildSubmissionTimeoutSeconds = 90
+$AcrBuildTimeoutSeconds = 900
+$CleanupChildTimeoutSeconds = 30
 
 . (Join-Path $PSScriptRoot 'release-vm-evidence.ps1')
 
@@ -318,7 +318,7 @@ function Remove-ReleaseContext([string]$Context, [string]$Directory) {
   [void](Invoke-ReleaseNative 'pwsh' @(
     '-NoProfile', '-NonInteractive', '-Command',
     "Remove-Item -LiteralPath '$escaped' -Recurse -Force -ErrorAction Stop"
-  ) $Directory $CleanupDeadlineSeconds)
+  ) $Directory $CleanupChildTimeoutSeconds)
 }
 
 function Get-ReleaseSha256([byte[]]$Bytes) {
@@ -722,7 +722,6 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     $releaseVerified = $true
   } catch {
     # Fail closed at the terminal boundary without leaking a CLI/HTTP error body.
-    $reportClock = [Diagnostics.Stopwatch]::StartNew()
     $code = 1
     $reason = "Unexpected $($_.Exception.GetType().Name); raw output withheld."
     if ($_.Exception.Data.Contains('ReleaseExitCode')) {
@@ -732,7 +731,6 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     Write-Host "Release failed/unverified at ${releaseStage}: $reason"
     if ($buildRun) { Write-Host "ACR run: $buildRun; registry: $acr." }
     if ($operation) { Write-Host "Guest invocation: $operation; VM: $vmId. Cloud work may outlive this command; no retry was submitted." }
-    if ($reportClock.Elapsed.TotalSeconds -ge $ReportDeadlineSeconds) { $code = 124 }
     $terminalFailure = [InvalidOperationException]::new('Release did not reach verified completion.')
     $terminalFailure.Data['ReleaseExitCode'] = $code
   } finally {
@@ -741,7 +739,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     } catch {
       $cleanupCode = 1
       if ($_.Exception.Data.Contains('ReleaseExitCode')) { $cleanupCode = $_.Exception.Data['ReleaseExitCode'] }
-      Write-Host 'Release failed/unverified at local cleanup: bounded source-archive cleanup did not complete.'
+      Write-Host 'Release failed/unverified at local cleanup: source-archive removal child did not complete within its native timeout.'
       if (-not $terminalFailure) {
         $terminalFailure = [InvalidOperationException]::new('Release did not reach verified completion.')
         $terminalFailure.Data['ReleaseExitCode'] = $cleanupCode
@@ -749,7 +747,6 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     }
   }
   if ($terminalFailure) { throw $terminalFailure }
-  Assert-ReleaseDeadline $releaseClock $ReleaseTerminalDeadlineSeconds 'Release terminal deadline exceeded before completion was reported.'
   if (-not $releaseVerified) { Stop-VmRelease 'Release did not reach verified completion.' }
   Write-Host "Release complete: $origin reports ok/db/collab true and version $Commit."
 }

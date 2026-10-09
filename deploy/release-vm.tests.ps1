@@ -176,7 +176,7 @@ function New-TestReleaseClock {
   $script:clockCount++
   if ($script:scenario.StartsWith('poll-') -or $script:scenario.StartsWith('deadline-') -or
       $script:scenario -in @('digest-deadline', 'digest-deadline-two-seconds', 'digest-deadline-three-seconds',
-        'pre-submit-elapsed', 'cleanup-timeout')) {
+        'pre-submit-elapsed', 'cleanup-child-timeout')) {
     return [pscustomobject]@{ Elapsed = [pscustomobject]@{ TotalSeconds = 0 } }
   }
   return [Diagnostics.Stopwatch]::StartNew()
@@ -339,14 +339,11 @@ $script:digest = 'sha256:' + ('a' * 64)
 $script:PreSubmissionDeadlineSeconds = 900
 $script:AcrBuildSubmissionTimeoutSeconds = 90
 $script:AcrBuildTimeoutSeconds = 900
-$script:BuildReconciliationReserveSeconds = 150
 $script:BuildPhaseDeadlineSeconds = 1140
 $script:PostBuildVerificationDeadlineSeconds = 180
 $script:VmPhaseDeadlineSeconds = 2400
 $script:PublicHealthDeadlineSeconds = 30
-$script:ReportDeadlineSeconds = 30
-$script:CleanupDeadlineSeconds = 30
-$script:ReleaseTerminalDeadlineSeconds = 4710
+$script:CleanupChildTimeoutSeconds = 30
 $script:subscription = '332d0c98-694c-48a0-91f3-465de6ac30a5'
 $script:tenant = 'f1fde69f-c8d3-4b94-adeb-02d045b37f6a'
 $script:registry = 'markdocacrmnd542unepl56.azurecr.io'
@@ -371,7 +368,7 @@ function Remove-ReleaseContext {
   param($Context, $Directory)
   if (-not $Context) { return }
   $script:cleanupCount++
-  if ($script:scenario -eq 'cleanup-timeout') {
+  if ($script:scenario -eq 'cleanup-child-timeout') {
     Stop-VmRelease 'Local command deadline exceeded; remote work may still be running. Do not retry the release.' 124
   }
 }
@@ -392,9 +389,6 @@ function Start-Sleep {
 function Write-Host {
   param([string]$Object)
   $script:messages.Add($Object)
-  if ($script:scenario -eq 'deadline-report' -and $Object -match '^Release failed/unverified at ') {
-    $reportClock.Elapsed.TotalSeconds = $script:ReportDeadlineSeconds
-  }
   Microsoft.PowerShell.Utility\Write-Host $Object
 }
 
@@ -565,7 +559,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     Assert-True ($Arguments -contains "APP_VERSION=$script:sha") 'Build must embed the exact commit.'
     Assert-True ($Arguments -contains "markdoc:$script:sha" -and $Arguments -contains "markdoc:$($script:sha.Substring(0, 12))") 'Existing full and short tags must be retained.'
     Assert-True ($Arguments -contains '--no-wait' -and $Arguments -contains '--no-logs') 'Submission must be asynchronous without streaming build logs.'
-    Assert-Equal ([string]$script:AcrBuildTimeoutSeconds) $Arguments[[array]::IndexOf($Arguments, '--timeout') + 1] 'ACR must have bounded headroom over the measured production build.'
+    Assert-Equal ([string]$script:AcrBuildTimeoutSeconds) $Arguments[[array]::IndexOf($Arguments, '--timeout') + 1] 'The one ACR build must retain its 900-second service timeout.'
     Assert-True (@($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' }).Count -eq 1) 'A lost submission response must have one unique tag for reconciliation.'
     Assert-True ($TimeoutSeconds -le $script:AcrBuildSubmissionTimeoutSeconds) 'Build submission must use the bounded submission timeout inside the build phase.'
     $script:submissionTag = @($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' })[0].Substring(8)
@@ -603,7 +597,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
   if ($commandKey -ceq 'acr task show-run') {
     $script:pollCount++
     $status = 'Succeeded'
-    if ($script:scenario -in @('build-failed', 'deadline-report')) { $status = 'Failed' }
+    if ($script:scenario -in @('build-failed', 'report-write')) { $status = 'Failed' }
     if ($script:scenario -eq 'build-timeout') { $status = 'Timeout' }
     if ($script:scenario -eq 'build-unknown-status') { $status = 'Unexpected' }
     if ($script:scenario -eq 'pending-then-success' -and $script:pollCount -eq 1) { $status = 'Running' }
@@ -719,7 +713,7 @@ $cases = @(
   'wrong-operation', 'nonterminal-marker', 'stderr-marker', 'wrong-local-version', 'local-health-false', 'local-health-string', 'malformed-local-json',
   'wrong-public-version', 'public-ok-false', 'public-db-false', 'public-collab-false', 'public-health-string', 'public-array',
   'public-request-failed', 'malformed-public-json', 'success', 'missing-run', 'reconcile-delayed', 'pending-then-success', 'uppercase-sha', 'retention-warning',
-  'pre-submit-elapsed', 'deadline-pre-submit', 'deadline-post-build-source', 'deadline-vm-result', 'deadline-health', 'deadline-report', 'cleanup-timeout'
+  'pre-submit-elapsed', 'deadline-pre-submit', 'deadline-post-build-source', 'deadline-vm-result', 'deadline-health', 'report-write', 'cleanup-child-timeout'
 )
 $pollCases = @()
 foreach ($stage in @('list', 'show')) {
@@ -895,9 +889,7 @@ try {
     $script:PostBuildVerificationDeadlineSeconds = 180
     $script:VmPhaseDeadlineSeconds = 2400
     $script:PublicHealthDeadlineSeconds = 30
-    $script:ReportDeadlineSeconds = 30
-    $script:CleanupDeadlineSeconds = 30
-    $script:ReleaseTerminalDeadlineSeconds = 4710
+    $script:CleanupChildTimeoutSeconds = 30
     $digestCase = @($digestCases | Where-Object { $_.Name -ceq $case }) | Select-Object -First 1
     $pollCase = @($pollCases | Where-Object { $_.Name -ceq $case }) | Select-Object -First 1
     $env:MARKDOC_DIGEST_CASE = $case
@@ -965,8 +957,8 @@ try {
     if ($cases.IndexOf($case) -lt $cases.IndexOf('wrong-public-version')) {
       Assert-Equal 0 $script:publicCount "Guest failure must not reach public health: $case."
     }
-    if ($case -in @('deadline-post-build-source', 'deadline-report')) {
-      Assert-Equal 0 $invocations.Count "Post-build/report deadline failure must not reach the VM: $case."
+    if ($case -in @('deadline-post-build-source', 'report-write')) {
+      Assert-Equal 0 $invocations.Count "Post-build/report failure must not reach the VM: $case."
     }
     if ($case -eq 'deadline-pre-submit') {
       Assert-Equal 0 $builds.Count 'Expired pre-submission work must stop before the ACR write.'
@@ -980,16 +972,22 @@ try {
       Assert-Equal 1 $invocations.Count 'Health deadline must follow exactly one VM invocation.'
       Assert-Equal 1 $script:publicCount 'Health deadline must exercise exactly one bounded public request.'
     }
-    if ($case -eq 'cleanup-timeout') {
+    if ($case -eq 'cleanup-child-timeout') {
       Assert-Equal 1 $invocations.Count 'Cleanup timeout must not repeat the completed VM write.'
       Assert-Equal 1 $script:publicCount 'Cleanup timeout must happen after one verified public request.'
-      Assert-Equal 1 $script:cleanupCount 'Cleanup must be attempted once.'
+      Assert-Equal 1 $script:cleanupCount 'Cleanup removal child must be attempted once.'
+      Assert-True ($log -match 'source-archive removal child did not complete within its native timeout') 'Cleanup failure must describe only the bounded removal child.'
+    }
+    if ($case -eq 'report-write') {
+      Assert-Equal 1 $code 'Synchronous failure reporting must preserve the original failure code.'
+      Assert-True ($log -match '^Release failed/unverified at ACR build completion:' -or
+        $log -match '(?m)^Release failed/unverified at ACR build completion:') 'Failure reporting must retain the fixed stage line.'
     }
     $expectedNativeCodes = @{ 'account-failed' = 19; 'archive-failed' = 31; 'build-submit-failed' = 32; 'vm-native-failed' = 33; 'build-submit-timeout' = 124; 'vm-timeout' = 124 }
     if ($expectedNativeCodes.ContainsKey($case)) {
       Assert-Equal $expectedNativeCodes[$case] $code "Exact native error code must survive for $case. Log: $log"
     }
-    if ($case -in @('deadline-pre-submit', 'deadline-post-build-source', 'deadline-vm-result', 'deadline-health', 'deadline-report', 'cleanup-timeout')) {
+    if ($case -in @('deadline-pre-submit', 'deadline-post-build-source', 'deadline-vm-result', 'deadline-health', 'cleanup-child-timeout')) {
       Assert-Equal 124 $code "Deadline failure must retain timeout exit code for $case."
       Assert-True ($log -notmatch 'Release complete:') "Deadline failure must not report completion for $case."
     }
