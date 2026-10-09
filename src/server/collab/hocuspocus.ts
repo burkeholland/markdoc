@@ -8,6 +8,7 @@ import {
 } from "@hocuspocus/server";
 import * as Y from "yjs";
 import { eq } from "drizzle-orm";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { getDb, schema } from "@/server/db";
 import { collabTokenFailureMessage, isVerifiedCollabClaims, verifyCollabToken, type CollabClaims, type VerifiedCollabClaims } from "./token";
 import { canEdit } from "@/server/documents";
@@ -20,6 +21,7 @@ import { CONTENT_AUTOSAVE_IDLE_MS } from "@/lib/document-persistence";
 import { documentStoreSnapshot, installDocumentAutosave } from "./autosave";
 import { hydrateDoc, revertDoubledSeed, META_KEY, TEXT_KEY } from "./seed";
 import { installOriginAwareBroadcast } from "./broadcast";
+import { Pace } from "@/server/pace";
 import {
   collabConnectionOpened,
   collabMessageBegins,
@@ -217,9 +219,13 @@ export function createCollabServer() {
           lastEditedBy: lastContext?.userId ?? null,
         };
         if (title) patch.title = title;
-        const stored = await db.update(schema.documents).set(patch).where(eq(schema.documents.id, documentName)).returning();
+        // The statements of one store answer in this thread on the embedded database: between two that took
+        // long the pace lets other requests in. Only the id comes back: the row holds the whole text twice.
+        const pace = new Pace();
+        // Both drivers build this statement alike; TypeScript cannot pick an overload of `returning` on the union of the two.
+        const stored = await pace.step(() => (db as NodePgDatabase<typeof schema>).update(schema.documents).set(patch).where(eq(schema.documents.id, documentName)).returning({ id: schema.documents.id }));
         if (stored.length !== 1) throw new Error("Document no longer exists");
-        await maybeAutoVersion(documentName, content, lastContext ?? null);
+        await maybeAutoVersion(documentName, content, lastContext ?? null, pace);
       } catch {
         // Hocuspocus logs hook messages; keep database and document details out of that diagnostic.
         throw new Error("Document persistence failed");
@@ -231,8 +237,8 @@ export function createCollabServer() {
   return hocuspocus;
 }
 
-async function maybeAutoVersion(docId: string, content: string, ctx: CollabContext | null) {
-  const latest = await latestVersion(docId);
+async function maybeAutoVersion(docId: string, content: string, ctx: CollabContext | null, pace: Pace) {
+  const latest = await pace.step(() => latestVersion(docId));
   if (!latest) {
     await addVersion({ documentId: docId, content, kind: "auto", createdBy: ctx?.userId, createdByName: ctx?.name });
     return;
@@ -297,6 +303,9 @@ export async function shutdownCollab(hocuspocus: Hocuspocus<CollabContext>, time
  * Apply a change to a live document (or load it, change, and store it) without
  * a WebSocket connection. Used by REST endpoints such as version restore and
  * comments from users who cannot edit the text.
+ *
+ * Loading, changing and storing a large document each keep this thread for a while on the embedded
+ * database; the pace lets other requests in between them (#2341). On PostgreSQL it never waits.
  */
 export async function withDocument<T>(
   hocuspocus: Hocuspocus<CollabContext>,
@@ -304,14 +313,17 @@ export async function withDocument<T>(
   ctx: CollabContext,
   fn: (doc: Y.Doc) => T,
 ): Promise<T> {
-  const connection = await hocuspocus.openDirectConnection(docId, ctx);
+  const pace = new Pace();
+  const connection = await pace.step(() => hocuspocus.openDirectConnection(docId, ctx));
   try {
     let result!: T;
-    await connection.transact((doc) => {
-      result = fn(doc);
-    });
+    await pace.step(() =>
+      connection.transact((doc) => {
+        result = fn(doc);
+      }),
+    );
     return result;
   } finally {
-    await connection.disconnect();
+    await pace.step(() => connection.disconnect());
   }
 }
