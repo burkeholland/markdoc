@@ -234,3 +234,54 @@ describe("acknowledged content persistence", () => {
     expect(snapshotContains(deleted, Y.snapshot(f.document))).toBe(false);
   });
 });
+
+/**
+ * #2284: `crypto.randomUUID` exists only where the browser calls the page "secure": https and localhost.
+ * A person who opens the app as http://<machine-name>:3000 on the local network has a `crypto` without it.
+ * The three places that ask the server about saving must work there too.
+ */
+describe("saving on a plain http address, where crypto.randomUUID does not exist", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // What such a page has: random bytes, but no randomUUID.
+    vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto), subtle: crypto.subtle });
+  });
+  afterEach(() => {
+    disposals.splice(0).forEach((dispose) => dispose());
+    vi.unstubAllGlobals();
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it("the stand-in really has no randomUUID", () => {
+    expect("randomUUID" in crypto).toBe(false);
+  });
+
+  it("asks for the save state, saves, and says goodbye, each with an id of its own", async () => {
+    const f = fixture();
+    f.client.synced();
+    const status = f.lastRequest();
+    expect(status.type).toBe("document-persistence-status");
+    f.client.receive(f.ack(0, { requestId: status.requestId }));
+    expect(f.client.state).toBe("saved");
+
+    f.text.insert(0, "edit ");
+    const flushed = f.client.flush();
+    const flush = f.lastRequest();
+    expect(flush.type).toBe("document-persistence-flush");
+    f.client.receive(f.ack(1, { requestId: flush.requestId }));
+    expect((await flushed)?.contentHash).toBe(contentHash("edit original"));
+    expect(f.client.state).toBe("saved");
+
+    f.text.insert(0, "more ");
+    f.client.destroy();
+    const goodbye = f.lastRequest();
+    expect(goodbye.type).toBe("document-persistence-flush");
+
+    const ids = [status.requestId, flush.requestId, goodbye.requestId];
+    expect(f.send).toHaveBeenCalledTimes(3);
+    expect(new Set(ids).size).toBe(3);
+    // The server refuses an id that is not a string or is longer than 100 characters (autosave.ts).
+    for (const id of ids) expect(id).toMatch(/^[a-z0-9]{8,100}$/);
+  });
+});
