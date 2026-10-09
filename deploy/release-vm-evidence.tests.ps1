@@ -169,6 +169,8 @@ function Get-SourceConstant([string]$Source, [string]$Name) {
 function Test-ReleaseBoundaryInvariants([hashtable]$Sources) {
   $release = $Sources.Release
   $workflow = $Sources.Workflow
+  $readme = $Sources.Readme
+  $hosting = $Sources.Hosting
   $documentation = "$($Sources.Readme)`n$($Sources.Hosting)`n$workflow"
   $timeouts = @([regex]::Matches($workflow, '(?m)^\s+timeout-minutes: (?<minutes>[0-9]+)\s*$') |
     ForEach-Object { [int]$_.Groups['minutes'].Value })
@@ -188,6 +190,8 @@ function Test-ReleaseBoundaryInvariants([hashtable]$Sources) {
   if ($timeouts.Count -ne 5 -or ($timeouts -join ',') -cne '99,5,5,5,79') { return $false }
   if ([regex]::Matches($release, "'acr', 'build'").Count -ne 1 -or
       [regex]::Matches($release, "'vm', 'run-command', 'invoke'").Count -ne 1 -or
+      $release -notmatch '(?ms)^function Invoke-MarkdocVmRelease\(\[string\]\$Commit\) \{\r?\n\s+\$releaseClock = \[Diagnostics\.Stopwatch\]::StartNew\(\)' -or
+      $release -notmatch '(?ms)^function Start-ReleaseBoundedSleep\([^\r\n]+\) \{\r?\n\s+\$remaining = Get-ReleaseRemainingSeconds \$Clock \$BudgetSeconds \$Message\r?\n\s+if \(\$remaining -lt \$Seconds\) \{ Stop-VmRelease \$Message 124 \}\r?\n\s+Start-Sleep -Seconds \$Seconds\r?\n\s+Assert-ReleaseDeadline \$Clock \$BudgetSeconds \$Message\r?\n\}' -or
       [regex]::Matches($release, 'Invoke-ReleaseAcrPoll[\s\S]{0,500}\$buildClock \$BuildPhaseDeadlineSeconds \$buildDeadlineMessage').Count -ne 2 -or
       [regex]::Matches($release, 'Start-ReleaseBoundedSleep \$buildClock \$BuildPhaseDeadlineSeconds 5 \$buildDeadlineMessage').Count -ne 4 -or
       $release -notmatch 'for \(\$attempt = 1; \$attempt -le 132; \$attempt\+\+\)' -or
@@ -197,6 +201,8 @@ function Test-ReleaseBoundaryInvariants([hashtable]$Sources) {
       $release -notmatch 'Assert-ReleaseDeadline \$vmClock \$VmPhaseDeadlineSeconds \$vmDeadlineMessage' -or
       $release -notmatch 'Get-ReleaseRemainingSeconds \$healthClock \$PublicHealthDeadlineSeconds \$healthDeadlineMessage' -or
       $release -notmatch 'Assert-ReleaseDeadline \$healthClock \$PublicHealthDeadlineSeconds \$healthDeadlineMessage' -or
+      $release -notmatch '(?ms)^function Get-ReleasePublicHealth\(\[string\]\$Origin, \[int\]\$TimeoutSeconds\) \{\r?\n\s+Invoke-RestMethod .+? -TimeoutSec \$TimeoutSeconds' -or
+      $release -match '(?ms)^function Get-ReleasePublicHealth\([^\r\n]+\) \{.{0,500}Invoke-ReleaseNative' -or
       $release -notmatch 'Invoke-ReleaseNative ''pwsh''[\s\S]+?\) \$Directory \$CleanupChildTimeoutSeconds\)' -or
       $release -match '\$reportClock|ReportDeadlineSeconds|ReleaseTerminalDeadlineSeconds') {
     return $false
@@ -206,8 +212,27 @@ function Test-ReleaseBoundaryInvariants([hashtable]$Sources) {
     return $false
   }
   foreach ($term in @('outer phase watchdog', 'native-command timeout', 'service timeout', 'polling bound',
-      'CLI invocation cap', 'post-return elapsed assertion', 'workflow/job headroom')) {
+      'CLI invocation cap', 'post-return elapsed assertion', 'workflow/job headroom',
+      'release orchestration entry', 'HTTP request timeout', 'floored remaining time',
+      'deadline overrun is rejected immediately afterward')) {
     if ($documentation -notmatch [regex]::Escape($term)) { return $false }
+  }
+  if ($readme -notmatch '\| Pre-submission \| Outer phase watchdog \| Release orchestration entry, 900 seconds \|' -or
+      $hosting -notmatch '\| Pre-submission \| Outer phase watchdog \| Release orchestration entry, 900 seconds \|' -or
+      $readme -notmatch '\| Public health \| HTTP request timeout plus post-return elapsed assertion \|' -or
+      $hosting -notmatch '\| Public health \| HTTP request timeout and post-return elapsed assertion \|' -or
+      $readme -notmatch '`Invoke-RestMethod -TimeoutSec` limits the HTTP request\.' -or
+      $hosting -notmatch '`Invoke-RestMethod -TimeoutSec` limits the HTTP request\.' -or
+      $hosting -notmatch 'A requested five-second poll delay starts only\s+when it fits the floored remaining time; any deadline overrun is rejected\s+immediately afterward\.' -or
+      $hosting -notmatch 'A requested sleep starts only when it fits the floored remaining time; any deadline overrun is rejected immediately afterward\.') {
+    return $false
+  }
+  foreach ($claimPattern in @(
+      '(?i)\bscript start\b',
+      '(?i)\bnative request timeout\b',
+      '(?i)\b(?:bounded )?sleeps?.{0,40}\b(?:refuse(?:d|s)?|cap(?:ped|s)?)\b.{0,40}\b(?:cross|crossing)\b',
+      '(?i)\bpoll delays?.{0,40}\brefuse(?:d|s)?\b.{0,40}\b(?:cross|crossing)\b')) {
+    if ($documentation -match $claimPattern) { return $false }
   }
   foreach ($claim in @('at least 150 seconds', '365 seconds above', '4,710 seconds',
       'leaving 28 seconds',
@@ -233,6 +258,10 @@ $boundaryMutations = @(
   @{ Name = 'cleanup-child-timeout'; Change = { param($s) $s.Release = $s.Release.Replace('$CleanupChildTimeoutSeconds = 30', '$CleanupChildTimeoutSeconds = 29') } },
   @{ Name = 'release-step-cap'; Change = { param($s) $s.Workflow = $s.Workflow.Replace('timeout-minutes: 79', 'timeout-minutes: 78') } },
   @{ Name = 'job-cap'; Change = { param($s) $s.Workflow = $s.Workflow.Replace('timeout-minutes: 99', 'timeout-minutes: 98') } },
+  @{ Name = 'pre-submission-clock-anchor'; Change = { param($s) $s.Release = $s.Release.Replace('$releaseClock = [Diagnostics.Stopwatch]::StartNew()', '$releaseClock = $script:ProcessClock') } },
+  @{ Name = 'sleep-fit-check-removed'; Change = { param($s) $s.Release = $s.Release.Replace('  if ($remaining -lt $Seconds) { Stop-VmRelease $Message 124 }', '') } },
+  @{ Name = 'sleep-post-check-removed'; Change = { param($s) $s.Release = $s.Release.Replace('  Assert-ReleaseDeadline $Clock $BudgetSeconds $Message', '') } },
+  @{ Name = 'public-health-native-child'; Change = { param($s) $s.Release = $s.Release.Replace('  Invoke-RestMethod -Uri "$Origin/api/health"', '  Invoke-ReleaseNative -Uri "$Origin/api/health"') } },
   @{ Name = 'build-clock-alias'; Change = { param($s) $s.Release = [regex]::Replace($s.Release, '(\[ref\]\$missedPolls\) )\$buildClock( \$BuildPhaseDeadlineSeconds)', '$1$releaseClock$2', 1) } },
   @{ Name = 'build-poll-sleep-removed'; Change = { param($s) $s.Release = [regex]::Replace($s.Release, '(?m)^\s*Start-ReleaseBoundedSleep \$buildClock \$BuildPhaseDeadlineSeconds 5 \$buildDeadlineMessage\s*$', '', 1) } },
   @{ Name = 'reconciliation-poll-bound'; Change = { param($s) $s.Release = $s.Release.Replace('$attempt -le 132', '$attempt -le 133') } },
@@ -253,7 +282,13 @@ $boundaryMutations = @(
   @{ Name = 'terminal-total-language'; Change = { param($s) $s.Readme += "`nThe phase maxima total 4,710 seconds." } },
   @{ Name = 'workflow-reserve-language'; Change = { param($s) $s.Workflow += "`n# guaranteed post-release-step reserve" } },
   @{ Name = 'report-cap-language'; Change = { param($s) $s.Readme += "`n| Failure reporting | 30 seconds |" } },
-  @{ Name = 'cleanup-cap-language'; Change = { param($s) $s.Hosting += "`nThe cleanup phase is guaranteed to terminate in 30 seconds." } }
+  @{ Name = 'cleanup-cap-language'; Change = { param($s) $s.Hosting += "`nThe cleanup phase is guaranteed to terminate in 30 seconds." } },
+  @{ Name = 'readme-script-start-language'; Change = { param($s) $s.Readme = $s.Readme.Replace('Release orchestration entry, 900 seconds', 'Script start, 900 seconds') } },
+  @{ Name = 'hosting-script-start-language'; Change = { param($s) $s.Hosting = $s.Hosting.Replace('Release orchestration entry, 900 seconds', 'Script start, 900 seconds') } },
+  @{ Name = 'poll-sleep-crossing-language'; Change = { param($s) $s.Hosting = $s.Hosting.Replace('A requested five-second poll delay starts only', 'Every five-second poll delay is refused') } },
+  @{ Name = 'bounded-sleep-crossing-language'; Change = { param($s) $s.Hosting = $s.Hosting.Replace('A requested sleep starts only', 'A bounded sleep is refused') } },
+  @{ Name = 'readme-native-health-language'; Change = { param($s) $s.Readme = $s.Readme.Replace('HTTP request timeout plus', 'Native request timeout plus') } },
+  @{ Name = 'hosting-native-health-language'; Change = { param($s) $s.Hosting = $s.Hosting.Replace('HTTP request timeout and', 'Native request timeout and') } }
 )
 foreach ($mutation in $boundaryMutations) {
   $mutated = $boundarySources.Clone()

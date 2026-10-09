@@ -497,13 +497,13 @@ The release uses these distinct boundaries:
 
 | Boundary | Kind | Anchor and value | What is actually controlled |
 | --- | --- | --- | --- |
-| Pre-submission | Outer phase watchdog | Script start, 900 seconds | Native commands use the remaining time and the phase is checked before the build. Synchronous PowerShell, .NET and file work is not forcibly terminated. |
+| Pre-submission | Outer phase watchdog | Release orchestration entry, 900 seconds | Native commands use the remaining time and the phase is checked before the build. Synchronous PowerShell, .NET and file work is not forcibly terminated. |
 | ACR submission | Native-command timeout | One local CLI child, up to 90 seconds within the build watchdog | Killing the local child does not cancel accepted cloud work. |
 | ACR service run | Service timeout | The one build requests 900 seconds | This is the ACR service limit, not a reserved portion of the local build clock. |
 | Build evidence | Outer phase watchdog plus polling bound | Before unique-tag creation, 1,140 seconds; at most 132 reconciliation polls | Submission setup, wrapper overhead, the one submission, tag reconciliation and completion polling all share this clock. No fixed reconciliation reserve is guaranteed. |
 | Post-build proof | Outer phase watchdog | After terminal build evidence, 180 seconds | Digest lookup/retry and final source checks share the clock; synchronous validation runs between elapsed checks. |
 | VM/result | CLI invocation cap plus post-return elapsed assertion | Immediately before the one VM invocation, 2,400 seconds | The local CLI child is capped by remaining time. Result parsing is checked after return, and guest work may continue beyond the local process. |
-| Public health | Native request timeout plus post-return elapsed assertion | After exact guest proof, 20-second request within a 30-second elapsed check | The request is terminated by its own timeout. Synchronous JSON and health validation is checked afterward, not forcibly terminated. |
+| Public health | HTTP request timeout plus post-return elapsed assertion | After exact guest proof, 20-second request within a 30-second elapsed check | `Invoke-RestMethod -TimeoutSec` limits the HTTP request. Synchronous JSON and health validation is checked afterward, not forcibly terminated. |
 | Failure report | Synchronous writes | Terminal catch | A few fixed safe lines are written without an independent termination cap. |
 | Local cleanup | Native-command timeout | Removal child, 30 seconds | Only the child that removes the invocation archive is capped. Context checks, path escaping, command resolution and process setup occur outside that child timeout. |
 
