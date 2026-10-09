@@ -35,6 +35,7 @@ interface Mounted {
   ytext: Y.Text;
   session: { canEdit: boolean; canComment: boolean; undoManager: { stopCapturing: Mock<() => void> } };
   onImage: Mock<() => void>;
+  onCard: Mock<() => void>;
   onLink: Mock<() => void>;
   onComment: Mock<() => void>;
   onConnectAgent: Mock<() => void>;
@@ -84,7 +85,7 @@ function mount({ markdown = "Hello\n\nWorld", strict = false, canEdit = true, ca
   const controller = createSlashMenuController();
   const { view, ytext, editorKeys } = makeEditor(markdown, controller);
   const session = { canEdit, canComment, undoManager: { stopCapturing: vi.fn<() => void>() } };
-  const callbacks = { onImage: vi.fn<() => void>(), onLink: vi.fn<() => void>(), onComment: vi.fn<() => void>(), onConnectAgent: vi.fn<() => void>() };
+  const callbacks = { onImage: vi.fn<() => void>(), onCard: vi.fn<() => void>(), onLink: vi.fn<() => void>(), onComment: vi.fn<() => void>(), onConnectAgent: vi.fn<() => void>() };
   const ui = (current: EditorView | null) => {
     const menu = <SlashMenu view={current} session={session as unknown as CollabSession} controller={controller} containerRef={containerRef} {...callbacks} />;
     return strict ? <StrictMode>{menu}</StrictMode> : menu;
@@ -205,7 +206,7 @@ describe("slash menu: what it shows", () => {
     press(view, "ArrowDown");
     expect(selected()).toEqual(["slash-item-heading1"]);
     typeAt(view, view.state.selection.head, "li");
-    expect(rowIds()).toEqual(["bullet", "numbered", "task", "divider", "link"]);
+    expect(rowIds()).toEqual(["bullet", "numbered", "task", "divider", "link", "card"]);
     expect(selected()).toEqual(["slash-item-bullet"]);
   });
 
@@ -559,6 +560,7 @@ describe("slash menu: pointer", () => {
 describe("slash menu: items that hand off to the shell", () => {
   it.each([
     ["image", "image", "onImage"],
+    ["video", "card", "onCard"],
     ["link", "link", "onLink"],
     // "/agent" lists Comment first (asking an agent is a comment); "/connect" names the agent dialog.
     ["connect", "agent", "onConnectAgent"],
@@ -572,7 +574,7 @@ describe("slash menu: items that hand off to the shell", () => {
     expect(menu()).toBeNull();
     // The removal of the typed text is an undo step of its own.
     expect(mounted.session.undoManager.stopCapturing).toHaveBeenCalledTimes(2);
-    for (const other of ["onImage", "onLink", "onComment", "onConnectAgent"] as const) {
+    for (const other of ["onImage", "onCard", "onLink", "onComment", "onConnectAgent"] as const) {
       if (other !== callback) expect(mounted[other], other).not.toHaveBeenCalled();
     }
   });
