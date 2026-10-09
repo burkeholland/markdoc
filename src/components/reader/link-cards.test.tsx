@@ -51,6 +51,7 @@ describe("the published page's link cards get their frames in the browser (#2317
         title: "Post on X: x.com/jack/status/20",
         class: "md-link-card-iframe",
         src: "https://platform.twitter.com/embed/Tweet.html?id=20&dnt=true",
+        tabindex: "-1",
       },
       {
         sandbox: "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox",
@@ -60,11 +61,13 @@ describe("the published page's link cards get their frames in the browser (#2317
         title: "YouTube video: youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
         class: "md-link-card-iframe",
         src: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=42",
+        tabindex: "-1",
       },
     ]);
     for (const frame of frames(body)) expect(frame.parentElement!.className).toBe("md-link-card-frame");
     expect(body.querySelectorAll("p")).toHaveLength(2);
-    expect(body.querySelectorAll("script, button")).toHaveLength(0);
+    expect(body.querySelectorAll("script")).toHaveLength(0);
+    expect(body.querySelectorAll("[data-card-cover]")).toHaveLength(2);
   });
 
   it("the frame comes from the card's link and the list, never from an address in the HTML", () => {
@@ -90,6 +93,7 @@ describe("the published page's link cards get their frames in the browser (#2317
   });
 
   it("a page loads 20 frames by itself; the cards after that get a Load button that loads theirs", () => {
+    expect(MAX_CARD_FRAMES).toBe(20);
     const links = Array.from({ length: MAX_CARD_FRAMES + 2 }, (_, i) => (i === MAX_CARD_FRAMES ? VIDEO : `https://x.com/jack/status/${i + 1}`));
     const body = show(links.map((link) => card(link, link === VIDEO ? "video" : "post")).join(""));
     expect(frames(body)).toHaveLength(MAX_CARD_FRAMES);
@@ -101,7 +105,7 @@ describe("the published page's link cards get their frames in the browser (#2317
     act(() => buttons[0].click());
     const figure = body.querySelectorAll("figure")[MAX_CARD_FRAMES];
     expect(frames(figure).map((frame) => frame.getAttribute("src"))).toEqual(["https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"]);
-    expect(figure.querySelector("button")).toBeNull();
+    expect(figure.querySelector('[data-testid="link-card-load"]')).toBeNull();
     expect(frames(body)).toHaveLength(MAX_CARD_FRAMES + 1);
     expect(body.querySelectorAll('[data-testid="link-card-load"]')).toHaveLength(1);
   });
@@ -177,12 +181,13 @@ describe("the published page's link cards get their frames in the browser (#2317
       vi.advanceTimersByTime(0);
     };
 
-    it("with nothing to type in, as on the published page, a frame may keep the keyboard, and its card shows it", () => {
+    it("on the published page, provider focus still needs a fresh parent-observed action", () => {
       const body = show(`${card(TWEET, "post")}${card(VIDEO)}`);
       const [post] = frames(body);
-      for (let n = 0; n < 5; n++) grab(post);
-      expect(document.activeElement).toBe(post);
-      expect(post.parentElement!.hasAttribute("data-has-keyboard")).toBe(true);
+      const before = document.activeElement;
+      grab(post);
+      expect(document.activeElement).toBe(before);
+      expect(post.parentElement!.hasAttribute("data-has-keyboard")).toBe(false);
       expect(frames(body)).toHaveLength(2);
       expect(body.querySelector('[data-testid="link-card-off"]')).toBeNull();
     });

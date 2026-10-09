@@ -194,9 +194,15 @@ describe("link cards in the rich pane (#2317)", () => {
         title: "Post on X: x.com/jack/status/20",
         class: "md-link-card-iframe",
         src: POST_FRAME,
+        tabindex: "-1",
       });
-      // In the card, after the link and the button: the tab order is link, Show as text, frame.
-      expect(Array.from(cards()[0].querySelectorAll("a[href], button, iframe"), (el) => el.tagName)).toEqual(["A", "BUTTON", "IFRAME"]);
+      // The parent-owned cover replaces the frame's direct Tab stop.
+      expect(Array.from(cards()[0].querySelectorAll("a[href], button, iframe"), (el) => [el.tagName, el.getAttribute("data-card-cover")])).toEqual([
+        ["A", null],
+        ["BUTTON", null],
+        ["IFRAME", null],
+        ["BUTTON", ""],
+      ]);
       // Still no script anywhere, and the frames are the only things that load.
       expect(document.querySelectorAll("script")).toHaveLength(0);
       expect(view.dom.querySelectorAll("object, embed, img, video, audio, link, [srcdoc]")).toHaveLength(0);

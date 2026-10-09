@@ -274,8 +274,8 @@ class LinkCardView implements NodeView {
     if (!frame) return;
     // The frame's page may not take the keyboard from the document by itself (#2338).
     this.unguard?.();
-    this.unguard = guardCardFrame(frame, () => this.turnOff(card, url));
     this.frameBox.replaceChildren(frame);
+    this.unguard = guardCardFrame(frame, () => this.turnOff(card, url));
   }
 
   /** The frame kept taking the keyboard: it goes, and the card says so and offers to load it again. */
@@ -352,4 +352,3 @@ export function createNodeViews(canEdit: () => boolean, { isolateUndo = () => {}
     link_card: (node, view, getPos) => new LinkCardView(node, view, getPos, canEdit, isolateUndo),
   };
 }
-
