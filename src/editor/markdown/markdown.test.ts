@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Node } from "prosemirror-model";
+import { EditorState } from "prosemirror-state";
+import { fixTables } from "prosemirror-tables";
 import { parseMarkdown, extractHeadings } from "./parse";
 import { serializeMarkdown } from "./serialize";
 import { schema } from "./schema";
@@ -88,6 +90,60 @@ describe("parseMarkdown", () => {
     const table = doc.child(0);
     expect(table.child(1).childCount).toBe(2);
     expect(table.child(1).child(1).textContent).toBe("");
+  });
+
+  it("ignores the cells a table row has beyond the header's, as GFM does", () => {
+    const { doc, map } = parseMarkdown("| a | b |\n|---|---|\n| 1 | 2 | 3 | 4 |\n| 5 | 6 |\n");
+    const table = doc.child(0);
+    const widths: number[] = [];
+    table.forEach((row) => widths.push(row.childCount));
+    expect(widths).toEqual([2, 2, 2]);
+    expect(table.child(1).textContent).toBe("12");
+    // A table that is already a rectangle is one prosemirror-tables leaves alone.
+    expect(fixTables(EditorState.create({ doc }))).toBeUndefined();
+    // The ignored cells have no place in the rich document: an offset inside them lands on text that is there.
+    const ignored = "| a | b |\n|---|---|\n| 1 | 2 | 3".length;
+    expect(doc.resolve(map.srcToPm(ignored)).parent.inlineContent).toBe(true);
+  });
+
+  describe("a space at the end of a table cell", () => {
+    const TABLE = "| a    | b   |\n| ---- | --- |\n| Beta | 2   |";
+    /** The table with `text` typed at the end (or the start) of the first body cell. */
+    const typed = (text: string, source = TABLE, at: "end" | "start" = "end") => {
+      const doc = parseMarkdown(source).doc;
+      const cell = doc.child(0).child(1).child(0);
+      let start = 0;
+      doc.descendants((node, pos) => {
+        if (node === cell) start = pos + 1;
+      });
+      return EditorState.create({ doc }).tr.insertText(text, at === "end" ? start + cell.content.size : start).doc;
+    };
+
+    it("is written as one no-break space and read back as the space", () => {
+      const doc = typed(" ");
+      const out = serializeMarkdown(doc).trimEnd();
+      expect(out).toBe("| a     | b   |\n| ----- | --- |\n| Beta\u00a0 | 2   |");
+      expect(parseMarkdown(out).doc.eq(doc)).toBe(true);
+      expect(parseMarkdown(out).doc.child(0).child(1).child(0).textContent).toBe("Beta ");
+      // The next letter makes it an ordinary space between two words.
+      expect(serializeMarkdown(typed("x", out)).trimEnd()).toBe("| a      | b   |\n| ------ | --- |\n| Beta x | 2   |");
+    });
+
+    it("is one space however many are typed, and after bold text too", () => {
+      expect(serializeMarkdown(typed("   ")).trimEnd()).toContain("| Beta\u00a0 |");
+      const bold = "| a        | b   |\n| -------- | --- |\n| **Beta** | 2   |";
+      const out = serializeMarkdown(typed(" ", bold)).trimEnd();
+      expect(out).toContain("| **Beta**\u00a0 |");
+      expect(parseMarkdown(out).doc.child(0).child(1).child(0).textContent).toBe("Beta ");
+    });
+
+    it("stays padding before the text and in a cell with nothing else", () => {
+      expect(serializeMarkdown(typed(" ", TABLE, "start")).trimEnd()).toBe(TABLE);
+      const empty = "| a   | b   |\n| --- | --- |\n|     | 2   |";
+      expect(serializeMarkdown(typed(" ", empty)).trimEnd()).toBe(empty);
+      // A cell that holds only a no-break space is someone's own, not a space typed after a word.
+      expect(parseMarkdown("| a | b |\n| --- | --- |\n| \u00a0 | x&nbsp; |").doc.child(0).child(1).textContent).toBe("\u00a0x\u00a0");
+    });
   });
 
   it("treats an empty task marker as an unchecked task item", () => {
