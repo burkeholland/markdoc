@@ -126,16 +126,19 @@ describe("the focus guard of a card's frame (#2338)", () => {
         original(options);
       });
       grab(frame, 1000);
-      expect(order).toEqual(["window", "editor"]);
+      expect(order).toEqual(["window", "editor", "window", "editor"]);
     });
 
-    it("the answer waits for the browser to finish the move: nothing happens inside the blur event itself", () => {
-      const { frame } = make();
+    it("the unauthorized target is detached and page focus is restored inside the blur event, before the next input can be delivered", () => {
+      const { frame, box } = make();
       editor.focus();
       frame.focus();
       page.dispatchEvent(at(new FocusEvent("blur"), 1000));
-      expect(document.activeElement).toBe(frame);
+      expect(frame.isConnected).toBe(false);
+      expect(document.activeElement).toBe(editor);
       vi.runOnlyPendingTimers();
+      expect(frame.isConnected).toBe(true);
+      expect(frame.parentElement).toBe(box);
       expect(document.activeElement).toBe(editor);
     });
 
@@ -199,23 +202,39 @@ describe("the focus guard of a card's frame (#2338)", () => {
       expect(turnOff).toHaveBeenCalledTimes(1);
     });
 
-    it("the place the person was in is gone: the frame loses focus, and nothing throws", () => {
+    it("the place the person was in is gone: quarantine still removes focus from the frame without throwing", () => {
       const { frame } = make();
       editor.focus();
       editor.remove();
-      const blur = vi.spyOn(frame, "blur");
       grab(frame, 1000);
-      expect(blur).toHaveBeenCalledTimes(1);
+      expect(document.activeElement).not.toBe(frame);
     });
 
-    it("the browser does not give focus back: the card at least shows where the keyboard is", () => {
+    it("the browser does not give focus back: the quarantined frame still cannot keep the keyboard", () => {
       const { frame, box } = make();
       editor.focus();
       vi.spyOn(editor, "focus").mockImplementation(() => {});
       vi.spyOn(frame, "blur").mockImplementation(() => {});
       grab(frame, 1000);
-      expect(document.activeElement).toBe(frame);
-      expect(box.hasAttribute("data-has-keyboard")).toBe(true);
+      expect(document.activeElement).not.toBe(frame);
+      expect(box.hasAttribute("data-has-keyboard")).toBe(false);
+      expect(cover(box)).not.toBeNull();
+    });
+
+    it("a browser that still reports the detached frame as active is explicitly asked to blur it", () => {
+      const { frame } = make();
+      editor.focus();
+      const actualRemove = frame.remove.bind(frame);
+      let detached = false;
+      vi.spyOn(frame, "remove").mockImplementation(() => {
+        actualRemove();
+        detached = true;
+      });
+      const active = Object.getOwnPropertyDescriptor(Document.prototype, "activeElement")!.get!.bind(document);
+      vi.spyOn(document, "activeElement", "get").mockImplementation(() => (detached ? frame : active()));
+      const blur = vi.spyOn(frame, "blur").mockImplementation(() => {});
+      grab(frame, 1000);
+      expect(blur).toHaveBeenCalled();
     });
   });
 
@@ -246,12 +265,45 @@ describe("the focus guard of a card's frame (#2338)", () => {
       expect(document.activeElement).toBe(made.frame);
     });
 
+    it("one Tab transition can be used only once, and a repeated Tab never authorizes", () => {
+      const first = make();
+      const second = make();
+      editor.focus();
+      key(editor, "Tab", 1000);
+      cover(first.box)!.dispatchEvent(at(new FocusEvent("focus"), 1001));
+      page.dispatchEvent(at(new FocusEvent("blur"), 1002));
+      vi.runOnlyPendingTimers();
+      expect(document.activeElement).toBe(first.frame);
+      editor.focus();
+      cover(second.box)!.dispatchEvent(at(new FocusEvent("focus"), 1003));
+      grab(second.frame, 1004);
+      expect(document.activeElement).toBe(editor);
+
+      key(editor, "Tab", 2000, { repeat: true });
+      cover(second.box)!.dispatchEvent(at(new FocusEvent("focus"), 2001));
+      grab(second.frame, 2002);
+      expect(document.activeElement).toBe(editor);
+    });
+
+    it("a Tab observed before a replacement proxy exists cannot activate that proxy", () => {
+      const made = make();
+      editor.focus();
+      enterByCover(made, 1000);
+      expect(cover(made.box)).toBeNull();
+      key(editor, "Tab", 2000);
+      editor.focus();
+      expect(cover(made.box)).not.toBeNull();
+      cover(made.box)!.dispatchEvent(at(new FocusEvent("focus"), 2001));
+      expect(document.activeElement).toBe(editor);
+    });
+
     it.each([
       ["a Tab the page used for itself (an editor that indents)", () => editor.addEventListener("keydown", (event) => event.preventDefault()), "Tab", {}, 10],
       ["a Tab that is too old", () => {}, "Tab", {}, 251],
       ["Ctrl+Tab", () => {}, "Tab", { ctrlKey: true }, 10],
       ["Alt+Tab", () => {}, "Tab", { altKey: true }, 10],
       ["Meta+Tab (Cmd+Tab)", () => {}, "Tab", { metaKey: true }, 10],
+      ["a repeated Tab", () => {}, "Tab", { repeat: true }, 10],
       ["another key", () => {}, "Enter", {}, 10],
     ])("not: %s", (_name, prepare, name, init, later) => {
       const made = make();
@@ -778,6 +830,16 @@ describe("the focus guard of a card's frame (#2338)", () => {
       expect(document.activeElement).toBe(editor);
     });
 
+    it("script click on a directly focused proxy cannot authorize the frame", () => {
+      const made = make();
+      editor.focus();
+      cover(made.box)!.focus();
+      cover(made.box)!.click();
+      expect(document.activeElement).toBe(cover(made.box));
+      grab(made.frame, 2110);
+      expect(document.activeElement).toBe(editor);
+    });
+
     it("a Tab capability is exact: another frame racing it is rejected", () => {
       const first = make();
       const second = make();
@@ -814,6 +876,21 @@ describe("the focus guard of a card's frame (#2338)", () => {
   });
 
   describe("ending, and failing safe", () => {
+    it("stopping while an unauthorized frame is quarantined cancels reinsertion and removes the cover", () => {
+      const made = make();
+      editor.focus();
+      made.frame.focus();
+      page.dispatchEvent(at(new FocusEvent("blur"), 2100));
+      expect(made.frame.isConnected).toBe(false);
+      const pending = vi.getTimerCount();
+      expect(pending).toBeGreaterThan(0);
+      made.stop();
+      expect(vi.getTimerCount()).toBe(pending - 1);
+      vi.runOnlyPendingTimers();
+      expect(made.frame.isConnected).toBe(false);
+      expect(cover(made.box)).toBeNull();
+    });
+
     it("the guard of a frame ends: no cover, no ring, and the frame is no longer watched", () => {
       const made = make();
       const { frame, box, stop, turnOff } = made;

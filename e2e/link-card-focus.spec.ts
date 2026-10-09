@@ -43,8 +43,7 @@ const scrollAndCaret = (page: Page) =>
 test.describe("link cards: the keyboard stays with the person (#2338)", () => {
   test("a frame that takes the keyboard by itself does not keep it: typing arrives in the document in both panes, the frame is turned off after three tries, and it can be loaded again", async ({ browser, baseURL }) => {
     const { page, context } = await signIn(browser, uniqueLogin("guard"));
-    // The post's frame takes the keyboard five times a second. The video's frame is quiet.
-    const sites = await standInWithKeyboard(context, baseURL!, (url) => (url === TWEET_FRAME ? 200 : 0));
+    const sites = await standInWithKeyboard(context, baseURL!);
     const id = await createDocument(page, DOC, "Guard");
     // The way people mostly open a document: from the dashboard, with no page load.
     await openByDashboardClick(page, id);
@@ -52,10 +51,18 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await frameReady(page, TWEET_FRAME);
     await frameReady(page, VIDEO_FRAME);
 
-    // The person types at the end of the preview, 60 ms between keys, while the frame keeps trying.
+    // The exact hostile canary from the rereview crosses several focus attempts. The provider must see
+    // no keydown, beforeinput, input, composition, or paste payload before the third rejection unloads it.
     await focusRichEnd(page);
-    const typed = "abcdefghijklmnopqrstuvwxyz0123";
-    await page.keyboard.type(typed, { delay: 60 });
+    const typed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const chunks = [typed.slice(0, 21), typed.slice(21, 42), typed.slice(42)];
+    for (const [index, chunk] of chunks.entries()) {
+      await Promise.all([takeFocusOnce(page, ".md-rich", TWEET_FRAME), page.keyboard.type(chunk, { delay: 5 })]);
+      if (index < chunks.length - 1) {
+        await expect.poll(() => keyboardPlace(page)).toBe("preview");
+        await frameReady(page, TWEET_FRAME);
+      }
+    }
     // Three tries, then the frame is gone and its card says why.
     await expect(notice(page)).toHaveCount(1);
     await expect(notice(page)).toContainText(TURNED_OFF);
@@ -67,10 +74,11 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     expect(await keyboardPlace(page)).toBe("preview");
     const inDocument = letters((await codeText(page)).split("Last paragraph")[1] ?? "", typed);
     const inFrame = sites.keys.join("");
-    expect(typed.startsWith(inDocument) || inDocument.length > 0, `in the document: ${inDocument}`).toBe(true);
-    expect(inDocument.length + inFrame.length, `document "${inDocument}", frame "${inFrame}"`).toBe(typed.length);
-    // The frame had three tries. Each can catch only the keys typed before the page has answered.
-    expect(inFrame.length, `keys that reached the frame: "${inFrame}"`).toBeLessThanOrEqual(3);
+    expect(inDocument, `in the document: ${inDocument}`).toBe(typed);
+    expect(inFrame, `keys that reached the frame: "${inFrame}"`).toBe("");
+    expect(sites.inputEvents).toEqual([]);
+    // The first two quarantines reload the same iframe. The third turns it off without another reload.
+    expect(sites.frames.filter((url) => url === TWEET_FRAME)).toHaveLength(3);
     // The quiet frame beside it was left alone.
     await expect(frame(page, VIDEO_FRAME)).toHaveCount(1);
     expect((await frameCounts(page, ".md-rich", VIDEO_FRAME)).keys).toBe(0);
@@ -89,16 +97,66 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     expect(sites.frames.filter((url) => url === TWEET_FRAME)).toHaveLength(before + 1);
     await focusCodeEnd(page);
     const caught = sites.keys.length;
+    const inputCaught = sites.inputEvents.length;
     const second = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    await page.keyboard.type(second, { delay: 60 });
+    const secondChunks = [second.slice(0, 9), second.slice(9, 18), second.slice(18)];
+    for (const [index, chunk] of secondChunks.entries()) {
+      await Promise.all([takeFocusOnce(page, ".md-rich", TWEET_FRAME), page.keyboard.type(chunk, { delay: 5 })]);
+      if (index < secondChunks.length - 1) {
+        await expect.poll(() => keyboardPlace(page)).toBe("markdown");
+        await frameReady(page, TWEET_FRAME);
+      }
+    }
     await expect(notice(page)).toHaveCount(1);
     expect(await keyboardPlace(page)).toBe("markdown");
     const secondInDocument = letters((await codeText(page)).split("MORE")[1] ?? "", second);
     const secondInFrame = sites.keys.slice(caught).join("");
-    expect(secondInDocument.length + secondInFrame.length, `document "${secondInDocument}", frame "${secondInFrame}"`).toBe(second.length);
-    expect(secondInFrame.length, `keys that reached the frame: "${secondInFrame}"`).toBeLessThanOrEqual(3);
+    expect(secondInDocument, `document "${secondInDocument}"`).toBe(second);
+    expect(secondInFrame, `frame "${secondInFrame}"`).toBe("");
+    expect(sites.inputEvents.slice(inputCaught)).toEqual([]);
     expect(sites.refused).toEqual([]);
     await context.close();
+  });
+
+  test("an unauthorized frame receives no paste, beforeinput, input, or IME composition payload", async ({ browser, baseURL }) => {
+    const { page, context } = await signIn(browser, uniqueLogin("guard-input-payloads"));
+    const sites = await standInWithKeyboard(context, baseURL!);
+    const id = await createDocument(page, `# Input payloads\n\n${VIDEO}\n\nDocument target\n`, "Input payloads");
+    await openDocument(page, id);
+    await frameReady(page, VIDEO_FRAME);
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(baseURL!).origin });
+    const cdp = await context.newCDPSession(page);
+
+    const raceWithUnauthorizedFocus = async (deliver: () => Promise<unknown>) => {
+      await focusRichEnd(page);
+      const loads = sites.frames.filter((url) => url === VIDEO_FRAME).length;
+      // These two protocol commands are issued together. The frame focuses synchronously; browser input
+      // follows while the old delayed-restoration implementation still left that frame active.
+      await Promise.all([takeFocusOnce(page, ".md-rich", VIDEO_FRAME), deliver()]);
+      await expect.poll(() => keyboardPlace(page)).toBe("preview");
+      await frameReady(page, VIDEO_FRAME);
+      expect(sites.frames.filter((url) => url === VIDEO_FRAME)).toHaveLength(loads + 1);
+    };
+
+    try {
+      const pasted = "PASTE-CANARY-0123456789";
+      await page.evaluate((text) => navigator.clipboard.writeText(text), pasted);
+      await raceWithUnauthorizedFocus(() => page.keyboard.press("Control+V"));
+      await expect.poll(() => codeText(page)).toContain(pasted);
+
+      await raceWithUnauthorizedFocus(async () => {
+        for (const text of ["に", "にほ", "にほん"]) await cdp.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+        await cdp.send("Input.insertText", { text: "日本" });
+      });
+      await expect.poll(() => codeText(page)).toContain(`${pasted}日本`);
+      expect(sites.keys).toEqual([]);
+      expect(sites.inputEvents).toEqual([]);
+      await expect(notice(page)).toHaveCount(0);
+      expect(sites.refused).toEqual([]);
+    } finally {
+      await cdp.detach();
+      await context.close();
+    }
   });
 
   test("a quiet frame: the first pointer press activates the exact frame, the second reaches it, and Tab enters directly", async ({ browser, baseURL }) => {
@@ -156,6 +214,14 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     expect(await keyboardPlace(page)).toBe(`frame ${VIDEO_FRAME}`);
     await expect(notice(page)).toHaveCount(0);
 
+    // Returning to the page recreates the proxy and consumes the prior Tab transition. Directly focusing
+    // that proxy cannot reuse the old event.
+    await page.locator(".md-rich").focus();
+    await coverFor(page, VIDEO_FRAME).focus();
+    await expect.poll(() => keyboardPlace(page)).toBe("cover");
+    await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
+    await expect.poll(() => keyboardPlace(page)).toBe("preview");
+
     // Shift+Tab from the next parent-owned control enters the same exact frame.
     await focusRichEnd(page);
     await page.evaluate(() => {
@@ -169,6 +235,51 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await page.getByTestId("after-video-frame").focus();
     await page.keyboard.press("Shift+Tab");
     await expect.poll(() => keyboardPlace(page)).toBe(`frame ${VIDEO_FRAME}`);
+
+    // Direct focus on the permanent proxy uses the browser's native button activation. Enter and Space
+    // work, while script click() cannot create authorization.
+    for (const activation of ["Enter", "Space"]) {
+      await focusRichEnd(page);
+      await coverFor(page, VIDEO_FRAME).focus();
+      await expect.poll(() => keyboardPlace(page)).toBe("cover");
+      await page.keyboard.press(activation);
+      await expect.poll(() => keyboardPlace(page), { message: `${activation} activates the focused proxy` }).toBe(`frame ${VIDEO_FRAME}`);
+    }
+    await focusRichEnd(page);
+    await coverFor(page, VIDEO_FRAME).focus();
+    await coverFor(page, VIDEO_FRAME).evaluate((proxy) => proxy.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    await expect.poll(() => keyboardPlace(page)).toBe("cover");
+    await coverFor(page, VIDEO_FRAME).evaluate((proxy: HTMLButtonElement) => proxy.click());
+    await expect.poll(() => keyboardPlace(page)).toBe("cover");
+    await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
+    await expect.poll(() => keyboardPlace(page)).toBe("preview");
+    expect((await inFrame()).keys).toBe(0);
+    await coverFor(page, VIDEO_FRAME).click();
+    await expect.poll(() => keyboardPlace(page)).toBe(`frame ${VIDEO_FRAME}`);
+
+    await focusRichEnd(page);
+    await page.evaluate((selector) => {
+      const proxy = document.querySelector<HTMLElement>(selector)!;
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", repeat: true, bubbles: true, cancelable: true }));
+      proxy.focus();
+    }, `.md-rich .md-link-card-frame:has(iframe[src="${VIDEO_FRAME}"]) [data-card-cover]`);
+    await expect.poll(() => keyboardPlace(page)).toBe("cover");
+    await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
+    await expect.poll(() => keyboardPlace(page)).toBe("preview");
+    await coverFor(page, VIDEO_FRAME).click();
+    await expect.poll(() => keyboardPlace(page)).toBe(`frame ${VIDEO_FRAME}`);
+
+    // A provider reload keeps the same guard. Its next unauthorized focus is quarantined, reloads once,
+    // and restores the cover without adding another page-level listener.
+    const loadsBeforeReload = sites.frames.filter((url) => url === VIDEO_FRAME).length;
+    await page.frameLocator(`.md-rich iframe[src="${VIDEO_FRAME}"]`).locator("body").evaluate(() => location.reload());
+    await frameReady(page, VIDEO_FRAME);
+    await focusRichEnd(page);
+    await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
+    await expect.poll(() => keyboardPlace(page)).toBe("preview");
+    await frameReady(page, VIDEO_FRAME);
+    expect(sites.frames.filter((url) => url === VIDEO_FRAME)).toHaveLength(loadsBeforeReload + 2);
+    await expect(coverFor(page, VIDEO_FRAME)).toHaveCount(1);
     expect(sites.refused).toEqual([]);
     await context.close();
   });
@@ -189,7 +300,7 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await page.keyboard.type("a");
     await page.waitForTimeout(1200);
     await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
-    await expect.poll(async () => (await inFrame()).grabs).toBe(1);
+    await expect.poll(() => sites.grabs.filter((url) => url === VIDEO_FRAME).length).toBe(1);
     await expect.poll(() => keyboardPlace(page)).toBe("preview");
     await page.keyboard.type("b");
     expect(await codeText(page)).toContain("Last paragraphab");
@@ -257,7 +368,8 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await expect.poll(() => codeText(other.page)).toContain("alpha1234 omega");
     // Two tries by now: the frame is still there, and it got no key.
     await expect(frame(page, TWEET_FRAME)).toHaveCount(1);
-    expect(await frameCounts(page, ".md-rich", TWEET_FRAME)).toMatchObject({ grabs: 2, keys: 0 });
+    expect(sites.grabs.filter((url) => url === TWEET_FRAME)).toHaveLength(2);
+    expect((await frameCounts(page, ".md-rich", TWEET_FRAME)).keys).toBe(0);
     expect(sites.refused).toEqual([]);
     expect(otherSites.refused).toEqual([]);
     await owner.context.close();
@@ -297,7 +409,9 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await expect.poll(() => keyboardPlace(page)).toBe("preview");
     await page.keyboard.type("XYZ", { delay: 60 });
     expect(await codeText(page)).toContain("Last paragraphabcdXYZ");
-    expect(await inFrame()).toMatchObject({ clicks: 1, keys: 0 });
+    // Quarantine reloads the provider, so its temporary click state is reset.
+    expect(await inFrame()).toMatchObject({ clicks: 0, keys: 0 });
+    expect(sites.frames.filter((url) => url === VIDEO_FRAME)).toHaveLength(2);
     await expect(notice(page)).toHaveCount(0);
     expect(sites.keys).toEqual([]);
     expect(sites.refused).toEqual([]);
@@ -315,16 +429,15 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await expect.poll(() => keyboardPlace(page)).toBe("preview");
     const textBefore = await codeText(page);
     // Nobody types for two seconds. The frame tries five times a second; each time the keyboard comes back.
-    const grabsBefore = (await frameCounts(page, ".md-rich", TWEET_FRAME)).grabs;
+    const grabsBefore = sites.grabs.filter((url) => url === TWEET_FRAME).length;
     let withFrame = 0;
     for (let look = 0; look < 20; look++) {
       await page.waitForTimeout(100);
       if ((await keyboardPlace(page)).startsWith("frame")) withFrame++;
     }
-    const idle = await frameCounts(page, ".md-rich", TWEET_FRAME);
-    expect(idle.grabs - grabsBefore).toBeGreaterThanOrEqual(5);
-    // A look can fall between a grab and the answer one task later; it must not stay there.
-    expect(withFrame, "looks that found the keyboard in the frame, of 20").toBeLessThanOrEqual(2);
+    expect(sites.grabs.filter((url) => url === TWEET_FRAME).length - grabsBefore).toBeGreaterThanOrEqual(5);
+    // Quarantine is synchronous: no observation may find the keyboard in the unauthorized frame.
+    expect(withFrame, "looks that found the keyboard in the frame, of 20").toBe(0);
     // None of those counted: the card is still there.
     await expect(notice(page)).toHaveCount(0);
     await expect(frame(page, TWEET_FRAME)).toHaveCount(1);
@@ -337,8 +450,9 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     expect(await keyboardPlace(page)).toBe("preview");
     const inDocument = (await codeText(page)).length - textBefore.length;
     const inFrame = sites.keys.join("");
-    expect(inDocument + inFrame.length, `${inDocument} in the document, frame "${inFrame}"`).toBe(typed.length);
-    expect(inFrame.length, `keys that reached the frame: "${inFrame}"`).toBeLessThanOrEqual(3);
+    expect(inDocument, "characters delivered to the document").toBe(typed.length);
+    expect(inFrame, `keys that reached the frame: "${inFrame}"`).toBe("");
+    expect(sites.inputEvents).toEqual([]);
     expect(sites.refused).toEqual([]);
     await context.close();
   });
@@ -404,7 +518,8 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     }
     await page.keyboard.type("XYZ", { delay: 60 });
     expect(await codeText(page)).toContain("abcXYZ");
-    expect(await frameCounts(page, ".md-rich", VIDEO_FRAME)).toMatchObject({ grabs: 4, clicks: 0, keys: 0 });
+    expect(sites.grabs.filter((url) => url === VIDEO_FRAME)).toHaveLength(4);
+    expect(await frameCounts(page, ".md-rich", VIDEO_FRAME)).toMatchObject({ clicks: 0, keys: 0 });
     expect(sites.keys).toEqual([]);
     expect(sites.refused).toEqual([]);
     await context.close();
@@ -417,7 +532,7 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await openDocument(page, id);
     await frameReady(page, VIDEO_FRAME);
     const last = page.locator(".md-rich p", { hasText: "Last paragraph" });
-    const grabs = async () => (await frameCounts(page, ".md-rich", VIDEO_FRAME)).grabs;
+    const grabs = () => sites.grabs.filter((url) => url === VIDEO_FRAME).length;
     await last.tap();
     await page.keyboard.press("Control+End");
     const started = Date.now();
@@ -447,13 +562,14 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     expect(sites.keys).toEqual([]);
 
     // Loaded again, the frame starts from nothing: one more such move does not turn it off.
+    const grabsBeforeReload = grabs();
     await notice(page).getByRole("button", { name: "Load it again" }).tap();
     await expect(frame(page, VIDEO_FRAME)).toHaveCount(1);
     await frameReady(page, VIDEO_FRAME);
     await last.tap();
     await page.keyboard.type("b");
     await takeFocusOnce(page, ".md-rich", VIDEO_FRAME);
-    await expect.poll(grabs).toBe(1);
+    await expect.poll(grabs).toBe(grabsBeforeReload + 1);
     await expect.poll(() => keyboardPlace(page)).toBe("preview");
     await page.waitForTimeout(300);
     await expect(notice(page)).toHaveCount(0);
@@ -483,7 +599,10 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await expect(coverFor(page, TWEET_FRAME, ".reader-body")).toHaveCount(1);
     await expect(page.locator('.reader-body [data-testid="link-card-off"]')).toHaveCount(0);
     await expect(frame(page, TWEET_FRAME, ".reader-body")).toHaveCount(1);
-    expect(sites.frames.filter((url) => url === TWEET_FRAME)).toHaveLength(1);
+    expect(sites.frames.filter((url) => url === TWEET_FRAME)).toHaveLength(2);
+    await page.keyboard.type("published-canary");
+    expect(sites.keys).toEqual([]);
+    expect(sites.inputEvents).toEqual([]);
 
     // A viewer's read-only editor follows the same rule.
     await openDocument(viewer.page, id);
@@ -496,6 +615,9 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await expect(coverFor(viewer.page, TWEET_FRAME)).toHaveCount(1);
     await expect(notice(viewer.page)).toHaveCount(0);
     await expect(frame(viewer.page, TWEET_FRAME)).toHaveCount(1);
+    await viewer.page.keyboard.type("viewer-canary");
+    expect(viewerSites.keys).toEqual([]);
+    expect(viewerSites.inputEvents).toEqual([]);
     expect(sites.refused).toEqual([]);
     expect(viewerSites.refused).toEqual([]);
     await owner.context.close();

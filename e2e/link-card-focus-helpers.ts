@@ -29,16 +29,50 @@ const standIn = (grabEveryMs: number) => `<!doctype html>
 </main>
 <script>
 document.getElementById("address").textContent = location.href;
-var counts = { keys: 0, text: "", clicks: 0, grabs: 0, ticksWithFocus: 0 };
+var counts = { keys: 0, text: "", clicks: 0, grabs: 0, ticksWithFocus: 0, beforeinputs: 0, inputs: 0, compositions: 0, pastes: 0 };
 function show() { document.getElementById("counts").textContent = JSON.stringify(counts); }
+function report(kind, data, inputType) {
+  try {
+    fetch("/__input-event?kind=" + encodeURIComponent(kind) + "&data=" + encodeURIComponent(data || "") + "&inputType=" + encodeURIComponent(inputType || ""), {
+      keepalive: true
+    }).catch(function () {});
+  } catch (error) {}
+}
 document.addEventListener("keydown", function (event) {
   counts.keys++;
   if (event.key.length === 1) counts.text += event.key;
   show();
   try { fetch("/__key?k=" + encodeURIComponent(event.key), { keepalive: true }).catch(function () {}); } catch (error) {}
 }, true);
+document.addEventListener("beforeinput", function (event) {
+  counts.beforeinputs++;
+  report("beforeinput", event.data, event.inputType);
+  show();
+}, true);
+document.addEventListener("input", function (event) {
+  counts.inputs++;
+  report("input", event.data, event.inputType);
+  show();
+}, true);
+for (const kind of ["compositionstart", "compositionupdate", "compositionend"]) {
+  document.addEventListener(kind, function (event) {
+    counts.compositions++;
+    report(kind, event.data, "");
+    show();
+  }, true);
+}
+document.addEventListener("paste", function (event) {
+  counts.pastes++;
+  report("paste", event.clipboardData ? event.clipboardData.getData("text/plain") : "", "");
+  show();
+}, true);
 document.addEventListener("click", function () { counts.clicks++; show(); }, true);
-window.grab = function () { counts.grabs++; try { window.focus(); document.getElementById("field").focus(); } catch (error) {} show(); };
+window.grab = function () {
+  counts.grabs++;
+  try { fetch("/__grab?frame=" + encodeURIComponent(location.href), { keepalive: true }).catch(function () {}); } catch (error) {}
+  try { window.focus(); document.getElementById("field").focus(); } catch (error) {}
+  show();
+};
 ${grabEveryMs ? `setInterval(window.grab, ${grabEveryMs});` : ""}
 setInterval(function () { if (document.hasFocus()) counts.ticksWithFocus++; show(); }, 50);
 show();
@@ -51,6 +85,10 @@ export interface FocusSites {
   frames: string[];
   /** The keys the stand-in pages received, in order. */
   keys: string[];
+  /** Every provider-initiated focus attempt, including attempts before a quarantine reload. */
+  grabs: string[];
+  /** beforeinput, input, composition, and paste payloads received by any stand-in frame. */
+  inputEvents: Array<{ kind: string; data: string; inputType: string }>;
   /** Every other request that tried to leave the app. Must stay empty. */
   refused: string[];
 }
@@ -61,12 +99,16 @@ export interface FrameCounts {
   clicks: number;
   grabs: number;
   ticksWithFocus: number;
+  beforeinputs: number;
+  inputs: number;
+  compositions: number;
+  pastes: number;
 }
 
 /** `grabEveryMs` says, per frame address, how often that frame's page takes the keyboard by itself (0: never). */
 export async function standInWithKeyboard(context: BrowserContext, baseURL: string, grabEveryMs: (frameUrl: string) => number = () => 0): Promise<FocusSites> {
   const origin = new URL(baseURL).origin;
-  const sites: FocusSites = { frames: [], keys: [], refused: [] };
+  const sites: FocusSites = { frames: [], keys: [], grabs: [], inputEvents: [], refused: [] };
   await context.route(
     (url) => (url.protocol === "http:" || url.protocol === "https:") && url.origin !== origin,
     (route) => {
@@ -80,6 +122,18 @@ export async function standInWithKeyboard(context: BrowserContext, baseURL: stri
       const sent = new URL(url);
       if (sent.pathname === "/__key" && FRAME_HOSTS.includes(sent.origin)) {
         sites.keys.push(sent.searchParams.get("k") ?? "");
+        return route.fulfill({ status: 204, body: "" });
+      }
+      if (sent.pathname === "/__grab" && FRAME_HOSTS.includes(sent.origin)) {
+        sites.grabs.push(sent.searchParams.get("frame") ?? "");
+        return route.fulfill({ status: 204, body: "" });
+      }
+      if (sent.pathname === "/__input-event" && FRAME_HOSTS.includes(sent.origin)) {
+        sites.inputEvents.push({
+          kind: sent.searchParams.get("kind") ?? "",
+          data: sent.searchParams.get("data") ?? "",
+          inputType: sent.searchParams.get("inputType") ?? "",
+        });
         return route.fulfill({ status: 204, body: "" });
       }
       sites.refused.push(url);
@@ -97,7 +151,14 @@ export async function frameCounts(page: Page, scope: string, frameUrl: string): 
 
 /** The stand-in in this frame takes the keyboard now, by its own script: nobody clicked or pressed anything. */
 export async function takeFocusOnce(page: Page, scope: string, frameUrl: string) {
-  await page.frameLocator(`${scope} iframe[src="${frameUrl}"]`).locator("body").evaluate(() => (window as Window & { grab?: () => void }).grab?.());
+  try {
+    await page.frameLocator(`${scope} iframe[src="${frameUrl}"]`).locator("body").evaluate(() => (window as Window & { grab?: () => void }).grab?.());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const lower = message.toLowerCase();
+    // The security response deliberately destroys this execution context by detaching the frame.
+    if (!lower.includes("execution context was destroyed") && !lower.includes("frame was detached")) throw error;
+  }
 }
 
 /** Which part of the page has the keyboard: the preview, the Markdown pane, a card's frame, or something else. */
@@ -106,6 +167,7 @@ export const keyboardPlace = (page: Page) =>
     const active = document.activeElement;
     if (!active) return "nothing";
     if (active.tagName === "IFRAME") return `frame ${active.getAttribute("src")}`;
+    if (active.hasAttribute("data-card-cover")) return "cover";
     if (active.closest(".md-rich")) return active.classList.contains("md-rich") ? "preview" : `preview: ${active.tagName.toLowerCase()}`;
     if (active.closest(".cm-editor")) return "markdown";
     return active.getAttribute("data-testid") ?? active.tagName.toLowerCase();
