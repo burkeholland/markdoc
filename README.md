@@ -493,19 +493,38 @@ The entrypoint performs one bounded attempt:
    Health is necessary evidence, not a substitute for the requested feature
    checks.
 
-The local deadline is 40 minutes. The ACR build has a bounded 15-minute service
-timeout, based on the 602-second successful `ch2g` build and the 602-604-second
-`ch2h`/`ch2j` timeouts at the old ten-minute boundary. Terminal build evidence
-gets another 150 seconds, leaving 1,350 seconds for the VM/WAL gate and exact
-health; the 45-minute workflow retains five more minutes for runner reporting
-and teardown. A timeout leaves unverified remote work; it is not cancellation.
-Cloud build or VM work may outlive the command; reconcile the printed
-submission/run and guest invocation identifiers before any further action, and
-do not retry the release. A failure before local readiness makes the guest
-script attempt to restore the previous environment, unit and application
-image. A public-health failure after guest readiness does not trigger that
-rollback automatically. Image/configuration rollback is not schema or data
-rollback: migrations already applied remain in place.
+The release uses independent worst-case phase deadlines instead of one shared
+clock:
+
+| Phase | Enforced maximum |
+| --- | ---: |
+| Pre-submission validation, preflight, target reads and archive | 900 seconds |
+| ACR submission, service run and terminal evidence | 1,140 seconds |
+| Digest verification and final source recheck | 180 seconds |
+| VM/WAL invocation and guest-result verification | 2,400 seconds |
+| Exact public health | 30 seconds |
+| Failure reporting | 30 seconds |
+| Local archive cleanup | 30 seconds |
+
+The 1,140-second build phase starts immediately before the one ACR submission:
+at most 90 seconds for submission, the 900-second ACR service timeout, then at
+least 150 seconds for unique-tag reconciliation and terminal run evidence. Both
+the 132-poll reconciliation bound and normal completion polling use that same
+clock. The script's phase maxima total 4,710 seconds. The release workflow caps
+checkout, Node setup and Azure login at five minutes each, caps the release step
+at 79 minutes, and caps the job at 99 minutes, leaving an enforced five-minute
+runner margin after every preceding step reaches its own limit.
+
+The ACR service timeout is based on the 602-second successful `ch2g` build and
+the 602-604-second `ch2h`/`ch2j` timeouts at the old ten-minute boundary. A
+timeout leaves unverified remote work; it is not cancellation. Cloud build or
+VM work may outlive the command; reconcile the printed submission/run and guest
+invocation identifiers before any further action, and do not retry the release.
+A failure before local readiness makes the guest script attempt to restore the
+previous environment, unit and application image. A public-health failure after
+guest readiness does not trigger that rollback automatically.
+Image/configuration rollback is not schema or data rollback: migrations already
+applied remain in place.
 
 Retain the prior immutable image and protected
 [same-host rollback bundle](docs/vm-hosting.md#rollback), but do not treat that

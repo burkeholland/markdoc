@@ -658,15 +658,16 @@ not-found and unknown errors remain immediately fatal, as do malformed or
 ambiguous evidence, invalid identities, unknown or failed statuses and digest
 checks. No build submission or VM command is retried.
 
-Both poll calls retain their 30-second per-call limit, capped by the remaining
-2400-second release deadline. Completion polls are also capped by the remaining
-1050-second build-completion budget, measured from release start. The ACR
-service timeout is 900 seconds: successful run `ch2g` took about 602 seconds,
-while `ch2h` and `ch2j` reached terminal `Timeout` at about 602-604 seconds with
-the old 600-second limit and produced no image. The new bounds retain 150
-seconds for terminal reconciliation after ACR, then 1350 seconds for the VM/WAL
-gate and exact health. Reconciliation still makes at most 132 polls, including
-missed polls. An exhausted time budget is terminal, not a missed poll,
+Both poll calls retain their 30-second per-call limit and use one
+1,140-second build-phase clock that starts immediately before the single ACR
+submission. That phase contains the 90-second submission limit, the 900-second
+ACR service timeout and at least 150 seconds for unique-tag reconciliation and
+terminal run evidence. Successful run `ch2g` took about 602 seconds, while
+`ch2h` and `ch2j` reached terminal `Timeout` at about 602-604 seconds with the
+old 600-second service limit and produced no image. The 132 unique-tag polls
+cannot borrow time from post-build proof, VM or health; normal completion
+polling uses the same deadline. Every five-second poll delay is refused when it
+would cross that deadline. An exhausted phase is terminal, not a missed poll,
 including when it expires during a failed or successful call. A terminal
 deadline is never caught as a per-call failure.
 
@@ -692,12 +693,14 @@ one additional call after a fixed two-second delay, for `transport`, `timeout`,
 `timeout`. `auth`, `configuration`,
 `not_found` and `unknown` fail immediately. Conflicting HTTP statuses are not
 treated as transient; recognizable permanent failures take precedence.
-Each call retains the native wrapper's 30-second limit, capped by the remaining
-40-minute release deadline. The retry adds at most **32 seconds** (two seconds
-of delay plus one 30-second lookup), never extends the deadline, and is refused
-if fewer than three whole seconds remain before the delay. No ACR build
-submission or VM command is retried. A successful retry must still return
-exactly one well-formed digest matching the completed build run.
+Each call retains the native wrapper's 30-second limit. Digest lookup, its one
+permitted two-second delay and retry, and the final three-command source recheck
+share an independent 180-second post-build deadline. The lookup can consume at
+most 62 seconds and the source recheck at most 90 seconds, leaving 28 seconds
+for validation and local processing. The delay is refused if it would cross the
+phase deadline. No ACR build submission or VM command is retried. A successful
+retry must still return exactly one well-formed digest matching the completed
+build run.
 
 The following digest-lookup log lines print before `Release: guest invocation`.
 Both **can appear in a successful release**, for example when a 503 lookup fails
@@ -817,23 +820,40 @@ A public failure after guest readiness is a failed/unverified release, **not** a
 automatic rollback. Existing local rollback restores configuration/image only;
 it does not undo schema changes.
 
-The local deadline is 40 minutes. Build polling stops by roughly 17.5 minutes
-and the ACR build itself has a 15-minute service timeout. The manual workflow
-has a 45-minute runner timeout, preserving five minutes after the release
-deadline for reporting and teardown. The guest
-gate is phase-bounded: lock acquisition is nonblocking, archive wait is five
-minutes, restore ten minutes, scratch start four minutes, SQL recovery readiness
-ten minutes, each control query 30 seconds, and cleanup gets a separate
-45-second stop. Cleanup targets only the invocation's directory/process. Cloud
-queue/upload/pull and startup durations are not guaranteed to fit. On failure
-or timeout, do not press Release again before reconciling the prior attempt: no
-write is resubmitted, but killing the CLI does **not** cancel remote work.
-Output records the unique submission tag and the reconciled ACR run ID, then
-the VM resource, guest invocation UUID and start time. The high-level VM CLI
-does not expose its ARM operation ID; the guest UUID is instead retained in Run
-Command parameters/output for targeted owner reconciliation. Failure to find
-one unique tagged run leaves Azure acceptance unknown. Raw build/VM/HTTP output
-is withheld. The protected rollback bundle and diagnostics are not terminal
+The entrypoint enforces this worst-case timing plan:
+
+| Phase | Clock start | Enforced maximum | Included work |
+| --- | --- | ---: | --- |
+| Pre-submission | Script start | 900 seconds | Three source checks, lock/audit preflight, four Azure target reads, archive/extract and local validation. The native command limits total 780 seconds, leaving 120 seconds for local processing. |
+| Build | Immediately before the one ACR submission | 1,140 seconds | Submission up to 90 seconds, ACR service up to 900 seconds, then at least 150 seconds for the shared reconciliation/completion deadline. |
+| Post-build proof | Successful terminal run evidence | 180 seconds | Digest lookup and retry up to 62 seconds, final source recheck up to 90 seconds, then local identity validation. |
+| VM and result proof | Before the one VM invocation | 2,400 seconds | Run Command, the guest WAL/deployment gate, transport result parsing, WAL evidence and local-health validation. |
+| Public health | After exact guest result proof | 30 seconds | One non-redirected request capped at 20 seconds plus response validation. |
+| Failure report | Entering the terminal catch | 30 seconds | Fixed bounded release/run/guest status lines only. |
+| Local cleanup | Entering source-archive cleanup | 30 seconds | One bounded child process removes only the invocation's archive directory. |
+
+Those phase maxima total 4,710 seconds. The release step has its own 79-minute
+timeout. Checkout, Node setup and Azure login each have a five-minute timeout,
+and the job timeout is 99 minutes. Even if all three setup steps and the release
+step consume their full limits, five minutes remain for runner post-steps and
+teardown. No phase borrows another phase's reserve.
+
+The guest gate is also phase-bounded: lock acquisition is nonblocking, archive
+wait is five minutes, restore ten minutes, scratch start four minutes, SQL
+recovery readiness ten minutes, each control query 30 seconds, and cleanup gets
+a separate 45-second stop. Those configured guest caps total about 2,035
+seconds before command overhead, image authentication/pull, application
+startup, rollback and retention, so the VM/result phase provides 365 seconds
+above them. Cleanup targets only the invocation's directory/process. Cloud
+work may still outlive a local timeout. On failure or timeout, do not press
+Release again before reconciling the prior attempt: no write is resubmitted,
+but killing the CLI does **not** cancel remote work. Output records the unique
+submission tag and the reconciled ACR run ID, then the VM resource, guest
+invocation UUID and start time. The high-level VM CLI does not expose its ARM
+operation ID; the guest UUID is instead retained in Run Command
+parameters/output for targeted owner reconciliation. Failure to find one
+unique tagged run leaves Azure acceptance unknown. Raw build/VM/HTTP output is
+withheld. The protected rollback bundle and diagnostics are not terminal
 scratch space.
 
 ### September 24 release-gate verification

@@ -26,19 +26,23 @@ jobs:
   deploy:
     if: inputs.confirm == 'deploy'
     runs-on: windows-latest
-    # The release has a 40-minute terminal deadline; retain five minutes for runner reporting and teardown.
-    timeout-minutes: 45
+    # Three five-minute setup caps plus the 79-minute release step leave five minutes for runner post-steps.
+    timeout-minutes: 99
     environment: production
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 5
       - uses: actions/setup-node@v5
+        timeout-minutes: 5
         with:
           node-version: 22
       - uses: azure/login@v2
+        timeout-minutes: 5
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Release the exact commit to the VM
         shell: pwsh
+        timeout-minutes: 79
         run: ./deploy/release-vm.ps1 -ExpectedCommit $env:GITHUB_SHA
