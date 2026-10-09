@@ -6,6 +6,7 @@ import {
   type PersistenceState,
   type SavedDocumentVersion,
 } from "@/lib/document-persistence";
+import { newId } from "./shared";
 
 export type { SavedDocumentVersion } from "@/lib/document-persistence";
 
@@ -78,7 +79,9 @@ export class ClientDocumentPersistence {
     if (this.disposed) return;
     this.connected = true;
     this.ready = false;
-    this.statusRequestId = crypto.randomUUID();
+    // newId, not crypto.randomUUID: that function exists only on https and localhost. On a plain http
+    // address (a name or number on the local network) it threw here and the document never reached "saved" (#2284).
+    this.statusRequestId = newId();
     if (this.statusTimer) clearTimeout(this.statusTimer);
     this.statusTimer = setTimeout(() => {
       this.statusTimer = null;
@@ -110,7 +113,7 @@ export class ClientDocumentPersistence {
     if (this.disposed) return Promise.reject(new Error("This document session is closed."));
     if (!this.connected) return Promise.reject(new Error("Offline: changes remain pending until reconnect."));
     if (this.state === "saved") return Promise.resolve(this.savedVersion);
-    const requestId = crypto.randomUUID();
+    const requestId = newId();
     const promise = new Promise<SavedDocumentVersion | null>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.requests.delete(requestId);
@@ -184,7 +187,7 @@ export class ClientDocumentPersistence {
   destroy(flush = true) {
     if (this.disposed) return;
     if (flush && this.connected && this.state !== "saved") {
-      this.send({ type: "document-persistence-flush", docId: this.docId, requestId: crypto.randomUUID() });
+      this.send({ type: "document-persistence-flush", docId: this.docId, requestId: newId() });
     }
     this.disposed = true;
     this.disconnected();
