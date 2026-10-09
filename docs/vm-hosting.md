@@ -659,11 +659,16 @@ ambiguous evidence, invalid identities, unknown or failed statuses and digest
 checks. No build submission or VM command is retried.
 
 Both poll calls retain their 30-second per-call limit, capped by the remaining
-2100-second release deadline. Completion polls are also capped by the remaining
-750-second build-completion budget, measured from release start. Reconciliation
-still makes at most 132 polls, including missed polls. An exhausted time budget
-is terminal, not a missed poll, including when it expires during a failed or
-successful call. A terminal deadline is never caught as a per-call failure.
+2400-second release deadline. Completion polls are also capped by the remaining
+1050-second build-completion budget, measured from release start. The ACR
+service timeout is 900 seconds: successful run `ch2g` took about 602 seconds,
+while `ch2h` and `ch2j` reached terminal `Timeout` at about 602-604 seconds with
+the old 600-second limit and produced no image. The new bounds retain 150
+seconds for terminal reconciliation after ACR, then 1350 seconds for the VM/WAL
+gate and exact health. Reconciliation still makes at most 132 polls, including
+missed polls. An exhausted time budget is terminal, not a missed poll,
+including when it expires during a failed or successful call. A terminal
+deadline is never caught as a per-call failure.
 
 This new line prints once per permitted missed poll, before
 `Release: guest invocation`, including the third consecutive miss:
@@ -688,7 +693,7 @@ one additional call after a fixed two-second delay, for `transport`, `timeout`,
 `not_found` and `unknown` fail immediately. Conflicting HTTP statuses are not
 treated as transient; recognizable permanent failures take precedence.
 Each call retains the native wrapper's 30-second limit, capped by the remaining
-35-minute release deadline. The retry adds at most **32 seconds** (two seconds
+40-minute release deadline. The retry adds at most **32 seconds** (two seconds
 of delay plus one 30-second lookup), never extends the deadline, and is refused
 if fewer than three whole seconds remain before the delay. No ACR build
 submission or VM command is retried. A successful retry must still return
@@ -812,8 +817,10 @@ A public failure after guest readiness is a failed/unverified release, **not** a
 automatic rollback. Existing local rollback restores configuration/image only;
 it does not undo schema changes.
 
-The local deadline is 35 minutes. Build polling stops by roughly 12.5 minutes
-and the ACR build itself has a ten-minute service timeout. The guest
+The local deadline is 40 minutes. Build polling stops by roughly 17.5 minutes
+and the ACR build itself has a 15-minute service timeout. The manual workflow
+has a 45-minute runner timeout, preserving five minutes after the release
+deadline for reporting and teardown. The guest
 gate is phase-bounded: lock acquisition is nonblocking, archive wait is five
 minutes, restore ten minutes, scratch start four minutes, SQL recovery readiness
 ten minutes, each control query 30 seconds, and cleanup gets a separate

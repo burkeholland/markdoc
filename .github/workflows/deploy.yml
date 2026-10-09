@@ -26,7 +26,8 @@ jobs:
   deploy:
     if: inputs.confirm == 'deploy'
     runs-on: windows-latest
-    timeout-minutes: 40
+    # The release has a 40-minute terminal deadline; retain five minutes for runner reporting and teardown.
+    timeout-minutes: 45
     environment: production
     steps:
       - uses: actions/checkout@v4

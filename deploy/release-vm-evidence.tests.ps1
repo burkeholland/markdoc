@@ -159,13 +159,25 @@ Assert-True ($workflowSource -match '(?m)^\s+runs-on: windows-latest\s*$' -and
 Assert-True ($workflowSource -notmatch '\baz\s+acr\s+build\b' -and
   $workflowSource -notmatch '\baz\s+vm\s+run-command\b') 'The workflow must not duplicate either Azure write owned by the release entrypoint.'
 Assert-True ($releaseSource -match '--scripts'', "@\$walScript", "@\$vmScript"') 'The configured release must send the WAL gate before deployment in one VM invocation.'
-Assert-True ($releaseSource -match '\$ReleaseDeadlineSeconds = 2100' -and
-  $releaseSource -notmatch 'Local command deadline exceeded; remote work was cancel') 'The revised deadline must stay explicit without claiming cancellation.'
+$acrBuildTimeout = [regex]::Match($releaseSource, '(?m)^\$AcrBuildTimeoutSeconds = (?<seconds>[0-9]+)\s*$')
+$buildCompletionDeadline = [regex]::Match($releaseSource, '(?m)^\$BuildCompletionDeadlineSeconds = (?<seconds>[0-9]+)\s*$')
 $releaseDeadline = [regex]::Match($releaseSource, '(?m)^\$ReleaseDeadlineSeconds = (?<seconds>[0-9]+)\s*$')
+$publicHealthReserve = [regex]::Match($releaseSource, '(?m)^\$PublicHealthReserveSeconds = (?<seconds>[0-9]+)\s*$')
 $workflowTimeout = [regex]::Match($workflowSource, '(?m)^\s+timeout-minutes: (?<minutes>[0-9]+)\s*$')
-Assert-True ($releaseDeadline.Success -and $workflowTimeout.Success) 'Release and runner deadlines must remain statically identifiable.'
-$runnerMarginSeconds = ([int]$workflowTimeout.Groups['minutes'].Value * 60) - [int]$releaseDeadline.Groups['seconds'].Value
-Assert-True ($runnerMarginSeconds -ge 60 -and $runnerMarginSeconds -le 600) 'The workflow timeout must exceed the configured release deadline by a small bounded runner margin.'
+Assert-True ($acrBuildTimeout.Success -and $buildCompletionDeadline.Success -and $releaseDeadline.Success -and
+  $publicHealthReserve.Success -and $workflowTimeout.Success) 'Build, release, health and runner deadlines must remain statically identifiable.'
+$acrSeconds = [int]$acrBuildTimeout.Groups['seconds'].Value
+$buildCompletionSeconds = [int]$buildCompletionDeadline.Groups['seconds'].Value
+$releaseSeconds = [int]$releaseDeadline.Groups['seconds'].Value
+$healthReserveSeconds = [int]$publicHealthReserve.Groups['seconds'].Value
+$buildReconciliationMarginSeconds = $buildCompletionSeconds - $acrSeconds
+$vmAndHealthSeconds = $releaseSeconds - $buildCompletionSeconds
+$runnerMarginSeconds = ([int]$workflowTimeout.Groups['minutes'].Value * 60) - $releaseSeconds
+Assert-True ($acrSeconds -eq 900) 'The ACR service timeout must retain five minutes of headroom over the measured 602-604 second builds.'
+Assert-True ($buildReconciliationMarginSeconds -eq 150) 'The terminal build budget must exceed the ACR timeout by the established 150-second reconciliation margin.'
+Assert-True ($vmAndHealthSeconds -eq 1350 -and $healthReserveSeconds -eq 30) 'The release deadline must preserve 1350 seconds for VM/WAL work and health, including a final 30-second health reserve.'
+Assert-True ($runnerMarginSeconds -eq 300) 'The workflow timeout must exceed the configured release deadline by the documented five-minute runner margin.'
+Assert-True ($releaseSource -notmatch 'Local command deadline exceeded; remote work was cancel') 'The revised deadline must not claim cancellation.'
 $workflowTriggers = [regex]::Match($workflowSource, '(?ms)^on:\s*\r?\n(?<body>.*?)(?=^[a-zA-Z][a-zA-Z-]*:)')
 Assert-True ($workflowTriggers.Success -and
   [regex]::Matches($workflowTriggers.Groups['body'].Value, '(?m)^  [a-zA-Z][a-zA-Z_-]*:').Count -eq 1 -and

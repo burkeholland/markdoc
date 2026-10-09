@@ -9,7 +9,12 @@
 param([string]$ExpectedCommit = $env:RELEASE_SHA)
 
 $ErrorActionPreference = 'Stop'
-$ReleaseDeadlineSeconds = 2100
+# Preserve 150 seconds after the ACR limit for terminal reconciliation, then
+# 1350 seconds for the VM/WAL gate and exact public health.
+$AcrBuildTimeoutSeconds = 900
+$BuildCompletionDeadlineSeconds = 1050
+$ReleaseDeadlineSeconds = 2400
+$PublicHealthReserveSeconds = 30
 
 . (Join-Path $PSScriptRoot 'release-vm-evidence.ps1')
 
@@ -514,7 +519,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     [void](Invoke-ReleaseAz (@(
       'acr', 'build', '--registry', $acr, '--image', "markdoc:$Commit", '--image', "markdoc:$($Commit.Substring(0, 12))",
       '--image', "markdoc:$submissionTag", '--build-arg', "APP_VERSION=$Commit",
-      '--file', (Join-Path $context 'Dockerfile'), $context, '--timeout', '600',
+      '--file', (Join-Path $context 'Dockerfile'), $context, '--timeout', "$AcrBuildTimeoutSeconds",
       '--no-wait', '--no-logs'
     ) + $nativeScope) 90)
 
@@ -561,8 +566,8 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     $releaseStage = 'ACR build completion'
     $missedPolls = 0
     do {
-      if ($releaseClock.Elapsed.TotalSeconds -ge 750) { Stop-VmRelease 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' 124 }
-      $poll = Invoke-ReleaseAcrPoll (@('acr', 'task', 'show-run', '--registry', $acr, '--run-id', $buildRun, '--query', '{runId:runId,status:status,outputImages:outputImages}') + $nativeScope) ([ref]$missedPolls) 750
+      if ($releaseClock.Elapsed.TotalSeconds -ge $BuildCompletionDeadlineSeconds) { Stop-VmRelease 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' 124 }
+      $poll = Invoke-ReleaseAcrPoll (@('acr', 'task', 'show-run', '--registry', $acr, '--run-id', $buildRun, '--query', '{runId:runId,status:status,outputImages:outputImages}') + $nativeScope) ([ref]$missedPolls) $BuildCompletionDeadlineSeconds
       if ($null -eq $poll) {
         Start-Sleep -Seconds 5
         continue
@@ -591,7 +596,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     Write-Host "Release: guest invocation $operation; VM $vmId; started $([DateTime]::UtcNow.ToString('o'))."
     Write-Host 'ARM operation ID is not exposed by invoke. The guest ID is recorded in the submitted script parameters and guest output.'
     Write-Host 'Timeout/failure is unverified, not cancellation or automatic rollback. Do not submit another release.'
-    $vmLimit = [math]::Floor(($ReleaseDeadlineSeconds - 30) - $releaseClock.Elapsed.TotalSeconds)
+    $vmLimit = [math]::Floor(($ReleaseDeadlineSeconds - $PublicHealthReserveSeconds) - $releaseClock.Elapsed.TotalSeconds)
     if ($vmLimit -lt 1) { Stop-VmRelease 'No time remains for a VM invocation and public health.' 124 }
     $result = ConvertFrom-ReleaseJson (Invoke-ReleaseAz (@('vm', 'run-command', 'invoke', '--name', $vm, '--command-id', 'RunShellScript',
       '--scripts', "@$walScript", "@$vmScript", '--parameters', $registry, $image, $Commit, $tenant, $operation) + $nativeScope) $vmLimit)

@@ -333,7 +333,10 @@ cleanup
 
 $script:sha = '0123456789abcdef0123456789abcdef01234567'
 $script:digest = 'sha256:' + ('a' * 64)
-$script:ReleaseDeadlineSeconds = 2100
+$script:AcrBuildTimeoutSeconds = 900
+$script:BuildCompletionDeadlineSeconds = 1050
+$script:ReleaseDeadlineSeconds = 2400
+$script:PublicHealthReserveSeconds = 30
 $script:subscription = '332d0c98-694c-48a0-91f3-465de6ac30a5'
 $script:tenant = 'f1fde69f-c8d3-4b94-adeb-02d045b37f6a'
 $script:registry = 'markdocacrmnd542unepl56.azurecr.io'
@@ -532,7 +535,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     Assert-True ($Arguments -contains "APP_VERSION=$script:sha") 'Build must embed the exact commit.'
     Assert-True ($Arguments -contains "markdoc:$script:sha" -and $Arguments -contains "markdoc:$($script:sha.Substring(0, 12))") 'Existing full and short tags must be retained.'
     Assert-True ($Arguments -contains '--no-wait' -and $Arguments -contains '--no-logs') 'Submission must be asynchronous without streaming build logs.'
-    Assert-Equal '600' $Arguments[[array]::IndexOf($Arguments, '--timeout') + 1] 'ACR must have enough time for the measured production build.'
+    Assert-Equal ([string]$script:AcrBuildTimeoutSeconds) $Arguments[[array]::IndexOf($Arguments, '--timeout') + 1] 'ACR must have bounded headroom over the measured production build.'
     Assert-True (@($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' }).Count -eq 1) 'A lost submission response must have one unique tag for reconciliation.'
     $script:submissionTag = @($Arguments | Where-Object { $_ -cmatch '^markdoc:release-[0-9a-f]{32}$' })[0].Substring(8)
     $dockerfile = $Arguments[[array]::IndexOf($Arguments, '--file') + 1]
@@ -714,13 +717,13 @@ $pollCases += @(
   @{ Name = 'poll-show-wrong-digest-after-miss'; Command = 'acr task show-run'; Stage = 'immutable image identity'; Calls = 2; Misses = @(1); Category = 'server_error'; Status = '503'; ExitCode = 1; Reason = 'The exact tag digest does not match this successful build run.' },
   @{ Name = 'poll-list-foreign-exception'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'Unexpected IOException; raw output withheld.' },
   @{ Name = 'poll-list-terminal-exception'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 124; Reason = 'Terminal poll failure.' },
-  @{ Name = 'poll-list-deadline-before'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 0; Misses = @(); StartAt = 2100; Budget = 2100; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
-  @{ Name = 'poll-list-deadline-during'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 2098; EndAt = 2100; Budget = 2100; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
-  @{ Name = 'poll-list-deadline-after-miss'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(1); StartAt = 2094; AfterMiss = 2100; Budget = 2100; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
-  @{ Name = 'poll-show-budget-during'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 748; EndAt = 750; Budget = 750; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-show-budget-after-miss'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(1); StartAt = 744; AfterMiss = 750; Budget = 750; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-show-success-at-budget'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 740; EndAt = 750; Budget = 750; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-list-success-at-budget'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 2090; EndAt = 2100; Budget = 2100; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' }
+  @{ Name = 'poll-list-deadline-before'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 0; Misses = @(); StartAt = 2400; Budget = 2400; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
+  @{ Name = 'poll-list-deadline-during'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 2398; EndAt = 2400; Budget = 2400; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
+  @{ Name = 'poll-list-deadline-after-miss'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(1); StartAt = 2394; AfterMiss = 2400; Budget = 2400; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' },
+  @{ Name = 'poll-show-budget-during'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 1048; EndAt = 1050; Budget = 1050; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-show-budget-after-miss'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(1); StartAt = 1044; AfterMiss = 1050; Budget = 1050; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-show-success-at-budget'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 1040; EndAt = 1050; Budget = 1050; ExitCode = 124; Reason = 'Build wait exceeded the terminal budget; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-list-success-at-budget'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 2390; EndAt = 2400; Budget = 2400; ExitCode = 124; Reason = 'Release deadline exceeded; remote work may still be running. Do not retry.' }
 )
 $digestCases = @(
   @{ Name = 'digest-server-success'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Success = $true },
@@ -841,7 +844,7 @@ try {
     $script:sourceChecks = 0
     $script:submissionTag = ''
     $script:sleeps.Clear()
-    $script:ReleaseDeadlineSeconds = 2100
+    $script:ReleaseDeadlineSeconds = 2400
     $digestCase = @($digestCases | Where-Object { $_.Name -ceq $case }) | Select-Object -First 1
     $pollCase = @($pollCases | Where-Object { $_.Name -ceq $case }) | Select-Object -First 1
     $env:MARKDOC_DIGEST_CASE = $case
