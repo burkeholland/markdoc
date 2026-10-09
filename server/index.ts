@@ -30,7 +30,13 @@ import { purgeTrashOlderThan, TRASH_RETENTION_DAYS } from "@/server/documents";
 import { httpOrigin, mcpRestOrigin } from "@/server/mcp-origin";
 import { REMOTE_ADDR_HEADER } from "@/server/rate-limit";
 import { localAccess } from "../scripts/lib/dev-origins.mjs";
-import { attachRequestErrorGuards, attachUpgradeErrorGuard } from "./request-guards";
+import {
+  answerUpgrade,
+  attachRequestErrorGuards,
+  closeHttpIntake,
+  installOtherUpgradeListeners,
+  STARTING_UPGRADE_ANSWER,
+} from "./request-guards";
 import { attachRequestLog } from "./request-log";
 import { serveStaticBrotli } from "./static-brotli";
 import { startGistAutoUpdateWorker, stopGistAutoUpdateWorker } from "@/server/gist-auto-update";
@@ -122,25 +128,10 @@ const runtime: RuntimeResources = {
   publishing: false,
 };
 
-function closeHttpIntake(server: Server | null): Promise<void> {
-  if (!server) return Promise.resolve();
-  server.removeAllListeners("upgrade");
-  // destroy() alone was not seen to raise an 'error' here; the guard keeps the rule "no upgrade socket
-  // of ours without an 'error' listener" (#2311) true on this path if it ever writes an answer.
-  server.on("upgrade", (req, socket) => {
-    attachUpgradeErrorGuard(req, socket);
-    socket.destroy();
-  });
-  return new Promise((resolve, reject) => {
-    server.close((error) => {
-      if (!error || (error as NodeJS.ErrnoException).code === "ERR_SERVER_NOT_RUNNING") resolve();
-      else reject(new Error("HTTP intake did not close"));
-    });
-  });
-}
-
 async function stopRuntimeIntake(): Promise<void> {
   runtime.collabAttachment?.abort();
+  // closeHttpIntake (server/request-guards.ts) also destroys the upgrade sockets the server answered
+  // itself or left with Next: server.close() waits for every one of them (#2328).
   const serverResults = await Promise.allSettled([
     closeHttpIntake(runtime.server),
     closeHttpIntake(runtime.standby),
@@ -248,14 +239,6 @@ function listenWithRetry(
   });
 }
 
-function setupNextWebSocketHandler(app: object, server: Server) {
-  // Next 16's custom-server wrapper exposes this at runtime but omits it from its public interface.
-  // Installing it now keeps WebSocket-only clients from depending on a later HTTP request after restart.
-  const setup = Reflect.get(app, "setupWebSocketHandler");
-  if (typeof setup !== "function") throw new Error("Next custom server does not expose setupWebSocketHandler");
-  Reflect.apply(setup, app, [server]);
-}
-
 async function main() {
   let requestHandler: ((req: IncomingMessage, res: ServerResponse) => void) | null = null;
   const server = createServer((req, res) => {
@@ -273,11 +256,11 @@ async function main() {
   // a pending HMR handshake makes Chromium queue every later /collab socket behind it.
   // The socket arrives here with no 'error' listener (Node removed its own before emitting 'upgrade'),
   // and the client is often gone already: an editor page gives up a socket that waited 5 s while this
-  // process was busy starting. The guard goes on before the write so that answering a client that left
-  // cannot become an uncaughtException and exit(1) (#2311).
+  // process was busy starting. answerUpgrade puts the guard on before the write so that answering a
+  // client that left cannot become an uncaughtException and exit(1) (#2311), and destroys the socket a
+  // moment later if the client keeps it open (#2328).
   const rejectStartupUpgrade = (req: IncomingMessage, socket: Duplex) => {
-    attachUpgradeErrorGuard(req, socket);
-    socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    answerUpgrade(req, socket, STARTING_UPGRADE_ANSWER);
   };
   server.on("upgrade", rejectStartupUpgrade);
   const initialListen =
@@ -302,10 +285,13 @@ async function main() {
   if (standbyPort === 0) startRuntimePublishing();
   const collabShutdown = new AbortController();
   runtime.collabAttachment = collabShutdown;
-  // Install Next's HMR listener before reporting readiness. Next otherwise waits for the first HTTP
+  // Set up Next's upgrade listener before reporting readiness. Next otherwise does it on the first HTTP
   // request, leaving a browser that survived a restart unable to reconnect through WebSockets alone.
+  // Development keeps that listener for HMR; production answers every upgrade that is not the
+  // collaboration path with a 404 instead (installOtherUpgradeListeners, #2328). Either way the
+  // listeners added here never see the collaboration path.
   const protectCollabUpgrade = protectUpgradePath(server, COLLAB_PATH);
-  setupNextWebSocketHandler(app, server);
+  installOtherUpgradeListeners(server, { dev, next: app });
   protectCollabUpgrade();
   server.off("upgrade", rejectStartupUpgrade);
   attachCollab(server, hocuspocus, { path: COLLAB_PATH, signal: collabShutdown.signal });

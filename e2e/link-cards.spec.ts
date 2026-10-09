@@ -2,7 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { devices, type Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
 import { codeText, createDocument, cssPx, devLogin, openDocument, reloadHydrated, setTheme, shareWith, signIn, uniqueLogin, waitForEditor } from "./helpers";
-import { expectOnlyCardFrames, standInForOtherSites, TWEET, TWEET_FRAME, VIDEO, VIDEO_FRAME } from "./link-card-helpers";
+import { expectOnlyCardFrames, pasteInRich, standInForOtherSites, TWEET, TWEET_FRAME, VIDEO, VIDEO_FRAME } from "./link-card-helpers";
 
 /**
  * Link cards in the editor (#2317): the form, the card and "Show as text". The frames themselves are in
@@ -17,13 +17,6 @@ const DOC = `# Cards\n\nIntro\n\n${TWEET}\n\nBetween\n\n${VIDEO}\n\nOutro\n`;
 const cards = (page: Page) => page.locator('.md-rich [data-testid="link-card"]');
 const asText = (page: Page) => page.locator('.md-rich [data-testid="link-card-as-text"]');
 
-async function pasteInRich(page: Page, text: string) {
-  await page.evaluate((value) => {
-    const data = new DataTransfer();
-    data.setData("text/plain", value);
-    document.querySelector(".md-rich")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
-  }, text);
-}
 
 async function scanCards(page: Page, state: string) {
   // The whole page with the 2.1 A and AA rules, colour contrast included, then WCAG 2.2 target size on the cards.

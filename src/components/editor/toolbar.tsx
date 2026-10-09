@@ -28,6 +28,7 @@ import {
   Heading,
   Strikethrough,
   SquareCode,
+  SquarePlay,
   MessageSquarePlus,
 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -114,6 +115,7 @@ export const Toolbar = memo(function Toolbar({
   format,
   onComment,
   onImage,
+  onCard,
   onTable,
 }: {
   session: CollabSession;
@@ -121,6 +123,8 @@ export const Toolbar = memo(function Toolbar({
   format: FormatState;
   onComment: () => void;
   onImage: () => void;
+  /** Opens "Video or post from a link" (#2317). */
+  onCard: () => void;
   onTable: () => void;
 }) {
   const { canEdit, canUndo, canRedo, canComment } = useSessionValue(
@@ -331,6 +335,9 @@ export const Toolbar = memo(function Toolbar({
         </ToolButton>
         <ToolButton label="Image" disabled={dis} onClick={run("edit", onImage)} testId="tb-image">
           <ImageIcon size={18} />
+        </ToolButton>
+        <ToolButton label="Video or post from a link" disabled={dis} onClick={run("edit", onCard)} testId="tb-card">
+          <SquarePlay size={18} />
         </ToolButton>
         <ToolButton label="Table" disabled={dis} onClick={run("edit", onTable)} testId="tb-table">
           <Table size={18} />
