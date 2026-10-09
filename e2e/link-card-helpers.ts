@@ -1,4 +1,5 @@
 import { expect, type BrowserContext, type Page } from "@playwright/test";
+import { waitForEditor, waitForHydration } from "./helpers";
 
 /**
  * Shared by the link card specs (#2317). No test touches the network: every request that leaves the app
@@ -124,4 +125,37 @@ export async function expectOnlyCardFrames(page: Page, expected: string[]) {
     };
   });
   expect(foreign).toEqual({ scripts: [], others: [] });
+}
+
+/** Paste plain text into the preview, as the clipboard would hand it over. */
+export async function pasteInRich(page: Page, text: string) {
+  await page.evaluate((value) => {
+    const data = new DataTransfer();
+    data.setData("text/plain", value);
+    document.querySelector(".md-rich")!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+  }, text);
+}
+
+/**
+ * Open a document the way people mostly do: a click on its card on the dashboard. The app then changes
+ * the page without loading a new one, so the document keeps the response headers of the dashboard. A
+ * test that only ever uses `page.goto` cannot see what that does to a card's frame.
+ */
+export async function openFromDashboard(page: Page, id: string) {
+  await page.goto("/");
+  await waitForHydration(page);
+  await page.evaluate(() => {
+    (window as Window & { __sameLoad?: boolean }).__sameLoad = true;
+  });
+  await page.locator(`[data-testid="document-card"][href="/d/${id}"]`).click();
+  await page.waitForURL(new RegExp(`/d/${id}$`));
+  await waitForEditor(page);
+  await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+  // Still the page that was loaded for the dashboard: no new page load happened.
+  expect(await page.evaluate(() => (window as Window & { __sameLoad?: boolean }).__sameLoad === true), "the document was reached without a page load").toBe(true);
+}
+
+/** The stand-in page inside a card's frame really loaded: it shows its own address. */
+export async function expectFrameLoaded(page: Page, scope: string, frameUrl: string) {
+  await expect(page.frameLocator(`${scope} iframe[src="${frameUrl}"]`).locator("#address")).toHaveText(frameUrl, { timeout: 15_000 });
 }

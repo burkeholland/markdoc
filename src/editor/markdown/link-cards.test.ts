@@ -8,6 +8,8 @@ import {
   CARD_FRAME_ALLOW,
   CARD_FRAME_HOSTS,
   CARD_FRAME_REFERRER_POLICY,
+  CARD_PROVIDER_NAMES,
+  cardProviderList,
   CARD_SANDBOX,
   CARD_SANDBOX_OWN_ORIGIN,
   cardFrameTitle,
@@ -310,6 +312,15 @@ describe("the frame address", () => {
       // A URL parser agrees about where the frame goes.
       expect(CARD_FRAME_HOSTS, url).toContain(new URL(card.frameUrl).origin);
     }
+  });
+
+  it("names its sites for the Settings row and the Insert dialog, one name per frame host", () => {
+    expect(CARD_PROVIDER_NAMES).toEqual(["YouTube", "X"]);
+    expect(CARD_PROVIDER_NAMES).toHaveLength(CARD_FRAME_HOSTS.length);
+    expect(cardProviderList()).toBe("YouTube or X");
+    expect(cardProviderList([])).toBe("");
+    expect(cardProviderList(["YouTube"])).toBe("YouTube");
+    expect(cardProviderList(["YouTube", "X", "Vimeo"])).toBe("YouTube, X or Vimeo");
   });
 
   it("the frame's limits are the ruled ones: scripts and new tabs, the provider's own origin only where it is blank without it", () => {
