@@ -600,6 +600,8 @@ export async function duplicateDocument(docId: string, userId: string, options: 
 const assetNanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);
 
 export interface AddVersionInput {
+  /** Stable server-owned id for idempotent recovery of a required version. */
+  id?: string;
   documentId: string;
   content: string;
   kind: schema.VersionKind;
@@ -635,7 +637,7 @@ async function insertNextVersion(on: Executor, input: AddVersionInput) {
   const [version] = await on
     .insert(schema.versions)
     .values({
-      id: nanoid(),
+      id: input.id ?? nanoid(),
       documentId: input.documentId,
       number: Number(max) + 1,
       content: input.content,
@@ -649,6 +651,23 @@ async function insertNextVersion(on: Executor, input: AddVersionInput) {
   return version;
 }
 
+async function versionById(on: Executor, id: string) {
+  const [version] = await on.select().from(schema.versions).where(eq(schema.versions.id, id));
+  return version ?? null;
+}
+
+function sameVersion(version: typeof schema.versions.$inferSelect, input: AddVersionInput): boolean {
+  return (
+    version.documentId === input.documentId &&
+    version.content === input.content &&
+    version.kind === input.kind &&
+    version.createdBy === (input.createdBy ?? null) &&
+    version.createdByName === (input.createdByName ?? null) &&
+    version.title === (input.title ?? null) &&
+    version.commitSha === (input.commitSha ?? null)
+  );
+}
+
 /**
  * Record the document's next version. Two version-producing calls on one document at the same time
  * (an agent's `PUT /content` and the collaboration server's auto-version, two agents, publish + restore)
@@ -659,12 +678,30 @@ async function insertNextVersion(on: Executor, input: AddVersionInput) {
  */
 export async function addVersion(input: AddVersionInput, tx?: Tx) {
   const attempt = tx ? () => tx.transaction((savepoint: Tx) => insertNextVersion(savepoint, input)) : async () => insertNextVersion(await getDb(), input);
-  try {
-    return await attempt();
-  } catch (err) {
-    if (!isVersionNumberCollision(err)) throw err;
-    return attempt();
+  const executor = tx ?? (await getDb());
+  for (let tries = 0; tries < 2; tries++) {
+    if (input.id) {
+      const existing = await versionById(executor, input.id);
+      if (existing) {
+        if (!sameVersion(existing, input)) throw new Error("Required version id already belongs to different version data");
+        return existing;
+      }
+    }
+    try {
+      return await attempt();
+    } catch (err) {
+      if (input.id) {
+        const existing = await versionById(executor, input.id);
+        if (existing) {
+          if (!sameVersion(existing, input)) throw new Error("Required version id already belongs to different version data");
+          return existing;
+        }
+      }
+      if (tries === 0 && isVersionNumberCollision(err)) continue;
+      throw err;
+    }
   }
+  throw new Error("Could not allocate a version number");
 }
 
 export async function listVersions(docId: string) {
@@ -826,4 +863,3 @@ export async function getGitHubToken(userId: string): Promise<string | null> {
   if (process.env.NODE_ENV !== "production" && process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
   return null;
 }
-

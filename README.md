@@ -87,6 +87,18 @@ Sign in is GitHub only (OAuth), with a development login for local work.
 | `Ctrl+Alt+↓` / `Ctrl+Alt+→` | Table: row below / column right (`↑` / `←` for above / left) |
 | `Ctrl+/` | Keyboard shortcuts help |
 
+### Where the keyboard is when a card is in the document
+
+A link to YouTube or X alone on its line is shown as a card, and the card holds a frame with that site's own page (the player, the post). A frame is a page inside the page: while the keyboard is in it, every key goes to that site and none to your document, and Markdoc's shortcuts do not work. This is how browsers work, and it is what you want when you press `k` or the space bar in a player. What Markdoc adds is that the keyboard only goes into a card when you send it there.
+
+- **Going in.** The first click or tap on a card gives that exact frame the keyboard but is not passed to the player or post; click or tap again to use its control. This one-press cost is how Markdoc can verify the action in the parent page instead of trusting a page from another site. With a keyboard, press `Tab` or `Shift+Tab` until the frame is reached; the verified keyboard transition enters it directly. If focus is placed on that entry button another way, `Enter`, `Space`, and the browser's accessible button action enter the frame too. While the keyboard is in a card, the card has a ring in the accent colour.
+- **Coming back.** Click or tap in the document, or press `Tab` or `Shift+Tab` until the frame is left. These are the browser's own ways; no key that Markdoc could listen for reaches the page while the frame has the keyboard, so there is no Markdoc shortcut for it.
+- **A card cannot take the keyboard by itself.** If a card's page moves the keyboard into itself without the verified cover press or keyboard transition for that exact frame, Markdoc immediately detaches that frame before browser input can be delivered and gives the keyboard back to where you were, with the caret and the scroll position unchanged. If the card remains enabled, the same frame element is reinserted and its provider page reloads. Hover, pointer movement, waiting after typing, a repeated or reused Tab, a script click, and an action on another card never count as permission. After three such moves in a row, or ten within a minute, the card is turned off: its frame stays out, the card says "This card kept taking the keyboard away from your document, so it was turned off." (a screen reader is told once), and **Load it again** brings it back.
+- **Mouse, pen and touch use the same authorization rule.** Each must press the parent-owned cover for that card. Touch still has a separate shutdown-counting rule so idle focus churn after a finger press does not turn an honest card off, but touch never falls back to hover or quiet time as permission.
+- **Published and read-only pages are protected too.** A provider page cannot keep focus there without the same verified action, even though there is no editable document field.
+
+Limits, stated plainly. The first pointer press after the keyboard returns to the page is consumed by the cover, so operating an embedded control takes a second press. Rejecting an unauthorized move reloads that provider frame, so temporary player or post state inside a misbehaving frame is reset. A card's page that takes the keyboard while the browser window is not the active one is not noticed until you come back. A screen reader reads the inside of a card as that site's page, and its browse mode can move through a frame without moving the keyboard; none of this was tried with a real screen reader, a real phone, Firefox or Safari (the tests run in Chromium, with touch emulated). Where a browser does not report the focus transition while the frame is the page's active element, Markdoc cannot apply the synchronous quarantine at that moment. The HTML `inert` attribute is not the cure: a frame from another site still takes the keyboard when it is set on the frame or on the document around the caret (measured in Chromium), which is why the guard detaches an unauthorized target instead. The code is `src/editor/link-card-focus-guard.ts`.
+
 ## Run it locally
 
 Requirements: Node.js 22+ and npm. No database or Docker needed in development or tests: an embedded Postgres (PGlite) is used when `DATABASE_URL` is not set. Production requires `DATABASE_URL` unless the explicit local/rehearsal-only opt-in below is set.
@@ -493,14 +505,35 @@ The entrypoint performs one bounded attempt:
    Health is necessary evidence, not a substitute for the requested feature
    checks.
 
-The local deadline is 35 minutes. A timeout leaves unverified remote work; it is
-not cancellation. Cloud build or VM work may outlive the command; reconcile the
-printed submission/run and guest invocation identifiers before any further
-action, and do not retry the release. A failure before local readiness makes
-the guest script attempt to restore the previous environment, unit and
-application image. A public-health failure after guest readiness does not
-trigger that rollback automatically. Image/configuration rollback is not
-schema or data rollback: migrations already applied remain in place.
+The release uses these distinct boundaries:
+
+| Boundary | Kind | Anchor and value | What is actually controlled |
+| --- | --- | --- | --- |
+| Pre-submission | Outer phase watchdog | Release orchestration entry, 900 seconds | Native commands use the remaining time and the phase is checked before the build. Synchronous PowerShell, .NET and file work is not forcibly terminated. |
+| ACR submission | Native-command timeout | One local CLI child, up to 90 seconds within the build watchdog | Killing the local child does not cancel accepted cloud work. |
+| ACR service run | Service timeout | The one build requests 900 seconds | This is the ACR service limit, not a reserved portion of the local build clock. |
+| Build evidence | Outer phase watchdog plus polling bound | Before unique-tag creation, 1,140 seconds; at most 132 reconciliation polls | Submission setup, wrapper overhead, the one submission, tag reconciliation and completion polling all share this clock. No fixed reconciliation reserve is guaranteed. |
+| Post-build proof | Outer phase watchdog | After terminal build evidence, 180 seconds | Digest lookup/retry and final source checks share the clock; synchronous validation runs between elapsed checks. |
+| VM/result | CLI invocation cap plus post-return elapsed assertion | Immediately before the one VM invocation, 2,400 seconds | The local CLI child is capped by remaining time. Result parsing is checked after return, and guest work may continue beyond the local process. |
+| Public health | HTTP request timeout plus post-return elapsed assertion | After exact guest proof, 20-second request within a 30-second elapsed check | `Invoke-RestMethod -TimeoutSec` limits the HTTP request. Synchronous JSON and health validation is checked afterward, not forcibly terminated. |
+| Failure report | Synchronous writes | Terminal catch | A few fixed safe lines are written without an independent termination cap. |
+| Local cleanup | Native-command timeout | Removal child, 30 seconds | Only the child that removes the invocation archive is capped. Context checks, path escaping, command resolution and process setup occur outside that child timeout. |
+
+The workflow's checkout, Node setup and Azure login steps each have five-minute
+caps, the release step has a 79-minute outer cap, and the job has a 99-minute
+outer cap. Their differences are workflow/job headroom, not guaranteed time
+reserved for post-release steps or teardown.
+
+The ACR service timeout is based on the 602-second successful `ch2g` build and
+the 602-604-second `ch2h`/`ch2j` timeouts at the old ten-minute boundary. A
+timeout leaves unverified remote work; it is not cancellation. Cloud build or
+VM work may outlive the command; reconcile the printed submission/run and guest
+invocation identifiers before any further action, and do not retry the release.
+A failure before local readiness makes the guest script attempt to restore the
+previous environment, unit and application image. A public-health failure after
+guest readiness does not trigger that rollback automatically.
+Image/configuration rollback is not schema or data rollback: migrations already
+applied remain in place.
 
 Retain the prior immutable image and protected
 [same-host rollback bundle](docs/vm-hosting.md#rollback), but do not treat that

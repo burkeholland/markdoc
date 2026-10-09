@@ -154,8 +154,12 @@ export function installDocumentAutosave<Context>(server: Hocuspocus<Context>) {
         (committed) => {
           document.broadcastStateless(JSON.stringify(message(entry, committed)));
           if (committed) {
-            // Hocuspocus rechecks the queue and its mutex before unloading.
-            setTimeout(() => void server.unloadDocument(document), 0);
+            // Hocuspocus rechecks the queue and its mutex before unloading, but it looks the document up by
+            // NAME. A write without an editor has unloaded this copy itself by now, and the next write may
+            // have loaded the document again: unloading "it" would remove the copy that write is using (#2341).
+            setTimeout(() => {
+              if (server.documents.get(document.name) === document) void server.unloadDocument(document);
+            }, 0);
           }
         },
         () => server.configuration.debounce,

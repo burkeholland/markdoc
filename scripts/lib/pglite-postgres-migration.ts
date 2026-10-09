@@ -51,6 +51,7 @@ export const APPLICATION_TABLES = [
   "notification",
   "ownership_transfer",
   "recent",
+  "required_version_intent",
   "review",
   "session",
   "star",

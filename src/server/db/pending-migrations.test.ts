@@ -21,9 +21,11 @@ import * as currentSchema from "./schema";
 
 const LEDGER_0018_TIME = "1788050213330";
 const LEDGER_0019_TIME = "1788219322678";
-const LEDGER_0021_TIME = "1790778877676";
+const LEDGER_0022_TIME = "1791572100116";
 const MIGRATION_TEST_TIMEOUT_MS = 60_000;
-const PRE_0020_TABLES = APPLICATION_TABLES.filter((table) => table !== "gist_auto_update");
+const PRE_0020_TABLES = APPLICATION_TABLES.filter(
+  (table) => table !== "gist_auto_update" && table !== "required_version_intent",
+);
 
 const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
   dataType() {
@@ -135,7 +137,7 @@ describe("pending production migrations", () => {
         await migrate(database, { migrationsFolder: path.resolve("drizzle") });
         await migrate(database, { migrationsFolder: path.resolve("drizzle") });
 
-        await expectLedger(client, 22, LEDGER_0021_TIME);
+        await expectLedger(client, 23, LEDGER_0022_TIME);
         expect(await applicationDataState(client, projection)).toEqual(before);
         await expectCurrentSchema(client);
         await expectServingSourceCompatibility(client);

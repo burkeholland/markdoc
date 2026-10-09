@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { cardLinkText, matchLinkCard, MAX_CARD_FRAMES } from "@/editor/markdown/link-cards";
 import { cardLoadLabel, createCardFrame } from "@/editor/link-card-frame";
+import { createTurnedOffNotice, guardCardFrame } from "@/editor/link-card-focus-guard";
 
 const ROOT_SELECTOR = "[data-reader-overflow-root]";
 
@@ -22,15 +23,35 @@ export function ReaderLinkCards({ contentKey }: { contentKey: string }) {
     if (!root) return;
     // Frames this run has made. A run over HTML it has already been through finds every box filled.
     let loading = 0;
+    // The focus guards of this run (#2338); they end with it.
+    const guards = new Set<() => void>();
     for (const figure of root.querySelectorAll<HTMLElement>("figure.md-link-card[data-link-card]")) {
       const link = figure.getAttribute("data-link-card") ?? "";
       const card = matchLinkCard(link);
       const box = figure.querySelector<HTMLElement>(":scope > .md-link-card-frame");
-      if (!card || !box || box.childElementCount > 0) continue;
+      if (!card || !box) continue;
+      /** The frame's page may not take the keyboard by itself; one that keeps trying is turned off. */
+      const watch = (frame: HTMLIFrameElement) => {
+        const stop = guardCardFrame(frame, () => {
+          stop();
+          guards.delete(stop);
+          box.replaceChildren(createTurnedOffNotice(add));
+        });
+        guards.add(stop);
+      };
       const add = () => {
         const frame = createCardFrame(card, link);
-        if (frame) box.replaceChildren(frame);
+        if (!frame) return;
+        box.replaceChildren(frame);
+        watch(frame);
       };
+      // A frame an earlier run made is kept, and guarded again.
+      const made = box.querySelector<HTMLIFrameElement>(":scope > iframe.md-link-card-iframe");
+      if (made) {
+        watch(made);
+        continue;
+      }
+      if (box.childElementCount > 0) continue;
       if (loading < MAX_CARD_FRAMES) {
         loading++;
         add();
@@ -45,6 +66,9 @@ export function ReaderLinkCards({ contentKey }: { contentKey: string }) {
       load.addEventListener("click", add);
       box.replaceChildren(load);
     }
+    return () => {
+      for (const stop of guards) stop();
+    };
   }, [contentKey]);
   return null;
 }

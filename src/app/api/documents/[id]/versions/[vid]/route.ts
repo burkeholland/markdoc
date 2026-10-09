@@ -6,6 +6,7 @@ import { getDb, schema } from "@/server/db";
 import { and, eq } from "drizzle-orm";
 import { activityActor, recordActivity } from "@/server/activity";
 import { warnTail } from "@/server/warnings";
+import { WriteTurn } from "@/server/large-write";
 
 type Params = { params: Promise<{ id: string; vid: string }> };
 
@@ -38,38 +39,41 @@ export const POST = handler(async (req: Request, { params }: Params) => {
     return json({ ok: true });
   }
 
-  // Restore: snapshot the current text first so nothing is lost, then replace. Both stay fatal: until the
-  // replace lands nothing has changed, so a 500 here is honest.
-  const live = await readLiveText(id);
-  if (live.text !== version.content) {
-    await addVersion({
-      documentId: id,
-      content: live.text,
-      kind: "auto",
-      title: "Before restore",
-      createdBy: user?.id,
-      createdByName: actorName(user),
-    });
-  }
-  await replaceLiveText(
-    id,
-    {
-      userId: user?.id ?? "system",
-      docId: id,
-      role: "owner",
-      name: user?.name ?? user?.login ?? "User",
-      login: user?.login ?? null,
-      avatar: user?.image ?? null,
-    },
-    version.content,
-  );
-  // The restored text is live (broadcast to every editor, irrevocable): the "Restored version n" row or the activity
-  // row failing here is logged and reported as a warning code on the 200 — `version` is null when the row could not
-  // be saved — never a 500 while everyone already sees the restored text.
-  const { tail, answer } = warnTail("version");
-  let restored: Awaited<ReturnType<typeof addVersion>> | undefined;
-  await tail("version-not-saved", async () => {
-    restored = await addVersion({
+  // A large version takes its turn like any large write (one at a time, two per user: see large-write.ts),
+  // before the snapshot below, so that a refused restore leaves nothing behind.
+  const write = await WriteTurn.begin(req, user!.id);
+  try {
+    await write.force();
+    write.assertWanted();
+    // Restore: snapshot the current text first so nothing is lost, then replace. Both stay fatal: until the
+    // replace lands nothing has changed, so a 500 here is honest.
+    const live = await readLiveText(id);
+    if (live.text !== version.content) {
+      await addVersion({
+        documentId: id,
+        content: live.text,
+        kind: "auto",
+        title: "Before restore",
+        createdBy: user?.id,
+        createdByName: actorName(user),
+      });
+    }
+    await replaceLiveText(
+      id,
+      {
+        userId: user?.id ?? "system",
+        docId: id,
+        role: "owner",
+        name: user?.name ?? user?.login ?? "User",
+        login: user?.login ?? null,
+        avatar: user?.image ?? null,
+      },
+      version.content,
+    );
+    // A 200 acknowledges both the restored text and its version row. Keep the turn until that row is durable;
+    // activity remains a warning because it is secondary bookkeeping after the restore has been recorded.
+    const { tail, answer } = warnTail("version");
+    const restored = await addVersion({
       documentId: id,
       content: version.content,
       kind: "restore",
@@ -77,9 +81,11 @@ export const POST = handler(async (req: Request, { params }: Params) => {
       createdBy: user?.id,
       createdByName: actorName(user),
     });
-  });
-  await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "version.restore", { number: version.number, title: version.title }));
-  return json(answer({ ok: true, version: restored ? { ...restored, createdAt: restored.createdAt.toISOString() } : null }));
+    await tail("activity-not-recorded", () => recordActivity(id, activityActor(user!), "version.restore", { number: version.number, title: version.title }));
+    return json(answer({ ok: true, version: { ...restored, createdAt: restored.createdAt.toISOString() } }));
+  } finally {
+    await write.end();
+  }
 });
 
 export const DELETE = handler(async (_req: Request, { params }: Params) => {
@@ -93,4 +99,3 @@ export const DELETE = handler(async (_req: Request, { params }: Params) => {
   if (deleted.length === 0) throw new HttpError(404, "Version not found");
   return json({ ok: true });
 });
-

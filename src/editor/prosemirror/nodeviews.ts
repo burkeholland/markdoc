@@ -5,6 +5,7 @@ import { toggleTaskChecked, setCodeBlockLanguage, showCardAsText } from "./comma
 import { normalizeLanguage } from "./code-highlight";
 import { cardLinkText, matchLinkCard, type LinkCard } from "../markdown/link-cards";
 import { cardLoadLabel, claimCardFrame, createCardFrame, releaseCardFrame } from "../link-card-frame";
+import { createTurnedOffNotice, guardCardFrame } from "../link-card-focus-guard";
 import { safeLinkHref } from "../links";
 
 class ListItemView implements NodeView {
@@ -170,6 +171,8 @@ class LinkCardView implements NodeView {
   private timer: ReturnType<typeof setTimeout> | null = null;
   /** This card holds one of the page's places for a frame that loads by itself. */
   private claimed = false;
+  /** Ends the focus guard of the frame this card shows. */
+  private unguard: (() => void) | null = null;
 
   constructor(
     private node: PMNode,
@@ -268,7 +271,22 @@ class LinkCardView implements NodeView {
 
   private addFrame(card: LinkCard, url: string) {
     const frame = createCardFrame(card, url);
-    if (frame) this.frameBox.replaceChildren(frame);
+    if (!frame) return;
+    // The frame's page may not take the keyboard from the document by itself (#2338).
+    this.unguard?.();
+    this.frameBox.replaceChildren(frame);
+    this.unguard = guardCardFrame(frame, () => this.turnOff(card, url));
+  }
+
+  /** The frame kept taking the keyboard: it goes, and the card says so and offers to load it again. */
+  private turnOff(card: LinkCard, url: string) {
+    this.dropFrame();
+    const notice = createTurnedOffNotice(() => {
+      this.load = null;
+      this.addFrame(card, url);
+    });
+    this.load = notice.querySelector("button");
+    this.frameBox.replaceChildren(notice);
   }
 
   /** The page already loads its limit of frames: this one waits for the person. */
@@ -292,6 +310,8 @@ class LinkCardView implements NodeView {
   private dropFrame() {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+    this.unguard?.();
+    this.unguard = null;
     if (this.claimed) releaseCardFrame(this.view.dom);
     this.claimed = false;
     this.load = null;
@@ -332,4 +352,3 @@ export function createNodeViews(canEdit: () => boolean, { isolateUndo = () => {}
     link_card: (node, view, getPos) => new LinkCardView(node, view, getPos, canEdit, isolateUndo),
   };
 }
-
