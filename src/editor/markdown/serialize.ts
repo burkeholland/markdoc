@@ -2,6 +2,7 @@ import { MarkdownSerializer, MarkdownSerializerState } from "./to-markdown";
 import type { Node as PMNode } from "prosemirror-model";
 import { schema } from "./schema";
 import { fenceFor } from "./code-fence";
+import { CELL_END_SPACE } from "./cell-space";
 import { matchLinkCard, MAX_CARD_URL_LENGTH } from "./link-cards";
 
 type NodeSerializer = (state: MarkdownSerializerState, node: PMNode, parent: PMNode, index: number) => void;
@@ -75,7 +76,10 @@ function renderCell(state: State, cell: PMNode): string {
   const sub = new State(state.nodes, state.marks, state.options);
   sub.inTable = true;
   sub.renderInline(cell, false);
-  return sub.out.replace(/\n/g, "<br>").trim();
+  const text = sub.out.replace(/\n/g, "<br>");
+  const content = text.trim();
+  // Spaces before the text, and in a cell with nothing else, stay padding. One at the end is kept.
+  return content && /[ \t\u00a0]$/.test(text) ? content + CELL_END_SPACE : content;
 }
 
 const isEmptyParagraph = (node: PMNode) => node.type === schema.nodes.paragraph && node.content.size === 0;

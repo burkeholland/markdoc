@@ -171,3 +171,144 @@ describe("agent suggestion granularity", () => {
     }
   });
 });
+
+/** The text while the edits are pending: each new text sits right before the text it replaces. */
+function pending(text: string, edits: EditInput[]): string {
+  for (const edit of [...edits].sort((a, b) => b.from - a.from)) text = text.slice(0, edit.from) + edit.insert + text.slice(edit.from);
+  return text;
+}
+
+/** Cells per line, for the lines of each table in `text` (blank-line separated blocks whose second line is a delimiter row). */
+function tableShapes(text: string): number[][] {
+  return text
+    .split(/\r?\n[ \t]*\r?\n/)
+    .map((block) => block.split(/\r?\n/).filter((line) => line.trim()))
+    .filter((rows) => rows.length > 1 && /^\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?$/.test(rows[1].trim()) && rows[1].includes("|"))
+    .map((rows) => rows.map((row) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split(/(?<!\\)\|/).length));
+}
+
+describe("agent suggestions in a table", () => {
+  const TABLE = "| Name | Owner | Status |\n| --- | --- | --- |\n| Alpha | Ann | Open |\n| Beta | Bob | Open |\n| Gamma | Cy | Blocked |";
+  const DOC = `# Plan\n\n${TABLE}\n\nAfter.\n`;
+
+  it("puts a rewritten row above the row it replaces, never on its line", () => {
+    const edits = targetedSuggestionEdits(DOC, [{ find: "| Beta | Bob | Open |", replace: "| Beta program | Robert | Closed last week |" }]);
+    expect(edits).toHaveLength(1);
+    expect(pending(DOC, edits)).toBe(DOC.replace("| Beta | Bob | Open |", "| Beta program | Robert | Closed last week |\n| Beta | Bob | Open |"));
+    expect(apply(DOC, edits)).toBe(DOC.replace("| Beta | Bob | Open |", "| Beta program | Robert | Closed last week |"));
+    expect(tableShapes(pending(DOC, edits))).toEqual([[3, 3, 3, 3, 3, 3]]);
+  });
+
+  it("keeps a rewrite of several rows one suggestion: the new rows, then the old rows", () => {
+    const after = DOC.replace("| Alpha | Ann | Open |", "| Alpha release | Annabel Lee | Done and shipped |")
+      .replace("| Beta | Bob | Open |", "| Beta program | Robert | Closed last week |")
+      .replace("| Gamma | Cy | Blocked |", "| Gamma rays | Cyrus | Unblocked today |");
+    const edits = diffSuggestionEdits(DOC, after);
+    expect(edits).toHaveLength(1);
+    expect(apply(DOC, edits)).toBe(after);
+    expect(tableShapes(pending(DOC, edits))).toEqual([[3, 3, 3, 3, 3, 3, 3, 3]]);
+    expect(pending(DOC, edits)).toContain("| Gamma rays | Cyrus | Unblocked today |\n| Alpha | Ann | Open |");
+  });
+
+  it("widens a change that crosses cells of one row to that row", () => {
+    const edits = targetedSuggestionEdits(DOC, [{ find: "Bob | Open", replace: "Robert | Closed" }]);
+    expect(edits).toHaveLength(1);
+    expect(pending(DOC, edits)).toContain("| Beta | Robert | Closed |\n| Beta | Bob | Open |\n| Gamma");
+    expect(apply(DOC, edits)).toBe(DOC.replace("Bob | Open", "Robert | Closed"));
+  });
+
+  it("leaves an edit inside one cell as small as it was", () => {
+    const at = DOC.indexOf("Bob");
+    expect(targetedSuggestionEdits(DOC, [{ find: "Bob", replace: "Robert" }])).toEqual([{ from: at, to: at + 3, insert: "Robert" }]);
+    expect(diffSuggestionEdits(DOC, DOC.replace("Bob", "Robert"))).toEqual([{ from: at, to: at + 3, insert: "Robert" }]);
+    const escaped = DOC.replace("Bob", "a \\| b");
+    expect(diffSuggestionEdits(escaped, escaped.replace("a \\| b", "c \\| d")).every((edit) => edit.to - edit.from <= 1)).toBe(true);
+  });
+
+  it("makes two targets on one row one suggestion, not a conflict", () => {
+    const edits = targetedSuggestionEdits(DOC, [{ find: "| Beta | Bob", replace: "| Beta program | Robert" }, { find: "Open |\n| Gamma", replace: "Closed |\n| Gamma" }]);
+    expect(edits).toHaveLength(1);
+    expect(apply(DOC, edits)).toBe(DOC.replace("| Beta | Bob | Open |", "| Beta program | Robert | Closed |"));
+    expect(tableShapes(pending(DOC, edits))).toEqual([[3, 3, 3, 3, 3, 3]]);
+  });
+
+  it("shows a table with a new header or other columns as its own table, above the old one", () => {
+    const wider = "| Name | Owner | Status | Due |\n| --- | --- | --- | --- |\n| Alpha | Ann | Open | Mon |\n| Beta | Bob | Open | Tue |\n| Gamma | Cy | Blocked | Wed |";
+    const renamed = TABLE.replace("| Name | Owner | Status |", "| Project | Lead | State |");
+    for (const [replacement, shape] of [[wider, [4, 4, 4, 4, 4]], [renamed, [3, 3, 3, 3, 3]], [TABLE.replace("| --- | --- | --- |", "| :-: | --- | --: |"), [3, 3, 3, 3, 3]]] as const) {
+      const edits = targetedSuggestionEdits(DOC, [{ find: TABLE, replace: replacement }]);
+      expect(edits).toHaveLength(1);
+      expect(pending(DOC, edits)).toBe(`# Plan\n\n${replacement}\n\n${TABLE}\n\nAfter.\n`);
+      expect(apply(DOC, edits)).toBe(DOC.replace(TABLE, replacement));
+      expect(tableShapes(pending(DOC, edits))).toEqual([shape, [3, 3, 3, 3, 3]]);
+    }
+  });
+
+  it("keeps a table and the text it replaces (or that replaces it) as separate blocks", () => {
+    const prose = "Alpha is Ann's, Beta is Bob's and Gamma is blocked on Cy.";
+    const listed = `# Plan\n\n${prose}\n\nAfter.\n`;
+    const toTable = diffSuggestionEdits(listed, DOC);
+    expect(pending(listed, toTable)).toBe(`# Plan\n\n${TABLE}\n\n${prose}\n\nAfter.\n`);
+    expect(apply(listed, toTable)).toBe(DOC);
+    const toProse = diffSuggestionEdits(DOC, listed);
+    expect(pending(DOC, toProse)).toBe(`# Plan\n\n${prose}\n\n${TABLE}\n\nAfter.\n`);
+    expect(apply(DOC, toProse)).toBe(listed);
+  });
+
+  it("uses the blank line after a table that starts the document, and a table alone keeps its text exact", () => {
+    const first = `${TABLE}\n\nAfter.\n`;
+    const renamed = TABLE.replace("| Name | Owner | Status |", "| Project | Lead | State |");
+    const edits = targetedSuggestionEdits(first, [{ find: TABLE, replace: renamed }]);
+    expect(pending(first, edits)).toBe(`${renamed}\n\n${TABLE}\n\nAfter.\n`);
+    expect(apply(first, edits)).toBe(`${renamed}\n\nAfter.\n`);
+    for (const alone of [TABLE, `${TABLE}\n`]) {
+      const only = targetedSuggestionEdits(alone, [{ find: TABLE, replace: renamed }]);
+      expect(apply(alone, only)).toBe(alone.replace(TABLE, renamed));
+    }
+  });
+
+  it("keeps rows whole with CRLF line endings and in the last row of the document", () => {
+    const crlf = DOC.replace(/\n/g, "\r\n");
+    const edits = targetedSuggestionEdits(crlf, [{ find: "| Beta | Bob | Open |", replace: "| Beta program | Robert | Closed |" }]);
+    expect(pending(crlf, edits)).toBe(crlf.replace("| Beta | Bob | Open |", "| Beta program | Robert | Closed |\r\n| Beta | Bob | Open |"));
+    expect(apply(crlf, edits)).toBe(crlf.replace("| Beta | Bob | Open |", "| Beta program | Robert | Closed |"));
+    const last = targetedSuggestionEdits(TABLE, [{ find: "| Gamma | Cy | Blocked |", replace: "| Gamma rays | Cyrus | Done |" }]);
+    expect(pending(TABLE, last)).toBe(TABLE.replace("| Gamma | Cy | Blocked |", "| Gamma rays | Cyrus | Done |\n| Gamma | Cy | Blocked |"));
+    expect(apply(TABLE, last)).toBe(TABLE.replace("| Gamma | Cy | Blocked |", "| Gamma rays | Cyrus | Done |"));
+  });
+
+  it("gives the exact text for random cell, row and column changes, with edits that do not overlap", () => {
+    let seed = 2317;
+    const random = (max: number) => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed % max;
+    };
+    const words = ["Alpha", "Bob", "Open", "x", "", "two words", "a \\| b", "Blocked"];
+    const row = (cells: number) => `| ${Array.from({ length: cells }, () => words[random(words.length)]).join(" | ")} |`;
+    const table = (rows: number, cells: number) => [row(cells), `| ${Array.from({ length: cells }, () => "---").join(" | ")} |`, ...Array.from({ length: rows }, () => row(cells))];
+    for (let sample = 0; sample < 300; sample++) {
+      const lines = table(1 + random(4), 2 + random(3));
+      const changed = [...lines];
+      for (let change = 1 + random(3); change > 0; change--) {
+        const at = random(changed.length);
+        if (random(5) === 0) changed.splice(at, random(2), row(2 + random(3)));
+        else if (at !== 1) changed[at] = row(changed[at].split(" | ").length);
+      }
+      // Half of the samples have the table as the first block of the document.
+      const skip = random(2) ? 0 : "Intro.\n\n".length;
+      const wrap = (rows: string[]) => ["Intro.", "", ...rows, "", "Outro."].join("\n").slice(skip);
+      const before = wrap(lines);
+      const after = wrap(changed);
+      for (const edits of [diffSuggestionEdits(before, after), before.includes(lines.join("\n")) && lines.join("\n") !== changed.join("\n") ? targetedSuggestionEdits(before, [{ find: lines.join("\n"), replace: changed.join("\n") }]) : []]) {
+        if (!edits.length) continue;
+        expect(apply(before, edits), `sample ${sample}`).toBe(after);
+        expect(edits.every((edit, index) => index === 0 || edits[index - 1].to <= edit.from), `sample ${sample}`).toBe(true);
+        // A replacement never glues its new text to the start of an old row.
+        for (const edit of edits) {
+          if (edit.to === edit.from || !edit.insert || !/\n|(?<!\\)\|/.test(edit.insert + before.slice(edit.from, edit.to))) continue;
+          expect(/^\r?\n/.test(before.slice(edit.from, edit.to)) || /\n$/.test(edit.insert), `sample ${sample}: ${JSON.stringify(edit)}`).toBe(true);
+        }
+      }
+    }
+  });
+});

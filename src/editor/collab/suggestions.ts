@@ -41,6 +41,25 @@ export class SuggestionConflictError extends Error {
 
 export const SUGGESTIONS_ORIGIN = { name: "suggestions" };
 
+/** A table row without the padding around its pipes; a delimiter row also without the length of its dashes. */
+function unpaddedRow(line: string): string {
+  const row = line.replace(/[ \t]*\|[ \t]*/g, "|").trim();
+  return /^\|?:?-+:?(?:\|:?-+:?)*\|?$/.test(row) ? row.replace(/-+/g, "-") : row;
+}
+
+/**
+ * Whether the text of a pending suggestion still reads as it did when it was proposed. The rich editor
+ * writes a table with its columns lined up, so typing in one cell changes the padding of every row and
+ * the dashes of the delimiter row. That is not a change to a suggestion on another row of the table,
+ * which would otherwise be outdated, with nothing left to accept or reject, by the first edit near it.
+ */
+function reads(current: string, proposed: string): boolean {
+  if (current === proposed) return true;
+  if (!proposed.includes("|") || !current.includes("|")) return false;
+  const rows = (text: string) => text.split("\n").map((line) => (line.includes("|") ? unpaddedRow(line) : line)).join("\n");
+  return rows(current) === rows(proposed);
+}
+
 export interface EditInput {
   from: number;
   to: number;
@@ -134,7 +153,7 @@ export class SuggestionsModel {
       group.members.push(member);
       group.from = Math.min(group.from, member.from);
       group.to = Math.max(group.to, member.to);
-      if (s.groupId && (!live || text.slice(member.from, member.to) !== s.text)) group.outdated = true;
+      if (s.groupId && (!live || !reads(text.slice(member.from, member.to), s.text))) group.outdated = true;
     });
     const groups = [...grouped.values()];
     const owners = new Map<string, SuggestionGroup>();
