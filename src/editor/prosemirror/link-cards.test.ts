@@ -29,7 +29,8 @@ import { EditorActions } from "@/components/editor/actions";
 import { CARD_FRAME_DELAY_MS, createNodeViews } from "./nodeviews";
 import { createRichEditorState, setEditable } from "./setup";
 import { refreshRichHighlights } from "./highlights";
-import { cardLinkParagraph, selectedCard, showCardAsText, showLinkAsCard, showSelectedCardAsText } from "./commands";
+import { cardLinkParagraph, insertLinkCard, selectedCard, showCardAsText, showLinkAsCard, showSelectedCardAsText } from "./commands";
+import { LINK_CARDS_STORAGE_KEY } from "../../lib/link-cards-setting";
 
 // jsdom has no layout: ProseMirror asks a Range for its boxes when it scrolls the selection into view.
 Range.prototype.getClientRects ??= () => [] as unknown as DOMRectList;
@@ -200,6 +201,27 @@ describe("link cards in the rich pane (#2317)", () => {
       expect(document.querySelectorAll("script")).toHaveLength(0);
       expect(view.dom.querySelectorAll("object, embed, img, video, audio, link, [srcdoc]")).toHaveLength(0);
       for (const src of sources(view.dom)) expect(CARD_FRAME_HOSTS.some((host) => src!.startsWith(`${host}/`)), src!).toBe(true);
+    });
+
+    it("the editor ignores what happens inside a card: the frame arriving, and a selection inside the card", () => {
+      const { view, cards, text } = open(`Intro\n\n${VIDEO}`);
+      const card = cards()[0];
+      // What ProseMirror asks before it reads a change in the page back into the document.
+      const desc = (card as HTMLElement & { pmViewDesc?: { ignoreMutation(mutation: { type: string; target: Node }): boolean } }).pmViewDesc!;
+      vi.advanceTimersByTime(CARD_FRAME_DELAY_MS);
+      const [frame] = frames(view.dom);
+      expect(desc.ignoreMutation({ type: "childList", target: frame.parentElement! })).toBe(true);
+      expect(desc.ignoreMutation({ type: "attributes", target: frame })).toBe(true);
+      // A selection inside the card (a person drags over the link's text to copy it) is not the editor's selection.
+      // Without the card's own answer the editor would take this one for its own.
+      expect(desc.ignoreMutation({ type: "selection", target: card.querySelector("a")! })).toBe(true);
+      // And when the editor does look at the page again, the document and the card are what they were.
+      const before = view.state.doc;
+      (view as unknown as { domObserver: { flush(): void } }).domObserver.flush();
+      expect(view.state.doc).toBe(before);
+      expect(cards()[0]).toBe(card);
+      expect(frame.isConnected).toBe(true);
+      expect(text()).toBe(`Intro\n\n${VIDEO}`);
     });
 
     it("a reader of the document gets the frame too", () => {
@@ -657,6 +679,211 @@ describe("link cards in the rich pane (#2317)", () => {
       key("Backspace");
       expect(text()).toBe(`Intro\n\n${VIDEO}`);
       expect(shape()).toBe(`p(Intro) | card(${VIDEO}) | p()`);
+    });
+  });
+
+  describe("the setting: Markdoc turns a known link into a card by itself, or does not (#2317)", () => {
+    afterEach(() => {
+      localStorage.removeItem(LINK_CARDS_STORAGE_KEY);
+    });
+    const off = () => localStorage.setItem(LINK_CARDS_STORAGE_KEY, "off");
+    /** Type `link` at the end of the document, as a person does: character by character into the preview. */
+    function typeAtEnd(view: EditorView, link: string) {
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 1)));
+      for (const char of link) view.dispatch(view.state.tr.insertText(char));
+    }
+
+    it("off: a known link pasted on an empty line stays the link it is, written in angle brackets", () => {
+      off();
+      const { view, shape, text, cards } = open("");
+      view.pasteText(TWEET, clipboard(TWEET));
+      expect(cards()).toHaveLength(0);
+      expect(shape()).toBe(`p(${TWEET})`);
+      expect(text()).toBe(`<${TWEET}>`);
+    });
+
+    it("only the exact stored value off turns it off", () => {
+      for (const value of ["on", "OFF", "false", "0", "", " off"]) {
+        localStorage.setItem(LINK_CARDS_STORAGE_KEY, value);
+        const { view, shape } = open("");
+        view.pasteText(TWEET, clipboard(TWEET));
+        expect(shape(), JSON.stringify(value)).toBe(`card(${TWEET}) | p()`);
+      }
+    });
+
+    it("Enter never makes a card, with the setting on or off: a typed link, a link shown as text, <link> and [link](link) stay links", () => {
+      for (const setting of ["on", "off"]) {
+        localStorage.setItem(LINK_CARDS_STORAGE_KEY, setting);
+
+        // Typed key by key alone on its line: the text keeps it in angle brackets, and Enter adds a line.
+        const typed = open("Intro");
+        typed.view.dispatch(typed.view.state.tr.insert(typed.view.state.doc.content.size, schema.nodes.paragraph.create()));
+        typeAtEnd(typed.view, VIDEO);
+        typed.key("Enter");
+        expect(typed.shape(), setting).toBe(`p(Intro) | p(${VIDEO}) | p()`);
+        expect(typed.text(), setting).toContain(`<${VIDEO}>`);
+
+        // A card, "Show as text" (which leaves the caret at the end of the link), then Enter: the choice holds.
+        const shown = open(`Intro\n\n${VIDEO}\n\nOutro`);
+        expect(shown.shape()).toBe(`p(Intro) | card(${VIDEO}) | p(Outro)`);
+        showCardAsText(shown.cardPos())(shown.view.state, shown.view.dispatch, shown.view);
+        expect(shown.view.state.selection.$from.parentOffset).toBe(VIDEO.length);
+        shown.key("Enter");
+        expect(shown.shape(), setting).toBe(`p(Intro) | p(${VIDEO}) | p() | p(Outro)`);
+        expect(shown.text(), setting).toContain(`<${VIDEO}>`);
+
+        // A document that already says <link>, and one that says [link](link): the caret at the end of the line, Enter.
+        for (const source of [`<${TWEET}>`, `[${TWEET}](${TWEET})`]) {
+          const old = open(`Intro\n\n${source}`);
+          old.view.dispatch(old.view.state.tr.setSelection(TextSelection.create(old.view.state.doc, old.view.state.doc.content.size - 1)));
+          old.key("Enter");
+          expect(old.shape(), `${setting} ${source}`).toBe(`p(Intro) | p(${TWEET}) | p()`);
+          expect(old.cards(), `${setting} ${source}`).toHaveLength(0);
+        }
+      }
+    });
+
+    it("someone who cannot edit gets nothing from Enter", () => {
+      const { view, shape, key } = open(`<${TWEET}>`, "viewer");
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 1)));
+      key("Enter");
+      expect(shape()).toBe(`p(${TWEET})`);
+    });
+  });
+
+  describe("Insert: a card from a link (#2317)", () => {
+    afterEach(() => {
+      localStorage.removeItem(LINK_CARDS_STORAGE_KEY);
+    });
+
+    it("on an empty line the card takes the line; writing goes on in a new paragraph under it", () => {
+      const { view, shape, text } = open("Intro");
+      view.dispatch(view.state.tr.insert(view.state.doc.content.size, schema.nodes.paragraph.create()));
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 1)));
+      expect(insertLinkCard(VIDEO)(view.state, view.dispatch, view)).toBe(true);
+      expect(shape()).toBe(`p(Intro) | card(${VIDEO}) | p()`);
+      expect(text()).toBe(`Intro\n\n${VIDEO}`);
+      expect(view.state.selection.$from.parent.content.size).toBe(0);
+      view.dispatch(view.state.tr.insertText("Next"));
+      expect(text()).toBe(`Intro\n\n${VIDEO}\n\nNext`);
+    });
+
+    it("in a paragraph with text the card goes under it; in a list or a quote, under the whole list or quote", () => {
+      const inText = open("First\n\nLast");
+      inText.view.dispatch(inText.view.state.tr.setSelection(TextSelection.create(inText.view.state.doc, 3)));
+      insertLinkCard(TWEET)(inText.view.state, inText.view.dispatch, inText.view);
+      expect(inText.shape()).toBe(`p(First) | card(${TWEET}) | p() | p(Last)`);
+      expect(inText.text()).toBe(`First\n\n${TWEET}\n\nLast`);
+
+      const inList = open("- one\n- two\n\nAfter");
+      inList.view.dispatch(inList.view.state.tr.setSelection(TextSelection.create(inList.view.state.doc, 4)));
+      insertLinkCard(TWEET)(inList.view.state, inList.view.dispatch, inList.view);
+      expect(inList.shape()).toBe(`bullet_list | card(${TWEET}) | p() | p(After)`);
+      expect(inList.text()).toBe(`- one\n- two\n\n${TWEET}\n\nAfter`);
+
+      const inQuote = open("> quoted");
+      inQuote.view.dispatch(inQuote.view.state.tr.setSelection(TextSelection.create(inQuote.view.state.doc, 4)));
+      insertLinkCard(VIDEO)(inQuote.view.state, inQuote.view.dispatch, inQuote.view);
+      expect(inQuote.shape()).toBe(`blockquote | card(${VIDEO}) | p()`);
+      expect(inQuote.text()).toBe(`> quoted\n\n${VIDEO}`);
+    });
+
+    it("an empty line inside a list is not the empty line of the document: the card goes under the list", () => {
+      const { view, shape, text, key } = open("- one");
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 3)));
+      key("Enter");
+      // A second, empty list item, with the caret in it.
+      expect(view.state.doc.firstChild!.childCount).toBe(2);
+      expect(view.state.selection.$from.parent.content.size).toBe(0);
+      expect(view.state.selection.$from.depth).toBeGreaterThan(1);
+      insertLinkCard(TWEET)(view.state, view.dispatch, view);
+      expect(shape()).toBe(`bullet_list | card(${TWEET}) | p()`);
+      expect(view.state.doc.firstChild!.childCount).toBe(2);
+      expect(text()).toContain(`\n\n${TWEET}`);
+    });
+
+    it("with a card selected the new card goes under it", () => {
+      const { view, shape, selectCard } = open(`${TWEET}\n\nOutro`);
+      selectCard(0);
+      insertLinkCard(VIDEO)(view.state, view.dispatch, view);
+      expect(shape()).toBe(`card(${TWEET}) | card(${VIDEO}) | p() | p(Outro)`);
+    });
+
+    it("a link that is not on the list inserts nothing", () => {
+      const { view, shape, text } = open("Intro");
+      for (const link of ["https://evil.example/watch?v=dQw4w9WgXcQ", "https://x.com.evil.example/jack/status/20", "javascript:alert(1)", "", ` ${TWEET}`, `${TWEET} `, "http://x.com/jack/status/20"]) {
+        expect(insertLinkCard(link)(view.state, view.dispatch, view), link).toBe(false);
+        expect(insertLinkCard(link)(view.state), link).toBe(false);
+      }
+      expect(shape()).toBe("p(Intro)");
+      expect(text()).toBe("Intro");
+    });
+
+    it("the action: one undo step, works with the setting off, and does nothing for someone who cannot edit", () => {
+      localStorage.setItem(LINK_CARDS_STORAGE_KEY, "off");
+      const { session, view, shape, text } = open("Intro");
+      const actions = new EditorActions(session, () => {});
+      actions.setRichView(view);
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 6)));
+      view.dispatch(view.state.tr.insertText("!"));
+      actions.insertCard(TWEET);
+      expect(shape()).toBe(`p(Intro!) | card(${TWEET}) | p()`);
+      actions.insertCard("https://evil.example/");
+      expect(shape()).toBe(`p(Intro!) | card(${TWEET}) | p()`);
+      // One undo takes the card away and nothing else: the typed "!" is its own step.
+      session.undo();
+      expect(shape()).not.toContain("card(");
+      expect(text()).toBe("Intro!");
+
+      // What is typed right after an inserted card is its own step too: undoing it leaves the card.
+      session.redo();
+      const again = open("Intro");
+      const againActions = new EditorActions(again.session, () => {});
+      againActions.setRichView(again.view);
+      again.view.dispatch(again.view.state.tr.setSelection(TextSelection.create(again.view.state.doc, 6)));
+      againActions.insertCard(VIDEO);
+      for (const char of "Next") again.view.dispatch(again.view.state.tr.insertText(char));
+      expect(again.text()).toBe(`Intro\n\n${VIDEO}\n\nNext`);
+      again.session.undo();
+      expect(again.shape()).toContain(`card(${VIDEO})`);
+      expect(again.text()).toBe(`Intro\n\n${VIDEO}`);
+
+      const viewer = open("Intro", "viewer");
+      const viewerActions = new EditorActions(viewer.session, () => {});
+      viewerActions.setRichView(viewer.view);
+      viewerActions.insertCard(TWEET);
+      expect(viewer.shape()).toBe("p(Intro)");
+    });
+
+    it("with the Markdown pane active the link is written on a line of its own, and only a link on the list is", () => {
+      const { session } = open("Intro");
+      const insertBlock = vi.fn();
+      const codeView = {} as Parameters<EditorActions["setCodeView"]>[0];
+      const actions = new EditorActions(session, () => {});
+      actions.setCodeView(codeView, { commands: { insertBlock } } as unknown as Parameters<EditorActions["setCodeView"]>[1]);
+      actions.insertCard(VIDEO);
+      expect(insertBlock).toHaveBeenCalledExactlyOnceWith(codeView, VIDEO);
+      // The Markdown pane takes any text, so here the action is the only one who asks the list.
+      for (const link of ["https://evil.example/watch?v=dQw4w9WgXcQ", "# A heading\n\n<script>alert(1)</script>", "", `${VIDEO}\n\nmore text`]) actions.insertCard(link);
+      expect(insertBlock).toHaveBeenCalledTimes(1);
+
+      const viewer = open("Intro", "viewer");
+      const viewerActions = new EditorActions(viewer.session, () => {});
+      viewerActions.setCodeView(codeView, { commands: { insertBlock } } as unknown as Parameters<EditorActions["setCodeView"]>[1]);
+      viewerActions.insertCard(VIDEO);
+      expect(insertBlock).toHaveBeenCalledTimes(1);
+    });
+
+    it("while suggesting, the inserted card is a suggestion: the text keeps the link as a pending insertion", () => {
+      const { session, view, cards } = open("Intro");
+      const actions = new EditorActions(session, () => {});
+      actions.setRichView(view);
+      session.setMode("suggesting");
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 6)));
+      actions.insertCard(VIDEO);
+      expect(session.suggestions.cleanText()).toBe("Intro");
+      expect(session.ytext.toString()).toContain(VIDEO);
+      expect(cards()).toHaveLength(1);
     });
   });
 

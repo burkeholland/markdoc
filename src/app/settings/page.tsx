@@ -5,6 +5,7 @@ import { auth } from "@/auth";
 import { Logo } from "@/components/ui/logo";
 import { AdvancedSettings } from "@/components/settings/advanced-settings";
 import { AgentsPanel } from "@/components/settings/agents-panel";
+import { LinkCardsSetting } from "@/components/settings/link-cards-setting";
 import { ThemePicker } from "@/components/ui/theme-toggle";
 import { embeddedDocumentPath } from "@/server/http";
 import { publicOrigin } from "@/server/public-origin";
@@ -47,6 +48,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           </div>
           <ThemePicker />
         </div>
+        <LinkCardsSetting />
         <AgentsPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} initialTokens={tokens} />
         <div className="mt-6">
           <AdvancedSettings />

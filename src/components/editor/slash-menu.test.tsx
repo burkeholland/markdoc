@@ -114,6 +114,7 @@ type MenuVisit = {
   view: EditorView;
   session: CollabSession;
   onImage: Mock<() => void>;
+  onCard: Mock<() => void>;
   onLink: Mock<() => void>;
   onComment: Mock<() => void>;
   onConnectAgent: Mock<() => void>;
@@ -259,6 +260,7 @@ function makeIntegratedVisit(): IntegratedVisit {
     view,
     session: makeSession(),
     onImage: vi.fn<() => void>(),
+    onCard: vi.fn<() => void>(),
     onLink: vi.fn<() => void>(),
     onComment: vi.fn<() => void>(),
     onConnectAgent: vi.fn<() => void>(),
@@ -395,6 +397,7 @@ function makeVisit(controller = new TrackingController()): Visit {
     view: makeView(),
     session: makeSession(),
     onImage: vi.fn<() => void>(),
+    onCard: vi.fn<() => void>(),
     onLink: vi.fn<() => void>(),
     onComment: vi.fn<() => void>(),
     onConnectAgent: vi.fn<() => void>(),
@@ -430,6 +433,7 @@ function BoundaryHarness({
       controller={visit.controller}
       containerRef={containerRef}
       onImage={visit.onImage}
+      onCard={visit.onCard}
       onLink={visit.onLink}
       onComment={visit.onComment}
       onConnectAgent={visit.onConnectAgent}
@@ -1586,6 +1590,7 @@ describe("slash-menu pointer presentation", () => {
 
   it.each([
     ["image", "onImage"],
+    ["card", "onCard"],
     ["link", "onLink"],
     ["agent", "onConnectAgent"],
   ] as const)("applies the frozen %s item context and callback once", (id, callback) => {

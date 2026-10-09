@@ -3,7 +3,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { EditorView } from "prosemirror-view";
 import { TextSelection } from "prosemirror-state";
-import { Bot, Calendar, Heading1, Heading2, Heading3, Image, Link, List, ListChecks, ListOrdered, MessageSquarePlus, Minus, Quote, SquareCode, Table, Type, type LucideIcon } from "lucide-react";
+import { Bot, Calendar, Heading1, Heading2, Heading3, Image, Link, List, ListChecks, ListOrdered, MessageSquarePlus, Minus, Quote, SquareCode, SquarePlay, Table, Type, type LucideIcon } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { tableAt } from "@/editor/prosemirror/commands";
 import {
@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils";
 import { clampToViewport } from "@/lib/viewport";
 import { useSessionValue } from "./use-session";
 
-const ICONS: Record<string, LucideIcon> = { Type, Heading1, Heading2, Heading3, List, ListOrdered, ListChecks, Quote, SquareCode, Minus, Table, Image, Link, MessageSquarePlus, Calendar, Bot };
+const ICONS: Record<string, LucideIcon> = { Type, Heading1, Heading2, Heading3, List, ListOrdered, ListChecks, Quote, SquareCode, Minus, Table, Image, SquarePlay, Link, MessageSquarePlus, Calendar, Bot };
 
 const MENU_WIDTH = 288;
 const ROW_HEIGHT = 36;
@@ -219,6 +219,7 @@ type PointerGroup = Readonly<{
 
 type PointerCallbacks = Readonly<{
   onImage: () => void;
+  onCard: () => void;
   onLink: () => void;
   onComment: () => void;
   onConnectAgent: () => void;
@@ -535,6 +536,7 @@ export function SlashMenu({
   controller,
   containerRef,
   onImage,
+  onCard,
   onLink,
   onComment,
   onConnectAgent,
@@ -544,6 +546,8 @@ export function SlashMenu({
   controller: SlashMenuController;
   containerRef: React.RefObject<HTMLElement | null>;
   onImage: () => void;
+  /** `/video`: opens "Video or post from a link" (#2317). */
+  onCard: () => void;
   onLink: () => void;
   onComment: () => void;
   /** `/agent`: opens the "Connect an AI agent" dialog. */
@@ -740,7 +744,7 @@ export function SlashMenu({
       groups: pointerGroups,
       highlightedIndex: index,
       argument: splitSlashQuery(state.query).arg,
-      callbacks: Object.freeze({ onImage, onLink, onComment, onConnectAgent }),
+      callbacks: Object.freeze({ onImage, onCard, onLink, onComment, onConnectAgent }),
       position: pos,
     } satisfies PointerPresentation);
   })();
@@ -1369,6 +1373,7 @@ export function SlashMenu({
       view: owner.view,
       where: candidate.where,
       openImage: callbacks.onImage,
+      openCard: callbacks.onCard,
       openLink: callbacks.onLink,
       startComment: () => {
         selectCurrentBlock(owner.view);

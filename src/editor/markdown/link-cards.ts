@@ -90,6 +90,8 @@ interface Rule {
 
 interface Provider {
   id: CardProviderId;
+  /** The site's name as people say it, for the Settings row and the Insert dialog. */
+  name: string;
   kind: CardKind;
   /** Origin of the provider's embed pages. A public `https` host, never the app's own. */
   frameHost: string;
@@ -112,6 +114,7 @@ const youtubeVideo = (id: string, query: string | undefined) => ({ label: "YouTu
 const PROVIDERS: readonly Provider[] = [
   {
     id: "youtube",
+    name: "YouTube",
     kind: "video",
     // The host that sets no cookies until the video is played.
     frameHost: "https://www.youtube-nocookie.com",
@@ -131,6 +134,7 @@ const PROVIDERS: readonly Provider[] = [
   },
   {
     id: "x",
+    name: "X",
     kind: "post",
     // X does not document this address: it is the page X's own widgets.js puts in its frame.
     frameHost: "https://platform.twitter.com",
@@ -143,6 +147,14 @@ const PROVIDERS: readonly Provider[] = [
     ],
   },
 ];
+
+/** The sites a link can be a card for, by name, in the order of the list. */
+export const CARD_PROVIDER_NAMES: readonly string[] = PROVIDERS.map((provider) => provider.name);
+
+/** The same names as people say them in a sentence: "YouTube or X", "A, B or C". */
+export function cardProviderList(names: readonly string[] = CARD_PROVIDER_NAMES): string {
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
+}
 
 /** The origins a card frame may point at, one per provider. */
 export const CARD_FRAME_HOSTS: readonly string[] = PROVIDERS.map((provider) => provider.frameHost);

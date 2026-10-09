@@ -10,6 +10,8 @@ import { insertHorizontalRule, insertTable, insertText, setHeadingLevel, toggleB
 export interface SlashContext {
   view: EditorView;
   openImage: () => void;
+  /** Opens "Video or post from a link" (#2317). */
+  openCard: () => void;
   openLink: () => void;
   /** Starts a comment on the current selection (see EditorShell.startComment). */
   startComment: () => void;
@@ -80,6 +82,18 @@ export const SLASH_ITEMS: readonly SlashItem[] = [
   { id: "table", title: "Table", keywords: ["grid", "rows", "columns"], icon: "Table", group: "Blocks", available: notInTable, command: () => insertTable(3, 3) },
   { id: "image", title: "Image", keywords: ["picture", "photo", "img", "upload"], icon: "Image", group: "Insert", run: (ctx) => ctx.openImage() },
   { id: "link", title: "Link", keywords: ["url", "href", "anchor"], icon: "Link", group: "Insert", run: (ctx) => ctx.openLink() },
+  {
+    // After Link, so "/link" still offers Link first. A card is a block of its own at the top level of the document
+    // (#2317), so it is not offered in a table.
+    id: "card",
+    title: "Video or post from a link",
+    description: "Paste a link and it becomes a card",
+    keywords: ["youtube", "tweet", "twitter", "x", "embed", "card", "media", "player", "clip"],
+    icon: "SquarePlay",
+    group: "Insert",
+    available: notInTable,
+    run: (ctx) => ctx.openCard(),
+  },
   {
     id: "comment",
     title: "Comment",

@@ -78,6 +78,29 @@ describe("slash items", () => {
     expect(splitSlashQuery("Heading")).toEqual({ word: "heading", arg: "" });
   });
 
+  it("offers 'Video or post from a link' in the Insert group, after Image and Link, and hands off to its dialog (#2317)", () => {
+    const card = SLASH_ITEMS.find((i) => i.id === "card")!;
+    expect(card.title).toBe("Video or post from a link");
+    expect(card.description).toBe("Paste a link and it becomes a card");
+    expect(card.group).toBe("Insert");
+    expect(card.icon).toBe("SquarePlay");
+    const insert = SLASH_ITEMS.filter((i) => i.group === "Insert").map((i) => i.id);
+    expect(insert.slice(0, 3)).toEqual(["image", "link", "card"]);
+    // What a person would type to find it.
+    for (const word of ["video", "post", "youtube", "tweet", "twitter", "x", "embed", "card", "media"]) expect(ids(word), word).toContain("card");
+    // "/link" still offers Link first, so Enter there does what it always did.
+    expect(ids("link")).toEqual(["link", "card"]);
+    expect(ids("image")).toEqual(["image"]);
+    // A card is a block of its own at the top of the document: not offered inside a table.
+    expect(ids("", { inTable: true, canComment: true })).not.toContain("card");
+    expect(ids("", { inTable: false, canComment: true })).toContain("card");
+    // It opens the dialog and does not edit the document.
+    expect(card.command).toBeUndefined();
+    let opened = 0;
+    card.run!({ openCard: () => opened++ } as unknown as Parameters<NonNullable<typeof card.run>>[0], "");
+    expect(opened).toBe(1);
+  });
+
   it("hides block insertions inside tables and the comment item when commenting is off", () => {
     const inTable = ids("", { inTable: true, canComment: true });
     expect(inTable).not.toContain("table");

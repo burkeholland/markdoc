@@ -4,6 +4,7 @@ import type { EditorView } from "prosemirror-view";
 import type * as Y from "yjs";
 import { schema } from "../markdown/schema";
 import { matchLinkCard } from "../markdown/link-cards";
+import { readLinkCardsSetting } from "../../lib/link-cards-setting";
 import { decideInsert, wrapInCodeFence } from "../markdown/renderable";
 import { tsvToMarkdownTable, TSV_TABLE_NOTICE, type NoticeAction } from "../markdown/tsv";
 import type { MarkdownBinding } from "../sync/markdown-binding";
@@ -188,7 +189,8 @@ function pasteAsCard(view: EditorView, session: PasteSession, url: string): bool
  *
  * - a URL pasted over a selection turns the selection into a link (the word-processor convention);
  *   without a selection it is inserted as text and autolinked by the Markdown;
- * - a link to a known site pasted on an empty line of its own becomes a card (not while suggesting);
+ * - a link to a known site pasted on an empty line of its own becomes a card (not while suggesting,
+ *   and not when the person turned that off in Settings: then it is pasted as the link it is);
  * - multi-line plain text that looks like Markdown is inserted as Markdown source so it
  *   renders as real structure instead of escaped literal text;
  * - tab-separated plain text (a spreadsheet range, `psql` or `jq -r @tsv` output) with the
@@ -209,7 +211,7 @@ export function smartPastePlugin(session: PasteSession, options: SmartPasteOptio
         if (isUrlText(text) && linkSelection(view, text)) return true;
 
         if (session.mode === "suggesting") return false;
-        if (isUrlText(text) && pasteAsCard(view, session, text.trim())) return true;
+        if (isUrlText(text) && readLinkCardsSetting() && pasteAsCard(view, session, text.trim())) return true;
         // Text micromark would choke on goes in as a fenced code block (which the guard skips),
         // whatever the clipboard's HTML says; inside a code block it is already safe.
         if (!view.state.selection.$from.parent.type.spec.code) {

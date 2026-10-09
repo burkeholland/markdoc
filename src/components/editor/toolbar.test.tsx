@@ -55,6 +55,7 @@ function setup({
   };
   const onComment = vi.fn();
   const onImage = vi.fn();
+  const onCard = vi.fn();
   const onTable = vi.fn();
   const toolbar = (
     <Toolbar
@@ -63,11 +64,12 @@ function setup({
       format={format}
       onComment={onComment}
       onImage={onImage}
+      onCard={onCard}
       onTable={onTable}
     />
   );
   const result = render(strict ? <StrictMode>{toolbar}</StrictMode> : toolbar);
-  return { ...result, session, actions, onComment, onImage, onTable };
+  return { ...result, session, actions, onComment, onImage, onCard, onTable };
 }
 
 const button = (name: string) => screen.getByRole("button", { name });
@@ -93,6 +95,8 @@ describe("Toolbar actions", () => {
     ["Task list", (a: ReturnType<typeof setup>) => expect(a.actions.toggleList).toHaveBeenCalledExactlyOnceWith("task")],
     ["Quote", (a: ReturnType<typeof setup>) => expect(a.actions.toggleQuote).toHaveBeenCalledOnce()],
     ["Image", (a: ReturnType<typeof setup>) => expect(a.onImage).toHaveBeenCalledOnce()],
+    // #2317: the way to add a video or a post, next to Image.
+    ["Video or post from a link", (a: ReturnType<typeof setup>) => expect(a.onCard).toHaveBeenCalledOnce()],
     ["Table", (a: ReturnType<typeof setup>) => expect(a.onTable).toHaveBeenCalledOnce()],
     ["Horizontal rule", (a: ReturnType<typeof setup>) => expect(a.actions.horizontalRule).toHaveBeenCalledOnce()],
     ["Undo", (a: ReturnType<typeof setup>) => expect(a.actions.undo).toHaveBeenCalledOnce()],
