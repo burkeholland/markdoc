@@ -25,6 +25,7 @@ export const REPAIR_SCHEMA_TABLES = [
   "notification",
   "ownership_transfer",
   "recent",
+  "required_version_intent",
   "review",
   "session",
   "star",
@@ -47,6 +48,7 @@ export const REPAIR_APPLICATION_TABLES = [
   "gist_auto_update",
   "notification",
   "recent",
+  "required_version_intent",
   "review",
   "star",
   "version",
@@ -74,6 +76,7 @@ export const USER_IDENTITY_CLASSIFICATIONS = [
   "document.last_edited_by",
   "collaborator.added_by",
   "version.created_by",
+  "required_version_intent.created_by",
   "activity.actor_id",
   "collaborator.login",
   "notification.user_login",
@@ -94,6 +97,7 @@ const APPLICATION_DEPENDENCY_LABELS = [
   "document.last_edited_by",
   "collaborator.added_by",
   "version.created_by",
+  "required_version_intent.created_by",
   "activity.actor_id",
   "collaborator.login",
   "notification.user_login",
@@ -102,6 +106,7 @@ const APPLICATION_DEPENDENCY_LABELS = [
   "gist_auto_update.document_id via duplicate-owned document",
   "collaborator.document_id via duplicate-owned document",
   "version.document_id via duplicate-owned document",
+  "required_version_intent.document_id via duplicate-owned document",
   "star.document_id via duplicate-owned document",
   "recent.document_id via duplicate-owned document",
   "asset.document_id via duplicate-owned document",
@@ -369,6 +374,10 @@ const SAFE_STATE_QUERIES: Record<RepairSchemaTable, string> = {
   recent: `SELECT xmin::text AS row_version,
                   user_id, document_id, opened_at::text AS opened_at
              FROM recent`,
+  required_version_intent: `SELECT xmin::text AS row_version,
+                                   document_id, version_id, content_hash, kind, created_by, applied,
+                                   created_at::text AS created_at
+                              FROM required_version_intent`,
   review: `SELECT xmin::text AS row_version,
                   id, document_id, user_id, agent_token_id, verdict, thread_ids,
                   created_at::text AS created_at
@@ -823,6 +832,7 @@ async function collectApplicationDependencies(
     { label: "document.last_edited_by", query: "SELECT COUNT(*)::text AS count FROM document WHERE last_edited_by = $1", values: [duplicateId] },
     { label: "collaborator.added_by", query: "SELECT COUNT(*)::text AS count FROM collaborator WHERE added_by = $1", values: [duplicateId] },
     { label: "version.created_by", query: "SELECT COUNT(*)::text AS count FROM version WHERE created_by = $1", values: [duplicateId] },
+    { label: "required_version_intent.created_by", query: "SELECT COUNT(*)::text AS count FROM required_version_intent WHERE created_by = $1", values: [duplicateId] },
     {
       label: "activity.actor_id",
       query: `SELECT COUNT(*)::text AS count
@@ -864,6 +874,13 @@ async function collectApplicationDependencies(
       label: "version.document_id via duplicate-owned document",
       query: `SELECT COUNT(*)::text AS count
                 FROM version v JOIN document d ON d.id = v.document_id
+               WHERE d.owner_id = $1`,
+      values: [duplicateId],
+    },
+    {
+      label: "required_version_intent.document_id via duplicate-owned document",
+      query: `SELECT COUNT(*)::text AS count
+                FROM required_version_intent r JOIN document d ON d.id = r.document_id
                WHERE d.owner_id = $1`,
       values: [duplicateId],
     },

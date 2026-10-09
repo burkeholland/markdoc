@@ -120,22 +120,20 @@ describe("POST /api/documents/[id]/versions and /versions/[vid] restore: post-wr
     expect(await activityActions()).toEqual(["version.restore"]);
   });
 
-  it("restore with the 'Restored version' insert failing: 200, the live text is the version's, version: null, warnings: [version-not-saved], one 'Before restore' snapshot", async () => {
+  it("restore with the 'Restored version' insert failing: 500, the missing durable version is never acknowledged", async () => {
     await freshDoc();
     const older = await addVersion({ documentId: docId, content: OLD, kind: "named", title: "Old" });
     const actual = await vi.importActual<typeof import("@/server/documents")>("@/server/documents");
     // The pre-restore snapshot (kind `auto`) must land; only the "Restored version n" row collides.
     vi.mocked(addVersion).mockImplementation((input, tx) => (input.kind === "restore" ? Promise.reject(VERSION_COLLISION) : actual.addVersion(input, tx)));
     let res: Response;
-    let logged: unknown[][];
     try {
-      ({ result: res, logged } = await quietly(() => post(version.POST, `versions/${older.id}`, { action: "restore" }, older.id)));
+      ({ result: res } = await quietly(() => post(version.POST, `versions/${older.id}`, { action: "restore" }, older.id)));
     } finally {
       vi.mocked(addVersion).mockImplementation(actual.addVersion);
     }
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, version: null, warnings: ["version-not-saved"] });
-    expect(logged).toEqual([["[version] version-not-saved", expect.any(Error)]]);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Unexpected error" });
 
     expect((await readLiveText(docId)).text).toBe(OLD);
     const rows = await listVersions(docId);
@@ -145,8 +143,7 @@ describe("POST /api/documents/[id]/versions and /versions/[vid] restore: post-wr
       ["auto", "Before restore"],
       ["named", "Old"],
     ]);
-    // The restore did happen, so it is in the feed.
-    expect(await activityActions()).toEqual(["version.restore"]);
+    expect(await activityActions()).toEqual([]);
   });
 
   it("restore with recordActivity failing: 200 with the restore version and warnings: [activity-not-recorded]", async () => {
@@ -162,25 +159,22 @@ describe("POST /api/documents/[id]/versions and /versions/[vid] restore: post-wr
     expect(await activityActions()).toEqual([]);
   });
 
-  it("both tails failing on a restore list both codes, in write order", async () => {
+  it("a restore version failure stops before the activity tail", async () => {
     await freshDoc();
     const older = await addVersion({ documentId: docId, content: OLD, kind: "named", title: "Old" });
     const actual = await vi.importActual<typeof import("@/server/documents")>("@/server/documents");
     vi.mocked(addVersion).mockImplementation((input, tx) => (input.kind === "restore" ? Promise.reject(VERSION_COLLISION) : actual.addVersion(input, tx)));
     vi.mocked(recordActivity).mockRejectedValueOnce(DB_FAILURE);
     let res: Response;
-    let logged: unknown[][];
+    const activityCalls = vi.mocked(recordActivity).mock.calls.length;
     try {
-      ({ result: res, logged } = await quietly(() => post(version.POST, `versions/${older.id}`, { action: "restore" }, older.id)));
+      ({ result: res } = await quietly(() => post(version.POST, `versions/${older.id}`, { action: "restore" }, older.id)));
     } finally {
       vi.mocked(addVersion).mockImplementation(actual.addVersion);
     }
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, version: null, warnings: ["version-not-saved", "activity-not-recorded"] });
-    expect(logged).toEqual([
-      ["[version] version-not-saved", expect.any(Error)],
-      ["[version] activity-not-recorded", expect.any(Error)],
-    ]);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Unexpected error" });
+    expect(vi.mocked(recordActivity).mock.calls.length).toBe(activityCalls);
     expect((await readLiveText(docId)).text).toBe(OLD);
   });
 

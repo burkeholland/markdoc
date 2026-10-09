@@ -7,11 +7,14 @@ import { withDocument, type CollabContext } from "@/server/collab/hocuspocus";
 import { hydrateDoc, META_KEY, TEXT_KEY } from "@/server/collab/seed";
 import { SuggestionsModel } from "@/editor/collab/suggestions";
 import { CommentsModel } from "@/editor/collab/comments";
-import { diffOps, applyOps } from "@/editor/sync/text-diff";
+import { replaceText } from "@/editor/sync/replace-plan";
 import { HttpError } from "@/server/http";
 import { noteContentWrite, rememberCleanText, cachedCleanText, unifiedDiff, type WriterRef } from "@/server/agent-events";
 import { contentHash } from "@/server/export/html";
 import type { AgentActivity } from "@/server/agents";
+
+/** The longest text a write through the API may leave in a document, in characters (`PUT` and `PATCH /content`). */
+export const MAX_TEXT_CHARS = 2_000_000;
 
 export interface LiveText {
   /** Full Markdown including pending suggested insertions. */
@@ -246,16 +249,14 @@ export async function evictLiveDocument(docId: string, reason: EvictionReason): 
   await collab.unloadDocument(live).catch(() => undefined);
 }
 
-/** Replace the document text with `newText` using a minimal diff, keeping collaborators' positions stable. */
+/**
+ * Replace the document text with `newText`, as edits that keep what did not change in place (and with it
+ * collaborators' carets and comments). The edits are planned in bounded time (`planReplace`, #2341).
+ */
 export async function replaceLiveText(docId: string, ctx: CollabContext, newText: string): Promise<boolean> {
   let changed = false;
   await mutateLiveDoc(docId, ctx, (doc) => {
-    const ytext = doc.getText(TEXT_KEY);
-    const ops = diffOps(ytext.toString(), newText, 0);
-    if (ops.length > 0) {
-      applyOps(ytext, ops);
-      changed = true;
-    }
+    changed = replaceText(doc.getText(TEXT_KEY), newText).length > 0;
   });
   return changed;
 }
