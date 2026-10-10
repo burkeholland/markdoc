@@ -485,6 +485,145 @@ describe("link cards in the rich pane (#2317)", () => {
   });
 
   describe("typing a link in the rich pane", () => {
+    const typedLinkCases = [
+      { name: "paragraph", source: "Prefix ", offset: "Prefix ".length },
+      { name: "list item", source: "- Prefix ", offset: "- Prefix ".length },
+      { name: "blockquote", source: "> Prefix ", offset: "> Prefix ".length },
+      { name: "heading", source: "## Prefix ", offset: "## Prefix ".length },
+      {
+        name: "table cell",
+        source: "| Header |\n| --- |\n| Prefix  after |",
+        offset: "| Header |\n| --- |\n| Prefix ".length,
+      },
+    ] as const;
+
+    const linkedText = (view: EditorView) => {
+      const links: Array<{ text: string; href: string }> = [];
+      view.state.doc.descendants((node) => {
+        if (!node.isText || !node.text) return;
+        const link = schema.marks.link.isInSet(node.marks);
+        if (link) links.push({ text: node.text, href: String(link.attrs.href) });
+      });
+      return links;
+    };
+
+    it.each(typedLinkCases)(
+      "keeps a web address typed in a $name whole and identical to a paste",
+      async ({ source, offset }) => {
+        const typed = open(source);
+        const position = typed.session.binding.getSourceMap().srcToPm(offset);
+        typed.view.dispatch(typed.view.state.tr.setSelection(TextSelection.create(typed.view.state.doc, position)));
+        for (const char of VIDEO) {
+          typed.view.dispatch(typed.view.state.tr.insertText(char));
+          await new Promise<void>((resolve) => queueMicrotask(resolve));
+        }
+
+        const pasted = open(source);
+        const pastedPosition = pasted.session.binding.getSourceMap().srcToPm(offset);
+        pasted.view.dispatch(pasted.view.state.tr.insertText(VIDEO, pastedPosition));
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+        expect(typed.text()).toBe(pasted.text());
+        expect(typed.text()).toContain(VIDEO);
+        expect(typed.text()).not.toContain("[www]");
+        const links = linkedText(typed.view);
+        expect(links.every((link) => link.text === VIDEO && link.href === VIDEO)).toBe(true);
+        expect(links.length).toBeLessThanOrEqual(1);
+        if (source !== "Prefix ") expect(links).toEqual([{ text: VIDEO, href: VIDEO }]);
+      },
+    );
+
+    it("keeps URL punctuation outside the link and malformed addresses plain", async () => {
+      const punctuation = "https://example.com/path).";
+      const first = open("- Prefix ");
+      const firstPosition = first.session.binding.getSourceMap().srcToPm("- Prefix ".length);
+      first.view.dispatch(first.view.state.tr.setSelection(TextSelection.create(first.view.state.doc, firstPosition)));
+      for (const char of punctuation) {
+        first.view.dispatch(first.view.state.tr.insertText(char));
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+      }
+      expect(first.text()).toBe(`- Prefix ${punctuation}`);
+      expect(linkedText(first.view)).toEqual([
+        { text: "https://example.com/path", href: "https://example.com/path" },
+      ]);
+
+      const malformed = "https://[invalid";
+      const second = open("- Prefix ");
+      const secondPosition = second.session.binding.getSourceMap().srcToPm("- Prefix ".length);
+      second.view.dispatch(second.view.state.tr.setSelection(TextSelection.create(second.view.state.doc, secondPosition)));
+      for (const char of malformed) {
+        second.view.dispatch(second.view.state.tr.insertText(char));
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+      }
+      expect(second.text()).toBe("- Prefix https://\\[invalid");
+      expect(linkedText(second.view)).toEqual([]);
+    });
+
+    it("preserves explicit, mail, and non-http links while editing around them", async () => {
+      const source = "[label](https://example.com) <ftp://example.com> a@example.com ";
+      const { session, view, text } = open(source);
+      const position = session.binding.getSourceMap().srcToPm(source.length);
+      view.dispatch(view.state.tr.insertText("after", position));
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(text()).toBe(source + "after");
+      expect(linkedText(view)).toEqual([
+        { text: "label", href: "https://example.com" },
+        { text: "ftp://example.com", href: "ftp://example.com" },
+        { text: "a@example.com", href: "mailto:a@example.com" },
+      ]);
+    });
+
+    it.each([
+      ["web", "<https://example.com>", "https://example.com"],
+      ["mail", "<mailto:person@example.com>", "mailto:person@example.com"],
+    ])("preserves an intentional angle $name link when typing beside it", async (_name, autolink, href) => {
+      const source = `- Prefix ${autolink}`;
+      const { session, view, text } = open(source);
+      const position = session.binding.getSourceMap().srcToPm(source.length);
+      view.dispatch(view.state.tr.insertText("x", position));
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(text()).toBe(`${source}x`);
+      expect(linkedText(view)).toEqual([{ text: href, href }]);
+    });
+
+    it("keeps a bare autolink bare when another item in the same list changes", async () => {
+      const source = "- Typed \n- Pasted";
+      const { session, view, text } = open(source);
+      const firstPosition = session.binding.getSourceMap().srcToPm("- Typed ".length);
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, firstPosition)));
+      for (const char of VIDEO) {
+        view.dispatch(view.state.tr.insertText(char));
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+      }
+      expect(text()).toBe(`- Typed ${VIDEO}\n- Pasted`);
+
+      const secondOffset = text().length;
+      const secondPosition = session.binding.getSourceMap().srcToPm(secondOffset);
+      view.dispatch(view.state.tr.insertText("!", secondPosition));
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(text()).toBe(`- Typed ${VIDEO}\n- Pasted!`);
+      expect(text()).not.toContain(`<${VIDEO}>`);
+      expect(linkedText(view)).toEqual([{ text: VIDEO, href: VIDEO }]);
+    });
+
+    it("undoes and redoes a typed address as text without leaving a partial link", async () => {
+      const { session, view, text } = open("- Prefix ");
+      const position = session.binding.getSourceMap().srcToPm("- Prefix ".length);
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, position)));
+      for (const char of VIDEO) {
+        view.dispatch(view.state.tr.insertText(char));
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+      }
+      expect(text()).toBe(`- Prefix ${VIDEO}`);
+      session.undo();
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(text()).toBe("- Prefix ");
+      session.redo();
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(text()).toBe(`- Prefix ${VIDEO}`);
+      expect(linkedText(view)).toEqual([{ text: VIDEO, href: VIDEO }]);
+    });
+
     it.each([
       ["a post link", TWEET],
       ["a video link", VIDEO],
