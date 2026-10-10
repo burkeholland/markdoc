@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useLayoutEffect, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { DocumentDto } from "@/server/dto";
 import { api, ApiError, apiErrorText } from "@/lib/api";
 import {
@@ -17,7 +17,7 @@ type Problem = { status: "failed" | "conflict"; message: string; source: Action[
 type AuthorityStamp = { mount: symbol; serial: number; visibilityGeneration: number };
 type RequestOwner = AuthorityStamp & { token: symbol; kind: Action["kind"] };
 type TimerOwner = AuthorityStamp & { token: symbol };
-class ControlAuthority {
+type ControlAuthority = {
   identity: string;
   mount: symbol | null;
   visible: boolean;
@@ -29,31 +29,24 @@ class ControlAuthority {
   timer: ReturnType<typeof setTimeout> | undefined;
   timerOwner: TimerOwner | null;
   runQueuedStatus: (() => void) | null;
+};
 
-  constructor(identity: string) {
-    this.identity = identity;
-    this.mount = null;
-    this.visible = false;
-    this.visibilityGeneration = 0;
-    this.serial = 0;
-    this.busy = "status";
-    this.requestOwner = null;
-    this.queuedStatus = null;
-    this.timer = undefined;
-    this.timerOwner = null;
-    this.runQueuedStatus = null;
-  }
+function createControlAuthority(identity: string): ControlAuthority {
+  return {
+    identity,
+    mount: null,
+    visible: false,
+    visibilityGeneration: 0,
+    serial: 0,
+    busy: "status",
+    requestOwner: null,
+    queuedStatus: null,
+    timer: undefined,
+    timerOwner: null,
+    runQueuedStatus: null,
+  };
 }
 
-class ControlAuthorityCell {
-  #current: ControlAuthority;
-
-  constructor(current: ControlAuthority) {
-    this.#current = current;
-  }
-
-  readonly read = () => this.#current;
-}
 
 type DestinationSnapshot = Readonly<{
   gistId: string;
@@ -105,7 +98,8 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
 }) {
   const id = useId();
   const [settingsMount] = useState(() => Symbol(identity));
-  const [authority] = useState(() => new ControlAuthorityCell(new ControlAuthority(identity)));
+  // A ref, not state: the authority is mutated in the same tick as the click that claims it, before React renders.
+  const authorityRef = useRef(createControlAuthority(identity));
   const [action, setAction] = useState<Action>({ kind: "status", serial: 0, explicit: false });
   const [busy, setBusy] = useState<Action["kind"] | null>("status");
   const [status, setStatus] = useState<GistAutoUpdateStatus | null>(null);
@@ -114,7 +108,7 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
   const [problem, setProblem] = useState<Problem | null>(null);
 
   useLayoutEffect(() => {
-    const current = authority.read();
+    const current = authorityRef.current;
     const mount = settingsMount;
     current.mount = mount;
     current.visible = document.visibilityState === "visible";
@@ -147,10 +141,10 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
       current.runQueuedStatus = null;
       clearAuthorityTimer(current);
     };
-  }, [authority, identity, settingsMount]);
+  }, [authorityRef, identity, settingsMount]);
 
   useEffect(() => {
-    const current = authority.read();
+    const current = authorityRef.current;
     let statusInFlight = false;
     const stampIsCurrent = (stamp: AuthorityStamp, requireVisible = true) => {
       return current.identity === identity
@@ -351,7 +345,7 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
     };
   }, [
     action,
-    authority,
+    authorityRef,
     documentId,
     filename,
     gistId,
@@ -366,7 +360,7 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
   // One request at a time. The authority's `busy` is set here, before React renders again, so the second
   // click of a double-click (or a second button in the same task) starts nothing.
   const start = (kind: Action["kind"]) => {
-    const current = authority.read();
+    const current = authorityRef.current;
     const mount = current.mount;
     if (
       mount !== settingsMount
@@ -399,7 +393,7 @@ function AutoUpdateSettings({ identity, documentId, gistId, filename, url }: {
         : { kind, serial: nextSerial });
   };
   const acknowledge = (checked: boolean) => {
-    const current = authority.read();
+    const current = authorityRef.current;
     if (current.mount !== settingsMount || current.busy !== null) return;
     setAcknowledged(checked);
   };

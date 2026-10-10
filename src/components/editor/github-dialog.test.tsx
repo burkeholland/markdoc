@@ -500,31 +500,36 @@ describe("GitHubSignInPrompt", () => {
     );
     const dialog = screen.getByTestId("dialog");
     const prompt = screen.getByTestId("github-signin-prompt");
-    // What Radix does while a dialog opens over a closing menu: a scroll lock and pointer-events on
-    // <body>, focus guards at both ends of it, ids on the dialog, the menu's portal removed.
+    const bodyStyle = document.body.getAttribute("style");
     const guard = document.createElement("span");
     const portal = document.createElement("div");
-    document.body.setAttribute("data-scroll-locked", "1");
-    document.body.style.pointerEvents = "none";
-    document.body.prepend(guard);
-    document.body.append(portal);
-    dialog.setAttribute("aria-describedby", "radix-description");
-    dialog.style.pointerEvents = "auto";
-    prompt.before(document.createElement("p"));
-    prompt.after(document.createElement("p"));
-    await act(async () => {});
-    portal.remove();
-    guard.remove();
-    document.body.removeAttribute("data-scroll-locked");
-    document.body.style.pointerEvents = "";
-    await act(async () => {});
-
     try {
+      // What Radix does while a dialog opens over a closing menu: a scroll lock and pointer-events on
+      // <body>, focus guards at both ends of it, ids on the dialog, the menu's portal removed.
+      document.body.setAttribute("data-scroll-locked", "1");
+      document.body.style.pointerEvents = "none";
+      document.body.prepend(guard);
+      document.body.append(portal);
+      dialog.setAttribute("aria-describedby", "radix-description");
+      dialog.style.pointerEvents = "auto";
+      prompt.before(document.createElement("p"));
+      prompt.after(document.createElement("p"));
+      await act(async () => {});
+      portal.remove();
+      guard.remove();
+      document.body.removeAttribute("data-scroll-locked");
+      document.body.style.pointerEvents = "";
+      await act(async () => {});
+
       fireEvent.click(button());
       expect(signIn).toHaveBeenCalledExactlyOnceWith("github", { redirectTo: "/documents/changed" });
       expect(button()).toBeDisabled();
     } finally {
-      document.body.removeAttribute("style");
+      portal.remove();
+      guard.remove();
+      document.body.removeAttribute("data-scroll-locked");
+      if (bodyStyle === null) document.body.removeAttribute("style");
+      else document.body.setAttribute("style", bodyStyle);
     }
   });
 

@@ -59,8 +59,9 @@ export function GitHubSignInPrompt({ githubConfigured, redirectTo }: { githubCon
     if (signingIn.current) return;
     signingIn.current = true;
     setBusy(true);
-    // A sign-in that starts leaves this page. One that fails gives the button back.
-    void (async () => signIn("github", { redirectTo: redirectTo ?? window.location.href }))().catch(() => {
+    // The executor calls signIn now, and a throw from it becomes a rejection. A sign-in that starts leaves
+    // this page; one that fails gives the button back.
+    void new Promise((resolve) => resolve(signIn("github", { redirectTo: redirectTo ?? window.location.href }))).catch(() => {
       signingIn.current = false;
       setBusy(false);
     });
