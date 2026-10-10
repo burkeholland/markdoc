@@ -1,6 +1,6 @@
 import { expect, type Page, type WebSocketRoute } from "@playwright/test";
 import { test } from "./fixtures";
-import { createDocument, openDocument, signIn, waitForEditor } from "./helpers";
+import { createDocument, openDocument, selectTextInRich, signIn, waitForEditor } from "./helpers";
 
 const mod = process.platform === "darwin" ? "Meta" : "Control";
 const CONTENT = "# Introduction\n\nIntro paragraph.\n";
@@ -167,4 +167,71 @@ test.describe("initial document readiness", () => {
       await user.context.close();
     }
   });
+});
+
+test.describe("palette document context", () => {
+  const commands = [
+    {
+      id: "format:bold",
+      prepare: (page: Page) => selectTextInRich(page, "Old paragraph"),
+    },
+    {
+      id: "block:heading1",
+      prepare: async (page: Page) => {
+        await page.locator(".md-rich p").last().click();
+        await page.keyboard.press("End");
+      },
+    },
+  ] as const;
+
+  for (const command of commands) {
+    test(`an already-open ${command.id} command cannot mutate either document after navigation`, async ({ browser }) => {
+      const user = await signIn(browser, `stale-palette-${command.id.replace(/[^a-z0-9]+/gi, "-")}`);
+      try {
+        const { page } = user;
+        const oldContent = "# Old document\n\nOld paragraph.\n";
+        const newContent = "# New document\n\nNew paragraph.\n";
+        const oldId = await createDocument(page, oldContent, "Old palette context");
+        const newId = await createDocument(page, newContent, "New palette context");
+        await openDocument(page, newId);
+        await page.evaluate((id) => {
+          const browser = window as typeof window & {
+            next?: { router?: { push: (href: string) => void } };
+          };
+          if (!browser.next?.router) throw new Error("Next router was unavailable");
+          browser.next.router.push(`/d/${id}`);
+        }, oldId);
+        await expect(page).toHaveURL(new RegExp(`/d/${oldId}$`));
+        await expect(page.locator(".md-rich")).toContainText("Old paragraph");
+        await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
+        await command.prepare(page);
+
+        await page.locator("body").press(`${mod}+Shift+P`);
+        await expect(page.getByTestId("command-palette")).toBeVisible();
+        const staleRow = page.getByTestId(`palette-item-${command.id}`);
+        await expect(staleRow).toBeVisible();
+
+        await page.evaluate((testId) => {
+          window.addEventListener("click", (event) => {
+            const target = event.target;
+            if (!(target instanceof Element) || !target.closest(`[data-testid="${testId}"]`)) {
+              throw new Error("Unexpected click before stale palette navigation");
+            }
+            window.history.back();
+          }, { once: true });
+        }, `palette-item-${command.id}`);
+
+        await staleRow.click();
+        await expect(page).toHaveURL(new RegExp(`/d/${newId}$`));
+        await expect(page.locator(".md-rich")).toContainText("New paragraph");
+        await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
+        await expect(page.getByTestId("command-palette")).toHaveCount(0);
+        await page.waitForTimeout(1_500);
+        expect(await liveText(page, oldId)).toBe(oldContent);
+        expect(await liveText(page, newId)).toBe(newContent);
+      } finally {
+        await user.context.close();
+      }
+    });
+  }
 });

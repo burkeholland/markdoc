@@ -21,6 +21,7 @@ function stubCtx(overrides: Partial<EditorCommandContext> = {}, session: Partial
   const canComment = session.canComment ?? true;
   const ctx: EditorCommandContext & { calls: string[] } = {
     calls,
+    executionScope: {},
     actions: {
       rich: null,
       toggleMark: (k) => calls.push(`mark:${k}`),

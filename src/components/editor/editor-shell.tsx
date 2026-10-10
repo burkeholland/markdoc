@@ -1748,6 +1748,15 @@ export function EditorShell({
   const [documentMutationOwner, setDocumentMutationOwner] = useState<DocumentMutationOwner | null>(null);
   const [nameVersionVisit, setNameVersionVisit] = useState<NameVersionVisit | null>(null);
   const currentEditorRef = useRef<EditorIdentity | null>(null);
+  const paletteExecutionScope = useMemo(() => {
+    let current = true;
+    return {
+      isCurrent: () => current && currentEditorRef.current === editorIdentity,
+      retire: () => {
+        current = false;
+      },
+    };
+  }, [editorIdentity]);
   const publishPullOwnerRef = useRef<PublishPullOwner | null>(null);
   const documentMutationOwnerRef = useRef<DocumentMutationOwner | null>(null);
   const documentMutationSequence = useRef(0);
@@ -1922,7 +1931,15 @@ export function EditorShell({
       if (documentMutationOwnerRef.current?.editor === editorIdentity) documentMutationOwnerRef.current = null;
       if (leavingEditorRef.current === editorIdentity) leavingEditorRef.current = null;
     };
-  }, [editorIdentity]);
+  }, [editorIdentity, paletteExecutionScope]);
+  useEffect(() => {
+    const editorPath = window.location.pathname;
+    const retire = () => {
+      if (window.location.pathname !== editorPath) paletteExecutionScope.retire();
+    };
+    window.addEventListener("popstate", retire);
+    return () => window.removeEventListener("popstate", retire);
+  }, [paletteExecutionScope]);
   useLayoutEffect(() => {
     toastAuthorityRef.current = toastAuthority;
     setToastPublications((current) =>
@@ -2666,6 +2683,7 @@ export function EditorShell({
         setPendingNotice(`“${owner.title}” was moved to the trash.`, "success");
         await owner.session.clearLocal();
         if (!ownsDocumentMutation(owner)) return;
+        paletteExecutionScope.retire();
         router.push("/");
       } catch (error) {
         if (ownsDocumentMutation(owner)) toast(apiErrorText(error, "Could not move to trash"), "error");
@@ -2673,7 +2691,7 @@ export function EditorShell({
         finishDocumentMutation(owner);
       }
     })();
-  }, [beginDocumentMutation, doc.title, editorIdentity, finishDocumentMutation, ownsDocumentMutation, router, toast]);
+  }, [beginDocumentMutation, doc.title, editorIdentity, finishDocumentMutation, ownsDocumentMutation, paletteExecutionScope, router, toast]);
 
   // Another owner session (or this one, via the API) trashed the document: leave with a notice.
   const trashed = useSessionValue(session, (s) => s.trashed);
@@ -2682,10 +2700,13 @@ export function EditorShell({
     leavingEditorRef.current = editorIdentity;
     setPendingNotice("This document was moved to the trash.", "info");
     const leaveIfCurrent = () => {
-      if (currentEditorRef.current === editorIdentity && leavingEditorRef.current === editorIdentity) router.push("/");
+      if (currentEditorRef.current === editorIdentity && leavingEditorRef.current === editorIdentity) {
+        paletteExecutionScope.retire();
+        router.push("/");
+      }
     };
     void session.clearLocal().then(leaveIfCurrent, leaveIfCurrent);
-  }, [editorIdentity, trashed, session, router]);
+  }, [editorIdentity, trashed, session, paletteExecutionScope, router]);
 
   const duplicateDoc = useCallback(() => {
     const mutation = beginDocumentMutation("duplicate", (documentId) => api.documents.duplicate(documentId));
@@ -2699,6 +2720,7 @@ export function EditorShell({
           owner.storage === "local" ? `Created “${res.title}”.` : `Created “${res.title}” as a Markdoc document. The copy is not connected to GitHub.`,
           "success",
         );
+        paletteExecutionScope.retire();
         router.push(`/d/${res.id}`);
       } catch (error) {
         if (ownsDocumentMutation(owner)) toast(apiErrorText(error, "Could not make a copy"), "error");
@@ -2706,7 +2728,7 @@ export function EditorShell({
         finishDocumentMutation(owner);
       }
     })();
-  }, [beginDocumentMutation, finishDocumentMutation, ownsDocumentMutation, router, toast]);
+  }, [beginDocumentMutation, finishDocumentMutation, ownsDocumentMutation, paletteExecutionScope, router, toast]);
 
   // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
   const toggleComments = useCallback(
@@ -2961,6 +2983,7 @@ export function EditorShell({
   }, [paletteOpen, session]);
 
   const paletteCtx: EditorCommandContext = {
+    executionScope: paletteExecutionScope,
     actions,
     session: {
       get contentReady() {
@@ -3011,7 +3034,10 @@ export function EditorShell({
     trash: deleteFromHeader,
     publish: () => (doc.storage === "local" ? setDialog("publish") : publishFromHeader()),
     openReader: () => window.open(`/p/${doc.id}`, "_blank", "noopener"),
-    navigate: (href) => router.push(href),
+    navigate: (href) => {
+      paletteExecutionScope.retire();
+      router.push(href);
+    },
     notify: (message) => toast(message, "info"),
     headings: () => session.binding.getHeadings(),
     collaborators: () => session.presence().filter((u) => !u.isLocal).map((u) => ({ id: u.id, name: u.name })),
@@ -3025,7 +3051,7 @@ export function EditorShell({
   };
   // The palette reads the context when it opens; a ref keeps `paletteCommands` stable across renders.
   const paletteCtxRef = useRef(paletteCtx);
-  useEffect(() => {
+  useLayoutEffect(() => {
     paletteCtxRef.current = paletteCtx;
   });
   const paletteCommands = useCallback(() => buildCommands(paletteCtxRef.current), []);

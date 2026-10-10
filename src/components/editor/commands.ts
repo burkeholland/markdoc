@@ -16,6 +16,8 @@ export interface Command {
   title: string;
   keywords: string[];
   group: string;
+  /** Stable identity and optional liveness check for the editor/document context that produced this command. */
+  executionScope?: { isCurrent?: () => boolean };
   /** Keymap-style shortcut, e.g. "Mod-Shift-P"; rendered through `shortcut()`. */
   shortcut?: string;
   /** lucide icon name, resolved by the palette. */
@@ -36,6 +38,8 @@ export interface DocumentRef {
 type RichView = SlashContext["view"];
 
 export interface EditorCommandContext {
+  /** Changes whenever the live editor session or document is replaced. */
+  executionScope: object;
   /** Toolbar-style formatting and reveal helpers (EditorActions in the shell). */
   actions: {
     rich: RichView | null;
@@ -130,6 +134,10 @@ function withLiveWhen(command: Command): Command {
   };
 }
 
+function scopedCommand(command: Command, executionScope: EditorCommandContext["executionScope"]): Command {
+  return { ...withLiveWhen(command), executionScope };
+}
+
 /** Block items reused from the slash menu (template items, other extensions and `/agent` - the palette has `doc:connect-agent` - are skipped). */
 function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = SLASH_ITEMS): Command[] {
   return items
@@ -163,17 +171,19 @@ function headingCommands(ctx: EditorCommandContext): Command[] {
     keywords: [`h${h.level}`, `line ${h.line}`],
     group: "Headings",
     icon: `Heading${Math.min(h.level, 6)}`,
+    executionScope: ctx.executionScope,
     run: () => ctx.actions.revealSource(h.from, { focus: true }),
   }));
 }
 
-export function documentCommands(docs: DocumentRef[], navigate: (href: string) => void, group = "Recent documents"): Command[] {
+export function documentCommands(docs: DocumentRef[], navigate: (href: string) => void, group = "Recent documents", executionScope?: Command["executionScope"]): Command[] {
   return docs.map((d) => ({
     id: `doc:${d.id}`,
     title: d.title || "Untitled",
     keywords: ["document", "open"],
     group,
     icon: "FileText",
+    executionScope,
     run: () => navigate(`/d/${d.id}`),
   }));
 }
@@ -216,7 +226,7 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
       keywords: ["switch", "file", "documents", "recent"],
       group: "Navigation",
       icon: "FileText",
-      children: async () => documentCommands(await ctx.recentDocuments(), ctx.navigate),
+      children: async () => documentCommands(await ctx.recentDocuments(), ctx.navigate, "Recent documents", ctx.executionScope),
       run: () => {},
     },
     {
@@ -233,6 +243,7 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
           keywords: ["follow", "collaborator"],
           group: "Collaborators",
           icon: "User",
+          executionScope: ctx.executionScope,
           run: () => ctx.follow?.(u.id),
         })),
       run: () => {},
@@ -351,13 +362,13 @@ export function buildCommands(ctx: EditorCommandContext): Command[] {
 
   const help: Command[] = [{ id: "help:shortcuts", title: "Keyboard shortcuts", keywords: ["help", "keys", "hotkeys", "cheatsheet"], group: "Help", icon: "Keyboard", shortcut: "Mod-/", run: () => ctx.setDialog("shortcuts") }];
 
-  if (!ctx.embed) return [...navigation, ...formatting, ...slashCommands(ctx), ...document, ...view, ...help].map(withLiveWhen);
+  if (!ctx.embed) return [...navigation, ...formatting, ...slashCommands(ctx), ...document, ...view, ...help].map((command) => scopedCommand(command, ctx.executionScope));
   const canvasNavigation = navigation.filter((command) => command.id !== "nav:recent" && command.id !== "nav:dashboard");
   const canvasDocument = document.filter(
     (command) =>
       !["doc:share", "doc:publish", "doc:download-md", "doc:download-html", "doc:download-pdf", "doc:copy-markdown", "doc:reader", "doc:duplicate", "doc:trash"].includes(command.id),
   );
-  return [...canvasNavigation, ...formatting, ...slashCommands(ctx), ...canvasDocument, ...view, ...help].map(withLiveWhen);
+  return [...canvasNavigation, ...formatting, ...slashCommands(ctx), ...canvasDocument, ...view, ...help].map((command) => scopedCommand(command, ctx.executionScope));
 }
 
 export interface DashboardCommandContext {
