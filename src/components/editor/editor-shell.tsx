@@ -1748,6 +1748,15 @@ export function EditorShell({
   const [documentMutationOwner, setDocumentMutationOwner] = useState<DocumentMutationOwner | null>(null);
   const [nameVersionVisit, setNameVersionVisit] = useState<NameVersionVisit | null>(null);
   const currentEditorRef = useRef<EditorIdentity | null>(null);
+  const paletteExecutionScope = useMemo(() => {
+    let current = true;
+    return {
+      isCurrent: () => current && currentEditorRef.current === editorIdentity,
+      retire: () => {
+        current = false;
+      },
+    };
+  }, [editorIdentity]);
   const publishPullOwnerRef = useRef<PublishPullOwner | null>(null);
   const documentMutationOwnerRef = useRef<DocumentMutationOwner | null>(null);
   const documentMutationSequence = useRef(0);
@@ -1922,7 +1931,15 @@ export function EditorShell({
       if (documentMutationOwnerRef.current?.editor === editorIdentity) documentMutationOwnerRef.current = null;
       if (leavingEditorRef.current === editorIdentity) leavingEditorRef.current = null;
     };
-  }, [editorIdentity]);
+  }, [editorIdentity, paletteExecutionScope]);
+  useEffect(() => {
+    const editorPath = window.location.pathname;
+    const retire = () => {
+      if (window.location.pathname !== editorPath) paletteExecutionScope.retire();
+    };
+    window.addEventListener("popstate", retire);
+    return () => window.removeEventListener("popstate", retire);
+  }, [paletteExecutionScope]);
   useLayoutEffect(() => {
     toastAuthorityRef.current = toastAuthority;
     setToastPublications((current) =>
@@ -2051,6 +2068,7 @@ export function EditorShell({
   }, [panelWidth, panelMax, setPanelWidth]);
 
   const openNameVersion = useCallback(() => {
+    if (!session.canEdit) return;
     const editor = currentEditorRef.current;
     if (!editor) return;
     const visit = {
@@ -2062,11 +2080,12 @@ export function EditorShell({
     currentNameVersionVisitRef.current = visit;
     setNameVersionVisit(visit);
     setDialog("versionName");
-  }, []);
+  }, [session]);
   const setEditorDialog = useCallback((kind: DialogKind) => {
+    if (kind && kind !== "share" && kind !== "publish" && kind !== "shortcuts" && !session.canEdit) return;
     if (kind === "versionName") openNameVersion();
     else setDialog(kind);
-  }, [openNameVersion]);
+  }, [openNameVersion, session]);
   const actions = useMemo(() => new EditorActions(session, setEditorDialog), [session, setEditorDialog]);
   // Transfer the live selection before changing surfaces, including while Comments owns focus.
   useEffect(() => {
@@ -2242,7 +2261,7 @@ export function EditorShell({
   /** Comment on the whole document: opens Comments with a zero-width composer at {0,0}; `mention` types `@` for the agent picker. */
   const startDocumentComment = useCallback(
     (opts?: { mention?: boolean }) => {
-      if (!session.canComment) return;
+      if (!session.canCreateComment) return;
       setSidePanel("comments");
       setDocumentComposer((prev) => ({ mention: !!opts?.mention, nonce: (prev?.nonce ?? 0) + 1 }));
     },
@@ -2250,7 +2269,7 @@ export function EditorShell({
   );
 
   const startComment = useCallback(() => {
-    if (!session.canComment) return;
+    if (!session.canCreateComment) return;
     const range = actions.selectionSourceRange();
     // No selection is no longer an error: the comment is about the document (#1025).
     if (!range) {
@@ -2262,9 +2281,10 @@ export function EditorShell({
   }, [actions, session, startDocumentComment]);
 
   const openLink = useCallback(() => {
+    if (!session.canEdit) return;
     setLinkInitial(actions.currentLink());
     setDialog("link");
-  }, [actions]);
+  }, [actions, session]);
 
   const reveal = useCallback((offset: number) => actions.revealSource(offset, { focus: true }), [actions]);
 
@@ -2493,7 +2513,7 @@ export function EditorShell({
           if (e instanceof ApiError && e.status === 409 && e.body?.status === "conflict" && typeof e.body.merged === "string") {
             if (!ownsPublishPull(owner)) throw e;
             // Put the marked text in the document so the user resolves conflicts inline (the `merge-conflict` lint flags each marker).
-            session.replaceSource([{ from: 0, to: session.ytext.length, text: e.body.merged }]);
+            session.replaceSourceFromReconciliation([{ from: 0, to: session.ytext.length, text: e.body.merged }]);
             session.setActiveSurface("code");
             if (shownLayout === "rich") setLayout(isPhone ? "code" : "split");
             toast(`Merged with ${e.body.conflicts} conflict${e.body.conflicts === 1 ? "" : "s"} — resolve the marked lines, then publish.`, "info");
@@ -2663,6 +2683,7 @@ export function EditorShell({
         setPendingNotice(`“${owner.title}” was moved to the trash.`, "success");
         await owner.session.clearLocal();
         if (!ownsDocumentMutation(owner)) return;
+        paletteExecutionScope.retire();
         router.push("/");
       } catch (error) {
         if (ownsDocumentMutation(owner)) toast(apiErrorText(error, "Could not move to trash"), "error");
@@ -2670,7 +2691,7 @@ export function EditorShell({
         finishDocumentMutation(owner);
       }
     })();
-  }, [beginDocumentMutation, doc.title, editorIdentity, finishDocumentMutation, ownsDocumentMutation, router, toast]);
+  }, [beginDocumentMutation, doc.title, editorIdentity, finishDocumentMutation, ownsDocumentMutation, paletteExecutionScope, router, toast]);
 
   // Another owner session (or this one, via the API) trashed the document: leave with a notice.
   const trashed = useSessionValue(session, (s) => s.trashed);
@@ -2679,10 +2700,13 @@ export function EditorShell({
     leavingEditorRef.current = editorIdentity;
     setPendingNotice("This document was moved to the trash.", "info");
     const leaveIfCurrent = () => {
-      if (currentEditorRef.current === editorIdentity && leavingEditorRef.current === editorIdentity) router.push("/");
+      if (currentEditorRef.current === editorIdentity && leavingEditorRef.current === editorIdentity) {
+        paletteExecutionScope.retire();
+        router.push("/");
+      }
     };
     void session.clearLocal().then(leaveIfCurrent, leaveIfCurrent);
-  }, [editorIdentity, trashed, session, router]);
+  }, [editorIdentity, trashed, session, paletteExecutionScope, router]);
 
   const duplicateDoc = useCallback(() => {
     const mutation = beginDocumentMutation("duplicate", (documentId) => api.documents.duplicate(documentId));
@@ -2696,6 +2720,7 @@ export function EditorShell({
           owner.storage === "local" ? `Created “${res.title}”.` : `Created “${res.title}” as a Markdoc document. The copy is not connected to GitHub.`,
           "success",
         );
+        paletteExecutionScope.retire();
         router.push(`/d/${res.id}`);
       } catch (error) {
         if (ownsDocumentMutation(owner)) toast(apiErrorText(error, "Could not make a copy"), "error");
@@ -2703,7 +2728,7 @@ export function EditorShell({
         finishDocumentMutation(owner);
       }
     })();
-  }, [beginDocumentMutation, finishDocumentMutation, ownsDocumentMutation, router, toast]);
+  }, [beginDocumentMutation, finishDocumentMutation, ownsDocumentMutation, paletteExecutionScope, router, toast]);
 
   // Stable handlers so the memoized header, toolbar and status bar skip re-renders while typing.
   const toggleComments = useCallback(
@@ -2846,9 +2871,15 @@ export function EditorShell({
   const openPublish = useCallback(() => setDialog("publish"), []);
   const openShortcuts = useCallback(() => setDialog("shortcuts"), []);
   const openPalette = useCallback(() => setPaletteOpen(true), []);
-  const openImage = useCallback(() => setDialog("image"), []);
-  const openTable = useCallback(() => setDialog("table"), []);
-  const openCard = useCallback(() => setDialog("card"), []);
+  const openImage = useCallback(() => {
+    if (session.canEdit) setDialog("image");
+  }, [session]);
+  const openTable = useCallback(() => {
+    if (session.canEdit) setDialog("table");
+  }, [session]);
+  const openCard = useCallback(() => {
+    if (session.canEdit) setDialog("card");
+  }, [session]);
   const openVersionName = openNameVersion;
   const openStorage = useCallback(() => (isOwner ? setDialog("publish") : undefined), [isOwner]);
   const publishFromHeader = useCallback(() => {
@@ -2911,6 +2942,7 @@ export function EditorShell({
       const key = isMac && e.altKey && /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : e.key.toLowerCase();
       if (mod && !e.altKey && !e.shiftKey && key === "s") {
         e.preventDefault();
+        if (!session.canEdit) return;
         void session.flushSave().then(
           () => session.dirty
             ? toast("Requested changes saved; newer edits are still pending.", "info")
@@ -2950,14 +2982,36 @@ export function EditorShell({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [paletteOpen, session]);
 
-  const canChangeMode = role === "owner" || role === "editor";
   const paletteCtx: EditorCommandContext = {
+    executionScope: paletteExecutionScope,
     actions,
-    session: { canEdit: session.canEdit, canComment: session.canComment, mode: session.mode, canChangeMode, setMode: (m) => session.setMode(m) },
+    session: {
+      get contentReady() {
+        return session.contentReady;
+      },
+      get canEdit() {
+        return session.canEdit;
+      },
+      get canComment() {
+        return session.canComment;
+      },
+      get canCreateComment() {
+        return session.canCreateComment;
+      },
+      get mode() {
+        return session.mode;
+      },
+      get canChangeMode() {
+        return session.canWrite;
+      },
+      setMode: (m) => session.setMode(m),
+    },
     doc,
-    isOwner,
+    get isOwner() {
+      return session.role === "owner" && !session.accessBlocked;
+    },
     embed,
-    slashWhere: { inTable: format.tablePos >= 0, canComment: session.canComment },
+    slashWhere: { inTable: format.tablePos >= 0, canComment: session.canCreateComment },
     setDialog: setEditorDialog,
     openLink,
     openImage,
@@ -2980,7 +3034,10 @@ export function EditorShell({
     trash: deleteFromHeader,
     publish: () => (doc.storage === "local" ? setDialog("publish") : publishFromHeader()),
     openReader: () => window.open(`/p/${doc.id}`, "_blank", "noopener"),
-    navigate: (href) => router.push(href),
+    navigate: (href) => {
+      paletteExecutionScope.retire();
+      router.push(href);
+    },
     notify: (message) => toast(message, "info"),
     headings: () => session.binding.getHeadings(),
     collaborators: () => session.presence().filter((u) => !u.isLocal).map((u) => ({ id: u.id, name: u.name })),
@@ -2994,7 +3051,7 @@ export function EditorShell({
   };
   // The palette reads the context when it opens; a ref keeps `paletteCommands` stable across renders.
   const paletteCtxRef = useRef(paletteCtx);
-  useEffect(() => {
+  useLayoutEffect(() => {
     paletteCtxRef.current = paletteCtx;
   });
   const paletteCommands = useCallback(() => buildCommands(paletteCtxRef.current), []);
@@ -3039,7 +3096,7 @@ export function EditorShell({
   // it and the binding has rebuilt the ProseMirror document from it (the rebuild is coalesced
   // while the document loads and its parse runs in a task of its own, see MarkdownBinding.holdRemoteSync)
   // or the server confirmed the document really is empty.
-  const richHasContent = useSessionValue(session, (s) => (s.synced || s.ytext.length > 0) && !s.binding.hasHeldSync);
+  const richHasContent = useSessionValue(session, (s) => s.contentReady);
   // Until then the server-rendered preview stands in for the rich pane; the server and the
   // hydrating client both render it (the session has no content on either), so markup matches.
   const showRichPlaceholder = initialHtml !== null && !richHasContent;

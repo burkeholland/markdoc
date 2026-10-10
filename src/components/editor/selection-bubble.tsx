@@ -217,7 +217,7 @@ export function SelectionBubble({
       const ownsFocus = view.hasFocus() || Boolean(document.activeElement && layer.contains(document.activeElement));
       if (dismissed && !stillDismissed()) dismissed = null;
       // A selected link card (#2317) has its own controls, and none of the bubble's formats apply to it.
-      if (dismissed || empty || selectedCard(view.state) || !ownsFocus || pointerDown || session.activeSurface !== "rich" || !(session.canEdit || session.canComment)) {
+      if (dismissed || empty || selectedCard(view.state) || !ownsFocus || pointerDown || session.activeSurface !== "rich" || !(session.canEdit || session.canCreateComment)) {
         hide();
         return;
       }
@@ -439,11 +439,11 @@ export function SelectionBubble({
   if (!geometry || !shown) return placeHold.shield;
   const { position: pos, placement, layer } = geometry;
   const canEdit = session.canEdit;
-  const canComment = session.canComment;
+  const canCreateComment = session.canCreateComment;
 
   // Roving tabindex over [Bold, Italic, Strikethrough, Inline code, Link, Comment]: one tab stop on the
   // last-used enabled button.
-  const enabled = [canEdit, canEdit, canEdit, canEdit, canEdit, canComment];
+  const enabled = [canEdit, canEdit, canEdit, canEdit, canEdit, canCreateComment];
   const rovingIndex = bubbleRovingIndex(requestedRovingIndex, enabled);
   // Remember a moved stop so it stays put when the original button is enabled again.
   if (rovingIndex >= 0 && rovingIndex !== requestedRovingIndex) setRovingIndex(rovingIndex);
@@ -481,7 +481,7 @@ export function SelectionBubble({
   // panel moves the text on its way in, and the rest of a double-click or a second tap would land on it.
   // A click from the keyboard has its focus on the button, and the bubble stays until the composer takes it.
   const commentAction = (e: ReactMouseEvent<HTMLButtonElement>) => {
-    if (!(session.canComment && session.activeSurface === "rich")) return;
+    if (!(session.canCreateComment && session.activeSurface === "rich")) return;
     if (e.detail > 0) {
       placeHold.arm(e, e.currentTarget.closest("[data-testid=selection-bubble]"));
       ownerRef.current?.dismiss();
@@ -522,7 +522,7 @@ export function SelectionBubble({
           <LinkIcon size={16} />
         </BubbleButton>
         <span className="mx-[2px] h-[20px] w-px shrink-0 bg-white/20" />
-        <BubbleButton label="Comment" disabled={!canComment} tabStop={rovingIndex === 5} onClick={commentAction}>
+        <BubbleButton label="Comment" disabled={!canCreateComment} tabStop={rovingIndex === 5} onClick={commentAction}>
           <MessageSquarePlus size={16} />
         </BubbleButton>
       </div>

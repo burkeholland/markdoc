@@ -338,7 +338,7 @@ function collectTitleTargets(snapshot: TitleDomSnapshot, targets: WeakSet<Node>)
 
 function titleRenderIsCurrent(render: TitleRender) {
   const { session } = render;
-  const canEdit = session.role === "owner" || session.role === "editor";
+  const canEdit = session.canWrite;
   return (
     session.role === render.role &&
     canEdit === render.canEdit &&
@@ -418,9 +418,12 @@ function titleInputIsExact(presentation: TitleInputPresentation, changing = fals
 }
 
 export function TitleEditor({ session, fallback, compact }: { session: CollabSession; fallback: string; compact?: boolean }) {
-  const title = useSessionValue(session, (current) => current.title || fallback);
+  const { title, canEdit } = useSessionValue(
+    session,
+    (current) => ({ title: current.title || fallback, canEdit: current.canWrite }),
+    jsonEqual,
+  );
   const role = session.role;
-  const canEdit = role === "owner" || role === "editor";
   const [mount] = useState(() => Symbol("title editor"));
   const [authority] = useState(() => new TitlePublicationAuthority());
   const [, setPublicationRevision] = useState(0);
@@ -6207,7 +6210,7 @@ function createPublishMenuOwners(
 
 function publishMenuFactsAreCurrent(render: PublishMenuRender) {
   const { document, props, session } = render;
-  const canEdit = session.role === "owner" || session.role === "editor";
+  const canEdit = session.canWrite;
   const currentDocumentFields = snapshotMoreMenuDocument(document);
   const actions = publishMenuActions(props, render.linked, canEdit);
   return (
@@ -6865,7 +6868,7 @@ const ARROW_BESIDE_STATUS = () => undefined;
 function PublishMenu({ props }: { props: HeaderProps }) {
   const { doc, session, githubConfigured } = props;
   const linked = doc.storage !== "local";
-  const canEdit = session.role === "owner" || session.role === "editor";
+  const canEdit = useSessionValue(session, (current) => current.canWrite);
   // The sync status the chip shows; null while the plain Publish button stands in its place.
   const chipSync = linked && canEdit ? props.sync : null;
   const [mount] = useState(() => Symbol("publish menu"));
@@ -7851,7 +7854,7 @@ function moreMenuFactsAreCurrent(render: MoreMenuRender) {
   } = render;
   const currentBindings = moreMenuBindings(props);
   const linked = document.storage !== "local";
-  const canEdit = session.role === "owner" || session.role === "editor";
+  const canEdit = session.canWrite;
   const mutation = props.documentMutation;
   return (
     render.visit.session === session
@@ -10002,7 +10005,7 @@ export const Header = memo(function Header(props: HeaderProps) {
   const { session, doc, compact, githubConfigured, embed = false, connectAgentNonce = 0 } = props;
   const openComments = useSessionValue(session, (s) => s.comments.list().filter((c) => !c.resolved).length);
   const linked = doc.storage !== "local";
-  const canEdit = session.role === "owner" || session.role === "editor";
+  const canEdit = useSessionValue(session, (current) => current.canWrite);
   const [moreMenuMount] = useState(() => Symbol("document more menu"));
   const [, setMoreMenuPublicationRevision] = useState(0);
   const [moreMenuCoordinator] = useState(

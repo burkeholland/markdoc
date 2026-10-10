@@ -19,6 +19,7 @@ class FakeSession {
   canUndo = true;
   canRedo = true;
   canComment = true;
+  canCreateComment = true;
   private readonly listeners = new Set<() => void>();
 
   readonly subscribe = (listener: () => void) => {
@@ -27,7 +28,7 @@ class FakeSession {
   };
 
   /** Change permissions and tell subscribers, like a real role or history change. */
-  publish(patch: Partial<Pick<FakeSession, "canEdit" | "canUndo" | "canRedo" | "canComment">>) {
+  publish(patch: Partial<Pick<FakeSession, "canEdit" | "canUndo" | "canRedo" | "canComment" | "canCreateComment">>) {
     Object.assign(this, patch);
     this.version++;
     act(() => {
@@ -128,7 +129,7 @@ describe("Toolbar actions", () => {
 
   it("disables editing buttons for read-only users and hides Comment without comment rights", () => {
     const session = new FakeSession();
-    Object.assign(session, { canEdit: false, canComment: false });
+    Object.assign(session, { canEdit: false, canComment: false, canCreateComment: false });
     setup({ session });
     for (const b of screen.getAllByRole("button")) expect(b).toBeDisabled();
     expect(screen.queryByTestId("tb-comment")).toBeNull();
@@ -136,7 +137,7 @@ describe("Toolbar actions", () => {
 
   it("lets a commenter comment but not edit", async () => {
     const session = new FakeSession();
-    Object.assign(session, { canEdit: false, canComment: true });
+    Object.assign(session, { canEdit: false, canComment: true, canCreateComment: true });
     const t = setup({ session });
     expect(button("Bold")).toBeDisabled();
     expect(heading()).toBeDisabled();
@@ -210,7 +211,7 @@ describe("Toolbar actions", () => {
     ["Undo", { canUndo: false }, (t: ReturnType<typeof setup>) => t.actions.undo],
     ["Undo", { canEdit: false }, (t: ReturnType<typeof setup>) => t.actions.undo],
     ["Redo", { canRedo: false }, (t: ReturnType<typeof setup>) => t.actions.redo],
-    ["Add comment", { canComment: false }, (t: ReturnType<typeof setup>) => t.onComment],
+    ["Add comment", { canCreateComment: false }, (t: ReturnType<typeof setup>) => t.onComment],
   ])("checks permission at click time: %s does nothing after %o lands before the re-render", (name, revoke, spy) => {
     const t = setup();
     // Change the session without notifying, so the button is still rendered enabled.

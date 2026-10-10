@@ -17,8 +17,11 @@ import { findReplaceShortcut } from "@/lib/utils";
 
 function stubCtx(overrides: Partial<EditorCommandContext> = {}, session: Partial<EditorCommandContext["session"]> = {}): EditorCommandContext {
   const calls: string[] = [];
+  const contentReady = session.contentReady ?? true;
+  const canComment = session.canComment ?? true;
   const ctx: EditorCommandContext & { calls: string[] } = {
     calls,
+    executionScope: {},
     actions: {
       rich: null,
       toggleMark: (k) => calls.push(`mark:${k}`),
@@ -26,7 +29,16 @@ function stubCtx(overrides: Partial<EditorCommandContext> = {}, session: Partial
       redo: () => calls.push("redo"),
       revealSource: (offset) => calls.push(`reveal:${offset}`),
     },
-    session: { canEdit: true, canComment: true, mode: "editing", canChangeMode: true, setMode: (m) => calls.push(`mode:${m}`), ...session },
+    session: {
+      contentReady,
+      canEdit: true,
+      canComment,
+      canCreateComment: session.canCreateComment ?? (contentReady && canComment),
+      mode: "editing",
+      canChangeMode: true,
+      setMode: (m) => calls.push(`mode:${m}`),
+      ...session,
+    },
     doc: { id: "d1", title: "Doc", storage: "local" },
     isOwner: true,
     slashWhere: { inTable: false, canComment: true },
@@ -80,6 +92,42 @@ describe("the palette's Insert entry for a card (#2317)", () => {
     const readOnly = buildCommands(stubCtx({}, { canEdit: false })).find((c) => c.id === "block:card")!;
     expect(readOnly.when?.()).toBe(false);
     expect(buildCommands(stubCtx({ slashWhere: { inTable: true, canComment: true } })).map((c) => c.id)).not.toContain("block:card");
+  });
+
+  it("re-checks edit readiness when a previously visible insert command runs", () => {
+    const ctx = stubCtx();
+    ctx.actions = { ...ctx.actions, rich: {} as NonNullable<EditorCommandContext["actions"]["rich"]> };
+    const entry = buildCommands(ctx).find((command) => command.id === "block:card")!;
+    expect(entry.when?.()).toBe(true);
+    ctx.session.contentReady = false;
+    void entry.run();
+    expect((ctx as unknown as { calls: string[] }).calls).toEqual([]);
+  });
+
+  it("uses comment permission after readiness instead of requiring text-edit permission", () => {
+    const ctx = stubCtx({}, { canEdit: false, canComment: true });
+    ctx.actions = { ...ctx.actions, rich: {} as NonNullable<EditorCommandContext["actions"]["rich"]> };
+    const entry = buildCommands(ctx).find((command) => command.id === "block:comment")!;
+    expect(entry.when?.()).toBe(true);
+    void entry.run();
+    expect((ctx as unknown as { calls: string[] }).calls).toEqual(["comment"]);
+  });
+
+  it("uses the same live creation capability for slash and whole-document comments", () => {
+    const calls: string[] = [];
+    const ctx = stubCtx({ commentDocument: () => calls.push("document") });
+    ctx.actions = { ...ctx.actions, rich: {} as NonNullable<EditorCommandContext["actions"]["rich"]> };
+    const commands = buildCommands(ctx);
+    const slash = commands.find((command) => command.id === "block:comment")!;
+    const document = commands.find((command) => command.id === "doc:comment-document")!;
+    expect(slash.when?.()).toBe(true);
+    expect(document.when?.()).toBe(true);
+
+    ctx.session.canCreateComment = false;
+    void slash.run();
+    void document.run();
+    expect((ctx as unknown as { calls: string[] }).calls).toEqual([]);
+    expect(calls).toEqual([]);
   });
 });
 const ids = (cmds: Command[]) => cmds.map((c) => c.id);
@@ -168,11 +216,12 @@ describe("buildCommands", () => {
     expect(cardIds(withCard("link", { canEdit: false }))).toEqual([]);
     expect(cardIds(buildCommands(stubCtx()))).toEqual([]);
 
-    const byId = new Map(withCard("card").map((c) => [c.id, c]));
-    expect(byId.get("card:as-text")?.title).toBe("Show card as text");
-    expect(byId.get("card:as-card")?.title).toBe("Show link as card");
-    void byId.get("card:as-text")!.run();
-    void byId.get("card:as-card")!.run();
+    const cardById = new Map(withCard("card").map((c) => [c.id, c]));
+    const linkById = new Map(withCard("link").map((c) => [c.id, c]));
+    expect(cardById.get("card:as-text")?.title).toBe("Show card as text");
+    expect(linkById.get("card:as-card")?.title).toBe("Show link as card");
+    void cardById.get("card:as-text")!.run();
+    void linkById.get("card:as-card")!.run();
     expect(calls).toEqual(["card:text", "card:card"]);
     // Found by the words a person would type.
     expect(ids(filterCommands("show as text", visible(withCard("card"))))[0]).toBe("card:as-text");
@@ -202,6 +251,43 @@ describe("buildCommands", () => {
     byId.get("layout:code")!.run();
     byId.get("help:shortcuts")!.run();
     expect((ctx as unknown as { calls: string[] }).calls).toEqual(["reader", "find:true", "sync:false", "layout:code", "dialog:shortcuts"]);
+  });
+
+  it.each([
+    ["format:bold", (ctx: EditorCommandContext) => { ctx.session.canEdit = false; }],
+    ["card:as-text", (ctx: EditorCommandContext) => { ctx.actions.cardState = () => null; }],
+    ["block:heading1", (ctx: EditorCommandContext) => { ctx.session.contentReady = false; ctx.session.canEdit = false; }],
+    ["block:comment", (ctx: EditorCommandContext) => { ctx.session.canCreateComment = false; }],
+    ["doc:publish", (ctx: EditorCommandContext) => { ctx.session.canEdit = false; }],
+    ["doc:name-version", (ctx: EditorCommandContext) => { ctx.session.canEdit = false; }],
+    ["doc:comment-document", (ctx: EditorCommandContext) => { ctx.session.canCreateComment = false; }],
+    ["doc:find-replace", (ctx: EditorCommandContext) => { ctx.session.canEdit = false; }],
+    ["mode:suggesting", (ctx: EditorCommandContext) => { ctx.session.canChangeMode = false; }],
+    ["layout:code", (ctx: EditorCommandContext) => { ctx.layout = "code"; }],
+    ["doc:trash", (ctx: EditorCommandContext) => { ctx.isOwner = false; }],
+    ["nav:follow", (ctx: EditorCommandContext) => { delete ctx.follow; }],
+    ["doc:connect-agent", (ctx: EditorCommandContext) => { delete ctx.connectAgent; }],
+  ] as const)("%s re-checks its captured live predicate before execution", (id, revoke) => {
+    const calls: string[] = [];
+    const ctx = stubCtx({
+      commentDocument: () => calls.push("comment-document"),
+      connectAgent: () => calls.push("connect-agent"),
+      collaborators: () => [{ id: "bob", name: "Bob" }],
+      follow: (id) => calls.push(`follow:${id}`),
+    });
+    ctx.actions = {
+      ...ctx.actions,
+      rich: {} as NonNullable<EditorCommandContext["actions"]["rich"]>,
+      cardState: () => "card",
+      showCard: (as) => calls.push(`card:${as}`),
+    };
+    const command = buildCommands(ctx).find((candidate) => candidate.id === id)!;
+    expect(command.when?.(), `${id} starts visible`).toBe(true);
+    revoke(ctx);
+    expect(command.when?.(), `${id} is revoked`).toBe(false);
+    void command.run();
+    expect((ctx as unknown as { calls: string[] }).calls).toEqual([]);
+    expect(calls).toEqual([]);
   });
 
   it("offers 'Connect an AI agent' for 'agent' only when the shell wires it", () => {

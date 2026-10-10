@@ -143,6 +143,8 @@ function makeSession(docId: string, role: "owner" | "viewer" = "owner", goal: Wr
     deferLocal: true,
   });
   session.keepAlive();
+  session.synced = true;
+  vi.spyOn(session.binding, "hasHeldSync", "get").mockReturnValue(false);
   if (goal) setGoal(session, goal);
   sessions.push(session);
   return session;

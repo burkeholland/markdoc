@@ -127,13 +127,13 @@ export const Toolbar = memo(function Toolbar({
   onCard: () => void;
   onTable: () => void;
 }) {
-  const { canEdit, canUndo, canRedo, canComment } = useSessionValue(
+  const { canEdit, canUndo, canRedo, canCreateComment } = useSessionValue(
     session,
     (s) => ({
       canEdit: s.canEdit,
       canUndo: s.canUndo,
       canRedo: s.canRedo,
-      canComment: s.canComment,
+      canCreateComment: s.canCreateComment,
     }),
     shallowEqual,
   );
@@ -150,7 +150,7 @@ export const Toolbar = memo(function Toolbar({
       case "redo":
         return session.canEdit && session.canRedo;
       case "comment":
-        return session.canComment;
+        return session.canCreateComment;
     }
   };
   const run = (permission: Permission, action: () => void) => () => {
@@ -359,7 +359,7 @@ export const Toolbar = memo(function Toolbar({
         </ToolButton>
       </Group>
       <div className="flex-1" />
-      {canComment && (
+      {canCreateComment && (
         <Tip label="Add comment" shortcut={shortcut("Mod-Alt-M")}>
           <button
             type="button"

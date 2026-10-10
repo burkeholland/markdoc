@@ -72,6 +72,8 @@ describe("CollabSession accepted comment suggestion undo", () => {
       autoConnect: false,
     });
     session.keepAlive();
+    session.synced = true;
+    vi.spyOn(session.binding, "hasHeldSync", "get").mockReturnValue(false);
     return session;
   }
 

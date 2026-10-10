@@ -44,6 +44,23 @@ const COMMENT_SUGGESTION_TRANSITION_VERSION = 1;
 const MAX_COMMENT_SUGGESTION_TRANSITIONS = 20;
 const COMMENT_SUGGESTION_HISTORY_ORIGIN = { name: "comment-suggestion-history" };
 const COMMENT_SUGGESTION_REPLAY_ORIGIN = { name: "comment-suggestion-replay" };
+const COMMENT_CREATION_UNAVAILABLE = "A new comment cannot be created until the document is ready and access allows comments.";
+const SOURCE_RECONCILIATION_UNAVAILABLE = "Source reconciliation requires authoritative content and editing access.";
+
+class SessionCommentsModel extends CommentsModel {
+  constructor(
+    ydoc: Y.Doc,
+    ytext: Y.Text,
+    private readonly assertCanAdd: () => void,
+  ) {
+    super(ydoc, ytext);
+  }
+
+  override add(input: Parameters<CommentsModel["add"]>[0]): ReturnType<CommentsModel["add"]> {
+    this.assertCanAdd();
+    return super.add(input);
+  }
+}
 
 interface CommentSuggestionTransitionSnapshot {
   text: string;
@@ -404,6 +421,8 @@ export class CollabSession {
 
   status: WebSocketStatus | "connecting" = "connecting";
   synced = false;
+  /** Once this session has received authoritative content, a connection drop cannot make an empty document unknown again. */
+  private authoritativeContentReady = false;
   authError: string | null = null;
   /** Set when the server told us the document was moved to the trash; the editor navigates away. */
   trashed = false;
@@ -584,6 +603,7 @@ export class CollabSession {
           // The first sync ends the coalesced initial load: one rebuild of the rich pane, before
           // the UI learns it is synced (so the stand-in is never swapped for an empty editor).
           this.binding.releaseRemoteSync();
+          this.authoritativeContentReady = true;
           this.persistence.synced();
         }
         this.updateRecovery();
@@ -692,7 +712,7 @@ export class CollabSession {
       captureTimeout: 400,
       trackedOrigins: new Set([SUGGESTIONS_ORIGIN, COMMENTS_ORIGIN]),
     });
-    this.comments = new CommentsModel(this.ydoc, this.ytext);
+    this.comments = new SessionCommentsModel(this.ydoc, this.ytext, () => this.assertCanCreateComment());
     this.suggestions = new SuggestionsModel(this.ydoc, this.ytext);
     this.undoManager.addToScope(this.suggestions.ymap);
     this.binding = new MarkdownBinding(this.ytext, {
@@ -874,13 +894,40 @@ export class CollabSession {
     return this.accessChange !== null && this.accessChange.kind !== "raised";
   }
 
+  /**
+   * The live rich pane represents the shared text. A non-empty local mirror may make the document
+   * available before the server sync; an empty document is authoritative only after that sync.
+   * In both cases the held Markdown rebuild must finish before a caret or action can target the pane.
+   */
+  private get sourceReady(): boolean {
+    return this.authoritativeContentReady || this.synced || this.ytext.length > 0;
+  }
+
+  get contentReady(): boolean {
+    return this.sourceReady && !this.binding.hasHeldSync;
+  }
+
+  /** The user's role may change this document, and its authoritative text is represented in the pane. */
+  get canWrite(): boolean {
+    if (this.accessBlocked || !this.contentReady) return false;
+    return this.role === "owner" || this.role === "editor";
+  }
+
   get canEdit(): boolean {
-    if (this.accessBlocked) return false;
-    return (this.role === "owner" || this.role === "editor") && this.mode !== "viewing";
+    return this.canWrite && this.mode !== "viewing";
   }
 
   get canComment(): boolean {
     return this.role !== "viewer";
+  }
+
+  /** New threads require authoritative rendered content; existing-thread operations keep role-only comment semantics. */
+  get canCreateComment(): boolean {
+    return this.contentReady && !this.accessBlocked && this.canComment;
+  }
+
+  assertCanCreateComment(): void {
+    if (!this.canCreateComment) throw new Error(COMMENT_CREATION_UNAVAILABLE);
   }
 
   /** Whether comment changes must go through the REST API (read-only connections). */
@@ -893,6 +940,7 @@ export class CollabSession {
     if (this.status === "connecting") return this.everConnected ? "reconnecting" : "connecting";
     if (this.status !== "connected") return "offline";
     if (!this.synced) return "saving";
+    if (!this.contentReady) return "saving";
     if (this.persistence.state !== "saved") return this.persistence.state;
     if (this.unsyncedChanges > 0) return "pending";
     if (!this.savedMarked) {
@@ -1015,7 +1063,7 @@ export class CollabSession {
   }
 
   setTitle(title: string) {
-    if (this.accessBlocked) return;
+    if (!this.canWrite) return;
     this.ydoc.transact(() => this.meta.set("title", title), COMMENTS_ORIGIN);
   }
 
@@ -1067,7 +1115,7 @@ export class CollabSession {
 
   /** Text and annotation decisions share one history step, isolated from nearby typing. */
   reviewSuggestion(action: "accept" | "reject" | "acceptAll" | "rejectAll", id?: string): number {
-    if (this.accessBlocked) return 0;
+    if (!this.canWrite) return 0;
     this.undoManager.stopCapturing();
     try {
       if (action === "acceptAll" || action === "rejectAll") return this.suggestions[action]();
@@ -1105,10 +1153,15 @@ export class CollabSession {
   }
 
   setPendingComment(range: { from: number; to: number } | null) {
+    if (!range) {
+      this.pending = null;
+      this.notify();
+      return;
+    }
+    this.assertCanCreateComment();
     const current = this.pendingComment;
-    if (!range) this.pending = null;
     // Comment pressed again on the range that is already pending is still the same comment.
-    else if (!current || current.from !== range.from || current.to !== range.to) {
+    if (!current || current.from !== range.from || current.to !== range.to) {
       this.pending = {
         id: ++this.pendingSeq,
         anchor: isDocumentRange(range) ? null : createAnchor(this.ytext, range.from, range.to),
@@ -1201,6 +1254,25 @@ export class CollabSession {
    */
   replaceSource(edits: { from: number; to: number; text: string }[]) {
     if (!this.canEdit || edits.length === 0) return;
+    this.applySourceEdits(edits);
+  }
+
+  /**
+   * Apply a server reconciliation while the rendered pane is still catching up.
+   * User mutation entry points remain gated by contentReady.
+   */
+  replaceSourceFromReconciliation(edits: { from: number; to: number; text: string }[]) {
+    if (edits.length === 0) return;
+    const canReconcile =
+      this.sourceReady &&
+      !this.accessBlocked &&
+      this.mode !== "viewing" &&
+      (this.role === "owner" || this.role === "editor");
+    if (!canReconcile) throw new Error(SOURCE_RECONCILIATION_UNAVAILABLE);
+    this.applySourceEdits(edits);
+  }
+
+  private applySourceEdits(edits: { from: number; to: number; text: string }[]) {
     const sorted = [...edits].sort((a, b) => b.from - a.from);
     if (this.mode === "suggesting") {
       this.ydoc.transact(() => {
@@ -1342,7 +1414,7 @@ export class CollabSession {
 
   /** Accept a root or reply suggestion as one text-and-comment undo step. */
   acceptCommentSuggestion(threadId: string, proposed: string, replyId?: string): boolean {
-    if (this.accessBlocked) return false;
+    if (!this.canWrite) return false;
     const target: CommentSuggestionTarget = replyId ? { kind: "reply", replyId } : { kind: "root" };
     const before = this.comments.snapshotSuggestion(threadId, target);
     if (!before) return false;
@@ -1421,10 +1493,10 @@ export class CollabSession {
   // last *edit*, and undo/redo do not reset that clock: an edit typed right after an undo would be
   // folded into the step below the one just undone, so the next undo removed both (task #437).
   // Closing the capture window makes whatever comes after an undo/redo its own step.
-  // Neither does anything on a page whose access was lowered or removed (#2269): an accepted comment
-  // suggestion is undone from the document itself, with no step on the stack.
+  // Neither does anything before the live pane represents the document, or on a page whose access was
+  // lowered or removed (#2269): an accepted comment suggestion is undone from the document itself.
   undo() {
-    if (this.accessBlocked) return;
+    if (this.accessBlocked || !this.contentReady) return;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.undoStack, "applied");
     if (this.undoManager.canUndo()) this.undoManager.undo();
     else this.replayCommentSuggestionTransition("applied");
@@ -1432,7 +1504,7 @@ export class CollabSession {
   }
 
   redo() {
-    if (this.accessBlocked) return;
+    if (this.accessBlocked || !this.contentReady) return;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.redoStack, "undone");
     const stored = this.readStoredCommentSuggestionTransition();
     const hasMatchingTransient =
@@ -1447,11 +1519,13 @@ export class CollabSession {
   }
 
   get canUndo(): boolean {
+    if (this.accessBlocked || !this.contentReady) return false;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.undoStack, "applied");
     return this.undoManager.canUndo() || !!this.readCurrentCommentSuggestionTransition("applied");
   }
 
   get canRedo(): boolean {
+    if (this.accessBlocked || !this.contentReady) return false;
     this.discardInvalidCommentSuggestionStackItems(this.undoManager.redoStack, "undone");
     const stored = this.readStoredCommentSuggestionTransition();
     const hasMatchingTransient =

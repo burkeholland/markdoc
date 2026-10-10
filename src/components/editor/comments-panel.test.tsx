@@ -88,7 +88,8 @@ vi.mock("@/lib/notifications-store", () => ({
 
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate, removeAwarenessStates } from "y-protocols/awareness";
-import { CollabSession } from "@/editor/collab/session";
+import { CollabSession as BaseCollabSession } from "@/editor/collab/session";
+import { CommentsModel } from "@/editor/collab/comments";
 import { makeCollabUser } from "@/editor/collab/shared";
 import { api } from "@/lib/api";
 import { AGENT_CONNECT_DISMISSED_KEY } from "@/lib/mcp";
@@ -98,6 +99,14 @@ import type { ReviewDto } from "@/server/reviews";
 import { TooltipProvider } from "@/components/ui/primitives";
 import { claimerName, requestInstruction, waitForSynced, type AgentRequestMode } from "./agent-requests";
 import { CommentsPanel, isReviewOpen, mentionedAgents, type CommentsPanelProps } from "./comments-panel";
+
+class CollabSession extends BaseCollabSession {
+  contentReadyValue = true;
+
+  override get contentReady() {
+    return this.contentReadyValue;
+  }
+}
 
 /** The mocked provider of the session under test (see the `@hocuspocus/provider` mock above). */
 type FakeProvider = { opts: { onAwarenessChange?: (e: { states: unknown[] }) => void } };
@@ -2190,9 +2199,11 @@ describe("CommentsPanel", () => {
       const next = new CollabSession({ docId: "doc", user, role, getToken: async () => "token", autoConnect: false });
       next.keepAlive();
       next.ytext.insert(0, TEXT);
+      const remoteComments = new CommentsModel(next.ydoc, next.ytext);
       const threadIds = QUOTES.slice(0, count).map((quote) =>
-        next.comments.add({ from: TEXT.indexOf(quote), to: TEXT.indexOf(quote) + quote.length, body: `Louder.\n\n\`\`\`suggestion\n${quote.toUpperCase()}\n\`\`\``, author: agent }),
+        remoteComments.add({ from: TEXT.indexOf(quote), to: TEXT.indexOf(quote) + quote.length, body: `Louder.\n\n\`\`\`suggestion\n${quote.toUpperCase()}\n\`\`\``, author: agent }),
       );
+      remoteComments.destroy();
       if (viaApi) vi.spyOn(next, "commentsViaApi", "get").mockReturnValue(true);
       const review = reviewDto("r1", threadIds);
       vi.mocked(api.documents.reviews).mockResolvedValue({ reviews: [review] } as ReviewsResponse);
@@ -11299,12 +11310,13 @@ describe("CommentsPanel", () => {
     const TEXT = "Intro text. The quick brown fox jumps.";
     const DISMISSED_KEY = "markdoc:agent-connect-dismissed";
 
-    const mount = (opts: { role?: "owner" | "editor" | "commenter"; documentComposer?: CommentsPanelProps["documentComposer"]; onConnectAgent?: () => void; collaborators?: boolean } = {}) => {
+    const mount = (opts: { role?: "owner" | "editor" | "commenter"; ready?: boolean; documentComposer?: CommentsPanelProps["documentComposer"]; onConnectAgent?: () => void; collaborators?: boolean } = {}) => {
       Element.prototype.scrollIntoView ??= () => {};
       const user = makeCollabUser("alice", "Alice", null, "alice");
       session = new CollabSession({ docId: "doc", user, role: opts.role ?? "owner", getToken: async () => "token", autoConnect: false });
       session.keepAlive();
       session.synced = true;
+      session.contentReadyValue = opts.ready ?? true;
       session.ytext.insert(0, TEXT);
       vi.mocked(api.documents.collaborators).mockResolvedValue(
         (opts.collaborators === false
@@ -11315,13 +11327,26 @@ describe("CommentsPanel", () => {
       );
       const onReveal = vi.fn<(offset: number) => void>();
       const onToast = vi.fn<NonNullable<CommentsPanelProps["onToast"]>>();
-      const props = (documentComposer: CommentsPanelProps["documentComposer"]) => (
+      let currentDocumentComposer = opts.documentComposer ?? null;
+      const props = () => (
         <TooltipProvider>
-          <CommentsPanel session={session!} onClose={() => {}} onReveal={onReveal} onToast={onToast} onConnectAgent={opts.onConnectAgent} documentComposer={documentComposer} />
+          <CommentsPanel session={session!} onClose={() => {}} onReveal={onReveal} onToast={onToast} onConnectAgent={opts.onConnectAgent} documentComposer={currentDocumentComposer} />
         </TooltipProvider>
       );
-      const view = render(props(opts.documentComposer ?? null));
-      return { onReveal, onToast, user, setDocumentComposer: (next: CommentsPanelProps["documentComposer"]) => view.rerender(props(next)) };
+      const view = render(props());
+      return {
+        onReveal,
+        onToast,
+        user,
+        setDocumentComposer: (next: CommentsPanelProps["documentComposer"]) => {
+          currentDocumentComposer = next ?? null;
+          view.rerender(props());
+        },
+        setReady: (ready: boolean) => {
+          session!.contentReadyValue = ready;
+          view.rerender(props());
+        },
+      };
     };
     const composer = async () => (await screen.findByPlaceholderText(/Add a comment/)) as HTMLTextAreaElement;
     const paste = async (box: HTMLTextAreaElement, text: string) => {
@@ -11332,6 +11357,7 @@ describe("CommentsPanel", () => {
     afterEach(() => {
       window.localStorage.removeItem(DISMISSED_KEY);
       vi.mocked(api.documents.createRequest).mockReset().mockResolvedValue({ request: { id: "req" } } as never);
+      vi.mocked(api.documents.comment).mockReset().mockResolvedValue({ id: "via-api" } as never);
       vi.mocked(api.tokens.list).mockClear().mockResolvedValue({ tokens: [] } as never);
       vi.mocked(api.documents.collaborators).mockResolvedValue({ owner: null, collaborators: [], agents: [] } as unknown as Awaited<ReturnType<typeof api.documents.collaborators>>);
     });
@@ -11366,6 +11392,43 @@ describe("CommentsPanel", () => {
       // No agent was mentioned: no request.
       await new Promise((r) => setTimeout(r, 20));
       expect(api.documents.createRequest).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["editor", "local"],
+      ["commenter", "api"],
+    ] as const)("%s new-thread UI stays blocked before readiness and submits once through the %s funnel after readiness", async (role, funnel) => {
+      const mounted = mount({ role, ready: false });
+      expect(session!.canComment).toBe(true);
+      expect(session!.canCreateComment).toBe(false);
+      expect(screen.queryByTestId("comment-document")).toBeNull();
+      mounted.setDocumentComposer({ mention: false, nonce: 1 });
+      expect(session!.pendingComment).toBeNull();
+      expect(screen.queryByTestId("pending-comment")).toBeNull();
+
+      mounted.setReady(true);
+      expect(session!.canCreateComment).toBe(true);
+      expect(screen.getByTestId("comment-document")).toBeVisible();
+      expect(screen.queryByTestId("pending-comment")).toBeNull();
+      fireEvent.click(screen.getByTestId("comment-document"));
+      const box = await composer();
+      await paste(box, `${role} comment`);
+      fireEvent.click(screen.getByTestId("comment-submit"));
+
+      if (funnel === "local") {
+        await waitFor(() => expect(session!.comments.list()).toHaveLength(1));
+        expect(api.documents.comment).not.toHaveBeenCalled();
+      } else {
+        await waitFor(() => expect(api.documents.comment).toHaveBeenCalledTimes(1));
+        expect(api.documents.comment).toHaveBeenCalledWith("doc", {
+          action: "add",
+          from: 0,
+          to: 0,
+          anchor: undefined,
+          body: `${role} comment`,
+        });
+        expect(session!.comments.list()).toEqual([]);
+      }
     });
 
     it("the empty state's 'Comment and mention an agent' seeds `@`, opens the picker at once and posts a request with selection: null", async () => {

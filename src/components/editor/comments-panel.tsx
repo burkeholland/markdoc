@@ -3383,6 +3383,7 @@ function useCommentOps(session: CollabSession) {
   return useMemo(
     () => ({
       async add(from: number, to: number, body: string, anchor?: CollabSession["pendingCommentAnchor"]) {
+        session.assertCanCreateComment();
         if (viaApi) return (await api.documents.comment(id, { action: "add", from, to, anchor: anchor ?? undefined, body })).id ?? null;
         return session.comments.add({ from, to, body, author: session.user });
       },
@@ -12202,7 +12203,7 @@ export function CommentsPanel({
   const [seed, setSeed] = useState<{ initial: string; nonce: number } | null>(null);
   const startDocumentComment = useCallback(
     (opts: { mention: boolean; nonce: number }) => {
-      if (!session.canComment) return;
+      if (!session.canCreateComment) return;
       setSeed({ initial: opts.mention ? "@" : "", nonce: opts.nonce });
       session.setPendingComment({ from: 0, to: 0 });
       setTab("open");
@@ -12288,7 +12289,7 @@ export function CommentsPanel({
           })}
         </div>
         {/* Outside the tablist (which holds only tabs): a comment on the whole document, no selection needed (#1025). */}
-        {session.canComment && (
+        {session.canCreateComment && (
           <button type="button" className="icon-btn h-7 w-7 shrink-0" title="Comment on the document" aria-label="Comment on the document" onClick={() => commentOnDocument(false)} data-testid="comment-document">
             <MessageSquarePlus size={15} />
           </button>
@@ -12373,7 +12374,7 @@ export function CommentsPanel({
                 </span>
               )}
               Select some text and press <kbd className="kbd">⌘/Ctrl</kbd>+<kbd className="kbd">Alt</kbd>+<kbd className="kbd">M</kbd> or use the Comment button.
-              {session.canComment && (
+              {session.canCreateComment && (
                 <span className="mt-3 flex flex-wrap items-center justify-center gap-1.5 text-ink-3" data-testid="comments-empty-agent-line">
                   Agents can review this document too —
                   <button type="button" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" onClick={() => commentOnDocument(true)} data-testid="comments-empty-agent">

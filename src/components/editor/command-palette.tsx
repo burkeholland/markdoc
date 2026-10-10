@@ -97,6 +97,7 @@ interface CommandFacts {
   id: string;
   title: string;
   group: string;
+  executionScope: Command["executionScope"];
   shortcut: string | undefined;
   icon: string | undefined;
   when: Command["when"];
@@ -280,6 +281,24 @@ interface CommandExecution {
   timer: ReturnType<typeof setTimeout> | null;
 }
 
+function liveExecutionCommand(execution: CommandExecution): Command | null {
+  const capturedScope = execution.command.executionScope;
+  if (capturedScope?.isCurrent?.() === false) return null;
+  const current = execution.commands();
+  if (capturedScope !== undefined && !current.some((command) => command.executionScope === capturedScope)) return null;
+  if (execution.expectedState.stack.length !== 1) return execution.command;
+  const command = current.find((candidate) => candidate.id === execution.command.id);
+  if (
+    !command ||
+    command.children ||
+    command.executionScope !== capturedScope ||
+    command.executionScope?.isCurrent?.() === false
+  ) {
+    return null;
+  }
+  return command;
+}
+
 interface VisitFocus {
   visit: PaletteVisit;
   claimed: boolean;
@@ -309,6 +328,7 @@ function commandFacts(command: Command): CommandFacts {
     id: command.id,
     title: command.title,
     group: command.group,
+    executionScope: command.executionScope,
     shortcut: command.shortcut,
     icon: command.icon,
     when: command.when,
@@ -323,6 +343,7 @@ function commandFactsAreCurrent(facts: CommandFacts): boolean {
     command.id === facts.id &&
     command.title === facts.title &&
     command.group === facts.group &&
+    command.executionScope === facts.executionScope &&
     command.shortcut === facts.shortcut &&
     command.icon === facts.icon &&
     command.when === facts.when &&
@@ -2037,7 +2058,9 @@ export const CommandPalette = memo(function CommandPalette({ open, onOpenChange,
                 committed.placeholder === execution.placeholder;
               if (!exact || !commandTimersRef.current.delete(execution)) return;
               execution.timer = null;
-              void execution.command.run();
+              const command = liveExecutionCommand(execution);
+              if (!command || (command.when && !command.when())) return;
+              void command.run();
             }, 0);
           }}
         >

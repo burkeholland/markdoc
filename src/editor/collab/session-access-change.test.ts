@@ -73,6 +73,102 @@ describe("the session learns that its own access changed (#2269)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("latches readiness to rendered content across reconnects but not across document sessions or permissions", () => {
+    const first = open("editor");
+    expect(first.session.ytext.toString()).toBe("");
+    expect(first.session.contentReady).toBe(false);
+    expect(first.session.canEdit).toBe(false);
+    expect(first.session.canCreateComment).toBe(false);
+
+    first.live();
+    expect(first.session.ytext.toString()).toBe("");
+    expect(first.session.contentReady).toBe(true);
+    expect(first.session.canEdit).toBe(true);
+    expect(first.session.canCreateComment).toBe(true);
+    first.provider.opts.onStatus({ status: "disconnected" });
+    expect(first.session.synced).toBe(false);
+    expect(first.session.ytext.toString()).toBe("");
+    expect(first.session.contentReady).toBe(true);
+    expect(first.session.canEdit).toBe(true);
+    expect(first.session.canCreateComment).toBe(true);
+    const offlineThread = first.session.comments.add({ from: 0, to: 0, body: "Offline comment", author: first.session.user });
+    expect(first.session.comments.get(offlineThread)?.body).toBe("Offline comment");
+    expect(first.session.ytext.toString()).toBe("");
+    first.provider.opts.onStatus({ status: "connecting" });
+    first.provider.opts.onStatus({ status: "connected" });
+    first.provider.opts.onSynced({ state: true });
+    expect(first.session.ytext.toString()).toBe("");
+    expect(first.session.contentReady).toBe(true);
+    expect(first.session.canEdit).toBe(true);
+    expect(first.session.canCreateComment).toBe(true);
+
+    const next = open("editor");
+    expect(next.session.contentReady).toBe(false);
+    expect(next.session.canEdit).toBe(false);
+    expect(next.session.canCreateComment).toBe(false);
+    next.live();
+    expect(next.session.contentReady).toBe(true);
+    expect(next.session.canEdit).toBe(true);
+    expect(next.session.canCreateComment).toBe(true);
+
+    const viewer = open("viewer");
+    viewer.live();
+    expect(viewer.session.contentReady).toBe(true);
+    expect(viewer.session.canEdit).toBe(false);
+    expect(viewer.session.canCreateComment).toBe(false);
+
+    first.session.destroy();
+    next.session.destroy();
+    viewer.session.destroy();
+  });
+
+  it("blocks direct new-thread state and persistence until authoritative content is ready", () => {
+    const { session, live } = open("editor");
+    expect(session.canComment).toBe(true);
+    expect(session.canCreateComment).toBe(false);
+    expect(() => session.setPendingComment({ from: 0, to: 0 })).toThrow(/document is ready/);
+    expect(() => session.comments.add({ from: 0, to: 0, body: "Too early", author: session.user })).toThrow(/document is ready/);
+    session.setPendingComment(null);
+    expect(session.pendingComment).toBeNull();
+    expect(session.comments.list()).toEqual([]);
+
+    live();
+    session.setPendingComment({ from: 0, to: 0 });
+    const threadId = session.comments.add({ from: 0, to: 0, body: "Ready", author: session.user });
+    expect(session.pendingComment).toEqual({ from: 0, to: 0 });
+    expect(session.comments.get(threadId)?.body).toBe("Ready");
+    session.destroy();
+  });
+
+  it("allows held source reconciliation without enabling pre-ready user edits or comments", async () => {
+    const { session } = open("editor");
+    session.ytext.insert(0, "Local mirror");
+    expect(session.binding.hasHeldSync).toBe(true);
+    expect(session.contentReady).toBe(false);
+    expect(session.canEdit).toBe(false);
+    expect(session.canCreateComment).toBe(false);
+
+    session.replaceSource([{ from: 0, to: session.ytext.length, text: "User edit" }]);
+    expect(() => session.setPendingComment({ from: 0, to: 0 })).toThrow(/document is ready/);
+    expect(() => session.comments.add({ from: 0, to: 0, body: "Too early", author: session.user })).toThrow(/document is ready/);
+    expect(session.ytext.toString()).toBe("Local mirror");
+    expect(session.comments.list()).toEqual([]);
+
+    session.replaceSourceFromReconciliation([{ from: 0, to: session.ytext.length, text: "Merged conflict" }]);
+    expect(session.ytext.toString()).toBe("Merged conflict");
+    expect(session.contentReady).toBe(false);
+    expect(session.canEdit).toBe(false);
+    expect(session.canCreateComment).toBe(false);
+
+    session.binding.releaseRemoteSync();
+    await vi.waitFor(() => expect(session.contentReady).toBe(true));
+    session.replaceSource([{ from: session.ytext.length, to: session.ytext.length, text: " resolved" }]);
+    const threadId = session.comments.add({ from: 0, to: 0, body: "Ready", author: session.user });
+    expect(session.ytext.toString()).toBe("Merged conflict resolved");
+    expect(session.comments.get(threadId)?.body).toBe("Ready");
+    session.destroy();
+  });
+
   describe("the server's message", () => {
     it.each([
       ["editor", "viewer"],
@@ -90,7 +186,29 @@ describe("the session learns that its own access changed (#2269)", () => {
       expect(session.accessBlocked).toBe(true);
       expect(before).toBe(built !== "commenter");
       expect(session.role).toBe(built);
+      expect(() => session.replaceSourceFromReconciliation([{ from: 0, to: 0, text: "blocked" }])).toThrow(/editing access/);
       await expect(session.flushSave()).rejects.toThrow(/permission/);
+      session.destroy();
+    });
+
+    it("lowering access blocks new threads without changing existing-thread operations", () => {
+      const { session, told, live } = open("editor");
+      live();
+      const threadId = session.comments.add({ from: 0, to: 0, body: "Existing", author: session.user });
+
+      told("commenter");
+      expect(session.canComment).toBe(true);
+      expect(session.canCreateComment).toBe(false);
+      expect(() => session.setPendingComment({ from: 0, to: 0 })).toThrow(/access allows comments/);
+      expect(() => session.comments.add({ from: 0, to: 0, body: "Blocked", author: session.user })).toThrow(/access allows comments/);
+      expect(session.comments.reply(threadId, "Reply", session.user)).not.toBeNull();
+      expect(session.comments.toggleReaction(threadId, null, "like", session.user)).toBe(true);
+      session.comments.setResolved(threadId, true, session.user);
+      expect(session.comments.get(threadId)).toMatchObject({
+        resolved: true,
+        replies: [expect.objectContaining({ body: "Reply" })],
+        reactions: { like: [session.user.id] },
+      });
       session.destroy();
     });
 
@@ -422,7 +540,9 @@ describe("the session learns that its own access changed (#2269)", () => {
       await expect(provider.opts.token()).rejects.toBe(failure);
       provider.opts.onAuthenticationFailed({ reason: `Failed to get token during sendToken(): ${failure}` });
       expect(session.accessChange).toBeNull();
-      expect(session.canEdit).toBe(true);
+      expect(session.accessBlocked).toBe(false);
+      expect(session.contentReady).toBe(false);
+      expect(session.canEdit).toBe(false);
       session.destroy();
     });
   });
@@ -535,6 +655,19 @@ describe("the session learns that its own access changed (#2269)", () => {
         expect(blocked.state()).toBe(before);
         blocked.session.destroy();
       }
+    });
+
+    it.each(PATHS.slice(2))("%s: does nothing while authoritative text is still held from the live pane", (_what, path, scene) => {
+      const loading = written(scene);
+      vi.spyOn(loading.session.binding, "hasHeldSync", "get").mockReturnValue(true);
+      expect(loading.session.canEdit).toBe(false);
+      expect(loading.session.canUndo).toBe(false);
+      expect(loading.session.canRedo).toBe(false);
+      const before = loading.state();
+      path(loading);
+      expect(loading.updates()).toBe(0);
+      expect(loading.state()).toBe(before);
+      loading.session.destroy();
     });
 
     it.each([

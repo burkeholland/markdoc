@@ -36,6 +36,8 @@ type Callbacks = {
 
 function makeSession(role: "owner" | "viewer", docId = "doc"): CollabSession {
   const session = new CollabSession({ docId, user: makeCollabUser("a", "Alice"), role, getToken: async () => "token", autoConnect: false });
+  session.synced = true;
+  vi.spyOn(session.binding, "hasHeldSync", "get").mockReturnValue(false);
   session.ytext.insert(0, TEXT);
   session.setFind("cat");
   return session;

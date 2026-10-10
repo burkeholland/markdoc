@@ -71,6 +71,7 @@ function setup(before = REWRITE_DOCUMENT, after = REWRITE_RESULT) {
   suggestions.destroy();
   remote.destroy();
   session.binding.releaseRemoteSync();
+  Object.defineProperty(session, "contentReady", { configurable: true, get: () => true });
   return { session, id };
 }
 

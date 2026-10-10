@@ -115,9 +115,9 @@ export function SlashMenu({
   const [pos, setPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
-  const canComment = useSessionValue(session, (s) => s.canComment);
+  const canCreateComment = useSessionValue(session, (s) => s.canCreateComment);
 
-  const where: SlashWhere = useMemo(() => ({ inTable: !!(view && state && tableAt(view.state)), canComment }), [view, state, canComment]);
+  const where: SlashWhere = useMemo(() => ({ inTable: !!(view && state && tableAt(view.state)), canComment: canCreateComment }), [view, state, canCreateComment]);
   const items = useMemo(() => (state ? filterSlashItems(state.query, SLASH_ITEMS, where) : []), [state, where]);
   const open = !!state && canEdit && !!view;
   const index = Math.min(highlight, Math.max(0, items.length - 1));
@@ -145,6 +145,7 @@ export function SlashMenu({
     if (!view) return;
     // "No matches" + Enter: the menu closes and the typed text stays.
     if (!item) return closeSlashMenu(view);
+    if (!session.contentReady || !(item.id === "comment" ? session.canCreateComment : session.canEdit)) return;
     const arg = splitSlashQuery(controller.getState()?.query ?? "").arg;
     if (item.command) {
       // One transaction for the /query removal and the edit: a single undo step.
@@ -155,7 +156,7 @@ export function SlashMenu({
     const run = item.run;
     const context = {
       view,
-      where: { inTable: !!tableAt(view.state), canComment: session.canComment },
+      where: { inTable: !!tableAt(view.state), canComment: session.canCreateComment },
       openImage: onImage,
       openCard: onCard,
       openLink: onLink,
@@ -175,7 +176,7 @@ export function SlashMenu({
   const takeKey = (key: SlashKey): boolean => {
     const current = controller.getState();
     if (!view || !current || !session.canEdit) return false;
-    const live = filterSlashItems(current.query, SLASH_ITEMS, { inTable: !!tableAt(view.state), canComment: session.canComment });
+    const live = filterSlashItems(current.query, SLASH_ITEMS, { inTable: !!tableAt(view.state), canComment: session.canCreateComment });
     const last = Math.max(0, live.length - 1);
     const at = Math.min(highlightRef.current, last);
     if (key === "Enter" || key === "Tab") {

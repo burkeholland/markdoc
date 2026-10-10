@@ -264,6 +264,11 @@ function Harness({ items, initiallyOpen = true }: { items: Command[]; initiallyO
   );
 }
 
+function RegistryHarness({ commands }: { commands: () => Command[] }) {
+  const [open, setOpen] = useState(true);
+  return <CommandPalette open={open} onOpenChange={setOpen} commands={commands} />;
+}
+
 function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
   useEffect(() => onCleanup, [onCleanup]);
   return null;
@@ -2082,6 +2087,117 @@ describe("CommandPalette direct-root Strict Mode replay", () => {
       expect(opener).toHaveFocus();
     } finally {
       setItem.mockRestore();
+      await mounted.unmount();
+    }
+  });
+
+  it("re-checks an externally supplied command's live predicate after capture and before delayed execution", async () => {
+    vi.useFakeTimers();
+    let allowed = true;
+    const run = vi.fn();
+    const guarded = { ...command("guarded", "Guarded", run), when: () => allowed };
+    const mounted = await renderStrictRoot(
+      <Harness items={[guarded]} initiallyOpen={false} />,
+    );
+
+    try {
+      await act(async () =>
+        fireEvent.click(screen.getByRole("button", { name: "Open palette" })),
+      );
+      fireEvent.click(screen.getByTestId("palette-item-guarded"));
+      allowed = false;
+      await act(async () => vi.runAllTimersAsync());
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("runs the command rebuilt from the current live registry instead of its captured closure", async () => {
+    vi.useFakeTimers();
+    const executionScope = {};
+    const staleRun = vi.fn();
+    const currentRun = vi.fn();
+    let registry = [{ ...command("format:bold", "Bold", staleRun), executionScope }];
+    const mounted = await renderStrictRoot(
+      <RegistryHarness commands={() => registry} />,
+    );
+
+    try {
+      fireEvent.click(screen.getByTestId("palette-item-format:bold"));
+      registry = [{ ...command("format:bold", "Bold", currentRun), executionScope }];
+      await act(async () => vi.runAllTimersAsync());
+      expect(staleRun).not.toHaveBeenCalled();
+      expect(currentRun).toHaveBeenCalledOnce();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it.each([
+    ["block:heading1", "before the stale row is picked"],
+    ["block:heading1", "after the stale row is picked"],
+    ["format:bold", "before the stale row is picked"],
+    ["format:bold", "after the stale row is picked"],
+  ] as const)(
+    "does not run captured or replacement %s commands when context changes %s",
+    async (id, replacementTiming) => {
+      vi.useFakeTimers();
+      const staleRun = vi.fn();
+      const currentRun = vi.fn();
+      let registry = [{
+        ...command(id, id, staleRun),
+        executionScope: { isCurrent: () => true },
+      }];
+      const mounted = await renderStrictRoot(
+        <RegistryHarness commands={() => registry} />,
+      );
+
+      try {
+        const row = screen.getByTestId(`palette-item-${id}`);
+        if (replacementTiming === "before the stale row is picked") {
+          registry = [{
+            ...command(id, id, currentRun),
+            executionScope: { isCurrent: () => true },
+          }];
+        }
+        fireEvent.click(row);
+        if (replacementTiming === "after the stale row is picked") {
+          registry = [{
+            ...command(id, id, currentRun),
+            executionScope: { isCurrent: () => true },
+          }];
+        }
+        await act(async () => vi.runAllTimersAsync());
+        expect(staleRun).not.toHaveBeenCalled();
+        expect(currentRun).not.toHaveBeenCalled();
+      } finally {
+        await mounted.unmount();
+      }
+    },
+  );
+
+  it("uses the replacement command's live predicate after capture", async () => {
+    vi.useFakeTimers();
+    const executionScope = {};
+    const staleRun = vi.fn();
+    const currentRun = vi.fn();
+    let registry = [{ ...command("block:table", "Table", staleRun), executionScope }];
+    const mounted = await renderStrictRoot(
+      <RegistryHarness commands={() => registry} />,
+    );
+
+    try {
+      fireEvent.click(screen.getByTestId("palette-item-block:table"));
+      registry = [{
+        ...command("block:table", "Table", currentRun),
+        executionScope,
+        when: () => false,
+      }];
+      await act(async () => vi.runAllTimersAsync());
+      expect(staleRun).not.toHaveBeenCalled();
+      expect(currentRun).not.toHaveBeenCalled();
+    } finally {
       await mounted.unmount();
     }
   });

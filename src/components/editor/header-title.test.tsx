@@ -34,6 +34,14 @@ class TitleSession {
     return this.currentTitle;
   }
 
+  get canEdit() {
+    return this.role === "owner" || this.role === "editor";
+  }
+
+  get canWrite() {
+    return this.canEdit;
+  }
+
   readonly subscribe = (listener: () => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

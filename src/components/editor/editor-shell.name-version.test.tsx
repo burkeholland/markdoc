@@ -172,6 +172,7 @@ function createSession() {
   created.keepAlive();
   created.localLoaded = true;
   created.ytext.insert(0, "Document text");
+  Object.defineProperty(created, "contentReady", { configurable: true, get: () => true });
   sessions.push(created);
   return created;
 }
