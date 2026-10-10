@@ -124,4 +124,38 @@ test.describe("typed web addresses (#2353)", () => {
 
     await user.context.close();
   });
+
+  test("typing beside intentional angle web and mail links preserves their syntax", async ({ browser }) => {
+    const alice = await signIn(browser, "typed-links-angle-alice");
+    const bob = await signIn(browser, "typed-links-angle-bob");
+    const source = "- Web <https://example.com>\n- Mail <mailto:person@example.com>\n";
+    const expected = "- Web <https://example.com>x\n- Mail <mailto:person@example.com>x\n";
+    const id = await createDocument(alice.page, source);
+    await shareWith(alice.page, id, "typed-links-angle-bob", "editor");
+    await openDocument(alice.page, id);
+    await openDocument(bob.page, id);
+
+    const aliceItems = alice.page.locator(".md-rich li p");
+    for (const item of [aliceItems.nth(0), aliceItems.nth(1)]) {
+      await item.click();
+      await alice.page.keyboard.press("End");
+      await alice.page.keyboard.type("x");
+    }
+
+    await expect.poll(() => codeText(alice.page)).toBe(expected);
+    await expect.poll(() => codeText(bob.page)).toBe(expected);
+    for (const page of [alice.page, bob.page]) {
+      const links = page.locator(".md-rich li p a");
+      await expect(links.nth(0)).toHaveText("https://example.com");
+      await expect(links.nth(0)).toHaveAttribute("href", "https://example.com");
+      await expect(links.nth(1)).toHaveText("mailto:person@example.com");
+      await expect(links.nth(1)).toHaveAttribute("href", "mailto:person@example.com");
+    }
+
+    await openDocument(alice.page, id);
+    await expect.poll(() => codeText(alice.page)).toBe(expected);
+
+    await alice.context.close();
+    await bob.context.close();
+  });
 });

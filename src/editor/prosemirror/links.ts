@@ -46,25 +46,20 @@ function automaticLink(mark: Mark, text: string): boolean {
   );
 }
 
-function sourceStyle(
+function isBareSourceLink(
   source: string,
   map: ReturnType<CollabSession["binding"]["getSourceMap"]>,
   node: PMNode,
   from: number,
   to: number,
   link: Mark,
-): "bare" | "angle" | null {
-  if (!node.isText || !node.text || !automaticLink(link, node.text)) return null;
+): boolean {
+  if (!node.isText || !node.text || !automaticLink(link, node.text)) return false;
   const sourceFrom = map.pmToSrc(from);
   const sourceTo = map.pmToSrc(to);
-  if (source.slice(sourceFrom, sourceTo) !== node.text) return null;
-  if (source[sourceFrom - 1] === "[" && source[sourceTo] === "]") return null;
-  if (source[sourceFrom - 1] === "<" && source[sourceTo] === ">") return "angle";
-  return "bare";
-}
-
-function canContinueAsBareAutolink(text: string): boolean {
-  return /^(?:https?:\/\/|www\.)\S+$/i.test(text) || /^[^\s@]+@[^\s@]+$/u.test(text);
+  if (source.slice(sourceFrom, sourceTo) !== node.text) return false;
+  if (source[sourceFrom - 1] === "[" && source[sourceTo] === "]") return false;
+  return source[sourceFrom - 1] !== "<" || source[sourceTo] !== ">";
 }
 
 function linkAtInsertion(state: EditorState, from: number): Mark | null {
@@ -102,14 +97,7 @@ function demoteTypedAutolinks(
     if (!link) return;
     const from = blockStart + 1 + offset;
     const to = from + node.nodeSize;
-    const style = sourceStyle(source, map, node, from, to, link);
-    if (!style) return;
-    if (style === "angle") {
-      if (oldState.doc.resolve(from).parent !== $from.parent) return;
-      if (to > insertion.from) return;
-      const continuation = oldState.doc.textBetween(to, insertion.from, "", "\ufffc");
-      if (/\s|\ufffc/u.test(continuation) || !canContinueAsBareAutolink(node.text + continuation + insertion.text)) return;
-    }
+    if (!isBareSourceLink(source, map, node, from, to, link)) return;
     transaction.removeMark(
       changedTransaction.mapping.map(from, -1),
       changedTransaction.mapping.map(to, 1),

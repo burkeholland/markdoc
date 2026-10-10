@@ -571,6 +571,19 @@ describe("link cards in the rich pane (#2317)", () => {
       ]);
     });
 
+    it.each([
+      ["web", "<https://example.com>", "https://example.com"],
+      ["mail", "<mailto:person@example.com>", "mailto:person@example.com"],
+    ])("preserves an intentional angle $name link when typing beside it", async (_name, autolink, href) => {
+      const source = `- Prefix ${autolink}`;
+      const { session, view, text } = open(source);
+      const position = session.binding.getSourceMap().srcToPm(source.length);
+      view.dispatch(view.state.tr.insertText("x", position));
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      expect(text()).toBe(`${source}x`);
+      expect(linkedText(view)).toEqual([{ text: href, href }]);
+    });
+
     it("keeps a bare autolink bare when another item in the same list changes", async () => {
       const source = "- Typed \n- Pasted";
       const { session, view, text } = open(source);
