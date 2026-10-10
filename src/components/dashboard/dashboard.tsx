@@ -30,6 +30,7 @@ import { DEFAULT_DASHBOARD_SORT, SORT_COOKIE, SORT_COOKIE_MAX_AGE, SORT_OPTIONS,
 
 import { Logo } from "@/components/ui/logo";
 import { GitHubPicker } from "@/components/editor/github-dialog";
+import { isManagedGithubLogin } from "@/lib/github-login";
 import { GITHUB_NOT_CONFIGURED } from "@/components/editor/labels";
 import { NotificationsStrip } from "@/components/dashboard/notifications-strip";
 import { ImportDialog, ImportDropzone, useFileImport } from "@/components/dashboard/import-dialog";
@@ -5959,7 +5960,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
 
         <Dialog open={openPicker} onOpenChange={setOpenPicker}>
           <DialogContent title="Open from GitHub" description="Pick a Markdown file. Markdoc keeps a live copy and publishes back when you ask it to." wide>
-            <GitHubPicker mode="import" githubAvailable={githubAvailable} githubConfigured={githubConfigured} onImported={(id) => router.push(`/d/${id}`)} />
+            <GitHubPicker mode="import" githubAvailable={githubAvailable} githubConfigured={githubConfigured} managedAccount={isManagedGithubLogin(user.login)} onImported={(id) => router.push(`/d/${id}`)} />
           </DialogContent>
         </Dialog>
 

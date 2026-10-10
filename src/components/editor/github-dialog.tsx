@@ -23,6 +23,7 @@ import { signIn } from "next-auth/react";
 import { Check, ExternalLink, FileText, GitBranch, Loader2, Lock, Search, Unlink } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import { api, apiErrorText } from "@/lib/api";
+import { MANAGED_ACCOUNT_GISTS_NOTE } from "@/lib/github-login";
 
 import { cn, relativeTime } from "@/lib/utils";
 import { GITHUB_NOT_CONFIGURED } from "./labels";
@@ -1483,6 +1484,8 @@ interface GitHubPickerProps {
   githubAvailable: boolean;
   /** The server has a GitHub OAuth app, so "Sign in with GitHub" can work. */
   githubConfigured: boolean;
+  /** The signed-in GitHub account is a managed one (`handle_shortcode`): GitHub gives it no gists. */
+  managedAccount?: boolean;
 }
 
 type GitHubPickerAction =
@@ -3426,7 +3429,16 @@ function exactPickerSubmit(
 /** Connect a document to a gist or repository file, or pick a file to import. */
 export function GitHubPicker(props: GitHubPickerProps) {
   const documentKey = props.mode === "link" ? (props.doc?.id ?? "missing") : "import";
-  return <GitHubPickerVisit key={`${props.mode}:${documentKey}`} {...props} />;
+  return (
+    <>
+      {props.managedAccount && props.githubAvailable && (
+        <p className="mb-3 rounded-lg bg-surface-2 px-3 py-2 text-sm text-ink-2" role="note" data-testid="managed-account-gists-note">
+          {MANAGED_ACCOUNT_GISTS_NOTE}
+        </p>
+      )}
+      <GitHubPickerVisit key={`${props.mode}:${documentKey}`} {...props} />
+    </>
+  );
 }
 
 function GitHubPickerVisit({
@@ -3436,10 +3448,12 @@ function GitHubPickerVisit({
   onImported,
   githubAvailable,
   githubConfigured,
+  managedAccount,
 }: GitHubPickerProps) {
   const [mount] = useState(() => Symbol("github-picker"));
   const gistChoiceName = useId();
-  const [tab, setTab] = useState<Tab>("gist");
+  // A managed account has no gists and cannot make one: it starts where it can work.
+  const [tab, setTab] = useState<Tab>(managedAccount ? "repo" : "gist");
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyOperation, setBusyOperation] = useState<GitHubPickerOperation | null>(null);
   const busy = busyOperation !== null;
@@ -5501,6 +5515,7 @@ export const GitHubDialog = memo(function GitHubDialog({
   onDocChange,
   githubAvailable,
   githubConfigured,
+  managedAccount,
   isOwner,
 }: {
   open: boolean;
@@ -5509,6 +5524,7 @@ export const GitHubDialog = memo(function GitHubDialog({
   onDocChange: (doc: DocumentDto) => void;
   githubAvailable: boolean;
   githubConfigured: boolean;
+  managedAccount?: boolean;
   isOwner: boolean;
 }) {
   const [unlinking, setUnlinking] = useState(false);
@@ -5569,6 +5585,7 @@ export const GitHubDialog = memo(function GitHubDialog({
           doc={doc}
           githubAvailable={githubAvailable}
           githubConfigured={githubConfigured}
+          managedAccount={managedAccount}
           onLinked={(d) => {
             onDocChange(d);
             onOpenChange(false);

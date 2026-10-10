@@ -19,6 +19,7 @@ import { api, ApiError, apiErrorText, type SyncStatusDto, type VersionSummary } 
 import { uploadAsset } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { readDownloadFilename } from "@/lib/download-filename";
+import { isManagedGithubLogin } from "@/lib/github-login";
 import { readJsonResponse } from "@/lib/json-response";
 import { setPendingNotice, takePendingNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
@@ -3520,7 +3521,7 @@ export function EditorShell({
           <>
             {everOpened.share && <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} onConnectAgent={openConnectAgent} />}
             {everOpened.publish && (
-              <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} isOwner={isOwner} />
+              <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} managedAccount={isManagedGithubLogin(user.login)} isOwner={isOwner} />
             )}
             {everOpened.commit && <CommitDialog key={`commit:${operationDialogKey}`} open={commitOpen} onOpenChange={changeCommitOpen} doc={docView} onCommit={publishNow} isOwner={isOwner} />}
             {everOpened.sync && <SyncDialog key={`sync:${operationDialogKey}`} open={syncOpen} onOpenChange={changeSyncOpen} doc={docView} sync={sync} actions={syncActions} unprompted={syncUnprompted} />}

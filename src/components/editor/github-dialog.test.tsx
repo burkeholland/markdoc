@@ -1405,6 +1405,57 @@ describe("GitHubDialog connection presentation", () => {
   });
 });
 
+// A managed account (Enterprise Managed Users, `handle_shortcode`) has no gists and GitHub lets it create none.
+describe("GitHubPicker for a managed account", () => {
+  const NOTE = "GitHub does not let company-managed accounts create gists. Use a repository instead.";
+
+  it("opens on Repository, says why, and never asks GitHub for gists", async () => {
+    render(<GitHubPicker mode="link" doc={documentDto()} githubAvailable githubConfigured managedAccount />);
+    expect(screen.getByTestId("managed-account-gists-note")).toHaveTextContent(NOTE);
+    expect(screen.getByTestId("picker-tab-repo")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("picker-tab-gist")).toHaveAttribute("aria-pressed", "false");
+    await screen.findByTestId("repo-item");
+    expect(repos).toHaveBeenCalledTimes(1);
+    expect(gists).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("gist-create")).toBeNull();
+  });
+
+  it("imports a repository file with the note in place", async () => {
+    const onImported = vi.fn();
+    render(<GitHubPicker mode="import" githubAvailable githubConfigured managedAccount onImported={onImported} />);
+    fireEvent.click(await screen.findByTestId("repo-item"));
+    fireEvent.click(await screen.findByTestId("repo-file"));
+    expect(importDocument).toHaveBeenCalledExactlyOnceWith({ source: "repo", owner: currentRepo.owner, repo: currentRepo.name, branch: "main", path: "README.md" });
+    await waitFor(() => expect(onImported).toHaveBeenCalledExactlyOnceWith("imported"));
+    expect(screen.getByTestId("managed-account-gists-note")).toHaveTextContent(NOTE);
+  });
+
+  it("can still look at the Gist tab, where the note stays", async () => {
+    gists.mockResolvedValue({ gists: [] });
+    render(<GitHubPicker mode="import" githubAvailable githubConfigured managedAccount />);
+    await screen.findByTestId("repo-item");
+    fireEvent.click(screen.getByTestId("picker-tab-gist"));
+    await screen.findByTestId("gist-list");
+    expect(screen.getByTestId("picker-tab-gist")).toHaveAttribute("aria-pressed", "true");
+    expect(gists).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("managed-account-gists-note")).toHaveTextContent(NOTE);
+  });
+
+  it("says nothing to an ordinary account, which opens on Gist as before", async () => {
+    renderPicker();
+    await screen.findByTestId("gist-item");
+    expect(screen.queryByTestId("managed-account-gists-note")).toBeNull();
+    expect(screen.getByTestId("picker-tab-gist")).toHaveAttribute("aria-pressed", "true");
+    expect(repos).not.toHaveBeenCalled();
+  });
+
+  it("says nothing next to the sign-in prompt", () => {
+    render(<GitHubPicker mode="import" githubAvailable={false} githubConfigured managedAccount />);
+    expect(screen.queryByTestId("managed-account-gists-note")).toBeNull();
+    expect(screen.getByRole("button", { name: /Sign in with GitHub/ })).toBeInTheDocument();
+  });
+});
+
 describe("GitHubPicker metadata titles", () => {
   const primaryClass = "truncate text-sm font-medium text-ink";
   const secondaryClass = "truncate text-xs text-ink-3";
