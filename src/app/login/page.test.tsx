@@ -45,10 +45,21 @@ function containsTestId(node: ReactNode, testId: string): boolean {
   return Children.toArray(node.props.children).some((child) => containsTestId(child, testId));
 }
 
-function pageProps(next: string) {
+function findByTestId(node: ReactNode, testId: string): ReactElement<ElementProps> | null {
+  if (!isValidElement<ElementProps>(node)) return null;
+  if (node.props["data-testid"] === testId) return node;
+
+  for (const child of Children.toArray(node.props.children)) {
+    const found = findByTestId(child, testId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function pageProps(next: string, error?: string) {
   const props: Parameters<typeof LoginPage>[0] = {
     params: Promise.resolve({}),
-    searchParams: Promise.resolve({ next }),
+    searchParams: Promise.resolve(error === undefined ? { next } : { next, error }),
   };
   return props;
 }
@@ -100,6 +111,26 @@ describe("LoginPage return paths", () => {
     authMocks.auth.mockResolvedValue(null);
     await LoginPage(pageProps(next));
     expect(signInPreviewMetadata).toHaveBeenCalledWith(expected);
+  });
+});
+
+describe("LoginPage after a failed sign-in", () => {
+  it("says nothing when the sign-in has not failed", async () => {
+    authMocks.auth.mockResolvedValue(null);
+    expect(findByTestId(await LoginPage(pageProps("/")), "login-error")).toBeNull();
+  });
+
+  // Auth.js comes back with `?error=Configuration` for every failure it keeps to itself (src/auth.ts, `pages.error`).
+  it.each([
+    ["Configuration", "Sign-in could not be completed because of a problem on our side. Please try again later."],
+    ["OAuthCallbackError", "The GitHub sign-in was cancelled or did not finish. Please try again."],
+  ])("explains %s in words and keeps the sign-in button", async (error, message) => {
+    authMocks.auth.mockResolvedValue(null);
+    const page = await LoginPage(pageProps("/d/document-1", error));
+
+    expect(findByTestId(page, "login-error")?.props.children).toBe(message);
+    await findForm(page, "github-signin")!.props.action!(new FormData());
+    expect(authMocks.signIn).toHaveBeenCalledWith("github", { redirectTo: "/d/document-1" });
   });
 });
 

@@ -6,6 +6,7 @@ import { notifyShare } from "@/server/notifications";
 import { listMentionableAgents } from "@/server/agents";
 import { changeCollaboratorAccess } from "@/server/collab/authorization";
 import { warnTail } from "@/server/warnings";
+import { GITHUB_LOGIN_MAX_LENGTH, GITHUB_LOGIN_RE } from "@/lib/github-login";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -30,7 +31,7 @@ const addSchema = z.object({
     .trim()
     .transform((value) => value.replace(/^@/, ""))
     // No min(1): the pattern already needs one character, so an empty handle and a lone `@` get the same one message.
-    .pipe(z.string().max(39).regex(/^[a-zA-Z0-9-]+$/, "Enter a GitHub handle")),
+    .pipe(z.string().max(GITHUB_LOGIN_MAX_LENGTH).regex(GITHUB_LOGIN_RE, "Enter a GitHub handle")),
   role: z.enum(["editor", "commenter", "viewer"]),
   /** "I mean to set this role even if the person already has another one." Only a real boolean counts. */
   change: z.boolean().optional(),

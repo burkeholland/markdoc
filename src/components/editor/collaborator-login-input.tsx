@@ -14,6 +14,7 @@ import {
 import { Loader2, UserPlus } from "lucide-react";
 import { api, apiErrorText, type GitHubUserDto } from "@/lib/api";
 import { cn, initials } from "@/lib/utils";
+import { GITHUB_LOGIN_MAX_LENGTH, GITHUB_LOGIN_PREFIX_RE, isGithubLogin } from "@/lib/github-login";
 
 /** Keystrokes settle for this long before one request goes out for the typed prefix. */
 export const SUGGEST_DEBOUNCE_MS = 250;
@@ -47,18 +48,18 @@ function SuggestionAvatar({ login, src }: { login: string; src: string }) {
 /** The login prefix worth searching for what was typed — trimmed, without a leading `@` — or null when too short or not a login. */
 export function suggestQuery(value: string): string | null {
   const q = value.trim().replace(/^@/, "");
-  return q.length >= SUGGEST_MIN_CHARS && q.length <= 39 && /^[a-zA-Z0-9-]+$/.test(q) ? q : null;
+  return q.length >= SUGGEST_MIN_CHARS && q.length <= GITHUB_LOGIN_MAX_LENGTH && GITHUB_LOGIN_PREFIX_RE.test(q) ? q : null;
 }
 
 /**
  * Whether a typed handle is a syntactically valid GitHub login (trimmed, `@` optional) — used to gate the
  * Add button. Matches exactly what POST /api/documents/[id]/collaborators accepts (1-39 chars, letters,
- * digits and hyphens, `@` optional) so Add is never stricter than the server — a login this short or shaped
- * can still be a real GitHub user even though it is too short to search suggestions for (see SUGGEST_MIN_CHARS).
+ * digits and hyphens, then `_` and a short code for a managed account, `@` optional) so Add is never
+ * stricter than the server — a login this short or shaped can still be a real GitHub user even though it
+ * is too short to search suggestions for (see SUGGEST_MIN_CHARS).
  */
 export function isValidLogin(value: string): boolean {
-  const q = value.trim().replace(/^@/, "");
-  return q.length >= 1 && q.length <= 39 && /^[a-zA-Z0-9-]+$/.test(q);
+  return isGithubLogin(value.trim().replace(/^@/, ""));
 }
 
 type Lookup = Readonly<{ status: "loading" } | { status: "error"; message: string; retrying: boolean }>;

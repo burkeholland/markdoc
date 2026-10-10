@@ -4,6 +4,7 @@ import { GitHubIcon } from "@/components/ui/github-icon";
 import { signIn, auth, devLoginEnabled, githubConfigured } from "@/auth";
 import { Logo } from "@/components/ui/logo";
 import { loginReturnPath } from "./return-path";
+import { signInErrorMessage } from "./sign-in-error";
 import { embeddedDocumentPath } from "@/server/http";
 import { signInPreviewMetadata } from "@/server/document-metadata";
 
@@ -44,7 +45,11 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
         <p className="mb-6 text-sm text-ink-2" data-testid="login-about">
           A collaborative Markdown editor. People and AI agents write the same document in real time, with comments, suggestions and version history.
         </p>
-        {error && <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40">Sign in failed ({error}). Please try again.</div>}
+        {error && (
+          <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert" data-testid="login-error">
+            {signInErrorMessage(error)}
+          </div>
+        )}
         {githubConfigured ? (
           <form
             action={async () => {

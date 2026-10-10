@@ -1,9 +1,11 @@
+import { GITHUB_LOGIN_MAX_LENGTH } from "@/lib/github-login";
+
 /**
  * `@login` mentions inside plain-text comment bodies.
  *
- * A mention is `@` followed by a GitHub-login-shaped token (`[A-Za-z0-9-]{1,39}`)
- * that is not glued to a preceding word character, so e-mail addresses such as
- * `a@b.com` are left alone.
+ * A mention is `@` followed by a GitHub-login-shaped token (`[A-Za-z0-9-]{1,39}`, or for a
+ * managed account that plus `_` and its short code: `@mona-cat_octo`) that is not glued to a
+ * preceding word character, so e-mail addresses such as `a@b.com` are left alone.
  *
  * Agents (API tokens) are mentioned as `@login/Agent-Name`: the login is the user the
  * token acts for (that is who the notification is keyed on, so the agent's watch sees
@@ -12,9 +14,9 @@
 
 export type MentionPart = { type: "text"; value: string } | { type: "mention"; value: string; agent?: string };
 
-export const MENTION_LOGIN_RE = /^[A-Za-z0-9-]{1,39}$/;
-
-const MENTION_RE = /(^|[^A-Za-z0-9_])@([A-Za-z0-9-]{1,39})(?:\/([A-Za-z0-9-]{1,39}))?(?![A-Za-z0-9-])/g;
+// The login ends where a login cannot go on: `@bob_ ` is `bob`, but `@mona-cat_octo` is never cut down
+// to `mona-cat` (another account) and neither is a token that only starts like a login (`@a_b_c`).
+const MENTION_RE = /(^|[^A-Za-z0-9_])@([A-Za-z0-9-]{1,39}(?:_[A-Za-z0-9]{1,37})?)(?:\/([A-Za-z0-9-]{1,39}))?(?![A-Za-z0-9-]|_[A-Za-z0-9])/g;
 
 /** Token name → the slug used after `@login/` (runs of anything else become `-`). */
 export function agentMentionSlug(name: string): string {
@@ -64,6 +66,8 @@ export function splitMentions(body: string): MentionPart[] {
   MENTION_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = MENTION_RE.exec(body))) {
+    // The two halves of a managed login are bounded separately above; together they still fit GitHub's limit.
+    if (m[2].length > GITHUB_LOGIN_MAX_LENGTH) continue;
     const start = m.index + m[1].length;
     if (start > last) parts.push({ type: "text", value: body.slice(last, start) });
     parts.push(m[3] ? { type: "mention", value: m[2], agent: m[3] } : { type: "mention", value: m[2] });
@@ -102,7 +106,7 @@ export function parseAgentMentions(body: string): { login: string; agent: string
  */
 export function mentionTriggerAt(text: string, caret: number): { start: number; query: string } | null {
   const before = text.slice(0, caret);
-  const m = /(^|[^A-Za-z0-9_])@([A-Za-z0-9-]{0,39}(?:\/[A-Za-z0-9-]{0,39})?)$/.exec(before);
+  const m = /(^|[^A-Za-z0-9_])@((?:[A-Za-z0-9-]{1,39}(?:_[A-Za-z0-9]{0,37})?)?(?:\/[A-Za-z0-9-]{0,39})?)$/.exec(before);
   if (!m) return null;
   return { start: m.index + m[1].length, query: m[2] };
 }
