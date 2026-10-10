@@ -17,3 +17,14 @@ export const GITHUB_LOGIN_PREFIX_RE = /^[A-Za-z0-9-]+(?:_[A-Za-z0-9]*)?$/;
 export function isGithubLogin(value: string): boolean {
   return value.length <= GITHUB_LOGIN_MAX_LENGTH && GITHUB_LOGIN_RE.test(value);
 }
+
+/**
+ * Whether a login is a managed account's (Enterprise Managed Users). Only those have the `_` before the
+ * enterprise's short code; an ordinary login cannot contain one.
+ */
+export function isManagedGithubLogin(login: string | null | undefined): boolean {
+  return !!login && login.includes("_");
+}
+
+/** What a managed account is told wherever a gist is on offer; GitHub's rule, not a setting here. */
+export const MANAGED_ACCOUNT_GISTS_NOTE = "GitHub does not let company-managed accounts create gists. Use a repository instead.";

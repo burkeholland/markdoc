@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GITHUB_LOGIN_PREFIX_RE, GITHUB_LOGIN_RE, isGithubLogin } from "./github-login";
+import { GITHUB_LOGIN_PREFIX_RE, GITHUB_LOGIN_RE, isGithubLogin, isManagedGithubLogin } from "./github-login";
 
 describe("isGithubLogin()", () => {
   it("accepts an ordinary login: letters, digits and hyphens, up to 39 characters", () => {
@@ -18,6 +18,14 @@ describe("isGithubLogin()", () => {
     for (const login of ["", "_octo", "mona_", "mona__octo", "a_b_c", "mona_oc-to", "bad name", "bad!", "a.b", "a@b", "a".repeat(40), `${"a".repeat(31)}_${"b".repeat(8)}`]) {
       expect(isGithubLogin(login), login).toBe(false);
     }
+  });
+});
+
+describe("isManagedGithubLogin()", () => {
+  it("is true for a login with the underscore of a managed account, and for nothing else", () => {
+    expect(isManagedGithubLogin("mona-cat_octo")).toBe(true);
+    expect(isManagedGithubLogin("Mona_Octo")).toBe(true);
+    for (const login of ["mona-cat", "d--b", "", null, undefined]) expect(isManagedGithubLogin(login), String(login)).toBe(false);
   });
 });
 

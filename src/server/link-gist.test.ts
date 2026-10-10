@@ -75,6 +75,68 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// GitHub does not let a managed account (Enterprise Managed Users, `handle_shortcode`) create gists, and
+// its refusal is not a clear one: a 403, a 404 and a rate-limit error have all been reported.
+describe("POST /link to a new gist from a managed account", () => {
+  let managed: User;
+  beforeAll(async () => {
+    const db = await getDb();
+    const [u] = await db.insert(schema.users).values({ name: "Mona", login: "mona-cat_octo", email: "mona-link@example.com" }).returning();
+    managed = { id: u.id, login: "mona-cat_octo", name: "Mona", image: null };
+  });
+  const refused = (status: number, message: string) => Object.assign(new Error(message), { status });
+
+  it.each([
+    [403, "Forbidden"],
+    [404, "Not Found"],
+    [422, "Validation Failed"],
+    [429, "API rate limit exceeded"],
+  ])("a %i from GitHub is a 403 that says why and what works instead; the document stays local", async (status, message) => {
+    actor = managed;
+    const doc = await createDocument({ ownerId: managed.id, content: TEXT, title: "Notes" });
+    const versions = (await listVersions(doc.id)).length;
+    vi.mocked(createGist).mockRejectedValueOnce(refused(status, message));
+
+    const res = await linkPost(post(`/api/documents/${doc.id}/link`, { storage: "gist", isPublic: false }), params(doc.id));
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "GitHub does not let company-managed accounts create gists. Use a repository instead.", code: "gists-unavailable" });
+    expect(createGist).toHaveBeenCalledTimes(1);
+    const after = (await getDocumentAccess(doc.id, managed))!.doc;
+    expect(after).toMatchObject({ storage: "local", gistId: null, gistFile: null });
+    expect((await listVersions(doc.id)).length).toBe(versions);
+  });
+
+  it("links as usual if GitHub does create the gist", async () => {
+    actor = managed;
+    const doc = await createDocument({ ownerId: managed.id, content: TEXT, title: "Notes" });
+    const res = await linkPost(post(`/api/documents/${doc.id}/link`, { storage: "gist" }), params(doc.id));
+    expect(res.status).toBe(200);
+    expect((await body(res)).document).toMatchObject({ storage: "gist", gistId: "g1", gistFile: "notes.md" });
+  });
+
+  it("a GitHub outage is still an unexpected error, for a managed account too", async () => {
+    actor = managed;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const doc = await createDocument({ ownerId: managed.id, content: TEXT });
+    vi.mocked(createGist).mockRejectedValueOnce(refused(502, "Bad Gateway"));
+    const res = await linkPost(post(`/api/documents/${doc.id}/link`, { storage: "gist" }), params(doc.id));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Unexpected error" });
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  it("an ordinary account's refusal is unchanged: nothing is said about managed accounts", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const doc = await createDocument({ ownerId: user.id, content: TEXT });
+    vi.mocked(createGist).mockRejectedValueOnce(refused(403, "Forbidden"));
+    const res = await linkPost(post(`/api/documents/${doc.id}/link`, { storage: "gist" }), params(doc.id));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Unexpected error" });
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("POST /link to a new gist", () => {
   it("links, records the base and a 'Published to new gist' version; no warnings key", async () => {
     const doc = await createDocument({ ownerId: user.id, content: TEXT, title: "Notes" });
