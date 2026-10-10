@@ -45,6 +45,7 @@ const MAX_COMMENT_SUGGESTION_TRANSITIONS = 20;
 const COMMENT_SUGGESTION_HISTORY_ORIGIN = { name: "comment-suggestion-history" };
 const COMMENT_SUGGESTION_REPLAY_ORIGIN = { name: "comment-suggestion-replay" };
 const COMMENT_CREATION_UNAVAILABLE = "A new comment cannot be created until the document is ready and access allows comments.";
+const SOURCE_RECONCILIATION_UNAVAILABLE = "Source reconciliation requires authoritative content and editing access.";
 
 class SessionCommentsModel extends CommentsModel {
   constructor(
@@ -898,8 +899,12 @@ export class CollabSession {
    * available before the server sync; an empty document is authoritative only after that sync.
    * In both cases the held Markdown rebuild must finish before a caret or action can target the pane.
    */
+  private get sourceReady(): boolean {
+    return this.authoritativeContentReady || this.synced || this.ytext.length > 0;
+  }
+
   get contentReady(): boolean {
-    return (this.authoritativeContentReady || this.synced || this.ytext.length > 0) && !this.binding.hasHeldSync;
+    return this.sourceReady && !this.binding.hasHeldSync;
   }
 
   /** The user's role may change this document, and its authoritative text is represented in the pane. */
@@ -1249,6 +1254,25 @@ export class CollabSession {
    */
   replaceSource(edits: { from: number; to: number; text: string }[]) {
     if (!this.canEdit || edits.length === 0) return;
+    this.applySourceEdits(edits);
+  }
+
+  /**
+   * Apply a server reconciliation while the rendered pane is still catching up.
+   * User mutation entry points remain gated by contentReady.
+   */
+  replaceSourceFromReconciliation(edits: { from: number; to: number; text: string }[]) {
+    if (edits.length === 0) return;
+    const canReconcile =
+      this.sourceReady &&
+      !this.accessBlocked &&
+      this.mode !== "viewing" &&
+      (this.role === "owner" || this.role === "editor");
+    if (!canReconcile) throw new Error(SOURCE_RECONCILIATION_UNAVAILABLE);
+    this.applySourceEdits(edits);
+  }
+
+  private applySourceEdits(edits: { from: number; to: number; text: string }[]) {
     const sorted = [...edits].sort((a, b) => b.from - a.from);
     if (this.mode === "suggesting") {
       this.ydoc.transact(() => {

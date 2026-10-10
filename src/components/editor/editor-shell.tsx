@@ -2513,7 +2513,7 @@ export function EditorShell({
           if (e instanceof ApiError && e.status === 409 && e.body?.status === "conflict" && typeof e.body.merged === "string") {
             if (!ownsPublishPull(owner)) throw e;
             // Put the marked text in the document so the user resolves conflicts inline (the `merge-conflict` lint flags each marker).
-            session.replaceSource([{ from: 0, to: session.ytext.length, text: e.body.merged }]);
+            session.replaceSourceFromReconciliation([{ from: 0, to: session.ytext.length, text: e.body.merged }]);
             session.setActiveSurface("code");
             if (shownLayout === "rich") setLayout(isPhone ? "code" : "split");
             toast(`Merged with ${e.body.conflicts} conflict${e.body.conflicts === 1 ? "" : "s"} — resolve the marked lines, then publish.`, "info");

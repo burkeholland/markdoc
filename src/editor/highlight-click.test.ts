@@ -114,11 +114,11 @@ function makeHarness(surface: Surface, kind: ActivatableHighlightKind, options: 
   });
   session.keepAlive();
   session.ytext.insert(0, TEXT);
+  const richDoc = session.binding.initialDoc();
+  session.binding.releaseRemoteSync();
   const id = options.replacement
     ? session.suggestions.propose({ ...ITEM_RANGE, insert: "replacement" }, session.user)
     : createItem(session, kind);
-  const richDoc = session.binding.initialDoc();
-  session.binding.releaseRemoteSync();
   if (options.overlap) {
     const overlapKind: ActivatableHighlightKind = kind.startsWith("comment") ? "suggest-insert" : "comment";
     createItem(session, overlapKind, { from: ITEM_RANGE.from + 2, to: ITEM_RANGE.to - 2 });

@@ -140,6 +140,35 @@ describe("the session learns that its own access changed (#2269)", () => {
     session.destroy();
   });
 
+  it("allows held source reconciliation without enabling pre-ready user edits or comments", async () => {
+    const { session } = open("editor");
+    session.ytext.insert(0, "Local mirror");
+    expect(session.binding.hasHeldSync).toBe(true);
+    expect(session.contentReady).toBe(false);
+    expect(session.canEdit).toBe(false);
+    expect(session.canCreateComment).toBe(false);
+
+    session.replaceSource([{ from: 0, to: session.ytext.length, text: "User edit" }]);
+    expect(() => session.setPendingComment({ from: 0, to: 0 })).toThrow(/document is ready/);
+    expect(() => session.comments.add({ from: 0, to: 0, body: "Too early", author: session.user })).toThrow(/document is ready/);
+    expect(session.ytext.toString()).toBe("Local mirror");
+    expect(session.comments.list()).toEqual([]);
+
+    session.replaceSourceFromReconciliation([{ from: 0, to: session.ytext.length, text: "Merged conflict" }]);
+    expect(session.ytext.toString()).toBe("Merged conflict");
+    expect(session.contentReady).toBe(false);
+    expect(session.canEdit).toBe(false);
+    expect(session.canCreateComment).toBe(false);
+
+    session.binding.releaseRemoteSync();
+    await vi.waitFor(() => expect(session.contentReady).toBe(true));
+    session.replaceSource([{ from: session.ytext.length, to: session.ytext.length, text: " resolved" }]);
+    const threadId = session.comments.add({ from: 0, to: 0, body: "Ready", author: session.user });
+    expect(session.ytext.toString()).toBe("Merged conflict resolved");
+    expect(session.comments.get(threadId)?.body).toBe("Ready");
+    session.destroy();
+  });
+
   describe("the server's message", () => {
     it.each([
       ["editor", "viewer"],
@@ -157,6 +186,7 @@ describe("the session learns that its own access changed (#2269)", () => {
       expect(session.accessBlocked).toBe(true);
       expect(before).toBe(built !== "commenter");
       expect(session.role).toBe(built);
+      expect(() => session.replaceSourceFromReconciliation([{ from: 0, to: 0, text: "blocked" }])).toThrow(/editing access/);
       await expect(session.flushSave()).rejects.toThrow(/permission/);
       session.destroy();
     });
