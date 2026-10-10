@@ -17,7 +17,8 @@ const { listMarkdownGists } = await import("@/server/github");
 const { GET } = await import("./route");
 
 const GIST = { id: "g1", description: null, public: false, updatedAt: "2026-10-01T00:00:00Z", htmlUrl: "https://gist.github.com/g1", files: [{ filename: "notes.md", language: "Markdown", size: 12 }] };
-const refused = (status: number) => Object.assign(new Error("refused (test)"), { status });
+const refused = (status: number, headers?: Record<string, string>) =>
+  Object.assign(new Error("refused (test)"), { status, response: headers ? { headers } : undefined });
 
 let ordinary: Actor;
 let managed: Actor;
@@ -51,7 +52,7 @@ describe("GET /api/github/gists", () => {
   });
 
   // A managed account (Enterprise Managed Users) cannot have gists; GitHub may refuse the question itself.
-  it.each([403, 404, 429])("a managed account that GitHub answers %i has none, not an error", async (status) => {
+  it.each([403, 404])("a managed account that GitHub answers %i has none, not an error", async (status) => {
     actor = managed;
     vi.mocked(listMarkdownGists).mockRejectedValueOnce(refused(status));
     const res = await GET();
@@ -59,14 +60,37 @@ describe("GET /api/github/gists", () => {
     expect(await res.json()).toEqual({ gists: [] });
   });
 
-  it("an ordinary account's refusal, and anyone's GitHub outage, are still unexpected errors", async () => {
+  it("preserves a 401 as lost GitHub access instead of hiding it as an empty list", async () => {
+    actor = managed;
+    vi.mocked(listMarkdownGists).mockRejectedValueOnce(refused(401));
+    const res = await GET();
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "GitHub access was lost. Sign in with GitHub." });
+  });
+
+  it("preserves a 429 and GitHub's retry metadata instead of hiding it as an empty list", async () => {
+    actor = managed;
+    vi.mocked(listMarkdownGists).mockRejectedValueOnce(
+      refused(429, { "retry-after": "23", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1791676800" }),
+    );
+    const res = await GET();
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({ error: "GitHub is rate limiting requests. Try again later.", retryAfter: 23 });
+    expect(res.headers.get("Retry-After")).toBe("23");
+    expect(res.headers.get("X-RateLimit-Remaining")).toBe("0");
+    expect(res.headers.get("X-RateLimit-Reset")).toBe("1791676800");
+  });
+
+  it("an ordinary account's refusal, an unknown managed-account 4xx, and anyone's GitHub outage are still unexpected errors", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     actor = ordinary;
     vi.mocked(listMarkdownGists).mockRejectedValueOnce(refused(403));
     expect((await GET()).status).toBe(500);
     actor = managed;
+    vi.mocked(listMarkdownGists).mockRejectedValueOnce(refused(400));
+    expect((await GET()).status).toBe(500);
     vi.mocked(listMarkdownGists).mockRejectedValueOnce(refused(502));
     expect((await GET()).status).toBe(500);
-    expect(errors).toHaveBeenCalledTimes(2);
+    expect(errors).toHaveBeenCalledTimes(3);
   });
 });

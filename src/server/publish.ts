@@ -18,7 +18,7 @@ import { hydrateDoc } from "@/server/collab/seed";
 import * as Y from "yjs";
 import type { CollabContext } from "@/server/collab/hocuspocus";
 import { warnTail, type WarningCode } from "@/server/warnings";
-import { managedAccountGistRefusal } from "@/server/github/managed-account";
+import { managedAccountGistRefusal, managedAccountGistTransientFailure } from "@/server/github/managed-account";
 import { diff3Merge, diffIndices } from "node-diff3";
 import type { GistAutoUpdatePreview } from "@/lib/gist-auto-update";
 import { getDb, schema, withGistPublicationLock } from "@/server/db";
@@ -661,7 +661,7 @@ async function linkWithinLock(doc: LinkedDocument, user: SessionUser, input: Lin
       description: input.description ?? doc.title,
       isPublic: !!input.isPublic,
     }).catch((error: unknown) => {
-      throw managedAccountGistRefusal(user, error) ?? error;
+      throw managedAccountGistRefusal(user, error) ?? managedAccountGistTransientFailure(user, error) ?? error;
     });
     // The gist exists now: write the link first so it is durable (a failure here is a 500 with the
     // document still local and the gist orphaned — nothing more can be done without a transaction
