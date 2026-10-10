@@ -129,6 +129,41 @@ describe("splitMentions", () => {
     expect(splitMentions(`@${max}`)).toEqual([{ type: "mention", value: max }]);
   });
 
+  it("reads a managed account's login whole: the handle, the underscore and the short code", () => {
+    expect(splitMentions("ping @mona-cat_octo, thanks")).toEqual([
+      { type: "text", value: "ping " },
+      { type: "mention", value: "mona-cat_octo" },
+      { type: "text", value: ", thanks" },
+    ]);
+    expect(splitMentions("@mona-cat_octo/Copilot-CLI tighten this")).toEqual([
+      { type: "mention", value: "mona-cat_octo", agent: "Copilot-CLI" },
+      { type: "text", value: " tighten this" },
+    ]);
+    expect(parseMentions("@Mona-Cat_Octo and @mona-cat")).toEqual(["mona-cat_octo", "mona-cat"]);
+    expect(parseAgentMentions("@Mona-Cat_Octo/Scribe")).toEqual([{ login: "mona-cat_octo", agent: "Scribe" }]);
+  });
+
+  it("never cuts a token with an underscore down to another account's login", () => {
+    for (const body of ["@a_b_c", "@mona_oc-to"]) {
+      expect(splitMentions(body), body).toEqual([{ type: "text", value: body }]);
+    }
+    // An underscore that no short code follows is ordinary text after the login.
+    expect(splitMentions("@bob_ ok")).toEqual([
+      { type: "mention", value: "bob" },
+      { type: "text", value: "_ ok" },
+    ]);
+  });
+
+  it("holds a managed account's login to GitHub's 39 characters as well", () => {
+    const max = `${"a".repeat(30)}_${"b".repeat(8)}`;
+    expect(splitMentions(`@${max}`)).toEqual([{ type: "mention", value: max }]);
+    const long = `${"a".repeat(31)}_${"b".repeat(8)}`;
+    expect(splitMentions(`@${long} @bob`)).toEqual([
+      { type: "text", value: `@${long} ` },
+      { type: "mention", value: "bob" },
+    ]);
+  });
+
   it("works across newlines", () => {
     expect(splitMentions("first\n@bob second")).toEqual([
       { type: "text", value: "first\n" },
@@ -158,5 +193,13 @@ describe("mentionTriggerAt", () => {
     expect(mentionTriggerAt("a@b", 3)).toBeNull();
     expect(mentionTriggerAt("hi @bob ", 8)).toBeNull();
     expect(mentionTriggerAt("plain", 5)).toBeNull();
+  });
+
+  it("follows a managed account's login through its underscore and short code", () => {
+    expect(mentionTriggerAt("hi @mona-cat_", 13)).toEqual({ start: 3, query: "mona-cat_" });
+    expect(mentionTriggerAt("hi @mona-cat_oc", 15)).toEqual({ start: 3, query: "mona-cat_oc" });
+    expect(mentionTriggerAt("hi @mona-cat_octo/Cop", 21)).toEqual({ start: 3, query: "mona-cat_octo/Cop" });
+    expect(mentionTriggerAt("hi @_x", 6)).toBeNull();
+    expect(mentionTriggerAt("hi @mona_oc_", 12)).toBeNull();
   });
 });

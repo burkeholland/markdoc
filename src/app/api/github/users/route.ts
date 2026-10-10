@@ -2,17 +2,19 @@ import { z } from "zod";
 import { handler, json, requireUser, HttpError } from "@/server/http";
 import { getGitHubToken } from "@/server/documents";
 import { githubClient, isGitHubMock, searchUsers } from "@/server/github";
+import { GITHUB_LOGIN_MAX_LENGTH, GITHUB_LOGIN_PREFIX_RE } from "@/lib/github-login";
 
 /**
- * A GitHub login prefix: 2–39 alphanumerics or hyphens (the login charset; a single character is not
- * worth a search-API call). A leading `@` (as people type handles) is dropped first.
+ * A GitHub login prefix: 2–39 alphanumerics or hyphens, then for a managed account `_` and its short
+ * code (the login charset; a single character is not worth a search-API call). A leading `@` (as
+ * people type handles) is dropped first.
  */
 const querySchema = z.object({
   q: z
     .string()
     .trim()
     .transform((s) => s.replace(/^@/, ""))
-    .pipe(z.string().min(2).max(39).regex(/^[a-zA-Z0-9-]+$/, "A GitHub handle has only letters, digits and hyphens")),
+    .pipe(z.string().min(2).max(GITHUB_LOGIN_MAX_LENGTH).regex(GITHUB_LOGIN_PREFIX_RE, "A GitHub handle has only letters, digits and hyphens, plus _ and a short code for a managed account")),
 });
 
 /**

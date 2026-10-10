@@ -169,16 +169,87 @@ describe("GitHub OAuth identity reconciliation", () => {
     expect(linked).toHaveLength(0);
   });
 
-  it("fails closed on a case-insensitive email conflict without profile or account writes", async () => {
+  it("fails closed when another row claims the legacy row's own address, without profile or account writes", async () => {
     const login = nextLogin("email");
     const old = await legacy(login);
-    await legacy(nextLogin("email-owner"), { email: `${login.toUpperCase()}@EXAMPLE.TEST` });
+    await legacy(nextLogin("email-owner"), { email: `${login.toUpperCase()}@DEV.LOCAL` });
 
     await expect(createGithubUser(profile(login, 836006))).rejects.toMatchObject({ reason: "email_conflict" });
 
     const [unchanged] = await db.select().from(schema.users).where(eq(schema.users.id, old.id));
     expect(unchanged).toEqual(old);
     expect(await db.select().from(schema.accounts).where(eq(schema.accounts.providerAccountId, "836006"))).toHaveLength(0);
+  });
+
+  it("reuses the legacy row without the e-mail when another user already has that address", async () => {
+    const login = nextLogin("shared-email");
+    const old = await legacy(login);
+    const holder = await legacy(nextLogin("email-holder"), { email: `${login.toUpperCase()}@EXAMPLE.TEST` });
+
+    const user = await createGithubUser(profile(login, 836014));
+
+    expect(user.id).toBe(old.id);
+    expect(user).toMatchObject({ login, email: null, name: `GitHub ${login}` });
+    const [untouched] = await db.select().from(schema.users).where(eq(schema.users.id, holder.id));
+    expect(untouched).toEqual(holder);
+    const [linked] = await db.select().from(schema.accounts).where(eq(schema.accounts.providerAccountId, "836014"));
+    expect(linked.userId).toBe(old.id);
+  });
+
+  // The work accounts of Enterprise Managed Users: `handle_shortcode`, often with the address the same
+  // person's personal account already signed in with.
+  it("signs a managed account in as its own user when a personal account has the same e-mail", async () => {
+    const handle = nextLogin("mona");
+    const address = `${handle}@work.test`;
+    const personal = await createGithubUser(profile(handle, 836015, address));
+    await linkGithub(account(personal.id, 836015));
+
+    const managed = await createGithubUser(profile(`${handle}_Octo`, 836016, address.toUpperCase()));
+    await linkGithub(account(managed.id, 836016));
+
+    expect(managed.id).not.toBe(personal.id);
+    expect(managed).toMatchObject({ login: `${handle}_octo`, email: null, name: `GitHub ${handle}_Octo` });
+    const [kept] = await db.select().from(schema.users).where(eq(schema.users.id, personal.id));
+    expect(kept).toMatchObject({ login: handle, email: address });
+    const accounts = await db
+      .select({ userId: schema.accounts.userId, providerAccountId: schema.accounts.providerAccountId })
+      .from(schema.accounts)
+      .where(sql`${schema.accounts.providerAccountId} in ('836015', '836016')`);
+    expect(accounts).toHaveLength(2);
+    expect(accounts).toContainEqual({ userId: personal.id, providerAccountId: "836015" });
+    expect(accounts).toContainEqual({ userId: managed.id, providerAccountId: "836016" });
+  });
+
+  it("keeps a managed account's e-mail when nobody else has it, and never reuses a legacy row for it", async () => {
+    const login = `${nextLogin("solo")}_octo`;
+    const old = await legacy(login);
+
+    const user = await createGithubUser(profile(login, 836017));
+
+    expect(user.id).not.toBe(old.id);
+    expect(user).toMatchObject({ login, email: `${login}@example.test` });
+  });
+
+  it("makes concurrent first sign-ins of a managed account converge on one user and one account", async () => {
+    const login = `${nextLogin("managed-concurrent")}_octo`;
+    const oauthProfile = profile(login, 836018);
+
+    const [first, second] = await Promise.all([createGithubUser(oauthProfile), createGithubUser(oauthProfile)]);
+    await Promise.all([linkGithub(account(first.id, 836018)), linkGithub(account(second.id, 836018))]);
+
+    expect(second.id).toBe(first.id);
+    expect(await db.select().from(schema.users).where(eq(schema.users.login, login))).toHaveLength(1);
+    const accounts = await db.select().from(schema.accounts).where(eq(schema.accounts.providerAccountId, "836018"));
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0].userId).toBe(first.id);
+  });
+
+  it("never finds a user by e-mail: the GitHub account id is the identity", async () => {
+    if (!adapter.getUserByEmail) throw new Error("getUserByEmail adapter method is missing");
+    const holder = await legacy(nextLogin("by-email"), { email: "by-email@example.test" });
+
+    expect(holder.email).toBe("by-email@example.test");
+    expect(await adapter.getUserByEmail("by-email@example.test")).toBeNull();
   });
 
   it("fails closed when the provider account becomes linked to a conflicting user", async () => {
@@ -319,9 +390,11 @@ describe("GitHub OAuth identity reconciliation", () => {
   });
 
   it("surfaces unnormalizable GitHub profile identifiers from the adapter without database writes", async () => {
-    await expect(
-      createGithubUser(profile("bad_login", 836013)),
-    ).rejects.toBeInstanceOf(ReconciliationError);
+    for (const login of ["bad.login", "bad login", "_octo", "a".repeat(40)]) {
+      await expect(
+        createGithubUser(profile(login, 836013)),
+      ).rejects.toBeInstanceOf(ReconciliationError);
+    }
     await expect(
       createGithubUser({
         ...githubOAuthProfile(

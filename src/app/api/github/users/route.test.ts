@@ -67,7 +67,7 @@ describe("GET /api/github/users", () => {
   });
 
   it("rejects an empty, one-character, over-long or non-login prefix with 400", async () => {
-    for (const q of ["", "a", "@", "@a", "bad!", "oct%20cat", "a".repeat(40), "o'neil", "%00oc", "oc/"]) {
+    for (const q of ["", "a", "@", "@a", "bad!", "oct%20cat", "a".repeat(40), "o'neil", "%00oc", "oc/", "_oc", "mona__oc", "mona_oc_to"]) {
       const res = await get(`?q=${q}`);
       expect(res.status, `q=${JSON.stringify(q)}`).toBe(400);
       expect(((await res.json()) as Body).error).toBe("Invalid request");
@@ -76,6 +76,14 @@ describe("GET /api/github/users", () => {
     // Two characters is the shortest prefix searched; 39 is the longest GitHub login. Both are accepted.
     expect((await get("?q=oc")).status).toBe(200);
     expect((await get(`?q=${"a".repeat(39)}`)).status).toBe(200);
+  });
+
+  it("accepts the prefix of a managed account's login: the handle, an underscore, the start of the short code", async () => {
+    for (const q of ["mona-cat_", "mona-cat_oc", "@mona-cat_octo"]) {
+      const res = await get(`?q=${encodeURIComponent(q)}`);
+      expect(res.status, `q=${JSON.stringify(q)}`).toBe(200);
+      expect((await res.json()) as Body).toEqual({ users: [], limited: false });
+    }
   });
 
   it("requires a signed-in browser session: anonymous 401, API token 403", async () => {

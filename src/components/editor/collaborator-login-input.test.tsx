@@ -105,6 +105,13 @@ describe("suggestQuery()", () => {
     expect(suggestQuery("bad!")).toBeNull();
     expect(suggestQuery("a".repeat(40))).toBeNull();
   });
+
+  it("keeps searching while a managed account's login is typed, underscore and short code included", () => {
+    expect(suggestQuery("mona-cat_")).toBe("mona-cat_");
+    expect(suggestQuery("@mona-cat_oc")).toBe("mona-cat_oc");
+    expect(suggestQuery("_oc")).toBeNull();
+    expect(suggestQuery("mona__oc")).toBeNull();
+  });
 });
 
 describe("isValidLogin()", () => {
@@ -113,6 +120,14 @@ describe("isValidLogin()", () => {
     expect(isValidLogin("  @octocat  ")).toBe(true);
     expect(isValidLogin("zz-nobody")).toBe(true);
     expect(isValidLogin("a1-b2")).toBe(true);
+  });
+
+  it("accepts a managed account's handle (one underscore before the short code) and nothing looser", () => {
+    expect(isValidLogin("mona-cat_octo")).toBe(true);
+    expect(isValidLogin("  @Mona-Cat_Octo ")).toBe(true);
+    expect(isValidLogin("mona_")).toBe(false);
+    expect(isValidLogin("_octo")).toBe(false);
+    expect(isValidLogin("mona_cat_octo")).toBe(false);
   });
 
   it("rejects only what the server would reject: empty, too long, spaces, or bad characters", () => {

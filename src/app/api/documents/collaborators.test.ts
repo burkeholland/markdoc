@@ -636,7 +636,14 @@ describe("POST /api/documents/:id/collaborators: the handle (#2252 item 2)", () 
     ["a trailing space", "trailing-space ", "trailing-space", null],
     ["upper case", "UPPER-Case", "upper-case", null],
     ["a space after the @", "@ name", null, NOT_A_HANDLE],
-    ["an underscore", "under_score", null, NOT_A_HANDLE],
+    // A managed (Enterprise Managed Users) account: the handle, one underscore, the enterprise's short code.
+    ["a managed account", "Mona-Cat_Octo", "mona-cat_octo", null],
+    ["@ + a managed account", "@under_score", "under_score", null],
+    ["a leading underscore", "_octo", null, NOT_A_HANDLE],
+    ["a trailing underscore", "mona_", null, NOT_A_HANDLE],
+    ["two underscores", "mona_cat_octo", null, NOT_A_HANDLE],
+    ["a hyphen in the short code", "mona_oc-to", null, NOT_A_HANDLE],
+    ["a dot", "mona.cat", null, NOT_A_HANDLE],
   ];
 
   it.each(handles)("%s: the server and the dialog's Add button agree", async (_label, typed, stored, message) => {

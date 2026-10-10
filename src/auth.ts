@@ -58,7 +58,7 @@ async function buildConfig(): Promise<NextAuthConfig> {
           const login = String(credentials?.login ?? "")
             .trim()
             .toLowerCase()
-            .replace(/[^a-z0-9-]/g, "");
+            .replace(/[^a-z0-9_-]/g, "");
           if (!login) return null;
           const [existing] = await db.select().from(schema.users).where(eq(schema.users.login, login));
           if (existing) return existing;
@@ -84,7 +84,9 @@ async function buildConfig(): Promise<NextAuthConfig> {
     // use JWT and enrich it from the database.
     session: { strategy: "jwt" },
     trustHost: true,
-    pages: { signIn: "/login" },
+    // A failed sign-in comes back to the sign-in page (`?error=`), which says what happened, instead of
+    // Auth.js's own "server configuration" page.
+    pages: { signIn: "/login", error: "/login" },
     logger: { error: logAuthError },
     callbacks: {
       async jwt({ token, user }) {

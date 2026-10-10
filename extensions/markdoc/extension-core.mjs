@@ -121,7 +121,7 @@ function agentMentionSlug(name) {
 }
 
 function eventTargetsAgent(event, entry) {
-  const named = [...String(event.body ?? event.snippet ?? "").matchAll(/(?:^|[^A-Za-z0-9_])@([A-Za-z0-9-]{1,39})\/([A-Za-z0-9-]{1,39})(?![A-Za-z0-9-])/g)];
+  const named = [...String(event.body ?? event.snippet ?? "").matchAll(/(?:^|[^A-Za-z0-9_])@([A-Za-z0-9-]{1,39}(?:_[A-Za-z0-9]{1,37})?)\/([A-Za-z0-9-]{1,39})(?![A-Za-z0-9-])/g)];
   if (named.length === 0) return true;
   return named.some((match) => match[1].toLowerCase() === entry.userLogin.toLowerCase() && match[2].toLowerCase() === entry.agentSlug.toLowerCase());
 }

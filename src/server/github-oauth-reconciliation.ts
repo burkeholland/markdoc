@@ -5,7 +5,10 @@ import type { Db } from "@/server/db";
 import { schema } from "@/server/db";
 
 const GITHUB_IDENTITY_FIELD = "__markdocGithubIdentity";
-const GITHUB_PROVIDER_LOGIN_PATTERN = /^[a-z\d][a-z\d-]{0,38}$/;
+// What GitHub may send as a login. The underscore is there for managed accounts (Enterprise Managed
+// Users), whose login is the handle, `_` and the enterprise's short code: `mona-cat_octo`.
+const GITHUB_PROVIDER_LOGIN_PATTERN = /^[a-z\d][a-z\d_-]{0,38}$/;
+// What a legacy row may be matched on: a canonical ordinary login. A managed login never is one.
 const GITHUB_RECONCILIATION_LOGIN_PATTERN = /^(?!.*--)[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/;
 const GITHUB_ACCOUNT_ID_PATTERN = /^\d{1,32}$/;
 
@@ -152,20 +155,16 @@ function githubMarker(data: AdapterUser): GithubIdentityMarker | null {
   return { ...marker, account: githubAccountTokens(marker.account) };
 }
 
-function withoutGithubMarker(data: AdapterUser): AdapterUser {
-  const user = { ...data } as AdapterUser & Partial<MarkedGithubUser>;
-  delete user[GITHUB_IDENTITY_FIELD];
-  return user;
-}
-
 function adapterUser(row: typeof schema.users.$inferSelect): AdapterUser {
   // Auth.js declares AdapterUser.email as required even though OAuth profiles
   // and its own adapters support a nullable email column.
   return row as AdapterUser;
 }
 
+type IdentityTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
 async function acquireIdentityLocks(
-  tx: Parameters<Parameters<Db["transaction"]>[0]>[0],
+  tx: IdentityTransaction,
   marker: GithubIdentityMarker,
   emails: string[] = [],
 ): Promise<void> {
@@ -179,7 +178,22 @@ async function acquireIdentityLocks(
   }
 }
 
-async function createOrReconcileGithubUser(db: Db, data: AdapterUser, marker: GithubIdentityMarker): Promise<AdapterUser> {
+/** Whether a user other than `exceptUserId` already has this (normalized) e-mail. */
+async function emailHeldByAnother(tx: IdentityTransaction, email: string, exceptUserId: string | undefined): Promise<boolean> {
+  const holders = await tx
+    .select({ id: schema.users.id })
+    .from(schema.users)
+    .where(sql`lower(trim(${schema.users.email})) = ${email}`)
+    .limit(2);
+  return holders.some((row) => row.id !== exceptUserId);
+}
+
+/**
+ * The user for a first GitHub sign-in, with its account row reserved in the same transaction. The
+ * GitHub account id is the identity. With `reconcileLegacy` (a canonical ordinary login) the one safe
+ * legacy row with that login is reused; otherwise the user is always new.
+ */
+async function createOrReconcileGithubUser(db: Db, data: AdapterUser, marker: GithubIdentityMarker, reconcileLegacy: boolean): Promise<AdapterUser> {
   const email = normalizeEmail(data.email);
   return db.transaction(async (tx) => {
     await acquireIdentityLocks(tx, marker, [email, `${marker.login}@dev.local`].filter((value): value is string => !!value));
@@ -196,42 +210,41 @@ async function createOrReconcileGithubUser(db: Db, data: AdapterUser, marker: Gi
       )
       .limit(1);
     if (linked) {
-      if (normalizeGithubLogin(linked.user.login) !== marker.login) {
+      if (normalizeProviderGithubLogin(linked.user.login) !== marker.login) {
         throw new GithubIdentityReconciliationError("provider_account_conflict");
       }
       return adapterUser(linked.user);
     }
 
-    const candidates = await tx
-      .select()
-      .from(schema.users)
-      .where(sql`lower(trim(${schema.users.login})) = ${marker.login}`)
-      .limit(2)
-      .for("update");
+    const candidates = reconcileLegacy
+      ? await tx
+          .select()
+          .from(schema.users)
+          .where(sql`lower(trim(${schema.users.login})) = ${marker.login}`)
+          .limit(2)
+          .for("update")
+      : [];
     if (candidates.length > 1) throw new GithubIdentityReconciliationError("ambiguous_login");
+    const candidate: typeof schema.users.$inferSelect | undefined = candidates[0];
 
-    const emailsToCheck = new Set([email, normalizeEmail(candidates[0]?.email)].filter((value): value is string => !!value));
-    for (const checkedEmail of emailsToCheck) {
-      const conflicts = await tx
-        .select({ id: schema.users.id })
-        .from(schema.users)
-        .where(sql`lower(trim(${schema.users.email})) = ${checkedEmail}`)
-        .limit(2);
-      if (conflicts.some((row) => row.id !== candidates[0]?.id)) {
-        throw new GithubIdentityReconciliationError("email_conflict");
-      }
+    // Two rows that claim the same legacy address: which one is this person is not ours to guess.
+    const legacyEmail = normalizeEmail(candidate?.email);
+    if (candidate && legacyEmail && (await emailHeldByAnother(tx, legacyEmail, candidate.id))) {
+      throw new GithubIdentityReconciliationError("email_conflict");
     }
 
+    // The e-mail is a detail of the profile, never the identity: one person can have a personal and a
+    // managed (work) GitHub account with the same address. The column is unique, so the account that
+    // signs in second is stored without it instead of being refused.
     const profile = {
       name: optionalText(data.name) ?? marker.login,
-      email,
+      email: email && (await emailHeldByAnother(tx, email, candidate?.id)) ? null : email,
       image: optionalText(data.image),
       login: marker.login,
       emailVerified: null,
     };
 
     let user: typeof schema.users.$inferSelect;
-    const candidate = candidates[0];
     if (candidate) {
       const [candidateAccounts, candidateSessions] = await Promise.all([
         tx.select({ provider: schema.accounts.provider }).from(schema.accounts).where(eq(schema.accounts.userId, candidate.id)).limit(1),
@@ -339,13 +352,16 @@ export function GithubReconciliationAdapter(db: Db): Adapter {
 
   return {
     ...base,
+    // Auth.js asks this before it creates a user for a new OAuth account, and refuses the sign-in
+    // (OAuthAccountNotLinked) when anyone has the profile's e-mail. No provider here signs in by e-mail,
+    // and a GitHub account is identified by its id alone, so nobody is ever found this way.
+    async getUserByEmail() {
+      return null;
+    },
     async createUser(data) {
       const marker = githubMarker(data);
       if (!marker) return createUser(data);
-      const reconciliationLogin = normalizeGithubLogin(marker.login);
-      return reconciliationLogin
-        ? createOrReconcileGithubUser(db, data, { ...marker, login: reconciliationLogin })
-        : createUser(withoutGithubMarker(data));
+      return createOrReconcileGithubUser(db, data, marker, normalizeGithubLogin(marker.login) !== null);
     },
     async linkAccount(data) {
       if (data.provider === "github") {
