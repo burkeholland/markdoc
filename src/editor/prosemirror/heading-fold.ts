@@ -261,6 +261,16 @@ export function headingFoldPlugin(): Plugin<FoldState> {
     },
     props: {
       decorations: (state) => key.getState(state)?.decorations,
+      // Delete at the end of a folded heading would pull the first hidden block into its text unseen: open the section first.
+      handleKeyDown(view, event) {
+        if (event.key !== "Delete") return false;
+        const { empty, $head } = view.state.selection;
+        if (!empty || $head.depth !== 1 || $head.parent.type.name !== "heading" || $head.parentOffset !== $head.parent.content.size) return false;
+        const at = $head.before(1);
+        if (!isHeadingFolded(view.state, at)) return false;
+        view.dispatch(view.state.tr.setMeta(key, { toggle: at, deep: false } satisfies FoldMeta).setMeta("addToHistory", false));
+        return true;
+      },
       handleDOMEvents: {
         mousedown(view, event) {
           if (event.button !== 0 || !(event.target instanceof HTMLElement)) return false;
@@ -281,8 +291,9 @@ export function headingFoldPlugin(): Plugin<FoldState> {
       if (!transactions.some((tr) => tr.selectionSet || tr.docChanged)) return null;
       const { selection } = newState;
       if (selection instanceof AllSelection) return null;
-      const index = selection.$head.index(0);
-      if (!state.hidden.has(index)) return null;
+      // Either end: a range with its anchor in a fold would otherwise be replaced by typing without being seen.
+      const index = [selection.$head.index(0), selection.$anchor.index(0)].find((i) => state.hidden.has(i));
+      if (index === undefined) return null;
       return newState.tr.setMeta(key, { reveal: index } satisfies FoldMeta).setMeta("addToHistory", false);
     },
     view(view) {

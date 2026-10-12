@@ -146,6 +146,28 @@ describe("headingFoldPlugin", () => {
     expect(hiddenTexts(view)).toEqual([]);
   });
 
+  it("opens a fold that holds the anchor of a selection whose head is visible", () => {
+    const view = mount();
+    fold(view, "A");
+    const a2 = blockPos(view, "a2");
+    const b1 = blockPos(view, "b1");
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, a2 + 1, b1 + 1)));
+    expect(isFolded(view, "A")).toBe(false);
+  });
+
+  it("Delete at the end of a folded heading opens it and leaves the text alone", () => {
+    const view = mount();
+    fold(view, "A");
+    const heading = blockPos(view, "A");
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, heading + 2)));
+    const doc = view.state.doc;
+    const event = new KeyboardEvent("keydown", { key: "Delete", bubbles: true, cancelable: true });
+    view.dom.dispatchEvent(event);
+    expect(isFolded(view, "A")).toBe(false);
+    expect(view.state.doc).toBe(doc);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
   it("leaves a fold that does not contain the selection alone", () => {
     const view = mount();
     fold(view, "A");
