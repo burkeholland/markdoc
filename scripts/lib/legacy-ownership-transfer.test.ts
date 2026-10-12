@@ -65,7 +65,7 @@ describe("legacy ownership transfer", () => {
         committed: false,
         verified: true,
         transferId: null,
-        schema: { userForeignKeys: 10, softUserReferences: 4, loginReferences: 3, rollbackTableReady: true },
+        schema: { userForeignKeys: 11, softUserReferences: 4, loginReferences: 3, rollbackTableReady: true },
         selection: {
           sourceUsers: 1,
           sourceLoginLength: SOURCE_LOGIN.length,

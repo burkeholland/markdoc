@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   jsonb,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import type { AdapterAccountType } from "next-auth/adapters";
 
 export const bytea = customType<{ data: Uint8Array; driverData: Uint8Array | Buffer }>({
@@ -84,6 +85,32 @@ export type Role = "owner" | "editor" | "commenter" | "viewer";
 /** How much of its user's access an API token carries: `read` < `comment` < `full` (everything the user can do). */
 export type TokenScope = "read" | "comment" | "full";
 
+/**
+ * A folder groups its owner's documents. One level only: a folder never holds another folder (#2377).
+ *
+ * A folder is an organizing layer and nothing more — it carries no access of its own, so a document's
+ * `folder_id` never widens who can read it. Sharing a folder is #2380, and that is the change that has
+ * to teach `getDocumentAccess()` and `visibleDocuments()` about folders.
+ */
+export const folders = pgTable(
+  "folder",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("folder_owner_idx").on(t.ownerId),
+    // Two folders of one owner may not share a name, compared case-insensitively, so the sidebar never
+    // shows two rows a person cannot tell apart. Different owners are free to reuse a name.
+    uniqueIndex("folder_owner_name_idx").on(t.ownerId, sql`lower(${t.name})`),
+  ],
+);
+
 export const documents = pgTable(
   "document",
   {
@@ -94,6 +121,15 @@ export const documents = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     /** Where the canonical copy lives outside Markdoc, if anywhere. */
     storage: text("storage").$type<StorageKind>().notNull().default("local"),
+    /**
+     * The folder holding this document, or null for the top level. Always a folder of the document's
+     * own owner. Deliberately unrelated to `repoPath`: a GitHub-backed document's folder here says
+     * nothing about where the file sits in its repository (#2377).
+     *
+     * `set null` on delete is a safety net only. Deleting a folder sends its documents to the trash
+     * first (`deleteFolder()`), so a document never silently reappears at the top level.
+     */
+    folderId: text("folder_id").references(() => folders.id, { onDelete: "set null" }),
     /** Latest Yjs document state (full update). */
     ystate: bytea("ystate"),
     /** Latest Markdown text, denormalized for listing, search, and export. */
@@ -121,7 +157,11 @@ export const documents = pgTable(
     /** Set when the document is in the trash; purged for good 30 days later. */
     deletedAt: timestamp("deleted_at", { mode: "date", withTimezone: true }),
   },
-  (t) => [index("document_owner_idx").on(t.ownerId)],
+  (t) => [
+    index("document_owner_idx").on(t.ownerId),
+    // "What is in this folder" on every dashboard render.
+    index("document_folder_idx").on(t.folderId),
+  ],
 );
 
 export const gistAutoUpdates = pgTable("gist_auto_update", {
@@ -520,6 +560,7 @@ export type OwnershipTransfer = typeof ownershipTransfers.$inferSelect;
 
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;
+export type Folder = typeof folders.$inferSelect;
 export type Version = typeof versions.$inferSelect;
 export type Collaborator = typeof collaborators.$inferSelect;
 export type User = typeof users.$inferSelect;

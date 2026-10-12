@@ -33,6 +33,7 @@ export const TRANSFER_USER_FOREIGN_KEYS = [
   "api_token.user_id",
   "asset.user_id",
   "document.owner_id",
+  "folder.owner_id",
   "recent.user_id",
   "review.user_id",
   "session.userId",
@@ -72,6 +73,7 @@ export const TRANSFER_COUNT_LABELS = [
   "agent_request.user_id moved",
   "review.user_id moved",
   "webhook.user_id moved",
+  "folder.owner_id moved",
   "activity.actor_id updated",
   "activity.actor_id agent_prefix updated",
   "notification.user_login moved",
@@ -603,6 +605,7 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
     { table: "agent_request", column: "user_id", label: "agent_request.user_id moved" },
     { table: "review", column: "user_id", label: "review.user_id moved" },
     { table: "webhook", column: "user_id", label: "webhook.user_id moved" },
+    { table: "folder", column: "owner_id", label: "folder.owner_id moved" },
   ];
   for (const move of simpleMoves) {
     const rows = await client.query<{ id: string }>(`SELECT id FROM ${quote(move.table)} WHERE ${quote(move.column)} = $1 ORDER BY id`, [source.id]);
@@ -616,6 +619,18 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
     [source.id, target.id],
   );
   if (slugConflicts !== 0) throw new LegacyOwnershipTransferError("UNIQUE_CONFLICT");
+
+  // folder_owner_name_idx is unique on (owner_id, lower(name)), so a folder name both people use
+  // would collide the moment the source's folders change hands. Refuse before writing anything,
+  // the same way a mention-slug collision is refused above.
+  const folderNameConflicts = await countWhere(
+    client,
+    `SELECT COUNT(*)::text AS count
+       FROM folder s JOIN folder t ON lower(t.name) = lower(s.name) AND t.owner_id = $2
+      WHERE s.owner_id = $1`,
+    [source.id, target.id],
+  );
+  if (folderNameConflicts !== 0) throw new LegacyOwnershipTransferError("UNIQUE_CONFLICT");
 
   // Soft user-id references.
   const softUpdates: Array<{ table: string; column: string; label: TransferCountLabel }> = [

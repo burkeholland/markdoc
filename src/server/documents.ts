@@ -165,6 +165,11 @@ export interface DocumentSummary {
   lastOpenedAt: Date | null;
   /** When the document was moved to the trash; null for live documents. */
   deletedAt: Date | null;
+  /**
+   * The folder this document is filed in, or null for the top level. Only ever a folder of the
+   * document's owner, so this is null on a document shared with the current user (#2377).
+   */
+  folderId: string | null;
 }
 
 /** The card excerpt: the document's first prose, Markdown removed (see `excerptOf`). */
@@ -194,6 +199,7 @@ const summaryColumns = {
   repoPath: schema.documents.repoPath,
   gistId: schema.documents.gistId,
   deletedAt: schema.documents.deletedAt,
+  folderId: schema.documents.folderId,
   // One character more than the bound, so a prefix longer than the bound is known to be cut short.
   contentHead: sql<string>`left(${schema.documents.content}, ${EXCERPT_PREFIX_CHARS + 1})`,
 };
@@ -282,6 +288,9 @@ function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow
     starred: starred === true,
     lastOpenedAt: lastOpenedAt ?? null,
     deletedAt: doc.deletedAt ?? null,
+    // A folder belongs to one person. Reporting an owner's folder id to a collaborator would leak
+    // which folder the owner files it under, and the collaborator could not resolve the id anyway.
+    folderId: doc.ownerId === user.id ? (doc.folderId ?? null) : null,
   };
 }
 

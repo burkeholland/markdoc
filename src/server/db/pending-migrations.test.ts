@@ -21,10 +21,12 @@ import * as currentSchema from "./schema";
 
 const LEDGER_0018_TIME = "1788050213330";
 const LEDGER_0019_TIME = "1788219322678";
-const LEDGER_0022_TIME = "1791572100116";
+const LEDGER_0023_TIME = "1791835745783";
 const MIGRATION_TEST_TIMEOUT_MS = 60_000;
+// Tables that arrived after 0020 are absent from the ledger-0018 fixture this file models:
+// gist_auto_update (0020), required_version_intent (0022) and folder (0023).
 const PRE_0020_TABLES = APPLICATION_TABLES.filter(
-  (table) => table !== "gist_auto_update" && table !== "required_version_intent",
+  (table) => table !== "gist_auto_update" && table !== "required_version_intent" && table !== "folder",
 );
 
 const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
@@ -137,7 +139,7 @@ describe("pending production migrations", () => {
         await migrate(database, { migrationsFolder: path.resolve("drizzle") });
         await migrate(database, { migrationsFolder: path.resolve("drizzle") });
 
-        await expectLedger(client, 23, LEDGER_0022_TIME);
+        await expectLedger(client, 24, LEDGER_0023_TIME);
         expect(await applicationDataState(client, projection)).toEqual(before);
         await expectCurrentSchema(client);
         await expectServingSourceCompatibility(client);

@@ -32,3 +32,16 @@ export function publicDocument(doc: PublicDocumentSource) {
     updatedAt: doc.updatedAt.toISOString(),
   };
 }
+
+export type FolderDto = ReturnType<typeof folderDto>;
+
+/** A folder as the dashboard sees it. Dates as ISO strings, like every other DTO here. */
+export function folderDto(folder: { id: string; name: string; documentCount: number; createdAt: Date; updatedAt: Date }) {
+  return {
+    id: folder.id,
+    name: folder.name,
+    documentCount: folder.documentCount,
+    createdAt: folder.createdAt.toISOString(),
+    updatedAt: folder.updatedAt.toISOString(),
+  };
+}
