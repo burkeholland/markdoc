@@ -18,6 +18,8 @@ import { markdownFileDropPlugin, type MarkdownFileDropHandler } from "./file-dro
 import { slashMenuPlugin, type SlashMenuHandlers } from "./slash-menu";
 import { editablePlugin, isEditable } from "./editable";
 import { richLinksPlugin } from "./links";
+import { headingFoldPlugin } from "./heading-fold";
+import { owningVerticalScroller } from "./scroller";
 import type { NoticeAction } from "../markdown/tsv";
 import {
   toggleMark,
@@ -87,14 +89,6 @@ export function minimalVerticalScroll(viewport: VerticalRect, target: VerticalRe
   if (target.top < viewport.top) return target.top - viewport.top;
   if (target.bottom > viewport.bottom) return target.bottom - viewport.bottom;
   return 0;
-}
-
-function owningVerticalScroller(dom: HTMLElement): HTMLElement | null {
-  for (let element = dom.parentElement; element; element = element.parentElement) {
-    const overflow = getComputedStyle(element).overflowY;
-    if ((overflow === "auto" || overflow === "scroll") && element.scrollHeight > element.clientHeight) return element;
-  }
-  return null;
 }
 
 function revealRichSelection(view: import("prosemirror-view").EditorView) {
@@ -345,6 +339,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     plugins: [
       editablePlugin(session.canEdit),
       richLinksPlugin(session),
+      headingFoldPlugin(),
       tableMenuPlugin(),
       ...(handlers.slashMenu ? [slashMenuPlugin(handlers.slashMenu)] : []),
       markdownBindingPlugin(session.binding),
