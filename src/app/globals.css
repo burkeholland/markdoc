@@ -694,6 +694,93 @@ body {
   font-size: 1em;
   color: var(--color-ink-2);
 }
+/* ---------- Heading folds (#2378) ----------
+   The chevron is the ::before of a top-level heading, laid over the pane's left padding, so no widget
+   sits in the text. src/editor/prosemirror/heading-fold.ts treats a click left of the heading's box as a
+   click on it. A heading with nothing under it (the next block is a heading of the same or a higher
+   level, or there is none) gets no chevron; that is the same rule the plugin uses for what it can fold. */
+.md-rich {
+  --md-fold-open: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6l6-6'/%3E%3C/svg%3E");
+  --md-fold-closed: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 6l6 6l-6 6'/%3E%3C/svg%3E");
+}
+.md-rich > :is(h1, h2, h3, h4, h5, h6) {
+  position: relative;
+}
+.md-rich > :is(h1, h2, h3, h4, h5, h6)::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -24px;
+  width: 24px;
+  height: 1.25em;
+  background-color: currentColor;
+  color: var(--color-ink-4);
+  -webkit-mask: var(--md-fold-open) center / 16px 16px no-repeat;
+  mask: var(--md-fold-open) center / 16px 16px no-repeat;
+  opacity: 0;
+  cursor: pointer;
+}
+.md-rich > h2::before {
+  top: 0.6em;
+}
+.md-rich > h2:first-child::before {
+  top: 0;
+}
+.md-rich > :is(
+    h1:not(:has(+ :not(h1))),
+    h2:not(:has(+ :not(h1, h2))),
+    h3:not(:has(+ :not(h1, h2, h3))),
+    h4:not(:has(+ :not(h1, h2, h3, h4))),
+    h5:not(:has(+ :not(h1, h2, h3, h4, h5))),
+    h6:not(:has(+ :not(h1, h2, h3, h4, h5, h6)))
+  )::before {
+  content: none;
+}
+.md-rich:hover > :is(h1, h2, h3, h4, h5, h6)::before {
+  opacity: 0.5;
+}
+.md-rich > :is(h1, h2, h3, h4, h5, h6):hover::before {
+  opacity: 1;
+  color: var(--color-ink);
+}
+.md-rich > :is(h1, h2, h3, h4, h5, h6).md-fold-collapsed::before,
+.md-rich > :is(h1, h2, h3, h4, h5, h6).md-fold-collapsed:hover::before {
+  opacity: 1;
+  color: var(--color-accent);
+  -webkit-mask-image: var(--md-fold-closed);
+  mask-image: var(--md-fold-closed);
+}
+@media (hover: none) {
+  .md-rich > :is(h1, h2, h3, h4, h5, h6)::before {
+    opacity: 0.55;
+  }
+}
+.md-rich > .md-fold-hidden {
+  display: none !important;
+}
+.md-fold-pill {
+  display: inline-block;
+  /* Negative block margins keep the tag from making a short heading's line taller when it folds. */
+  margin: -4px 0 -4px 0.6rem;
+  padding: 2px 8px;
+  border: 1px solid var(--color-line);
+  border-radius: 6px;
+  background: var(--color-surface-2);
+  color: var(--color-ink-3);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.4;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.md-fold-pill:hover {
+  color: var(--color-ink);
+}
 .md-rich a {
   color: var(--color-accent);
   /* Underlined, not colour-only (WCAG 1.4.1); the decoration is toned down until hover. */
@@ -1236,7 +1323,10 @@ body {
 /* ProseMirror adds a separator + trailing <br> after a block that ends with a widget; that would add a blank line. */
 .md-rich .md-remote-caret + .ProseMirror-separator,
 .md-rich .md-remote-caret + .ProseMirror-separator + .ProseMirror-trailingBreak,
-.md-rich .md-remote-caret + .ProseMirror-trailingBreak {
+.md-rich .md-remote-caret + .ProseMirror-trailingBreak,
+.md-rich .md-fold-pill + .ProseMirror-separator,
+.md-rich .md-fold-pill + .ProseMirror-separator + .ProseMirror-trailingBreak,
+.md-rich .md-fold-pill + .ProseMirror-trailingBreak {
   display: none;
 }
 .md-remote-caret > .md-remote-caret-label {
