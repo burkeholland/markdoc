@@ -1,4 +1,4 @@
-import type { DocumentDto } from "@/server/dto";
+import type { DocumentDto, FolderDto } from "@/server/dto";
 import type { DocumentSummary, SearchResult } from "@/server/documents";
 import type { ActivityAction, NotificationKind, Role, TokenScope } from "@/server/db/schema";
 import type { ReviewDto } from "@/server/reviews";
@@ -178,6 +178,8 @@ export interface CreatedApiTokenDto {
   expiresAt: string | null;
 }
 
+export type { FolderDto };
+
 export type DocumentSummaryDto = Omit<DocumentSummary, "updatedAt" | "createdAt" | "lastOpenedAt" | "deletedAt"> & {
   updatedAt: string;
   createdAt: string;
@@ -287,6 +289,20 @@ export const api = {
     createRequest: (id: string, body: { instruction: string; selection?: { from: number; to: number; quote: string } | null; mode: AgentRequestDto["mode"]; threadId?: string | null; agent?: string | null }) =>
       request<{ request: AgentRequestDto }>(`/api/documents/${id}/requests`, { method: "POST", body: JSON.stringify(body) }),
     cancelRequest: (id: string, rid: string) => request<{ request: AgentRequestDto }>(`/api/documents/${id}/requests/${rid}/cancel`, { method: "POST" }),
+    /**
+     * File documents under a folder, or at the top level with `folderId: null`. Takes a list so one
+     * document and a multi-select are the same call. `moved` lists the ids that actually changed.
+     */
+    move: (documentIds: readonly string[], folderId: string | null) =>
+      request<{ moved: string[] }>("/api/documents/move", { method: "POST", body: JSON.stringify({ documentIds, folderId }) }),
+  },
+  folders: {
+    list: () => request<{ folders: FolderDto[] }>("/api/folders", { cache: "no-store" }),
+    create: (name: string) => request<{ folder: FolderDto }>("/api/folders", { method: "POST", body: JSON.stringify({ name }) }),
+    rename: (id: string, name: string) =>
+      request<{ folder: FolderDto }>(`/api/folders/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+    /** Deleting a folder sends its documents to the trash; `trashed` is how many moved. */
+    delete: (id: string) => request<{ ok: true; trashed: number }>(`/api/folders/${id}`, { method: "DELETE" }),
   },
   tokens: {
     list: (includeRevoked = false) => request<{ tokens: ApiTokenDto[] }>(`/api/tokens${includeRevoked ? "?includeRevoked=true" : ""}`, { cache: "no-store" }),

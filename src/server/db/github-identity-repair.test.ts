@@ -60,7 +60,7 @@ describe("GitHub identity repair", () => {
         mode: "dry-run",
         committed: false,
         verified: true,
-        schema: { tables: 20, userForeignKeys: 10 },
+        schema: { tables: 21, userForeignKeys: 11 },
         selection: {
           normalizedLoginUsers: 2,
           targetGithubAccounts: 1,
@@ -747,6 +747,7 @@ async function seedAllApplicationTables(database: PGlite): Promise<void> {
     `INSERT INTO "verificationToken" (identifier, token, expires)
      VALUES ('preserved-identifier', 'preserved-verification-secret', now() + interval '1 day')`,
   );
+  await database.query(`INSERT INTO folder (id, name, owner_id) VALUES ('preserved-folder', 'Preserved', $1)`, [LEGACY_ID]);
 }
 
 function identityYState(

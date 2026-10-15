@@ -117,6 +117,10 @@ export async function seedMigrationFixture(source: PGlite): Promise<void> {
 }
 
 export async function setMigrationFixtureSchemaToVersion15(source: PGlite): Promise<void> {
+  // Newest migration first. 0023: dropping the column takes its foreign key and document_folder_idx
+  // with it, which has to happen before the table it points at can go.
+  await source.query(`ALTER TABLE document DROP COLUMN folder_id`);
+  await source.query(`DROP TABLE folder`);
   await source.query(`DROP TABLE required_version_intent`);
   await source.query(`ALTER TABLE document DROP COLUMN link_preview`);
   await source.query(`DROP TRIGGER document_gist_saved ON document`);

@@ -51,6 +51,7 @@ export const FIXTURE_EXPECTED_DRY_RUN: Record<(typeof TRANSFER_COUNT_LABELS)[num
   "agent_request.user_id moved": 1,
   "review.user_id moved": 1,
   "webhook.user_id moved": 1,
+  "folder.owner_id moved": 1,
   "activity.actor_id updated": 1,
   "activity.actor_id agent_prefix updated": 1,
   "notification.user_login moved": 1,
@@ -117,6 +118,9 @@ export async function seedLegacyOwnershipFixture(q: FixtureQuery): Promise<void>
   await q(`INSERT INTO review (id, document_id, user_id, author_name) VALUES ('rev-legacy', 'doc-b', $1, 'Legacy Dev'), ('rev-target', 'doc-t2', $2, 'Target')`, [sourceId, targetId]);
   await q(`INSERT INTO webhook (id, user_id, url, secret) VALUES ('hook-legacy', $1, 'https://example.test/legacy', 'legacy-hook-secret'), ('hook-target', $2, 'https://example.test/target', 'target-hook-secret')`, [sourceId, targetId]);
   await q(`INSERT INTO webhook_delivery (id, webhook_id, event, status, duration_ms) VALUES ('del-legacy', 'hook-legacy', 'document.updated', 200, 5), ('del-target', 'hook-target', 'document.updated', 200, 5)`);
+  // One folder each, under names that do not collide: folder_owner_name_idx is unique on
+  // (owner_id, lower(name)), and the transfer refuses outright when the two owners share a name.
+  await q(`INSERT INTO folder (id, name, owner_id) VALUES ('fold-legacy', 'Legacy work', $1), ('fold-target', 'Target work', $2)`, [sourceId, targetId]);
 
   await q(`INSERT INTO activity (id, document_id, actor_id, actor_name, action) VALUES ('act-user', 'doc-a', $1, 'Legacy Dev', 'edit'), ('act-agent', 'doc-a', $2, 'Copilot CLI', 'comment.add'), ('act-target', 'doc-t1', $3, 'Target', 'edit'), ('act-other', 'doc-o1', $4, 'Other', 'edit')`, [sourceId, `agent:${sourceId}:Copilot CLI`, targetId, otherId]);
   await q(

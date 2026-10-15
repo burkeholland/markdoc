@@ -28,6 +28,7 @@ const restoreDocument = vi.fn<(id: string) => Promise<{ ok: true }>>();
 const purgeDocument = vi.fn<(id: string, options?: { permanent?: boolean }) => Promise<{ ok: true; permanent: boolean }>>();
 const starDocument = vi.fn<(id: string) => Promise<{ starred: true }>>();
 const unstarDocument = vi.fn<(id: string) => Promise<{ starred: false }>>();
+const listFolders = vi.fn<() => Promise<{ folders: [] }>>();
 const takePendingNotice = vi.fn<() => PendingNotice | null>();
 const signOutSafely = vi.fn<() => Promise<boolean>>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
@@ -55,6 +56,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
         star: (id: string) => starDocument(id),
         unstar: (id: string) => unstarDocument(id),
       },
+      // The dashboard asks for folders on mount. Stubbed so these tests never reach the network;
+      // the folder UI itself is covered in folders.test.tsx.
+      folders: { ...actual.api.folders, list: () => listFolders() },
     },
   };
 });
@@ -85,6 +89,7 @@ function doc(id: string, title: string, excerpt = ""): DocumentSummaryDto {
     repoPath: null,
     gistId: null,
     starred: false,
+    folderId: null,
   };
 }
 
@@ -1171,6 +1176,8 @@ beforeEach(() => {
   searchDocuments.mockImplementation(async (query) => ({ query, documents: [] }));
   listDocuments.mockReset();
   listDocuments.mockResolvedValue({ documents: [] });
+  listFolders.mockReset();
+  listFolders.mockResolvedValue({ folders: [] });
   createDocument.mockReset();
   createDocument.mockResolvedValue({ document: { id: "created", title: "Untitled" } });
   restoreDocument.mockReset();

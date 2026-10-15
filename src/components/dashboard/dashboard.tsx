@@ -20,7 +20,7 @@ import {
 } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
+import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, MoreVertical, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
 import { api, apiErrorText, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/relative-time";
@@ -34,6 +34,15 @@ import { isManagedGithubLogin } from "@/lib/github-login";
 import { GITHUB_NOT_CONFIGURED } from "@/components/editor/labels";
 import { NotificationsStrip } from "@/components/dashboard/notifications-strip";
 import { ImportDialog, ImportDropzone, useFileImport } from "@/components/dashboard/import-dialog";
+import {
+  DOCUMENT_DRAG_TYPE,
+  FolderRail,
+  MoveToItems,
+  SelectionBar,
+  TOP_LEVEL,
+  useFolders,
+  type FolderSelection,
+} from "@/components/dashboard/folders";
 import { CommandPalette, isPaletteShortcut } from "@/components/editor/command-palette";
 import { buildDashboardCommands } from "@/components/editor/commands";
 import { signOutSafely } from "@/lib/sign-out";
@@ -5132,9 +5141,26 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     starStatesRef.current = next;
     setStarStates(next);
   }, []);
+  /**
+   * Folders a document has been moved to in this session, by document id. The page is server-rendered
+   * with its documents, so a move has to show immediately here — the same shape `starStates` uses for
+   * stars. Cleared when the server sends a fresh list (#2377).
+   */
+  const [folderOverrides, setFolderOverrides] = useState<Record<string, string | null>>({});
+  const folderPropsRef = useRef(initialDocuments);
+  useEffect(() => {
+    if (folderPropsRef.current === initialDocuments) return;
+    folderPropsRef.current = initialDocuments;
+    setFolderOverrides({});
+  }, [initialDocuments]);
+
   const documents = useMemo(
-    () => initialDocuments.map((d) => (starStates[d.id] ? { ...d, starred: starStates[d.id].value } : d)),
-    [initialDocuments, starStates],
+    () =>
+      initialDocuments.map((d) => {
+        const starred = starStates[d.id] ? { ...d, starred: starStates[d.id].value } : d;
+        return d.id in folderOverrides ? { ...starred, folderId: folderOverrides[d.id] } : starred;
+      }),
+    [initialDocuments, starStates, folderOverrides],
   );
   const toggleStar = useCallback(
     (doc: Doc) => {
@@ -5374,21 +5400,80 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     },
     [],
   );
+  const noticeFromFolders = useCallback(
+    (message: string, kind: "error" | "info" = "info") => void publishNotice({ message, kind }),
+    [publishNotice],
+  );
+  const folders = useFolders(noticeFromFolders);
+  const folderSelection: FolderSelection = folders.selection;
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [moving, setMoving] = useState(false);
+
+  // Only a document the person owns can be filed: a folder belongs to one person, so there is nowhere
+  // to put a document shared with them.
+  const canFile = useCallback((doc: Doc) => doc.ownerId === user.id, [user.id]);
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+  const toggleSelected = useCallback((id: string) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
   const filtered = useMemo<(Doc & { snippet?: string | null })[]>(() => {
     const matchesFilter = (d: Doc) => {
       if (filter === "mine" && d.ownerId !== user.id) return false;
       if (filter === "shared" && d.ownerId === user.id) return false;
       if (filter === "starred" && !d.starred) return false;
+      // A folder selection narrows the list the same way a chip does. "All documents" (`null`) keeps
+      // everything; `TOP_LEVEL` keeps what is not filed, which includes documents shared with this
+      // person — their `folderId` is always null, since the folder would be someone else's (#2377).
+      if (folderSelection === TOP_LEVEL && d.folderId !== null) return false;
+      if (typeof folderSelection === "string" && d.folderId !== folderSelection) return false;
       return true;
     };
     // Search results keep their relevance order (title matches first); the sort applies to the browsing list.
     if (serverResults) return serverResults.map((d) => (starStates[d.id] ? { ...d, starred: starStates[d.id].value } : d)).filter(matchesFilter);
     const q = trimmed.toLowerCase();
     return documents.filter((d) => matchesFilter(d) && (!q || d.title.toLowerCase().includes(q))).sort(compareDocs(sort));
-  }, [documents, serverResults, trimmed, filter, sort, user.id, starStates]);
+  }, [documents, serverResults, trimmed, filter, sort, user.id, starStates, folderSelection]);
 
   const starred = useMemo(() => documents.filter((d) => d.starred).sort(compareDocs(sort)), [documents, sort]);
   const showStrip = filter === "all" && !trimmed && starred.length > 0;
+
+  /**
+   * File documents under a folder (or back to the top level for `null`). The server answers with the
+   * ids it actually moved, so a document that was trashed or un-owned in between is simply left alone
+   * rather than shown in the wrong place.
+   */
+  const moveDocuments = useCallback(
+    async (documentIds: readonly string[], folderId: string | null) => {
+      if (documentIds.length === 0 || moving) return;
+      setMoving(true);
+      try {
+        const { moved } = await api.documents.move(documentIds, folderId);
+        setFolderOverrides((current) => {
+          const next = { ...current };
+          for (const id of moved) next[id] = folderId;
+          return next;
+        });
+        clearSelection();
+        // The chip counts live on the server; refresh them rather than guessing the arithmetic.
+        void folders.refresh();
+        const where = folderId ? (folders.folders.find((f) => f.id === folderId)?.name ?? "the folder") : "Not in a folder";
+        if (moved.length > 0) {
+          publishNotice({ message: `Moved ${moved.length} document${moved.length === 1 ? "" : "s"} to ${where}`, kind: "info" });
+        }
+      } catch (err) {
+        publishNotice({ message: apiErrorText(err, "Could not move the document"), kind: "error" });
+      } finally {
+        setMoving(false);
+      }
+    },
+    [moving, clearSelection, folders, publishNotice],
+  );
 
   const createOwner = useRef(user.id);
   const createOperation = useRef<CreateOperation | null>(null);
@@ -5799,6 +5884,27 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
             </div>
           )}
 
+          {/* Folders organize what a person owns, so the rail is out of the way in the trash and while
+              searching, where the list is not a folder's contents. */}
+          {filter !== "trash" && !trimmed && (
+            <FolderRail
+              state={folders}
+              totalCount={documents.length}
+              unfiledCount={documents.filter((d) => canFile(d) && d.folderId === null).length}
+              onDropDocuments={moveDocuments}
+            />
+          )}
+
+          {selectedIds.size > 0 && filter !== "trash" && (
+            <SelectionBar
+              count={selectedIds.size}
+              folders={folders.folders}
+              busy={moving}
+              onClear={clearSelection}
+              onMove={(folderId) => void moveDocuments([...selectedIds], folderId)}
+            />
+          )}
+
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <h2 className="text-sm font-semibold text-ink">Documents</h2>
             <div className="ml-auto flex min-h-8 max-w-full items-center gap-2 overflow-x-auto max-sm:basis-full" data-testid="dashboard-chips">
@@ -5923,13 +6029,31 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           ) : (
             <ul ref={searchResultListRef} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3" data-testid="document-list">
               {filtered.map((d) => (
-                <li key={d.id} className="group relative min-w-0" data-testid={trimmed ? "search-result" : undefined}>
+                <li
+                  key={d.id}
+                  className="group relative min-w-0"
+                  data-testid={trimmed ? "search-result" : undefined}
+                  // Dragging a selected card takes the whole selection; dragging an unselected one takes
+                  // just it, so a drag never silently moves documents the person forgot were ticked.
+                  draggable={canFile(d)}
+                  onDragStart={(event) => {
+                    if (!canFile(d)) return;
+                    const ids = selectedIds.has(d.id) ? [...selectedIds] : [d.id];
+                    event.dataTransfer.setData(DOCUMENT_DRAG_TYPE, JSON.stringify(ids));
+                    event.dataTransfer.effectAllowed = "move";
+                  }}
+                  data-selected={selectedIds.has(d.id) || undefined}
+                >
                   <Link
                     href={`/d/${d.id}`}
-                    className="flex h-full flex-col rounded-2xl border border-line bg-surface p-4 shadow-sm transition hover:border-accent hover:shadow-md"
+                    className={cn(
+                      "flex h-full flex-col rounded-2xl border bg-surface p-4 shadow-sm transition hover:border-accent hover:shadow-md",
+                      selectedIds.has(d.id) ? "border-accent ring-1 ring-accent" : "border-line",
+                    )}
                     data-testid="document-card"
                   >
-                    <div className="mb-2 flex items-start justify-between gap-2">
+                    {/* `pr-8` on an own-document card keeps the storage badge clear of the ⋮ menu. */}
+                    <div className={cn("mb-2 flex items-start justify-between gap-2", canFile(d) && "pr-8")}>
                       <h3 className="line-clamp-2 break-words text-[15px] font-semibold leading-5 text-ink">
                         <Highlight text={d.title} needle={trimmed} />
                       </h3>
@@ -5942,7 +6066,8 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                     ) : (
                       <p className="line-clamp-3 flex-1 break-words text-[13px] leading-5 text-ink-3">{d.excerpt || "Empty document"}</p>
                     )}
-                    <div className="mt-3 flex items-center gap-2 pr-8 text-xs text-ink-4">
+                    {/* Room for the star, plus the select box beside it on an own-document card. */}
+                    <div className={cn("mt-3 flex items-center gap-2 text-xs text-ink-4", canFile(d) ? "pr-16" : "pr-8")}>
                       <span>{sort === "recent" && d.lastOpenedAt ? <RelativeTime date={d.lastOpenedAt} prefix="Opened " /> : <RelativeTime date={d.updatedAt} prefix="Edited " />}</span>
                       {d.ownerId !== user.id && (
                         <span className="inline-flex items-center gap-1">
@@ -5952,6 +6077,49 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                     </div>
                   </Link>
                   <StarButton starred={d.starred} pending={starStates[d.id]?.pending ?? false} onToggle={() => toggleStar(d)} className="absolute bottom-3 right-3" />
+                  {canFile(d) && (
+                    <>
+                      {/* A real checkbox, so the card is selectable from the keyboard and screen readers
+                          read its state. Shown once anything is selected, on hover, or on focus. */}
+                      <label
+                        className={cn(
+                          "absolute bottom-3 right-10 inline-flex h-6 w-6 items-center justify-center rounded-md border border-line bg-surface/95 transition",
+                          "focus-within:opacity-100 group-hover:opacity-100",
+                          selectedIds.has(d.id) ? "border-accent opacity-100" : "opacity-0",
+                        )}
+                      >
+                        <span className="sr-only">Select {d.title}</span>
+                        <input
+                          type="checkbox"
+                          className="h-3.5 w-3.5 accent-[var(--accent)]"
+                          checked={selectedIds.has(d.id)}
+                          onChange={() => toggleSelected(d.id)}
+                          data-testid="select-document"
+                          data-document-id={d.id}
+                        />
+                      </label>
+                      <Menu>
+                        <MenuTrigger asChild>
+                          <button
+                            type="button"
+                            className="absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 opacity-0 transition hover:bg-surface-2 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+                            aria-label={`Actions for ${d.title}`}
+                            data-testid="document-menu"
+                            data-document-id={d.id}
+                          >
+                            <MoreVertical size={15} />
+                          </button>
+                        </MenuTrigger>
+                        <MenuContent className="w-52">
+                          <MoveToItems
+                            folders={folders.folders}
+                            currentFolderId={d.folderId}
+                            onMove={(folderId) => void moveDocuments([d.id], folderId)}
+                          />
+                        </MenuContent>
+                      </Menu>
+                    </>
+                  )}
                 </li>
               ))}
             </ul>
