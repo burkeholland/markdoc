@@ -183,19 +183,20 @@ describe("route classes and caller keys", () => {
     expect(clientIp(h)).toBe("10.1.1.1");
   });
 
-  it("with TRUST_PROXY=1 uses x-real-ip, then the last x-forwarded-for entry, never the first", () => {
+  it("with TRUST_PROXY=1 uses the last x-forwarded-for entry, then x-real-ip, never the first", () => {
     process.env.TRUST_PROXY = "1";
     try {
       const forged = { [REMOTE_ADDR_HEADER]: "10.1.1.1", "x-forwarded-for": "6.6.6.6, 203.0.113.7" };
       expect(clientIp(new Headers(forged))).toBe("203.0.113.7");
-      expect(clientIp(new Headers({ ...forged, "x-real-ip": "198.51.100.2" }))).toBe("198.51.100.2");
+      expect(clientIp(new Headers({ ...forged, "x-real-ip": "198.51.100.2" }))).toBe("203.0.113.7");
+      expect(clientIp(new Headers({ [REMOTE_ADDR_HEADER]: "10.1.1.1", "x-real-ip": "198.51.100.2" }))).toBe("198.51.100.2");
       expect(clientIp(new Headers({ [REMOTE_ADDR_HEADER]: "10.1.1.1" }))).toBe("10.1.1.1");
     } finally {
       delete process.env.TRUST_PROXY;
     }
   });
 
-  it("behind nginx (loopback peer) uses the address nginx stated, without TRUST_PROXY", () => {
+  it("behind nginx (loopback peer) uses the address nginx appended, without TRUST_PROXY", () => {
     for (const peer of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) {
       const base = { [REMOTE_ADDR_HEADER]: peer };
       // The client forged the first X-Forwarded-For entry; nginx appended the real peer last.
@@ -204,19 +205,30 @@ describe("route classes and caller keys", () => {
     }
   });
 
+  it("ignores a client-forged x-real-ip when nginx has not yet been told to overwrite it (the interim state)", () => {
+    // nginx passes a client's X-Real-IP through until `proxy_set_header X-Real-IP` is installed; the last
+    // X-Forwarded-For entry is nginx's own and wins, so nobody can burn a victim's authFail bucket.
+    const h = new Headers({ [REMOTE_ADDR_HEADER]: "127.0.0.1", "x-real-ip": "198.51.100.99", "x-forwarded-for": "6.6.6.6, 203.0.113.7" });
+    expect(clientIp(h)).toBe("203.0.113.7");
+    const victim = new Headers({ [REMOTE_ADDR_HEADER]: "127.0.0.1", "x-real-ip": "198.51.100.99", "x-forwarded-for": "203.0.113.7" });
+    for (let i = 0; i < RATE_LIMITS.authFail.burst; i++) recordFailedAuth(victim);
+    expect(failedAuthAllowed(new Headers({ [REMOTE_ADDR_HEADER]: "127.0.0.1", "x-forwarded-for": "198.51.100.99" })).ok).toBe(true);
+  });
+
   it("with no proxy (dev, e2e) the socket address is the client", () => {
     expect(clientIp(new Headers({ [REMOTE_ADDR_HEADER]: "127.0.0.1" }))).toBe("127.0.0.1");
     expect(clientIp(new Headers({ [REMOTE_ADDR_HEADER]: "192.0.2.9" }))).toBe("192.0.2.9");
   });
 
-  it("without a socket header falls back to x-real-ip, the last x-forwarded-for entry, then unknown", () => {
+  it("without a socket header falls back to the last x-forwarded-for entry, then x-real-ip, then unknown", () => {
     expect(clientIp(new Headers({ "x-forwarded-for": "1.2.3.4" }))).toBe("1.2.3.4");
-    expect(clientIp(new Headers({ "x-forwarded-for": "6.6.6.6, 1.2.3.4", "x-real-ip": "5.5.5.5" }))).toBe("5.5.5.5");
+    expect(clientIp(new Headers({ "x-forwarded-for": "6.6.6.6, 1.2.3.4", "x-real-ip": "5.5.5.5" }))).toBe("1.2.3.4");
+    expect(clientIp(new Headers({ "x-real-ip": "5.5.5.5" }))).toBe("5.5.5.5");
     expect(clientIp(new Headers())).toBe("unknown");
   });
 
   it("gives two client addresses behind the same proxy separate authFail buckets", () => {
-    const via = (ip: string) => new Headers({ [REMOTE_ADDR_HEADER]: "127.0.0.1", "x-real-ip": ip });
+    const via = (ip: string) => new Headers({ [REMOTE_ADDR_HEADER]: "127.0.0.1", "x-forwarded-for": `6.6.6.6, ${ip}` });
     const a = via("203.0.113.1");
     const b = via("203.0.113.2");
     for (let i = 0; i < RATE_LIMITS.authFail.burst; i++) recordFailedAuth(a);

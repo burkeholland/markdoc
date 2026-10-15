@@ -139,19 +139,22 @@ function isLoopback(address: string): boolean {
  * connect from loopback, and on the VM that is our own nginx. A caller that reaches the app directly
  * has a non-loopback socket address, so it can never switch this on by sending headers.
  *
- * 1. Trusted proxy: `x-real-ip` (nginx sets it to `$remote_addr`, replacing any client value), else
- *    the LAST `x-forwarded-for` entry (the peer our proxy appended). Never the first entry: nginx's
- *    `$proxy_add_x_forwarded_for` appends to what the client sent, so the first entry is the client's
- *    to choose.
+ * 1. Trusted proxy: the LAST `x-forwarded-for` entry, else `x-real-ip`. nginx's
+ *    `$proxy_add_x_forwarded_for` appends `$remote_addr` to whatever the client sent, so the last
+ *    entry is always nginx's own view of the peer and a client cannot add one after it. Never the
+ *    first entry: that one is the client's to choose. `x-real-ip` comes second on purpose: until
+ *    `proxy_set_header X-Real-IP` is installed, nginx passes a client-sent `X-Real-IP` through
+ *    untouched, so preferring it would let a client name any address (and burn that address's
+ *    `authFail` bucket). It is only the fallback for a proxy that does not append `x-forwarded-for`.
  * 2. Otherwise the socket address (no proxy at all: dev, e2e, a direct connection).
- * 3. No socket header (the request did not come through `server/index.ts`): `x-real-ip`, the last
- *    `x-forwarded-for` entry, else `unknown`.
+ * 3. No socket header (the request did not come through `server/index.ts`): the last
+ *    `x-forwarded-for` entry, else `x-real-ip`, else `unknown`.
  */
 export function clientIp(headers: Headers): string {
   const socket = headers.get(REMOTE_ADDR_HEADER)?.trim();
   const realIp = headers.get("x-real-ip")?.trim();
   const forwarded = headers.get("x-forwarded-for")?.split(",").pop()?.trim();
-  const proxied = realIp || forwarded;
+  const proxied = forwarded || realIp;
   if (process.env.TRUST_PROXY === "1" || (socket && isLoopback(socket))) {
     if (proxied) return proxied;
   }
