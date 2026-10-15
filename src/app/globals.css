@@ -1417,6 +1417,19 @@ body {
 .animate-fade-in {
   animation: md-fade-in 0.12s ease-out;
 }
+/*
+ * Radix keeps a closing Content mounted while it believes an animation is still running: on close it
+ * reads `animation-name`, and unmounts at once only when that is `none`. The rule above leaves
+ * `md-fade-in` named for the element's whole life, so a Radix menu, popover or dialog that is told to
+ * close never unmounts. It stays in the page at `opacity: 0` with `pointer-events: auto` — an
+ * invisible rectangle that swallows every click over whatever it used to cover.
+ *
+ * Clearing the animation once Radix marks the element closed lets it unmount immediately. Elements
+ * that are not Radix (toasts, the slash and table menus) carry no `data-state`, so they keep theirs.
+ */
+[data-state="closed"].animate-fade-in {
+  animation: none;
+}
 
 /* Brief confirmation on the header save chip after offline edits finish syncing. */
 @keyframes md-recovered {
