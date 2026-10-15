@@ -101,10 +101,10 @@ export function useFolders(onNotice: (message: string, kind?: "error" | "info") 
     async (name: string) => {
       try {
         const { folder } = await api.folders.create(name);
-        if (live.current) {
-          setFolders((current) => [...current, folder].sort(byName));
-          setSelection(folder.id);
-        }
+        // The new folder's chip appears, but the view stays where it was. Jumping into it would show
+        // "No matches" — and a folder is almost always created in order to put documents into it,
+        // which means the documents have to stay on screen.
+        if (live.current) setFolders((current) => [...current, folder].sort(byName));
         return folder;
       } catch (err) {
         onNotice(apiErrorText(err, "Could not create the folder"), "error");
@@ -332,7 +332,9 @@ export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }:
           title={confirmDelete ? `Delete "${confirmDelete.name}"?` : "Delete folder?"}
           description={
             confirmDelete?.documentCount
-              ? `Its ${confirmDelete.documentCount} document${confirmDelete.documentCount === 1 ? "" : "s"} go to the trash, where you can restore them for 30 days.`
+              ? confirmDelete.documentCount === 1
+                ? "Its 1 document goes to the trash, where you can restore it for 30 days."
+                : `Its ${confirmDelete.documentCount} documents go to the trash, where you can restore them for 30 days.`
               : "The folder is empty, so nothing else changes."
           }
         >
