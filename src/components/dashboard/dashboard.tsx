@@ -5462,9 +5462,13 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         clearSelection();
         // The chip counts live on the server; refresh them rather than guessing the arithmetic.
         void folders.refresh();
-        const where = folderId ? (folders.folders.find((f) => f.id === folderId)?.name ?? "the folder") : "Not in a folder";
         if (moved.length > 0) {
-          publishNotice({ message: `Moved ${moved.length} document${moved.length === 1 ? "" : "s"} to ${where}`, kind: "info" });
+          const count = `${moved.length} document${moved.length === 1 ? "" : "s"}`;
+          // "to Not in a folder" reads as a mistake, so the top level gets its own wording.
+          const message = folderId
+            ? `Moved ${count} to ${folders.folders.find((f) => f.id === folderId)?.name ?? "the folder"}`
+            : `Moved ${count} out of the folder`;
+          publishNotice({ message, kind: "info" });
         }
       } catch (err) {
         publishNotice({ message: apiErrorText(err, "Could not move the document"), kind: "error" });

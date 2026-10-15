@@ -146,17 +146,20 @@ describe("the folder rail", () => {
     expect(cardTitles()).toHaveLength(2);
   });
 
-  it("creates a folder from the dialog and selects it", async () => {
+  it("creates a folder from the dialog, trimming the name, and leaves the view where it was", async () => {
     createFolder.mockResolvedValue({ folder: folder("new", "Ideas") });
-    await mount([doc("d1", "One", "new")]);
+    await mount([doc("d1", "One"), doc("d2", "Two")]);
 
     fireEvent.click(screen.getByTestId("new-folder"));
     fireEvent.change(screen.getByTestId("folder-name-input"), { target: { value: "  Ideas  " } });
     fireEvent.submit(screen.getByTestId("folder-name-form"));
 
     await waitFor(() => expect(createFolder).toHaveBeenCalledWith("Ideas"));
-    // Creating it also opens it, so the person lands in the folder they just made.
-    await waitFor(() => expect(cardTitles()).toEqual(["One"]));
+    await waitFor(() => expect(screen.getByTestId("folder-chip")).toHaveTextContent("Ideas"));
+    // The documents stay on screen: a folder is made in order to put things in it, and jumping into
+    // the empty folder would replace the list with "No matches".
+    expect(cardTitles()).toEqual(["One", "Two"]);
+    expect(screen.getByTestId("folder-all")).toHaveAttribute("aria-pressed", "true");
   });
 
   it("will not submit a name that is only whitespace", async () => {
