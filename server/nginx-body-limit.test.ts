@@ -182,6 +182,14 @@ describe("infra/nginx-markdoc.conf client_max_body_size", () => {
   });
 });
 
+describe("infra/nginx-markdoc.conf client address (#2324)", () => {
+  it("states the peer in X-Real-IP, which replaces a client-sent value, where it proxies to the app", () => {
+    const location = proxying[0].blocks.find((b) => b.name === "location" && every(b, "proxy_pass").length > 0);
+    const headers = (location?.directives ?? []).filter((d) => d.name === "proxy_set_header").map((d) => d.args);
+    expect(headers).toContain("X-Real-IP $remote_addr");
+  });
+});
+
 describe("the app limits the nginx value follows", () => {
   it("are the ones this file was written for", () => {
     expect(MAX_ASSET_BYTES).toBe(5 * MIB);

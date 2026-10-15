@@ -483,7 +483,7 @@ Every `/api/*` route spends one request from a budget, counted **per token** (a 
 | create | `POST /api/documents`, `POST /api/import`, `POST /api/import/file`, `POST /api/documents/:id/assets`, `POST /api/documents/:id/duplicate` | 20 | 20 / min |
 | failed auth | bearer tokens that do not resolve, per IP — the 31st wrong token in a minute (and any token from that IP until one failure refills) is refused before the database is asked | 30 | 30 / min |
 
-Every response carries `X-RateLimit-Limit` (the burst) and `X-RateLimit-Remaining`. Past the budget the answer is `429 { error, retryAfter }` with a `Retry-After` header (whole seconds); nothing was done — wait that long and send the request again. `/api/health` and the collaboration WebSocket are never limited. Operators: `RATE_LIMIT=off` disables the limiter (the e2e dev server and `npm run dev:port` do this by default); `TRUST_PROXY=1` makes the per-IP buckets use the first `X-Forwarded-For` hop instead of the socket address when Markdoc sits behind a reverse proxy.
+Every response carries `X-RateLimit-Limit` (the burst) and `X-RateLimit-Remaining`. Past the budget the answer is `429 { error, retryAfter }` with a `Retry-After` header (whole seconds); nothing was done — wait that long and send the request again. `/api/health` and the collaboration WebSocket are never limited. Operators: `RATE_LIMIT=off` disables the limiter (the e2e dev server and `npm run dev:port` do this by default); Behind a reverse proxy the per-IP buckets use the last `X-Forwarded-For` entry, else `X-Real-IP`, when the connection comes from loopback or `TRUST_PROXY=1` is set; see `clientIp()` in `src/server/rate-limit.ts` and `docs/vm-hosting.md`.
 
 ## 4. Recipes
 
