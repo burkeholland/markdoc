@@ -125,17 +125,37 @@ export function rateLimitingEnabled(): boolean {
 /** Header our own `server/index.ts` stamps with the socket address so a client cannot forge its IP. */
 export const REMOTE_ADDR_HEADER = "x-markdoc-remote-addr";
 
+/** Whether a socket address is this machine: 127.0.0.0/8, `::1`, or either mapped into IPv6. */
+function isLoopback(address: string): boolean {
+  const a = address.toLowerCase();
+  return a === "::1" || /^(::ffff:)?127\.\d+\.\d+\.\d+$/.test(a);
+}
+
 /**
- * The caller's IP. `x-forwarded-for` is only trusted with `TRUST_PROXY=1` (behind a reverse proxy
- * that sets it); otherwise the address the socket saw wins, and forwarded headers are a last resort
- * for requests that did not come through `server/index.ts`.
+ * The caller's IP, for the per-IP buckets.
+ *
+ * A request is "from a trusted proxy" when `TRUST_PROXY=1`, or when the socket peer (the address
+ * `server/index.ts` stamped in `REMOTE_ADDR_HEADER`) is loopback: only a process on this machine can
+ * connect from loopback, and on the VM that is our own nginx. A caller that reaches the app directly
+ * has a non-loopback socket address, so it can never switch this on by sending headers.
+ *
+ * 1. Trusted proxy: `x-real-ip` (nginx sets it to `$remote_addr`, replacing any client value), else
+ *    the LAST `x-forwarded-for` entry (the peer our proxy appended). Never the first entry: nginx's
+ *    `$proxy_add_x_forwarded_for` appends to what the client sent, so the first entry is the client's
+ *    to choose.
+ * 2. Otherwise the socket address (no proxy at all: dev, e2e, a direct connection).
+ * 3. No socket header (the request did not come through `server/index.ts`): `x-real-ip`, the last
+ *    `x-forwarded-for` entry, else `unknown`.
  */
 export function clientIp(headers: Headers): string {
-  const forwarded = headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  if (process.env.TRUST_PROXY === "1" && forwarded) return forwarded;
   const socket = headers.get(REMOTE_ADDR_HEADER)?.trim();
-  if (socket) return socket;
-  return forwarded || headers.get("x-real-ip")?.trim() || "unknown";
+  const realIp = headers.get("x-real-ip")?.trim();
+  const forwarded = headers.get("x-forwarded-for")?.split(",").pop()?.trim();
+  const proxied = realIp || forwarded;
+  if (process.env.TRUST_PROXY === "1" || (socket && isLoopback(socket))) {
+    if (proxied) return proxied;
+  }
+  return socket || proxied || "unknown";
 }
 
 const shortHash = (value: string) => createHash("sha256").update(value).digest("base64url").slice(0, 22);

@@ -1085,6 +1085,33 @@ it did on the nginx of the review (see
 `413`, the VM's nginx behaves differently from that one: report it. It harms
 nothing.
 
+## Client address behind nginx (rate limits)
+
+The app sits behind nginx, so every socket connection comes from `127.0.0.1`.
+Until issue #2324 the per-IP limiter for failed bearer tokens (`authFail`, 30
+per client) therefore used one shared bucket for the whole internet: 30 wrong
+tokens from anyone locked out every API-token, agent and MCP user.
+
+- [`infra/nginx-markdoc.conf`](../infra/nginx-markdoc.conf) sets
+  `proxy_set_header X-Real-IP $remote_addr;`. nginx replaces a client-sent
+  `X-Real-IP`, so it cannot be forged. `X-Forwarded-For` is not safe to read from
+  the front: nginx appends to what the client sent.
+- `clientIp()` in `src/server/rate-limit.ts` trusts the proxy headers when the
+  socket peer is loopback (only our own nginx connects from there) or when
+  `TRUST_PROXY=1` is in `/etc/markdoc/markdoc.env`. It then uses `X-Real-IP`,
+  else the **last** `X-Forwarded-For` entry, never the first. `TRUST_PROXY=1` is
+  not needed on the VM; set it only if the app is ever reached through a proxy
+  that is not on loopback. A caller that reaches the app port directly is not
+  loopback and keeps its socket address.
+- Ship the app change and the nginx change together. App only: it falls back to
+  the last `X-Forwarded-For` entry, which the current nginx already appends, so
+  it works. nginx only: the old app ignores `X-Real-IP` and the shared bucket
+  stays. Either order is safe; the fix is complete when both are live.
+- Check once both are live: 31 requests with a wrong bearer token from one
+  machine end in `429`, and a valid token from another machine still answers
+  `200`. Installing the nginx file follows the steps in
+  [Install on the VM](#install-on-the-vm-a-person).
+
 ## Health and safe diagnostics
 
 For an authorized operational read, use bounded nonsecret metadata:
