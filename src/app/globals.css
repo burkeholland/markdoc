@@ -260,8 +260,11 @@
   background: var(--p-selection);
 }
 
-html,
-body {
+/* Only <html> gets a fixed height. The body is a column flex container (layout.tsx, min-h-full), so a
+   definite `height: 100%` on it made every page's <main min-h-screen> flex-shrink back to one viewport
+   and its content overflow it: the page's own background (surface-2) stopped at the fold and the
+   canvas colour (the body's surface) showed below it. With only min-height the body grows with its content. */
+html {
   height: 100%;
 }
 
