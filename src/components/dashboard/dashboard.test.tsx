@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { compile } from "tailwindcss";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DocumentSummaryDto, SearchResultDto } from "@/lib/api";
+import type { DocumentSummaryDto, FolderDto, SearchResultDto } from "@/lib/api";
 import type { PendingNotice } from "@/lib/notice";
 
 type SearchResponse = { query: string; documents: SearchResultDto[] };
@@ -28,7 +28,7 @@ const restoreDocument = vi.fn<(id: string) => Promise<{ ok: true }>>();
 const purgeDocument = vi.fn<(id: string, options?: { permanent?: boolean }) => Promise<{ ok: true; permanent: boolean }>>();
 const starDocument = vi.fn<(id: string) => Promise<{ starred: true }>>();
 const unstarDocument = vi.fn<(id: string) => Promise<{ starred: false }>>();
-const listFolders = vi.fn<() => Promise<{ folders: [] }>>();
+const listFolders = vi.fn<() => Promise<{ folders: FolderDto[] }>>();
 const takePendingNotice = vi.fn<() => PendingNotice | null>();
 const signOutSafely = vi.fn<() => Promise<boolean>>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
@@ -52,7 +52,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
         list: (options?: ListOptions) => listDocuments(options),
         create: (body?: { template?: string }) => createDocument(body),
         restore: (id: string) => restoreDocument(id),
-        delete: (id: string, options?: { permanent?: boolean }) => purgeDocument(id, options),
+        delete: (id: string, options?: { permanent?: boolean }) =>
+          options === undefined ? purgeDocument(id) : purgeDocument(id, options),
         star: (id: string) => starDocument(id),
         unstar: (id: string) => unstarDocument(id),
       },
@@ -99,6 +100,16 @@ function result(id: string, title: string, snippet: string | null): SearchResult
 
 function trashedDoc(id: string, title: string): DocumentSummaryDto {
   return { ...doc(id, title), deletedAt: "2026-09-07T13:00:00.000Z" };
+}
+
+function folder(id: string, name: string, documentCount: number): FolderDto {
+  return {
+    id,
+    name,
+    documentCount,
+    createdAt: "2026-09-01T12:00:00.000Z",
+    updatedAt: "2026-09-07T12:00:00.000Z",
+  };
 }
 
 const DOCUMENTS = [
@@ -239,6 +250,15 @@ function documentStar(title: string) {
   const list = screen.getByTestId("document-list");
   const link = within(list).getByRole("link", { name: new RegExp(title) });
   return within(link.closest("li")!).getByTestId("star-toggle");
+}
+
+function openDocumentMenu(title: string) {
+  const list = screen.getByTestId("document-list");
+  const link = within(list).getByRole("link", { name: new RegExp(title) });
+  const card = link.closest("li");
+  if (!card) throw new Error(`Document card ${title} was not rendered`);
+  fireEvent.pointerDown(within(card).getByTestId("document-menu"), { button: 0, ctrlKey: false });
+  return screen.getByRole("menu");
 }
 
 type CapturedClick = (event?: unknown) => void;
@@ -5455,6 +5475,96 @@ describe("dashboard star recovery", () => {
     });
 
     expect(console.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("dashboard card trash action", () => {
+  it("asks for confirmation and leaves the card alone when cancelled", () => {
+    const confirmDelete = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderDashboard(undefined, [doc("owned", "Owned document")]);
+
+    fireEvent.click(within(openDocumentMenu("Owned document")).getByTestId("document-delete"));
+
+    expect(confirmDelete).toHaveBeenCalledWith(
+      "Move “Owned document” to trash? You can restore it from the dashboard for 30 days.",
+    );
+    expect(purgeDocument).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: /Owned document/ })).toBeInTheDocument();
+    expect(screen.queryByTestId("toast")).toBeNull();
+  });
+
+  it("moves the card to trash, prevents duplicate activation while pending, and refreshes", async () => {
+    const deletion = deferred<{ ok: true; permanent: boolean }>();
+    purgeDocument.mockReturnValueOnce(deletion.promise);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderDashboard(undefined, [doc("owned", "Owned document")]);
+
+    const item = within(openDocumentMenu("Owned document")).getByTestId("document-delete");
+    fireEvent.click(item);
+    fireEvent.click(item);
+
+    expect(purgeDocument).toHaveBeenCalledOnce();
+    expect(purgeDocument).toHaveBeenCalledWith("owned");
+    const pendingItem = within(openDocumentMenu("Owned document")).getByTestId("document-delete");
+    expect(pendingItem).toHaveAttribute("data-disabled");
+    expect(pendingItem).toHaveTextContent("Moving to trash…");
+
+    await act(async () => {
+      deletion.resolve({ ok: true, permanent: false });
+      await deletion.promise;
+    });
+
+    expect(screen.queryByRole("link", { name: /Owned document/ })).toBeNull();
+    expect(screen.getByTestId("toast")).toHaveTextContent("“Owned document” was moved to the trash.");
+    expect(screen.getByTestId("toast")).toHaveAttribute("data-kind", "success");
+    expect(router.refresh).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes the filed folder count after moving its card to trash", async () => {
+    listFolders
+      .mockResolvedValueOnce({ folders: [folder("f1", "Recipes", 1)] })
+      .mockResolvedValueOnce({ folders: [folder("f1", "Recipes", 0)] });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderDashboard(undefined, [{ ...doc("filed", "Filed document"), folderId: "f1" }]);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("folder-chip")).toHaveTextContent("Recipes1");
+
+    fireEvent.click(within(openDocumentMenu("Filed document")).getByTestId("document-delete"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId("folder-chip")).toHaveTextContent("Recipes0");
+    expect(listFolders).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the card after a failed move and allows one retry", async () => {
+    const failed = deferred<{ ok: true; permanent: boolean }>();
+    const retry = deferred<{ ok: true; permanent: boolean }>();
+    purgeDocument.mockReturnValueOnce(failed.promise).mockReturnValueOnce(retry.promise);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderDashboard(undefined, [doc("owned", "Owned document")]);
+
+    fireEvent.click(within(openDocumentMenu("Owned document")).getByTestId("document-delete"));
+    await act(async () => {
+      failed.reject(new ApiError(503, "Trash service unavailable"));
+      await Promise.allSettled([failed.promise]);
+    });
+
+    expect(screen.getByRole("link", { name: /Owned document/ })).toBeInTheDocument();
+    expect(screen.getByTestId("toast")).toHaveTextContent("Trash service unavailable");
+    expect(within(openDocumentMenu("Owned document")).getByTestId("document-delete")).not.toHaveAttribute("data-disabled");
+
+    fireEvent.click(screen.getByTestId("document-delete"));
+    expect(purgeDocument).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      retry.resolve({ ok: true, permanent: false });
+      await retry.promise;
+    });
+    expect(screen.queryByRole("link", { name: /Owned document/ })).toBeNull();
   });
 });
 
