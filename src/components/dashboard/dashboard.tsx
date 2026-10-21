@@ -385,6 +385,10 @@ interface DeleteOperation {
   ownerId: string;
   documentId: string;
   title: string;
+  focusRecovery: {
+    nextDocumentId: string | null;
+    previousDocumentId: string | null;
+  } | null;
 }
 
 interface SearchAuthority {
@@ -4849,6 +4853,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
   const searchResultListRef = useRef<HTMLUListElement>(null);
+  const documentsHeadingRef = useRef<HTMLHeadingElement>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const paletteOpenRef = useRef(false);
   const [openPicker, setOpenPicker] = useState(false);
@@ -5145,6 +5150,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [deletedIds, setDeletedIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const deleteFocusRecovery = useRef<{ documentId: string; nextDocumentId: string | null; previousDocumentId: string | null } | null>(null);
 
   useLayoutEffect(() => {
     const previousOwner = deleteOwner.current;
@@ -5161,6 +5167,23 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     },
     [],
   );
+  useLayoutEffect(() => {
+    const recovery = deleteFocusRecovery.current;
+    if (!recovery || !deletedIds.has(recovery.documentId)) return;
+    deleteFocusRecovery.current = null;
+
+    const cards = Array.from(
+      searchResultListRef.current?.querySelectorAll<HTMLAnchorElement>('a[data-testid="document-card"]') ?? [],
+    );
+    const cardFor = (documentId: string | null) =>
+      documentId ? cards.find((card) => card.getAttribute("href") === `/d/${documentId}`) ?? null : null;
+    const destination = cardFor(recovery.nextDocumentId) ?? cardFor(recovery.previousDocumentId);
+    if (destination) {
+      destination.focus({ preventScroll: true });
+    } else {
+      documentsHeadingRef.current?.focus({ preventScroll: true });
+    }
+  }, [deletedIds]);
 
   // One shared state per id keeps duplicate cards in lockstep and synchronously rejects overlapping writes.
   const [starStates, setStarStates] = useState<Record<string, { confirmed: boolean; value: boolean; pending: boolean }>>({});
@@ -5470,10 +5493,21 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       if (!canFile(doc) || deleteOperations.current.has(doc.id)) return;
       if (!confirm(`Move “${doc.title}” to trash? You can restore it from the dashboard for 30 days.`)) return;
 
+      const cards = Array.from(
+        searchResultListRef.current?.querySelectorAll<HTMLAnchorElement>('a[data-testid="document-card"]') ?? [],
+      );
+      const cardIndex = cards.findIndex((card) => card.getAttribute("href") === `/d/${doc.id}`);
       const operation: DeleteOperation = {
         ownerId: user.id,
         documentId: doc.id,
         title: doc.title,
+        focusRecovery:
+          cardIndex < 0
+            ? null
+            : {
+                nextDocumentId: cards[cardIndex + 1]?.getAttribute("href")?.slice("/d/".length) ?? null,
+                previousDocumentId: cards[cardIndex - 1]?.getAttribute("href")?.slice("/d/".length) ?? null,
+              },
       };
       deleteOperations.current.set(doc.id, operation);
       setDeleteBusyIds((current) => {
@@ -5489,6 +5523,11 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         try {
           await api.documents.delete(operation.documentId);
           if (!isCurrent()) return;
+          deleteFocusRecovery.current =
+            operation.focusRecovery && {
+              documentId: operation.documentId,
+              ...operation.focusRecovery,
+            };
           setDeletedIds((current) => {
             if (current.has(operation.documentId)) return current;
             const next = new Set(current);
@@ -6016,7 +6055,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           )}
 
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <h2 className="text-sm font-semibold text-ink">Documents</h2>
+            <h2 ref={documentsHeadingRef} tabIndex={-1} className="text-sm font-semibold text-ink">Documents</h2>
             <div className="ml-auto flex min-h-8 max-w-full items-center gap-2 overflow-x-auto max-sm:basis-full" data-testid="dashboard-chips">
               <label className="flex items-center gap-1.5 text-xs text-ink-3">
                 <span className="sr-only">Sort by</span>

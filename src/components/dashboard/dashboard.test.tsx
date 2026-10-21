@@ -5500,8 +5500,10 @@ describe("dashboard card trash action", () => {
     renderDashboard(undefined, [doc("owned", "Owned document")]);
 
     const item = within(openDocumentMenu("Owned document")).getByTestId("document-delete");
-    fireEvent.click(item);
-    fireEvent.click(item);
+    act(() => {
+      fireEvent.click(item);
+      fireEvent.click(item);
+    });
 
     expect(purgeDocument).toHaveBeenCalledOnce();
     expect(purgeDocument).toHaveBeenCalledWith("owned");
