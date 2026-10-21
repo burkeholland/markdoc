@@ -103,8 +103,8 @@ test.describe("folders", () => {
     await page.keyboard.press("Enter");
     await expect(page.getByRole("menu")).toBeVisible();
 
-    // Focus starts on the first enabled row ("Not in a folder"); the folder is the next one.
-    await page.keyboard.press("ArrowDown");
+    // The top-level row is disabled because the document is already at the top level, so focus starts
+    // on the first enabled folder row.
     await expect(page.getByTestId("move-to-folder")).toBeFocused();
     await page.keyboard.press("Enter");
 

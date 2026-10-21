@@ -86,6 +86,47 @@ test.describe("make a copy and trash", () => {
     expect(trash.documents.map((d) => d.id)).not.toContain(docId);
   });
 
+  test("Move to trash from a dashboard card menu", async () => {
+    const page = owner.page;
+    const docId = await createDocument(page, "# Dashboard delete\n\nDelete me from the card menu.\n", "Dashboard delete");
+    const remainingId = await createDocument(page, "# Dashboard remains\n\nKeep this card for focus recovery.\n", "Dashboard remains");
+    await goHome(page);
+
+    const card = page.getByTestId("document-card").filter({ hasText: "Dashboard delete" });
+    await expect(card).toHaveCount(1);
+    const menuTrigger = card.locator("..").getByTestId("document-menu");
+    await menuTrigger.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("document-delete")).toBeFocused();
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.keyboard.press("Enter");
+
+    await expect(page.getByTestId("toast")).toContainText("moved to the trash");
+    await expect(card).toHaveCount(0);
+    await expect(page.locator(`[data-testid="document-card"][href="/d/${remainingId}"]`)).toBeFocused();
+
+    const remainingCard = page.getByTestId("document-card").filter({ hasText: "Dashboard remains" });
+    await remainingCard.locator("..").getByTestId("document-menu").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("document-delete")).toBeFocused();
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.keyboard.press("Enter");
+    await expect(remainingCard).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Documents" })).toBeFocused();
+
+    await page.getByTestId("filter-trash").click();
+    const trashed = page.getByTestId("trash-card").filter({ hasText: /Dashboard delete|Dashboard remains/ });
+    await expect(trashed).toHaveCount(2);
+    expect((await page.request.get(`/api/documents/${docId}`)).status()).toBe(404);
+
+    for (const title of ["Dashboard delete", "Dashboard remains"]) {
+      const trashCard = page.getByTestId("trash-card").filter({ hasText: title });
+      page.once("dialog", (dialog) => dialog.accept());
+      await trashCard.getByTestId("purge-button").click();
+    }
+    await expect(page.getByTestId("trash-card")).toHaveCount(0);
+  });
+
   test("a second browser with the document open is kicked to the dashboard when it is trashed", async () => {
     const docId = await createDocument(owner.page, "# Shared then trashed\n\nStill here.\n", "Shared then trashed");
     await shareWith(owner.page, docId, other.login, "editor");

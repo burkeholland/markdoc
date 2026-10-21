@@ -1,5 +1,5 @@
 "use client";
-import { Avatar, Dialog, DialogContent, DialogTrigger, Kbd, Menu, MenuContent, MenuItem, MenuTrigger, TooltipProvider } from "@/components/ui/primitives";
+import { Avatar, Dialog, DialogContent, DialogTrigger, Kbd, Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, TooltipProvider } from "@/components/ui/primitives";
 import { GitHubIcon } from "@/components/ui/github-icon";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 
@@ -379,6 +379,16 @@ interface TrashActionOperation {
 interface CreateOperation {
   ownerId: string;
   key: string;
+}
+
+interface DeleteOperation {
+  ownerId: string;
+  documentId: string;
+  title: string;
+  focusRecovery: {
+    nextDocumentId: string | null;
+    previousDocumentId: string | null;
+  } | null;
 }
 
 interface SearchAuthority {
@@ -4843,6 +4853,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
   const searchResultListRef = useRef<HTMLUListElement>(null);
+  const documentsHeadingRef = useRef<HTMLHeadingElement>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const paletteOpenRef = useRef(false);
   const [openPicker, setOpenPicker] = useState(false);
@@ -5130,6 +5141,50 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     [canRunTrashAction, runTrashAction],
   );
 
+  const deleteOwner = useRef(user.id);
+  const deleteOperations = useRef(new Map<string, DeleteOperation>());
+  const deletePropsRef = useRef(initialDocuments);
+  const [deleteBusyIds, setDeleteBusyIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [deletedIds, setDeletedIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const deleteFocusRecovery = useRef<{ documentId: string; nextDocumentId: string | null; previousDocumentId: string | null } | null>(null);
+
+  useLayoutEffect(() => {
+    const previousOwner = deleteOwner.current;
+    deleteOwner.current = user.id;
+    if (previousOwner === user.id) return;
+    deleteOperations.current.clear();
+    setDeleteBusyIds(new Set());
+    setDeletedIds(new Set());
+  }, [user.id]);
+
+  useLayoutEffect(
+    () => () => {
+      deleteOperations.current.clear();
+    },
+    [],
+  );
+  useLayoutEffect(() => {
+    const recovery = deleteFocusRecovery.current;
+    if (!recovery || !deletedIds.has(recovery.documentId)) return;
+    deleteFocusRecovery.current = null;
+
+    const cards = Array.from(
+      searchResultListRef.current?.querySelectorAll<HTMLAnchorElement>('a[data-testid="document-card"]') ?? [],
+    );
+    const cardFor = (documentId: string | null) =>
+      documentId ? cards.find((card) => card.getAttribute("href") === `/d/${documentId}`) ?? null : null;
+    const destination = cardFor(recovery.nextDocumentId) ?? cardFor(recovery.previousDocumentId);
+    if (destination) {
+      destination.focus({ preventScroll: true });
+    } else {
+      documentsHeadingRef.current?.focus({ preventScroll: true });
+    }
+  }, [deletedIds]);
+
   // One shared state per id keeps duplicate cards in lockstep and synchronously rejects overlapping writes.
   const [starStates, setStarStates] = useState<Record<string, { confirmed: boolean; value: boolean; pending: boolean }>>({});
   const starStatesRef = useRef(starStates);
@@ -5156,12 +5211,24 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
 
   const documents = useMemo(
     () =>
-      initialDocuments.map((d) => {
-        const starred = starStates[d.id] ? { ...d, starred: starStates[d.id].value } : d;
-        return d.id in folderOverrides ? { ...starred, folderId: folderOverrides[d.id] } : starred;
-      }),
-    [initialDocuments, starStates, folderOverrides],
+      initialDocuments
+        .filter((d) => !deletedIds.has(d.id))
+        .map((d) => {
+          const starred = starStates[d.id] ? { ...d, starred: starStates[d.id].value } : d;
+          return d.id in folderOverrides ? { ...starred, folderId: folderOverrides[d.id] } : starred;
+        }),
+    [initialDocuments, starStates, folderOverrides, deletedIds],
   );
+  useEffect(() => {
+    if (deletePropsRef.current === initialDocuments) return;
+    deletePropsRef.current = initialDocuments;
+    setDeletedIds((current) => {
+      if (current.size === 0) return current;
+      const present = new Set(initialDocuments.map((document) => document.id));
+      const next = new Set([...current].filter((id) => present.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [initialDocuments]);
   const toggleStar = useCallback(
     (doc: Doc) => {
       if (starRequests.current.has(doc.id)) return;
@@ -5421,6 +5488,79 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       return next;
     });
   }, []);
+  const deleteDocument = useCallback(
+    (doc: Doc) => {
+      if (!canFile(doc) || deleteOperations.current.has(doc.id)) return;
+      if (!confirm(`Move “${doc.title}” to trash? You can restore it from the dashboard for 30 days.`)) return;
+
+      const cards = Array.from(
+        searchResultListRef.current?.querySelectorAll<HTMLAnchorElement>('a[data-testid="document-card"]') ?? [],
+      );
+      const cardIndex = cards.findIndex((card) => card.getAttribute("href") === `/d/${doc.id}`);
+      const operation: DeleteOperation = {
+        ownerId: user.id,
+        documentId: doc.id,
+        title: doc.title,
+        focusRecovery:
+          cardIndex < 0
+            ? null
+            : {
+                nextDocumentId: cards[cardIndex + 1]?.getAttribute("href")?.slice("/d/".length) ?? null,
+                previousDocumentId: cards[cardIndex - 1]?.getAttribute("href")?.slice("/d/".length) ?? null,
+              },
+      };
+      deleteOperations.current.set(doc.id, operation);
+      setDeleteBusyIds((current) => {
+        const next = new Set(current);
+        next.add(doc.id);
+        return next;
+      });
+      const isCurrent = () =>
+        deleteOwner.current === operation.ownerId &&
+        deleteOperations.current.get(operation.documentId) === operation;
+
+      void (async () => {
+        try {
+          await api.documents.delete(operation.documentId);
+          if (!isCurrent()) return;
+          deleteFocusRecovery.current =
+            operation.focusRecovery && {
+              documentId: operation.documentId,
+              ...operation.focusRecovery,
+            };
+          setDeletedIds((current) => {
+            if (current.has(operation.documentId)) return current;
+            const next = new Set(current);
+            next.add(operation.documentId);
+            return next;
+          });
+          setSelectedIds((current) => {
+            if (!current.has(operation.documentId)) return current;
+            const next = new Set(current);
+            next.delete(operation.documentId);
+            return next;
+          });
+          publishNotice({ message: `“${operation.title}” was moved to the trash.`, kind: "success" });
+          void folders.refresh();
+          router.refresh();
+        } catch (error) {
+          if (isCurrent()) {
+            publishNotice({ message: apiErrorText(error, "Could not move to trash"), kind: "error" });
+          }
+        } finally {
+          if (deleteOperations.current.get(operation.documentId) !== operation) return;
+          deleteOperations.current.delete(operation.documentId);
+          setDeleteBusyIds((current) => {
+            if (!current.has(operation.documentId)) return current;
+            const next = new Set(current);
+            next.delete(operation.documentId);
+            return next;
+          });
+        }
+      })();
+    },
+    [canFile, folders, publishNotice, router, user.id],
+  );
 
   const filtered = useMemo<(Doc & { snippet?: string | null })[]>(() => {
     const matchesFilter = (d: Doc) => {
@@ -5435,10 +5575,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       return true;
     };
     // Search results keep their relevance order (title matches first); the sort applies to the browsing list.
-    if (serverResults) return serverResults.map((d) => (starStates[d.id] ? { ...d, starred: starStates[d.id].value } : d)).filter(matchesFilter);
+    if (serverResults) {
+      return serverResults
+        .filter((d) => !deletedIds.has(d.id))
+        .map((d) => (starStates[d.id] ? { ...d, starred: starStates[d.id].value } : d))
+        .filter(matchesFilter);
+    }
     const q = trimmed.toLowerCase();
     return documents.filter((d) => matchesFilter(d) && (!q || d.title.toLowerCase().includes(q))).sort(compareDocs(sort));
-  }, [documents, serverResults, trimmed, filter, sort, user.id, starStates, folderSelection]);
+  }, [documents, serverResults, trimmed, filter, sort, user.id, starStates, folderSelection, deletedIds]);
 
   const starred = useMemo(() => documents.filter((d) => d.starred).sort(compareDocs(sort)), [documents, sort]);
   const showStrip = filter === "all" && !trimmed && starred.length > 0;
@@ -5910,7 +6055,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           )}
 
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <h2 className="text-sm font-semibold text-ink">Documents</h2>
+            <h2 ref={documentsHeadingRef} tabIndex={-1} className="text-sm font-semibold text-ink">Documents</h2>
             <div className="ml-auto flex min-h-8 max-w-full items-center gap-2 overflow-x-auto max-sm:basis-full" data-testid="dashboard-chips">
               <label className="flex items-center gap-1.5 text-xs text-ink-3">
                 <span className="sr-only">Sort by</span>
@@ -6120,6 +6265,17 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                             currentFolderId={d.folderId}
                             onMove={(folderId) => void moveDocuments([d.id], folderId)}
                           />
+                          <MenuSeparator />
+                          <MenuItem
+                            icon={deleteBusyIds.has(d.id) ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
+                            className="text-danger"
+                            onSelect={() => deleteDocument(d)}
+                            disabled={deleteBusyIds.has(d.id)}
+                            aria-busy={deleteBusyIds.has(d.id) || undefined}
+                            data-testid="document-delete"
+                          >
+                            {deleteBusyIds.has(d.id) ? "Moving to trash…" : "Move to trash"}
+                          </MenuItem>
                         </MenuContent>
                       </Menu>
                     </>
