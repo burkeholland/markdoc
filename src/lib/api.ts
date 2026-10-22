@@ -159,9 +159,9 @@ export interface ApiTokenDto {
   collaboratorsMayAsk: boolean;
   createdAt: string;
   lastUsedAt: string | null;
-  /** Last `tools/list` over /api/mcp with this token (an MCP client is connected). */
+  /** Last MCP `tools/list` with this token (an MCP client is connected). */
   lastMcpSeenAt: string | null;
-  /** Last `tools/call` over /api/mcp with this token (a tool ran). */
+  /** Last MCP `tools/call` with this token (a tool ran). */
   lastMcpCallAt: string | null;
   expiresAt: string | null;
   revokedAt?: string | null;

@@ -8,7 +8,7 @@ import { AgentsPanel } from "@/components/settings/agents-panel";
 import { LinkCardsSetting } from "@/components/settings/link-cards-setting";
 import { ThemePicker } from "@/components/ui/theme-toggle";
 import { embeddedDocumentPath } from "@/server/http";
-import { publicOrigin } from "@/server/public-origin";
+import { mcpServerUrl } from "@/server/mcp-url";
 import { listApiTokens, serializeApiTokenMetadata } from "@/server/tokens";
 
 export const metadata = { title: "Settings" };
@@ -19,7 +19,6 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   const embedPath = await embeddedDocumentPath(session?.user?.id);
   if (embedPath) redirect(embedPath);
   if (!session?.user?.id) redirect("/login?next=/settings");
-  const origin = publicOrigin();
   const rawNext = (await searchParams).next;
   const nextParam = Array.isArray(rawNext) ? rawNext[0] : rawNext;
   // Only relative document paths: never bounce the user off-site.
@@ -49,7 +48,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <ThemePicker />
         </div>
         <LinkCardsSetting />
-        <AgentsPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} initialTokens={tokens} />
+        <AgentsPanel mcpUrl={mcpServerUrl()} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} initialTokens={tokens} />
         <div className="mt-6">
           <AdvancedSettings />
         </div>

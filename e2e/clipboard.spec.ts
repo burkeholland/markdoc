@@ -1,3 +1,4 @@
+import { mcpURL } from "./mcp-url";
 import { test, expect } from "./fixtures";
 import type { Browser, BrowserContext, Page } from "@playwright/test";
 import { createDocument, devLogin, openDocument, uniqueLogin, waitForHydration } from "./helpers";
@@ -157,7 +158,7 @@ test.describe("copy buttons without navigator.clipboard (plain-HTTP LAN origin)"
     await expect(dialog.getByTestId("agent-setup-copy")).toHaveText("Copied");
     const config = await readClipboard();
     expect(config === (await snippet.innerText()).trim()).toBe(true);
-    expect(config).toContain(`${origin}/api/mcp`);
+    expect(config).toContain(`${mcpURL()}`);
     expect(config).toMatch(/mdk_/);
 
     await dialog.getByTestId("agent-invite-copy").click();

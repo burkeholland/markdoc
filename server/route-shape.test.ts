@@ -56,7 +56,7 @@ describe("routeShape", () => {
     expect(routeShape(`/api/documents/${DOCUMENT_ID}/gist-auto-update?preview=1`)).toBe("/api/documents/:id/gist-auto-update");
     expect(routeShape("/api/notifications/read-all")).toBe("/api/notifications/read-all");
     expect(routeShape("/api/embed/handoff")).toBe("/api/embed/handoff");
-    expect(routeShape("/api/mcp")).toBe("/api/mcp");
+    expect(routeShape("/api/agent/mcp-activity")).toBe("/api/agent/mcp-activity");
     expect(routeShape("/api/auth/callback/github")).toBe("/api/auth/callback/github");
     expect(routeShape("/api/admin/backup")).toBe("/api/admin/backup");
     expect(routeShape("/_standby/takeover")).toBe("/_standby/takeover");

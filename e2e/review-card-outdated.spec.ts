@@ -1,3 +1,4 @@
+import { mcpURL } from "./mcp-url";
 import AxeBuilder from "@axe-core/playwright";
 import { test, expect } from "./fixtures";
 import type { Locator, Page } from "@playwright/test";
@@ -34,10 +35,10 @@ const REWORDS = [
 const PENDING_NOTE = "None of the 4 suggestions can be applied: a pending suggestion changes the text they quote. They apply again if it is rejected.";
 const CHANGED_NOTE = "None of the 4 suggestions can be applied: the text they quote has changed.";
 
-/** JSON-RPC over /api/mcp, the way an agent calls the HTTP server. */
+/** JSON-RPC over the MCP server, the way an agent calls the HTTP server. */
 async function mcp<T>(page: Page, token: string, name: string, args: Record<string, unknown>): Promise<T> {
   const post = () =>
-    page.request.post("/api/mcp", {
+    page.request.post(mcpURL(), {
       headers: { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
       data: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
     });

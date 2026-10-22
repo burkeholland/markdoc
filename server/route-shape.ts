@@ -53,7 +53,6 @@ export const STATIC_SEGMENTS: ReadonlySet<string> = new Set([
   "github",
   "health",
   "import",
-  "mcp",
   "me",
   "mentions",
   "notifications",
@@ -64,6 +63,8 @@ export const STATIC_SEGMENTS: ReadonlySet<string> = new Set([
   "backup",
   // src/app/api/agent/* and agent/documents/[id]/*
   "events",
+  "mcp-activity",
+  "mcp-url",
   "presence",
   "requests",
   // src/app/api/documents/* — a static sibling of [id]; no document id can be "move" (nanoid is 12 chars)

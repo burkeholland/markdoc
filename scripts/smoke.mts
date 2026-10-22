@@ -107,14 +107,13 @@ async function main() {
       `status ${nf.status} ${nfType} ${notFound.body ? JSON.stringify(notFound.body) : JSON.stringify(notFound.text.slice(0, 120))}`,
     );
 
-    // Same expectation as e2e/share-agent.spec.ts ("The URL in the card is live"): a plain GET is the
-    // liveness card, name "markdoc", tools > 0.
-    const mcp = await call("/api/mcp");
-    const alive = await readJson(mcp);
+    // MCP is served by a separate service; markdoc only advertises its URL.
+    const mcpUrl = await call("/api/agent/mcp-url");
+    const advertised = await readJson(mcpUrl);
     check(
-      mcp.ok && alive.body?.name === "markdoc" && typeof alive.body.tools === "number" && alive.body.tools > 0,
-      "GET /api/mcp (alive)",
-      `status ${mcp.status} ${alive.body ? `name=${JSON.stringify(alive.body.name)} tools=${alive.body.tools}` : JSON.stringify(alive.text.slice(0, 120))}`,
+      mcpUrl.ok && typeof advertised.body?.url === "string" && /^https?:\/\//.test(advertised.body.url),
+      "GET /api/agent/mcp-url",
+      `status ${mcpUrl.status} ${advertised.body ? `url=${JSON.stringify(advertised.body.url)}` : JSON.stringify(advertised.text.slice(0, 120))}`,
     );
   });
 

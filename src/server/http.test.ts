@@ -158,7 +158,8 @@ describe("route classes and caller keys", () => {
   it("classifies reads, writes and creates", () => {
     expect(routeClass("GET", "/api/me")).toBe("read");
     expect(routeClass("HEAD", "/api/documents")).toBe("read");
-    expect(routeClass("POST", "/api/mcp")).toBe("read");
+    expect(routeClass("POST", "/api/agent/mcp-activity")).toBe("read");
+    expect(routeClass("POST", "/api/mcp")).toBe("write");
     expect(routeClass("PUT", "/api/documents/abc/content")).toBe("write");
     expect(routeClass("POST", "/api/documents/abc/comments")).toBe("write");
     expect(routeClass("POST", "/api/documents")).toBe("create");

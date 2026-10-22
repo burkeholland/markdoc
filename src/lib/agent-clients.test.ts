@@ -1,27 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { CHECK_REQUESTS_PROMPT, joinDocumentPrompt, KEY_PLACEHOLDER, mcpSetup } from "./agent-clients";
+import { CHECK_REQUESTS_PROMPT, joinDocumentPrompt, KEY_PLACEHOLDER, MCP_URL_PLACEHOLDER, mcpSetup } from "./agent-clients";
 
-const origin = "https://docs.example.com";
+const mcpUrl = "https://mcp.markdoc.app/mcp";
 const key = "mdk_abc123";
 
 describe("mcpSetup", () => {
   it("gives every client the same URL, header and mcpServers config", () => {
-    const setup = mcpSetup({ origin, key });
-    expect(setup.url).toBe("https://docs.example.com/api/mcp");
+    const setup = mcpSetup({ mcpUrl, key });
+    expect(setup.url).toBe(mcpUrl);
     expect(setup.authorization).toBe("Bearer " + key);
     expect(JSON.parse(setup.config)).toEqual({
-      mcpServers: { markdoc: { type: "http", url: "https://docs.example.com/api/mcp", headers: { Authorization: "Bearer " + key } } },
+      mcpServers: { markdoc: { type: "http", url: mcpUrl, headers: { Authorization: "Bearer " + key } } },
     });
   });
 
   it("shows a placeholder instead of a key when there is none", () => {
-    const setup = mcpSetup({ origin });
+    const setup = mcpSetup({ mcpUrl });
     expect(setup.config).toContain(KEY_PLACEHOLDER);
     expect(setup.config).not.toContain("mdk_");
   });
 
-  it("falls back to a local origin before the browser origin is known", () => {
-    expect(mcpSetup({ origin: "", key }).url).toBe("http://localhost:3000/api/mcp");
+  it("shows a placeholder URL until the configured one has loaded", () => {
+    expect(mcpSetup({ mcpUrl: "", key }).url).toBe(MCP_URL_PLACEHOLDER);
   });
 });
 

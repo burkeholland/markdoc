@@ -1,3 +1,4 @@
+import { mcpURL } from "./mcp-url";
 import { test, expect } from "./fixtures";
 import type { BrowserContext, Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
@@ -106,7 +107,7 @@ test.describe("connect an AI agent", () => {
   });
 
   test("once an agent has used the key, the dialog opens on the invite, with Connect another agent and Manage keys", async () => {
-    const listed = await page.request.post("/api/mcp", {
+    const listed = await page.request.post(mcpURL(), {
       headers: { Authorization: bearer(key), Accept: "application/json, text/event-stream", "Content-Type": "application/json" },
       data: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
     });

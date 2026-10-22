@@ -68,3 +68,4 @@ board.mjs
 # Claude Code worktrees: each is a full checkout with its own node_modules, so an unguarded
 # `git add` would commit hundreds of megabytes (and the build-machine sync tars them too).
 .claude/worktrees/
+/.markdoc-mcp

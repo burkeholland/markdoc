@@ -129,9 +129,8 @@ export default async function globalSetup(config: FullConfig) {
       "/api/documents?q=warm",
       "/api/templates",
       `/api/documents/${docId}/export?format=html`,
-      // A plain GET answers the liveness card (200) and compiles the route: scale.spec.ts test 8 measured
-      // 14,504 ms for its first timed `markdoc_suggest` on CI (Turbopack's cold compile) vs 1,204 ms on retry.
-      "/api/mcp",
+      // The Connect-an-agent dialog reads the remote MCP server's URL from here.
+      "/api/agent/mcp-url",
       // Agent requests from comments (#1024/#1025): the first hit compiles the route the comment composer posts to.
       `/api/documents/${docId}/requests`,
       // agent-presence.spec.ts l.138/l.182 give the picker/caret 1 s from `bot.presence` (POST, same module): the
@@ -151,6 +150,16 @@ export default async function globalSetup(config: FullConfig) {
       // 13.5 s, so the toast had dismissed before the click (#2212).
       `/api/documents/${docId}/activity?limit=200`,
     ];
+    // The remote MCP server (markdoc-mcp) runs beside the dev server: its liveness card proves it is up before
+    // any spec talks to it. scale.spec.ts test 8 measured 14,504 ms for a cold first `markdoc_suggest` on CI;
+    // the REST routes it forwards to are warmed below.
+    if (process.env.E2E_MCP_URL) {
+      const mcp = process.env.E2E_MCP_URL;
+      await timed("GET <mcp>", async () => {
+        const res = await page.request.get(mcp, { timeout: WARMUP_STEP_TIMEOUT_MS });
+        if (!res.ok()) throw new Error(`[e2e warm-up] ${mcp} -> ${res.status()}`);
+      });
+    }
     for (const route of apiRoutes) {
       await timed(`GET ${route.replace(docId!, "<id>")}`, async () => {
         const res = await page.request.get(route, { timeout: WARMUP_STEP_TIMEOUT_MS });

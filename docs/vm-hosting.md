@@ -945,13 +945,13 @@ it. With `10m`, nginx passes everything the app can read and refuses the rest
 early, from the `Content-Length`, before any of the body is read.
 
 The app's own limits are all below that. Sizes are the request's
-`Content-Length`, measured on a development server with Chromium on 2026-10-08:
+`Content-Length`, measured on a development server with Chromium on 2026-10-08
+(MCP is a separate service, markdoc-mcp, with its own 4 MiB cap; it does not pass through this block):
 
 | Route | Carries | The app's limit | Enforced | Largest body at the limit |
 | --- | --- | --- | --- | --- |
 | `POST /api/documents/:id/assets` | one picture, multipart `file` or a raw image body | 5 MiB (`MAX_ASSET_BYTES`) | the route, from `Content-Length`, then `src/server/assets.ts` on the bytes: `413 { error: "Images must be 5 MB or smaller" }` | 5,243,062 bytes for a 5 MiB `photo.png` (182 bytes of multipart frame); 5,243,256 with a 204-character file name |
 | `PUT /api/documents/:id/content`, `POST /api/documents`, `POST /api/documents/:id/suggest` | a document's text as JSON | 2,000,000 characters, not bytes | the route's schema, after the body is read: `400` | 2,000,014 bytes for ASCII; 6,000,014 bytes for 2,000,000 CJK characters (three bytes each), answered `200` |
-| `POST /api/mcp` | one JSON-RPC request | 4 MiB (4,194,304 bytes), the MCP SDK's default | the SDK, after the token is checked: `413` JSON-RPC | 4,194,304 bytes answered `200`; 4,194,305 answered `413` |
 | `POST /api/import/file`, JSON | one text | 2 MiB of UTF-8 (`MAX_IMPORT_BYTES`) | `src/server/import-file.ts`: `413 { error: "Content is larger than 2 MB" }` | 2,097,186 bytes |
 | `POST /api/import/file`, multipart | up to 20 files of 2 MiB each plus the pictures they reference, all in one request | 2 MiB a file (`MAX_IMPORT_BYTES`), 20 files (`MAX_IMPORT_FILES`) | the route | four full files are 8,389,224 bytes and answered `201`; 12,583,814 bytes (six files) and 10,486,291 bytes (one file with two 5 MiB pictures) are over what Next passes on and answered `400 { error: "Invalid multipart body" }` |
 | every other route with a body (comments, reviews, requests, tokens, webhooks, sharing) | small JSON | a few thousand characters a field | the route's schema | a few KB |
@@ -978,7 +978,7 @@ with `client_max_body_size` when it has chosen the location, before it runs the
 `return` inside that location. With the 1 MB default a POST over 1 MB to an old
 origin would therefore get nginx's `413` instead of the `308`. This was run in
 the review of pull request 2343 with nginx 1.24.0 (the Ubuntu 24.04 package):
-with the 1 MB default a POST of 2 MB to `/api/mcp` on either name answered
+with the 1 MB default a POST of 2 MB to an `/api/*` path on either name answered
 `413`, and with this file it answered `308`. The plain HTTP block on port 80 is
 unchanged.
 
@@ -1059,11 +1059,11 @@ nginx -t && systemctl reload nginx
 
 ### Check afterwards
 
-From any machine, without credentials: a POST of 2 MB to `/api/mcp`.
+From any machine, without credentials: a POST of 2 MB to `/api/documents`.
 
 ```bash
 head -c 2097152 /dev/zero | curl -sS -o /dev/null -w '%{http_code} %{content_type}\n' \
-  -H 'Content-Type: application/json' --data-binary @- https://markdoc.app/api/mcp
+  -H 'Content-Type: application/json' --data-binary @- https://markdoc.app/api/documents
 ```
 
 | Answer | Meaning |
@@ -1079,7 +1079,7 @@ Three more checks:
 - A signed-in person uploads a picture of about 3 MB into a document and it
   appears.
 
-The same 2 MB POST to `https://www.markdoc.app/api/mcp` should answer `308`, as
+The same 2 MB POST to `https://www.markdoc.app/api/documents` should answer `308`, as
 it did on the nginx of the review (see
 [the section above](#in-the-redirecting-server-blocks-too)). If it answers
 `413`, the VM's nginx behaves differently from that one: report it. It harms

@@ -7,10 +7,8 @@ import { hasConnected, isActiveKey, keyReaches, lastSeenAt } from "@/lib/agent-k
 import { ConnectedBanner, InviteBlock, type DocRef } from "./agent-parts";
 import { AgentSetup } from "./agent-setup";
 import { useApiTokens } from "./use-api-tokens";
-import { useOrigin } from "./use-origin";
 
 function AgentDialogBody({ doc }: { doc: DocRef }) {
-  const origin = useOrigin();
   const { tokens, error, reload } = useApiTokens();
   const [settingUp, setSettingUp] = useState(false);
 
@@ -29,7 +27,7 @@ function AgentDialogBody({ doc }: { doc: DocRef }) {
 
   // The wizard stays put once a key is made, and shows its own connected state; a returning user goes straight to the invite.
   if (settingUp || connected.length === 0) {
-    return <AgentSetup origin={origin} tokens={tokens} reload={reload} doc={doc} onKeyCreated={() => setSettingUp(true)} />;
+    return <AgentSetup tokens={tokens} reload={reload} doc={doc} onKeyCreated={() => setSettingUp(true)} />;
   }
 
   return (

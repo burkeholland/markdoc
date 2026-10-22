@@ -62,13 +62,13 @@ Markdoc stores only a hash of the secret. A newly created or replaced secret is 
 
 ## 2. Connect an MCP client
 
-Markdoc serves the Model Context Protocol itself at `/api/mcp` (Streamable HTTP). Any MCP client connects with the server URL and a key: nothing to install, no checkout. The steps in section 1 print the exact setup for your agent, using the server you are currently browsing and the key you just made:
+The Model Context Protocol is served by a separate service, [markdoc-mcp](https://github.com/burkeholland/markdoc-mcp), at the MCP URL shown in Settings (`https://mcp.markdoc.app/mcp` in production; markdoc reports it at `GET /api/agent/mcp-url`). Any MCP client connects with the server URL and a key: nothing to install, no checkout. The steps in section 1 print the exact setup for your agent, using that MCP URL and the key you just made:
 
 | Agent | What you get |
 | --- | --- |
-| Copilot CLI | `copilot mcp add --transport http --header "Authorization: Bearer <key>" markdoc <origin>/api/mcp`, then a new Copilot session. An optional **Skip permission prompts** block adds a `copilot --allow-tool …` line (see [Permissions in Copilot CLI](#permissions-in-copilot-cli)). |
+| Copilot CLI | `copilot mcp add --transport http --header "Authorization: Bearer <key>" markdoc <mcp-url>`, then a new Copilot session. An optional **Skip permission prompts** block adds a `copilot --allow-tool …` line (see [Permissions in Copilot CLI](#permissions-in-copilot-cli)). |
 | VS Code | A `servers` block for your **user** MCP configuration (Command Palette → *MCP: Open User Configuration*), not `.vscode/mcp.json`, so the key stays out of your repository. |
-| Claude Code | `claude mcp add --transport http --scope user markdoc <origin>/api/mcp --header "Authorization: Bearer <key>"`. `--header` goes last because it takes several values. |
+| Claude Code | `claude mcp add --transport http --scope user markdoc <mcp-url> --header "Authorization: Bearer <key>"`. `--header` goes last because it takes several values. |
 | Cursor | A `mcpServers` block for `~/.cursor/mcp.json`, then restart Cursor. |
 | Copilot app | `MARKDOC_URL` and `MARKDOC_TOKEN` for the environment that launches the app, plus the extension install [below](#inside-the-copilot-app). |
 | Other | The generic block below, and a stdio block for clients that cannot speak HTTP. |
@@ -80,7 +80,7 @@ The generic block for other Streamable HTTP clients; substitute your key for `MA
   "mcpServers": {
     "markdoc": {
       "type": "http",
-      "url": "http://<machine-name>:3000/api/mcp",
+      "url": "https://mcp.markdoc.app/mcp",
       "headers": { "Authorization": "Bearer mdk_…" },
       "tools": ["*"]
     }
@@ -88,7 +88,7 @@ The generic block for other Streamable HTTP clients; substitute your key for `MA
 }
 ```
 
-Copilot CLI also reads this same shape from `~/.copilot/mcp-config.json` if you prefer to edit it by hand. Use the stable machine-hostname URL you open Markdoc with so DHCP changes do not invalidate the config; a numeric LAN URL remains useful only as a connection diagnostic. Moving an existing browser from a numeric URL to the hostname is a new origin: sign in once there, and reconnect/save or manually copy any unsynced old-origin edit because cookies, localStorage, and IndexedDB cannot be invisibly migrated. Behind a reverse proxy, set `MARKDOC_URL` to Markdoc's canonical public origin so tool results contain usable links. Token-bearing REST callbacks never use `Host`, `Forwarded` or `X-Forwarded-*`: the custom server pins them to its own listener. A non-custom deployment falls back to `http://127.0.0.1:$PORT`; set `MARKDOC_INTERNAL_URL` to a trusted internal http(s) origin only when that loopback URL cannot reach Markdoc. Both settings must be bare origins such as `https://docs.example.com`; if an older deployment used a URL path prefix, move that routing to the reverse proxy. Paths, credentials, queries, fragments, and non-http(s) schemes make startup or `/api/mcp` fail closed. A plain `GET /api/mcp` (no token) answers `{ name, version, transport, tools, docs, auth }` so a `curl` shows it is alive; without a token every MCP request is a `401` that says where to create one. The transport is stateless (no session ids): `GET` with `Accept: text/event-stream` and `DELETE` answer `405` as the MCP spec prescribes, which Streamable HTTP clients treat as "no standalone stream / nothing to close". When a tool call fails on validation, the tool error text carries the first problem (`… failed (400): Invalid request — content: Too big: …`) so you can tell why.
+Copilot CLI also reads this same shape from `~/.copilot/mcp-config.json` if you prefer to edit it by hand. markdoc-mcp (Streamable HTTP at `/mcp`, `GET /health`, 4 MiB request cap) forwards your Bearer key to Markdoc's REST API, so every tool call is authorised and rate-limited like a direct REST call; it also reports activity to `POST /api/agent/mcp-activity`. Self-hosters run markdoc-mcp next to Markdoc (default `http://localhost:3100/mcp`) and set `MARKDOC_MCP_URL` so Settings shows the right URL. When a tool call fails on validation, the tool error text carries the first problem (`… failed (400): Invalid request — content: Too big: …`) so you can tell why.
 
 **Alternative: stdio.** [burkeholland/markdoc-mcp](https://github.com/burkeholland/markdoc-mcp) exposes the same tools over stdio for clients that cannot speak HTTP:
 
@@ -104,7 +104,7 @@ Copilot CLI also reads this same shape from `~/.copilot/mcp-config.json` if you 
 }
 ```
 
-The hosted endpoint registers its tools from `src/lib/mcp-tools.mjs`; markdoc-mcp mirrors them, and its `npm run smoke:http` (with `MARKDOC_URL` and `MARKDOC_TOKEN`) checks a running server's `/api/mcp` against its own list with a real MCP client. **API contract:** markdoc-mcp only calls the REST API documented here, so REST routes it uses (`/api/documents/*`, `/api/import/file`, `/api/me`, `/api/templates`, `/api/agent/events`) must stay backward-compatible; a tool change lands in both repos together.
+The tools live only in markdoc-mcp; its `npm run smoke:http` (with `MARKDOC_URL` and `MARKDOC_TOKEN`) checks a running server with a real MCP client. **API contract:** markdoc-mcp only calls the REST API documented here, so REST routes it uses (`/api/documents/*`, `/api/import/file`, `/api/me`, `/api/templates`, `/api/agent/events`, `/api/agent/mcp-activity`) must stay backward-compatible.
 
 ### Inside the Copilot app
 
@@ -478,7 +478,7 @@ Every `/api/*` route spends one request from a budget, counted **per token** (a 
 
 | Budget | Applies to | Burst | Sustained |
 | --- | --- | --- | --- |
-| read | `GET`/`HEAD`/`OPTIONS`, and JSON-RPC posts to `/api/mcp` (each tool call is also counted at the REST route it uses) | 60 | 600 / min |
+| read | `GET`/`HEAD`/`OPTIONS`, and `POST /api/agent/mcp-activity` (each MCP tool call is counted at the REST route it uses) | 60 | 600 / min |
 | write | every other method | 30 | 120 / min |
 | create | `POST /api/documents`, `POST /api/import`, `POST /api/import/file`, `POST /api/documents/:id/assets`, `POST /api/documents/:id/duplicate` | 20 | 20 / min |
 | failed auth | bearer tokens that do not resolve, per IP — the 31st wrong token in a minute (and any token from that IP until one failure refills) is refused before the database is asked | 30 | 30 / min |

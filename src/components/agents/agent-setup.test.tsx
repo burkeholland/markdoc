@@ -5,7 +5,7 @@ import type { ApiTokenDto } from "@/lib/api";
 import { AgentSetup } from "./agent-setup";
 import { useApiTokens } from "./use-api-tokens";
 
-const ORIGIN = "https://docs.example.com";
+const MCP_URL = "https://mcp.example.com/mcp";
 const SECRET = `mdk_${"s".repeat(40)}`;
 const DOC = { id: "doc1", title: "Launch plan" };
 
@@ -60,7 +60,7 @@ afterEach(() => {
 
 function Harness({ doc }: { doc?: { id: string; title: string } }) {
   const { tokens, reload } = useApiTokens();
-  return <AgentSetup origin={ORIGIN} tokens={tokens} reload={reload} doc={doc} />;
+  return <AgentSetup mcpUrl={MCP_URL} tokens={tokens} reload={reload} doc={doc} />;
 }
 
 const createKey = () => fireEvent.click(screen.getByTestId("agent-create-key"));
@@ -83,7 +83,7 @@ describe("AgentSetup", () => {
     const snippet = await screen.findByTestId("agent-setup-snippet");
 
     expect(server.creates).toEqual([{ name: "AI agent", expiresInDays: 90, scope: "comment", documentIds: null }]);
-    expect(JSON.parse(snippet.textContent ?? "")).toEqual({ mcpServers: { markdoc: { type: "http", url: `${ORIGIN}/api/mcp`, headers: { Authorization: "Bearer " + SECRET } } } });
+    expect(JSON.parse(snippet.textContent ?? "")).toEqual({ mcpServers: { markdoc: { type: "http", url: MCP_URL, headers: { Authorization: "Bearer " + SECRET } } } });
     expect(screen.getByText(/shown only once/i)).toBeInTheDocument();
     expect(screen.getByTestId("agent-connection")).toHaveAttribute("data-state", "waiting");
     expect(screen.getByTestId("agent-setup-copy")).toHaveFocus();

@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Check, ExternalLink, KeyRound, Loader2, TriangleAlert } from "lucide-react";
 import { api, ApiError, apiErrorText, type ApiTokenDto } from "@/lib/api";
 import { DEFAULT_KEY_NAME, mcpSetup } from "@/lib/agent-clients";
+import { useMcpUrl } from "./use-mcp-url";
 import { hasConnected, lastSeenAt, uniqueKeyName } from "@/lib/agent-keys";
 import { AGENT_DOCS_URL, SCOPES, TOKEN_SCOPE_LABEL, TOKEN_SCOPE_SUMMARY, type TokenScopeName } from "@/lib/mcp";
 import { cn } from "@/lib/utils";
@@ -30,7 +31,8 @@ interface CreatedKey {
 }
 
 export interface AgentSetupProps {
-  origin: string;
+  /** The MCP server URL when the server already knows it (Settings); otherwise loaded from GET /api/agent/mcp-url. */
+  mcpUrl?: string;
   tokens: ApiTokenDto[] | null;
   /** Re-reads the key list. Also called on a timer while waiting for the agent to connect. */
   reload: () => Promise<void>;
@@ -65,7 +67,7 @@ function Step({ n, title, state, children }: { n: number; title: string; state: 
   );
 }
 
-export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentSetupProps) {
+export function AgentSetup({ mcpUrl, tokens, reload, doc, onKeyCreated }: AgentSetupProps) {
   const uid = useId();
   const optionsId = `${uid}-options`;
   const [scope, setScope] = useState<TokenScopeName>("comment");
@@ -84,7 +86,8 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentS
   const summary = `${TOKEN_SCOPE_LABEL[scope]} · ${onlyThisDoc && doc ? "this document only" : "all your documents"} · ${expiry.phrase}`;
   const row = created ? tokens?.find((key) => key.id === created.id) : undefined;
   const connected = Boolean(row && hasConnected(row));
-  const setup = mcpSetup({ origin, key: created?.key });
+  const loadedMcpUrl = useMcpUrl();
+  const setup = mcpSetup({ mcpUrl: mcpUrl || loadedMcpUrl, key: created?.key });
 
   // Watch for the agent's first request so the result of pasting the command shows up right here.
   useEffect(() => {

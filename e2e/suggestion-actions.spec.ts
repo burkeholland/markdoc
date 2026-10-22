@@ -1,3 +1,4 @@
+import { mcpURL } from "./mcp-url";
 import { test, expect } from "./fixtures";
 import type { Locator, Page } from "@playwright/test";
 import {
@@ -48,9 +49,9 @@ async function activate(button: Locator, input: Input) {
   await button.page().keyboard.press(input);
 }
 
-/** JSON-RPC over /api/mcp, the way Copilot CLI calls the HTTP server. */
+/** JSON-RPC over the MCP server, the way Copilot CLI calls the HTTP server. */
 async function mcp<T>(page: Page, token: string, name: string, args: Record<string, unknown>): Promise<T> {
-  const res = await page.request.post("/api/mcp", {
+  const res = await page.request.post(mcpURL(), {
     headers: { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
     data: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
   });

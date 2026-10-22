@@ -4,13 +4,12 @@ import { useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { AgentSetup } from "@/components/agents/agent-setup";
 import { useApiTokens } from "@/components/agents/use-api-tokens";
-import { useOrigin } from "@/components/agents/use-origin";
 import type { ApiTokenDto } from "@/lib/api";
 import { KeysList } from "./keys-list";
 
 export interface AgentsPanelProps {
-  /** The server's public origin; the browser's own origin replaces it after hydration. */
-  origin: string;
+  /** The MCP server agents connect to (`MARKDOC_MCP_URL`). */
+  mcpUrl: string;
   userLogin: string;
   /** A document path to return to (set when Settings was opened from the editor). */
   next?: string | null;
@@ -19,8 +18,7 @@ export interface AgentsPanelProps {
 }
 
 /** Settings → AI agents: connect an agent, then manage the keys behind the ones you have. */
-export function AgentsPanel({ origin, userLogin, next, initialTokens }: AgentsPanelProps) {
-  const liveOrigin = useOrigin(origin);
+export function AgentsPanel({ mcpUrl, userLogin, next, initialTokens }: AgentsPanelProps) {
   const keys = useApiTokens(true, initialTokens);
   const [expanded, setExpanded] = useState(false);
   const hasKeys = (keys.tokens?.length ?? 0) > 0;
@@ -54,7 +52,7 @@ export function AgentsPanel({ origin, userLogin, next, initialTokens }: AgentsPa
         </div>
         {showSetup && (
           <div className="mt-4">
-            <AgentSetup origin={liveOrigin} tokens={keys.tokens} reload={keys.reload} onKeyCreated={() => setExpanded(true)} />
+            <AgentSetup mcpUrl={mcpUrl} tokens={keys.tokens} reload={keys.reload} onKeyCreated={() => setExpanded(true)} />
           </div>
         )}
       </section>

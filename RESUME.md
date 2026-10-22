@@ -167,7 +167,7 @@ until its replacement is compiled:
    copy the live `.env.local`, start `npm run dev` with `STANDBY_PORT=3001` — `server/index.ts` comes up on
    `127.0.0.1:3001` against an **in-memory** PGlite (the real data dir is single-writer and still open in the old process);
 2. warm it: `/api/health` until `ok:true,db:true`, then `/`, a dev login + `POST /api/documents`, `/d/<that id>`,
-   `/api/documents?q=`, `/api/templates`, `/api/mcp`. A 500 or no answer here is a failed build: `ROLLBACK REASON` is
+   `/api/documents?q=`, `/api/templates`, `/api/agent/mcp-url`. A 500 or no answer here is a failed build: `ROLLBACK REASON` is
    printed, the standby is stopped and the old server was never touched;
 3. handover: stop the old worktree's node processes, `POST http://127.0.0.1:3001/_standby/takeover` — the standby
    closes the throwaway database, opens `PGLITE_DATA_DIR`, listens on :3000 (retrying while the port is released) and

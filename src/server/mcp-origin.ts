@@ -1,5 +1,3 @@
-type McpOriginEnv = Partial<Pick<NodeJS.ProcessEnv, "MARKDOC_INTERNAL_URL" | "MARKDOC_URL" | "NODE_ENV" | "PORT">>;
-
 export function httpOrigin(value: string, variable: string): string {
   let url: URL;
   try {
@@ -21,26 +19,8 @@ export function httpOrigin(value: string, variable: string): string {
 }
 
 /**
- * Destination for token-bearing REST calls made by the remote MCP route. Only process
- * configuration may select it; the request URL and forwarding headers are deliberately absent.
- */
-export function mcpRestOrigin(env: McpOriginEnv = process.env): string {
-  const internal = env.MARKDOC_INTERNAL_URL?.trim();
-  if (internal) return httpOrigin(internal, "MARKDOC_INTERNAL_URL");
-
-  const canonical = env.MARKDOC_URL?.trim();
-  if (canonical) return httpOrigin(canonical, "MARKDOC_URL");
-
-  const portText = env.PORT?.trim() || "3000";
-  if (!/^\d+$/.test(portText)) throw new Error("PORT must be an integer from 1 to 65535");
-  const port = Number(portText);
-  if (port < 1 || port > 65535) throw new Error("PORT must be an integer from 1 to 65535");
-  return `http://127.0.0.1:${port}`;
-}
-
-/**
- * Public origin included in MCP tool output. Forwarding headers preserve LAN and tunnel links, but
- * this value is kept separate from `mcpRestOrigin` and is never used as a fetch destination.
+ * Public origin of this request (MARKDOC_URL wins). Forwarding headers preserve LAN and tunnel links;
+ * the value is never used as a fetch destination.
  */
 export function mcpPublicOrigin(req: Request, env?: { MARKDOC_URL?: string }): string {
   const canonical = (env ? env.MARKDOC_URL : process.env.MARKDOC_URL)?.trim();

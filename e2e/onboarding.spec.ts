@@ -1,3 +1,4 @@
+import { mcpURL } from "./mcp-url";
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
@@ -256,7 +257,7 @@ test.describe("onboarding: Settings agent setup", () => {
       tokens: { lastMcpSeenAt: string | null; lastMcpCallAt: string | null }[];
     };
     const headers = { Authorization: ["Bearer", minted.token].join(" "), "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
-    const listed = await page.request.post("/api/mcp", { headers, data: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} } });
+    const listed = await page.request.post(mcpURL(), { headers, data: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} } });
     expect(listed.ok()).toBeTruthy();
     await expect.poll(async () => Boolean((await readUsage()).tokens[0]?.lastMcpSeenAt)).toBe(true);
 
@@ -276,7 +277,7 @@ test.describe("onboarding: Settings agent setup", () => {
     // The secret is not recoverable from the page: only a short prefix is shown.
     expect(await page.locator("body").innerText()).not.toContain(minted.token);
 
-    const called = await page.request.post("/api/mcp", { headers, data: { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "markdoc_whoami", arguments: {} } } });
+    const called = await page.request.post(mcpURL(), { headers, data: { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "markdoc_whoami", arguments: {} } } });
     expect(called.ok()).toBeTruthy();
     await expect.poll(async () => Boolean((await readUsage()).tokens[0]?.lastMcpCallAt)).toBe(true);
     // Persisted on the key, not just this tab's state.

@@ -250,7 +250,7 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
     expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors 'none'; ${CARDS}`);
   });
 
-  it.each(["/api/health", "/api/assets/asset-1", "/api/documents/abc", "/api/mcp", "/embed/some-nonce"])(
+  it.each(["/api/health", "/api/assets/asset-1", "/api/documents/abc", "/api/agent/mcp-url", "/embed/some-nonce"])(
     "%s gets no Content-Security-Policy from the proxy (API routes keep their own; the handoff answers inside the frame)",
     async (path) => {
       for (const cookie of [undefined, await embedCookie()]) {
@@ -339,7 +339,7 @@ describe("proxy: canonical host redirect", () => {
 
   it("set + different host GET /api/*: no redirect (health probes and agents on the old URL keep working)", async () => {
     process.env.MARKDOC_CANONICAL_HOST = CANONICAL;
-    for (const path of ["/api/health", "/api/mcp", "/api/documents/abc"]) {
+    for (const path of ["/api/health", "/api/agent/mcp-url", "/api/documents/abc"]) {
       const res = await proxy(on("old.example", path));
       expect(res.status, path).toBe(200);
       expect(res.headers.get("location"), path).toBeNull();

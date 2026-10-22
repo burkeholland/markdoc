@@ -1,3 +1,4 @@
+import { mcpURL } from "./mcp-url";
 import { test, expect } from "./fixtures";
 import type { Locator, Page } from "@playwright/test";
 import { budgetMs, signIn, createDocument, openDocument, shareWith, selectTextInRich, ensureCommentsOpen, codeText, focusRichEnd, mintToken, reloadHydrated, type MintedToken, type User } from "./helpers";
@@ -10,10 +11,10 @@ const SOURCE = "# Review me\n\nOur product is very unique.\n\nWe launched recent
  */
 const AGENT = "Copilot Review";
 
-/** JSON-RPC over /api/mcp, the way Copilot CLI calls the HTTP server. */
+/** JSON-RPC over the MCP server, the way Copilot CLI calls the HTTP server. */
 async function mcp<T>(page: Page, token: string, name: string, args: Record<string, unknown>): Promise<T> {
   const post = () =>
-    page.request.post("/api/mcp", {
+    page.request.post(mcpURL(), {
       headers: { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
       data: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
     });

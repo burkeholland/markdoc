@@ -47,10 +47,19 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The remote MCP server the agent specs talk to (playwright.config.ts starts it beside the dev server).
+      - uses: actions/checkout@v5
+        with:
+          repository: burkeholland/markdoc-mcp
+          token: ${{ secrets.MARKDOC_MCP_TOKEN }}
+          path: .markdoc-mcp
+      - run: npm ci
+        working-directory: .markdoc-mcp
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e -- --project default --shard=${{ matrix.shard }}/2
         env:
           CI: "1"
+          MARKDOC_MCP_DIR: .markdoc-mcp
           NEXT_TELEMETRY_DISABLED: "1"
       - uses: actions/upload-artifact@v5
         if: failure()
@@ -76,10 +85,19 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The remote MCP server the agent specs talk to (playwright.config.ts starts it beside the dev server).
+      - uses: actions/checkout@v5
+        with:
+          repository: burkeholland/markdoc-mcp
+          token: ${{ secrets.MARKDOC_MCP_TOKEN }}
+          path: .markdoc-mcp
+      - run: npm ci
+        working-directory: .markdoc-mcp
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e -- --project scale
         env:
           CI: "1"
+          MARKDOC_MCP_DIR: .markdoc-mcp
           NEXT_TELEMETRY_DISABLED: "1"
       - uses: actions/upload-artifact@v5
         if: failure()

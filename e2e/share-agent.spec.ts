@@ -1,3 +1,4 @@
+import { mcpURL } from "./mcp-url";
 import { test, expect } from "./fixtures";
 import type { Locator, Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
@@ -29,7 +30,7 @@ const postsToTokens = (page: Page) => page.waitForRequest((req) => req.url().end
 
 /**
  * The Share dialog is people, link, and one row that leads to the agent steps. The steps themselves (make a key,
- * paste the common MCP config) are src/components/agents; the endpoint is covered by src/app/api/mcp/route.test.ts
+ * paste the common MCP config) are src/components/agents; the endpoint is covered by burkeholland/markdoc-mcp
  * and markdoc-mcp's smoke:http. Here: how it lays out, and that what it hands out really works.
  */
 test.describe("share dialog", () => {
@@ -89,7 +90,7 @@ test.describe("share dialog", () => {
     await context.close();
   });
 
-  test("Connect an AI agent closes Share, opens the steps, and one click makes a key that works against /api/mcp", async ({ browser }) => {
+  test("Connect an AI agent closes Share, opens the steps, and one click makes a key that works against the MCP server", async ({ browser }) => {
     const context = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"], viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
     await devLogin(page, uniqueLogin("share-agent-owner"));
@@ -119,7 +120,7 @@ test.describe("share dialog", () => {
     const command = await readBlock(snippet);
     const key = keyIn(command);
     expect(key, "the command carries the new key").not.toBe("");
-    expect(JSON.parse(command)).toEqual({ mcpServers: { markdoc: { type: "http", url: `${origin}/api/mcp`, headers: { Authorization: bearer(key) } } } });
+    expect(JSON.parse(command)).toEqual({ mcpServers: { markdoc: { type: "http", url: `${mcpURL()}`, headers: { Authorization: bearer(key) } } } });
     await expect(setup).toContainText("It is shown only once");
     await expect(setup.getByTestId("agent-connection")).toHaveAttribute("data-state", "waiting");
     // The invite has come alive: the sentence names this document.
@@ -131,12 +132,12 @@ test.describe("share dialog", () => {
     expect((await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, "\n")).toBe(command);
 
     // The URL in the command is live, and the key in it works.
-    const alive = await page.request.get(`${origin}/api/mcp`);
+    const alive = await page.request.get(`${mcpURL()}`);
     expect(alive.ok()).toBeTruthy();
     const info = (await alive.json()) as { name: string; tools: number };
     expect(info.name).toBe("markdoc");
     expect(info.tools).toBeGreaterThan(0);
-    const listed = await page.request.post(`${origin}/api/mcp`, {
+    const listed = await page.request.post(`${mcpURL()}`, {
       headers: { Authorization: bearer(key), Accept: "application/json, text/event-stream", "Content-Type": "application/json" },
       data: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
     });
@@ -170,7 +171,7 @@ test.describe("share dialog", () => {
     const id = await createDocument(page, "# Picker\n\nHello.\n", "Picker");
     await openDocument(page, id);
     const origin = await page.evaluate(() => window.location.origin);
-    const url = `${origin}/api/mcp`;
+    const url = `${mcpURL()}`;
     let creates = 0;
     page.on("request", (req) => {
       if (req.url().endsWith("/api/tokens") && req.method() === "POST") creates++;

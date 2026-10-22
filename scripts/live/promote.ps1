@@ -5,7 +5,7 @@
 #   1. in the idle twin: checkout --detach <sha>, npm ci if package*.json changed, delete .next, copy the live
 #      .env.local, start `npm run dev` in STANDBY mode (server/index.ts): loopback :<StandbyPort>, in-memory
 #      database, while the old server keeps serving :<Port>;
-#   2. warm it up: /api/health, /, /d/<new doc>, /api/documents, /api/templates, /api/mcp — every route compiles now;
+#   2. warm it up: /api/health, /, /d/<new doc>, /api/documents, /api/templates, /api/agent/mcp-url — every route compiles now;
 #   3. handover: stop the old process, POST /_standby/takeover -> the standby opens the real PGLITE_DATA_DIR and
 #      listens on :<Port> with everything already compiled (~1-2 s), live.json points at the twin.
 # Rollback: anything that fails before step 3 leaves the old server running untouched (gap 0) and prints
@@ -118,7 +118,7 @@ function Invoke-WarmUp {
   } catch {
     Write-Step "  warm dev login / create document failed ($($_.Exception.Message)); /d/<id> is warmed unauthenticated"
   }
-  $routes = @('/api/documents?q=warm', '/api/templates', '/api/mcp')
+  $routes = @('/api/documents?q=warm', '/api/templates', '/api/agent/mcp-url')
   if ($docId) { $routes = @("/d/$docId") + $routes } else { $routes = @('/d/promote-warmup') + $routes }
   foreach ($r in $routes) {
     $status = Invoke-Warm -Path $r -Session $session

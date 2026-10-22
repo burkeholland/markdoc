@@ -296,7 +296,7 @@ export const apiTokens = pgTable(
     collaboratorsMayAsk: boolean("collaborators_may_ask").notNull().default(false),
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
     lastUsedAt: timestamp("last_used_at", { mode: "date", withTimezone: true }),
-    /** Last time an MCP client listed tools with this token (`tools/list` on /api/mcp): the CLI is connected. */
+    /** Last time an MCP client listed tools with this token (`tools/list` reported by markdoc-mcp to POST /api/agent/mcp-activity): the CLI is connected. */
     lastMcpSeenAt: timestamp("last_mcp_seen_at", { mode: "date", withTimezone: true }),
     /** Last time an MCP client called a tool with this token (`tools/call`): permissions were granted and it worked. */
     lastMcpCallAt: timestamp("last_mcp_call_at", { mode: "date", withTimezone: true }),

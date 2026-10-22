@@ -209,7 +209,7 @@ describe("small helpers", () => {
   });
 });
 
-/** An origin that behaves like production: health, the JSON `/api/*` 404 catch-all, the `/api/mcp` card, /login, chunks with identity/br/gzip negotiation, /collab rejecting every token, the #1224 headers. */
+/** An origin that behaves like production: health, the JSON `/api/*` 404 catch-all, `/api/agent/mcp-url` advertising the MCP card at `/mcp`, /login, chunks with identity/br/gzip negotiation, /collab rejecting every token, the #1224 headers. */
 interface FakeSite {
   server: Server;
   url: string;
@@ -223,9 +223,11 @@ interface FakeSite {
   headerOverrides: Map<string, Record<string, string | string[] | null>>;
   /** What an unknown `/api/*` path answers: production's JSON catch-all, Next's HTML 404 page (the catch-all gone from the build) or a 200 (a route swallowed the path). */
   apiNotFound: "json" | "html" | "ok";
-  /** The `GET /api/mcp` liveness card as JSON; a string is sent verbatim as text/html (a non-JSON body). */
+  /** The `GET /mcp` liveness card as JSON; a string is sent verbatim as text/html (a non-JSON body). */
   mcp: Record<string, unknown> | string;
-  /** The `Accept` header of the last `GET /api/mcp` the site saw. */
+  /** `"missing"` makes `/api/agent/mcp-url` a 404 HTML page. */
+  mcpUrl?: "missing";
+  /** The `Accept` header of the last `GET /mcp` the site saw. */
   lastMcpAccept?: string;
 }
 
@@ -235,7 +237,7 @@ const BASELINE_HEADERS: Record<string, string> = {
   "permissions-policy": "camera=(), microphone=(), geolocation=()",
 };
 
-/** What production's `GET /api/mcp` answers (src/app/api/mcp/route.ts): 27 tools at revision 29. */
+/** What the markdoc-mcp service's `GET /mcp` answers: 27 tools at revision 29. */
 const MCP_CARD: Record<string, unknown> = { name: "markdoc", version: "0.1.0", transport: "streamable-http", tools: 27, docs: "https://release.example/docs/agents.md", auth: "Authorization: ****** — create one at /settings" };
 /** Next's HTML 404 page: what an unknown `/api/*` path answers once the `[...rest]` catch-all is gone from the build. */
 const HTML_404 = `<!DOCTYPE html><html lang="en"><head><meta charSet="utf-8"/><meta name="viewport" content="width=device-width"/><title>404: This page could not be found.</title></head><body><div style="font-family:system-ui"><h1>404</h1><h2>This page could not be found.</h2></div></body></html>`;
@@ -260,8 +262,17 @@ function startSite(chunks: Map<string, Buffer>, html: string): Promise<FakeSite>
       const body = url.searchParams.get("probe") === "live" ? { ok: true, probe: "live", collab: true, version: site.version } : { ok: true, db: true, collab: true, documentsLoaded: 0, connections: 0, latencyMs: 1, version: site.version };
       return finish(JSON.stringify(body));
     }
-    if (url.pathname === "/api/mcp") {
-      // src/app/api/mcp/route.ts: a plain GET is the liveness card (an SSE Accept would get a 405; the check never sends one).
+    if (url.pathname === "/api/agent/mcp-url") {
+      if (site.mcpUrl === "missing") {
+        res.statusCode = 404;
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        return finish(HTML_404);
+      }
+      res.setHeader("content-type", "application/json");
+      return finish(JSON.stringify({ url: `${site.url}/mcp` }));
+    }
+    if (url.pathname === "/mcp") {
+      // The markdoc-mcp service: a plain GET is the liveness card (an SSE Accept would get a 405; the check never sends one).
       site.lastMcpAccept = req.headers.accept;
       if (typeof site.mcp === "string") {
         res.setHeader("content-type", "text/html; charset=utf-8");
@@ -496,7 +507,7 @@ describe("runReleaseVerify against an in-process origin", () => {
 
   describe("api:404 and mcp:alive", () => {
     const PASS_404 = /^GET \/api\/nonexistent-[0-9a-z]{8}: status 404, rtt \d+ ms, application\/json, JSON \{ error, path \} echoing the path$/;
-    const PASS_MCP = /^GET \/api\/mcp: status 200, rtt \d+ ms, name=markdoc tools=27 version=0\.1\.0$/;
+    const PASS_MCP = /^GET http:\/\/[^ ]+\/mcp: status 200, rtt \d+ ms, name=markdoc tools=27 version=0\.1\.0$/;
     /** The quoted body excerpt of a failure detail, decoded. */
     const excerptOf = (detail: string): string => JSON.parse(detail.match(/body(?: is not JSON:)? ("(?:[^"\\]|\\.)*")/)![1]) as string;
 
@@ -532,7 +543,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(paths[0]).toMatch(/^\/api\/nonexistent-[0-9a-z]{8}$/);
       expect(paths[1]).toMatch(/^\/api\/nonexistent-[0-9a-z]{8}$/);
       expect(paths[0]).not.toBe(paths[1]);
-      expect(asked.filter((url) => url.endsWith("/api/mcp"))).toHaveLength(2);
+      expect(asked.filter((url) => url.endsWith("/mcp"))).toHaveLength(2);
       expect(site.lastMcpAccept).toBeDefined();
       expect(site.lastMcpAccept).not.toContain("text/event-stream");
       for (const report of [first, second]) expect(formatReport(report.checks)).not.toMatch(/Authorization|\*\*\*\*\*\*|\/settings|docs\/agents/);
@@ -576,7 +587,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       site.mcp = { ...MCP_CARD, tools: 0 };
       try {
         const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
-        expect(row(report.checks, "mcp:alive")).toEqual({ name: "mcp:alive", status: "fail", detail: expect.stringMatching(/^GET \/api\/mcp: status 200, rtt \d+ ms, name=markdoc tools=0 version=0\.1\.0; tools=0 \(expected a number > 0\)$/) });
+        expect(row(report.checks, "mcp:alive")).toEqual({ name: "mcp:alive", status: "fail", detail: expect.stringMatching(/^GET http:\/\/[^ ]+\/mcp: status 200, rtt \d+ ms, name=markdoc tools=0 version=0\.1\.0; tools=0 \(expected a number > 0\)$/) });
         expect(row(report.checks, "api:404").status).toBe("pass");
         expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
         site.mcp = { ...MCP_CARD, tools: "27" };
@@ -593,7 +604,7 @@ describe("runReleaseVerify against an in-process origin", () => {
         const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
         const check = row(report.checks, "mcp:alive");
         expect(check.status).toBe("fail");
-        expect(check.detail).toMatch(/^GET \/api\/mcp: status 200, rtt \d+ ms, name=\? tools=\? version=\?; content-type "text\/html; charset=utf-8" is not application\/json; body is not JSON: "<!DOCTYPE html>/);
+        expect(check.detail).toMatch(/^GET http:\/\/[^ ]+\/mcp: status 200, rtt \d+ ms, name=\? tools=\? version=\?; content-type "text\/html; charset=utf-8" is not application\/json; body is not JSON: "<!DOCTYPE html>/);
         expect(excerptOf(check.detail)).toBe(HTML_404.slice(0, 120));
         expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
       } finally {
@@ -605,7 +616,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       try {
         site.mcp = { ...MCP_CARD, name: "other" };
         const other = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
-        expect(row(other.checks, "mcp:alive")).toMatchObject({ status: "fail", detail: expect.stringMatching(/^GET \/api\/mcp: status 200, rtt \d+ ms, name=other tools=27 version=0\.1\.0; name="other" \(expected "markdoc"\)$/) });
+        expect(row(other.checks, "mcp:alive")).toMatchObject({ status: "fail", detail: expect.stringMatching(/^GET http:\/\/[^ ]+\/mcp: status 200, rtt \d+ ms, name=other tools=27 version=0\.1\.0; name="other" \(expected "markdoc"\)$/) });
         expect(other.summary.failed).toBe(1);
         site.mcp = { ...MCP_CARD, transport: "sse" };
         const sse = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
@@ -618,11 +629,21 @@ describe("runReleaseVerify against an in-process origin", () => {
       }
     });
 
-    it("a 405 on GET /api/mcp (the stateless transport refusing an SSE stream) fails mcp:alive by status", async () => {
+    it("mcp:alive fails when /api/agent/mcp-url is a 404 page, naming the endpoint", async () => {
+      site.mcpUrl = "missing";
+      try {
+        const report = await runReleaseVerify({ base: site.url, sha: SHA }, io({}, null));
+        expect(row(report.checks, "mcp:alive")).toEqual({ name: "mcp:alive", status: "fail", detail: "GET /api/agent/mcp-url: status 404" });
+      } finally {
+        site.mcpUrl = undefined;
+      }
+    });
+
+    it("a 405 on GET <mcp url> (the stateless transport refusing an SSE stream) fails mcp:alive by status", async () => {
       const real = io({}, null);
       const refused = { status: 405, headers: { "content-type": "application/json", allow: "GET, POST" }, text: JSON.stringify({ error: "Method Not Allowed", detail: "GET as an SSE stream is not supported: this MCP endpoint is stateless." }) };
-      const report = await runReleaseVerify({ base: site.url, sha: SHA }, { ...real, fetchText: (url, init) => (url.endsWith("/api/mcp") ? Promise.resolve(refused) : real.fetchText(url, init)) });
-      expect(row(report.checks, "mcp:alive")).toMatchObject({ status: "fail", detail: expect.stringMatching(/^GET \/api\/mcp: status 405, rtt \d+ ms, name=\? tools=\? version=\?; status 405; name=absent \(expected "markdoc"\); tools=absent \(expected a number > 0\); transport=absent \(expected "streamable-http"\)$/) });
+      const report = await runReleaseVerify({ base: site.url, sha: SHA }, { ...real, fetchText: (url, init) => (url.endsWith("/mcp") ? Promise.resolve(refused) : real.fetchText(url, init)) });
+      expect(row(report.checks, "mcp:alive")).toMatchObject({ status: "fail", detail: expect.stringMatching(/^GET http:\/\/[^ ]+\/mcp: status 405, rtt \d+ ms, name=\? tools=\? version=\?; status 405; name=absent \(expected "markdoc"\); tools=absent \(expected a number > 0\); transport=absent \(expected "streamable-http"\)$/) });
       expect(row(report.checks, "mcp:alive").detail).not.toContain("stateless");
       expect(report.summary).toMatchObject({ failed: 1, exitCode: 1 });
     });
@@ -852,7 +873,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(await runMain(["--base", site.url, "--sha", SHA, "--bogus"], { output })).toBe(2);
       expect(await runMain(["--help"], { output })).toBe(0);
       expect(lines.at(-1)).toContain("usage: npm run release:verify");
-      expect(lines.at(-1)).toMatch(/\n {2}health:live {6}GET .*\n {2}api:404 {10}GET \/api\/nonexistent-<8 random chars>: 404 application\/json .*\n {2}mcp:alive {8}GET \/api\/mcp with a plain Accept: 200 JSON, name "markdoc", tools > 0, transport "streamable-http"\n {2}redirect {9}GET /);
+      expect(lines.at(-1)).toMatch(/\n {2}health:live {6}GET .*\n {2}api:404 {10}GET \/api\/nonexistent-<8 random chars>: 404 application\/json .*\n {2}mcp:alive {8}GET \/api\/agent\/mcp-url, then GET that URL with a plain Accept: 200 JSON, name "markdoc", tools > 0, transport "streamable-http"\n {2}redirect {9}GET /);
     });
 
     it("runMain prints the table and the summary line, writes --json and returns the exit code", async () => {
@@ -889,7 +910,7 @@ describe("runReleaseVerify against an in-process origin", () => {
       expect(result.stdout).toContain("| collab:idle | pass |");
       expect(result.stdout).toContain("| collab:reject | pass |");
       expect(result.stdout).toMatch(/\| api:404 \| pass \| GET \/api\/nonexistent-[0-9a-z]{8}: status 404, rtt \d+ ms, application\/json, JSON \{ error, path \} echoing the path \|/);
-      expect(result.stdout).toMatch(/\| mcp:alive \| pass \| GET \/api\/mcp: status 200, rtt \d+ ms, name=markdoc tools=27 version=0\.1\.0 \|/);
+      expect(result.stdout).toMatch(/\| mcp:alive \| pass \| GET http:\/\/[^ ]+\/mcp: status 200, rtt \d+ ms, name=markdoc tools=27 version=0\.1\.0 \|/);
       expect(result.stdout).toContain("| headers | pass | GET /login, /api/health, main-abc.js: 5 + 4 + 1 headers as expected (HSTS not expected over http) |");
       expect(result.stdout.trim().split("\n").at(-1)).toBe("release-verify: 14 passed, 0 failed, 0 warned, 1 skipped");
       expect(result.code).toBe(0);

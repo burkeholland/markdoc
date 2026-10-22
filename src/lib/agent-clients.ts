@@ -1,4 +1,4 @@
-import { MCP_PATH, MCP_SERVER_KEY } from "@/lib/mcp";
+import { MCP_SERVER_KEY } from "@/lib/mcp";
 
 /** Shown where a key goes when no real key exists yet (previews, docs). */
 export const KEY_PLACEHOLDER = "MARKDOC_TOKEN";
@@ -6,8 +6,8 @@ export const KEY_PLACEHOLDER = "MARKDOC_TOKEN";
 /** Default name of a new key; it becomes the agent's name in documents. */
 export const DEFAULT_KEY_NAME = "AI agent";
 
-/** Used only before the browser origin is known (server render); a snippet is never built from it in practice. */
-const FALLBACK_ORIGIN = "http://localhost:3000";
+/** Shown until the configured MCP server URL has loaded. */
+export const MCP_URL_PLACEHOLDER = "MARKDOC_MCP_URL";
 
 export interface McpSetup {
   /** The remote (Streamable HTTP) MCP server URL. */
@@ -19,8 +19,8 @@ export interface McpSetup {
 }
 
 /** The one MCP setup every client uses: a URL and an Authorization header. */
-export function mcpSetup(input: { origin: string; key?: string | null }): McpSetup {
-  const url = `${input.origin || FALLBACK_ORIGIN}${MCP_PATH}`;
+export function mcpSetup(input: { mcpUrl: string; key?: string | null }): McpSetup {
+  const url = input.mcpUrl || MCP_URL_PLACEHOLDER;
   const authorization = "Bearer " + (input.key || KEY_PLACEHOLDER);
   const config = JSON.stringify({ mcpServers: { [MCP_SERVER_KEY]: { type: "http", url, headers: { Authorization: authorization } } } }, null, 2);
   return { url, authorization, config };

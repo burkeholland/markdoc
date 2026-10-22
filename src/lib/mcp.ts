@@ -1,6 +1,5 @@
-/** Where the agent guide lives (there is no in-app docs route) and the remote MCP endpoint path. */
+/** Where the agent guide lives (there is no in-app docs route). The MCP server URL is runtime config: GET /api/agent/mcp-url. */
 export const AGENT_DOCS_URL = "https://github.com/burkeholland/markdoc/blob/main/docs/agents.md";
-export const MCP_PATH = "/api/mcp";
 
 /** The key under `mcpServers` in the config block the UI hands out. */
 export const MCP_SERVER_KEY = "markdoc";

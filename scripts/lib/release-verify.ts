@@ -677,10 +677,18 @@ export async function runReleaseVerify(options: ReleaseVerifyOptions, io: Releas
   });
 
   await guarded("mcp:alive", async () => {
-    // The card scripts/smoke.mts' "GET /api/mcp (alive)" row and e2e/share-agent.spec.ts read: a plain Accept
-    // (never text/event-stream, which the stateless transport refuses with 405) answers JSON, not a stream.
+    // MCP is served by a separate service (markdoc-mcp) whose URL markdoc advertises at /api/agent/mcp-url.
+    const advertised = await io.fetchText(`${origin}/api/agent/mcp-url`);
+    const advertisedBody = parseJson(advertised.text);
+    const mcpUrl = typeof advertisedBody?.url === "string" && /^https?:\/\//.test(advertisedBody.url) ? advertisedBody.url : null;
+    if (advertised.status !== 200 || !mcpUrl) {
+      const why = advertised.status !== 200 ? `status ${advertised.status}` : !advertisedBody ? `body is not JSON: ${bodyExcerpt(advertised.text)}` : `url=${shown(advertisedBody.url)} is not an http(s) URL`;
+      return { name: "mcp:alive", status: "fail", detail: `GET /api/agent/mcp-url: ${why}` };
+    }
+    // The MCP service's liveness card: a plain Accept (never text/event-stream, which the stateless
+    // transport refuses with 405) answers JSON, not a stream.
     const started = io.now();
-    const response = await io.fetchText(`${origin}/api/mcp`);
+    const response = await io.fetchText(mcpUrl);
     const rtt = io.now() - started;
     const contentType = response.headers["content-type"] ?? "";
     const body = parseJson(response.text);
@@ -694,7 +702,7 @@ export async function runReleaseVerify(options: ReleaseVerifyOptions, io: Releas
       if (body.transport !== "streamable-http") problems.push(`transport=${shown(body.transport)} (expected "streamable-http")`);
     }
     // The card's name and version are fixed strings and tools a count; its auth and docs lines are never echoed.
-    const detail = `GET /api/mcp: status ${response.status}, rtt ${rtt} ms, name=${typeof body?.name === "string" ? body.name : "?"} tools=${typeof body?.tools === "number" ? body.tools : "?"} version=${typeof body?.version === "string" ? body.version : "?"}`;
+    const detail = `GET ${mcpUrl}: status ${response.status}, rtt ${rtt} ms, name=${typeof body?.name === "string" ? body.name : "?"} tools=${typeof body?.tools === "number" ? body.tools : "?"} version=${typeof body?.version === "string" ? body.version : "?"}`;
     return { name: "mcp:alive", status: problems.length === 0 ? "pass" : "fail", detail: problems.length === 0 ? detail : `${detail}; ${problems.join("; ")}` };
   });
 

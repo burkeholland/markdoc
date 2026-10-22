@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { e2eDistDir, removeDistDir } from "./e2e/dist-dir";
 import { factoryRoot } from "./scripts/lib/factory-root.mjs";
 
@@ -9,6 +10,12 @@ const PORT = Number(process.env.E2E_PORT ?? 3100);
 // no dev server is started in that case.
 const prodBaseURL = process.env.PROD_BASE_URL?.replace(/\/$/, "");
 const baseURL = prodBaseURL ?? `http://localhost:${PORT}`;
+// The remote MCP server (burkeholland/markdoc-mcp) runs beside the dev server; specs read its URL
+// from E2E_MCP_URL (see e2e/mcp-url.ts). MARKDOC_MCP_DIR may be absolute or relative to this repo.
+const MCP_PORT = Number(process.env.E2E_MCP_PORT ?? PORT + 1);
+const mcpDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), process.env.MARKDOC_MCP_DIR ?? "../markdoc-mcp");
+const mcpURL = prodBaseURL ? process.env.E2E_MCP_URL : `http://localhost:${MCP_PORT}/mcp`;
+if (mcpURL) process.env.E2E_MCP_URL = mcpURL;
 
 // Several devs share this machine. When the Tools team's load gate is installed, start the dev
 // server only once CPU is <= 70 % (it gives up and starts anyway after 300 s), so the server's
@@ -65,7 +72,7 @@ export default defineConfig({
   ],
   webServer: prodBaseURL
     ? undefined
-    : {
+    : [{
         command: webServerCommand,
         url: baseURL,
         reuseExistingServer: false,
@@ -95,9 +102,18 @@ export default defineConfig({
           // `RATE_LIMIT=on npx playwright test …` runs a spec with the limiter on (e2e/rate-limit.spec.ts).
           RATE_LIMIT: process.env.RATE_LIMIT ?? "off",
           COLLAB_ACCESS_CHANGE_TEST_DELAY_MS: process.env.COLLAB_ACCESS_CHANGE_TEST_DELAY_MS ?? "40", // every access change pauses live connections about as long as a database on another machine does (#2281)
+          MARKDOC_MCP_URL: mcpURL!,
           NODE_ENV: "development",
         },
       },
+      {
+        command: `node "${path.join(mcpDir, "src", "http-server.mjs")}"`,
+        url: `http://127.0.0.1:${MCP_PORT}/health`,
+        reuseExistingServer: false,
+        timeout: 60_000,
+        stdout: "ignore",
+        env: { PORT: String(MCP_PORT), MARKDOC_URL: baseURL },
+      }],
 });
 
 

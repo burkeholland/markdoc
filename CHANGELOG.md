@@ -2,6 +2,12 @@
 
 Newest first. Each entry is one merged feature or fix on `main`; test-only and work-in-progress commits are folded into the feature they belong to. Short hashes point at the merge or squash commit.
 
+## 2026-10-22
+
+### Agents
+
+- MCP moves out of the app: `/api/mcp` and its tool definitions are removed; connect MCP clients to [markdoc-mcp](https://github.com/burkeholland/markdoc-mcp) at `https://mcp.markdoc.app/mcp`. New `POST /api/agent/mcp-activity` (the service reports tool activity) and public `GET /api/agent/mcp-url` → `{ url }`, set with `MARKDOC_MCP_URL`; `MARKDOC_INTERNAL_URL` is no longer used
+
 ## 2026-09-03
 
 ### Build, ops and tests

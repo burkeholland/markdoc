@@ -2,7 +2,6 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MAX_REQUEST_BODY_SIZE } from "@modelcontextprotocol/sdk/server/requestBody.js";
 import { MAX_ASSET_BYTES } from "@/server/assets";
 import { MAX_IMPORT_BYTES } from "@/server/import-file";
 import nextConfig from "../next.config";
@@ -14,7 +13,8 @@ import nextConfig from "../next.config";
  * value in infra/nginx-markdoc.conf between two bounds, so that it and the app's limits cannot drift
  * apart without a failing test:
  *
- * - at least every body the app accepts (a picture, a document's text, an MCP request, an import);
+ * - at least every body the app accepts (a picture, a document's text, an import; MCP
+ *   is a separate service, markdoc-mcp, with its own 4 MiB cap);
  * - at most the body Next passes on in full: a body that goes through src/proxy.ts is cut after
  *   10 MiB without an error, so anything nginx let through above that would reach a route mangled.
  *
@@ -139,7 +139,6 @@ const importFilesPerRequest = Math.floor((nextLimit - MULTIPART_OVERHEAD) / MAX_
 const accepted = [
   { what: "a picture of MAX_ASSET_BYTES in a multipart upload", bytes: MAX_ASSET_BYTES + MULTIPART_OVERHEAD },
   { what: "a document's text of 2,000,000 three-byte characters as JSON", bytes: DOCUMENT_MAX_CHARACTERS * MAX_UTF8_BYTES_PER_CHARACTER + JSON_OVERHEAD },
-  { what: "an MCP request at the SDK's bound", bytes: DEFAULT_MAX_REQUEST_BODY_SIZE },
   { what: "one imported text of MAX_IMPORT_BYTES as JSON", bytes: MAX_IMPORT_BYTES + JSON_OVERHEAD },
   { what: `an import of ${importFilesPerRequest} files of MAX_IMPORT_BYTES in one multipart request`, bytes: importFilesPerRequest * MAX_IMPORT_BYTES + MULTIPART_OVERHEAD },
 ];
@@ -194,7 +193,6 @@ describe("the app limits the nginx value follows", () => {
   it("are the ones this file was written for", () => {
     expect(MAX_ASSET_BYTES).toBe(5 * MIB);
     expect(MAX_IMPORT_BYTES).toBe(2 * MIB);
-    expect(DEFAULT_MAX_REQUEST_BODY_SIZE).toBe(4 * MIB);
     expect(importFilesPerRequest).toBe(4);
   });
 
@@ -213,10 +211,6 @@ describe("the app limits the nginx value follows", () => {
       "src/app/api/documents/route.ts",
     ]);
     expect(largest).toBe(DOCUMENT_MAX_CHARACTERS);
-  });
-
-  it("the MCP route keeps the SDK's default body bound", () => {
-    expect(read("src", "app", "api", "mcp", "route.ts")).not.toContain("maxRequestBodySize");
   });
 });
 

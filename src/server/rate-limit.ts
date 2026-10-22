@@ -18,7 +18,7 @@ export interface Limit {
 }
 
 export const RATE_LIMITS: Record<RouteClass | "authFail", Limit> = {
-  /** GET/HEAD/OPTIONS on any `/api/*` route, and JSON-RPC posts to `/api/mcp` (the tools are counted at the REST routes they call). */
+  /** GET/HEAD/OPTIONS on any `/api/*` route, and `POST /api/agent/mcp-activity` (the MCP server's bookkeeping; its tools are counted at the REST routes they call). */
   read: { perMinute: 600, burst: 60 },
   /** Every other method. */
   write: { perMinute: 120, burst: 30 },
@@ -187,8 +187,8 @@ const CREATE_PATHS = [/^\/api\/documents\/?$/, /^\/api\/import(\/|$)/, /^\/api\/
 export function routeClass(method: string, pathname: string): RouteClass {
   const m = method.toUpperCase();
   if (m === "GET" || m === "HEAD" || m === "OPTIONS") return "read";
-  // The MCP transport is a carrier: each tool call hits a REST route below with the same token and is counted there.
-  if (/^\/api\/mcp\/?$/.test(pathname)) return "read";
+  // The MCP server reports activity once per JSON-RPC message; each tool call is counted at the REST route it hits.
+  if (/^\/api\/agent\/mcp-activity\/?$/.test(pathname)) return "read";
   if (m === "POST" && CREATE_PATHS.some((re) => re.test(pathname))) return "create";
   return "write";
 }

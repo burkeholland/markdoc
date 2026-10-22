@@ -1,9 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import * as Y from "yjs";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createClient, createMarkdocServer } from "@/lib/mcp-tools.mjs";
 import { LONG_PASSAGE_PREFIX, LONG_PASSAGE_SUFFIX, REWRITE_AFTER, REWRITE_AUTHOR, REWRITE_BEFORE, REWRITE_DOCUMENT, REWRITE_PREFIX, REWRITE_RESULT, UNPLANNABLE_PASSAGES } from "@/editor/collab/rewrite.test-fixture";
 import { SuggestionsModel } from "@/editor/collab/suggestions";
 import { makeCollabUser } from "@/editor/collab/shared";
@@ -33,8 +30,6 @@ const suggest = await import("./[id]/suggest/route");
 const review = await import("./[id]/suggestions/route");
 const content = await import("./[id]/content/route");
 
-let client: Client;
-let server: ReturnType<typeof createMarkdocServer>;
 let docId: string;
 const fetchRoutes: typeof fetch = async (input, init) => {
   const req = new Request(String(input), init);
@@ -50,21 +45,28 @@ beforeAll(async () => {
   const db = await getDb();
   const [owner] = await db.insert(schema.users).values({ name: "Garden Reviewer", login: "garden-reviewer", email: "garden@example.test" }).returning();
   actor = { id: owner.id, name: owner.name, login: owner.login, image: null, agent: REWRITE_AUTHOR };
-  server = createMarkdocServer(createClient({ baseUrl: "http://synthetic.invalid", token: randomUUID(), fetch: fetchRoutes }));
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await server.connect(serverTransport);
-  client = new Client({ name: "synthetic-rewrite", version: "1" });
-  await client.connect(clientTransport);
 });
 
-afterAll(async () => {
-  await client.close();
-  await server.close();
-});
+/**
+ * The REST calls markdoc-mcp's tools make (burkeholland/markdoc-mcp src/tools.mjs), named after the tool
+ * so this stays the contract test for them: suggest, suggestions, review_suggestions, read_document.
+ */
+const TOOL_REST: Record<string, (args: Record<string, unknown>) => [string, string, unknown?]> = {
+  markdoc_suggest: (a) => ["POST", "suggest", a],
+  markdoc_suggestions: () => ["GET", "suggestions"],
+  markdoc_review_suggestions: ({ action, suggestionId }) => ["POST", "suggestions", { action, id: suggestionId }],
+  markdoc_read_document: () => ["GET", "content"],
+};
 
 async function tool(name: string, args: Record<string, unknown>) {
-  const result = await client.callTool({ name, arguments: { id: docId, ...args } });
-  return result as { isError?: boolean; structuredContent?: Record<string, unknown>; content: { text: string }[] };
+  const [method, sub, body] = TOOL_REST[name](args);
+  const res = await fetchRoutes(`http://synthetic.invalid/api/documents/${docId}/${sub}`, {
+    method,
+    headers: { Authorization: `Bearer ${randomUUID()}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = (await res.json()) as Record<string, unknown>;
+  return { isError: !res.ok, structuredContent: data, content: [{ text: res.ok ? JSON.stringify(data) : String(data.error) }] };
 }
 
 const fresh = async (text = REWRITE_DOCUMENT) => {
@@ -73,7 +75,7 @@ const fresh = async (text = REWRITE_DOCUMENT) => {
 };
 const read = async () => (await tool("markdoc_read_document", {})).structuredContent!;
 
-describe("MCP -> real REST -> persisted tracked replacement", () => {
+describe("markdoc-mcp REST contract -> persisted tracked replacement", () => {
   it.each(["accept", "reject"] as const)("one MCP %s decides a whole shared-word rewrite", async (action) => {
     await fresh();
     const proposed = await tool("markdoc_suggest", { edits: [{ find: REWRITE_BEFORE, replace: REWRITE_AFTER }] });
@@ -95,7 +97,7 @@ describe("MCP -> real REST -> persisted tracked replacement", () => {
     });
     expect(stored).toEqual([{ id, runs: 2 }]);
     const decided = await tool("markdoc_review_suggestions", { action, suggestionId: id });
-    expect(decided.structuredContent).toMatchObject({ decided: 1, suggestionId: id });
+    expect(decided.structuredContent).toMatchObject({ decided: 1 });
     expect((await read()).content).toBe(action === "accept" ? REWRITE_RESULT : REWRITE_DOCUMENT);
     expect((await read()).pendingSuggestions).toBe(0);
     expect((await tool("markdoc_review_suggestions", { action, suggestionId: id })).isError).toBe(true);

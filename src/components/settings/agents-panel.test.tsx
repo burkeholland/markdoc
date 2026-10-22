@@ -51,7 +51,7 @@ function renderPanel({
   next?: string | null;
   userLogin?: string;
 } = {}) {
-  render(<AgentsPanel origin="https://markdoc.test" userLogin={userLogin} next={next} initialTokens={initialTokens} />);
+  render(<AgentsPanel mcpUrl="https://mcp.markdoc.test/mcp" userLogin={userLogin} next={next} initialTokens={initialTokens} />);
 }
 
 function routeTokens(tokens: ApiTokenDto[], create?: CreatedApiTokenDto) {
