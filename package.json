@@ -31,9 +31,7 @@
     "repair:imported-ystate": "tsx scripts/repair-imported-ystate.mts",
     "domain:preflight": "tsx scripts/custom-domain-preflight.mts",
     "dependency:preflight": "node --no-warnings --experimental-strip-types scripts/dependency-policy-preflight.mts",
-    "release:verify": "tsx scripts/release-verify.mts",
-    "mcp": "node mcp/server.mjs",
-    "mcp:smoke": "node scripts/mcp-smoke.mjs"
+    "release:verify": "tsx scripts/release-verify.mts"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.11.3",

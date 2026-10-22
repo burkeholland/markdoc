@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createClient, createMarkdocServer } from "../../../../mcp/tools.mjs";
+import { createClient, createMarkdocServer } from "@/lib/mcp-tools.mjs";
 
 /**
  * `markdoc_complete_request` must say only what the server did (#1232, audit #1202 Q5): the REST route answers

@@ -1,8 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { ADDITIVE, DESTRUCTIVE, READ_ONLY, listToolDefinitions, listToolNames } from "../../../../mcp/tools.mjs";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ADDITIVE, DESTRUCTIVE, READ_ONLY, createClient, createMarkdocServer, listToolDefinitions, listToolNames } from "@/lib/mcp-tools.mjs";
 
 /**
  * The MCP `annotations` every Markdoc tool advertises (readOnlyHint, destructiveHint, idempotentHint,
@@ -53,16 +52,12 @@ describe("MCP tool annotations", () => {
   let tools: ListedTool[];
 
   beforeAll(async () => {
-    // The real stdio server, the way a client without HTTP would run it. tools/list never calls the
-    // REST API, so the URL and token only have to be present.
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: [path.resolve(__dirname, "../../../../mcp/server.mjs")],
-      env: { ...(process.env as Record<string, string>), MARKDOC_URL: "http://127.0.0.1:9", MARKDOC_TOKEN: "mdk_test" },
-      stderr: "pipe",
-    });
+    // tools/list never calls the REST API, so the URL and token only have to be present.
+    const server = createMarkdocServer(createClient({ baseUrl: "http://127.0.0.1:9", token: "mdk_test" }));
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
     client = new Client({ name: "annotations-test", version: "0.0.0" });
-    await client.connect(transport);
+    await client.connect(clientSide);
     tools = (await client.listTools()).tools as ListedTool[];
   });
 
@@ -77,7 +72,7 @@ describe("MCP tool annotations", () => {
     expect([...all].sort()).toEqual([...listToolNames()].sort());
   });
 
-  it("tools/list over stdio returns annotations and a title on every tool", () => {
+  it("tools/list returns annotations and a title on every tool", () => {
     expect(tools.map((t) => t.name)).toEqual(listToolNames());
     for (const t of tools) {
       expect(t.annotations, `${t.name} has no annotations`).toBeDefined();

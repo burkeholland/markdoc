@@ -90,21 +90,21 @@ The generic block for other Streamable HTTP clients; substitute your key for `MA
 
 Copilot CLI also reads this same shape from `~/.copilot/mcp-config.json` if you prefer to edit it by hand. Use the stable machine-hostname URL you open Markdoc with so DHCP changes do not invalidate the config; a numeric LAN URL remains useful only as a connection diagnostic. Moving an existing browser from a numeric URL to the hostname is a new origin: sign in once there, and reconnect/save or manually copy any unsynced old-origin edit because cookies, localStorage, and IndexedDB cannot be invisibly migrated. Behind a reverse proxy, set `MARKDOC_URL` to Markdoc's canonical public origin so tool results contain usable links. Token-bearing REST callbacks never use `Host`, `Forwarded` or `X-Forwarded-*`: the custom server pins them to its own listener. A non-custom deployment falls back to `http://127.0.0.1:$PORT`; set `MARKDOC_INTERNAL_URL` to a trusted internal http(s) origin only when that loopback URL cannot reach Markdoc. Both settings must be bare origins such as `https://docs.example.com`; if an older deployment used a URL path prefix, move that routing to the reverse proxy. Paths, credentials, queries, fragments, and non-http(s) schemes make startup or `/api/mcp` fail closed. A plain `GET /api/mcp` (no token) answers `{ name, version, transport, tools, docs, auth }` so a `curl` shows it is alive; without a token every MCP request is a `401` that says where to create one. The transport is stateless (no session ids): `GET` with `Accept: text/event-stream` and `DELETE` answer `405` as the MCP spec prescribes, which Streamable HTTP clients treat as "no standalone stream / nothing to close". When a tool call fails on validation, the tool error text carries the first problem (`… failed (400): Invalid request — content: Too big: …`) so you can tell why.
 
-**Alternative: stdio from a checkout.** `mcp/server.mjs` exposes the same tools over stdio for clients that cannot speak HTTP:
+**Alternative: stdio.** [burkeholland/markdoc-mcp](https://github.com/burkeholland/markdoc-mcp) exposes the same tools over stdio for clients that cannot speak HTTP:
 
 ```json
 {
   "mcpServers": {
     "markdoc": {
       "command": "node",
-      "args": ["/path/to/markdoc/mcp/server.mjs"],
+      "args": ["/path/to/markdoc-mcp/src/server.mjs"],
       "env": { "MARKDOC_URL": "http://localhost:3000", "MARKDOC_TOKEN": "mdk_…" }
     }
   }
 }
 ```
 
-From a checkout you can also run `npm run mcp` with `MARKDOC_URL` and `MARKDOC_TOKEN` set. Both transports register the same tool set from `mcp/tools.mjs`; `npm run mcp:smoke` (with `MARKDOC_URL` and `MARKDOC_TOKEN`) checks a running server over HTTP with a real MCP client.
+The hosted endpoint registers its tools from `src/lib/mcp-tools.mjs`; markdoc-mcp mirrors them, and its `npm run smoke:http` (with `MARKDOC_URL` and `MARKDOC_TOKEN`) checks a running server's `/api/mcp` against its own list with a real MCP client. **API contract:** markdoc-mcp only calls the REST API documented here, so REST routes it uses (`/api/documents/*`, `/api/import/file`, `/api/me`, `/api/templates`, `/api/agent/events`) must stay backward-compatible; a tool change lands in both repos together.
 
 ### Inside the Copilot app
 
@@ -209,7 +209,7 @@ Copilot CLI runs MCP tools under its own permission layer: reads are allowed aut
 2. **Answer *Don't ask again in this directory* once per tool** when prompted. The approval lands in `~/.copilot/permissions-config.json`; `/reset-allowed-tools` clears it for the current location.
 3. `/allow-all` (or `--allow-all-tools`) allows everything, shell included — not recommended outside a sandbox.
 
-Every Markdoc tool carries the MCP `annotations` clients use to decide whether to ask (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false` — the server only talks to Markdoc). `tools/list` returns them; `npm run mcp:smoke` prints them.
+Every Markdoc tool carries the MCP `annotations` clients use to decide whether to ask (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint: false` — the server only talks to Markdoc). `tools/list` returns them; markdoc-mcp's `npm run smoke:http` prints them.
 
 | Hint | Tools | Meaning for the client |
 | --- | --- | --- |

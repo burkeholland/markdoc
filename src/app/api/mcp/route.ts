@@ -4,10 +4,10 @@ import { recordMcpActivity } from "@/server/tokens";
 import { mcpActivityIn } from "./activity";
 import { AGENT_DOCS_URL } from "@/lib/mcp";
 import { mcpPublicOrigin, mcpRestOrigin } from "@/server/mcp-origin";
-import { createClient, createMarkdocServer, listToolNames, SERVER_INFO } from "../../../../mcp/tools.mjs";
+import { createClient, createMarkdocServer, listToolNames, SERVER_INFO } from "@/lib/mcp-tools.mjs";
 
 /**
- * Remote MCP endpoint (Streamable HTTP): the same tool set as `mcp/server.mjs`, served by Markdoc
+ * Remote MCP endpoint (Streamable HTTP): the same tool set as the stdio server in burkeholland/markdoc-mcp, served by Markdoc
  * itself so any MCP client (GitHub Copilot CLI, VS Code, Claude, Cursor) connects with a URL and a
  * token instead of a checkout. Stateless: one transport per request, no session ids.
  *

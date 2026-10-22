@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeAll, beforeEach, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createClient, createMarkdocServer } from "../../../../mcp/tools.mjs";
+import { createClient, createMarkdocServer } from "@/lib/mcp-tools.mjs";
 
 /**
  * `markdoc_review_suggestions` must not say "done" when nothing was decided: a model that forgot

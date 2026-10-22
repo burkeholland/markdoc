@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { listToolNames } from "../../../../mcp/tools.mjs";
+import { listToolNames } from "@/lib/mcp-tools.mjs";
 
 /**
  * `docs/agents.md` says how many MCP tools there are in words ("Twenty-seven tools") and lists each
@@ -13,7 +13,7 @@ const TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", 
 const inWords = (n: number) => (n < 20 ? WORDS[n] : `${TENS[Math.floor(n / 10)]}${n % 10 ? `-${WORDS[n % 10]}` : ""}`);
 
 describe("docs/agents.md MCP tool count", () => {
-  it("names the same number of tools as mcp/tools.mjs registers, in words and in the table", async () => {
+  it("names the same number of tools as src/lib/mcp-tools.mjs registers, in words and in the table", async () => {
     const docs = await readFile(fileURLToPath(new URL("../../../../docs/agents.md", import.meta.url)), "utf8");
     const names = listToolNames();
     const expected = inWords(names.length);

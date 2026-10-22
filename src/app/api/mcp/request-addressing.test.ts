@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createClient, createMarkdocServer } from "../../../../mcp/tools.mjs";
+import { createClient, createMarkdocServer } from "@/lib/mcp-tools.mjs";
 
 /**
  * Addressed agent requests (#1296): `markdoc_list_requests` names the addressee of each request

@@ -30,7 +30,7 @@ const postsToTokens = (page: Page) => page.waitForRequest((req) => req.url().end
 /**
  * The Share dialog is people, link, and one row that leads to the agent steps. The steps themselves (make a key,
  * paste the common MCP config) are src/components/agents; the endpoint is covered by src/app/api/mcp/route.test.ts
- * and scripts/mcp-smoke.mjs. Here: how it lays out, and that what it hands out really works.
+ * and markdoc-mcp's smoke:http. Here: how it lays out, and that what it hands out really works.
  */
 test.describe("share dialog", () => {
   test("reads top to bottom (add people, who has access, the link, connect an agent, Done) and fits without scrolling", async ({ browser }) => {

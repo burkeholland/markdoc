@@ -37,7 +37,7 @@ interface RequestDto {
   threadId: string | null;
 }
 
-/** Act as alice's agent: the REST the CLI uses through mcp/server.mjs, with the token minted below. */
+/** Act as alice's agent: the REST the CLI uses through markdoc-mcp, with the token minted below. */
 function agent(page: Page, token: string) {
   const headers = { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json" };
   const call = async <T,>(path: string, data?: unknown): Promise<T> => {

@@ -7,7 +7,7 @@ interface EventsDto {
   events: { type: string; threadId?: string | null; author?: string; body?: string; snippet?: string; agent?: string | null }[];
 }
 
-/** Act as an agent: the same REST calls Copilot CLI makes through mcp/server.mjs (markdoc_presence / markdoc_watch / markdoc_suggest). */
+/** Act as an agent: the same REST calls Copilot CLI makes through markdoc-mcp (markdoc_presence / markdoc_watch / markdoc_suggest). */
 function agent(page: Page, token: string) {
   const headers = { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json" };
   return {

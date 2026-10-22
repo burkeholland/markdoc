@@ -1,6 +1,6 @@
-// The Markdoc MCP tool set, shared by the stdio server (mcp/server.mjs) and the remote endpoint
-// (src/app/api/mcp/route.ts). Both build a `client` over the REST API with a base URL and a token,
-// then call `registerTools(server, client)`; the tool definitions live here exactly once.
+// The Markdoc MCP tool set served by the remote endpoint (src/app/api/mcp/route.ts). The stdio server
+// lives in https://github.com/burkeholland/markdoc-mcp and mirrors these definitions; its
+// `npm run smoke:http` fails if the two drift, so change both together.
 //
 // To add a tool: call `tool(name, config, handler)` inside `registerTools`; the count and the
 // name list the HTTP route reports come from that same list.

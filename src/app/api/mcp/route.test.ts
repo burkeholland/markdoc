@@ -19,7 +19,7 @@ const { getDb, schema } = await import("@/server/db");
 const { createApiToken, listApiTokens } = await import("@/server/tokens");
 const { GET, POST, DELETE } = await import("./route");
 const { mcpActivityIn } = await import("./activity");
-const { listToolNames } = await import("../../../../mcp/tools.mjs");
+const { listToolNames } = await import("@/lib/mcp-tools.mjs");
 const { mcpRestOrigin } = await import("@/server/mcp-origin");
 
 const URL_ = "http://192.168.0.10:3700/api/mcp";

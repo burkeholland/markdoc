@@ -47,7 +47,25 @@
     ".next-e2e-startup-59152-55822/types/**/*.ts",
     ".next-e2e-startup-59152-55822/dev/types/**/*.ts",
     ".next-e2e-startup-59152-59544/types/**/*.ts",
-    ".next-e2e-startup-59152-59544/dev/types/**/*.ts"
+    ".next-e2e-startup-59152-59544/dev/types/**/*.ts",
+    ".next-e2e-startup-76255-57191/types/**/*.ts",
+    ".next-e2e-startup-76255-57191/dev/types/**/*.ts",
+    ".next-e2e-startup-76255-57240/types/**/*.ts",
+    ".next-e2e-startup-76255-57240/dev/types/**/*.ts",
+    ".next-e2e-startup-76255-57974/types/**/*.ts",
+    ".next-e2e-startup-76255-57974/dev/types/**/*.ts",
+    ".next-e2e-startup-77019-58773/types/**/*.ts",
+    ".next-e2e-startup-77019-58773/dev/types/**/*.ts",
+    ".next-e2e-startup-77019-58961/types/**/*.ts",
+    ".next-e2e-startup-77019-58961/dev/types/**/*.ts",
+    ".next-e2e-startup-77019-59754/types/**/*.ts",
+    ".next-e2e-startup-77019-59754/dev/types/**/*.ts",
+    ".next-e2e-startup-78994-61575/types/**/*.ts",
+    ".next-e2e-startup-78994-61575/dev/types/**/*.ts",
+    ".next-e2e-startup-78994-61786/types/**/*.ts",
+    ".next-e2e-startup-78994-61786/dev/types/**/*.ts",
+    ".next-e2e-startup-78994-63449/types/**/*.ts",
+    ".next-e2e-startup-78994-63449/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

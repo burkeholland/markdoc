@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import * as Y from "yjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createClient, createMarkdocServer } from "../../../../mcp/tools.mjs";
+import { createClient, createMarkdocServer } from "@/lib/mcp-tools.mjs";
 import { LONG_PASSAGE_PREFIX, LONG_PASSAGE_SUFFIX, REWRITE_AFTER, REWRITE_AUTHOR, REWRITE_BEFORE, REWRITE_DOCUMENT, REWRITE_PREFIX, REWRITE_RESULT, UNPLANNABLE_PASSAGES } from "@/editor/collab/rewrite.test-fixture";
 import { SuggestionsModel } from "@/editor/collab/suggestions";
 import { makeCollabUser } from "@/editor/collab/shared";

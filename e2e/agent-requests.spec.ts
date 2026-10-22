@@ -24,7 +24,7 @@ interface RequestDto {
   result: { suggestions: number; comments: number; summary?: string } | null;
 }
 
-/** Act as an agent: the calls Copilot CLI makes through mcp/server.mjs, with a token minted in the UI. */
+/** Act as an agent: the calls Copilot CLI makes through markdoc-mcp, with a token minted in the UI. */
 function agent(page: Page, token: string) {
   const headers = { Authorization: ["Bearer", token].join(" "), "Content-Type": "application/json" };
   const call = async <T,>(method: "get" | "post", path: string, data?: unknown): Promise<T> => {

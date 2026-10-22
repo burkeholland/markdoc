@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createClient, createMarkdocServer, describeIssues } from "../../../../mcp/tools.mjs";
+import { createClient, createMarkdocServer, describeIssues } from "@/lib/mcp-tools.mjs";
 
 /**
  * What a model sees when a REST call behind a tool fails (#121): the zod `issues` of a 400 must
