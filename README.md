@@ -10,6 +10,8 @@ Markdown, together. Write Markdown with other people in real time, edit the **so
 
 ![Agent review](docs/agent-review.png)
 
+User docs: **[burkeholland/markdoc-docs](https://github.com/burkeholland/markdoc-docs)**.
+
 ## What it does
 
 What changed recently is in [CHANGELOG.md](CHANGELOG.md).
