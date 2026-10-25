@@ -41,6 +41,9 @@ import { attachRequestLog } from "./request-log";
 import { serveStaticBrotli } from "./static-brotli";
 import { startGistAutoUpdateWorker, stopGistAutoUpdateWorker } from "@/server/gist-auto-update";
 import { createShutdownOwner } from "./shutdown";
+import { assertDemoAuthSafe } from "@/server/demo-auth";
+
+assertDemoAuthSafe();
 
 /** How often documents that have been in the trash for more than TRASH_RETENTION_DAYS are removed for good. */
 const TRASH_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;

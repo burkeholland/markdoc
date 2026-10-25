@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import type { Metadata } from "next";
 import { GitHubIcon } from "@/components/ui/github-icon";
-import { signIn, auth, devLoginEnabled, githubConfigured } from "@/auth";
+import { signIn, auth, demoLoginEnabled, devLoginEnabled, githubConfigured } from "@/auth";
 import { Logo } from "@/components/ui/logo";
 import { loginReturnPath } from "./return-path";
 import { signInErrorMessage } from "./sign-in-error";
@@ -83,6 +83,20 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
               </button>
             </div>
             <p className="mt-2 text-xs text-ink-4">Only available when AUTH_DEV_LOGIN=1 outside production.</p>
+          </form>
+        )}
+        {demoLoginEnabled && (
+          <form
+            className="mt-6 border-t border-line pt-6"
+            action={async () => {
+              "use server";
+              await signIn("demo", { redirectTo: next });
+            }}
+          >
+            <button type="submit" className="btn btn-outline h-11 w-full" data-testid="demo-signin">
+              Try the demo account
+            </button>
+            <p className="mt-2 text-xs text-ink-4">Test environments only (MARKDOC_DEMO_AUTH=1).</p>
           </form>
         )}
         <p className="mt-6 text-center text-xs text-ink-4">Markdoc asks for access to your gists and repositories so it can publish documents on your behalf.</p>

@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import { GithubReconciliationAdapter, githubOAuthProfile } from "@/server/github-oauth-reconciliation";
 import { logAuthError } from "@/server/session-cookie";
+import { demoAuthEnabled, ensureDemoUser } from "@/server/demo-auth";
 
 declare module "next-auth" {
   interface Session {
@@ -26,6 +27,9 @@ declare module "next-auth" {
  */
 export const devLoginEnabled =
   (process.env.AUTH_DEV_LOGIN === "1" && process.env.NODE_ENV !== "production") || process.env.AUTH_DEV_LOGIN === "force";
+
+/** Test-environment-only sign-in as a fixed, seeded demo user (see src/server/demo-auth.ts). */
+export const demoLoginEnabled = demoAuthEnabled();
 
 export const githubConfigured = !!(process.env.AUTH_GITHUB_ID && process.env.AUTH_GITHUB_SECRET);
 
@@ -72,6 +76,20 @@ async function buildConfig(): Promise<NextAuthConfig> {
             })
             .returning();
           return created;
+        },
+      }),
+    );
+  }
+
+  if (demoLoginEnabled) {
+    providers.push(
+      Credentials({
+        id: "demo",
+        name: "Demo account",
+        credentials: {},
+        async authorize() {
+          if (!demoAuthEnabled()) return null;
+          return (await ensureDemoUser(db)) ?? null;
         },
       }),
     );
