@@ -1608,7 +1608,8 @@ describe("accepted advisories (#2260)", () => {
   // stays green when an entry is added, expires or is deleted.
   it("keeps every entry of the real list in the format the release script checks", () => {
     for (const item of ACCEPTED_ADVISORIES) {
-      expect(Object.keys(item).sort()).toEqual(["advisory", "expires", "package", "reason", "version"]);
+      expect(Object.keys(item).filter((key) => key !== "production").sort()).toEqual(["advisory", "expires", "package", "reason", "version"]);
+      expect(item.production === undefined || item.production === true).toBe(true);
       expect(item.advisory).toMatch(ACCEPTED_ADVISORY_ID_PATTERN);
       expect(item.package).toMatch(ACCEPTED_PACKAGE_PATTERN);
       expect(item.version).toMatch(/^[0-9a-z][0-9a-z.+_-]{0,127}$/i);
@@ -1682,6 +1683,41 @@ describe("accepted advisories (#2260)", () => {
 
   it("rejects the same audit, exactly as before, once the list is empty", () => {
     expect(evaluateBraces({ ...bracesCase(), advisories: [] })).toEqual(BRACES_REJECTED);
+  });
+
+  function productionBracesCase(): BracesCase {
+    const fixture = bracesCase();
+    for (const node of fixture.packages) node.flags = {};
+    return fixture;
+  }
+
+  it("rejects a production chain unless every listed advisory on it is marked production", () => {
+    expect(evaluateBraces(productionBracesCase())).toEqual(BRACES_REJECTED);
+    const fixture = productionBracesCase();
+    fixture.advisories = [{ ...TEST_ADVISORY, production: true }];
+    expect(formatDependencyPolicyReport(evaluateBraces(fixture))).toBe(ACCEPTED_OUTPUT);
+  });
+
+  it("fails closed on a production entry's expiry date like any other", () => {
+    const fixture = productionBracesCase();
+    fixture.advisories = [{ ...TEST_ADVISORY, production: true }];
+    expect(evaluateBraces({ ...fixture, now: LAST_ACCEPTED_MOMENT }).status).toBe("accepted");
+    expect(evaluateBraces({ ...fixture, now: FIRST_REJECTED_MOMENT })).toEqual(BRACES_REJECTED);
+  });
+
+  it("still lets a production entry accept a dev-only node", () => {
+    const fixture = bracesCase();
+    fixture.advisories = [{ ...TEST_ADVISORY, production: true }];
+    expect(formatDependencyPolicyReport(evaluateBraces(fixture))).toBe(ACCEPTED_OUTPUT);
+  });
+
+  it("parses npm's empty range on a dependent-only entry, but not on an entry with its own advisory", () => {
+    const fixture = bracesCase();
+    fixture.audit.vulnerabilities.micromatch.range = "";
+    expect(formatDependencyPolicyReport(evaluateBraces(fixture))).toBe(ACCEPTED_OUTPUT);
+    const own = bracesCase();
+    own.audit.vulnerabilities.braces.range = "";
+    expect(evaluateBraces(own).status).toBe("malformed_audit");
   });
 
   it("treats an aliased node as the package named in its lock entry", () => {

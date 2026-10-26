@@ -61,13 +61,23 @@ export interface AcceptedAdvisory {
 
 export interface ListedAdvisory extends AcceptedAdvisory {
   reason: string;
+  // Only an entry that sets this may match a package that production installs. Leave it out for dev-only advisories.
+  production?: true;
 }
 
 // Advisories that do not stop a release, for a limited time, because no patched version exists. The whole rule is
 // in acceptedAudit below and in docs/vm-hosting.md. This list is code: a change goes through a pull request, and no
 // environment variable, flag or option can add to it. Delete an entry as soon as the lock has a patched version or
-// no longer has the package. The list is empty since #2294, when braces (GHSA-vfj7-8cjw-p6xm, #2260) left the lock.
-export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [];
+// no longer has the package.
+const MCP_BODY_PARSER_REASON = "No patched body-parser 2.x; reached in production via @modelcontextprotocol/sdk -> express 5. Tracked in #2391.";
+const MCP_FAST_URI_REASON = "No patched fast-uri 3.x; reached in production via @modelcontextprotocol/sdk -> ajv. Tracked in #2392.";
+export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [
+  { advisory: "GHSA-27r3-jxmh-p828", package: "body-parser", version: "2.3.0", expires: "2026-11-24", reason: MCP_BODY_PARSER_REASON, production: true },
+  { advisory: "GHSA-w74x-v6f9-j3xg", package: "fast-uri", version: "3.1.8", expires: "2026-11-24", reason: MCP_FAST_URI_REASON, production: true },
+  { advisory: "GHSA-xhq7-xmqj-769h", package: "fast-uri", version: "3.1.8", expires: "2026-11-24", reason: MCP_FAST_URI_REASON, production: true },
+  { advisory: "GHSA-wjr9-j795-jxcr", package: "fast-uri", version: "3.1.8", expires: "2026-11-24", reason: MCP_FAST_URI_REASON, production: true },
+  { advisory: "GHSA-333x-w4r6-6crp", package: "fast-uri", version: "3.1.8", expires: "2026-11-24", reason: MCP_FAST_URI_REASON, production: true },
+];
 
 // What tests may set about the accepted-advisory rule: the clock that decides expiry and the list itself. These are
 // function parameters only. The command line and the release never pass them, so they use the real clock and
@@ -543,7 +553,8 @@ function parseAuditJson(auditJson: string, lock: PackageLockSnapshot): ParsedAud
       || !Array.isArray(entry.effects)
       || !entry.effects.every(validPackageName)
       || typeof entry.range !== "string"
-      || entry.range.length === 0
+      // npm reports an empty range for an entry that is listed only because of what it depends on.
+      || (entry.range.length === 0 && !entry.via.every((item: unknown) => typeof item === "string"))
       || entry.range.length > 512
       || !Array.isArray(entry.nodes)
       || entry.nodes.length === 0
@@ -689,8 +700,11 @@ function acceptedAudit(
 ): { packages: DependencyPackageResult[]; exceptions: AcceptedAdvisory[] } | null {
   if (audit.entries.length === 0 || audit.counts.critical > 0) return null;
   const matched = new Set<ListedAdvisory>();
+  // Entries whose every advisory is listed with production: true. Only these, and entries that depend on nothing
+  // else, may have nodes that production installs.
+  const productionListed = new Set<string>();
   for (const entry of audit.entries) {
-    if (!entry.nodes.every(isOutsideProduction)) return null;
+    let allProduction = entry.advisories.length > 0;
     for (const advisory of entry.advisories) {
       const listed = advisories.find((item) =>
         advisory.url === ADVISORY_URL_PREFIX + item.advisory
@@ -703,27 +717,36 @@ function acceptedAudit(
         || !ACCEPTED_PACKAGE_PATTERN.test(listed.package)
         || !validPackageVersion(listed.version)
         // Read from the lock itself, so a node of the package that npm left out of its report is checked too.
-        || !lock.packages.every((node) => !isLockedPackage(node, listed.package) || (isOutsideProduction(node) && node.version === listed.version))
+        || !lock.packages.every((node) => !isLockedPackage(node, listed.package)
+          || ((listed.production === true || isOutsideProduction(node)) && node.version === listed.version))
         // Written so that an expiry date or a clock that is not a number is rejected too.
         || !(now < expiryEndMs(listed.expires))
       ) {
         return null;
       }
+      if (listed.production !== true) allProduction = false;
       matched.add(listed);
     }
+    if (allProduction) productionListed.add(entry.name);
   }
 
   // An entry stands once everything it depends on stands. One with only advisory objects stands at once, because
   // the loop above already matched all of them. An entry that never stands leaves the audit rejected: it names a
-  // package the audit does not report, or itself, or it is part of a cycle.
+  // package the audit does not report, or itself, or it is part of a cycle. An entry with a node in production
+  // stands only through production-listed advisories: its own, or every entry it depends on standing that way.
   const standing = new Set<string>();
+  const productionStanding = new Set<string>();
   for (let grew = true; grew;) {
     grew = false;
     for (const entry of audit.entries) {
-      if (!standing.has(entry.name) && entry.dependsOn.every((name) => standing.has(name))) {
-        standing.add(entry.name);
-        grew = true;
-      }
+      if (standing.has(entry.name) || !entry.dependsOn.every((name) => standing.has(name))) continue;
+      const viaProduction = entry.advisories.length > 0
+        ? productionListed.has(entry.name) && entry.dependsOn.every((name) => productionStanding.has(name))
+        : entry.dependsOn.length > 0 && entry.dependsOn.every((name) => productionStanding.has(name));
+      if (!viaProduction && !entry.nodes.every(isOutsideProduction)) return null;
+      standing.add(entry.name);
+      if (viaProduction) productionStanding.add(entry.name);
+      grew = true;
     }
   }
   if (standing.size !== audit.entries.length) return null;
