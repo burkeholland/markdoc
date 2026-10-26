@@ -129,6 +129,7 @@ To sign in with GitHub for real, create an OAuth App (Settings → Developer set
 | `DATABASE_URL` | in production | Postgres connection string. Missing and blank values fail production startup before PGlite opens or migrates. Omit in development and tests to use PGlite in `.data/pglite`. |
 | `DATABASE_SSL` | optional | Set to `1` to require TLS (Azure PostgreSQL). |
 | `MARKDOC_PRODUCTION_PGLITE` | local/rehearsal only | The exact value `local-rehearsal-only` permits PGlite under `NODE_ENV=production` for `start:local` and the isolated image rehearsal. Other values fail closed, and `PGLITE_DATA_DIR` alone never opts a production process in. Never set this in a deployment. |
+| `MARKDOC_DEMO_AUTH` | test only | `1` adds a **Try the demo account** button that signs in as a fixed `markdoc-demo` user seeded with sample documents (used by automated dogfooding). Honoured only when `NODE_ENV` is `development` or `test`; there is no production override, the server refuses to start with it set in production, and `infra/deploy-vm-image.sh` rejects an env file containing it. |
 | `AUTH_DEV_LOGIN` | dev only | `1` enables the development login (ignored when `NODE_ENV=production`); `force` enables it in production too, only for smoke-testing a local build. |
 | `GITHUB_TOKEN` | dev only | Personal token used for gists/repos with the development login. |
 | `PGLITE_DATA_DIR` | optional | Embedded database location; `memory://` for tests. |

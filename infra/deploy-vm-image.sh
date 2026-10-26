@@ -27,6 +27,10 @@ if ! [[ "$app_version" =~ ^[0-9a-f]{40}$ ]]; then
   exit 2
 fi
 test -f /etc/markdoc/markdoc.env
+if grep -Eq '^[[:space:]]*(export[[:space:]]+)?MARKDOC_DEMO_AUTH=' /etc/markdoc/markdoc.env; then
+  echo 'MARKDOC_DEMO_AUTH is a test-only flag and must not be in the production environment' >&2
+  exit 2
+fi
 test -f /etc/systemd/system/markdoc-app.service
 
 if ! declare -F run_markdoc_release_wal_gate >/dev/null; then
