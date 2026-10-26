@@ -2,6 +2,7 @@
 // Usage: BASE_URL=http://localhost:3000 MARKDOC_TOKEN=mdk_... npx tsx scripts/mcp-smoke.mts
 // Without MARKDOC_TOKEN it mints one through the UI with the dev login.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { chromium, expect } from "@playwright/test";
 
@@ -25,7 +26,7 @@ if (!token) {
 }
 
 const transport = new StdioClientTransport({ command: "node", args: ["mcp/server.mjs"], env: { ...process.env, MARKDOC_URL: base, MARKDOC_TOKEN: token! } as Record<string, string> });
-const client = new Client({ name: "mcp-smoke", version: "0.0.0" });
+const client = new Client({ name: "mcp-smoke", version: "0.0.0" }, { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
 await client.connect(transport);
 
 const tools = await client.listTools();

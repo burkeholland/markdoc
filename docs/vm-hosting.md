@@ -472,19 +472,17 @@ A dev-only entry has been used before: `GHSA-vfj7-8cjw-p6xm` on `braces`
 `3.0.3` (only the linter used it, through `eslint-config-next`, and every
 published `braces` is affected) was added on 2026-10-03 and deleted in #2294,
 when `braces` left the lock; see
-[The fast-glob override](#the-fast-glob-override). The current entries are the
-first production ones (see below). A new entry adds a row
+[The fast-glob override](#the-fast-glob-override). Production entries for
+`body-parser` and `fast-uri` (MCP SDK, #2391 and #2392) were added on 2026-10-25 and
+deleted when those packages left the lock; see
+[The MCP SDK stand-ins](#the-mcp-sdk-stand-ins). The list is empty. A new entry adds a row
 here in the same pull request; a test in
 `scripts/lib/dependency-policy.test.ts` fails while this table and the list do
 not hold the same entries:
 
 | Advisory | Package | Version | Expires (UTC) | Reason |
 | --- | --- | --- | --- | --- |
-| `GHSA-27r3-jxmh-p828` | `body-parser` | `2.3.0` | `2026-11-24` | Production, via MCP SDK → express 5; no patched 2.x. #2391 |
-| `GHSA-w74x-v6f9-j3xg` | `fast-uri` | `3.1.8` | `2026-11-24` | Production, via MCP SDK → ajv; no patched 3.x. #2392 |
-| `GHSA-xhq7-xmqj-769h` | `fast-uri` | `3.1.8` | `2026-11-24` | Production, via MCP SDK → ajv; no patched 3.x. #2392 |
-| `GHSA-wjr9-j795-jxcr` | `fast-uri` | `3.1.8` | `2026-11-24` | Production, via MCP SDK → ajv; no patched 3.x. #2392 |
-| `GHSA-333x-w4r6-6crp` | `fast-uri` | `3.1.8` | `2026-11-24` | Production, via MCP SDK → ajv; no patched 3.x. #2392 |
+| (no entries) | | | | |
 
 **Production entries.** An entry may set `production: true`. Only such an
 entry may match lock nodes that production installs; every other entry still
@@ -619,8 +617,26 @@ finds nothing. When `eslint-config-next` is upgraded while the override is
 still needed, run that test and compare the output of `npx eslint -f json`
 before and after.
 
+### The MCP SDK stand-ins
+
+`@modelcontextprotocol/sdk` depends on `express` 5 (and through it
+`body-parser`), `express-rate-limit`, `ajv` and `ajv-formats` (and through them
+`fast-uri`), which had advisories with no patched release on the feed (#2391,
+#2392). Markdoc never runs any of them: it only uses the SDK's web-standard and
+stdio transports, never its Express helpers, and every MCP `Server` and
+`Client` it creates passes
+`jsonSchemaValidator: new CfWorkerJsonSchemaValidator()` (`@cfworker/json-schema`)
+instead of the SDK's default ajv validator. The SDK still imports `ajv` and
+`ajv-formats` at load time, so an override scoped to the SDK installs all four
+names as the inert `npm:content-type@1.0.5`, a package the SDK already
+depends on. Calling one of them (for example `new Ajv()`) throws, so a new code
+path that reaches them fails loudly instead of running unvalidated. A new
+`new Client(...)` or `new McpServer(...)` must pass the cfworker validator.
+Delete these four overrides once patched releases reach the feed, then run
+`npm install` and `npm audit`.
+
 The current lock resolves the audited transitive packages to
-`fast-uri@3.1.8`, `qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and
+`qs@6.16.0`, `hono@4.13.8`, `js-yaml@4.3.2` and
 `sharp@0.35.4`. From 2026-10-03 until #2294 the bounded dependency preflight
 returned the accepted report for `GHSA-vfj7-8cjw-p6xm` (five high findings,
 all in development-only packages) with zero blocked, critical and omitted

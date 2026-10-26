@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ADDITIVE, DESTRUCTIVE, READ_ONLY, listToolDefinitions, listToolNames } from "../../../../mcp/tools.mjs";
 
@@ -61,7 +62,7 @@ describe("MCP tool annotations", () => {
       env: { ...(process.env as Record<string, string>), MARKDOC_URL: "http://127.0.0.1:9", MARKDOC_TOKEN: "mdk_test" },
       stderr: "pipe",
     });
-    client = new Client({ name: "annotations-test", version: "0.0.0" });
+    client = new Client({ name: "annotations-test", version: "0.0.0" }, { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
     await client.connect(transport);
     tools = (await client.listTools()).tools as ListedTool[];
   });
