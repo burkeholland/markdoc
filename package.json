@@ -135,6 +135,9 @@
     "@esbuild-kit/core-utils": {
       "esbuild": "$esbuild"
     },
+    "ajv-formats": {
+      "ajv": "^8.18.0"
+    },
     "@next/eslint-plugin-next": {
       "fast-glob": "npm:tinyglobby@0.2.17"
     }

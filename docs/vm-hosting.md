@@ -468,18 +468,32 @@ goes through a pull request and a review like any other change. No environment
 variable, flag or command-line option can add an entry, widen one or move the
 clock.
 
-The list is empty. Its only entry so far, `GHSA-vfj7-8cjw-p6xm` on `braces`
+A dev-only entry has been used before: `GHSA-vfj7-8cjw-p6xm` on `braces`
 `3.0.3` (only the linter used it, through `eslint-config-next`, and every
-published `braces` is affected), was added on 2026-10-03 and deleted in #2294,
+published `braces` is affected) was added on 2026-10-03 and deleted in #2294,
 when `braces` left the lock; see
-[The fast-glob override](#the-fast-glob-override). A new entry adds a row
+[The fast-glob override](#the-fast-glob-override). The current entries are the
+first production ones (see below). A new entry adds a row
 here in the same pull request; a test in
 `scripts/lib/dependency-policy.test.ts` fails while this table and the list do
 not hold the same entries:
 
 | Advisory | Package | Version | Expires (UTC) | Reason |
 | --- | --- | --- | --- | --- |
-| (no entries) | | | | |
+| `GHSA-27r3-jxmh-p828` | `body-parser` | `2.3.0` | `2026-11-24` | Production, via MCP SDK → express 5; no patched 2.x. #2391 |
+| `GHSA-w74x-v6f9-j3xg` | `fast-uri` | `3.1.8` | `2026-11-24` | Production, via MCP SDK → ajv; no patched 3.x. #2392 |
+| `GHSA-xhq7-xmqj-769h` | `fast-uri` | `3.1.8` | `2026-11-24` | Production, via MCP SDK → ajv; no patched 3.x. #2392 |
+| `GHSA-wjr9-j795-jxcr` | `fast-uri` | `3.1.8` | `2026-11-24` | Production, via MCP SDK → ajv; no patched 3.x. #2392 |
+| `GHSA-333x-w4r6-6crp` | `fast-uri` | `3.1.8` | `2026-11-24` | Production, via MCP SDK → ajv; no patched 3.x. #2392 |
+
+**Production entries.** An entry may set `production: true`. Only such an
+entry may match lock nodes that production installs; every other entry still
+needs the "outside production" checks in 1 and 3 below. A reported package
+with a node in production is accepted only if every advisory of its own is
+listed with `production: true`, or, if it has none, everything it depends on
+was accepted that way. Expiry, version pinning and the critical rule apply
+unchanged, so a production entry fails closed on its expiry date like any
+other. Keep production entries short-lived and tracked by an issue.
 
 An audit with findings is accepted only when all of these hold. Anything else
 is `rejected`, exactly as if the list did not exist:
