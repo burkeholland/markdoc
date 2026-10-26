@@ -69,15 +69,7 @@ export interface ListedAdvisory extends AcceptedAdvisory {
 // in acceptedAudit below and in docs/vm-hosting.md. This list is code: a change goes through a pull request, and no
 // environment variable, flag or option can add to it. Delete an entry as soon as the lock has a patched version or
 // no longer has the package.
-const MCP_BODY_PARSER_REASON = "No patched body-parser 2.x; reached in production via @modelcontextprotocol/sdk -> express 5. Tracked in #2391.";
-const MCP_FAST_URI_REASON = "No patched fast-uri 3.x; reached in production via @modelcontextprotocol/sdk -> ajv. Tracked in #2392.";
-export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [
-  { advisory: "GHSA-27r3-jxmh-p828", package: "body-parser", version: "2.3.0", expires: "2026-11-24", reason: MCP_BODY_PARSER_REASON, production: true },
-  { advisory: "GHSA-w74x-v6f9-j3xg", package: "fast-uri", version: "3.1.8", expires: "2026-11-24", reason: MCP_FAST_URI_REASON, production: true },
-  { advisory: "GHSA-xhq7-xmqj-769h", package: "fast-uri", version: "3.1.8", expires: "2026-11-24", reason: MCP_FAST_URI_REASON, production: true },
-  { advisory: "GHSA-wjr9-j795-jxcr", package: "fast-uri", version: "3.1.8", expires: "2026-11-24", reason: MCP_FAST_URI_REASON, production: true },
-  { advisory: "GHSA-333x-w4r6-6crp", package: "fast-uri", version: "3.1.8", expires: "2026-11-24", reason: MCP_FAST_URI_REASON, production: true },
-];
+export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [];
 
 // What tests may set about the accepted-advisory rule: the clock that decides expiry and the list itself. These are
 // function parameters only. The command line and the release never pass them, so they use the real clock and

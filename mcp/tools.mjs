@@ -6,6 +6,7 @@
 // name list the HTTP route reports come from that same list.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { z } from "zod";
 
 export const SERVER_INFO = { name: "markdoc", version: "0.1.0" };
@@ -117,7 +118,11 @@ const withUnreadableHint = (err) => Object.assign(new Error(`${err.message} ${UN
 
 /** A new McpServer with the Markdoc instructions and every tool registered against `client`. */
 export function createMarkdocServer(client) {
-  const server = new McpServer(SERVER_INFO, { instructions: INSTRUCTIONS });
+  const server = new McpServer(SERVER_INFO, {
+    instructions: INSTRUCTIONS,
+    // The SDK's default ajv validator is replaced by a stub; see vendor/ajv-unavailable.
+    jsonSchemaValidator: new CfWorkerJsonSchemaValidator(),
+  });
   registerTools(server, client);
   return server;
 }

@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import { devices, type Page } from "@playwright/test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { signIn, devLogin, createDocument, openDocument, codeText, budgetMs, ensureCommentsOpen, reloadHydrated, type User } from "./helpers";
 import { seedBurkeScale, h2Texts, firstH3Of, UNIQUE_WORD, UNIQUE_WORD_DOC_INDEX, MANY_DOCS, type BurkeScaleSeed } from "./fixtures/burke-scale";
@@ -143,7 +144,7 @@ async function typeAndMeasure(page: Page, prefix: string): Promise<number[]> {
 /** MCP client over /api/mcp with a bearer token — what Copilot CLI does with the config from Settings. */
 async function mcpClient(baseURL: string, token: string) {
   const transport = new StreamableHTTPClientTransport(new URL(`${baseURL}/api/mcp`), { requestInit: { headers: { Authorization: ["Bearer", token].join(" ") } } });
-  const client = new Client({ name: "scale-spec", version: "0.0.0" });
+  const client = new Client({ name: "scale-spec", version: "0.0.0" }, { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
   await client.connect(transport);
   return client;
 }

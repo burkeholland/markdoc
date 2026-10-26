@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createClient, createMarkdocServer, describeIssues } from "../../../../mcp/tools.mjs";
 
@@ -114,7 +115,7 @@ describe("tools over a real MCP client", () => {
     const server = createMarkdocServer(createClient({ baseUrl: "http://markdoc.test", token: "mdk_test", fetch: fakeFetch }));
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
-    mcp = new Client({ name: "test", version: "0" });
+    mcp = new Client({ name: "test", version: "0" }, { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
     await mcp.connect(clientTransport);
   });
 

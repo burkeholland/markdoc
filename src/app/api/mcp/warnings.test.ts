@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createClient, createMarkdocServer } from "../../../../mcp/tools.mjs";
 
@@ -45,7 +46,7 @@ beforeAll(async () => {
   const server = createMarkdocServer(createClient({ baseUrl: "http://markdoc.test", token: "mdk_test", fetch: fakeFetch }));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
-  client = new Client({ name: "test", version: "0" });
+  client = new Client({ name: "test", version: "0" }, { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
   await client.connect(clientTransport);
 });
 

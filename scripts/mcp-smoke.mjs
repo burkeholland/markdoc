@@ -10,6 +10,7 @@
 // error. Exits non-zero on the first mismatch. See scripts/mcp-smoke.mts for the stdio run.
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { listToolDefinitions, listToolNames } from "../mcp/tools.mjs";
 
@@ -54,7 +55,7 @@ console.log("POST without token → 401 with a hint");
 const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`), {
   requestInit: { headers: { Authorization: ["Bearer", token].join(" ") } },
 });
-const client = new Client({ name: "mcp-smoke-http", version: "0.0.0" });
+const client = new Client({ name: "mcp-smoke-http", version: "0.0.0" }, { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
 await client.connect(transport);
 console.log(`connected; server instructions: ${(client.getInstructions() ?? "").slice(0, 60)}…`);
 
@@ -174,7 +175,7 @@ await client.close();
 // tool error that points at /settings — not a silent success.
 const readToken = process.env.MARKDOC_READ_TOKEN;
 if (readToken) {
-  const ro = new Client({ name: "mcp-smoke-http-read", version: "0.0.0" });
+  const ro = new Client({ name: "mcp-smoke-http-read", version: "0.0.0" }, { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
   await ro.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/api/mcp`), { requestInit: { headers: { Authorization: ["Bearer", readToken].join(" ") } } }));
   const roWho = await ro.callTool({ name: "markdoc_whoami", arguments: {} });
   check(!roWho.isError && roWho.structuredContent?.scope === "read", `read token whoami should report scope read: ${text(roWho)}`);

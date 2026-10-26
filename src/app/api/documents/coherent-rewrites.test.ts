@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import * as Y from "yjs";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createClient, createMarkdocServer } from "../../../../mcp/tools.mjs";
 import { LONG_PASSAGE_PREFIX, LONG_PASSAGE_SUFFIX, REWRITE_AFTER, REWRITE_AUTHOR, REWRITE_BEFORE, REWRITE_DOCUMENT, REWRITE_PREFIX, REWRITE_RESULT, UNPLANNABLE_PASSAGES } from "@/editor/collab/rewrite.test-fixture";
@@ -53,7 +54,7 @@ beforeAll(async () => {
   server = createMarkdocServer(createClient({ baseUrl: "http://synthetic.invalid", token: randomUUID(), fetch: fetchRoutes }));
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
-  client = new Client({ name: "synthetic-rewrite", version: "1" });
+  client = new Client({ name: "synthetic-rewrite", version: "1" }, { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
   await client.connect(clientTransport);
 });
 
