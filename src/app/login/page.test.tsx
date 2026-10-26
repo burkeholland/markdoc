@@ -9,6 +9,7 @@ const authMocks = vi.hoisted(() => ({
 vi.mock("@/auth", () => ({
   auth: authMocks.auth,
   signIn: authMocks.signIn,
+  demoLoginEnabled: true,
   devLoginEnabled: true,
   githubConfigured: true,
 }));
@@ -101,6 +102,19 @@ describe("LoginPage return paths", () => {
 
     expect(authMocks.signIn).toHaveBeenNthCalledWith(1, "github", { redirectTo: expected });
     expect(authMocks.signIn).toHaveBeenNthCalledWith(2, "dev", { login: "alice", redirectTo: expected });
+  });
+
+  it.each([
+    ["/d/document-1?mode=focus#comments", "/d/document-1?mode=focus#comments"],
+    ["//example.invalid/path", "/"],
+  ])("signs in to the demo account with the validated path for %j", async (next, expected) => {
+    authMocks.auth.mockResolvedValue(null);
+    const page = await LoginPage(pageProps(next));
+    const demoAction = findForm(page, "demo-signin")?.props.action;
+
+    expect(demoAction).toBeTypeOf("function");
+    await demoAction!(new FormData());
+    expect(authMocks.signIn).toHaveBeenCalledWith("demo", { redirectTo: expected });
   });
 
   // Waiting for the card in the body keeps its tags in <head> for crawlers Next.js does not block for (Teams).
