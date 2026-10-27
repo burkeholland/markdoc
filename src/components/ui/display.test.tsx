@@ -120,6 +120,24 @@ describe.each([false, true])("Avatar (StrictMode=%s)", (strict) => {
     expect(screen.getByText("GH").style.color).toBe("");
   });
 
+  it("falls back when the image already failed before hydration", () => {
+    vi.spyOn(HTMLImageElement.prototype, "complete", "get").mockReturnValue(true);
+    vi.spyOn(HTMLImageElement.prototype, "naturalWidth", "get").mockReturnValue(0);
+
+    renderAvatar({ name: "Ada Lovelace", src: SOURCE_A });
+
+    expect(screen.queryAllByRole("img")).toHaveLength(0);
+    expect(screen.getByText("AL")).toBeInTheDocument();
+  });
+
+  it("allows callers to keep the image decorative", () => {
+    renderAvatar({ name: "Ada Lovelace", src: SOURCE_A, alt: "" });
+
+    const image = screen.getByTitle("Ada Lovelace").querySelector("img");
+    expect(image).toHaveAttribute("alt", "");
+    expect(screen.queryAllByRole("img")).toHaveLength(0);
+  });
+
   it("ignores a late error from A when B replaces it before any error", () => {
     const view = renderAvatar({ name: "Ada Lovelace", src: SOURCE_A });
     const imageA = screen.getByRole("img");

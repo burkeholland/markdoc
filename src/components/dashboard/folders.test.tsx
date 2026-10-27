@@ -130,6 +130,25 @@ describe("the folder rail", () => {
     expect(screen.getByTestId("folder-all")).toHaveTextContent("3");
   });
 
+  it("keeps the shared keyboard focus outline on folder controls and sorting", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes")] });
+    await mount([doc("d1", "Soup")]);
+    await waitFor(() => expect(screen.getByTestId("folder-menu")).toBeInTheDocument());
+
+    const controls = [
+      screen.getByTestId("folder-all"),
+      screen.getByTestId("folder-unfiled"),
+      screen.getByTestId("folder-chip"),
+      screen.getByTestId("folder-menu"),
+      screen.getByTestId("new-folder"),
+      screen.getByTestId("sort-select"),
+    ];
+    for (const control of controls) {
+      expect(control).toHaveClass("focus-visible:border-accent");
+      expect(control).not.toHaveClass("outline-none");
+    }
+  });
+
   it("shows only that folder's documents once a chip is picked", async () => {
     listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes", 1)] });
     await mount([doc("d1", "Soup", "f1"), doc("d2", "Loose")]);
@@ -146,7 +165,7 @@ describe("the folder rail", () => {
     expect(cardTitles()).toHaveLength(2);
   });
 
-  it("creates a folder from the dialog, trimming the name, and leaves the view where it was", async () => {
+  it("selects a newly created folder and explains how to add documents", async () => {
     createFolder.mockResolvedValue({ folder: folder("new", "Ideas") });
     await mount([doc("d1", "One"), doc("d2", "Two")]);
 
@@ -156,10 +175,14 @@ describe("the folder rail", () => {
 
     await waitFor(() => expect(createFolder).toHaveBeenCalledWith("Ideas"));
     await waitFor(() => expect(screen.getByTestId("folder-chip")).toHaveTextContent("Ideas"));
-    // The documents stay on screen: a folder is made in order to put things in it, and jumping into
-    // the empty folder would replace the list with "No matches".
-    expect(cardTitles()).toEqual(["One", "Two"]);
-    expect(screen.getByTestId("folder-all")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("folder-chip")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("folder-all")).toHaveAttribute("aria-pressed", "false");
+    expect(cardTitles()).toEqual([]);
+    expect(screen.getByTestId("empty-state")).toHaveTextContent("This folder is empty");
+    expect(screen.getByTestId("empty-state")).toHaveTextContent(
+      "Create a document above, then move it here from its card menu, or drag an existing card onto this folder.",
+    );
+    expect(screen.getByTestId("empty-state")).not.toHaveTextContent("Try a different search");
   });
 
   it("will not submit a name that is only whitespace", async () => {
