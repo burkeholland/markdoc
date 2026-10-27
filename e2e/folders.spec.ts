@@ -28,6 +28,8 @@ async function newFolder(page: Page, name: string) {
   await page.getByTestId("folder-name-input").fill(name);
   await page.getByTestId("folder-name-submit").click();
   await expect(chip(page, name)).toBeVisible();
+  // These specs exercise card actions after folder creation, so restore the all-documents view.
+  await page.getByTestId("folder-all").click();
 }
 
 /** The card for a document, by its title. */

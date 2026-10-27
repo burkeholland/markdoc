@@ -101,10 +101,11 @@ export function useFolders(onNotice: (message: string, kind?: "error" | "info") 
     async (name: string) => {
       try {
         const { folder } = await api.folders.create(name);
-        // The new folder's chip appears, but the view stays where it was. Jumping into it would show
-        // "No matches" — and a folder is almost always created in order to put documents into it,
-        // which means the documents have to stay on screen.
-        if (live.current) setFolders((current) => [...current, folder].sort(byName));
+        // Select the folder so its empty state explains how to add documents.
+        if (live.current) {
+          setFolders((current) => [...current, folder].sort(byName));
+          setSelection(folder.id);
+        }
         return folder;
       } catch (err) {
         onNotice(apiErrorText(err, "Could not create the folder"), "error");
@@ -179,7 +180,7 @@ function sameSelection(a: FolderSelection, b: FolderSelection): boolean {
 }
 
 const CHIP_CLASS =
-  "inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition outline-none focus-visible:border-accent";
+  "inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition focus-visible:border-accent";
 
 function chipClass(selected: boolean, dropActive: boolean): string {
   return cn(

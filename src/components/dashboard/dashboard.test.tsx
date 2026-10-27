@@ -3290,6 +3290,138 @@ describe("dashboard search shortcut", () => {
   });
 });
 
+describe("dashboard polish", () => {
+  it("hides unconfigured GitHub storage and lets New document fill the row", () => {
+    const view = render(
+      <Dashboard user={USER} documents={DOCUMENTS} githubAvailable={false} githubConfigured={false} />,
+    );
+
+    expect(screen.queryByTestId("open-github")).not.toBeInTheDocument();
+    expect(screen.getByTestId("new-document").parentElement).toHaveClass("sm:col-span-2");
+
+    view.rerender(<Dashboard user={USER} documents={DOCUMENTS} githubAvailable={false} githubConfigured />);
+    expect(screen.getByTestId("open-github")).toBeEnabled();
+    expect(screen.getByTestId("new-document").parentElement).not.toHaveClass("sm:col-span-2");
+  });
+
+  it("wraps the filter controls instead of clipping them on narrow screens", () => {
+    renderDashboard();
+
+    expect(screen.getByTestId("dashboard-chips")).not.toHaveClass("overflow-x-auto");
+    expect(screen.getByRole("toolbar", { name: "Document filters" })).toHaveClass("flex-wrap");
+  });
+
+  it("shows a shared-specific empty state when no documents have been shared", () => {
+    render(<Dashboard user={USER} documents={[]} githubAvailable githubConfigured />);
+
+    fireEvent.click(screen.getByTestId("filter-shared"));
+
+    const emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("Nothing has been shared with you yet");
+    expect(emptyState).toHaveTextContent("Documents shared with you will appear here.");
+    expect(emptyState).not.toHaveTextContent("No documents yet");
+  });
+
+  it("keeps shared and starred empty states scoped to the selected folder", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes", 1)] });
+    const filed = { ...doc("filed", "Filed"), folderId: "f1" };
+    const shared = {
+      ...doc("shared", "Shared with me"),
+      ownerId: "other",
+      ownerName: "Someone else",
+      ownerLogin: "other",
+      role: "editor" as const,
+    };
+    const starred = { ...doc("starred", "Starred elsewhere"), starred: true };
+    renderDashboard(undefined, [filed, shared, starred]);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByTestId("folder-chip"));
+    fireEvent.click(screen.getByTestId("filter-shared"));
+
+    let emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("Shared documents aren't filed in folders");
+    expect(emptyState).toHaveTextContent("Choose All documents to see documents shared with you.");
+    expect(emptyState).not.toHaveTextContent("Nothing has been shared with you yet");
+
+    fireEvent.click(screen.getByTestId("filter-starred"));
+
+    emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("No matching documents in this folder");
+    expect(emptyState).toHaveTextContent("Choose All documents or another folder to see more.");
+    expect(emptyState).not.toHaveTextContent("No starred documents");
+  });
+
+  it("uses the shared empty state when Not in a folder is selected", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes", 1)] });
+    const filed = { ...doc("filed", "Filed"), folderId: "f1" };
+    renderDashboard(undefined, [filed]);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByTestId("folder-unfiled"));
+    fireEvent.click(screen.getByTestId("filter-shared"));
+
+    const emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("Nothing has been shared with you yet");
+    expect(emptyState).toHaveTextContent("Documents shared with you will appear here.");
+    expect(emptyState).not.toHaveTextContent("No matching unfiled documents");
+  });
+
+  it("does not claim there are no owned documents when the unfiled selection has none", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes", 1)] });
+    const filed = { ...doc("filed", "Filed"), folderId: "f1" };
+    renderDashboard(undefined, [filed]);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByTestId("folder-unfiled"));
+    fireEvent.click(screen.getByTestId("filter-mine"));
+
+    const emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("No unfiled documents owned by you");
+    expect(emptyState).toHaveTextContent("Choose All documents to see your filed documents.");
+    expect(emptyState).not.toHaveTextContent("No documents owned by you yet");
+  });
+
+  it("uses device-neutral guidance for an empty Starred filter", () => {
+    renderDashboard(undefined, [doc("unstarred", "Unstarred document")]);
+
+    fireEvent.click(screen.getByTestId("filter-starred"));
+
+    const emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("No starred documents");
+    expect(emptyState).toHaveTextContent("Star a document from its card or editor header to keep it here.");
+    expect(emptyState).not.toHaveTextContent(/hover/i);
+  });
+
+  it("keeps the account avatar decorative inside its labeled button", () => {
+    render(
+      <Dashboard
+        user={{ ...USER, image: "https://example.test/avatar.png" }}
+        documents={DOCUMENTS}
+        githubAvailable
+        githubConfigured
+      />,
+    );
+
+    const accountButton = screen.getByRole("button", { name: "Account" });
+    expect(accountButton.querySelector("img")).toHaveAttribute("alt", "");
+  });
+
+  it("does not mention GitHub in the guided empty state when storage is unconfigured", () => {
+    render(<Dashboard user={USER} documents={[]} githubAvailable={false} githubConfigured={false} />);
+
+    const emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("or open a Markdown file.");
+    expect(emptyState).not.toHaveTextContent("GitHub");
+  });
+});
+
 describe("dashboard search controls", () => {
   it("filters on a single change event with no prior typing and shows the no-match empty state", async () => {
     renderDashboard();
@@ -5236,7 +5368,7 @@ describe("dashboard direct create control ownership", () => {
       const guided = guidedRootElement(host);
       expect(guided).toHaveTextContent("No documents yet");
       expect(guided).toHaveTextContent(
-        "Start with a short guided document, pick a template, or open a Markdown file from GitHub.",
+        "Start with a short guided document, pick a template, or open a Markdown file.",
       );
       const welcome = directCreateButton(host, "start-guided-doc");
       expect(welcome).toHaveTextContent("Start with a guided doc");

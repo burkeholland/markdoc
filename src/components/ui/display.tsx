@@ -12,6 +12,7 @@ export function Avatar({
   size = 36,
   className,
   title,
+  alt = name,
 }: {
   name: string;
   src?: string | null;
@@ -19,27 +20,37 @@ export function Avatar({
   size?: number;
   className?: string;
   title?: string;
+  alt?: string;
 }) {
   const style: React.CSSProperties = { width: size, height: size, fontSize: Math.max(10, Math.round(size * 0.36)) };
   if (color) style.boxShadow = `0 0 0 2px var(--color-surface), 0 0 0 4px ${color}`;
   return (
     <span className={cn("avatar", className)} style={style} title={title ?? name}>
-      <AvatarContent key={src} name={name} src={src} size={size} />
+      <AvatarContent key={src} name={name} src={src} size={size} alt={alt} />
     </span>
   );
 }
 
 // Initials use the theme ink (not the identity color, which shows in the ring): presence colors like
 // orange-600 on surface-3 fall to ~3:1, below WCAG AA (#2396).
-function AvatarContent({ name, src, size }: {
+function AvatarContent({ name, src, size, alt }: {
   name: string;
   src?: string | null;
   size: number;
+  alt: string;
 }) {
   const [failed, setFailed] = React.useState(false);
+  const imageRef = React.useRef<HTMLImageElement>(null);
+
+  React.useLayoutEffect(() => {
+    // An image can fail before hydration attaches onError; detect that before the browser paints.
+    const image = imageRef.current;
+    if (src && image?.complete && image.naturalWidth === 0) setFailed(true);
+  }, [src]);
+
   return src && !failed ? (
     // eslint-disable-next-line @next/next/no-img-element
-    <img src={src} alt={name} width={size} height={size} className="h-full w-full object-cover" onError={() => setFailed(true)} referrerPolicy="no-referrer" />
+    <img ref={imageRef} src={src} alt={alt} width={size} height={size} className="h-full w-full object-cover" onError={() => setFailed(true)} referrerPolicy="no-referrer" />
   ) : (
     <span>{initials(name)}</span>
   );

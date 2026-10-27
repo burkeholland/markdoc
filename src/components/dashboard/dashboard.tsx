@@ -31,7 +31,6 @@ import { DEFAULT_DASHBOARD_SORT, SORT_COOKIE, SORT_COOKIE_MAX_AGE, SORT_OPTIONS,
 import { Logo } from "@/components/ui/logo";
 import { GitHubPicker } from "@/components/editor/github-dialog";
 import { isManagedGithubLogin } from "@/lib/github-login";
-import { GITHUB_NOT_CONFIGURED } from "@/components/editor/labels";
 import { NotificationsStrip } from "@/components/dashboard/notifications-strip";
 import { ImportDialog, ImportDropzone, useFileImport } from "@/components/dashboard/import-dialog";
 import {
@@ -798,7 +797,7 @@ const CREATE_GUIDED_PRIMARY_CLASS = "text-sm font-medium text-ink-2";
 const CREATE_GUIDED_SECONDARY_CLASS = "mt-1 text-sm text-ink-3";
 const CREATE_GUIDED_PRIMARY_TEXT = "No documents yet";
 const CREATE_GUIDED_SECONDARY_TEXT =
-  "Start with a short guided document, pick a template, or open a Markdown file from GitHub.";
+  "Start with a short guided document, pick a template, or open a Markdown file.";
 const CREATE_WELCOME_BUTTON_CLASS = "btn btn-primary mt-4 gap-2";
 
 interface NoticeAuthority {
@@ -1141,7 +1140,7 @@ const FILTERS = Object.freeze([
   Object.freeze({ value: "trash", label: "Trash" }),
 ] as const satisfies readonly FilterDefinition[]);
 const FILTER_GROUP_CLASS =
-  "flex shrink-0 rounded-lg border border-line bg-surface p-0.5 text-xs";
+  "flex min-w-0 max-w-full flex-wrap rounded-lg border border-line bg-surface p-0.5 text-xs";
 const FILTER_GROUP_LABEL = "Document filters";
 
 function filterDescriptorsMatch(
@@ -5781,10 +5780,80 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     destination.focus({ preventScroll: true });
   };
   const showCreateEmptyState =
-    filter !== "trash" &&
+    filter === "all" &&
+    folderSelection === null &&
     filtered.length === 0 &&
     !trimmed &&
     documents.length === 0;
+  const selectedFolderIsEmpty =
+    typeof folderSelection === "string" &&
+    folders.folders.some((folder) => folder.id === folderSelection && folder.documentCount === 0);
+  const selectedFolderFilterEmptyState = (() => {
+    if (folderSelection === null || filter === "all" || filter === "trash") return null;
+    if (folderSelection === TOP_LEVEL && filter === "mine") {
+      return {
+        title: "No unfiled documents owned by you",
+        description: "Choose All documents to see your filed documents.",
+      };
+    }
+    if (folderSelection === TOP_LEVEL && filter === "shared") return null;
+    if (folderSelection === TOP_LEVEL) {
+      return {
+        title: "No matching unfiled documents",
+        description: "Choose All documents or another folder to see more.",
+      };
+    }
+    if (filter === "shared") {
+      return {
+        title: "Shared documents aren't filed in folders",
+        description: "Choose All documents to see documents shared with you.",
+      };
+    }
+    return {
+      title: "No matching documents in this folder",
+      description: "Choose All documents or another folder to see more.",
+    };
+  })();
+  const emptyStateTitle =
+    pending
+      ? `Searching for "${trimmed}"…`
+      : currentSearchError
+        ? `No title matches for "${trimmed}"`
+        : trimmed
+          ? `No matches for "${trimmed}"`
+          : selectedFolderIsEmpty
+            ? "This folder is empty"
+            : selectedFolderFilterEmptyState
+              ? selectedFolderFilterEmptyState.title
+              : filter === "shared"
+                ? "Nothing has been shared with you yet"
+                : filter === "starred"
+                  ? "No starred documents"
+                  : filter === "mine"
+                    ? "No documents owned by you yet"
+                    : folderSelection === TOP_LEVEL
+                      ? "No unfiled documents"
+                      : "No documents to show";
+  const emptyStateDescription =
+    pending
+      ? "Looking through titles and content."
+      : currentSearchError
+        ? "Content results are unavailable. Retry the search above."
+        : trimmed
+          ? "Try a different search."
+          : selectedFolderIsEmpty
+            ? "Create a document above, then move it here from its card menu, or drag an existing card onto this folder."
+            : selectedFolderFilterEmptyState
+              ? selectedFolderFilterEmptyState.description
+              : filter === "shared"
+                ? "Documents shared with you will appear here."
+                : filter === "starred"
+                  ? "Star a document from its card or editor header to keep it here."
+                  : filter === "mine"
+                    ? "Documents you own will appear here."
+                    : folderSelection === TOP_LEVEL
+                      ? "Move documents here from a card menu, or choose All documents to see everything."
+                      : "Choose another filter to see more documents.";
   const welcomeTemplate = getTemplate(WELCOME_TEMPLATE_ID);
   // The factory stores these callbacks for committed event delivery; it never reads a ref or invokes a callback during render.
   // eslint-disable-next-line react-hooks/refs
@@ -5906,7 +5975,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                   onKeyDownCapture={captureAccountKeyDown}
                   routeAccountKeyDown={routeAccountKeyDown}
                 >
-                  <Avatar name={user.name} src={user.image} size={36} />
+                  <Avatar name={user.name} src={user.image} size={36} alt="" />
                 </AccountMenuTrigger>
               </MenuTrigger>
               <MenuContent
@@ -5933,7 +6002,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
         <section className="safe-x mx-auto max-w-6xl py-6 sm:py-8 sm:[--safe-pad:1.5rem]">
           <NotificationsStrip />
           <div className="mb-8 grid gap-3 sm:grid-cols-2">
-            <div className={CREATE_CARD_CLASS}>
+            <div className={cn(CREATE_CARD_CLASS, !githubConfigured && "sm:col-span-2")}>
               <button
                 type="button"
                 onClick={() => void create()}
@@ -5979,22 +6048,22 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                 <FolderOpen size={16} />
               </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setOpenPicker(true)}
-              disabled={!githubConfigured}
-              title={githubConfigured ? undefined : GITHUB_NOT_CONFIGURED}
-              className="group flex items-center gap-4 rounded-2xl border border-line bg-surface p-5 text-left shadow-sm transition hover:border-accent hover:shadow-md disabled:cursor-default disabled:opacity-60 disabled:hover:border-line disabled:hover:shadow-sm"
-              data-testid="open-github"
-            >
-              <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-inverse text-white">
-                <GitHubIcon size={22} />
-              </span>
-              <span>
-                <span className="block text-[15px] font-semibold text-ink">Open from GitHub</span>
-                <span className="block text-sm text-ink-3">{githubConfigured ? "Edit a Markdown file from a gist or repository." : GITHUB_NOT_CONFIGURED}</span>
-              </span>
-            </button>
+            {githubConfigured && (
+              <button
+                type="button"
+                onClick={() => setOpenPicker(true)}
+                className="group flex items-center gap-4 rounded-2xl border border-line bg-surface p-5 text-left shadow-sm transition hover:border-accent hover:shadow-md"
+                data-testid="open-github"
+              >
+                <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-inverse text-white">
+                  <GitHubIcon size={22} />
+                </span>
+                <span>
+                  <span className="block text-[15px] font-semibold text-ink">Open from GitHub</span>
+                  <span className="block text-sm text-ink-3">Edit a Markdown file from a gist or repository.</span>
+                </span>
+              </button>
+            )}
           </div>
 
           {showStrip && (
@@ -6057,11 +6126,11 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
 
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <h2 ref={documentsHeadingRef} tabIndex={-1} className="text-sm font-semibold text-ink">Documents</h2>
-            <div className="ml-auto flex min-h-8 max-w-full items-center gap-2 overflow-x-auto max-sm:basis-full" data-testid="dashboard-chips">
+            <div className="ml-auto flex min-h-8 min-w-0 max-w-full flex-wrap items-center gap-2 max-sm:basis-full" data-testid="dashboard-chips">
               <label className="flex items-center gap-1.5 text-xs text-ink-3">
                 <span className="sr-only">Sort by</span>
                 <select
-                  className="h-7 rounded-lg border border-line bg-surface px-2 text-xs text-ink-2 outline-none focus-visible:border-accent"
+                  className="h-7 rounded-lg border border-line bg-surface px-2 text-xs text-ink-2 focus-visible:border-accent"
                   value={sort}
                   onChange={(e) => changeSort(e.target.value as DashboardSort)}
                   aria-label="Sort by"
@@ -6160,10 +6229,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
             <div className="rounded-2xl border border-dashed border-line-2 bg-surface px-6 py-16 text-center" data-testid="empty-state">
               <FileText className="mx-auto mb-3 text-ink-4" size={28} />
               <p className="text-sm font-medium text-ink-2">
-                {pending ? `Searching for "${trimmed}"…` : currentSearchError ? `No title matches for "${trimmed}"` : trimmed ? `No matches for "${trimmed}"` : filter === "starred" ? "No starred documents" : "No matches"}
+                {emptyStateTitle}
               </p>
               <p className="mt-1 text-sm text-ink-3">
-                {pending ? "Looking through titles and content." : currentSearchError ? "Content results are unavailable. Retry the search above." : filter === "starred" && !trimmed ? "Hover a document and click the star to keep it close." : "Try a different search."}
+                {emptyStateDescription}
               </p>
               {trimmed && !pending && (
                 <button
