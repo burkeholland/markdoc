@@ -2833,6 +2833,10 @@ export function EditorShell({
         return;
       }
       if (n.kind === "share") return;
+      if (n.kind === "access.request") {
+        setDialog("share");
+        return;
+      }
       if (!activateRef(n.refId)) {
         // Decided suggestions are gone from the document; show the panel anyway.
         setSidePanel("comments");
@@ -2869,6 +2873,14 @@ export function EditorShell({
   }, [doc.id]);
   const toggleActivity = useCallback(() => setSidePanel((p) => (p === "activity" ? null : "activity")), []);
   const openShare = useCallback(() => setDialog("share"), []);
+  // `/d/<id>?share=1` (from an access-request notification) opens the share dialog once.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("share") !== "1") return;
+    url.searchParams.delete("share");
+    window.history.replaceState(window.history.state, "", url.toString());
+    setDialog("share");
+  }, []);
   const openPublish = useCallback(() => setDialog("publish"), []);
   const openShortcuts = useCallback(() => setDialog("shortcuts"), []);
   const openPalette = useCallback(() => setPaletteOpen(true), []);

@@ -13,13 +13,13 @@ let inFlight: Promise<boolean> | null = null;
  * The single client-side account-boundary flow. Auth.js is reached only after every local
  * document mirror and its registry have been removed.
  */
-export function signOutSafely(): Promise<boolean> {
+export function signOutSafely(callbackUrl?: string): Promise<boolean> {
   if (inFlight) return inFlight;
   inFlight = (async () => {
     try {
       if ((await hasLocalDocuments()) && !window.confirm(SIGN_OUT_WARNING)) return false;
       await clearAllLocalDocuments();
-      navigateTo("/api/auth/signout");
+      navigateTo(callbackUrl ? `/api/auth/signout?callbackUrl=${encodeURIComponent(callbackUrl)}` : "/api/auth/signout");
       return true;
     } catch (error) {
       console.error("[markdoc] sign-out cleanup failed", error);
