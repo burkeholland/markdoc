@@ -1130,6 +1130,13 @@ tokens from anyone locked out every API-token, agent and MCP user.
   if the app is ever reached through a proxy that is not on loopback. A caller
   that reaches the app port directly is not loopback and keeps its socket
   address.
+- Exactly one proxy hop is trusted: our own nginx on the same VM. The app takes
+  the entry that hop appended and ignores everything before it.
+- Which bucket a request spends (#2323): a bearer token that resolves counts
+  per token, a valid session per user, a signed embed cookie per token.
+  Anything unverified (a made-up bearer value, a forged cookie, no
+  credentials) counts against the client address above, so inventing a
+  credential never earns a fresh bucket.
 - Why the last `X-Forwarded-For` entry cannot be forged: nginx's
   `$proxy_add_x_forwarded_for` appends `$remote_addr` to whatever the client
   sent, so the final entry is always nginx's own view of the peer, and a client

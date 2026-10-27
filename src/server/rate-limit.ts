@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 /**
  * In-memory rate limiting for `/api/*`. One token bucket per (caller, route class): the bucket
  * holds `burst` tokens and refills at `perMinute`, so a caller can spend a short burst and then
@@ -161,23 +159,17 @@ export function clientIp(headers: Headers): string {
   return socket || proxied || "unknown";
 }
 
-const shortHash = (value: string) => createHash("sha256").update(value).digest("base64url").slice(0, 22);
-
 /**
- * Who to count a request against: the bearer token when there is one (per token, so one leaked or
- * looping token cannot starve the others), else the session cookie (per browser session), else the IP.
+ * Bucket key for a caller whose identity has been VERIFIED (a resolved API token, a valid session,
+ * a signed embed cookie). Never build a key from an unverified credential: a made-up bearer value
+ * would get a fresh bucket per value and sidestep the limit (#2323). Unverified callers use `ipKey`.
  */
-export function callerKey(headers: Headers): string {
-  const authorization = headers.get("authorization");
-  if (authorization?.toLowerCase().startsWith("bearer ")) {
-    const token = authorization.slice(7).trim();
-    if (token) return `tok:${shortHash(token)}`;
-  }
-  const cookie = headers.get("cookie");
-  if (cookie) {
-    const session = cookie.split(";").map((c) => c.trim()).find((c) => /^((__Secure-)?authjs\.session-token|(__Secure-)?markdoc\.embed-session)(\.\d+)?=/.test(c));
-    if (session) return `ses:${shortHash(session.slice(session.indexOf("=") + 1))}`;
-  }
+export function verifiedKey(kind: "tok" | "usr", id: string): string {
+  return `${kind}:${id}`;
+}
+
+/** Bucket key for a caller with no verified identity: the client address (see `clientIp`). */
+export function ipKey(headers: Headers): string {
   return `ip:${clientIp(headers)}`;
 }
 
@@ -193,10 +185,10 @@ export function routeClass(method: string, pathname: string): RouteClass {
   return "write";
 }
 
-/** Spend one request from the caller's bucket for this route. */
-export function takeApiRequest(req: Request): TakeResult & { cls: RouteClass } {
+/** Spend one request from `caller`'s bucket for this route; `caller` comes from `verifiedKey` or `ipKey`. */
+export function takeApiRequest(req: Request, caller: string): TakeResult & { cls: RouteClass } {
   const cls = routeClass(req.method, new URL(req.url).pathname);
-  return { cls, ...apiLimiter.take(`${cls}:${callerKey(req.headers)}`, RATE_LIMITS[cls]) };
+  return { cls, ...apiLimiter.take(`${cls}:${caller}`, RATE_LIMITS[cls]) };
 }
 
 /** Whether this IP may still try a bearer token (it has not exhausted its failed-authentication budget). */

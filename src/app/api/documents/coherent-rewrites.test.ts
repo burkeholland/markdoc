@@ -12,6 +12,8 @@ import type { Actor } from "@/server/http";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 delete process.env.DATABASE_URL;
+// Every call here is one signed-in user, so all of them share one bucket (#2323); this file is not about limits.
+process.env.RATE_LIMIT = "off";
 
 let actor: Actor;
 vi.mock("@/auth", () => ({ auth: async () => ({ user: actor }) }));
