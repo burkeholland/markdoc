@@ -8368,7 +8368,7 @@ describe("VersionsPanel · mutation ownership", () => {
 });
 
 describe("VersionsPanel · compare target", () => {
-  it("keeps each compact checkbox inside a labelled 24px target that toggles the intended version", async () => {
+  it("shows a visible compare instruction and associates it with each checkbox", async () => {
     const older = { ...named, id: "ver-0", number: 0, title: "Earlier" };
     versions.mockResolvedValueOnce({ versions: [named, older] });
     version.mockImplementation(async (_docId: string, versionId: string) => ({
@@ -8378,11 +8378,15 @@ describe("VersionsPanel · compare target", () => {
     const session = { docId: DOC_ID, role: "owner" } as unknown as CollabSession;
     render(<VersionsPanel session={session} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
 
+    expect(await screen.findByTestId("compare-instruction")).toHaveTextContent(
+      "Select two versions below to compare their changes.",
+    );
     const draft = await screen.findByRole("checkbox", { name: "Compare v1" });
     const earlier = await screen.findByRole("checkbox", { name: "Compare v0" });
     for (const checkbox of [draft, earlier]) {
       expect(checkbox).toHaveClass("h-3.5", "w-3.5");
       expect(checkbox.closest("label")).toHaveClass("h-6", "w-6");
+      expect(checkbox).toHaveAttribute("aria-describedby", "compare-instruction");
     }
 
     fireEvent.click(draft.closest("label")!);

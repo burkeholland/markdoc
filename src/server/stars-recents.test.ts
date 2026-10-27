@@ -62,6 +62,31 @@ describe("stars", () => {
 });
 
 describe("recents", () => {
+  it("lists opened link-shared documents while access is active, but hides unopened and revoked links", async () => {
+    const db = await getDb();
+    const openedViewer = await createDocument({ ownerId: alice.id, title: "Link-only viewer" });
+    const openedCommenter = await createDocument({ ownerId: alice.id, title: "Link-only commenter" });
+    const unopened = await createDocument({ ownerId: alice.id, title: "Link-only unopened" });
+    const revoked = await createDocument({ ownerId: alice.id, title: "Link-only revoked" });
+
+    await db.update(schema.documents).set({ linkAccess: "view" }).where(eq(schema.documents.id, openedViewer.id));
+    await db.update(schema.documents).set({ linkAccess: "comment" }).where(eq(schema.documents.id, openedCommenter.id));
+    await db.update(schema.documents).set({ linkAccess: "view" }).where(eq(schema.documents.id, unopened.id));
+    await db.update(schema.documents).set({ linkAccess: "view" }).where(eq(schema.documents.id, revoked.id));
+    await recordDocumentOpen(bob.id, openedViewer.id);
+    await recordDocumentOpen(bob.id, openedCommenter.id);
+    await recordDocumentOpen(bob.id, revoked.id);
+    await db.update(schema.documents).set({ linkAccess: "private" }).where(eq(schema.documents.id, revoked.id));
+
+    const documents = await listDocumentsForUser(bob);
+    expect(idsOf(documents)).toEqual(expect.arrayContaining([openedViewer.id, openedCommenter.id]));
+    expect(idsOf(documents)).not.toContain(unopened.id);
+    expect(idsOf(documents)).not.toContain(revoked.id);
+    expect(documents.find((doc) => doc.id === openedViewer.id)?.role).toBe("viewer");
+    expect(documents.find((doc) => doc.id === openedCommenter.id)?.role).toBe("commenter");
+    expect(idsOf(await searchDocumentsForUser(bob, "Link-only viewer"))).toContain(openedViewer.id);
+  });
+
   it("upserts opened_at per user and document", async () => {
     const doc = await createDocument({ ownerId: alice.id, title: "Opened" });
     const first = new Date("2026-01-01T10:00:00Z");
