@@ -76,6 +76,7 @@ const every = (block: Block, name: string): Directive[] => [...block.directives.
 const serverName = (server: Block) => server.directives.find((d) => d.name === "server_name")?.args ?? "";
 
 const config = parseNginx(read("infra", "nginx-markdoc.conf"));
+const serverNamesHashConfig = parseNginx(read("infra", "nginx-server-names-hash.conf"));
 const servers = config.blocks.filter((b) => b.name === "server");
 const tlsServers = servers.filter((s) => s.directives.some((d) => d.name === "listen" && /\b443\b/.test(d.args)));
 const proxying = servers.filter((s) => every(s, "proxy_pass").length > 0);
@@ -187,6 +188,17 @@ describe("infra/nginx-markdoc.conf client address (#2324)", () => {
     const location = proxying[0].blocks.find((b) => b.name === "location" && every(b, "proxy_pass").length > 0);
     const headers = (location?.directives ?? []).filter((d) => d.name === "proxy_set_header").map((d) => d.args);
     expect(headers).toContain("X-Real-IP $remote_addr");
+  });
+});
+
+describe("infra/nginx-server-names-hash.conf (#2346)", () => {
+  it("raises the HTTP-context bucket for the long Azure server name", () => {
+    expect(serverNamesHashConfig.directives.filter((d) => d.name === "server_names_hash_bucket_size")).toEqual([
+      { name: "server_names_hash_bucket_size", args: "128" },
+    ]);
+    expect(serverNamesHashConfig.blocks).toHaveLength(0);
+    expect(every(serverNamesHashConfig, "server_names_hash_bucket_size")).toHaveLength(1);
+    expect(tlsServers.some((server) => serverName(server).includes("markdoc-burkeholland.eastus2.cloudapp.azure.com"))).toBe(true);
   });
 });
 

@@ -151,7 +151,10 @@ run for this documentation update.
    commit. `AZURE_RESOURCE_GROUP` must name `markdoc-rg`, and
    `AZURE_ACR_NAME` must name the existing registry.
 3. The workflow builds in ACR with full/12-character SHA tags and
-   `APP_VERSION`, resolves the immutable digest, then sends
+   `APP_VERSION`. Both `npm ci` stages in the Dockerfile use
+   `--fetch-retries=5` for transient registry/network errors; persistent
+   failures still fail the image build. The workflow resolves the immutable
+   digest, then sends
    [`infra/release-wal-gate.sh`](../infra/release-wal-gate.sh) before
    [`infra/deploy-vm-image.sh`](../infra/deploy-vm-image.sh) in one VM Run
    Command on `markdoc-pg`. The deployment script invokes the gate and refuses
@@ -888,10 +891,26 @@ but killing the CLI does **not** cancel remote work. Output records the unique
 submission tag and the reconciled ACR run ID, then the VM resource, guest
 invocation UUID and start time. The high-level VM CLI does not expose its ARM
 operation ID; the guest UUID is instead retained in Run Command
-parameters/output for targeted owner reconciliation. Failure to find one
-unique tagged run leaves Azure acceptance unknown. Raw build/VM/HTTP output is
-withheld. The protected rollback bundle and diagnostics are not terminal
-scratch space.
+parameters/output for targeted owner reconciliation. For the image build, the
+script uses a `runId` returned by `az acr build` when available; otherwise it
+reconciles by the unique output tag. If that tag is absent, a single new
+QuickRun may be matched by its creation time **only to report a terminal
+failure**, never to select an image. A failed build immediately reports its
+status, a sanitized ACR error and a read-only `az acr task logs` command. If no
+single run can be identified, acceptance remains unknown. Raw build/VM/HTTP
+output is withheld. The protected rollback bundle and diagnostics are not
+terminal scratch space.
+
+On Windows, if redirecting ACR task logs fails with `UnicodeEncodeError`, use
+the Azure CLI's bundled Python with UTF-8 mode explicitly enabled. The standard
+MSI wrapper starts Python with `-I`, which ignores `PYTHONUTF8`; invoke the
+module directly and replace the quoted placeholders with the values printed by
+the failed release. For a custom Azure CLI install, use that installation's
+bundled `python.exe`:
+
+```powershell
+& "$env:ProgramFiles\Microsoft SDKs\Azure\CLI2\python.exe" -X utf8 -IBm azure.cli acr task logs --registry '<registry>' --run-id '<run-id>' --resource-group '<resource-group>' --subscription '<subscription>'
+```
 
 ### September 24 release-gate verification
 
@@ -932,20 +951,59 @@ HTTPS for it: the certificate must exist before anyone opens the site.
 | --- | --- |
 | DNS (Cloudflare, **DNS only**, grey cloud) | `A markdoc.app -> 20.62.106.80`, `CNAME www -> markdoc.app`. The Cloudflare proxy must stay off: certbot validates over plain HTTP on the VM, and nginx terminates TLS itself. |
 | Certificates | Let's Encrypt `markdoc.app` (covers `markdoc.app` and `www.markdoc.app`) plus the existing `markdoc-burkeholland.eastus2.cloudapp.azure.com`; both renew through `certbot.timer`. |
-| nginx | [`infra/nginx-markdoc.conf`](../infra/nginx-markdoc.conf) is the source for `/etc/nginx/sites-available/markdoc`. `markdoc.app` proxies to the app on `127.0.0.1:3000`; `www.markdoc.app`, the Azure name and plain HTTP redirect to `https://markdoc.app` with the same path and query (`301` for pages, `308` for `/api/*` so writes keep their method). The three TLS server blocks set `client_max_body_size 10m`: see [Request body size](#request-body-size-nginx). |
+| nginx | [`infra/nginx-markdoc.conf`](../infra/nginx-markdoc.conf) is the source for `/etc/nginx/sites-available/markdoc`. [`infra/nginx-server-names-hash.conf`](../infra/nginx-server-names-hash.conf) sets `server_names_hash_bucket_size 128` at HTTP scope and is installed under `/etc/nginx/conf.d/`. `markdoc.app` proxies to the app on `127.0.0.1:3000`; `www.markdoc.app`, the Azure name and plain HTTP redirect to `https://markdoc.app` with the same path and query (`301` for pages, `308` for `/api/*` so writes keep their method). The three TLS server blocks set `client_max_body_size 10m`: see [Request body size](#request-body-size-nginx). |
 | App environment (`/etc/markdoc/markdoc.env`) | `AUTH_URL=https://markdoc.app`, `MARKDOC_URL=https://markdoc.app`, `MARKDOC_CANONICAL_HOST=markdoc.app`. |
 | GitHub OAuth app | Homepage URL `https://markdoc.app`, authorization callback URL `https://markdoc.app/api/auth/callback/github`. |
 
 Cutover order (each step reversible until the OAuth change):
 
 1. Wait until `Resolve-DnsName markdoc.app` and `Resolve-DnsName www.markdoc.app` return `20.62.106.80`.
-2. On the VM: `certbot certonly --nginx --cert-name markdoc.app -d markdoc.app -d www.markdoc.app`. This only issues the certificate; nginx config is unchanged.
-3. Back up `/etc/nginx/sites-available/markdoc` and `/etc/markdoc/markdoc.env`, install `infra/nginx-markdoc.conf`, `nginx -t`, `systemctl reload nginx`.
-4. Set the three environment values above and `systemctl restart markdoc-app.service`.
-5. Update the GitHub OAuth app (GitHub allows one callback URL, so the old origin stops signing in; it only redirects now anyway).
-6. Verify `https://markdoc.app/api/health` reports `ok`, `db`, `collab` true, that the old name answers `301` to `https://markdoc.app/...`, and that GitHub sign-in completes.
+2. Before enabling or validating a server block with the long Azure hostname, install or verify the HTTP-level hash setting in [Server-name hash bucket](#server-name-hash-bucket-nginx).
+3. On the VM: `certbot certonly --nginx --cert-name markdoc.app -d markdoc.app -d www.markdoc.app`. This only issues the certificate; certbot does not change the nginx config.
+4. Back up `/etc/nginx/sites-available/markdoc` and `/etc/markdoc/markdoc.env`, install `infra/nginx-markdoc.conf`, run `nginx -t`, then `systemctl reload nginx`.
+5. Set the three environment values above and `systemctl restart markdoc-app.service`.
+6. Update the GitHub OAuth app (GitHub allows one callback URL, so the old origin stops signing in; it only redirects now anyway).
+7. Verify `https://markdoc.app/api/health` reports `ok`, `db`, `collab` true, that the old name answers `301` to `https://markdoc.app/...`, and that GitHub sign-in completes.
 
-Rollback before step 5: restore both backups, `nginx -t && systemctl reload nginx`, restart `markdoc-app.service`. After step 5, also set the OAuth callback back to the Azure name.
+Rollback before step 6: restore both backups, `nginx -t && systemctl reload nginx`, restart `markdoc-app.service`. If step 2 added the hash snippet, remove only that newly added file and reload after `nginx -t` succeeds. After step 6, also set the OAuth callback back to the Azure name.
+
+## Server-name hash bucket (nginx)
+
+nginx 1.24 on the Ubuntu 24.04 VM rejects the long Azure `server_name` in
+`infra/nginx-markdoc.conf` with the default bucket size of `64`. In nginx's
+error, `: 64` reports the current size, not the recommended setting; raise it
+to the next power of two, `128`, for this 47-character name. The
+repository ships
+[`infra/nginx-server-names-hash.conf`](../infra/nginx-server-names-hash.conf)
+for `/etc/nginx/conf.d/markdoc-server-names-hash.conf`. Ubuntu's packaged
+`nginx.conf` includes `conf.d/*.conf` inside `http {}`. Merging this file does
+not change the VM; the release script does not install or reload nginx.
+
+### Install on a new VM (a person)
+
+Before enabling the Markdoc site or running `nginx -t` against its long server
+name, inspect the effective configuration:
+
+```sh
+sudo nginx -T 2>&1 | grep -n -B 3 -A 3 'server_names_hash_bucket_size'
+```
+
+If a directive already exists, verify it is in the `http` context and is `128`
+or larger; `64` is insufficient for this name. Do not install a duplicate or
+overwrite an existing file. If none exists, copy the checked-in snippet to the VM as
+`/tmp/markdoc-server-names-hash.conf`, then install and validate it:
+
+```sh
+sudo test ! -e /etc/nginx/conf.d/markdoc-server-names-hash.conf
+sudo install -o root -g root -m 0644 /tmp/markdoc-server-names-hash.conf /etc/nginx/conf.d/markdoc-server-names-hash.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Do not reload if `nginx -t` fails. If the file was newly installed and the
+validation fails, remove that exact file, re-test, and investigate before
+continuing. To roll back a successful installation, remove the snippet only
+when it was absent before this procedure, then run `nginx -t` and reload only
+if the test passes.
 
 ## Request body size (nginx)
 

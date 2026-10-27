@@ -15,7 +15,7 @@
 FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --fetch-retries=5
 
 FROM node:22-alpine AS build
 WORKDIR /app
@@ -79,7 +79,7 @@ USER node
 # Runtime dependencies only. @electric-sql/pglite ships its WASM/data files for those explicit
 # rehearsals; ordinary production requires a nonblank DATABASE_URL. npm's cache
 # lands in /home/node/.npm; the clean empties it in the same layer.
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev --fetch-retries=5 && npm cache clean --force
 COPY --chown=node:node --from=build /app/.next ./.next
 COPY --chown=node:node --from=build /app/dist ./dist
 EXPOSE 3000

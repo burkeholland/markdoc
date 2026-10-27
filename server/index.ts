@@ -77,6 +77,61 @@ function setSecurityHeaders(req: IncomingMessage, res: ServerResponse) {
   if (arrivedOverHttps(req)) res.setHeader("Strict-Transport-Security", STRICT_TRANSPORT_SECURITY);
 }
 
+// `next dev` compiles the health route on its first request, which can be slow under startup load.
+const STARTUP_HEALTH_TIMEOUT_MS = dev ? 60_000 : 30_000;
+const STARTUP_HEALTH_RETRY_MS = 250;
+
+async function waitForStartupHealth(host: string, port: number, signal: AbortSignal): Promise<void> {
+  const urlHost = host.includes(":") && !host.startsWith("[") ? `[${host.replace(/%/g, "%25")}]` : host;
+  const url = `http://${urlHost}:${port}/api/health`;
+  const deadline = Date.now() + STARTUP_HEALTH_TIMEOUT_MS;
+  let lastResult = "no response";
+
+  while (Date.now() < deadline) {
+    signal.throwIfAborted();
+    const remaining = deadline - Date.now();
+    try {
+      const response = await fetch(url, {
+        headers: { connection: "close", "cache-control": "no-cache" },
+        signal: AbortSignal.any([signal, AbortSignal.timeout(remaining)]),
+      });
+      if (response.status === 200) {
+        const health: unknown = await response.json();
+        if (
+          typeof health === "object" && health !== null &&
+          "ok" in health && health.ok === true &&
+          "db" in health && health.db === true &&
+          "collab" in health && health.collab === true
+        ) {
+          return;
+        }
+        lastResult = "HTTP 200 without ok/db/collab true";
+      } else {
+        lastResult = `HTTP ${response.status}`;
+        await response.body?.cancel();
+      }
+    } catch (error: unknown) {
+      if (signal.aborted) signal.throwIfAborted();
+      lastResult = error instanceof Error ? `${error.name}: ${error.message}` : "request failed";
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, Math.min(STARTUP_HEALTH_RETRY_MS, Math.max(0, deadline - Date.now()))));
+  }
+
+  const message = `Startup health check did not pass within ${STARTUP_HEALTH_TIMEOUT_MS} ms (last result: ${lastResult}).`;
+  console.error(`> ${message}`);
+  throw new Error(message);
+}
+
+function startupHealthAddress(server: Server): { host: string; port: number } {
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Cannot determine the listening address for startup health check.");
+  }
+  const host = address.address === "0.0.0.0" ? "127.0.0.1" : address.address === "::" ? "::1" : address.address;
+  return { host, port: address.port };
+}
+
 // Where `next build` put the client assets (same rule as next.config.ts). Production serves the
 // precompressed `.br` siblings from here; `next dev` writes no `.br` files and the branch stays off.
 const staticRoot = path.resolve(process.cwd(), process.env.NEXT_DIST_DIR || ".next", "static");
@@ -376,6 +431,8 @@ async function main() {
     });
   } else {
     await initialListen;
+    const healthAddress = startupHealthAddress(server);
+    await waitForStartupHealth(healthAddress.host, healthAddress.port, shutdownOwner.signal);
     const shownHost = hostname ?? localUrls.canonicalHost;
     console.log(`> Markdoc ready on http://${shownHost}:${port} (${hostname ? "configured host" : "stable hostname"}; ${dev ? "development" : "production"})`);
     console.log(`> Collaboration WebSocket on ws://${shownHost}:${port}${COLLAB_PATH}`);

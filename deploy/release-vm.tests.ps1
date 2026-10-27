@@ -91,6 +91,7 @@ async function main() {
     if (mode === 'failed-after-miss') { status = 'Failed'; }
     console.log(JSON.stringify({
       runId: mode === 'wrong-identity' ? 'other' : 'build123', status,
+      runErrorMessage: status === 'Failed' ? 'npm error code ECONNRESET password=FAKE_BUILD_SECRET_2254 APP_SECRET=FAKE_APP_SECRET_2254 NPM_TOKEN=FAKE_NPM_TOKEN_2254 "private_key":"FAKE_JSON_SECRET_2254" https://registry.example.test/?token=FAKE_URL_SECRET_2254' : null,
       outputImages: [{ registry: 'markdocacrmnd542unepl56.azurecr.io', repository: 'markdoc', tag: env.MARKDOC_POLL_SHA,
         digest: mode === 'wrong-digest-after-miss' ? 'sha256:' + 'b'.repeat(64) : env.MARKDOC_POLL_DIGEST }]
     }));
@@ -576,8 +577,8 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     }
     if ($script:scenario -eq 'build-submit-failed') { Stop-VmRelease 'Build submission failed.' 32 }
     if ($script:scenario -eq 'build-submit-timeout') { Stop-VmRelease 'Submission acceptance unknown.' 124 }
-    if ($script:scenario -eq 'missing-run') { return '{}' }
-    return '{"runId":"build123"}'
+    if ($script:scenario -eq 'build-failed-direct') { return '{"runId":"build123"}' }
+    return '{}'
   }
   if ($commandKey -ceq 'acr task list-runs') {
     $script:reconcileCount++
@@ -586,7 +587,15 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     if ($script:scenario -eq 'reconcile-delayed' -and $script:reconcileCount -eq 1) { return '[]' }
     $run = @{
       runId = 'build123'; runType = 'QuickRun'; status = 'Queued'
+      createTime = [DateTimeOffset]::UtcNow.ToString('o'); runErrorMessage = $null
       outputImages = @(@{ registry = $script:registry; repository = 'markdoc'; tag = $script:submissionTag; digest = $null })
+    }
+    if ($script:scenario -eq 'reconcile-failed-unmatched') {
+      $run.status = 'Failed'
+      $run.runErrorMessage = 'npm error code ECONNRESET password=FAKE_BUILD_SECRET_2254 APP_SECRET=FAKE_APP_SECRET_2254 NPM_TOKEN=FAKE_NPM_TOKEN_2254 "private_key":"FAKE_JSON_SECRET_2254" https://registry.example.test/?token=FAKE_URL_SECRET_2254'
+      $run.outputImages = @()
+      $authScheme = 'Be' + 'arer'
+      $run.runErrorMessage += ' Authorization: Basic FAKE_BASIC_AUTH_2254 Authorization=' + $authScheme + ' FAKE_BEARER_AUTH_2254 "Authorization":"Basic FAKE_JSON_AUTH_2254"'
     }
     if ($script:scenario -eq 'reconcile-malformed-run') { $run.runId = 'not valid!' }
     if ($script:scenario -eq 'reconcile-ambiguous') {
@@ -597,12 +606,15 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
   if ($commandKey -ceq 'acr task show-run') {
     $script:pollCount++
     $status = 'Succeeded'
-    if ($script:scenario -in @('build-failed', 'report-write')) { $status = 'Failed' }
+    if ($script:scenario -in @('build-failed', 'build-failed-direct', 'report-write')) { $status = 'Failed' }
     if ($script:scenario -eq 'build-timeout') { $status = 'Timeout' }
     if ($script:scenario -eq 'build-unknown-status') { $status = 'Unexpected' }
     if ($script:scenario -eq 'pending-then-success' -and $script:pollCount -eq 1) { $status = 'Running' }
     $run = @{
       runId = 'build123'; status = $status
+      runErrorMessage = if ($status -in @('Failed', 'Error', 'Timeout', 'Canceled')) {
+        'npm error code ECONNRESET password=FAKE_BUILD_SECRET_2254 APP_SECRET=FAKE_APP_SECRET_2254 NPM_TOKEN=FAKE_NPM_TOKEN_2254 "private_key":"FAKE_JSON_SECRET_2254" https://registry.example.test/?token=FAKE_URL_SECRET_2254'
+      } else { $null }
       outputImages = @(@{ registry = $script:registry; repository = 'markdoc'; tag = $script:sha; digest = $script:digest })
     }
     if ($script:scenario -eq 'wrong-run') { $run.runId = 'other' }
@@ -706,7 +718,8 @@ $cases = @(
   'missing-sha', 'malformed-sha', 'short-sha', 'conflicting-sha', 'wrong-branch', 'detached', 'wrong-head', 'dirty', 'untracked',
   'account-failed', 'wrong-subscription', 'wrong-tenant', 'wrong-cloud', 'disabled-subscription',
   'wrong-registry', 'wrong-vm', 'old-origin', 'wrong-ip-association', 'archive-failed',
-  'build-submit-failed', 'build-submit-timeout', 'reconcile-missing', 'reconcile-ambiguous', 'reconcile-malformed-run',
+  'build-submit-failed', 'build-submit-timeout', 'build-failed-direct', 'reconcile-failed-unmatched',
+  'reconcile-missing', 'reconcile-ambiguous', 'reconcile-malformed-run',
   'build-failed', 'build-timeout', 'build-unknown-status', 'wrong-run',
   'ambiguous-digest', 'missing-digest', 'null-digest', 'malformed-digest', 'scalar-digest', 'tag-raced', 'changed-after-build',
   'vm-timeout', 'vm-native-failed', 'transport-failed', 'transport-only', 'missing-ready-marker', 'missing-local-health', 'image-space', 'wal-diagnostic',
@@ -749,9 +762,9 @@ $pollCases += @(
   @{ Name = 'poll-list-stage-reset'; Command = 'acr task list-runs'; Success = $true; Calls = 2; Misses = @(1, 1); Category = 'server_error'; Status = '503' },
   @{ Name = 'poll-list-bound'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 132; Misses = @(1); Category = 'server_error'; Status = '503'; ExitCode = 1; Reason = 'ACR submission acceptance is unknown after unique-tag reconciliation. Do not retry.' },
   @{ Name = 'poll-list-ambiguous'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'The unique ACR submission tag matched more than one build run.' },
-  @{ Name = 'poll-show-unknown-status'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'ACR build failed or returned an unknown status.' },
+  @{ Name = 'poll-show-unknown-status'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'ACR build returned an unknown status; run ID build123; status Unexpected; no VM command was sent.' },
   @{ Name = 'poll-show-wrong-identity'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'ACR returned a different run identity.' },
-  @{ Name = 'poll-show-failed-after-miss'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 2; Misses = @(1); Category = 'server_error'; Status = '503'; ExitCode = 1; Reason = 'ACR build failed or returned an unknown status.' },
+  @{ Name = 'poll-show-failed-after-miss'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 2; Misses = @(1); Category = 'server_error'; Status = '503'; ExitCode = 1; Reason = 'ACR image build failed; run ID build123; status Failed; no VM command was sent.' },
   @{ Name = 'poll-show-wrong-digest-after-miss'; Command = 'acr task show-run'; Stage = 'immutable image identity'; Calls = 2; Misses = @(1); Category = 'server_error'; Status = '503'; ExitCode = 1; Reason = 'The exact tag digest does not match this successful build run.' },
   @{ Name = 'poll-list-foreign-exception'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'Unexpected IOException; raw output withheld.' },
   @{ Name = 'poll-list-terminal-exception'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 124; Reason = 'Terminal poll failure.' },
@@ -926,11 +939,11 @@ try {
       ($digestCase -and $digestCase.Success -eq $true) -or ($pollCase -and $pollCase.Success -eq $true)
     $log = $script:messages -join "`n"
     try {
-    Assert-True ($streamText -notmatch 'FAKE_(DIGEST_SECRET_2211|POLL_SECRET_2221)|private\.example\.test|credential=|response body') "Fake secret escaped through a captured stream for $case."
+    Assert-True ($streamText -notmatch 'FAKE_(DIGEST_SECRET_2211|POLL_SECRET_2221|BUILD_SECRET_2254|APP_SECRET_2254|NPM_TOKEN_2254|JSON_SECRET_2254|URL_SECRET_2254)|private\.example\.test|registry\.example\.test|credential=|response body') "Fake secret escaped through a captured stream for $case."
     Assert-Equal $success ($code -eq 0) "Unexpected exit outcome for $case. Log: $log"
     $log = $script:messages -join "`n"
     Assert-Equal ($success -and -not $digestCase.Remaining) ($log -match 'Release complete:') "Completion reporting mismatch for $case."
-    Assert-True ($log -notmatch 'withheld response body|failed after marker|bad json|private-token') "Raw diagnostics escaped for $case."
+    Assert-True ($log -notmatch 'withheld response body|failed after marker|bad json|private-token|FAKE_(BUILD_SECRET_2254|APP_SECRET_2254|NPM_TOKEN_2254|JSON_SECRET_2254|URL_SECRET_2254)|registry\.example\.test') "Raw diagnostics escaped for $case."
     if ($case -eq 'retention-warning') {
       Assert-True ($log -match 'Release warning: old-image retention failed; the healthy application was not rolled back') 'Retention warning was not surfaced without failing release.'
     }
@@ -982,6 +995,22 @@ try {
       Assert-Equal 1 $code 'Synchronous failure reporting must preserve the original failure code.'
       Assert-True ($log -match '^Release failed/unverified at ACR build completion:' -or
         $log -match '(?m)^Release failed/unverified at ACR build completion:') 'Failure reporting must retain the fixed stage line.'
+    }
+    if ($case -in @('build-failed-direct', 'reconcile-failed-unmatched')) {
+      Assert-True ($streamText -notmatch 'FAKE_(BASIC_AUTH_2254|BEARER_AUTH_2254|JSON_AUTH_2254)') "Authorization credentials escaped through a captured stream for $case."
+      Assert-True ($log -notmatch 'FAKE_(BASIC_AUTH_2254|BEARER_AUTH_2254|JSON_AUTH_2254)') "Authorization credentials escaped into release diagnostics for $case."
+      if ($case -eq 'reconcile-failed-unmatched') {
+        Assert-Equal 3 ([regex]::Matches($log, 'Authorization=\[redacted\]')).Count 'Basic and Bearer credentials must be redacted from HTTP and JSON Authorization fields.'
+      }
+      Assert-True ($log.Contains('ACR image build failed; run ID build123; status Failed; no VM command was sent.')) "Failed ACR run identity and status were not surfaced for $case. Log: $log"
+      Assert-True ($log -match 'ACR error: npm error code ECONNRESET password=\[redacted\] APP_SECRET=\[redacted\] NPM_TOKEN=\[redacted\] private_key=\[redacted\] \[URL\]') "Safe ACR error message was not surfaced for $case. Log: $log"
+      Assert-True ($log.Contains('az acr task logs --registry markdocacrmnd542unepl56 --run-id build123 --resource-group markdoc-rg --subscription 332d0c98-694c-48a0-91f3-465de6ac30a5')) "Read-only ACR log command was not surfaced for $case. Log: $log"
+      Assert-Equal 0 $invocations.Count "Failed ACR run must not reach the VM for $case."
+      if ($case -eq 'build-failed-direct') {
+        Assert-Equal 0 @($script:calls | Where-Object { ($_.Arguments | Select-Object -First 3) -join ' ' -ceq 'acr task list-runs' }).Count 'A run ID from the build submission must skip reconciliation.'
+      } else {
+        Assert-Equal 1 @($script:calls | Where-Object { ($_.Arguments | Select-Object -First 3) -join ' ' -ceq 'acr task list-runs' }).Count 'An untagged terminal failure must be found in the first time-based reconciliation poll.'
+      }
     }
     $expectedNativeCodes = @{ 'account-failed' = 19; 'archive-failed' = 31; 'build-submit-failed' = 32; 'vm-native-failed' = 33; 'build-submit-timeout' = 124; 'vm-timeout' = 124 }
     if ($expectedNativeCodes.ContainsKey($case)) {
