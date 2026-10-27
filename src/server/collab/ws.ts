@@ -4,6 +4,7 @@ import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Hocuspocus } from "@hocuspocus/server";
 import type { CollabContext, CollabPreAuthentication } from "./hocuspocus";
+import { createFloodGuard, type FloodLimits } from "./flood-guard";
 import { rejectUnparseableUpgrade } from "../../../server/request-guards";
 
 export const COLLAB_PATH = "/collab";
@@ -52,6 +53,8 @@ export interface AttachOptions {
   preAuthenticationCloseGraceMs?: number;
   /** Test-only error sink; production reports sanitized operation labels to stderr. */
   preAuthenticationErrorReporter?: CollabPreAuthenticationErrorReporter;
+  /** Per-connection flood limits; defaults to `DEFAULT_FLOOD_LIMITS`. */
+  floodLimits?: Partial<FloodLimits>;
 }
 
 type UpgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
@@ -281,15 +284,19 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
     const context = {} as CollabContext;
     context.preAuthentication = deadline;
     const connection = hocuspocus.handleConnection(socket, request ?? toWebRequest(req), context);
+    const guard = createFloodGuard(socket, (bytes) => connection.handleMessage(bytes), options.floodLimits);
     socket.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
       const bytes = Array.isArray(data)
         ? new Uint8Array(Buffer.concat(data))
         : data instanceof ArrayBuffer
           ? new Uint8Array(data)
           : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      connection.handleMessage(bytes);
+      guard.receive(bytes);
     });
-    socket.on("close", (code: number, reason: Buffer) => connection.handleClose({ code, reason: reason.toString() }));
+    socket.on("close", (code: number, reason: Buffer) => {
+      guard.dispose();
+      connection.handleClose({ code, reason: reason.toString() });
+    });
     socket.on("error", (err: Error) => console.error("[collab] socket error", err));
   });
 
