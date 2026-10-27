@@ -10,6 +10,38 @@ import { rejectUnparseableUpgrade } from "../../../server/request-guards";
 export const COLLAB_PATH = "/collab";
 export const COLLAB_PRE_AUTHENTICATION_TIMEOUT_MS = 3_000;
 export const COLLAB_PRE_AUTHENTICATION_CLOSE_GRACE_MS = 500;
+/** 1012 "Service Restart": the provider reconnects, and the next server answers it. */
+export const COLLAB_SHUTDOWN_CLOSE = { code: 1012, reason: "Server restarting" } as const;
+export const COLLAB_SHUTDOWN_CLOSE_GRACE_MS = 1_000;
+
+/**
+ * Close every collaboration WebSocket still open at shutdown (#2355). Hocuspocus' closeConnections()
+ * only sends a protocol message and leaves the socket open, so server.close() would wait for it until
+ * the shutdown deadline. Sends a close frame first, then destroys what has not closed after the grace.
+ */
+export function closeCollabSockets(
+  clients: Iterable<WebSocket>,
+  graceMs = COLLAB_SHUTDOWN_CLOSE_GRACE_MS,
+): Promise<void> {
+  const open = [...clients].filter((socket) => socket.readyState !== WebSocket.CLOSED);
+  return Promise.all(open.map((socket) => new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      try { socket.terminate(); } catch { /* already gone */ }
+      resolve();
+    }, graceMs);
+    timer.unref?.();
+    socket.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    try {
+      if (socket.readyState === WebSocket.OPEN) socket.close(COLLAB_SHUTDOWN_CLOSE.code, COLLAB_SHUTDOWN_CLOSE.reason);
+      else if (socket.readyState === WebSocket.CONNECTING) socket.terminate();
+    } catch {
+      try { socket.terminate(); } catch { /* already gone */ }
+    }
+  }))).then(() => undefined);
+}
 const UNAUTHORIZED = { code: 4401, reason: "Unauthorized" } as const;
 type CollabPreAuthenticationErrorOperation = "close" | "terminate" | "abort";
 type CollabPreAuthenticationErrorReporter = (operation: CollabPreAuthenticationErrorOperation) => void;
@@ -263,7 +295,11 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
   const pendingAuthentication = new Set<CollabPreAuthenticationDeadline>();
   const wss = Object.assign(
     new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 }),
-    { getPendingAuthenticationCount: () => pendingAuthentication.size },
+    {
+      getPendingAuthenticationCount: () => pendingAuthentication.size,
+      /** Closes the established collaboration sockets; call after the documents have been stored. */
+      closeSockets: (graceMs?: number) => closeCollabSockets(wss.clients, graceMs),
+    },
   );
   let stopped = false;
 

@@ -171,6 +171,7 @@ type RuntimeResources = {
   appPreparation: Promise<void> | null;
   hocuspocus: ReturnType<typeof createCollabServer> | null;
   collabAttachment: AbortController | null;
+  collabSockets: ReturnType<typeof attachCollab> | null;
   databaseInitialization: Promise<unknown> | null;
   publishing: boolean;
 };
@@ -182,6 +183,7 @@ const runtime: RuntimeResources = {
   appPreparation: null,
   hocuspocus: null,
   collabAttachment: null,
+  collabSockets: null,
   databaseInitialization: null,
   publishing: false,
 };
@@ -224,7 +226,13 @@ const shutdownOwner = createShutdownOwner({
     if (runtime.publishing) await stopGistAutoUpdateWorker();
   },
   stopCollaboration: async () => {
-    if (runtime.hocuspocus) await shutdownCollab(runtime.hocuspocus);
+    // Store the documents first, then close the sockets that are left (#2355): until they close,
+    // server.close() in stopIntake waits for them and the database is never reached.
+    try {
+      if (runtime.hocuspocus) await shutdownCollab(runtime.hocuspocus);
+    } finally {
+      await runtime.collabSockets?.closeSockets();
+    }
   },
   closeDatabase: closeRuntimeDatabase,
   exit: (code) => process.exit(code),
@@ -352,7 +360,7 @@ async function main() {
   installOtherUpgradeListeners(server, { dev, next: app });
   protectCollabUpgrade();
   server.off("upgrade", rejectStartupUpgrade);
-  attachCollab(server, hocuspocus, { path: COLLAB_PATH, signal: collabShutdown.signal });
+  runtime.collabSockets = attachCollab(server, hocuspocus, { path: COLLAB_PATH, signal: collabShutdown.signal });
 
   const purgeTrash = () =>
     purgeTrashOlderThan(TRASH_RETENTION_DAYS)
