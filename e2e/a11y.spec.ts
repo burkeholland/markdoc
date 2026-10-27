@@ -93,7 +93,11 @@ const DISABLED_RULES = ["color-contrast"];
 
 const softMode = process.env.A11Y_SOFT === "1";
 
-async function scan(page: Page, state: string, { contrast = false, targetSize = false }: { contrast?: boolean; targetSize?: boolean } = {}) {
+async function scan(
+  page: Page,
+  state: string,
+  { contrast = false, targetSize = false, landmarks = false }: { contrast?: boolean; targetSize?: boolean; landmarks?: boolean } = {},
+) {
   const results = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .disableRules(contrast ? [] : DISABLED_RULES)
@@ -102,6 +106,8 @@ async function scan(page: Page, state: string, { contrast = false, targetSize = 
   // WCAG 2.2 target size (24×24 px, SC 2.5.8) is outside the 2.1 tag set and `withRules` replaces
   // `withTags`, so touch scans run it as a second pass (#116: "Show all starred" was 117×16 px).
   if (targetSize) violations.push(...(await new AxeBuilder({ page }).withRules(["target-size"]).analyze()).violations);
+  // Best-practice landmark rules (#2397): a page title heading and every control inside a landmark.
+  if (landmarks) violations.push(...(await new AxeBuilder({ page }).withRules(["page-has-heading-one", "region"]).analyze()).violations);
   const lines = violations.map(
     (v) =>
       `  ${v.id} [${v.impact ?? "n/a"}] ×${v.nodes.length} — ${v.help}\n` +
@@ -895,7 +901,7 @@ test.describe("axe: contrast", () => {
   test("dashboard light + dark (color-contrast enabled)", async ({ browser }) => {
     const { page, context } = await signIn(browser, "a11y-contrast-dash");
     await seedDashboard(page);
-    await scan(page, "dashboard (light)", { contrast: true });
+    await scan(page, "dashboard (light)", { contrast: true, landmarks: true });
 
     await setTheme(page, "dark");
     await expect(page.getByTestId("document-card").first()).toBeVisible();
@@ -910,7 +916,9 @@ test.describe("axe: contrast", () => {
     await expect(page.locator(".md-rich table")).toBeVisible();
     await ensureOutlineOpen(page);
     await ensureCommentsOpen(page);
-    await scan(page, "editor (light) split + outline + comments", { contrast: true });
+    await scan(page, "editor (light) split + outline + comments", { contrast: true, landmarks: true });
+    // The presence avatar initials (#2396) are part of this scan; assert one is on the page so it is covered.
+    await expect(page.getByTestId("presence").locator(".avatar").first()).toBeVisible();
 
     await setTheme(page, "dark");
     await expect(page.locator(".md-rich table")).toBeVisible();
@@ -1209,7 +1217,10 @@ test.describe("axe: phone (iPhone 13)", () => {
     expect(box, "show-all-starred bounding box").not.toBeNull();
     expect(cssPx(box!.height)).toBeGreaterThanOrEqual(44);
     expect(cssPx(box!.width)).toBeGreaterThanOrEqual(44);
-    await scan(page, "phone dashboard", { targetSize: true });
+    await scan(page, "phone dashboard", { targetSize: true, landmarks: true });
+    const select = page.getByTestId("select-document").first();
+    const selectBox = (await select.boundingBox())!;
+    expect(cssPx(selectBox.width), "selection checkbox ≥ 24 px (#2398)").toBeGreaterThanOrEqual(24);
 
     // Desktop keeps a ≥ 24 px target (WCAG 2.2 minimum) without the phone padding.
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -1228,7 +1239,16 @@ test.describe("axe: phone (iPhone 13)", () => {
     await expect(page.getByTestId("editor-shell")).toHaveAttribute("data-breakpoint", "phone");
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
     await expect(page.locator(".md-rich")).toBeVisible();
-    await scan(page, "phone editor");
+    // #2398: the icon-only Save button keeps a ≥ 44 px hit area on touch (pseudo-element padding).
+    const saveHit = await page.getByRole("button", { name: "Save document", exact: true }).evaluate((el) => {
+      const after = getComputedStyle(el, "::after");
+      return { w: parseFloat(after.width), h: parseFloat(after.height) };
+    });
+    expect(saveHit.w).toBeGreaterThanOrEqual(44);
+    expect(saveHit.h).toBeGreaterThanOrEqual(44);
+    // #2399: the clipped formatting strip fades its hidden edge.
+    await expect(page.getByTestId("toolbar")).toHaveAttribute("data-overflow", /end|both/);
+    await scan(page, "phone editor", { landmarks: true });
     await context.close();
   });
 

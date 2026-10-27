@@ -9,6 +9,7 @@ import {
   type FocusEvent,
   type KeyboardEvent,
   type MouseEvent,
+  type RefObject,
 } from "react";
 import {
   Bold,
@@ -175,6 +176,7 @@ export const Toolbar = memo(function Toolbar({
     for (const b of root.querySelectorAll<HTMLButtonElement>("button")) b.tabIndex = b === stop ? 0 : -1;
   }, [enabledButtons]);
   useLayoutEffect(syncTabStops);
+  useToolbarOverflow(rootRef);
 
   const onToolbarFocus = (e: FocusEvent<HTMLDivElement>) => {
     const btn = (e.target as HTMLElement).closest("button");
@@ -234,6 +236,8 @@ export const Toolbar = memo(function Toolbar({
   };
 
   return (
+    // A named region so landmark navigation reaches the toolbar (axe `region`, #2397); `contents` keeps the layout.
+    <section aria-label="Formatting toolbar" className="contents">
     <div
       ref={rootRef}
       className={TOOLBAR_BOX}
@@ -375,5 +379,32 @@ export const Toolbar = memo(function Toolbar({
       )}
       {menuHold.shield}
     </div>
+    </section>
   );
 });
+
+/**
+ * Marks which edges of a horizontally scrolling toolbar hide buttons (`data-overflow="start|end|both"`),
+ * so the CSS fades only those edges and phones see there is more to scroll to (#2399).
+ */
+export function useToolbarOverflow(ref: RefObject<HTMLElement | null>) {
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const update = () => {
+      const start = el.scrollLeft > 1;
+      const end = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+      const value = start && end ? "both" : start ? "start" : end ? "end" : null;
+      if (value) el.dataset.overflow = value;
+      else delete el.dataset.overflow;
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+    ro?.observe(el);
+    return () => {
+      el.removeEventListener("scroll", update);
+      ro?.disconnect();
+    };
+  }, [ref]);
+}

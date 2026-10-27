@@ -24,15 +24,16 @@ export function Avatar({
   if (color) style.boxShadow = `0 0 0 2px var(--color-surface), 0 0 0 4px ${color}`;
   return (
     <span className={cn("avatar", className)} style={style} title={title ?? name}>
-      <AvatarContent key={src} name={name} src={src} color={color} size={size} />
+      <AvatarContent key={src} name={name} src={src} size={size} />
     </span>
   );
 }
 
-function AvatarContent({ name, src, color, size }: {
+// Initials use the theme ink (not the identity color, which shows in the ring): presence colors like
+// orange-600 on surface-3 fall to ~3:1, below WCAG AA (#2396).
+function AvatarContent({ name, src, size }: {
   name: string;
   src?: string | null;
-  color?: string;
   size: number;
 }) {
   const [failed, setFailed] = React.useState(false);
@@ -40,7 +41,7 @@ function AvatarContent({ name, src, color, size }: {
     // eslint-disable-next-line @next/next/no-img-element
     <img src={src} alt={name} width={size} height={size} className="h-full w-full object-cover" onError={() => setFailed(true)} referrerPolicy="no-referrer" />
   ) : (
-    <span style={color ? { color } : undefined}>{initials(name)}</span>
+    <span>{initials(name)}</span>
   );
 }
 
