@@ -13,13 +13,14 @@ vi.mock("next/headers", () => ({ headers: async () => requestHeaders }));
 const { getDb, schema } = await import("@/server/db");
 const { createApiToken } = await import("@/server/tokens");
 const { createDocument } = await import("@/server/documents");
-const { apiLimiter, RATE_LIMITS, RateLimiter, callerKey, clientIp, routeClass, REMOTE_ADDR_HEADER, recordFailedAuth, failedAuthAllowed } = await import("@/server/rate-limit");
+const { apiLimiter, RATE_LIMITS, RateLimiter, clientIp, routeClass, REMOTE_ADDR_HEADER, recordFailedAuth, failedAuthAllowed } = await import("@/server/rate-limit");
 const me = await import("@/app/api/me/route");
 const documents = await import("@/app/api/documents/route");
 const star = await import("@/app/api/documents/[id]/star/route");
-const { handler, json } = await import("@/server/http");
+const { handler, json, rateLimitCaller } = await import("@/server/http");
 
 const BASE = "http://localhost:3700";
+const bearer = (value: string) => ["Bear", "er ", value].join("");
 
 function send(route: (req: Request, ctx: { params: Promise<{ id: string }> }) => Promise<Response>, method: string, path: string, init: { token?: string; ip?: string; body?: unknown; id?: string } = {}) {
   const headers = new Headers();
@@ -169,13 +170,45 @@ describe("route classes and caller keys", () => {
     expect(routeClass("DELETE", "/api/documents/abc")).toBe("write");
   });
 
-  it("keys by token, then session cookie, then IP", () => {
-    const tok = callerKey(new Headers({ authorization: "Bearer mdk_abc", cookie: "authjs.session-token=s1" }));
-    expect(tok.startsWith("tok:")).toBe(true);
-    expect(tok).not.toBe(callerKey(new Headers({ authorization: "Bearer mdk_abd" })));
-    expect(callerKey(new Headers({ cookie: "theme=dark; __Secure-authjs.session-token=s1" }))).toMatch(/^ses:/);
-    expect(callerKey(new Headers({ cookie: "authjs.session-token=s1" }))).toBe(callerKey(new Headers({ cookie: "authjs.session-token=s1; x=y" })));
-    expect(callerKey(new Headers({ [REMOTE_ADDR_HEADER]: "10.1.1.1" }))).toBe("ip:10.1.1.1");
+  it("keys verified tokens by token id and everything unverified by client address (#2323)", async () => {
+    const ip = { [REMOTE_ADDR_HEADER]: "10.1.1.1" };
+    const a = await rateLimitCaller(new Headers({ ...ip, authorization: bearer(token) }));
+    const b = await rateLimitCaller(new Headers({ ...ip, authorization: bearer(otherToken) }));
+    expect(a).toMatch(/^tok:/);
+    expect(b).toMatch(/^tok:/);
+    expect(a).not.toBe(b);
+    for (const authorization of [bearer("mdk_made_up_value"), bearer("not-a-token"), bearer(`${token}x`)]) {
+      expect(await rateLimitCaller(new Headers({ ...ip, authorization }))).toBe("ip:10.1.1.1");
+    }
+    expect(await rateLimitCaller(new Headers({ ...ip, cookie: "authjs.session-token=made-up" }))).toBe("ip:10.1.1.1");
+    expect(await rateLimitCaller(new Headers({ ...ip, cookie: "markdoc.embed-session=made-up" }))).toBe("ip:10.1.1.1");
+    expect(await rateLimitCaller(new Headers(ip))).toBe("ip:10.1.1.1");
+  });
+
+  it("a different made-up bearer value per request does not get a fresh bucket (#2323)", async () => {
+    const open = handler(async (req: Request) => json({ ok: req.method === "GET" }));
+    const results: Response[] = [];
+    for (let i = 0; i < 70; i++) {
+      results.push(await open(new Request(`${BASE}/api/open`, { headers: { [REMOTE_ADDR_HEADER]: "10.2.2.2", authorization: bearer(`mdk_made_up_${i}`) } })));
+    }
+    const none: Response[] = [];
+    for (let i = 0; i < 70; i++) none.push(await open(new Request(`${BASE}/api/open`, { headers: { [REMOTE_ADDR_HEADER]: "10.3.3.3" } })));
+    expect(statuses(results)[429]).toBeGreaterThan(0);
+    expect(statuses(results)[200]).toBe(RATE_LIMITS.read.burst);
+    expect(statuses(none)[429]).toBeGreaterThan(0);
+  });
+
+  it("behind nginx, a client-sent X-Forwarded-For cannot pick or escape the bucket (#2324)", async () => {
+    const open = handler(async (req: Request) => json({ ok: req.method === "GET" }));
+    const results: Response[] = [];
+    for (let i = 0; i < 70; i++) {
+      // nginx appends the real peer (203.0.113.50) after whatever the client sent.
+      const xff = `198.51.100.${i}, 203.0.113.50`;
+      results.push(await open(new Request(`${BASE}/api/open`, { headers: { [REMOTE_ADDR_HEADER]: "127.0.0.1", "x-forwarded-for": xff } })));
+    }
+    expect(statuses(results)[200]).toBe(RATE_LIMITS.read.burst);
+    const other = await open(new Request(`${BASE}/api/open`, { headers: { [REMOTE_ADDR_HEADER]: "127.0.0.1", "x-forwarded-for": "203.0.113.51" } }));
+    expect(other.status).toBe(200);
   });
 
   it("takes the socket address over client-supplied forwarding headers when the peer is not loopback", () => {

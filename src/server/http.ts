@@ -5,7 +5,7 @@ import { getDocumentAccess, type AccessOptions, type DocumentAccess, type Sessio
 import { resolveApiToken, resolveApiTokenById, looksLikeApiToken, scopeSatisfies } from "@/server/tokens";
 import type { Role, TokenScope } from "@/server/db/schema";
 import { UnrenderableDocumentError } from "@/editor/markdown/renderable";
-import { failedAuthAllowed, rateLimitingEnabled, recordFailedAuth, takeApiRequest, withRateLimitHeaders, type TakeResult } from "@/server/rate-limit";
+import { failedAuthAllowed, ipKey, rateLimitingEnabled, recordFailedAuth, takeApiRequest, verifiedKey, withRateLimitHeaders, type TakeResult } from "@/server/rate-limit";
 import { decodeEmbedSession } from "@/server/session-cookie";
 import { mcpPublicOrigin } from "@/server/mcp-origin";
 
@@ -232,10 +232,37 @@ export function json(data: unknown, init?: ResponseInit) {
 export function handler<T extends unknown[]>(fn: (...args: T) => Promise<Response>) {
   return async (...args: T): Promise<Response> => {
     const req = args[0] instanceof Request ? args[0] : null;
-    const budget = req && rateLimitingEnabled() ? takeApiRequest(req) : null;
+    const budget = req && rateLimitingEnabled() ? takeApiRequest(req, await rateLimitCaller(req.headers)) : null;
     const res = await run(fn, args, budget);
     return budget ? withRateLimitHeaders(res, budget) : res;
   };
+}
+
+/**
+ * Who a request is counted against, decided only from VERIFIED credentials (#2323), in the same
+ * order as `currentUser()`: a bearer token that resolves (per token id), a valid session (per user),
+ * a signed embed cookie (per token id). Anything unverified — a made-up bearer, a forged cookie —
+ * is counted by client address, so inventing credentials never earns a fresh bucket. A wrong bearer
+ * is not recorded as a failed attempt here; `resolveBearer` does that when the route authenticates.
+ */
+export async function rateLimitCaller(h: Headers): Promise<string> {
+  try {
+    const authorization = h.get("authorization");
+    if (authorization?.toLowerCase().startsWith("bearer ")) {
+      const token = authorization.slice(7).trim();
+      if (looksLikeApiToken(token)) {
+        const actor = failedAuthAllowed(h).ok ? await resolveApiToken(token) : null;
+        return actor ? verifiedKey("tok", actor.tokenId) : ipKey(h);
+      }
+    }
+    const session = await auth();
+    if (session?.user?.id) return verifiedKey("usr", session.user.id);
+    const embed = await decodeEmbedSession(h.get("cookie"));
+    if (embed) return verifiedKey("tok", embed.tokenId);
+  } catch {
+    // Verification failed (e.g. no request scope): count by address.
+  }
+  return ipKey(h);
 }
 
 async function run<T extends unknown[]>(fn: (...args: T) => Promise<Response>, args: T, budget: TakeResult | null): Promise<Response> {
