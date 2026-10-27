@@ -1,4 +1,5 @@
-import { handler, json, requireUser } from "@/server/http";
+import { handler, json, readJson, requireUser, HttpError } from "@/server/http";
+import { deleteAccount, isDemoAccount, requireBrowserSession } from "@/server/account";
 import { activeWebhooksFor, startWebhookDispatcher } from "@/server/webhooks";
 import { agentMentionSlug } from "@/editor/collab/mentions";
 import { isAgentMentionUnique } from "@/server/tokens";
@@ -27,4 +28,22 @@ export const GET = handler(async () => {
     collaboratorsMayAsk: user.agent ? (user.collaboratorsMayAsk ?? false) : null,
     webhooks,
   });
+});
+
+function parseConfirmation(data: unknown): string {
+  const confirm = data && typeof data === "object" ? (data as { confirm?: unknown }).confirm : undefined;
+  if (typeof confirm !== "string") throw new HttpError(400, "Type your login to confirm");
+  return confirm.trim();
+}
+
+/** Delete the signed-in account and everything it owns. Body: `{ "confirm": "<login>" }`. */
+export const DELETE = handler(async (req: Request) => {
+  const user = await requireUser();
+  requireBrowserSession(user, "delete an account");
+  const confirm = await readJson(req, parseConfirmation);
+  const expected = user.login ?? "";
+  if (!expected || confirm.toLowerCase() !== expected.toLowerCase()) throw new HttpError(400, "Confirmation does not match your login");
+  if (isDemoAccount(user.login)) throw new HttpError(403, "The shared demo account cannot be deleted");
+  await deleteAccount({ id: user.id, login: user.login });
+  return json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
 });

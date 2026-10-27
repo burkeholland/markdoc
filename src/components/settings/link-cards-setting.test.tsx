@@ -18,7 +18,7 @@ describe("the Settings row for link cards (#2317)", () => {
     expect(toggle.tagName).toBe("BUTTON");
     expect(toggle.getAttribute("type")).toBe("button");
     expect(toggle.getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByRole("heading", { level: 2, name: "Turn links to known sites into cards" })).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 3, name: "Turn links to known sites into cards" })).toBeTruthy();
     const description = document.getElementById(toggle.getAttribute("aria-describedby")!)!;
     expect(description.textContent).toBe(
       'A link to YouTube or X that you paste on an empty line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and the toolbar button "Video or post from a link" can still add one. The choice is saved in this browser.',
