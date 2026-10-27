@@ -91,7 +91,7 @@ describe.each([false, true])("Avatar (StrictMode=%s)", (strict) => {
     expect(screen.queryAllByRole("img")).toHaveLength(0);
     view.rerender(<Avatar name="Grace Hopper" src={SOURCE_A} color="#123456" size={48} title="Owner" className="owner-avatar" />);
     expect(screen.queryAllByRole("img")).toHaveLength(0);
-    expect(screen.getByText("GH")).toHaveStyle({ color: "#123456" });
+    expect(screen.getByText("GH").style.color).toBe(""); // #2396: identity color stays on the ring
 
     view.rerender(<Avatar name="Grace Hopper" src={SOURCE_B} color="#123456" size={48} title="Owner" className="owner-avatar" />);
     const imageB = screen.getByRole("img", { name: "Grace Hopper" });
@@ -106,7 +106,7 @@ describe.each([false, true])("Avatar (StrictMode=%s)", (strict) => {
     expect(screen.getAllByRole("img")).toEqual([imageB]);
     fireEvent.error(imageB);
     expect(screen.queryAllByRole("img")).toHaveLength(0);
-    expect(screen.getByText("GH")).toHaveStyle({ color: "#123456" });
+    expect(screen.getByText("GH").style.color).toBe(""); // #2396: identity color stays on the ring
     expect(outer).toHaveAttribute("title", "Owner");
     expect(outer).toHaveAttribute("class", "avatar owner-avatar");
     expect(outer).toHaveStyle({

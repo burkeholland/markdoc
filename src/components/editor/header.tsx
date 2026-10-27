@@ -154,7 +154,7 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
     >
       <button
         type="button"
-        className="inline-flex items-center gap-1.5"
+        className="tap-target relative inline-flex min-h-6 min-w-6 items-center justify-center gap-1.5"
         disabled={!canEdit || manualPending}
         aria-busy={manualPending || undefined}
         aria-label="Save document"

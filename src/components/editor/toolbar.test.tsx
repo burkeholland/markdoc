@@ -83,6 +83,34 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("Toolbar landmark and overflow (#2397, #2399)", () => {
+  it("sits inside a named region so landmark navigation reaches it", () => {
+    setup();
+    const region = screen.getByRole("region", { name: "Formatting toolbar" });
+    expect(region).toContainElement(screen.getByRole("toolbar", { name: "Formatting" }));
+  });
+
+  it("marks hidden edges with data-overflow as the strip scrolls", () => {
+    setup();
+    const toolbar = screen.getByTestId("toolbar");
+    Object.defineProperty(toolbar, "clientWidth", { configurable: true, value: 300 });
+    Object.defineProperty(toolbar, "scrollWidth", { configurable: true, value: 600 });
+    toolbar.scrollLeft = 0;
+    fireEvent.scroll(toolbar);
+    expect(toolbar.dataset.overflow).toBe("end");
+    toolbar.scrollLeft = 100;
+    fireEvent.scroll(toolbar);
+    expect(toolbar.dataset.overflow).toBe("both");
+    toolbar.scrollLeft = 300;
+    fireEvent.scroll(toolbar);
+    expect(toolbar.dataset.overflow).toBe("start");
+    Object.defineProperty(toolbar, "scrollWidth", { configurable: true, value: 300 });
+    toolbar.scrollLeft = 0;
+    fireEvent.scroll(toolbar);
+    expect(toolbar.dataset.overflow).toBeUndefined();
+  });
+});
+
 describe("Toolbar actions", () => {
   it.each([
     ["Bold", (a: ReturnType<typeof setup>) => expect(a.actions.toggleMark).toHaveBeenCalledExactlyOnceWith("strong")],

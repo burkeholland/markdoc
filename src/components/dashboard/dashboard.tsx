@@ -5858,6 +5858,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       {fileImport.input}
       <ImportDialog open={fileImport.open} onOpenChange={fileImport.setOpen} items={fileImport.items} ignored={fileImport.ignored} />
       <main className="min-h-screen bg-surface-2">
+        <h1 className="sr-only">Documents</h1>
         <header className="app-header sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
           <div className="safe-x mx-auto flex h-16 max-w-6xl items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
             <Link href="/" className="flex items-center gap-2.5" aria-label="Markdoc — all documents">
@@ -6232,15 +6233,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                           read its state. Shown once anything is selected, on hover, or on focus. */}
                       <label
                         className={cn(
-                          "absolute bottom-3 right-10 inline-flex h-6 w-6 items-center justify-center rounded-md border border-line bg-surface/95 transition",
+                          "tap-target absolute bottom-3 right-10 inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-md transition",
                           "focus-within:opacity-100 group-hover:opacity-100",
-                          selectedIds.has(d.id) ? "border-accent opacity-100" : "opacity-0",
+                          selectedIds.has(d.id) ? "opacity-100" : "opacity-0",
                         )}
                       >
                         <span className="sr-only">Select {d.title}</span>
                         <input
                           type="checkbox"
-                          className="h-3.5 w-3.5 accent-[var(--accent)]"
+                          className="m-0 h-6 w-6 cursor-pointer accent-[var(--accent)]"
                           checked={selectedIds.has(d.id)}
                           onChange={() => toggleSelected(d.id)}
                           data-testid="select-document"

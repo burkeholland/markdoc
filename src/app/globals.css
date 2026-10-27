@@ -1463,15 +1463,45 @@ body {
   padding-right: max(var(--safe-pad, 0.75rem), env(safe-area-inset-right, 0px));
 }
 
-/* Horizontal toolbar strip on phones: no wrap, no scrollbar, faded edges hint at more items. */
+/* Grows a small control's hit area without changing its look: ≥24 px (WCAG 2.5.8), 44 px on touch (#2398).
+   The control must be positioned (`relative`/`absolute`); this rule leaves `position` alone so utilities win. */
+.tap-target::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: max(100%, 24px);
+  height: max(100%, 24px);
+  transform: translate(-50%, -50%);
+}
+@media (pointer: coarse) {
+  .tap-target::after {
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+  }
+}
+
+/* Horizontal toolbar strip on phones: no wrap, no scrollbar. `useToolbarOverflow` sets data-overflow on
+   the edges that hide buttons; those edges fade so the strip reads as scrollable (#2399). */
 @media (max-width: 767.98px) {
   .toolbar-scroll {
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
-    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
-    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    scroll-padding-inline: 32px;
+  }
+  .toolbar-scroll[data-overflow="end"] {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+  }
+  .toolbar-scroll[data-overflow="start"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 40px);
+    mask-image: linear-gradient(to right, transparent, #000 40px);
+  }
+  .toolbar-scroll[data-overflow="both"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
   }
   .toolbar-scroll::-webkit-scrollbar {
     display: none;
