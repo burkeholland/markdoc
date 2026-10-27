@@ -1,7 +1,7 @@
 "use client";
 
 import { useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { AtSign, Bell, Bot, CheckCheck, CircleCheck, ClipboardCheck, Reply, RotateCcw, ThumbsDown, ThumbsUp, UserPlus, WebhookOff } from "lucide-react";
+import { AtSign, Bell, Bot, CheckCheck, KeyRound, CircleCheck, ClipboardCheck, Reply, RotateCcw, ThumbsDown, ThumbsUp, UserPlus, WebhookOff } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { RelativeTime } from "@/components/ui/relative-time";
 import type { NotificationDto } from "@/lib/api";
@@ -26,6 +26,7 @@ const ICONS: Record<NotificationKind, React.ComponentType<{ size?: number; class
   "suggestion.accepted": CheckCheck,
   review: ClipboardCheck,
   share: UserPlus,
+  "access.request": KeyRound,
   "request.done": Bot,
   "webhook.disabled": WebhookOff,
 };

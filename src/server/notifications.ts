@@ -170,7 +170,7 @@ export interface NotificationItem {
   readAt: Date | null;
 }
 
-export const NOTIFICATION_KINDS: NotificationKind[] = ["mention", "reply", "resolve", "reopen", "suggestion.accept", "suggestion.reject", "suggestion.accepted", "review", "share", "request.done", "webhook.disabled"];
+export const NOTIFICATION_KINDS: NotificationKind[] = ["mention", "reply", "resolve", "reopen", "suggestion.accept", "suggestion.reject", "suggestion.accepted", "review", "share", "access.request", "request.done", "webhook.disabled"];
 
 /** Wire shape: dates as ISO strings. */
 export function toNotificationDto(n: NotificationItem) {
@@ -378,6 +378,24 @@ export async function notifySuggestionDecision(docId: string, suggestion: Pick<S
 /** `share`: the person a document was just shared with. */
 export async function notifyShare(docId: string, login: string, role: string, actor: Actor): Promise<boolean> {
   return notify({ userLogin: login, documentId: docId, kind: "share", actorLogin: actor.login, actorName: actor.name, refId: `${docId}:${login.toLowerCase()}`, snippet: role });
+}
+
+/**
+ * `access.request`: the owner of a document someone without access asked to join. Silently a no-op
+ * (false) when the document is missing or trashed, or the requester has no login, so callers can answer
+ * identically either way and never reveal whether the document exists. Idempotent per requester.
+ */
+export async function notifyAccessRequest(docId: string, actor: { login?: string | null; name?: string | null }): Promise<boolean> {
+  if (!actor.login) return false;
+  const db = await getDb();
+  const [row] = await db
+    .select({ ownerLogin: schema.users.login })
+    .from(schema.documents)
+    .innerJoin(schema.users, eq(schema.users.id, schema.documents.ownerId))
+    .where(and(eq(schema.documents.id, docId), isNull(schema.documents.deletedAt)))
+    .limit(1);
+  if (!row?.ownerLogin) return false;
+  return notify({ userLogin: row.ownerLogin, documentId: docId, kind: "access.request", actorLogin: actor.login, actorName: actor.name, refId: `${docId}:${actor.login.toLowerCase()}` });
 }
 
 /** `suggestion.accepted`: the author of a comment or reply whose suggestion was applied, unless they did it themselves. */

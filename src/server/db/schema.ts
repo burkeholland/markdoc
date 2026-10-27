@@ -328,7 +328,7 @@ export const assets = pgTable(
 export type Asset = typeof assets.$inferSelect;
 export type ApiToken = typeof apiTokens.$inferSelect;
 
-export type NotificationKind = "mention" | "reply" | "resolve" | "reopen" | "suggestion.accept" | "suggestion.reject" | "suggestion.accepted" | "review" | "share" | "request.done" | "webhook.disabled";
+export type NotificationKind = "mention" | "reply" | "resolve" | "reopen" | "suggestion.accept" | "suggestion.reject" | "suggestion.accepted" | "review" | "share" | "access.request" | "request.done" | "webhook.disabled";
 
 /**
  * Per-user notifications: @mentions, replies to and resolutions of threads they took part in,

@@ -255,7 +255,7 @@ export function NotificationsStrip() {
             >
               <span className="text-ink-2">
                 <span className="font-medium text-ink">{actorLabel(notification)}</span> {sentence(notification)}
-                {notification.kind !== "share" && (
+                {notification.kind !== "share" && notification.kind !== "access.request" && (
                   <>
                     {" "}
                     in{" "}
@@ -266,7 +266,7 @@ export function NotificationsStrip() {
                 )}
               </span>
               <RelativeTime date={notification.createdAt} className="ml-2 text-xs text-ink-4" />
-              {notification.snippet && notification.kind !== "share" && <span className="mt-0.5 block truncate text-ink-3" title={notification.snippet}>{notification.snippet}</span>}
+              {notification.snippet && notification.kind !== "share" && notification.kind !== "access.request" && <span className="mt-0.5 block truncate text-ink-3" title={notification.snippet}>{notification.snippet}</span>}
             </button>
             <button
               type="button"
