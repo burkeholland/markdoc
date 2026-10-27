@@ -5788,6 +5788,32 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const selectedFolderIsEmpty =
     typeof folderSelection === "string" &&
     folders.folders.some((folder) => folder.id === folderSelection && folder.documentCount === 0);
+  const selectedFolderFilterEmptyState = (() => {
+    if (folderSelection === null || filter === "all" || filter === "trash") return null;
+    if (folderSelection === TOP_LEVEL && filter === "mine") {
+      return {
+        title: "No unfiled documents owned by you",
+        description: "Choose All documents to see your filed documents.",
+      };
+    }
+    if (folderSelection === TOP_LEVEL && filter === "shared") return null;
+    if (folderSelection === TOP_LEVEL) {
+      return {
+        title: "No matching unfiled documents",
+        description: "Choose All documents or another folder to see more.",
+      };
+    }
+    if (filter === "shared") {
+      return {
+        title: "Shared documents aren't filed in folders",
+        description: "Choose All documents to see documents shared with you.",
+      };
+    }
+    return {
+      title: "No matching documents in this folder",
+      description: "Choose All documents or another folder to see more.",
+    };
+  })();
   const emptyStateTitle =
     pending
       ? `Searching for "${trimmed}"…`
@@ -5797,15 +5823,17 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           ? `No matches for "${trimmed}"`
           : selectedFolderIsEmpty
             ? "This folder is empty"
-            : filter === "shared"
-              ? "Nothing has been shared with you yet"
-              : filter === "starred"
-                ? "No starred documents"
-                : filter === "mine"
-                  ? "No documents owned by you yet"
-                  : folderSelection === TOP_LEVEL
-                    ? "No unfiled documents"
-                    : "No documents to show";
+            : selectedFolderFilterEmptyState
+              ? selectedFolderFilterEmptyState.title
+              : filter === "shared"
+                ? "Nothing has been shared with you yet"
+                : filter === "starred"
+                  ? "No starred documents"
+                  : filter === "mine"
+                    ? "No documents owned by you yet"
+                    : folderSelection === TOP_LEVEL
+                      ? "No unfiled documents"
+                      : "No documents to show";
   const emptyStateDescription =
     pending
       ? "Looking through titles and content."
@@ -5815,15 +5843,17 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
           ? "Try a different search."
           : selectedFolderIsEmpty
             ? "Create a document above, then move it here from its card menu, or drag an existing card onto this folder."
-            : filter === "shared"
-              ? "Documents shared with you will appear here."
-              : filter === "starred"
-                ? "Star a document from its card or editor header to keep it here."
-                : filter === "mine"
-                  ? "Documents you own will appear here."
-                  : folderSelection === TOP_LEVEL
-                    ? "Move documents here from a card menu, or choose All documents to see everything."
-                    : "Choose another filter to see more documents.";
+            : selectedFolderFilterEmptyState
+              ? selectedFolderFilterEmptyState.description
+              : filter === "shared"
+                ? "Documents shared with you will appear here."
+                : filter === "starred"
+                  ? "Star a document from its card or editor header to keep it here."
+                  : filter === "mine"
+                    ? "Documents you own will appear here."
+                    : folderSelection === TOP_LEVEL
+                      ? "Move documents here from a card menu, or choose All documents to see everything."
+                      : "Choose another filter to see more documents.";
   const welcomeTemplate = getTemplate(WELCOME_TEMPLATE_ID);
   // The factory stores these callbacks for committed event delivery; it never reads a ref or invokes a callback during render.
   // eslint-disable-next-line react-hooks/refs

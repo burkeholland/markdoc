@@ -561,7 +561,12 @@ test.describe("production build", () => {
 
     test("Sign in with GitHub in the Open from GitHub dialog starts the GitHub sign-in", async ({ page }) => {
       await signInFresh(page, "prod-github");
+      await expect(page.getByTestId("new-document")).toBeVisible();
       const card = page.getByTestId("open-github");
+      test.skip(
+        (await card.count()) === 0,
+        "this server has no GitHub OAuth app (AUTH_GITHUB_ID / AUTH_GITHUB_SECRET)",
+      );
       await expect(card).toBeVisible();
       test.skip(await card.isDisabled(), "this server has no GitHub OAuth app (AUTH_GITHUB_ID / AUTH_GITHUB_SECRET)");
 

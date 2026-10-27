@@ -3322,6 +3322,72 @@ describe("dashboard polish", () => {
     expect(emptyState).not.toHaveTextContent("No documents yet");
   });
 
+  it("keeps shared and starred empty states scoped to the selected folder", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes", 1)] });
+    const filed = { ...doc("filed", "Filed"), folderId: "f1" };
+    const shared = {
+      ...doc("shared", "Shared with me"),
+      ownerId: "other",
+      ownerName: "Someone else",
+      ownerLogin: "other",
+      role: "editor" as const,
+    };
+    const starred = { ...doc("starred", "Starred elsewhere"), starred: true };
+    renderDashboard(undefined, [filed, shared, starred]);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByTestId("folder-chip"));
+    fireEvent.click(screen.getByTestId("filter-shared"));
+
+    let emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("Shared documents aren't filed in folders");
+    expect(emptyState).toHaveTextContent("Choose All documents to see documents shared with you.");
+    expect(emptyState).not.toHaveTextContent("Nothing has been shared with you yet");
+
+    fireEvent.click(screen.getByTestId("filter-starred"));
+
+    emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("No matching documents in this folder");
+    expect(emptyState).toHaveTextContent("Choose All documents or another folder to see more.");
+    expect(emptyState).not.toHaveTextContent("No starred documents");
+  });
+
+  it("uses the shared empty state when Not in a folder is selected", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes", 1)] });
+    const filed = { ...doc("filed", "Filed"), folderId: "f1" };
+    renderDashboard(undefined, [filed]);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByTestId("folder-unfiled"));
+    fireEvent.click(screen.getByTestId("filter-shared"));
+
+    const emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("Nothing has been shared with you yet");
+    expect(emptyState).toHaveTextContent("Documents shared with you will appear here.");
+    expect(emptyState).not.toHaveTextContent("No matching unfiled documents");
+  });
+
+  it("does not claim there are no owned documents when the unfiled selection has none", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes", 1)] });
+    const filed = { ...doc("filed", "Filed"), folderId: "f1" };
+    renderDashboard(undefined, [filed]);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByTestId("folder-unfiled"));
+    fireEvent.click(screen.getByTestId("filter-mine"));
+
+    const emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent("No unfiled documents owned by you");
+    expect(emptyState).toHaveTextContent("Choose All documents to see your filed documents.");
+    expect(emptyState).not.toHaveTextContent("No documents owned by you yet");
+  });
+
   it("uses device-neutral guidance for an empty Starred filter", () => {
     renderDashboard(undefined, [doc("unstarred", "Unstarred document")]);
 
