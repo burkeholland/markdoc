@@ -96,6 +96,69 @@ function Get-ReleaseSafeAzFailure([Exception]$Failure) {
   return @{ Category = $category; HttpStatus = $status }
 }
 
+function Test-ReleaseAcrFailureStatus([object]$Status) {
+  return ($Status -is [string] -and $Status -cin @('Failed', 'Error', 'Timeout', 'Canceled'))
+}
+
+function Test-ReleaseAcrRunCreatedAfter([object]$Run, [DateTimeOffset]$SubmittedAt) {
+  if ($Run -isnot [System.Collections.IDictionary] -or $Run['runType'] -cne 'QuickRun') {
+    return $false
+  }
+  $rawCreateTime = $Run['createTime']
+  $createdAt = [DateTimeOffset]::MinValue
+  if ($rawCreateTime -is [DateTimeOffset]) {
+    $createdAt = $rawCreateTime
+  } elseif ($rawCreateTime -is [DateTime]) {
+    if ($rawCreateTime.Kind -eq [DateTimeKind]::Unspecified) {
+      $rawCreateTime = [DateTime]::SpecifyKind($rawCreateTime, [DateTimeKind]::Utc)
+    }
+    $createdAt = [DateTimeOffset]$rawCreateTime
+  } elseif ($rawCreateTime -isnot [string] -or -not [DateTimeOffset]::TryParse(
+      $rawCreateTime,
+      [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::AssumeUniversal,
+      [ref]$createdAt
+    )) {
+    return $false
+  }
+  return $createdAt -gt $SubmittedAt
+}
+
+function Get-ReleaseSafeAcrErrorMessage([object]$Message) {
+  if ($Message -isnot [string] -or [string]::IsNullOrWhiteSpace($Message)) {
+    return 'No error message was returned by ACR.'
+  }
+  $safe = $Message -replace '[\r\n\t]+', ' '
+  $safe = $safe -replace '(?i)\b(?:https?://)\S+', '[URL]'
+  $secretAssignment = '(?i)["'']?(?<key>[A-Za-z0-9_.-]*(?:password|passwd|passphrase|access[_-]?token|refresh[_-]?token|token|secret|credential|authorization|api[_-]?key|account[_-]?key|access[_-]?key(?:[_-]?id)?|private[_-]?key|client[_-]?secret|signature|sig)[A-Za-z0-9_.-]*)["'']?\s*[:=]\s*(?:(?:bearer|basic)\s+)?("[^"]*"|''[^'']*''|[^\s,;}\]]+)'
+  $safe = $safe -replace $secretAssignment, '${key}=[redacted]'
+  $safe = $safe -replace '(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/-]+=*', '[redacted authentication]'
+  $safe = $safe -replace '(?i)\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b', '[redacted token]'
+  $safe = $safe.Trim()
+  if ([string]::IsNullOrWhiteSpace($safe)) { return 'No safe error message was returned by ACR.' }
+  if ($safe.Length -gt 300) { return $safe.Substring(0, 300) + '...' }
+  return $safe
+}
+
+function Stop-ReleaseAcrBuildUnsuccessful(
+  [string]$RunId,
+  [object]$Status,
+  [object]$ErrorMessage,
+  [string]$RegistryName,
+  [string]$ResourceGroup,
+  [string]$Subscription
+) {
+  if ($RunId -cnotmatch '^[a-zA-Z0-9]{1,80}$') { Stop-VmRelease 'The failed ACR build run has an invalid identity.' }
+  $safeStatus = 'unknown'
+  if ($Status -is [string] -and $Status -cmatch '^[A-Za-z][A-Za-z0-9_-]{0,39}$') { $safeStatus = $Status }
+  $summary = 'ACR build returned an unknown status'
+  if (Test-ReleaseAcrFailureStatus $Status) { $summary = 'ACR image build failed' }
+  $safeError = Get-ReleaseSafeAcrErrorMessage $ErrorMessage
+  Write-Host "Release: ACR error: $safeError"
+  Write-Host "Release: retrieve the run log (read-only): az acr task logs --registry $RegistryName --run-id $RunId --resource-group $ResourceGroup --subscription $Subscription"
+  Stop-VmRelease "$summary; run ID $RunId; status $safeStatus; no VM command was sent."
+}
+
 function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$Directory, [int]$TimeoutSeconds, [switch]$KeepFailureOutput, [switch]$ClassifyDigestFailure) {
   $executable = (Get-Command $Command -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
   # A child PowerShell handles az.cmd without shell-string argument interpolation.
@@ -585,53 +648,82 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     $releaseStage = 'ACR build submission'
     # A unique additional tag can identify a submission even if the run-ID response is lost.
     $submissionTag = "release-$([guid]::NewGuid().ToString('N'))"
+    $buildSubmittedAt = [DateTimeOffset]::UtcNow
     Write-Host "Release: ACR submission $acr/markdoc:$submissionTag (run ID not yet returned)."
     Write-Host 'Stopping the CLI does not cancel cloud work. Reconcile this submission before any retry.'
-    [void](Invoke-ReleaseAz (@(
+    $submissionOutput = Invoke-ReleaseAz (@(
       'acr', 'build', '--registry', $acr, '--image', "markdoc:$Commit", '--image', "markdoc:$($Commit.Substring(0, 12))",
       '--image', "markdoc:$submissionTag", '--build-arg', "APP_VERSION=$Commit",
       '--file', (Join-Path $context 'Dockerfile'), $context, '--timeout', "$AcrBuildTimeoutSeconds",
       '--no-wait', '--no-logs'
-    ) + $nativeScope) $AcrBuildSubmissionTimeoutSeconds $buildClock $BuildPhaseDeadlineSeconds $buildDeadlineMessage)
+    ) + $nativeScope) $AcrBuildSubmissionTimeoutSeconds $buildClock $BuildPhaseDeadlineSeconds $buildDeadlineMessage
+    $submission = $null
+    if (-not [string]::IsNullOrWhiteSpace($submissionOutput)) {
+      $submission = ConvertFrom-Json -InputObject $submissionOutput -AsHashtable -NoEnumerate -ErrorAction SilentlyContinue
+    }
+    if ($submission -is [System.Collections.IDictionary] -and
+        $submission['runId'] -is [string] -and $submission['runId'] -cmatch '^[a-zA-Z0-9]{1,80}$') {
+      $buildRun = $submission['runId']
+      Write-Host "Release: ACR submission returned run ID $buildRun."
+    } else {
+      Write-Host 'Release: ACR submission did not return a usable run ID; reconciling by unique tag and submission time.'
+    }
 
-    $releaseStage = 'ACR build reconciliation'
-    $missedPolls = 0
-    for ($attempt = 1; $attempt -le 132; $attempt++) {
-      $poll = Invoke-ReleaseAcrPoll (@(
-        'acr', 'task', 'list-runs', '--registry', $acr, '--top', '50',
-        '--query', '[].{runId:runId,runType:runType,status:status,outputImages:outputImages}'
-      ) + $nativeScope) ([ref]$missedPolls) $buildClock $BuildPhaseDeadlineSeconds $buildDeadlineMessage
-      if ($null -eq $poll) {
+    if (-not $buildRun) {
+      $releaseStage = 'ACR build reconciliation'
+      $missedPolls = 0
+      for ($attempt = 1; $attempt -le 132; $attempt++) {
+        $poll = Invoke-ReleaseAcrPoll (@(
+          'acr', 'task', 'list-runs', '--registry', $acr, '--top', '50',
+          '--query', '[].{runId:runId,runType:runType,status:status,createTime:createTime,runErrorMessage:runErrorMessage,outputImages:outputImages}'
+        ) + $nativeScope) ([ref]$missedPolls) $buildClock $BuildPhaseDeadlineSeconds $buildDeadlineMessage
+        if ($null -eq $poll) {
+          if ($attempt -lt 132) {
+            Start-ReleaseBoundedSleep $buildClock $BuildPhaseDeadlineSeconds 5 $buildDeadlineMessage
+          }
+          continue
+        }
+        $runs = ConvertFrom-ReleaseJson $poll
+        if ($runs -isnot [array]) {
+          Stop-VmRelease 'ACR build reconciliation did not return a run list.'
+        }
+        $matches = @(
+          $runs | Where-Object {
+            $_ -is [System.Collections.IDictionary] -and
+            $_['runType'] -ceq 'QuickRun' -and
+            @($_['outputImages'] | Where-Object {
+              $_ -is [System.Collections.IDictionary] -and $_['tag'] -ceq $submissionTag
+            }).Count -eq 1
+          }
+        )
+        if ($matches.Count -gt 1) {
+          Stop-VmRelease 'The unique ACR submission tag matched more than one build run.'
+        }
+        if ($matches.Count -eq 1) {
+          $matchedRun = $matches[0]
+          $buildRun = $matchedRun['runId']
+          if ($buildRun -isnot [string] -or $buildRun -cnotmatch '^[a-zA-Z0-9]{1,80}$') {
+            Stop-VmRelease 'The reconciled ACR build run has an invalid identity.'
+          }
+          if (Test-ReleaseAcrFailureStatus $matchedRun['status']) {
+            Stop-ReleaseAcrBuildUnsuccessful $buildRun $matchedRun['status'] $matchedRun['runErrorMessage'] $acr $group $subscription
+          }
+          break
+        }
+
+        # A timestamp may identify one terminal failure for reporting, but never a deployable image.
+        $createdRuns = @($runs | Where-Object { Test-ReleaseAcrRunCreatedAfter $_ $buildSubmittedAt })
+        if ($createdRuns.Count -eq 1 -and (Test-ReleaseAcrFailureStatus $createdRuns[0]['status'])) {
+          $failedRun = $createdRuns[0]
+          $buildRun = $failedRun['runId']
+          if ($buildRun -isnot [string] -or $buildRun -cnotmatch '^[a-zA-Z0-9]{1,80}$') {
+            Stop-VmRelease 'The newly created failed ACR run has an invalid identity.'
+          }
+          Stop-ReleaseAcrBuildUnsuccessful $buildRun $failedRun['status'] $failedRun['runErrorMessage'] $acr $group $subscription
+        }
         if ($attempt -lt 132) {
           Start-ReleaseBoundedSleep $buildClock $BuildPhaseDeadlineSeconds 5 $buildDeadlineMessage
         }
-        continue
-      }
-      $runs = ConvertFrom-ReleaseJson $poll
-      if ($runs -isnot [array]) {
-        Stop-VmRelease 'ACR build reconciliation did not return a run list.'
-      }
-      $matches = @(
-        $runs | Where-Object {
-          $_ -is [System.Collections.IDictionary] -and
-          $_['runType'] -ceq 'QuickRun' -and
-          @($_['outputImages'] | Where-Object {
-            $_ -is [System.Collections.IDictionary] -and $_['tag'] -ceq $submissionTag
-          }).Count -eq 1
-        }
-      )
-      if ($matches.Count -gt 1) {
-        Stop-VmRelease 'The unique ACR submission tag matched more than one build run.'
-      }
-      if ($matches.Count -eq 1) {
-        $buildRun = $matches[0]['runId']
-        if ($buildRun -isnot [string] -or $buildRun -cnotmatch '^[a-zA-Z0-9]{1,80}$') {
-          Stop-VmRelease 'The reconciled ACR build run has an invalid identity.'
-        }
-        break
-      }
-      if ($attempt -lt 132) {
-        Start-ReleaseBoundedSleep $buildClock $BuildPhaseDeadlineSeconds 5 $buildDeadlineMessage
       }
     }
     if (-not $buildRun) {
@@ -641,7 +733,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
     $releaseStage = 'ACR build completion'
     $missedPolls = 0
     do {
-      $poll = Invoke-ReleaseAcrPoll (@('acr', 'task', 'show-run', '--registry', $acr, '--run-id', $buildRun, '--query', '{runId:runId,status:status,outputImages:outputImages}') + $nativeScope) `
+      $poll = Invoke-ReleaseAcrPoll (@('acr', 'task', 'show-run', '--registry', $acr, '--run-id', $buildRun, '--query', '{runId:runId,status:status,runErrorMessage:runErrorMessage,outputImages:outputImages}') + $nativeScope) `
         ([ref]$missedPolls) $buildClock $BuildPhaseDeadlineSeconds $buildDeadlineMessage
       if ($null -eq $poll) {
         Start-ReleaseBoundedSleep $buildClock $BuildPhaseDeadlineSeconds 5 $buildDeadlineMessage
@@ -650,7 +742,9 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
       $run = ConvertFrom-ReleaseJson $poll
       if ($run.runId -cne $buildRun) { Stop-VmRelease 'ACR returned a different run identity.' }
       if ($run.status -ceq 'Succeeded') { break }
-      if ($run.status -cnotin @('Queued', 'Started', 'Running')) { Stop-VmRelease 'ACR build failed or returned an unknown status.' }
+      if ($run.status -cnotin @('Queued', 'Started', 'Running')) {
+        Stop-ReleaseAcrBuildUnsuccessful $buildRun $run.status $run.runErrorMessage $acr $group $subscription
+      }
       Start-ReleaseBoundedSleep $buildClock $BuildPhaseDeadlineSeconds 5 $buildDeadlineMessage
     } while ($true)
     Assert-ReleaseDeadline $buildClock $BuildPhaseDeadlineSeconds $buildDeadlineMessage

@@ -42,11 +42,11 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
   });
 }
 
-async function waitForStartup(child: ChildProcess, output: () => string, timeoutMs: number): Promise<void> {
+async function waitForStartup(child: ChildProcess, output: () => string, timeoutMs: number): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const log = output();
-    if (log.includes("> Markdoc ready on ") && log.includes(NEXT_RUNTIME_READY)) return;
+    if (log.includes("> Markdoc ready on ") && log.includes(NEXT_RUNTIME_READY)) return Date.now();
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error(`Server exited before readiness (code ${child.exitCode}, signal ${child.signalCode})\n${log.slice(-4_000)}`);
     }
@@ -154,13 +154,15 @@ async function withCustomServer(run: (server: StartedServer) => Promise<void>): 
   }
 }
 
-async function expectHealthy(port: number): Promise<void> {
+async function expectHealthy(port: number, since?: number): Promise<number> {
+  const startedAt = Date.now();
   const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
     headers: { connection: "close" },
     signal: AbortSignal.timeout(30_000),
   });
   expect(response.status).toBe(200);
   await expect(response.json()).resolves.toMatchObject({ ok: true, db: true, collab: true });
+  return Date.now() - (since ?? startedAt);
 }
 
 /** The answer `server/index.ts` gives a websocket upgrade until it is ready. */
@@ -222,10 +224,12 @@ function leavingWebSocketClients(port: number) {
 }
 
 describe("custom development server startup", () => {
-  it("initializes Next's Node AsyncLocalStorage before serving the readiness route", async () => {
+  it("warms the full readiness route before logging ready", async () => {
     await withCustomServer(async ({ port, child, output }) => {
-      await waitForStartup(child, output, 120_000);
-      await expectHealthy(port);
+      const readyAt = await waitForStartup(child, output, 120_000);
+      const firstHealthResponseMs = await expectHealthy(port, readyAt);
+      process.stderr.write(`> [test] first health response after ready: ${firstHealthResponseMs} ms\n`);
+      expect(firstHealthResponseMs, "first /api/health response after ready").toBeLessThan(1_000);
       expect(output()).toContain(NEXT_RUNTIME_READY);
       expect(output()).not.toContain(ASYNC_LOCAL_STORAGE_INVARIANT);
     });
