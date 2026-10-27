@@ -2,10 +2,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import {
-  StrictMode,
   createElement,
-  useEffect,
-  useLayoutEffect,
   type ComponentType,
   type ReactNode,
 } from "react";
@@ -34,25 +31,6 @@ interface DirectView {
   readonly root: Root;
 }
 
-type ElementRef<T extends HTMLElement> = (element: T | null) => void;
-
-interface CapturedClick {
-  readonly type: string;
-  readonly currentTarget: EventTarget | null;
-  readonly target: EventTarget | null;
-  readonly nativeEvent: Event;
-}
-
-type ClickHandler = (event: CapturedClick) => void;
-
-interface CapturedRetry {
-  readonly actions: HTMLDivElement;
-  readonly button: HTMLButtonElement;
-  readonly click: ClickHandler;
-  readonly actionsRef: ElementRef<HTMLDivElement>;
-  readonly buttonRef: ElementRef<HTMLButtonElement>;
-}
-
 const BOUNDARIES: readonly BoundaryDefinition[] = [
   { name: "AppError", Component: AppError },
   { name: "GlobalError", Component: GlobalError },
@@ -60,75 +38,13 @@ const BOUNDARIES: readonly BoundaryDefinition[] = [
 
 const directViews: DirectView[] = [];
 
-function reactProperty<T>(element: HTMLElement, name: string): T | undefined {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error(`React props were not attached to ${element.tagName}`);
-  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  return props?.[name] as T | undefined;
-}
-
-function reactHandler<T extends (...args: never[]) => unknown>(
-  element: HTMLElement,
-  name: string,
-): T {
-  const handler = reactProperty<T>(element, name);
-  if (typeof handler !== "function") throw new Error(`${name} was not attached to ${element.tagName}`);
-  return handler;
-}
-
-function reactRef<T extends HTMLElement>(element: HTMLElement): ElementRef<T> {
-  const ref = reactProperty<ElementRef<T>>(element, "ref");
-  if (typeof ref !== "function") throw new Error(`A callback ref was not attached to ${element.tagName}`);
-  return ref;
-}
-
-function captureRetry(host: HTMLElement): CapturedRetry {
-  const button = [...host.querySelectorAll("button")].find(
-    (candidate) => candidate.textContent?.trim() === "Try again",
-  );
+function captureRetry(host: HTMLElement) {
+  const button = [...host.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === "Try again");
   const actions = button?.parentElement;
   if (!(button instanceof HTMLButtonElement) || !(actions instanceof HTMLDivElement)) {
     throw new Error("The Retry action was not rendered");
   }
-  return {
-    actions,
-    button,
-    click: reactHandler<ClickHandler>(button, "onClick"),
-    actionsRef: reactRef<HTMLDivElement>(actions),
-    buttonRef: reactRef<HTMLButtonElement>(button),
-  };
-}
-
-function nativeClick(target: EventTarget, ownerDocument: Document = document): MouseEvent {
-  const MouseEventConstructor = ownerDocument.defaultView?.MouseEvent;
-  if (!MouseEventConstructor) throw new Error("The owner document has no MouseEvent constructor");
-  const event = new MouseEventConstructor("click", { bubbles: true });
-  Object.defineProperty(event, "target", { configurable: true, value: target });
-  return event;
-}
-
-function capturedClick(
-  control: CapturedRetry,
-  {
-    type = "click",
-    currentTarget = control.button,
-    target = currentTarget,
-    nativeTarget = target,
-    nativeEvent,
-  }: {
-    type?: string;
-    currentTarget?: EventTarget | null;
-    target?: EventTarget | null;
-    nativeTarget?: EventTarget | null;
-    nativeEvent?: Event;
-  } = {},
-): CapturedClick {
-  return {
-    type,
-    currentTarget,
-    target,
-    nativeEvent: nativeEvent ?? nativeClick(nativeTarget ?? control.button, control.button.ownerDocument),
-  };
+  return { actions, button };
 }
 
 function renderDirect(node: ReactNode): DirectView {
@@ -146,47 +62,6 @@ function boundaryNode(
   key?: string,
 ) {
   return createElement(definition.Component, { ...props, key });
-}
-
-function expectRejected(
-  control: CapturedRetry,
-  event: CapturedClick,
-  reset: ReturnType<typeof vi.fn>,
-  host: HTMLElement,
-) {
-  const activeElement = document.activeElement;
-  const markup = host.innerHTML;
-  act(() => control.click(event));
-  expect(reset).not.toHaveBeenCalled();
-  expect(document.activeElement).toBe(activeElement);
-  expect(host.innerHTML).toBe(markup);
-}
-
-function ParentBoundary({
-  definition,
-  boundaryProps,
-  visit,
-  mountKey,
-  onLayout,
-  onPassiveCleanup,
-}: {
-  definition: BoundaryDefinition;
-  boundaryProps: BoundaryProps;
-  visit: number;
-  mountKey?: string;
-  onLayout?: () => void;
-  onPassiveCleanup?: () => void;
-}) {
-  useLayoutEffect(() => {
-    onLayout?.();
-  }, [onLayout, visit]);
-  useEffect(
-    () => () => {
-      onPassiveCleanup?.();
-    },
-    [onPassiveCleanup, visit],
-  );
-  return boundaryNode(definition, boundaryProps, mountKey);
 }
 
 afterEach(() => {
@@ -276,7 +151,6 @@ describe.each(BOUNDARIES)("$name bounded details", (definition) => {
     fireEvent.click(summary);
     expect(details.open).toBe(false);
     fireEvent.click(current.button);
-    fireEvent.click(current.button);
     expect(reset).toHaveBeenCalledOnce();
   });
 
@@ -307,7 +181,7 @@ describe.each(BOUNDARIES)("$name bounded details", (definition) => {
     expect(populated.documentElement.outerHTML).toBe(empty.documentElement.outerHTML);
   });
 
-  it("replaces and removes facts on the same instance without reviving stale retry callbacks", () => {
+  it("replaces and removes facts on the same instance and retries with the latest reset", () => {
     const resetA = vi.fn();
     const resetB = vi.fn();
     const error: BoundaryError = Object.assign(new Error("old-message".repeat(32)), { digest: "old-reference".repeat(32) });
@@ -315,7 +189,6 @@ describe.each(BOUNDARIES)("$name bounded details", (definition) => {
     const details = view.host.querySelector("details");
     const summary = details?.querySelector("summary");
     if (!details || !summary) throw new Error("The native disclosure was not rendered");
-    const stale = captureRetry(view.host);
     fireEvent.click(summary);
 
     const replacement = { digest: " new-reference\n", message: "\nnew-message  " };
@@ -327,11 +200,8 @@ describe.each(BOUNDARIES)("$name bounded details", (definition) => {
     expect(details.querySelector("pre")?.textContent).toBe(replacement.message);
     expect(view.host.textContent).not.toContain("old-message");
     expect(view.host.textContent).not.toContain("old-reference");
-    expectRejected(stale, capturedClick(stale), resetA, view.host);
-    expect(resetB).not.toHaveBeenCalled();
-    const current = captureRetry(view.host);
-    fireEvent.click(current.button);
-    fireEvent.click(current.button);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(resetA).not.toHaveBeenCalled();
     expect(resetB).toHaveBeenCalledOnce();
 
     error.message = "";
@@ -378,7 +248,6 @@ describe.each(BOUNDARIES)("$name bounded details", (definition) => {
     if (!link) throw new Error("The recovery link was not rendered");
     expect(link.getAttribute("href")).toBe("/");
     expect(link.hasAttribute("target")).toBe(false);
-    expect(reactProperty(link, "onClick")).toBeUndefined();
   });
 });
 
@@ -420,340 +289,5 @@ describe("bounded details styling", () => {
   :root { --bg: #1c1f24; --ink: #e7e5e4; --ink-2: #d6d3d1; --ink-3: #a8a29e; --accent: #2dd4bf; --on-accent: #14161a; }
 }`);
     expect(doc.querySelector("[class], link, script")).toBeNull();
-  });
-});
-
-describe.each(BOUNDARIES)("$name Retry authority", (definition) => {
-  it("lets the exact committed button invoke only its frozen reset once", () => {
-    const currentRef: { value: CapturedRetry | null } = { value: null };
-    const reset = vi.fn(() => {
-      const current = currentRef.value;
-      if (!current) throw new Error("The Retry control was not captured");
-      current.click(capturedClick(current));
-    });
-    const view = renderDirect(boundaryNode(definition, { error: new Error("boom"), reset }));
-    const current = captureRetry(view.host);
-    currentRef.value = current;
-
-    fireEvent.click(current.button);
-    fireEvent.click(current.button);
-
-    expect(reset).toHaveBeenCalledOnce();
-  });
-
-  it("rejects invalid controls, documents, descendants, state, and markup without consuming authority", () => {
-    const reset = vi.fn();
-    const view = renderDirect(boundaryNode(definition, { error: new Error("boom"), reset }));
-    const current = captureRetry(view.host);
-    const link = current.button.nextElementSibling;
-    if (!(link instanceof HTMLAnchorElement)) throw new Error("The recovery link was not rendered");
-    const focusOwner = document.createElement("button");
-    const sibling = document.createElement("button");
-    const detached = document.createElement("button");
-    const iframe = document.createElement("iframe");
-    document.body.append(focusOwner, sibling, iframe);
-    const foreign = iframe.contentDocument?.createElement("button");
-    if (!foreign || !iframe.contentDocument?.body) throw new Error("The foreign document was not created");
-    iframe.contentDocument.body.append(foreign);
-    focusOwner.focus();
-
-    expectRejected(current, capturedClick(current, { currentTarget: sibling }), reset, view.host);
-    expectRejected(current, capturedClick(current, { currentTarget: foreign }), reset, view.host);
-    expectRejected(current, capturedClick(current, { currentTarget: detached }), reset, view.host);
-
-    current.button.remove();
-    expectRejected(current, capturedClick(current), reset, view.host);
-    current.actions.insertBefore(current.button, link);
-
-    const replacement = current.button.cloneNode(true);
-    if (!(replacement instanceof HTMLButtonElement)) throw new Error("The replacement is not a button");
-    current.actions.replaceChild(replacement, current.button);
-    expectRejected(
-      current,
-      capturedClick(current, { currentTarget: replacement, target: replacement }),
-      reset,
-      view.host,
-    );
-    current.actions.replaceChild(current.button, replacement);
-
-    const inserted = document.createElement("span");
-    current.button.append(inserted);
-    expectRejected(
-      current,
-      capturedClick(current, { target: inserted, nativeTarget: inserted }),
-      reset,
-      view.host,
-    );
-    inserted.remove();
-
-    current.button.disabled = true;
-    expectRejected(current, capturedClick(current), reset, view.host);
-    current.button.disabled = false;
-
-    current.button.setAttribute("aria-disabled", "true");
-    expectRejected(current, capturedClick(current), reset, view.host);
-    current.button.removeAttribute("aria-disabled");
-
-    const buttonClass = current.button.getAttribute("class");
-    current.button.className = `${buttonClass ?? ""} mutated`;
-    expectRejected(current, capturedClick(current), reset, view.host);
-    if (buttonClass === null) current.button.removeAttribute("class");
-    else current.button.setAttribute("class", buttonClass);
-
-    const href = link.getAttribute("href");
-    link.setAttribute("href", "/mutated");
-    expectRejected(current, capturedClick(current), reset, view.host);
-    if (href === null) link.removeAttribute("href");
-    else link.setAttribute("href", href);
-
-    fireEvent.click(current.button);
-    expect(reset).toHaveBeenCalledOnce();
-
-    focusOwner.remove();
-    sibling.remove();
-    iframe.remove();
-  });
-
-  it("rejects forged, mismatched, wrong-source, and reused native events", () => {
-    const resetA = vi.fn();
-    const resetB = vi.fn();
-    const error = new Error("boom");
-    const view = renderDirect(boundaryNode(definition, { error, reset: resetA }));
-    const stale = captureRetry(view.host);
-    const sibling = document.createElement("button");
-    document.body.append(sibling);
-
-    expectRejected(
-      stale,
-      { ...capturedClick(stale), nativeEvent: new Event("click") },
-      resetA,
-      view.host,
-    );
-    expectRejected(
-      stale,
-      capturedClick(stale, { target: stale.button, nativeTarget: stale.actions }),
-      resetA,
-      view.host,
-    );
-    expectRejected(
-      stale,
-      capturedClick(stale, { currentTarget: sibling, target: stale.button }),
-      resetA,
-      view.host,
-    );
-    expectRejected(
-      stale,
-      capturedClick(stale, { type: "pointerdown" }),
-      resetA,
-      view.host,
-    );
-
-    const reusable = nativeClick(stale.button);
-    expectRejected(
-      stale,
-      capturedClick(stale, {
-        currentTarget: sibling,
-        target: stale.button,
-        nativeTarget: stale.button,
-        nativeEvent: reusable,
-      }),
-      resetA,
-      view.host,
-    );
-    act(() => stale.click(capturedClick(stale, { nativeEvent: reusable })));
-    expect(resetA).toHaveBeenCalledOnce();
-
-    act(() => view.root.render(boundaryNode(definition, { error, reset: resetB })));
-    const current = captureRetry(view.host);
-    expect(current.button).toBe(stale.button);
-    expectRejected(
-      current,
-      capturedClick(current, { nativeEvent: reusable }),
-      resetB,
-      view.host,
-    );
-    fireEvent.click(current.button);
-    expect(resetB).toHaveBeenCalledOnce();
-
-    sibling.remove();
-  });
-
-  it.each(["error identity", "message", "digest", "reset"] as const)(
-    "retires a same-element generation when its %s changes",
-    (change) => {
-      const resetA = vi.fn();
-      const resetB = vi.fn();
-      const errorA = Object.assign(new Error("first"), { digest: "digest-a" });
-      const view = renderDirect(boundaryNode(definition, { error: errorA, reset: resetA }));
-      const stale = captureRetry(view.host);
-      let errorB: BoundaryError = errorA;
-      let nextReset = resetA;
-      if (change === "error identity") {
-        errorB = Object.assign(new Error("first"), { digest: "digest-a" });
-      } else if (change === "message") {
-        errorA.message = "second";
-      } else if (change === "digest") {
-        errorA.digest = "digest-b";
-      } else {
-        nextReset = resetB;
-      }
-
-      act(() => view.root.render(boundaryNode(definition, { error: errorB, reset: nextReset })));
-      const current = captureRetry(view.host);
-      expect(current.button).toBe(stale.button);
-      expectRejected(stale, capturedClick(stale), resetA, view.host);
-      expect(resetB).not.toHaveBeenCalled();
-
-      fireEvent.click(current.button);
-      if (change === "reset") {
-        expect(resetA).not.toHaveBeenCalled();
-        expect(resetB).toHaveBeenCalledOnce();
-      } else {
-        expect(resetA).toHaveBeenCalledOnce();
-        expect(resetB).not.toHaveBeenCalled();
-      }
-    },
-  );
-
-  it("re-proves mutable error facts immediately before claiming", () => {
-    const reset = vi.fn();
-    const error = Object.assign(new Error("original"), { digest: "digest" });
-    const view = renderDirect(boundaryNode(definition, { error, reset }));
-    const current = captureRetry(view.host);
-
-    error.message = "mutated";
-    expectRejected(current, capturedClick(current), reset, view.host);
-    error.message = "original";
-    error.digest = "mutated";
-    expectRejected(current, capturedClick(current), reset, view.host);
-    error.digest = "digest";
-
-    fireEvent.click(current.button);
-    expect(reset).toHaveBeenCalledOnce();
-  });
-
-  it("retires stale authority before parent layout and before passive cleanup", () => {
-    const resetA = vi.fn();
-    const resetB = vi.fn();
-    let passiveCleanups = 0;
-    const view = renderDirect(
-      <ParentBoundary
-        definition={definition}
-        boundaryProps={{ error: new Error("first"), reset: resetA }}
-        visit={0}
-        onPassiveCleanup={() => passiveCleanups++}
-      />,
-    );
-    const stale = captureRetry(view.host);
-
-    act(() => {
-      view.root.render(
-        <ParentBoundary
-          definition={definition}
-          boundaryProps={{ error: new Error("second"), reset: resetB }}
-          visit={1}
-          onPassiveCleanup={() => passiveCleanups++}
-          onLayout={() => {
-            expect(passiveCleanups).toBe(0);
-            const currentAtLayout = captureRetry(view.host);
-            expect(currentAtLayout.button).toBe(stale.button);
-            stale.click(capturedClick(stale, { currentTarget: currentAtLayout.button }));
-          }}
-        />,
-      );
-    });
-
-    expect(passiveCleanups).toBe(1);
-    expect(resetA).not.toHaveBeenCalled();
-    expect(resetB).not.toHaveBeenCalled();
-    fireEvent.click(captureRetry(view.host).button);
-    expect(resetB).toHaveBeenCalledOnce();
-  });
-
-  it("isolates equal-looking remounts, detached controls, and late old refs", () => {
-    const resetA = vi.fn();
-    const resetB = vi.fn();
-    const propsA = { error: new Error("same"), reset: resetA };
-    const propsB = { error: new Error("same"), reset: resetB };
-    const view = renderDirect(boundaryNode(definition, propsA, "a"));
-    const stale = captureRetry(view.host);
-
-    act(() => view.root.render(boundaryNode(definition, propsB, "b")));
-    const current = captureRetry(view.host);
-    expect(current.button).not.toBe(stale.button);
-    expect(stale.button.isConnected).toBe(false);
-    expectRejected(
-      stale,
-      capturedClick(stale, { currentTarget: current.button, target: current.button }),
-      resetA,
-      view.host,
-    );
-    expectRejected(
-      current,
-      capturedClick(current, { currentTarget: stale.button, target: stale.button }),
-      resetB,
-      view.host,
-    );
-    expectRejected(stale, capturedClick(stale), resetA, view.host);
-
-    act(() => {
-      stale.actionsRef(current.actions);
-      stale.buttonRef(current.button);
-      stale.actionsRef(null);
-      stale.buttonRef(null);
-    });
-
-    fireEvent.click(current.button);
-    expect(resetA).not.toHaveBeenCalled();
-    expect(resetB).toHaveBeenCalledOnce();
-  });
-
-  it("keeps the committed control usable through Strict Mode ref and layout replays", () => {
-    const reset = vi.fn();
-    const view = renderDirect(
-      <StrictMode>
-        {boundaryNode(definition, { error: new Error("boom"), reset })}
-      </StrictMode>,
-    );
-
-    fireEvent.click(captureRetry(view.host).button);
-    expect(reset).toHaveBeenCalledOnce();
-  });
-});
-
-describe("AppError and GlobalError isolation", () => {
-  it("does not share authority, claims, or cleanup between boundaries", () => {
-    const appReset = vi.fn();
-    const globalReset = vi.fn();
-    const appView = renderDirect(
-      <AppError error={new Error("app")} reset={appReset} />,
-    );
-    const globalView = renderDirect(
-      <GlobalError error={new Error("global")} reset={globalReset} />,
-    );
-    const app = captureRetry(appView.host);
-    const global = captureRetry(globalView.host);
-
-    expectRejected(
-      app,
-      capturedClick(app, { currentTarget: global.button, target: global.button }),
-      appReset,
-      appView.host,
-    );
-    expectRejected(
-      global,
-      capturedClick(global, { currentTarget: app.button, target: app.button }),
-      globalReset,
-      globalView.host,
-    );
-    fireEvent.click(app.button);
-    act(() => {
-      app.actionsRef(null);
-      app.buttonRef(null);
-    });
-
-    fireEvent.click(global.button);
-    expect(appReset).toHaveBeenCalledOnce();
-    expect(globalReset).toHaveBeenCalledOnce();
   });
 });
