@@ -103,6 +103,8 @@ interface Fixture {
   /** What the editor reports when a click lands; the rendered `format` unless a test replaces it. */
   live: { format: FormatState };
   containerRef: RefObject<HTMLElement | null>;
+  /** Whether the rich editor has focus. */
+  focused: { value: boolean };
   container: HTMLElement;
   editor: HTMLElement;
   stateRead: ReturnType<typeof vi.fn>;
@@ -145,6 +147,7 @@ function fixture({
   const domRead = vi.fn(() => editor);
   const destroyedRead = vi.fn(() => false);
   const nodeDOM = vi.fn(() => wrapper);
+  const focused = { value: true };
   const view = {
     get dom() {
       return domRead();
@@ -156,6 +159,7 @@ function fixture({
       return destroyedRead();
     },
     nodeDOM,
+    hasFocus: () => focused.value,
   } as unknown as EditorView;
 
   const subscribers = new Set<() => void>();
@@ -199,6 +203,7 @@ function fixture({
     format,
     live,
     containerRef: { current: container },
+    focused,
     container,
     editor,
     stateRead,
@@ -278,10 +283,12 @@ describe("TableMenu geometry ownership", () => {
     try {
       act(() => root.render(<Boundary current={first} onPassiveCleanup={recordPassiveCleanup} />));
       expect(browser.request).toHaveBeenCalledTimes(1);
-      expect(browser.listeners).toHaveLength(3);
+      expect(browser.listeners).toHaveLength(5);
       expect(browser.listeners.map(({ target, type }) => [target, type])).toEqual([
         [first.container, "scroll"],
         [window, "resize"],
+        [document, "focusin"],
+        [document, "focusout"],
         [first.editor, TABLE_MENU_EVENT],
       ]);
       browser.flush();
@@ -334,10 +341,12 @@ describe("TableMenu geometry ownership", () => {
       });
       expect(replacementBoundaries).toBe(1);
       expect(passiveCleanups).toBe(1);
-      expect(browser.listeners).toHaveLength(6);
-      expect(browser.listeners.slice(3).map(({ target, type }) => [target, type])).toEqual([
+      expect(browser.listeners).toHaveLength(10);
+      expect(browser.listeners.slice(5).map(({ target, type }) => [target, type])).toEqual([
         [second.container, "scroll"],
         [window, "resize"],
+        [document, "focusin"],
+        [document, "focusout"],
         [second.editor, TABLE_MENU_EVENT],
       ]);
       expect(browser.cancel).toHaveBeenNthCalledWith(1, 2);
@@ -399,7 +408,7 @@ describe("TableMenu geometry ownership", () => {
             onBoundary={() => {
               removalBoundaries++;
               expect(passiveCleanups).toBe(1);
-              expect(browser.listeners.slice(3).every((listener) => listener.removed === 1)).toBe(true);
+              expect(browser.listeners.slice(5).every((listener) => listener.removed === 1)).toBe(true);
               const scheduled = browser.request.mock.calls.length;
               second.container.dispatchEvent(new Event("scroll"));
               second.editor.dispatchEvent(new Event(TABLE_MENU_EVENT));
@@ -414,7 +423,7 @@ describe("TableMenu geometry ownership", () => {
       expect(browser.cancel).toHaveBeenNthCalledWith(2, 5);
       expect(browser.cancel).toHaveBeenCalledTimes(2);
       expect(browser.frames.size).toBe(0);
-      expect(browser.listeners).toHaveLength(6);
+      expect(browser.listeners).toHaveLength(10);
       expect(browser.listeners.every((listener) => listener.removed === 1)).toBe(true);
       expect(host.querySelectorAll("[data-testid=table-menu]")).toHaveLength(0);
       expect(() => removedFrame(0)).not.toThrow();
@@ -479,6 +488,42 @@ describe("TableMenu geometry ownership", () => {
       expect(current.alignAction.mock.calls).toEqual(alignments.map(([, alignment]) => [alignment]));
       expect(current.alignAction).toHaveBeenCalledTimes(3);
       expect(screen.getAllByRole("button")).toHaveLength(10);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+});
+
+describe("TableMenu focus", () => {
+  it("stays hidden while the editor is unfocused, even with the selection in a table (#2389)", () => {
+    const browser = controlledBrowser();
+    const current = fixture({ host: new DOMRect(50, 120, 800, 600), tableBox: new DOMRect(400, 360, 500, 300) });
+    current.focused.value = false;
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    try {
+      act(() => root.render(<Boundary current={current} />));
+      browser.flush();
+      expect(screen.queryByTestId("table-menu")).toBeNull();
+
+      current.focused.value = true;
+      act(() => current.editor.dispatchEvent(new FocusEvent("focusin", { bubbles: true })));
+      browser.flush();
+      expect(screen.getByTestId("table-menu")).toBeInTheDocument();
+
+      // Focus moving onto the menu itself (keyboard) keeps it open.
+      current.focused.value = false;
+      act(() => screen.getByTestId("table-align-left").focus());
+      browser.flush();
+      expect(screen.getByTestId("table-menu")).toBeInTheDocument();
+
+      // Focus leaving for elsewhere (e.g. the Share dialog) hides it.
+      const outside = document.createElement("button");
+      document.body.append(outside);
+      act(() => outside.focus());
+      browser.flush();
+      expect(screen.queryByTestId("table-menu")).toBeNull();
     } finally {
       act(() => root.unmount());
     }

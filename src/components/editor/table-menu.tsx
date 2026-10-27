@@ -114,6 +114,7 @@ export function TableMenu({
 }) {
   const [geometry, setGeometry] = useState<TableMenuGeometry | null>(null);
   const authorityRef = useRef<TableMenuAuthority | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const activeSurface = useSessionValue(session, (s) => s.activeSurface);
   const shown = Boolean(geometry && geometry.authority.view === view && geometry.authority.session === session);
@@ -165,6 +166,14 @@ export function TableMenu({
       setGeometry(position ? { authority, ...position } : null);
     }
 
+    // The rich pane keeps a selection while unfocused (on load it can sit in a table); the menu only
+    // belongs to a caret the user is actually working with, in the editor or on the menu itself.
+    function hasFocus() {
+      const active = document.activeElement;
+      if (active && menuRef.current?.contains(active)) return true;
+      return ownedView.hasFocus();
+    }
+
     function compute(scheduled: ScheduledFrame) {
       if (!owns(scheduled)) return;
       const currentFormat = authority.format;
@@ -173,7 +182,8 @@ export function TableMenu({
         currentFormat.tablePos < 0 ||
         !authority.canEdit ||
         authority.activeSurface !== "rich" ||
-        isTableMenuHidden(ownedView.state)
+        isTableMenuHidden(ownedView.state) ||
+        !hasFocus()
       ) {
         publish(scheduled, null);
         return;
@@ -215,6 +225,8 @@ export function TableMenu({
       disposed = true;
       ownedContainer.removeEventListener("scroll", schedule);
       window.removeEventListener("resize", schedule);
+      document.removeEventListener("focusin", schedule);
+      document.removeEventListener("focusout", schedule);
       authority.editor?.removeEventListener(TABLE_MENU_EVENT, schedule);
       const scheduled = frame;
       frame = null;
@@ -228,6 +240,8 @@ export function TableMenu({
     authority.editor = editor;
     ownedContainer.addEventListener("scroll", schedule, { passive: true });
     window.addEventListener("resize", schedule);
+    document.addEventListener("focusin", schedule);
+    document.addEventListener("focusout", schedule);
     // Esc hides the menu (and the next caret move shows it again) through plugin state; the editor
     // announces each flip here because a meta-only transaction changes nothing the shell re-renders on.
     editor.addEventListener(TABLE_MENU_EVENT, schedule);
@@ -286,6 +300,7 @@ export function TableMenu({
 
   return (
     <div
+      ref={menuRef}
       className="touch-target scrollbar-thin absolute z-30 flex items-center gap-0.5 overflow-x-auto rounded-lg bg-inverse px-1 py-1 shadow-xl animate-fade-in dark:ring-1 dark:ring-white/10"
       style={{ left, top, width }}
       data-testid="table-menu"
