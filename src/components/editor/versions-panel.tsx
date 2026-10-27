@@ -2122,6 +2122,8 @@ function panelExactDomIsCurrent(
         checkboxLabel.children.length !== 1 ||
         checkbox.parentElement !== checkboxLabel ||
         checkbox.type !== "checkbox" ||
+        checkbox.getAttribute("aria-describedby") !==
+          (publication.compare.length > 0 ? "compare-hint" : "compare-instruction") ||
         (checkbox === pendingInput
           ? checkbox.checked === publication.compare.includes(row.id)
           : checkbox.checked !== publication.compare.includes(row.id)) ||
@@ -6079,7 +6081,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
   } = capturePanel;
   const compareHint =
     publication.compare.length === 1
-      ? "Tick one more version to compare"
+      ? "Select one more version to compare"
       : publication.compare.length === 2
         ? "Comparing two versions"
         : null;
@@ -6162,8 +6164,13 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
           </div>
         )}
         {error && <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger wrap-anywhere">{error}</div>}
+        {versions?.length && publication.compare.length === 0 && (
+          <div id="compare-instruction" className="mb-3 rounded-lg bg-accent-soft px-3 py-2 text-xs text-ink-2" data-testid="compare-instruction">
+            Select two versions below to compare their changes.
+          </div>
+        )}
         {compareHint && (
-          <div className="mb-3 flex items-center justify-between rounded-lg bg-accent-soft px-3 py-1.5 text-xs text-ink-2" data-testid="compare-hint">
+          <div id="compare-hint" className="mb-3 flex items-center justify-between rounded-lg bg-accent-soft px-3 py-1.5 text-xs text-ink-2" data-testid="compare-hint">
             <span>{compareHint}</span>
             <button
               ref={captureClear}
@@ -6210,7 +6217,7 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                       <div className="flex items-start gap-2">
                         <label
                           className="-mx-[5px] flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center"
-                          title="Tick two versions to compare them"
+                          title="Select two versions to compare"
                           data-testid="version-compare-target"
                         >
                           <input
@@ -6220,7 +6227,10 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                             checked={compare.includes(row.id)}
                             onChange={(event) => toggleCompare(publication, row, event)}
                             aria-label={`Compare v${row.number}`}
-                            title="Tick two versions to compare them"
+                            aria-describedby={
+                              compareHint ? "compare-hint" : "compare-instruction"
+                            }
+                            title="Select two versions to compare"
                             data-testid="version-compare"
                           />
                         </label>

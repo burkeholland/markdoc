@@ -194,6 +194,7 @@ const summaryColumns = {
   updatedAt: schema.documents.updatedAt,
   createdAt: schema.documents.createdAt,
   ownerId: schema.documents.ownerId,
+  linkAccess: schema.documents.linkAccess,
   repoOwner: schema.documents.repoOwner,
   repoName: schema.documents.repoName,
   repoPath: schema.documents.repoPath,
@@ -215,10 +216,10 @@ interface VisibleRow {
 }
 
 /**
- * Documents the user owns or is listed as a collaborator on, with the owner, the user's collaborator
- * role, their star and their last-opened time joined in. Reads no `ystate`, `publishedContent` or
- * full `content`: the dashboard and `GET /api/documents` only show metadata and a short excerpt.
- * `extra` adds `document` columns to `doc` for the one caller that needs more (search).
+ * Documents the user owns, is listed as a collaborator on, or has opened through an active link share,
+ * with the owner, the user's role, their star and their last-opened time joined in. Reads no `ystate`,
+ * `publishedContent` or full `content`: the dashboard and `GET /api/documents` only show metadata and a
+ * short excerpt. `extra` adds `document` columns to `doc` for the one caller that needs more (search).
  */
 function visibleDocuments<E extends Partial<typeof schema.documents._.columns> = Record<never, never>>(db: Awaited<ReturnType<typeof getDb>>, user: SessionUser, extra?: E) {
   const login = user.login?.toLowerCase() ?? "";
@@ -238,7 +239,11 @@ function visibleDocuments<E extends Partial<typeof schema.documents._.columns> =
     )
     .leftJoin(schema.stars, and(eq(schema.stars.documentId, schema.documents.id), eq(schema.stars.userId, user.id)))
     .leftJoin(schema.recents, and(eq(schema.recents.documentId, schema.documents.id), eq(schema.recents.userId, user.id)));
-  const visible = and(or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`), isNull(schema.documents.deletedAt))!;
+  const openedViaLink = and(isNotNull(schema.recents.documentId), ne(schema.documents.linkAccess, "private"));
+  const visible = and(
+    or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`, openedViaLink),
+    isNull(schema.documents.deletedAt),
+  )!;
   const starredOnly = eq(schema.stars.starred, true);
   return { query, visible, starredOnly };
 }
@@ -279,7 +284,10 @@ function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow
     ownerId: doc.ownerId,
     ownerName: owner?.name ?? null,
     ownerLogin: owner?.login ?? null,
-    role: doc.ownerId === user.id ? "owner" : (collabRole ?? "viewer"),
+    role:
+      doc.ownerId === user.id
+        ? "owner"
+        : (collabRole ?? (lastOpenedAt ? roleFromLink(doc.linkAccess, true) : null) ?? "viewer"),
     excerpt,
     repoOwner: doc.repoOwner,
     repoName: doc.repoName,
