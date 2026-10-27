@@ -15,6 +15,7 @@ import {
   SOURCE_MAP_MAX_RETAINED_DOCUMENTS,
   STALE_OPERATION_MAX_SOURCE_UNITS,
   VERIFY_TRUST_AFTER,
+  VERIFY_INTERACTION_QUIET_MS,
   VERIFY_EVERY_NTH_WINDOW,
 } from "./markdown-binding";
 import { schema } from "../markdown/schema";
@@ -4546,6 +4547,19 @@ describe("MarkdownBinding", () => {
       expect(structural("```\ncode\n```", "```\ncod\n```")).toBe(false);
       expect(structural("```\ncode\n```", "\ncode\n```")).toBe(true);
       expect(structural("text\n\n    code", "text\n\n    cod")).toBe(true);
+    });
+
+    it("holds the full-parse verification while the user keeps scrolling (#2401)", () => {
+      ytext.insert(0, DOC);
+      const { binding } = editor();
+      ytext.insert(ytext.length, "!");
+      for (let i = 0; i < 10; i++) {
+        document.dispatchEvent(new Event("wheel"));
+        vi.advanceTimersByTime(500);
+      }
+      expect(binding.verifyStats.runs).toBe(0);
+      vi.advanceTimersByTime(VERIFY_INTERACTION_QUIET_MS);
+      expect(binding.verifyStats).toMatchObject({ runs: 1, matches: 1 });
     });
 
     it("verifies an incremental parse after the quiet period and repairs drift", () => {

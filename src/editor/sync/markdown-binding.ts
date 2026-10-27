@@ -88,6 +88,29 @@ export const VERIFY_EVERY_NTH_WINDOW = 25;
 export const HOLD_QUIET_MS = 50;
 /** Longest the held text waits for an idle period before it is parsed anyway. */
 export const HELD_PARSE_TIMEOUT_MS = 1000;
+/**
+ * A scheduled verification waits until the user has not scrolled, typed, or pointed for this long.
+ * The full parse is one uninterruptible task (~500 ms on a 42k-word document); an idle callback
+ * still fires between wheel events, so without this it landed mid-scroll as a long jank (#2401).
+ */
+export const VERIFY_INTERACTION_QUIET_MS = 1500;
+const INTERACTION_EVENTS = ["wheel", "scroll", "keydown", "pointerdown", "touchmove"] as const;
+let lastInteraction = -Infinity;
+let interactionTracking = false;
+const noteInteraction = () => {
+  lastInteraction = performance.now();
+};
+function trackInteraction() {
+  if (interactionTracking || typeof document === "undefined") return;
+  interactionTracking = true;
+  for (const type of INTERACTION_EVENTS) document.addEventListener(type, noteInteraction, { capture: true, passive: true });
+}
+/** Milliseconds until the user has been idle for {@link VERIFY_INTERACTION_QUIET_MS}; 0 when already idle. */
+export function interactionWait(now = performance.now()): number {
+  // A timestamp from the future (a reset clock, e.g. fake timers) is stale, not a recent interaction.
+  if (lastInteraction > now) lastInteraction = -Infinity;
+  return Math.max(0, lastInteraction + VERIFY_INTERACTION_QUIET_MS - now);
+}
 const NO_HEADINGS: HeadingInfo[] = [];
 /**
  * An edit is structural when a changed line could alter block structure or references beyond
@@ -1772,13 +1795,18 @@ export class MarkdownBinding {
    */
   private scheduleVerify() {
     this.cancelVerify();
+    trackInteraction();
     const run = () => {
       this.verifyHandle = null;
-      this.runScheduledVerify();
+      const wait = interactionWait();
+      if (wait > 0) this.verifyHandle = { timer: setTimeout(whenIdle, wait) };
+      else this.runScheduledVerify();
     };
     const whenIdle = () => {
       this.verifyHandle = null;
+      const wait = interactionWait();
       if (this.tabHidden()) this.deferUntilVisible();
+      else if (wait > 0) this.verifyHandle = { timer: setTimeout(whenIdle, wait) };
       else if (typeof requestIdleCallback === "function") this.verifyHandle = { idle: requestIdleCallback(run, { timeout: 3000 }) };
       else run();
     };
