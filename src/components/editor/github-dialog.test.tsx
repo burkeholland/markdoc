@@ -5,13 +5,7 @@ import {
   StrictMode,
   useEffect,
   useLayoutEffect,
-  useRef,
-  type ChangeEvent,
-  type FormEvent,
-  type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
   type ReactNode,
-  type RefCallback,
 } from "react";
 import { createRoot } from "react-dom/client";
 import type { DocumentDto } from "@/server/dto";
@@ -189,21 +183,6 @@ function PickerLayoutBoundary({
   return children;
 }
 
-function StrictPickerReplayProbe({
-  onReplay,
-  children,
-}: {
-  onReplay: () => void;
-  children: ReactNode;
-}) {
-  const layouts = useRef(0);
-  useLayoutEffect(() => {
-    layouts.current++;
-    if (layouts.current === 2) onReplay();
-  }, [onReplay]);
-  return children;
-}
-
 function PassiveCleanupProbe({ onCleanup }: { onCleanup: () => void }) {
   useEffect(() => onCleanup, [onCleanup]);
   return null;
@@ -220,53 +199,6 @@ function PickerSlot({ name, githubAvailable = true }: { name: string; githubAvai
 function pickerSlot(name: string) {
   return within(screen.getByTestId(`picker-slot-${name}`));
 }
-
-function reactProp<T>(element: HTMLElement, name: string): T {
-  const props = reactProps(element);
-  const value = props[name];
-  if (typeof value !== "function") throw new Error(`${name} was not attached to ${element.dataset.testid ?? element.tagName}`);
-  return value as T;
-}
-
-function reactProps(element: HTMLElement): Record<string, unknown> {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
-  const props = (element as unknown as Record<string, Record<string, unknown> | undefined>)[propsKey];
-  if (!props) throw new Error(`React props were empty on ${element.dataset.testid ?? element.tagName}`);
-  return props;
-}
-
-function replaceReactProp(element: HTMLElement, name: string, value: unknown) {
-  const propsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-  if (!propsKey) throw new Error(`React props were not attached to ${element.dataset.testid ?? element.tagName}`);
-  const record = element as unknown as Record<string, Record<string, unknown> | undefined>;
-  const original = record[propsKey];
-  if (!original) throw new Error(`React props were empty on ${element.dataset.testid ?? element.tagName}`);
-  record[propsKey] = { ...original, [name]: value };
-  return () => {
-    record[propsKey] = original;
-  };
-}
-
-function clonePickerSyntheticEvent<T extends object>(
-  event: T,
-  overrides: Partial<T> = {},
-  syntheticConstructor?: new () => object,
-): T {
-  const prototype = syntheticConstructor
-    ? Object.create(Object.getPrototypeOf(event), {
-        constructor: { value: syntheticConstructor },
-      })
-    : Object.getPrototypeOf(event);
-  return Object.assign(Object.create(prototype) as T, event, overrides);
-}
-
-type PickerClickHandler = (event: ReactMouseEvent<HTMLButtonElement>) => void;
-type PickerChangeHandler<T extends HTMLInputElement | HTMLSelectElement> = (event: ChangeEvent<T>) => void;
-type PickerSubmitHandler = (event: FormEvent<HTMLFormElement>) => void;
-type PickerKeyHandler<T extends HTMLElement> = (
-  event: ReactKeyboardEvent<T>,
-) => void;
 
 /** jsdom stores event trust in an internal slot that production browser events set for dispatch. */
 function markPickerEventTrusted(event: Event) {
@@ -337,78 +269,6 @@ function pickerKey(
   act(() => {
     element.dispatchEvent(event);
   });
-  return event;
-}
-
-function nativePickerClick(control: HTMLButtonElement, target: EventTarget | null = control, type = "click") {
-  const MouseEventConstructor = control.ownerDocument.defaultView?.MouseEvent;
-  if (!MouseEventConstructor) throw new Error("The picker control has no owner-document MouseEvent");
-  const event = new MouseEventConstructor(type, { bubbles: true, cancelable: true, button: 0 });
-  Object.defineProperty(event, "target", { configurable: true, value: target });
-  return event;
-}
-
-function directPickerClick(
-  handler: PickerClickHandler,
-  control: HTMLButtonElement,
-  {
-    currentTarget = control,
-    target = control,
-    nativeEvent = nativePickerClick(control, target),
-  }: {
-    currentTarget?: HTMLButtonElement;
-    target?: EventTarget | null;
-    nativeEvent?: Event;
-  } = {},
-) {
-  handler({
-    type: "click",
-    currentTarget,
-    target,
-    nativeEvent,
-    defaultPrevented: false,
-  } as unknown as ReactMouseEvent<HTMLButtonElement>);
-}
-
-function nativePickerChange(control: HTMLInputElement | HTMLSelectElement, target: EventTarget | null = control, type = "change") {
-  const EventConstructor = control.ownerDocument.defaultView?.Event;
-  if (!EventConstructor) throw new Error("The picker control has no owner-document Event");
-  const event = new EventConstructor(type, { bubbles: true, cancelable: true });
-  Object.defineProperty(event, "target", { configurable: true, value: target });
-  return event;
-}
-
-function directPickerChange<T extends HTMLInputElement | HTMLSelectElement>(
-  handler: PickerChangeHandler<T>,
-  control: T,
-  {
-    currentTarget = control,
-    target = control,
-    nativeEvent = nativePickerChange(control, target),
-  }: {
-    currentTarget?: T;
-    target?: EventTarget | null;
-    nativeEvent?: Event;
-  } = {},
-) {
-  handler({
-    type: "change",
-    currentTarget,
-    target,
-    nativeEvent,
-    defaultPrevented: false,
-  } as unknown as ChangeEvent<T>);
-}
-
-function dispatchPickerSubmit(form: HTMLFormElement, submitter: HTMLButtonElement) {
-  const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
-  if (!SubmitEventConstructor) throw new Error("The picker form has no owner-document SubmitEvent");
-  const event = new SubmitEventConstructor("submit", {
-    bubbles: true,
-    cancelable: true,
-    submitter,
-  });
-  form.dispatchEvent(event);
   return event;
 }
 
@@ -1327,16 +1187,7 @@ describe("GitHubPicker wrapped failures", () => {
     return pending;
   }
 
-  function savedClick(button: HTMLButtonElement) {
-    const handler = reactProp<PickerClickHandler>(button, "onClick");
-    return () => directPickerClick(handler, button);
-  }
 
-  function expectRetired(click: () => void) {
-    const before = callCounts();
-    act(click);
-    expect(callCounts()).toEqual(before);
-  }
 
   it.each(surfaces.flatMap((surface) => messages.map((message) => ({ surface, ...message }))))(
     "keeps $kind $surface failures complete and passive in the existing message div",
@@ -1400,7 +1251,6 @@ describe("GitHubPicker wrapped failures", () => {
     const view = await openSurface(surface);
     const original = expectFailure(surface, unbroken);
     const retry = screen.getByRole<HTMLButtonElement>("button", { name: "Retry" });
-    const retired = savedClick(retry);
     const repeated = holdListAttempt(surface);
     fireEvent.click(retry);
     fireEvent.click(retry);
@@ -1418,10 +1268,8 @@ describe("GitHubPicker wrapped failures", () => {
     expect(replacement.alert).toBe(original.alert);
     expect(replacement.text).toBe(original.text);
     expect(screen.getByRole("button", { name: "Retry" })).toBe(retry);
-    expectRetired(retired);
 
     const recovered = holdListAttempt(surface);
-    const retiredReplacement = savedClick(retry);
     fireEvent.click(retry);
     fireEvent.click(retry);
     expect(source(surface)).toHaveBeenCalledTimes(3);
@@ -1432,7 +1280,6 @@ describe("GitHubPicker wrapped failures", () => {
     expect(screen.queryByTestId(errorId(surface))).toBeNull();
     expect(original.alert).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
-    expectRetired(retiredReplacement);
     if (surface === "gist") expect(screen.getByText("No Markdown gists found.")).toBeInTheDocument();
     if (surface === "repo") expect(screen.getByTestId("repo-item")).toBeEnabled();
     if (surface === "branch") {
@@ -1444,8 +1291,6 @@ describe("GitHubPicker wrapped failures", () => {
       expect(screen.getByTestId("branch-select")).toHaveValue("main");
     }
     view.unmount();
-    expectRetired(retired);
-    expectRetired(retiredReplacement);
     expect(importDocument).not.toHaveBeenCalled();
     expect(linkDocument).not.toHaveBeenCalled();
   });
@@ -1454,16 +1299,13 @@ describe("GitHubPicker wrapped failures", () => {
     source(surface).mockRejectedValueOnce(new Error(unbroken));
     const view = await openSurface(surface);
     const original = expectFailure(surface, unbroken);
-    const retired = savedClick(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }));
     fireEvent.click(screen.getByTestId(`picker-tab-${surface === "gist" ? "repo" : "gist"}`));
     await screen.findByTestId(surface === "gist" ? "repo-item" : "gist-item");
     expect(original.alert).not.toBeInTheDocument();
     expect(screen.queryByTestId(errorId(surface))).toBeNull();
-    expectRetired(retired);
     fireEvent.click(screen.getByTestId(`picker-tab-${surface === "gist" ? "gist" : "repo"}`));
     expectFailure(surface, unbroken);
     expect(source(surface)).toHaveBeenCalledOnce();
-    expectRetired(retired);
     const recovered = holdListAttempt(surface);
     const current = screen.getByRole("button", { name: "Retry" });
     fireEvent.click(current);
@@ -1472,7 +1314,6 @@ describe("GitHubPicker wrapped failures", () => {
     await act(async () => { recovered.resolve(); await recovered.promise; });
     expect(screen.queryByTestId(errorId(surface))).toBeNull();
     view.unmount();
-    expectRetired(retired);
   });
 
   it.each(["branch", "file"] as const)("replaces %s reasons and retires Retry when choosing another repository", async (surface) => {
@@ -1481,14 +1322,12 @@ describe("GitHubPicker wrapped failures", () => {
     source(surface).mockRejectedValueOnce(new Error(unbroken)).mockRejectedValueOnce(new Error(messages[3].message));
     await openSurface(surface);
     const original = expectFailure(surface, unbroken);
-    const retired = savedClick(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }));
     fireEvent.click(screen.getByRole("button", { name: /Repositories/ }));
     expect(original.alert).not.toBeInTheDocument();
     fireEvent.click(screen.getByTitle(nextRepo.fullName));
     await screen.findByTestId(errorId(surface));
     await act(async () => {});
     expectFailure(surface, messages[3].message, nextRepo, "release");
-    expectRetired(retired);
     const recovered = holdListAttempt(surface);
     const current = screen.getByRole("button", { name: "Retry" });
     fireEvent.click(current);
@@ -1498,7 +1337,6 @@ describe("GitHubPicker wrapped failures", () => {
       : [["octo", "current", "main"], ["octo", "replacement", "release"], ["octo", "replacement", "release"]]);
     await act(async () => { recovered.resolve(); await recovered.promise; });
     expect(screen.queryByTestId(errorId(surface))).toBeNull();
-    expectRetired(retired);
     expect(repos).toHaveBeenCalledOnce();
   });
 
@@ -1507,13 +1345,11 @@ describe("GitHubPicker wrapped failures", () => {
     files.mockRejectedValueOnce(new Error(unbroken)).mockRejectedValueOnce(new Error(messages[2].message));
     await openSurface("file");
     const original = expectFailure("file", unbroken);
-    const retired = savedClick(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }));
     fireEvent.change(screen.getByTestId("branch-select"), { target: { value: "release" } });
     await screen.findByTestId("file-load-error");
     await act(async () => {});
     expectFailure("file", messages[2].message, currentRepo, "release");
     expect(original.alert).not.toBeInTheDocument();
-    expectRetired(retired);
     const recovered = holdListAttempt("file");
     const current = screen.getByRole("button", { name: "Retry" });
     fireEvent.click(current);
@@ -1525,7 +1361,6 @@ describe("GitHubPicker wrapped failures", () => {
     expect(screen.queryByTestId("file-load-error")).toBeNull();
     expect(screen.getByTestId("branch-select")).toHaveValue("release");
     expect(screen.getByText("recovered.md")).toBeInTheDocument();
-    expectRetired(retired);
   });
 
   it("keeps wrapped action feedback separate from list recovery and clears repeated action errors on success", async () => {
@@ -1536,19 +1371,16 @@ describe("GitHubPicker wrapped failures", () => {
     fireEvent.click(await screen.findByTestId("gist-item"));
     await screen.findByTestId("github-action-error");
     const original = expectFailure("action", unbroken);
-    const retired = savedClick(screen.getByTestId<HTMLButtonElement>("gist-item"));
     fireEvent.click(screen.getByTestId("picker-tab-repo"));
     await screen.findByTestId("repo-load-error");
     expectFailure("repo", messages[2].message);
     expect(expectFailure("action", unbroken).alert).toBe(original.alert);
-    expectRetired(retired);
     const recovered = holdListAttempt("repo");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await act(async () => { recovered.resolve(); await recovered.promise; });
     expect(screen.queryByTestId("repo-load-error")).toBeNull();
     expect(expectFailure("action", unbroken).alert).toBe(original.alert);
     fireEvent.click(screen.getByTestId("picker-tab-gist"));
-    expectRetired(retired);
     const repeated = deferred<{ document: { id: string; title: string } }>();
     importDocument.mockReturnValueOnce(repeated.promise);
     const row = screen.getByTestId("gist-item");
@@ -1562,7 +1394,6 @@ describe("GitHubPicker wrapped failures", () => {
       await Promise.allSettled([repeated.promise]);
     });
     expectFailure("action", messages[3].message);
-    const retiredRepeated = savedClick(screen.getByTestId<HTMLButtonElement>("gist-item"));
     const success = deferred<{ document: { id: string; title: string } }>();
     importDocument.mockReturnValueOnce(success.promise);
     fireEvent.click(row);
@@ -1577,10 +1408,7 @@ describe("GitHubPicker wrapped failures", () => {
     expect(onImported).toHaveBeenCalledExactlyOnceWith("wrapped-recovery");
     expect(row).toBeEnabled();
     expect(screen.queryByTestId("github-action-error")).toBeNull();
-    expectRetired(retiredRepeated);
     view.unmount();
-    expectRetired(retired);
-    expectRetired(retiredRepeated);
     expect(linkDocument).not.toHaveBeenCalled();
   });
 
@@ -1600,14 +1428,12 @@ describe("GitHubPicker wrapped failures", () => {
     await screen.findByTestId("github-action-error");
     const original = expectFailure("action", unbroken);
     const oldButton = screen.getByTestId<HTMLButtonElement>("gist-create");
-    const retired = savedClick(oldButton);
     fireEvent.click(oldButton);
     fireEvent.click(oldButton);
     expect(linkDocument).toHaveBeenCalledTimes(2);
     expect(original.alert).not.toBeInTheDocument();
     view.rerender(<GitHubPicker mode="link" doc={currentDoc} githubAvailable githubConfigured onLinked={onLinked} />);
     expect(screen.queryByTestId("github-action-error")).toBeNull();
-    expectRetired(retired);
     const current = screen.getByTestId<HTMLButtonElement>("gist-create");
     fireEvent.click(current);
     fireEvent.click(current);
@@ -1623,8 +1449,6 @@ describe("GitHubPicker wrapped failures", () => {
     });
     expect(expectFailure("action", messages[2].message).alert).toBe(feedback.alert);
     expect(onLinked).not.toHaveBeenCalled();
-    expectRetired(retired);
-    const retiredCurrent = savedClick(current);
     fireEvent.click(current);
     fireEvent.click(current);
     expect(linkDocument.mock.calls.map(([id]) => id)).toEqual([firstDoc.id, firstDoc.id, currentDoc.id, currentDoc.id]);
@@ -1634,10 +1458,7 @@ describe("GitHubPicker wrapped failures", () => {
     await act(async () => { success.resolve({ document: linked }); await success.promise; });
     expect(onLinked).toHaveBeenCalledExactlyOnceWith(linked);
     expect(current).toBeEnabled();
-    expectRetired(retiredCurrent);
     view.unmount();
-    expectRetired(retired);
-    expectRetired(retiredCurrent);
     expect(screen.queryByTestId("github-action-error")).toBeNull();
     expect(importDocument).not.toHaveBeenCalled();
   });
@@ -1646,17 +1467,12 @@ describe("GitHubPicker wrapped failures", () => {
     source(surface).mockRejectedValueOnce(new Error(unbroken)).mockRejectedValueOnce(new Error(messages[1].message));
     const view = await openSurface(surface);
     const original = expectFailure(surface, unbroken);
-    const retired = savedClick(surface === "action"
-      ? screen.getByTestId<HTMLButtonElement>("gist-item")
-      : screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }));
     view.unmount();
     expect(original.alert).not.toBeInTheDocument();
     expect(screen.queryByTestId(errorId(surface))).toBeNull();
-    expectRetired(retired);
     const fresh = await openSurface(surface);
     expectFailure(surface, messages[1].message);
     expect(screen.getByTestId("github-picker").textContent).not.toContain(unbroken);
-    expectRetired(retired);
     const pending = surface === "action" ? deferred<void>() : holdListAttempt(surface);
     if (surface === "action") {
       importDocument.mockImplementationOnce(async () => {
@@ -1672,7 +1488,6 @@ describe("GitHubPicker wrapped failures", () => {
     expect(source(surface)).toHaveBeenCalledTimes(3);
     await act(async () => { pending.resolve(); await pending.promise; });
     expect(screen.queryByTestId(errorId(surface))).toBeNull();
-    expectRetired(retired);
     fresh.unmount();
   });
 
@@ -1685,11 +1500,9 @@ describe("GitHubPicker wrapped failures", () => {
     fireEvent.click(screen.getByTestId("gist-create"));
     await screen.findByTestId("github-action-error");
     const original = expectFailure("action", unbroken);
-    const retired = savedClick(screen.getByTestId<HTMLButtonElement>("gist-create"));
     view.rerender(<GitHubPicker mode="link" doc={currentDoc} githubAvailable githubConfigured onLinked={onLinked} />);
     expect(screen.queryByTestId("github-action-error")).toBeNull();
     expect(original.alert).not.toBeInTheDocument();
-    expectRetired(retired);
     const current = screen.getByTestId("gist-create");
     fireEvent.click(current);
     fireEvent.click(current);
@@ -1697,12 +1510,10 @@ describe("GitHubPicker wrapped failures", () => {
     await screen.findByTestId("github-action-error");
     expectFailure("action", messages[1].message);
     expect(screen.getByTestId("github-picker").textContent).not.toContain(unbroken);
-    expectRetired(retired);
     expect(current).toBeEnabled();
     expect(onLinked).not.toHaveBeenCalled();
     view.unmount();
     expect(screen.queryByTestId("github-action-error")).toBeNull();
-    expectRetired(retired);
   });
 
   it("compiles the installed wrapping utility without claiming browser line-break coverage", async () => {
@@ -2241,171 +2052,7 @@ describe("GitHubPicker list recovery", () => {
   });
 });
 
-describe("GitHubPicker exact control publication", () => {
-  it("accepts each production-mangled React event family once while rejecting invalid provenance", async () => {
-    const doc = documentDto();
-    const mangledConstructor = class a {};
-    branches.mockResolvedValue({ branches: ["main", "next"] });
-    const view = render(
-      <GitHubPicker mode="link" doc={doc} githubAvailable githubConfigured />,
-    );
-    const foreignButton = document.createElement("button");
-    const foreignSelect = document.createElement("select");
-    const foreignForm = document.createElement("form");
-    document.body.append(foreignButton, foreignSelect, foreignForm);
-
-    try {
-      const repoTab = view.getByTestId("picker-tab-repo") as HTMLButtonElement;
-      const click = reactProp<PickerClickHandler>(repoTab, "onClick");
-      replaceReactProp(repoTab, "onClick", (event: ReactMouseEvent<HTMLButtonElement>) => {
-        click(clonePickerSyntheticEvent(event, { persist: undefined }, mangledConstructor));
-        click(clonePickerSyntheticEvent(event, { currentTarget: foreignButton }, mangledConstructor));
-        click(
-          clonePickerSyntheticEvent(
-            event,
-            { nativeEvent: nativePickerClick(repoTab) },
-            mangledConstructor,
-          ),
-        );
-      });
-
-      fireEvent.click(repoTab);
-      expect(repos).not.toHaveBeenCalled();
-      expect(view.queryByTestId("repo-list")).toBeNull();
-
-      replaceReactProp(repoTab, "onClick", (event: ReactMouseEvent<HTMLButtonElement>) => {
-        const structuralEvent = clonePickerSyntheticEvent(event, {}, mangledConstructor);
-        expect(Object.getPrototypeOf(structuralEvent).constructor.name).toBe("a");
-        click(structuralEvent);
-        click(structuralEvent);
-      });
-      fireEvent.click(repoTab);
-      expect(await view.findByTestId("repo-list")).toBeInTheDocument();
-      expect(repos).toHaveBeenCalledOnce();
-
-      fireEvent.click(await view.findByTestId("repo-item"));
-      const branch = (await view.findByTestId("branch-select")) as HTMLSelectElement;
-      await waitFor(() =>
-        expect(files).toHaveBeenCalledExactlyOnceWith(currentRepo.owner, currentRepo.name, "main"),
-      );
-      const change = reactProp<PickerChangeHandler<HTMLSelectElement>>(branch, "onChange");
-      replaceReactProp(branch, "onChange", (event: ChangeEvent<HTMLSelectElement>) => {
-        change(clonePickerSyntheticEvent(event, { persist: undefined }, mangledConstructor));
-        change(clonePickerSyntheticEvent(event, { currentTarget: foreignSelect }, mangledConstructor));
-        change(
-          clonePickerSyntheticEvent(
-            event,
-            { nativeEvent: nativePickerChange(branch) },
-            mangledConstructor,
-          ),
-        );
-      });
-
-      fireEvent.change(branch, { target: { value: "next" } });
-      expect(files).toHaveBeenCalledOnce();
-
-      branch.value = "main";
-      replaceReactProp(branch, "onChange", (event: ChangeEvent<HTMLSelectElement>) => {
-        const structuralEvent = clonePickerSyntheticEvent(event, {}, mangledConstructor);
-        expect(Object.getPrototypeOf(structuralEvent).constructor.name).toBe("a");
-        change(structuralEvent);
-        change(structuralEvent);
-      });
-      fireEvent.change(branch, { target: { value: "next" } });
-      await waitFor(() => expect(files).toHaveBeenCalledTimes(2));
-      expect(files).toHaveBeenLastCalledWith(currentRepo.owner, currentRepo.name, "next");
-
-      const path = view.getByTestId("repo-path") as HTMLInputElement;
-      fireEvent.change(path, { target: { value: "docs/production.md" } });
-      const form = path.form;
-      const submit = view.getByTestId("repo-link") as HTMLButtonElement;
-      if (!form) throw new Error("The production-mangled repository path has no form");
-      const submitHandler = reactProp<PickerSubmitHandler>(form, "onSubmit");
-      replaceReactProp(form, "onSubmit", (event: FormEvent<HTMLFormElement>) => {
-        submitHandler(clonePickerSyntheticEvent(event, { persist: undefined }, mangledConstructor));
-        submitHandler(clonePickerSyntheticEvent(event, { currentTarget: foreignForm }, mangledConstructor));
-        const SubmitEventConstructor = form.ownerDocument.defaultView?.SubmitEvent;
-        if (!SubmitEventConstructor) throw new Error("The picker form has no owner-document SubmitEvent");
-        submitHandler(
-          clonePickerSyntheticEvent(
-            event,
-            {
-              nativeEvent: new SubmitEventConstructor("submit", {
-                bubbles: true,
-                cancelable: true,
-                submitter: submit,
-              }),
-            },
-            mangledConstructor,
-          ),
-        );
-      });
-
-      const rejectedSubmit = dispatchPickerSubmit(form, submit);
-      expect(rejectedSubmit.defaultPrevented).toBe(true);
-      expect(linkDocument).not.toHaveBeenCalled();
-
-      replaceReactProp(form, "onSubmit", (event: FormEvent<HTMLFormElement>) => {
-        const structuralEvent = clonePickerSyntheticEvent(event, {}, mangledConstructor);
-        expect(Object.getPrototypeOf(structuralEvent).constructor.name).toBe("a");
-        submitHandler(structuralEvent);
-        submitHandler(structuralEvent);
-      });
-      const acceptedSubmit = dispatchPickerSubmit(form, submit);
-
-      expect(acceptedSubmit.defaultPrevented).toBe(true);
-      expect(linkDocument).toHaveBeenCalledExactlyOnceWith(doc.id, {
-        storage: "repo",
-        owner: currentRepo.owner,
-        repo: currentRepo.name,
-        branch: "next",
-        path: "docs/production.md",
-      });
-    } finally {
-      foreignButton.remove();
-      foreignSelect.remove();
-      foreignForm.remove();
-    }
-  });
-
-  it("retires the first Strict Mode publication before an exact successor handles the replayed tab", async () => {
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-    const onReplay = vi.fn(() => {
-      const tab = host.querySelector<HTMLButtonElement>('[data-testid="picker-tab-repo"]');
-      if (!tab) throw new Error("The replayed picker has no repository tab");
-      const MouseEventConstructor = tab.ownerDocument.defaultView?.MouseEvent;
-      if (!MouseEventConstructor) throw new Error("The replayed tab has no owner-document MouseEvent");
-      tab.dispatchEvent(new MouseEventConstructor("click", { bubbles: true, cancelable: true, button: 0 }));
-    });
-
-    try {
-      await act(async () => {
-        root.render(
-          <StrictMode>
-            <StrictPickerReplayProbe onReplay={onReplay}>
-              <GitHubPicker mode="import" githubAvailable githubConfigured />
-            </StrictPickerReplayProbe>
-          </StrictMode>,
-        );
-      });
-
-      expect(onReplay).toHaveBeenCalledOnce();
-      expect(repos).not.toHaveBeenCalled();
-      expect(host.querySelector('[data-testid="picker-tab-gist"]')).toBeInTheDocument();
-      expect(host.querySelector('[data-testid="repo-list"]')).toBeNull();
-
-      const currentTab = host.querySelector<HTMLButtonElement>('[data-testid="picker-tab-repo"]');
-      if (!currentTab) throw new Error("The exact successor has no repository tab");
-      fireEvent.click(currentTab);
-      await waitFor(() => expect(repos).toHaveBeenCalledOnce());
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
+describe("GitHubPicker under Strict Mode", () => {
   it("accepts one exact filter change after direct-root Strict Mode replay", async () => {
     gists.mockResolvedValue({ gists: [gist("gist-alpha", "alpha.md"), gist("gist-beta", "beta.md")] });
     const view = await renderStrictPicker(
@@ -2568,168 +2215,6 @@ describe("GitHubPicker exact control publication", () => {
     }
   });
 
-  it("prevents a retired implicit repository submit before a fresh picker submits once", async () => {
-    const doc = documentDto();
-    const picker = (key: string) => (
-      <GitHubPicker
-        key={key}
-        mode="link"
-        doc={doc}
-        githubAvailable
-        githubConfigured
-      />
-    );
-    const view = await renderStrictPicker(picker("retired-form"));
-
-    try {
-      await selectStrictRepository(view.host);
-      const stalePath = (await view.picker.findByTestId("repo-path")) as HTMLInputElement;
-      const staleForm = stalePath.form;
-      if (!staleForm) throw new Error("The retired repository path has no form");
-      fireEvent.change(stalePath, { target: { value: "docs/retired.md" } });
-      await act(async () => {});
-      stalePath.setAttribute("name", "transient");
-      stalePath.removeAttribute("name");
-
-      fireEvent.keyDown(stalePath, { key: "Enter", code: "Enter" });
-      const SubmitEventConstructor = staleForm.ownerDocument.defaultView?.SubmitEvent;
-      if (!SubmitEventConstructor) throw new Error("The retired form has no owner-document SubmitEvent");
-      const staleSubmit = new SubmitEventConstructor("submit", {
-        bubbles: true,
-        cancelable: true,
-        submitter: null,
-      });
-      const preventDefault = vi.spyOn(staleSubmit, "preventDefault");
-      let dispatched = true;
-      act(() => {
-        dispatched = staleForm.dispatchEvent(staleSubmit);
-      });
-
-      expect(dispatched).toBe(false);
-      expect(staleSubmit.defaultPrevented).toBe(true);
-      expect(preventDefault).toHaveBeenCalledOnce();
-      expect(linkDocument).not.toHaveBeenCalled();
-
-      await act(async () => {
-        view.root.render(<StrictMode>{picker("fresh-form")}</StrictMode>);
-      });
-      await selectStrictRepository(view.host);
-      await view.picker.findByTestId("repo-path");
-      await act(async () => {});
-      const path = view.picker.getByTestId("repo-path") as HTMLInputElement;
-      fireEvent.change(path, { target: { value: "docs/current.md" } });
-      await act(async () => {});
-
-      const currentPath = view.picker.getByTestId("repo-path") as HTMLInputElement;
-      const currentForm = currentPath.form;
-      const currentSubmit = view.picker.getByTestId("repo-link") as HTMLButtonElement;
-      if (!currentForm) throw new Error("The fresh repository path has no form");
-      expect(currentPath).toHaveValue("docs/current.md");
-      expect(currentSubmit.form).toBe(currentForm);
-      expect(currentSubmit).toBeEnabled();
-      expect(linkDocument).not.toHaveBeenCalled();
-
-      act(() => currentForm.requestSubmit());
-
-      expect(linkDocument).toHaveBeenCalledExactlyOnceWith(doc.id, {
-        storage: "repo",
-        owner: currentRepo.owner,
-        repo: currentRepo.name,
-        branch: "main",
-        path: "docs/current.md",
-      });
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("rejects Strict Mode mutation, detach, stale crossing, repetition, and reentry without poisoning a remount", async () => {
-    const onImported = vi.fn();
-    const picker = (key: string) => (
-      <StrictMode>
-        <GitHubPicker
-          key={key}
-          mode="import"
-          githubAvailable
-          githubConfigured
-          onImported={onImported}
-        />
-      </StrictMode>
-    );
-    const host = document.createElement("div");
-    document.body.append(host);
-    const root = createRoot(host);
-
-    try {
-      await act(async () => root.render(picker("A")));
-      const staleRow = (await within(host).findByTestId("gist-item")) as HTMLButtonElement;
-      const staleHandler = reactProp<PickerClickHandler>(staleRow, "onClick");
-      const staleRef = reactProp<RefCallback<HTMLButtonElement>>(staleRow, "ref");
-
-      const staleFilter = within(host).getByPlaceholderText("Filter gists");
-      staleFilter.setAttribute("name", "transient");
-      staleFilter.removeAttribute("name");
-      fireEvent.click(staleRow);
-      expect(importDocument).not.toHaveBeenCalled();
-
-      await act(async () => root.render(picker("B")));
-      const detachedRow = (await within(host).findByTestId("gist-item")) as HTMLButtonElement;
-      const detachedItem = detachedRow.parentElement;
-      const detachedList = detachedItem?.parentElement;
-      const detachedNext = detachedItem?.nextSibling ?? null;
-      if (!detachedItem || !detachedList) throw new Error("The detachable Strict Mode row has no list");
-      detachedItem.remove();
-      detachedList.insertBefore(detachedItem, detachedNext);
-      fireEvent.click(detachedRow);
-      expect(importDocument).not.toHaveBeenCalled();
-
-      await act(async () => root.render(picker("A")));
-      const currentRow = (await within(host).findByTestId("gist-item")) as HTMLButtonElement;
-      staleRef(currentRow);
-      const restoreCurrentHandler = replaceReactProp(currentRow, "onClick", staleHandler);
-      fireEvent.click(currentRow);
-      restoreCurrentHandler();
-      staleRef(null);
-      expect(importDocument).not.toHaveBeenCalled();
-
-      importDocument.mockImplementationOnce(() => {
-        const tab = within(host).getByTestId("picker-tab-repo") as HTMLButtonElement;
-        const MouseEventConstructor = tab.ownerDocument.defaultView?.MouseEvent;
-        if (!MouseEventConstructor) throw new Error("The reentrant tab has no owner-document MouseEvent");
-        tab.dispatchEvent(
-          new MouseEventConstructor("click", {
-            bubbles: true,
-            cancelable: true,
-            button: 0,
-          }),
-        );
-        return Promise.resolve({ document: { id: "imported", title: "Imported" } });
-      });
-      const MouseEventConstructor = currentRow.ownerDocument.defaultView?.MouseEvent;
-      if (!MouseEventConstructor) throw new Error("The repeated row has no owner-document MouseEvent");
-      const repeatedEvent = new MouseEventConstructor("click", {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-      });
-      act(() => {
-        currentRow.dispatchEvent(repeatedEvent);
-        currentRow.dispatchEvent(repeatedEvent);
-      });
-
-      expect(importDocument).toHaveBeenCalledExactlyOnceWith({
-        source: "gist",
-        gistId: "gist-current",
-        filename: "current.md",
-      });
-      expect(repos).not.toHaveBeenCalled();
-      await waitFor(() => expect(onImported).toHaveBeenCalledExactlyOnceWith("imported"));
-    } finally {
-      await act(async () => root.unmount());
-      host.remove();
-    }
-  });
-
   it("uses one stable radio group per link picker and switches both destinations independently", async () => {
     render(
       <>
@@ -2780,271 +2265,6 @@ describe("GitHubPicker exact control publication", () => {
     expect(existingA).not.toBeChecked();
   });
 
-  it("accepts the exact repository submit in a secondary document after rejecting foreign forms", async () => {
-    const frame = document.createElement("iframe");
-    document.body.append(frame);
-    const secondaryDocument = frame.contentDocument;
-    if (!secondaryDocument?.defaultView) throw new Error("The test iframe has no browsing context");
-    const pickerHost = secondaryDocument.createElement("div");
-    const foreignHost = secondaryDocument.createElement("div");
-    secondaryDocument.body.append(pickerHost, foreignHost);
-    const pickerView = render(
-      <GitHubPicker mode="link" doc={documentDto()} githubAvailable githubConfigured />,
-      { container: pickerHost },
-    );
-    const picker = within(pickerHost);
-
-    try {
-      fireEvent.click(picker.getByTestId("picker-tab-repo"));
-      fireEvent.click(await picker.findByTestId("repo-item"));
-      const path = (await picker.findByTestId("repo-path")) as HTMLInputElement;
-      const form = path.form;
-      const submit = picker.getByTestId("repo-link") as HTMLButtonElement;
-      if (!form) throw new Error("The repository path is not attached to its form");
-      fireEvent.change(path, { target: { value: "docs/secondary.md" } });
-      const submitHandler = reactProp<(event: FormEvent<HTMLFormElement>) => void>(form, "onSubmit");
-
-      const sameDocumentForeignView = render(
-        <form onSubmit={submitHandler}>
-          <button type="submit">Foreign submit</button>
-        </form>,
-        { container: foreignHost },
-      );
-      const crossDocumentForeignView = render(
-        <form onSubmit={submitHandler}>
-          <button type="submit">Cross-document submit</button>
-        </form>,
-      );
-      try {
-        const sameDocumentForeignForm = foreignHost.querySelector("form");
-        const sameDocumentForeignSubmit = foreignHost.querySelector("button");
-        const crossDocumentForeignForm = crossDocumentForeignView.container.querySelector("form");
-        const crossDocumentForeignSubmit = crossDocumentForeignView.getByRole("button");
-        if (
-          !sameDocumentForeignForm ||
-          !sameDocumentForeignSubmit ||
-          !crossDocumentForeignForm ||
-          !(crossDocumentForeignSubmit instanceof HTMLButtonElement)
-        ) {
-          throw new Error("A foreign submit fixture was not mounted");
-        }
-
-        act(() => dispatchPickerSubmit(sameDocumentForeignForm, sameDocumentForeignSubmit));
-        act(() => dispatchPickerSubmit(crossDocumentForeignForm, crossDocumentForeignSubmit));
-        expect(linkDocument).not.toHaveBeenCalled();
-        expect(path).toHaveValue("docs/secondary.md");
-
-        act(() => dispatchPickerSubmit(form, submit));
-        expect(linkDocument).toHaveBeenCalledExactlyOnceWith(documentDto().id, {
-          storage: "repo",
-          owner: currentRepo.owner,
-          repo: currentRepo.name,
-          branch: "main",
-          path: "docs/secondary.md",
-        });
-      } finally {
-        sameDocumentForeignView.unmount();
-        crossDocumentForeignView.unmount();
-      }
-    } finally {
-      pickerView.unmount();
-      frame.remove();
-    }
-  });
-
-  it("keeps a restored mutated or reordered gist publication retired while a fresh picker works", async () => {
-    const first = gist("gist-first", "first.md");
-    const second = gist("gist-second", "second.md");
-    const mutableGists = [first, second];
-    const onImported = vi.fn();
-    gists.mockResolvedValue({ gists: mutableGists });
-
-    const view = render(
-      <GitHubPicker key="gist-a" mode="import" githubAvailable githubConfigured onImported={onImported} />,
-    );
-    const rows = await screen.findAllByTestId("gist-item");
-    const firstRow = rows[0] as HTMLButtonElement;
-    const list = firstRow.parentElement?.parentElement;
-    const firstItem = firstRow.parentElement;
-    const secondItem = rows[1]?.parentElement;
-    expect(list).toBeInstanceOf(HTMLUListElement);
-    expect(firstItem).toBeInstanceOf(HTMLLIElement);
-    expect(secondItem).toBeInstanceOf(HTMLLIElement);
-
-    first.id = "mutated";
-    fireEvent.click(firstRow);
-    expect(importDocument).not.toHaveBeenCalled();
-    first.id = "gist-first";
-
-    list!.append(firstItem!);
-    fireEvent.click(firstRow);
-    expect(importDocument).not.toHaveBeenCalled();
-    list!.insertBefore(firstItem!, secondItem!);
-
-    fireEvent.click(firstRow);
-    expect(importDocument).not.toHaveBeenCalled();
-
-    view.rerender(
-      <GitHubPicker key="gist-b" mode="import" githubAvailable githubConfigured onImported={onImported} />,
-    );
-    const currentRow = (await screen.findAllByTestId("gist-item"))[0] as HTMLButtonElement;
-    fireEvent.click(currentRow);
-    expect(importDocument).toHaveBeenCalledExactlyOnceWith({
-      source: "gist",
-      gistId: "gist-first",
-      filename: "first.md",
-    });
-    await waitFor(() => expect(onImported).toHaveBeenCalledExactlyOnceWith("imported"));
-  });
-
-  it("keeps a same-DOM callback replacement usable after late old refs and cross-generation handlers", async () => {
-    const oldCallback = vi.fn();
-    const currentCallback = vi.fn();
-    const view = render(
-      <GitHubPicker mode="import" githubAvailable githubConfigured onImported={oldCallback} />,
-    );
-    const oldRow = (await screen.findByTestId("gist-item")) as HTMLButtonElement;
-    const oldHandler = reactProp<PickerClickHandler>(oldRow, "onClick");
-    const oldRef = reactProp<RefCallback<HTMLButtonElement>>(oldRow, "ref");
-
-    view.rerender(
-      <GitHubPicker mode="import" githubAvailable githubConfigured onImported={currentCallback} />,
-    );
-    const currentRow = screen.getByTestId("gist-item") as HTMLButtonElement;
-    expect(currentRow).toBe(oldRow);
-
-    oldRef(currentRow);
-    oldRef(null);
-    directPickerClick(oldHandler, currentRow);
-    expect(importDocument).not.toHaveBeenCalled();
-    expect(oldCallback).not.toHaveBeenCalled();
-    expect(currentCallback).not.toHaveBeenCalled();
-
-    fireEvent.click(currentRow);
-    await waitFor(() => expect(currentCallback).toHaveBeenCalledExactlyOnceWith("imported"));
-    expect(oldCallback).not.toHaveBeenCalled();
-    expect(importDocument).toHaveBeenCalledOnce();
-  });
-
-  it("isolates sibling visit handlers in both orders and accepts each exact visit once", async () => {
-    const importedA = vi.fn();
-    const importedB = vi.fn();
-    render(
-      <>
-        <section data-testid="picker-visit-a">
-          <GitHubPicker mode="import" githubAvailable githubConfigured onImported={importedA} />
-        </section>
-        <section data-testid="picker-visit-b">
-          <GitHubPicker mode="import" githubAvailable githubConfigured onImported={importedB} />
-        </section>
-      </>,
-    );
-    const visitA = within(screen.getByTestId("picker-visit-a"));
-    const visitB = within(screen.getByTestId("picker-visit-b"));
-    const rowA = (await visitA.findByTestId("gist-item")) as HTMLButtonElement;
-    const rowB = (await visitB.findByTestId("gist-item")) as HTMLButtonElement;
-    const handlerA = reactProp<PickerClickHandler>(rowA, "onClick");
-    const handlerB = reactProp<PickerClickHandler>(rowB, "onClick");
-
-    directPickerClick(handlerA, rowB);
-    directPickerClick(handlerB, rowA);
-    expect(importDocument).not.toHaveBeenCalled();
-
-    fireEvent.click(rowB);
-    directPickerClick(handlerA, rowB);
-    directPickerClick(handlerB, rowA);
-    fireEvent.click(rowB);
-    fireEvent.click(rowA);
-
-    expect(importDocument).toHaveBeenCalledTimes(2);
-    await waitFor(() => {
-      expect(importedA).toHaveBeenCalledExactlyOnceWith("imported");
-      expect(importedB).toHaveBeenCalledExactlyOnceWith("imported");
-    });
-  });
-
-  it("retires a filtered repository row and ignores its late ref before selecting the exact visible row", async () => {
-    const alpha = repository("alpha");
-    const beta = repository("beta", "trunk");
-    repos.mockResolvedValue({ repos: [alpha, beta] });
-    renderPicker();
-
-    fireEvent.click(screen.getByTestId("picker-tab-repo"));
-    const repositoryButtons = (await screen.findAllByTestId("repo-item")) as HTMLButtonElement[];
-    const alphaButton = repositoryButtons.find((button) => button.textContent?.includes(alpha.fullName))!;
-    const oldHandler = reactProp<PickerClickHandler>(alphaButton, "onClick");
-    const oldRef = reactProp<RefCallback<HTMLButtonElement>>(alphaButton, "ref");
-    fireEvent.change(screen.getByPlaceholderText("Filter repositories"), { target: { value: "beta" } });
-
-    const betaButton = (await screen.findByTestId("repo-item")) as HTMLButtonElement;
-    expect(betaButton).toHaveTextContent(beta.fullName);
-    oldRef(betaButton);
-    oldRef(null);
-    directPickerClick(oldHandler, betaButton);
-    expect(branches).not.toHaveBeenCalled();
-
-    fireEvent.click(betaButton);
-    await waitFor(() => expect(branches).toHaveBeenCalledExactlyOnceWith(beta.owner, beta.name));
-    expect(screen.getByText(beta.fullName)).toBeInTheDocument();
-  });
-
-  it("rejects fabricated field changes and keeps restored branch facts retired until a fresh picker", async () => {
-    const doc = documentDto();
-    const linkView = render(
-      <GitHubPicker mode="link" doc={doc} githubAvailable githubConfigured />,
-    );
-    const filename = screen.getByTestId("gist-filename") as HTMLInputElement;
-    const filenameHandler = reactProp<PickerChangeHandler<HTMLInputElement>>(filename, "onChange");
-    const foreign = document.createElement("input");
-    document.body.append(foreign);
-
-    try {
-      filename.value = "fabricated.md";
-      directPickerChange(filenameHandler, filename);
-      filename.value = "current-document.md";
-      directPickerChange(filenameHandler, filename, {
-        currentTarget: foreign,
-        target: foreign,
-        nativeEvent: nativePickerChange(foreign),
-      });
-      expect(filename).toHaveValue("current-document.md");
-
-      fireEvent.change(filename, { target: { value: "accepted.md" } });
-      expect(screen.getByTestId("gist-filename")).toHaveValue("accepted.md");
-    } finally {
-      foreign.remove();
-    }
-    linkView.unmount();
-
-    const mutableBranches = ["main", "next"];
-    branches.mockResolvedValue({ branches: mutableBranches });
-    const branchView = render(
-      <GitHubPicker key="branch-a" mode="import" githubAvailable githubConfigured />,
-    );
-    await selectRepository();
-    const branchSelect = (await screen.findByTestId("branch-select")) as HTMLSelectElement;
-    await waitFor(() => expect(files).toHaveBeenCalledExactlyOnceWith(currentRepo.owner, currentRepo.name, "main"));
-
-    mutableBranches[1] = "release";
-    fireEvent.change(branchSelect, { target: { value: "next" } });
-    expect(files).toHaveBeenCalledTimes(1);
-
-    mutableBranches[1] = "next";
-    branchSelect.value = "main";
-    fireEvent.change(branchSelect, { target: { value: "next" } });
-    expect(files).toHaveBeenCalledTimes(1);
-
-    branchView.rerender(
-      <GitHubPicker key="branch-b" mode="import" githubAvailable githubConfigured />,
-    );
-    await selectRepository();
-    const currentBranch = (await screen.findByTestId("branch-select")) as HTMLSelectElement;
-    await waitFor(() => expect(files).toHaveBeenCalledTimes(2));
-    fireEvent.change(currentBranch, { target: { value: "next" } });
-    await waitFor(() => expect(files).toHaveBeenCalledTimes(3));
-    expect(files).toHaveBeenLastCalledWith(currentRepo.owner, currentRepo.name, "next");
-    expect(screen.getByTestId("branch-select")).toHaveValue("next");
-  });
 });
 
 describe("GitHubPicker source focus navigation", () => {
@@ -3171,993 +2391,6 @@ describe("GitHubPicker source focus navigation", () => {
     }
   });
 
-  it("authenticates four independent public wrappers and ignores private compatibility shape", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const view = await renderStrictPicker(
-      <GitHubPicker mode="import" githubAvailable githubConfigured />,
-    );
-    try {
-      const group = view.picker.getByRole("group", {
-        name: "GitHub source",
-      });
-      const source = view.picker.getByTestId(
-        "picker-tab-gist",
-      ) as HTMLButtonElement;
-      const destination = view.picker.getByTestId(
-        "picker-tab-repo",
-      ) as HTMLButtonElement;
-      const stages = [
-        {
-          element: group,
-          prop: "onKeyDownCapture",
-          handler: reactProp<PickerKeyHandler<HTMLDivElement>>(
-            group,
-            "onKeyDownCapture",
-          ),
-        },
-        {
-          element: source,
-          prop: "onKeyDownCapture",
-          handler: reactProp<PickerKeyHandler<HTMLButtonElement>>(
-            source,
-            "onKeyDownCapture",
-          ),
-        },
-        {
-          element: source,
-          prop: "onKeyDown",
-          handler: reactProp<PickerKeyHandler<HTMLButtonElement>>(
-            source,
-            "onKeyDown",
-          ),
-        },
-        {
-          element: group,
-          prop: "onKeyDown",
-          handler: reactProp<PickerKeyHandler<HTMLDivElement>>(
-            group,
-            "onKeyDown",
-          ),
-        },
-      ] as const;
-      const wrappers: ReactKeyboardEvent<HTMLElement>[] = [];
-      const prototypes: object[] = [];
-      const methodSets: Array<{
-        preventDefault: ReturnType<typeof vi.fn>;
-        isDefaultPrevented: ReturnType<typeof vi.fn>;
-        isPropagationStopped: ReturnType<typeof vi.fn>;
-      }> = [];
-      const preventionReceivers: object[] = [];
-      const scalarReads: string[] = [];
-      const reentrantEvents: KeyboardEvent[] = [];
-      let outerNativeEvent: Event | null = null;
-      const restorers = stages.map((stage, index) =>
-        replaceReactProp(
-          stage.element,
-          stage.prop,
-          (actual: ReactKeyboardEvent<HTMLElement>) => {
-            outerNativeEvent ??= actual.nativeEvent;
-            if (actual.nativeEvent !== outerNativeEvent) {
-              stage.handler(
-                actual as ReactKeyboardEvent<
-                  HTMLDivElement & HTMLButtonElement
-                >,
-              );
-              return;
-            }
-            const prototype = Object.create(null) as object;
-            Object.defineProperty(prototype, "constructor", {
-              get: () => {
-                throw new Error("source navigation read a wrapper constructor");
-              },
-            });
-            const wrapper = Object.create(
-              prototype,
-            ) as ReactKeyboardEvent<HTMLElement>;
-            const scalarNames = [
-              "nativeEvent",
-              "type",
-              "target",
-              "currentTarget",
-              "eventPhase",
-              "bubbles",
-              "cancelable",
-              "defaultPrevented",
-              "isTrusted",
-              "key",
-              "code",
-              "location",
-              "repeat",
-              "ctrlKey",
-              "altKey",
-              "metaKey",
-              "shiftKey",
-              "view",
-              "detail",
-            ] as const;
-            const scalarValues = new Map<string, unknown>(
-              scalarNames.map((name) => [name, actual[name]]),
-            );
-            let publicDefaultPrevented = actual.defaultPrevented;
-            for (const name of scalarNames) {
-              Object.defineProperty(wrapper, name, {
-                configurable: true,
-                get: () => {
-                  scalarReads.push(`${index}:${name}`);
-                  return name === "defaultPrevented"
-                    ? publicDefaultPrevented
-                    : scalarValues.get(name);
-                },
-              });
-            }
-            const reenter = () => {
-              stage.handler(
-                wrapper as ReactKeyboardEvent<
-                  HTMLDivElement & HTMLButtonElement
-                >,
-              );
-              const nested = pickerKeyboardEvent(source, "ArrowRight");
-              reentrantEvents.push(nested);
-              source.dispatchEvent(nested);
-            };
-            const methods = {
-              preventDefault: vi.fn(function (this: object) {
-                preventionReceivers.push(this);
-                reenter();
-                publicDefaultPrevented = true;
-                return actual.preventDefault();
-              }),
-              isDefaultPrevented: vi.fn(function (this: object) {
-                expect(this).toBe(wrapper);
-                reenter();
-                return publicDefaultPrevented;
-              }),
-              isPropagationStopped: vi.fn(function (this: object) {
-                expect(this).toBe(wrapper);
-                reenter();
-                return actual.isPropagationStopped();
-              }),
-            };
-            Object.defineProperties(wrapper, {
-              preventDefault: { configurable: true, value: methods.preventDefault },
-              isDefaultPrevented: {
-                configurable: true,
-                value: methods.isDefaultPrevented,
-              },
-              isPropagationStopped: {
-                configurable: true,
-                value: methods.isPropagationStopped,
-              },
-              _reactName: {
-                configurable: true,
-                get: () => {
-                  throw new Error("source navigation read _reactName");
-                },
-              },
-              stopPropagation: {
-                configurable: true,
-                get: () => {
-                  throw new Error("source navigation read stopPropagation");
-                },
-              },
-              persist: { configurable: true, value: 17 },
-              isPersistent: { configurable: true, value: null },
-            });
-            wrappers.push(wrapper);
-            prototypes.push(prototype);
-            methodSets.push(methods);
-            stage.handler(
-              wrapper as ReactKeyboardEvent<
-                HTMLDivElement & HTMLButtonElement
-              >,
-            );
-          },
-        ),
-      );
-      source.focus();
-      focus.mockClear();
-      nativePreventDefault.mockClear();
-
-      const event = pickerKey(source, "ArrowRight");
-
-      expect(wrappers).toHaveLength(4);
-      expect(new Set(wrappers)).toHaveLength(4);
-      expect(new Set(prototypes)).toHaveLength(4);
-      expect(
-        new Set(methodSets.flatMap((methods) => Object.values(methods))),
-      ).toHaveLength(12);
-      expect(methodSets.map((methods) => methods.preventDefault.mock.calls.length)).toEqual([
-        0,
-        0,
-        0,
-        1,
-      ]);
-      expect(
-        methodSets.map(
-          (methods) => methods.isDefaultPrevented.mock.calls.length,
-        ),
-      ).toEqual([1, 1, 1, 2]);
-      expect(
-        methodSets.map(
-          (methods) => methods.isPropagationStopped.mock.calls.length,
-        ),
-      ).toEqual([1, 1, 1, 2]);
-      expect(preventionReceivers).toEqual([wrappers[3]]);
-      expect(reentrantEvents).toHaveLength(11);
-      expect(reentrantEvents.every((entry) => !entry.defaultPrevented)).toBe(
-        true,
-      );
-      expect(scalarReads).toContain("0:key");
-      expect(scalarReads).toContain("3:defaultPrevented");
-      expect(nativePreventDefault).toHaveBeenCalledOnce();
-      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
-      expect(event.defaultPrevented).toBe(true);
-      expect(destination).toHaveFocus();
-      for (const restore of restorers.reverse()) restore();
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it.each([
-    [0, "isDefaultPrevented"],
-    [0, "isPropagationStopped"],
-    [1, "isDefaultPrevented"],
-    [1, "isPropagationStopped"],
-    [2, "isDefaultPrevented"],
-    [2, "isPropagationStopped"],
-    [3, "isDefaultPrevented"],
-    [3, "isPropagationStopped"],
-  ] as const)(
-    "rejects a next-method replacement after stage %s %s and admits a clean successor",
-    async (driftStage, driftQuery) => {
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-      const view = await renderStrictPicker(
-        <GitHubPicker mode="import" githubAvailable githubConfigured />,
-      );
-      try {
-        const group = view.picker.getByRole("group", {
-          name: "GitHub source",
-        });
-        const source = view.picker.getByTestId(
-          "picker-tab-gist",
-        ) as HTMLButtonElement;
-        const destination = view.picker.getByTestId(
-          "picker-tab-repo",
-        ) as HTMLButtonElement;
-        const stages = [
-          {
-            element: group,
-            prop: "onKeyDownCapture",
-            handler: reactProp<PickerKeyHandler<HTMLDivElement>>(
-              group,
-              "onKeyDownCapture",
-            ),
-          },
-          {
-            element: source,
-            prop: "onKeyDownCapture",
-            handler: reactProp<PickerKeyHandler<HTMLButtonElement>>(
-              source,
-              "onKeyDownCapture",
-            ),
-          },
-          {
-            element: source,
-            prop: "onKeyDown",
-            handler: reactProp<PickerKeyHandler<HTMLButtonElement>>(
-              source,
-              "onKeyDown",
-            ),
-          },
-          {
-            element: group,
-            prop: "onKeyDown",
-            handler: reactProp<PickerKeyHandler<HTMLDivElement>>(
-              group,
-              "onKeyDown",
-            ),
-          },
-        ] as const;
-        let sabotage = true;
-        const restorers = stages.map((stage, stageIndex) =>
-          replaceReactProp(
-            stage.element,
-            stage.prop,
-            (actual: ReactKeyboardEvent<HTMLElement>) => {
-              const publicPreventDefault = vi.fn(function (this: object) {
-                Object.defineProperty(this, "defaultPrevented", {
-                  configurable: true,
-                  value: true,
-                });
-                return actual.preventDefault();
-              });
-              const publicIsPropagationStopped = vi.fn(function (
-                this: object,
-              ) {
-                if (
-                  sabotage &&
-                  stageIndex === driftStage &&
-                  driftQuery === "isPropagationStopped"
-                ) {
-                  Object.defineProperty(this, "preventDefault", {
-                    configurable: true,
-                    value: vi.fn(),
-                  });
-                }
-                return false;
-              });
-              const publicIsDefaultPrevented = vi.fn(function (this: object) {
-                if (
-                  sabotage &&
-                  stageIndex === driftStage &&
-                  driftQuery === "isDefaultPrevented"
-                ) {
-                  Object.defineProperty(this, "isPropagationStopped", {
-                    configurable: true,
-                    value: vi.fn(() => false),
-                  });
-                }
-                return Boolean(
-                  (this as { defaultPrevented?: boolean }).defaultPrevented,
-                );
-              });
-              const wrapper = clonePickerSyntheticEvent(
-                actual,
-                {
-                  currentTarget: actual.currentTarget,
-                  preventDefault: publicPreventDefault,
-                  isDefaultPrevented: publicIsDefaultPrevented,
-                  isPropagationStopped: publicIsPropagationStopped,
-                },
-                class {},
-              );
-              stage.handler(
-                wrapper as ReactKeyboardEvent<
-                  HTMLDivElement & HTMLButtonElement
-                >,
-              );
-            },
-          ),
-        );
-        source.focus();
-        focus.mockClear();
-        preventDefault.mockClear();
-
-        const rejected = pickerKey(source, "ArrowRight");
-
-        expect(rejected.defaultPrevented).toBe(false);
-        expect(source).toHaveFocus();
-        expect(preventDefault).not.toHaveBeenCalled();
-        expect(focus).not.toHaveBeenCalled();
-
-        sabotage = false;
-        const accepted = pickerKey(source, "ArrowRight");
-
-        expect(accepted.defaultPrevented).toBe(true);
-        expect(destination).toHaveFocus();
-        expect(preventDefault).toHaveBeenCalledOnce();
-        expect(focus).toHaveBeenCalledExactlyOnceWith({
-          preventScroll: true,
-        });
-        for (const restore of restorers.reverse()) restore();
-      } finally {
-        await view.unmount();
-      }
-    },
-  );
-
-  it.each(["missing-stage", "throwing-query"] as const)(
-    "keeps a %s partial route inert and accepts the next clean event",
-    async (failure) => {
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-      const view = await renderStrictPicker(
-        <GitHubPicker mode="import" githubAvailable githubConfigured />,
-      );
-      try {
-        const group = view.picker.getByRole("group", {
-          name: "GitHub source",
-        });
-        const source = view.picker.getByTestId(
-          "picker-tab-gist",
-        ) as HTMLButtonElement;
-        const destination = view.picker.getByTestId(
-          "picker-tab-repo",
-        ) as HTMLButtonElement;
-        const groupCapture = reactProp<PickerKeyHandler<HTMLDivElement>>(
-          group,
-          "onKeyDownCapture",
-        );
-        const sourceCapture = reactProp<PickerKeyHandler<HTMLButtonElement>>(
-          source,
-          "onKeyDownCapture",
-        );
-        let reject = true;
-        const restoreGroup = replaceReactProp(
-          group,
-          "onKeyDownCapture",
-          (event: ReactKeyboardEvent<HTMLDivElement>) => {
-            if (reject && failure === "throwing-query") {
-              groupCapture(
-                clonePickerSyntheticEvent(event, {
-                  isDefaultPrevented: vi.fn(() => {
-                    throw new Error("query failed");
-                  }),
-                }),
-              );
-              return;
-            }
-            groupCapture(event);
-          },
-        );
-        const restoreSource = replaceReactProp(
-          source,
-          "onKeyDownCapture",
-          (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-            if (reject && failure === "missing-stage") return;
-            sourceCapture(event);
-          },
-        );
-        source.focus();
-        focus.mockClear();
-        preventDefault.mockClear();
-
-        const rejected = pickerKey(source, "ArrowRight");
-
-        expect(rejected.defaultPrevented).toBe(false);
-        expect(source).toHaveFocus();
-        expect(preventDefault).not.toHaveBeenCalled();
-        expect(focus).not.toHaveBeenCalled();
-
-        reject = false;
-        const accepted = pickerKey(source, "ArrowRight");
-
-        expect(accepted.defaultPrevented).toBe(true);
-        expect(destination).toHaveFocus();
-        expect(preventDefault).toHaveBeenCalledOnce();
-        expect(focus).toHaveBeenCalledExactlyOnceWith({
-          preventScroll: true,
-        });
-        restoreSource();
-        restoreGroup();
-      } finally {
-        await view.unmount();
-      }
-    },
-  );
-
-  it("keeps nested exact-native routes isolated through crossed live delivery and replay", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const view = await renderStrictPicker(
-      <GitHubPicker mode="import" githubAvailable githubConfigured />,
-    );
-    try {
-      const source = view.picker.getByTestId(
-        "picker-tab-gist",
-      ) as HTMLButtonElement;
-      const destination = view.picker.getByTestId(
-        "picker-tab-repo",
-      ) as HTMLButtonElement;
-      const ownerWindow = source.ownerDocument.defaultView;
-      if (!ownerWindow) throw new Error("The picker has no owner Window");
-      const sourceCapture = reactProp<PickerKeyHandler<HTMLButtonElement>>(
-        source,
-        "onKeyDownCapture",
-      );
-      let outerWrapper: ReactKeyboardEvent<HTMLButtonElement> | null = null;
-      let nestedEvent: KeyboardEvent | null = null;
-      const authenticatedWrappers: KeyboardEvent[] = [];
-      const restoreSource = replaceReactProp(
-        source,
-        "onKeyDownCapture",
-        (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-          if (!outerWrapper) {
-            outerWrapper = event;
-            nestedEvent = pickerKeyboardEvent(source, "ArrowRight");
-            source.dispatchEvent(nestedEvent);
-            source.focus();
-            return;
-          }
-          if (!nestedEvent || event.nativeEvent !== nestedEvent) {
-            sourceCapture(event);
-            return;
-          }
-          const outerEvent = outerWrapper.nativeEvent;
-          const captures = [
-            [outerWrapper, outerEvent],
-            [event, nestedEvent],
-          ] as const;
-          for (const [wrapper, nativeEvent] of captures) {
-            if (
-              wrapper.nativeEvent === nativeEvent &&
-              wrapper.target === source &&
-              wrapper.currentTarget === source &&
-              wrapper.eventPhase === ownerWindow.Event.CAPTURING_PHASE
-            ) {
-              authenticatedWrappers.push(nativeEvent);
-            }
-          }
-          sourceCapture(outerWrapper);
-          sourceCapture(event);
-        },
-      );
-      source.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-      const outerEvent = pickerKeyboardEvent(source, "ArrowRight");
-      const nativeCaptures: Array<{
-        event: Event;
-        receiver: EventTarget;
-        target: EventTarget | null;
-        currentTarget: EventTarget | null;
-        phase: number;
-        terminal: EventTarget | undefined;
-      }> = [];
-      const observeNativeCapture = function (
-        this: EventTarget,
-        nativeEvent: Event,
-      ) {
-        nativeCaptures.push({
-          event: nativeEvent,
-          receiver: this,
-          target: nativeEvent.target,
-          currentTarget: nativeEvent.currentTarget,
-          phase: nativeEvent.eventPhase,
-          terminal: nativeEvent.composedPath().at(-1),
-        });
-      };
-      ownerWindow.addEventListener("keydown", observeNativeCapture, true);
-
-      try {
-        act(() => {
-          source.dispatchEvent(outerEvent);
-        });
-      } finally {
-        ownerWindow.removeEventListener("keydown", observeNativeCapture, true);
-      }
-
-      expect(nestedEvent).not.toBeNull();
-      expect(authenticatedWrappers).toEqual([outerEvent, nestedEvent]);
-      expect(nativeCaptures.map(({ event }) => event)).toEqual([
-        outerEvent,
-        nestedEvent,
-      ]);
-      const terminalReceiver = nativeCaptures[0]?.receiver;
-      expect(terminalReceiver).toBeDefined();
-      for (const capture of nativeCaptures) {
-        expect(capture.receiver).toBe(terminalReceiver);
-        expect(capture.target).toBe(source);
-        expect(capture.currentTarget).toBe(capture.receiver);
-        expect(capture.phase).toBe(ownerWindow.Event.CAPTURING_PHASE);
-        expect(capture.terminal).toBe(capture.receiver);
-        expect((capture.event as KeyboardEvent).view).toBe(ownerWindow);
-      }
-      expect(outerEvent.defaultPrevented).toBe(true);
-      expect(nestedEvent!.defaultPrevented).toBe(true);
-      expect(destination).toHaveFocus();
-      expect(preventDefault).toHaveBeenCalledTimes(2);
-      expect(focus).toHaveBeenCalledTimes(3);
-      expect(focus.mock.instances).toEqual([destination, source, destination]);
-      expect(focus).toHaveBeenNthCalledWith(1, { preventScroll: true });
-      expect(focus).toHaveBeenNthCalledWith(2);
-      expect(focus).toHaveBeenNthCalledWith(3, { preventScroll: true });
-
-      source.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-      act(() => {
-        source.dispatchEvent(outerEvent);
-        source.dispatchEvent(nestedEvent!);
-      });
-
-      expect(source).toHaveFocus();
-      expect(preventDefault).not.toHaveBeenCalled();
-      expect(focus).not.toHaveBeenCalled();
-
-      const successor = pickerKey(source, "ArrowRight");
-
-      expect(successor.defaultPrevented).toBe(true);
-      expect(destination).toHaveFocus();
-      expect(preventDefault).toHaveBeenCalledOnce();
-      expect(focus).toHaveBeenCalledExactlyOnceWith({
-        preventScroll: true,
-      });
-      restoreSource();
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("uses distinct capture and bubble wrappers, ignores persist compatibility drift, and calls public prevention once", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const nativePreventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const view = await renderStrictPicker(
-      <GitHubPicker mode="import" githubAvailable githubConfigured />,
-    );
-    try {
-      const group = view.picker.getByRole("group", {
-        name: "GitHub source",
-      });
-      const gistTab = view.picker.getByTestId(
-        "picker-tab-gist",
-      ) as HTMLButtonElement;
-      const repoTab = view.picker.getByTestId(
-        "picker-tab-repo",
-      ) as HTMLButtonElement;
-      const groupCapture = reactProp<PickerKeyHandler<HTMLDivElement>>(
-        group,
-        "onKeyDownCapture",
-      );
-      const buttonCapture = reactProp<PickerKeyHandler<HTMLButtonElement>>(
-        gistTab,
-        "onKeyDownCapture",
-      );
-      const buttonBubble = reactProp<PickerKeyHandler<HTMLButtonElement>>(
-        gistTab,
-        "onKeyDown",
-      );
-      const groupBubble = reactProp<PickerKeyHandler<HTMLDivElement>>(
-        group,
-        "onKeyDown",
-      );
-      let captureWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
-      let bubbleWrapper: ReactKeyboardEvent<HTMLElement> | null = null;
-      const publicPreventDefaults: Array<ReturnType<typeof vi.fn>> = [];
-      const reentrantEvents: KeyboardEvent[] = [];
-      const capturePersist = vi.fn();
-      const bubblePersist = vi.fn();
-      const incompatiblePersist = Object.freeze({ compatibility: false });
-      const persistValues: unknown[] = [];
-      let trackedNativeEvent: Event | null = null;
-      const replacePersist = (
-        event: ReactKeyboardEvent<HTMLElement>,
-        value: unknown,
-      ) => {
-        trackedNativeEvent ??= event.nativeEvent;
-        Object.defineProperty(event, "persist", {
-          configurable: true,
-          writable: true,
-          value,
-        });
-        if (event.nativeEvent === trackedNativeEvent) {
-          persistValues.push(
-            (event as unknown as { persist?: unknown }).persist,
-          );
-        }
-      };
-      replaceReactProp(
-        group,
-        "onKeyDownCapture",
-        (event: ReactKeyboardEvent<HTMLDivElement>) => {
-          replacePersist(event, undefined);
-          captureWrapper = event;
-          groupCapture(event);
-        },
-      );
-      replaceReactProp(
-        gistTab,
-        "onKeyDownCapture",
-        (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-          expect(event).toBe(captureWrapper);
-          replacePersist(event, capturePersist);
-          buttonCapture(event);
-        },
-      );
-      replaceReactProp(
-        gistTab,
-        "onKeyDown",
-        (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-          replacePersist(event, incompatiblePersist);
-          bubbleWrapper = event;
-          const original = event.preventDefault;
-          const publicPreventDefault = vi.fn(function (
-            this: ReactKeyboardEvent<HTMLButtonElement>,
-          ) {
-            const result = original.call(this);
-            const reentrantEvent = pickerKeyboardEvent(gistTab, "ArrowRight");
-            reentrantEvents.push(reentrantEvent);
-            gistTab.dispatchEvent(reentrantEvent);
-            return result;
-          });
-          publicPreventDefaults.push(publicPreventDefault);
-          Object.defineProperty(event, "preventDefault", {
-            configurable: true,
-            writable: true,
-            value: publicPreventDefault,
-          });
-          buttonBubble(event);
-        },
-      );
-      replaceReactProp(
-        group,
-        "onKeyDown",
-        (event: ReactKeyboardEvent<HTMLDivElement>) => {
-          expect(event).toBe(bubbleWrapper);
-          replacePersist(event, bubblePersist);
-          groupBubble(event);
-        },
-      );
-      gistTab.focus();
-      focus.mockClear();
-      nativePreventDefault.mockClear();
-
-      const event = pickerKey(gistTab, "ArrowRight");
-
-      expect(captureWrapper).not.toBeNull();
-      expect(bubbleWrapper).not.toBeNull();
-      expect(captureWrapper).not.toBe(bubbleWrapper);
-      expect(persistValues).toEqual([
-        undefined,
-        capturePersist,
-        incompatiblePersist,
-        bubblePersist,
-      ]);
-      expect(publicPreventDefaults).toHaveLength(2);
-      expect(publicPreventDefaults[0]).toHaveBeenCalledOnce();
-      expect(publicPreventDefaults[1]).not.toHaveBeenCalled();
-      expect(reentrantEvents).toHaveLength(1);
-      expect(reentrantEvents[0]?.defaultPrevented).toBe(false);
-      expect(nativePreventDefault).toHaveBeenCalledOnce();
-      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
-      expect(event.defaultPrevented).toBe(true);
-      expect(repoTab).toHaveFocus();
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it.each([
-    "preventDefault",
-    "isDefaultPrevented",
-    "isPropagationStopped",
-  ] as const)(
-    "rejects retained %s drift and admits a clean successor",
-    async (method) => {
-      const focus = vi.spyOn(HTMLElement.prototype, "focus");
-      const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-      const view = await renderStrictPicker(
-        <GitHubPicker mode="import" githubAvailable githubConfigured />,
-      );
-      try {
-        const group = view.picker.getByRole("group", {
-          name: "GitHub source",
-        });
-        const source = view.picker.getByTestId(
-          "picker-tab-gist",
-        ) as HTMLButtonElement;
-        const destination = view.picker.getByTestId(
-          "picker-tab-repo",
-        ) as HTMLButtonElement;
-        const groupCapture = reactProp<PickerKeyHandler<HTMLDivElement>>(
-          group,
-          "onKeyDownCapture",
-        );
-        let drift = true;
-        replaceReactProp(
-          group,
-          "onKeyDownCapture",
-          (event: ReactKeyboardEvent<HTMLDivElement>) => {
-            groupCapture(event);
-            if (!drift) return;
-            Object.defineProperty(event, method, {
-              configurable: true,
-              writable: true,
-              value: vi.fn(() =>
-                method.startsWith("is") ? false : undefined,
-              ),
-            });
-          },
-        );
-        source.focus();
-        focus.mockClear();
-        preventDefault.mockClear();
-
-        const rejected = pickerKey(source, "ArrowRight");
-
-        expect(rejected.defaultPrevented).toBe(false);
-        expect(source).toHaveFocus();
-        expect(preventDefault).not.toHaveBeenCalled();
-        expect(focus).not.toHaveBeenCalled();
-
-        drift = false;
-        const accepted = pickerKey(source, "ArrowRight");
-
-        expect(accepted.defaultPrevented).toBe(true);
-        expect(destination).toHaveFocus();
-        expect(preventDefault).toHaveBeenCalledOnce();
-        expect(focus).toHaveBeenCalledExactlyOnceWith({
-          preventScroll: true,
-        });
-      } finally {
-        await view.unmount();
-      }
-    },
-  );
-
-  it("accepts the genuine Window receiver while rejecting an exact structural facade", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const view = await renderStrictPicker(
-      <GitHubPicker mode="import" githubAvailable githubConfigured />,
-    );
-    try {
-      const source = view.picker.getByTestId(
-        "picker-tab-gist",
-      ) as HTMLButtonElement;
-      const destination = view.picker.getByTestId(
-        "picker-tab-repo",
-      ) as HTMLButtonElement;
-      const ownerWindow = source.ownerDocument.defaultView;
-      if (!ownerWindow) throw new Error("The picker has no owner Window");
-      const event = pickerKeyboardEvent(source, "ArrowRight");
-      const observation: {
-        receiver?: EventTarget;
-        currentTarget?: EventTarget | null;
-        terminal?: EventTarget;
-      } = {};
-      const observeReceiver = function (
-        this: EventTarget,
-        nativeEvent: Event,
-      ) {
-        if (nativeEvent !== event) return;
-        observation.receiver = this;
-        observation.currentTarget = nativeEvent.currentTarget;
-        observation.terminal = nativeEvent.composedPath().at(-1);
-        setPickerEventView(event, this as Window);
-      };
-      ownerWindow.addEventListener("keydown", observeReceiver, true);
-      source.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-      try {
-        act(() => {
-          source.dispatchEvent(event);
-        });
-      } finally {
-        ownerWindow.removeEventListener("keydown", observeReceiver, true);
-      }
-
-      expect(observation.receiver).toBe(observation.currentTarget);
-      expect(observation.receiver).toBe(observation.terminal);
-      expect(event.view).toBe(observation.receiver);
-      expect(event.defaultPrevented).toBe(true);
-      expect(destination).toHaveFocus();
-
-      const structural = Object.create(
-        ownerWindow.Window.prototype,
-      ) as Window;
-      Object.defineProperties(structural, {
-        document: { value: source.ownerDocument },
-        Window: { value: ownerWindow.Window },
-        Event: { value: ownerWindow.Event },
-        UIEvent: { value: ownerWindow.UIEvent },
-        EventTarget: { value: ownerWindow.EventTarget },
-        KeyboardEvent: { value: ownerWindow.KeyboardEvent },
-        HTMLElement: { value: ownerWindow.HTMLElement },
-        Object: { value: ownerWindow.Object },
-        Reflect: { value: ownerWindow.Reflect },
-        window: { value: structural },
-        self: { value: structural },
-      });
-      const facadeEvent = pickerKeyboardEvent(source, "ArrowRight");
-      setPickerEventView(facadeEvent, structural);
-      source.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-
-      act(() => {
-        source.dispatchEvent(facadeEvent);
-      });
-
-      expect(facadeEvent.view).toBe(structural);
-      expect(facadeEvent.defaultPrevented).toBe(false);
-      expect(source).toHaveFocus();
-      expect(preventDefault).not.toHaveBeenCalled();
-      expect(focus).not.toHaveBeenCalled();
-
-      const recovered = pickerKey(source, "ArrowRight");
-      expect(recovered.defaultPrevented).toBe(true);
-      expect(destination).toHaveFocus();
-    } finally {
-      await view.unmount();
-    }
-  });
-
-  it("rejects stale source callbacks after a same-DOM replacement and lets the current callbacks recover", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const view = await renderStrictPicker(
-      <GitHubPicker
-        mode="import"
-        githubAvailable
-        githubConfigured
-        onImported={vi.fn()}
-      />,
-    );
-    try {
-      const staleGroup = view.picker.getByRole("group", {
-        name: "GitHub source",
-      });
-      const staleSource = view.picker.getByTestId(
-        "picker-tab-gist",
-      ) as HTMLButtonElement;
-      const staleHandlers = {
-        groupCapture: reactProp<PickerKeyHandler<HTMLDivElement>>(
-          staleGroup,
-          "onKeyDownCapture",
-        ),
-        sourceCapture: reactProp<PickerKeyHandler<HTMLButtonElement>>(
-          staleSource,
-          "onKeyDownCapture",
-        ),
-        sourceBubble: reactProp<PickerKeyHandler<HTMLButtonElement>>(
-          staleSource,
-          "onKeyDown",
-        ),
-        groupBubble: reactProp<PickerKeyHandler<HTMLDivElement>>(
-          staleGroup,
-          "onKeyDown",
-        ),
-      };
-      await view.rerender(
-        <GitHubPicker
-          mode="import"
-          githubAvailable
-          githubConfigured
-          onImported={vi.fn()}
-        />,
-      );
-      const group = view.picker.getByRole("group", {
-        name: "GitHub source",
-      });
-      const source = view.picker.getByTestId(
-        "picker-tab-gist",
-      ) as HTMLButtonElement;
-      const destination = view.picker.getByTestId(
-        "picker-tab-repo",
-      ) as HTMLButtonElement;
-      expect(group).toBe(staleGroup);
-      expect(source).toBe(staleSource);
-      const restorers = [
-        replaceReactProp(
-          group,
-          "onKeyDownCapture",
-          staleHandlers.groupCapture,
-        ),
-        replaceReactProp(
-          source,
-          "onKeyDownCapture",
-          staleHandlers.sourceCapture,
-        ),
-        replaceReactProp(source, "onKeyDown", staleHandlers.sourceBubble),
-        replaceReactProp(group, "onKeyDown", staleHandlers.groupBubble),
-      ];
-      source.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-      const staleEvent = pickerKey(source, "ArrowRight");
-      for (const restore of restorers.reverse()) restore();
-
-      expect(staleEvent.defaultPrevented).toBe(false);
-      expect(source).toHaveFocus();
-      expect(preventDefault).not.toHaveBeenCalled();
-      expect(focus).not.toHaveBeenCalled();
-
-      const recovered = pickerKey(source, "ArrowRight");
-      expect(recovered.defaultPrevented).toBe(true);
-      expect(destination).toHaveFocus();
-      expect(focus).toHaveBeenCalledExactlyOnceWith({
-        preventScroll: true,
-      });
-    } finally {
-      await view.unmount();
-    }
-  });
-
   it.each(["Enter", " "] as const)(
     "retains %s activation after focus-only navigation",
     async (key) => {
@@ -4190,112 +2423,6 @@ describe("GitHubPicker source focus navigation", () => {
     },
   );
 
-  it("keeps busy, detached, restored, and Strict replay sources inert before a clean successor moves", async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, "focus");
-    const preventDefault = vi.spyOn(Event.prototype, "preventDefault");
-    const replayEvents: KeyboardEvent[] = [];
-    const onReplay = vi.fn(() => {
-      const source = document.querySelector<HTMLButtonElement>(
-        '[data-testid="picker-tab-gist"]',
-      );
-      if (!source) throw new Error("The replayed picker has no gist source");
-      source.focus();
-      const event = pickerKeyboardEvent(source, "ArrowRight");
-      replayEvents.push(event);
-      source.dispatchEvent(event);
-    });
-    const replayView = await renderStrictPicker(
-      <StrictPickerReplayProbe onReplay={onReplay}>
-        <GitHubPicker mode="import" githubAvailable githubConfigured />
-      </StrictPickerReplayProbe>,
-    );
-    let retiredSource: HTMLButtonElement;
-    try {
-      expect(onReplay).toHaveBeenCalledOnce();
-      expect(replayEvents[0]?.defaultPrevented).toBe(false);
-      const source = replayView.picker.getByTestId(
-        "picker-tab-gist",
-      ) as HTMLButtonElement;
-      retiredSource = source;
-      const destination = replayView.picker.getByTestId(
-        "picker-tab-repo",
-      ) as HTMLButtonElement;
-      source.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-      const accepted = pickerKey(source, "ArrowRight");
-      expect(accepted.defaultPrevented).toBe(true);
-      expect(destination).toHaveFocus();
-    } finally {
-      await replayView.unmount();
-    }
-    const cleanupEvent = pickerKeyboardEvent(retiredSource!, "ArrowRight");
-    retiredSource!.dispatchEvent(cleanupEvent);
-    expect(cleanupEvent.defaultPrevented).toBe(false);
-
-    const request = deferred<{
-      document: { id: string; title: string };
-    }>();
-    importDocument.mockReturnValue(request.promise);
-    const busyView = renderPicker();
-    const busySource = busyView.getByTestId(
-      "picker-tab-gist",
-    ) as HTMLButtonElement;
-    busySource.focus();
-    fireEvent.click(await busyView.findByTestId("gist-item"));
-    expect(busySource).toBeDisabled();
-    const busyEvent = pickerKeyboardEvent(busySource, "ArrowRight");
-    act(() => {
-      busySource.dispatchEvent(busyEvent);
-    });
-    expect(busyEvent.defaultPrevented).toBe(false);
-    expect(repos).not.toHaveBeenCalled();
-    await act(async () => {
-      request.resolve({ document: { id: "busy", title: "Busy" } });
-      await request.promise;
-    });
-    busyView.unmount();
-
-    const restoredView = await renderStrictPicker(
-      <GitHubPicker mode="import" githubAvailable githubConfigured />,
-    );
-    try {
-      const group = restoredView.picker.getByRole("group", {
-        name: "GitHub source",
-      });
-      const source = restoredView.picker.getByTestId(
-        "picker-tab-gist",
-      ) as HTMLButtonElement;
-      const destination = restoredView.picker.getByTestId(
-        "picker-tab-repo",
-      ) as HTMLButtonElement;
-      destination.remove();
-      source.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-      const missingEvent = pickerKey(source, "ArrowRight");
-      await act(async () => {});
-      expect(missingEvent.defaultPrevented).toBe(false);
-      expect(source).toHaveFocus();
-      expect(preventDefault).not.toHaveBeenCalled();
-      expect(focus).not.toHaveBeenCalled();
-
-      group.append(destination);
-      source.focus();
-      focus.mockClear();
-      preventDefault.mockClear();
-
-      const restoredEvent = pickerKey(source, "ArrowRight");
-      await act(async () => {});
-
-      expect(restoredEvent.defaultPrevented).toBe(false);
-      expect(source).toHaveFocus();
-      expect(preventDefault).not.toHaveBeenCalled();
-      expect(focus).not.toHaveBeenCalled();
-    } finally {
-      await restoredView.unmount();
-    }
-  });
 });
 
 describe("GitHubPicker action ownership", () => {

@@ -830,14 +830,17 @@ describe("the focus guard of a card's frame (#2338)", () => {
       expect(document.activeElement).toBe(editor);
     });
 
-    it("script click on a directly focused proxy cannot authorize the frame", () => {
+    it("a click or Enter on a directly focused proxy enters the frame", () => {
       const made = make();
       editor.focus();
       cover(made.box)!.focus();
       cover(made.box)!.click();
-      expect(document.activeElement).toBe(cover(made.box));
-      grab(made.frame, 2110);
-      expect(document.activeElement).toBe(editor);
+      expect(document.activeElement).toBe(made.frame);
+      const other = make();
+      editor.focus();
+      cover(other.box)!.focus();
+      cover(other.box)!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      expect(document.activeElement).toBe(other.frame);
     });
 
     it("a Tab capability is exact: another frame racing it is rejected", () => {

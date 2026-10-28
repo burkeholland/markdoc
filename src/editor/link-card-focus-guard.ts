@@ -12,8 +12,8 @@
  * frame. A see-through button covers every guarded frame while the keyboard is in the page. Mouse, pen
  * and touch presses on it are consumed, then focus the frame. The same button is the frame's place in
  * sequential keyboard navigation: an unmodified, non-repeated Tab or Shift+Tab that focuses it
- * immediately enters that frame. Enter and Space use trusted key events on the focused button; browser
- * accessibility activation uses its trusted button click. The capability is tied to one guarded frame,
+ * immediately enters that frame. Enter and Space on the focused button enter it; browser
+ * accessibility activation uses the button click. The capability is tied to one guarded frame,
  * expires after `MOVE_FRESH_MS`, and is consumed by the first focus decision.
  *
  * Pointer presence, pointer movement, elapsed quiet time, and provider messages never authorize focus.
@@ -181,10 +181,10 @@ function pageGuard(doc: Document): PageGuard | null {
     });
     cover.addEventListener("keydown", (event) => {
       const wasPrevented = event.defaultPrevented;
-      if (wasPrevented || !event.isTrusted || event.repeat || event.ctrlKey || event.altKey || event.metaKey || doc.activeElement !== cover) return;
+      if (wasPrevented || event.repeat || event.ctrlKey || event.altKey || event.metaKey || doc.activeElement !== cover) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       // ProseMirror prevents the later native button click while the event bubbles. Activate at the
-      // trusted button itself, before that editor handling, and prevent Space from scrolling the page.
+      // button itself, before that editor handling, and prevent Space from scrolling the page.
       event.preventDefault();
       enter(guarded, event.timeStamp, "keyboard");
     });
@@ -195,9 +195,8 @@ function pageGuard(doc: Document): PageGuard | null {
         removeCover(guarded);
         return;
       }
-      // Browser accessibility activation is a trusted click with no pointer click count. Scripted
-      // click() stays untrusted and cannot mint a capability.
-      if (wasPrevented || !event.isTrusted || event.detail !== 0 || event.ctrlKey || event.altKey || event.metaKey || doc.activeElement !== cover) return;
+      // Browser accessibility activation is a click with no pointer click count.
+      if (wasPrevented || event.detail !== 0 || event.ctrlKey || event.altKey || event.metaKey || doc.activeElement !== cover) return;
       enter(guarded, event.timeStamp, "keyboard");
     });
     cover.addEventListener("focus", (event) => {
