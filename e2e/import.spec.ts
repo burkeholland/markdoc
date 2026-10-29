@@ -110,6 +110,9 @@ test.describe("import local files", () => {
       { name: "trip.md", type: "text/markdown", text: "# Trip\n\n![Beach](./images/beach.png)\n\n![Missing](lost.png)\n" },
       { name: "beach.png", type: "image/png", base64: PNG_BASE64 },
     ]);
+    // `lost.png` is a warning, so the dialog stays with it (#2292) and Open goes to the document.
+    await expect(page.getByTestId("import-warning")).toContainText("lost.png");
+    await page.getByTestId("import-open").click();
     await page.waitForURL(/\/d\/[a-z0-9]+$/);
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
     const text = await codeText(page);
@@ -126,6 +129,56 @@ test.describe("import local files", () => {
     expect(res.status()).toBe(200);
     expect(res.headers()["content-type"]).toBe("image/png");
     expect((await res.body()).equals(PNG)).toBeTruthy();
+  });
+
+  test("a batch over 10 MiB imports file by file with every file done (#2340)", async ({ browser }) => {
+    const { page } = await signIn(browser, "bulkimporter");
+    const filler = "lorem ipsum ".repeat(170_000); // ~2 MB of text per file
+    const files = Array.from({ length: 6 }, (_, i) => ({ name: `bulk-${i}.md`, type: "text/markdown", text: `# Bulk ${i}\n\n${filler}` }));
+    const requests: number[] = [];
+    page.on("request", (req) => {
+      if (req.url().endsWith("/api/import/file")) requests.push(req.postDataBuffer()?.length ?? 0);
+    });
+    await dropFiles(page, "body", files);
+    const items = page.getByTestId("import-item");
+    await expect(items).toHaveCount(6);
+    for (let i = 0; i < 6; i++) await expect(items.nth(i)).toHaveAttribute("data-status", "done", { timeout: 60_000 });
+    expect(requests).toHaveLength(6);
+    for (const size of requests) expect(size).toBeLessThan(10 * 1024 * 1024);
+  });
+
+  test("one file with a refused image keeps the dialog with the warning and an Open link (#2292)", async ({ browser }) => {
+    const { page } = await signIn(browser, "warnedimporter");
+    await dropFiles(page, "body", [
+      { name: "trip.md", type: "text/markdown", text: "# Trip\n\n![Beach](beach.png)\n" },
+      // Declared PNG, but the bytes are not an image: the server refuses it.
+      { name: "beach.png", type: "image/png", text: "not a picture" },
+    ]);
+    const dialog = page.getByTestId("import-dialog");
+    await expect(dialog).toBeVisible();
+    await expect(page.getByTestId("import-warning").first()).toContainText("“beach.png”:");
+    expect(new URL(page.url()).pathname).toBe("/");
+    await dialog.screenshot({ path: test.info().outputPath("single-file-warning.png") });
+    await page.getByTestId("import-open").click();
+    await page.waitForURL(/\/d\/[a-z0-9]+$/);
+  });
+
+  test("a binary file renamed .md is refused with a plain message and creates nothing (#2419)", async ({ browser }) => {
+    const { page } = await signIn(browser, "binaryimporter");
+    const imports: string[] = [];
+    page.on("request", (req) => {
+      if (req.url().endsWith("/api/import/file")) imports.push(req.url());
+    });
+    await page.getByTestId("import-file-input").setInputFiles({
+      name: "fake.md",
+      mimeType: "text/markdown",
+      buffer: Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("notreally")]),
+    });
+    const dialog = page.getByTestId("import-dialog");
+    await expect(dialog).toContainText("“fake.md” doesn't look like a text or Markdown file");
+    await dialog.screenshot({ path: test.info().outputPath("binary-refused.png") });
+    expect(imports).toEqual([]);
+    expect(new URL(page.url()).pathname).toBe("/");
   });
 
   test("dropping a .md file on the editor offers Insert at cursor", async ({ browser }) => {

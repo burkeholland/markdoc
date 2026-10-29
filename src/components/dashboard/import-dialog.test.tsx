@@ -18,7 +18,7 @@ vi.mock("@/lib/import-upload", async (importOriginal) => ({
 }));
 
 import { ApiError } from "@/lib/api";
-import { ImportDialog, type ImportItem, useFileImport } from "./import-dialog";
+import { ImportDialog, type ImportItem, shouldOpenImported, useFileImport } from "./import-dialog";
 
 function Harness({
   label = "Import",
@@ -623,7 +623,7 @@ describe("ImportDialog result hover labels", () => {
       </StrictMode>,
     );
     fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
-    expect(uploadImportBatch).toHaveBeenCalledExactlyOnceWith([first, second, third], []);
+    expect(uploadImportBatch).toHaveBeenCalledExactlyOnceWith([first, second, third], [], expect.any(Function));
     for (const [index, row] of screen.getAllByTestId("import-item").entries()) {
       expectLabels(row, [first, second, third][index].name);
       expect(row).toHaveAttribute("data-status", "uploading");
@@ -2318,7 +2318,7 @@ describe("useFileImport - retry ownership", () => {
     fireEvent.click(retry);
     fireEvent.click(replacementBatch);
     expect(uploadImportBatch).toHaveBeenCalledTimes(2);
-    expect(uploadImportBatch).toHaveBeenNthCalledWith(1, [first, second], [image]);
+    expect(uploadImportBatch).toHaveBeenNthCalledWith(1, [first, second], [image], expect.any(Function));
     expect(uploadImportBatch).toHaveBeenNthCalledWith(2, [second], [image]);
     expect(screen.queryByText("replacement.md")).toBeNull();
     expect(screen.getByTestId("import-ignored")).toHaveTextContent("notes.pdf");
@@ -3070,5 +3070,43 @@ describe("useFileImport - request errors", () => {
     expect(screen.getByRole("button", { name: "Retry failed" })).toBeEnabled();
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith("Import at most 20 files at a time");
+  });
+});
+
+describe("useFileImport - per-file progress (#2340)", () => {
+  it("settles each row as its own request answers, before the batch finishes", async () => {
+    const first = new File(["# First"], "first.md", { type: "text/markdown" });
+    const second = new File(["# Second"], "second.md", { type: "text/markdown" });
+    const rest = deferred<ImportBatch>();
+    let progress: ((index: number, outcome: { document: ImportedDocument } | { error: unknown }) => void) | undefined;
+    uploadImportBatch.mockImplementationOnce((_docs: File[], _images: File[], onProgress: typeof progress) => {
+      progress = onProgress;
+      return rest.promise;
+    });
+    render(<Harness batches={[[first, second]]} onError={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Import batch 1" }));
+    const document = { id: "first", title: "First", warnings: [] };
+    act(() => progress?.(0, { document }));
+    const [firstRow, secondRow] = screen.getAllByTestId("import-item");
+    expect(firstRow).toHaveAttribute("data-status", "done");
+    expect(secondRow).toHaveAttribute("data-status", "uploading");
+    await act(async () => {
+      rest.resolve({ documents: [document], failed: [{ index: 1, name: second.name, error: "Too big" }] });
+    });
+    expect(screen.getAllByTestId("import-item")[1]).toHaveAttribute("data-status", "error");
+  });
+});
+
+describe("shouldOpenImported (#2292)", () => {
+  const document = (warnings: string[] = []): ImportedDocument => ({ id: "d", title: "D", warnings });
+  it("opens one imported file without warnings straight away", () => {
+    expect(shouldOpenImported([document()], [])).toBe(true);
+  });
+  it("keeps the dialog with the warning when the one file lost an image", () => {
+    expect(shouldOpenImported([document(["“beach.png”: Images must be 5 MB or smaller"])], [])).toBe(false);
+  });
+  it("keeps the dialog for several files or a failure", () => {
+    expect(shouldOpenImported([document(), document()], [])).toBe(false);
+    expect(shouldOpenImported([document()], [{ index: 1, name: "b.md", error: "x" }])).toBe(false);
   });
 });

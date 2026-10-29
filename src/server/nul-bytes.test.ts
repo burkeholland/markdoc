@@ -153,7 +153,7 @@ describe("POST /api/import/file with uploaded bytes", () => {
     form.append("files", new File([new Uint8Array([0x23, 0x20, 0x61, 0x00, 0x62])], "nul.md", { type: "text/markdown" }));
     const res = await postForm(form);
     expect(res.status).toBe(415);
-    expect(await res.json()).toEqual({ error: "“nul.md” is not a text file" });
+    expect(await res.json()).toEqual({ error: "“nul.md” doesn't look like a text or Markdown file" });
     expect((await db.select().from(schema.documents)).length).toBe(before);
   });
 
@@ -189,7 +189,7 @@ describe("POST /api/import/file with uploaded bytes", () => {
   it("UTF-8 with a BOM and plain UTF-8 still import as before", async () => {
     expect(decodeImportBytes("a.md", new Uint8Array([0xef, 0xbb, 0xbf, 0x23, 0x20, 0x41]))).toBe("# A");
     expect(decodeImportBytes("a.md", new TextEncoder().encode("# Ünïcødé\n"))).toBe("# Ünïcødé\n");
-    expect(() => decodeImportBytes("x.md", new Uint8Array([0x61, 0x00]))).toThrow(/not a text file/);
+    expect(() => decodeImportBytes("x.md", new Uint8Array([0x61, 0x00]))).toThrow(/doesn.t look like a text or Markdown file/);
   });
 });
 

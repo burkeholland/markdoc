@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, apiErrorText, UPLOAD_TOO_LARGE_MESSAGE, uploadAsset } from "./api";
-import { uploadImportBatch } from "./import-upload";
+import { IMPORT_REQUEST_TOO_LARGE, uploadImportBatch } from "./import-upload";
 
 const FALLBACK = "Could not add collaborator";
 const fetchMock = vi.fn<typeof fetch>();
@@ -48,6 +48,7 @@ const requestPaths: { name: string; call: () => Promise<unknown>; apiError: bool
     call: () => uploadImportBatch([new File(["# Notes"], "notes.md", { type: "text/markdown" })]),
     apiError: false,
     context: "Import failed",
+    tooLarge: IMPORT_REQUEST_TOO_LARGE,
   },
 ];
 
@@ -156,10 +157,11 @@ describe.each(requestPaths)("$name response boundary", ({ call, apiError, contex
     expect(read).toHaveBeenCalledTimes(1);
   });
 
-  it.each([200, 204, 205])("preserves an empty success body (%s)", async (status) => {
+  it.each([200, 204, 205])("handles an empty success body (%s)", async (status) => {
     const read = respond(null, { status });
-    const result = await call();
-    expect(JSON.stringify(result) === JSON.stringify(apiError ? null : { documents: [], failed: [] })).toBe(true);
+    if (apiError) expect((await call()) === null).toBe(true);
+    // An import answer without the created document means the file was not imported.
+    else expect((await captureError(call())).message).toBe(`Import failed (${status})`);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalledTimes(1);
   });

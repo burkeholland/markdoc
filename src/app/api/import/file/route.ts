@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { handler, json, readJson, requireCanCreateDocuments, requireUser, HttpError } from "@/server/http";
 import { normalizeMime } from "@/server/assets";
+import { IMPORT_REQUEST_TOO_LARGE, MAX_IMPORT_REQUEST_BYTES } from "@/lib/import-upload";
 import { ImportError, importFiles, importText, MAX_IMPORT_BYTES, MAX_IMPORT_FILES, type ImportFileInput, type ImportImageInput } from "@/server/import-file";
 
 const textSchema = z.object({
@@ -45,7 +46,7 @@ export const POST = handler(async (req: Request) => {
     }
 
     const declared = Number(req.headers.get("content-length") ?? 0);
-    if (declared > MAX_IMPORT_FILES * MAX_IMPORT_BYTES + 20 * 5 * 1024 * 1024) throw new HttpError(413, "Upload too large");
+    if (declared > MAX_IMPORT_REQUEST_BYTES) throw new HttpError(413, IMPORT_REQUEST_TOO_LARGE);
 
     const form = await readForm(req);
     const fileBlobs = blobs(form, "files");

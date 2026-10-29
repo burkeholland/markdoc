@@ -28,7 +28,7 @@ import { Logo } from "@/components/ui/logo";
 import { GitHubPicker } from "@/components/editor/github-dialog";
 import { isManagedGithubLogin } from "@/lib/github-login";
 import { NotificationsStrip } from "@/components/dashboard/notifications-strip";
-import { ImportDialog, ImportDropzone, useFileImport } from "@/components/dashboard/import-dialog";
+import { ImportDialog, ImportDropzone, shouldOpenImported, useFileImport } from "@/components/dashboard/import-dialog";
 import {
   DOCUMENT_DRAG_TYPE,
   FolderRail,
@@ -1164,12 +1164,12 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   );
 
   // Command palette (Mod-Shift-P, or Mod-K outside the search box), scoped to dashboard actions.
-  // Local files dropped on the page or picked with "Open file…": one file opens straight away,
-  // several stay listed in the dialog while the list behind it refreshes — as does a batch with a
-  // failure in it, so the failed file stays visible.
+  // Local files dropped on the page or picked with "Open file…": one file without warnings opens
+  // straight away; several stay listed in the dialog while the list behind it refreshes — as does a
+  // batch with a failure in it, or one file with warnings (a refused image), so they stay visible.
   const fileImport = useFileImport({
     onDone: (created, failed) => {
-      if (created.length === 1 && failed.length === 0) router.push(`/d/${created[0].id}`);
+      if (shouldOpenImported(created, failed)) router.push(`/d/${created[0].id}`);
       else if (created.length > 0) router.refresh();
     },
     onError: (message) => publishNotice({ message, kind: "error" }),
