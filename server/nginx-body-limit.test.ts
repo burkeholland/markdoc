@@ -2,9 +2,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MAX_REQUEST_BODY_SIZE } from "@modelcontextprotocol/sdk/server/requestBody.js";
 import { MAX_ASSET_BYTES } from "@/server/assets";
 import { MAX_IMPORT_BYTES } from "@/server/import-file";
+import { MCP_MAX_REQUEST_BODY_BYTES } from "@/server/mcp-body";
 import nextConfig from "../next.config";
 
 /**
@@ -140,7 +140,7 @@ const importFilesPerRequest = Math.floor((nextLimit - MULTIPART_OVERHEAD) / MAX_
 const accepted = [
   { what: "a picture of MAX_ASSET_BYTES in a multipart upload", bytes: MAX_ASSET_BYTES + MULTIPART_OVERHEAD },
   { what: "a document's text of 2,000,000 three-byte characters as JSON", bytes: DOCUMENT_MAX_CHARACTERS * MAX_UTF8_BYTES_PER_CHARACTER + JSON_OVERHEAD },
-  { what: "an MCP request at the SDK's bound", bytes: DEFAULT_MAX_REQUEST_BODY_SIZE },
+  { what: "an MCP request at /api/mcp's bound", bytes: MCP_MAX_REQUEST_BODY_BYTES },
   { what: "one imported text of MAX_IMPORT_BYTES as JSON", bytes: MAX_IMPORT_BYTES + JSON_OVERHEAD },
   { what: `an import of ${importFilesPerRequest} files of MAX_IMPORT_BYTES in one multipart request`, bytes: importFilesPerRequest * MAX_IMPORT_BYTES + MULTIPART_OVERHEAD },
 ];
@@ -206,7 +206,7 @@ describe("the app limits the nginx value follows", () => {
   it("are the ones this file was written for", () => {
     expect(MAX_ASSET_BYTES).toBe(5 * MIB);
     expect(MAX_IMPORT_BYTES).toBe(2 * MIB);
-    expect(DEFAULT_MAX_REQUEST_BODY_SIZE).toBe(4 * MIB);
+    expect(MCP_MAX_REQUEST_BODY_BYTES).toBe(8 * MIB);
     expect(importFilesPerRequest).toBe(4);
   });
 
@@ -227,8 +227,9 @@ describe("the app limits the nginx value follows", () => {
     expect(largest).toBe(DOCUMENT_MAX_CHARACTERS);
   });
 
-  it("the MCP route keeps the SDK's default body bound", () => {
-    expect(read("src", "app", "api", "mcp", "route.ts")).not.toContain("maxRequestBodySize");
+  it("the MCP route passes our body bound to the SDK, which fits a document of three-byte characters", () => {
+    expect(read("src", "app", "api", "mcp", "route.ts")).toContain("maxRequestBodySize: MCP_MAX_REQUEST_BODY_BYTES");
+    expect(MCP_MAX_REQUEST_BODY_BYTES).toBeGreaterThanOrEqual(DOCUMENT_MAX_CHARACTERS * MAX_UTF8_BYTES_PER_CHARACTER + JSON_OVERHEAD);
   });
 });
 

@@ -14,6 +14,7 @@ import userEvent from "@testing-library/user-event";
 import { compile } from "tailwindcss";
 import { ApiError } from "@/lib/api";
 import { ImageDialog } from "./dialogs";
+import { IMAGE_TOO_LARGE_MESSAGE, MAX_IMAGE_BYTES } from "@/lib/image-limits";
 
 interface UploadResult {
   url: string;
@@ -1358,4 +1359,20 @@ describe("ImageDialog dismissal (#2223)", () => {
       expect(onSubmit).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("ImageDialog size check (#2345)", () => {
+  it("says a picture over 5 MB is too large at once and does not upload it", async () => {
+    const onUpload = vi.fn(() => new Promise<UploadResult>(() => {}));
+    await renderStrictRoot(<Harness onUpload={onUpload} />);
+    choose(new File([new Uint8Array(MAX_IMAGE_BYTES + 1)], "big.png", { type: "image/png" }));
+    expect(screen.getByTestId("image-upload-error")).toHaveTextContent(IMAGE_TOO_LARGE_MESSAGE);
+    expect(onUpload).not.toHaveBeenCalled();
+    expect(screen.getByTestId("image-upload")).toBeEnabled();
+    expect(screen.getByTestId("image-file")).toHaveValue("");
+
+    const exact = new File([new Uint8Array(MAX_IMAGE_BYTES)], "exact.png", { type: "image/png" });
+    choose(exact);
+    expect(onUpload).toHaveBeenCalledExactlyOnceWith(exact);
+  });
 });

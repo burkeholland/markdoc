@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, apiErrorText, UPLOAD_TOO_LARGE_MESSAGE, uploadAsset } from "./api";
 import { IMPORT_REQUEST_TOO_LARGE, uploadImportBatch } from "./import-upload";
+import { IMAGE_TOO_LARGE_MESSAGE, MAX_IMAGE_BYTES } from "./image-limits";
 
 const FALLBACK = "Could not add collaborator";
 const fetchMock = vi.fn<typeof fetch>();
@@ -358,5 +359,13 @@ describe("apiErrorText", () => {
 
   it("returns the fallback for a non-Error", () => {
     expect(apiErrorText(undefined, FALLBACK)).toBe(FALLBACK);
+  });
+});
+
+describe("uploadAsset size check (#2345)", () => {
+  it("refuses a picture over 5 MB without sending a request", async () => {
+    const big = new File([new Uint8Array(MAX_IMAGE_BYTES + 1)], "big.png", { type: "image/png" });
+    await expect(uploadAsset("document-one", big)).rejects.toThrow(IMAGE_TOO_LARGE_MESSAGE);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

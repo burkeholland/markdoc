@@ -14,6 +14,7 @@ import { Dialog, DialogContent, Kbd } from "@/components/ui/primitives";
 import { gridCell, type GridCell } from "@/lib/a11y";
 import { apiErrorText } from "@/lib/api";
 import { findReplaceShortcut, shortcut } from "@/lib/utils";
+import { IMAGE_TOO_LARGE_MESSAGE, isImageTooLarge } from "@/lib/image-limits";
 
 /**
  * Editor actions picked in a dialog run after the dialog has closed and let go of focus (see
@@ -235,6 +236,11 @@ export const ImageDialog = memo(function ImageDialog({
 
   const startUpload = (file: File, input: HTMLInputElement) => {
     if (!onUpload || activeUpload.current) return;
+    if (isImageTooLarge(file)) {
+      input.value = "";
+      update((current) => ({ ...current, error: IMAGE_TOO_LARGE_MESSAGE }));
+      return;
+    }
     const token = Symbol("image-upload");
     activeUpload.current = token;
     const fallbackAlt = file.name.replace(/\.[a-z0-9]{2,5}$/i, "");

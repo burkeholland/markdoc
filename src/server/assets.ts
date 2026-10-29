@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { getDb, schema } from "@/server/db";
+import { IMAGE_TOO_LARGE_MESSAGE, MAX_IMAGE_BYTES } from "@/lib/image-limits";
 
 const nanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);
 
-export const MAX_ASSET_BYTES = 5 * 1024 * 1024;
+export const MAX_ASSET_BYTES = MAX_IMAGE_BYTES;
 
 export const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"]);
 
@@ -237,7 +238,7 @@ const SVG_TYPE = "image/svg+xml";
 export function assetTypeFor(input: { mime: string; bytes: Uint8Array }): string {
   if (!ALLOWED_IMAGE_TYPES.has(input.mime)) throw new AssetError(415, "Only PNG, JPEG, GIF, WebP and SVG images can be uploaded");
   if (input.bytes.byteLength === 0) throw new AssetError(400, "The file is empty");
-  if (input.bytes.byteLength > MAX_ASSET_BYTES) throw new AssetError(413, "Images must be 5 MB or smaller");
+  if (input.bytes.byteLength > MAX_ASSET_BYTES) throw new AssetError(413, IMAGE_TOO_LARGE_MESSAGE);
   const content = detectContentType(input.bytes);
   if (content === SVG_TYPE && isUnsafeSvg(input.bytes)) throw new AssetError(400, "SVG images may not contain scripts or event handlers");
   if (content === input.mime) return content;

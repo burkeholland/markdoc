@@ -2,6 +2,7 @@ import { EditorSelection, type Extension } from "@codemirror/state";
 import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import * as Y from "yjs";
 import { altFromFileName, imageFiles, type ImageUploader } from "../prosemirror/images";
+import { withoutOversizedImages } from "@/lib/image-limits";
 
 export interface CodeImageOptions {
   onError?: (message: string, file: File) => void;
@@ -153,7 +154,10 @@ export function codeImageUpload(session: CodeImageSession, upload: ImageUploader
       this.flush(member.batch);
     }
 
-    private start(pos: number, files: File[]) {
+    private start(pos: number, dropped: File[]) {
+      // Too large: say so now and send nothing.
+      const files = withoutOversizedImages(dropped, options.onError);
+      if (!files.length) return;
       const materializedFiles = [...files];
       const originalAnchor = Math.min(Math.max(pos, 0), this.view.state.doc.length);
       const batch: UploadBatch = {
