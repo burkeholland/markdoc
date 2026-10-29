@@ -4,6 +4,7 @@ import type { ActivityAction, NotificationKind, Role, TokenScope } from "@/serve
 import type { ReviewDto } from "@/server/reviews";
 import type { GistAutoUpdatePreview, GistAutoUpdateSettings, GistAutoUpdateStatus } from "@/lib/gist-auto-update";
 import { readJsonResponse } from "@/lib/json-response";
+import { IMAGE_TOO_LARGE_MESSAGE, isImageTooLarge } from "./image-limits";
 
 export class ApiError extends Error {
   constructor(
@@ -372,6 +373,8 @@ export const UPLOAD_TOO_LARGE_MESSAGE = "The file is too large for the server to
 
 /** Upload an image for a document; the returned `url` is what goes into `![alt](url)`. */
 export async function uploadAsset(documentId: string, file: File): Promise<UploadedAsset> {
+  // Refused before sending: on a slow link a too-large body only ends in "Failed to fetch" (#2345).
+  if (isImageTooLarge(file)) throw new Error(IMAGE_TOO_LARGE_MESSAGE);
   const form = new FormData();
   form.append("file", file, file.name);
   const res = await fetch(`/api/documents/${documentId}/assets`, { method: "POST", body: form, credentials: "same-origin" });

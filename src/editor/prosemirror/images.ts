@@ -1,6 +1,7 @@
 import { Plugin, PluginKey, type EditorState } from "prosemirror-state";
 import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import { schema } from "../markdown/schema";
+import { withoutOversizedImages } from "@/lib/image-limits";
 
 /** Uploads a file and resolves with the URL to put in the document (and optionally alt text). */
 export type ImageUploader = (file: File) => Promise<{ url: string; alt?: string }>;
@@ -254,10 +255,13 @@ export function imageUploadPlugin(session: { readonly canEdit: boolean }, upload
     flushBatch(batch);
   }
 
-  function handleFiles(view: EditorView, files: File[], pos: number): boolean {
-    if (!files.length || !session.canEdit) return false;
+  function handleFiles(view: EditorView, dropped: File[], pos: number): boolean {
+    if (!dropped.length || !session.canEdit) return false;
     const runtime = runtimes.get(view);
     if (!runtime || runtime.destroyed || view.isDestroyed) return false;
+    // Too large: say so now and send nothing; the event is still ours so the browser does not insert the file.
+    const files = withoutOversizedImages(dropped, options.onError);
+    if (!files.length) return true;
 
     const materializedFiles = [...files];
     const originalAnchor = Math.min(Math.max(pos, 0), view.state.doc.content.size);

@@ -6,6 +6,7 @@ import { EditorView } from "prosemirror-view";
 import { Slice } from "prosemirror-model";
 import { MarkdownBinding, markdownBindingPlugin } from "../sync/markdown-binding";
 import { schema } from "../markdown/schema";
+import { IMAGE_TOO_LARGE_MESSAGE, MAX_IMAGE_BYTES } from "@/lib/image-limits";
 import { imageUploadPlugin, imageUploadKey, findPlaceholder, altFromFileName, imageFiles, type ImageUploader } from "./images";
 
 const views: EditorView[] = [];
@@ -353,5 +354,35 @@ describe("imageUploadPlugin", () => {
     expect(imageAttrs(second.view)).toEqual([{ src: "/second", alt: "Second" }]);
     expect(secondError).not.toHaveBeenCalled();
     expect(previews.revokeObjectURL).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("imageUploadPlugin size check (#2345)", () => {
+  const sized = (bytes: number, name: string) => new File([new Uint8Array(bytes)], name, { type: "image/png" });
+
+  it.each([
+    ["paste", paste],
+    ["drop", drop],
+  ] as const)("refuses a picture over 5 MB on %s at once, without a placeholder or a request", (_how, send) => {
+    const upload = vi.fn<ImageUploader>();
+    const { view, ytext, onError } = makeEditor("Hello\n", upload);
+    const big = sized(MAX_IMAGE_BYTES + 1, "big.png");
+    expect(send(view, [big])).toBe(true);
+    expect(upload).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(IMAGE_TOO_LARGE_MESSAGE, big);
+    expect(imageUploadKey.getState(view.state)!.find()).toHaveLength(0);
+    expect(ytext.toString()).toBe("Hello\n");
+  });
+
+  it("uploads a picture of exactly 5 MB and the small ones beside a refused one", () => {
+    previewSpies();
+    const upload = vi.fn<ImageUploader>(() => new Promise(() => {}));
+    const { view, onError } = makeEditor("Hello\n", upload);
+    const exact = sized(MAX_IMAGE_BYTES, "exact.png");
+    const big = sized(MAX_IMAGE_BYTES + 1, "big.png");
+    expect(paste(view, [exact, big, pngFile()])).toBe(true);
+    expect(upload.mock.calls.map(([file]) => file.name)).toEqual(["exact.png", "Shot 1.png"]);
+    expect(onError).toHaveBeenCalledExactlyOnceWith(IMAGE_TOO_LARGE_MESSAGE, big);
+    expect(imageUploadKey.getState(view.state)!.find()).toHaveLength(2);
   });
 });

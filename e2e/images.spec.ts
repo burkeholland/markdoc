@@ -177,4 +177,42 @@ test.describe("image upload", () => {
     expect(await codeText(page)).not.toContain("![");
     await user.context.close();
   });
+
+  test("refuses a picture over 5 MB in the browser, before any request, in the dialog and on paste (#2345)", async ({ browser }) => {
+    const user = await signIn(browser, "big-picture");
+    const id = await createDocument(user.page, "Huge\n");
+    await openDocument(user.page, id);
+    const { page } = user;
+    const MESSAGE = "Images must be 5 MB or smaller";
+    const BIG = 5 * 1024 * 1024 + 1;
+    const sent: string[] = [];
+    page.on("request", (req) => {
+      if (/\/api\/documents\/[^/]+\/assets/.test(req.url())) sent.push(req.url());
+    });
+
+    await page.getByTestId("tb-image").click();
+    await page.getByTestId("image-file").setInputFiles({ name: "huge.png", mimeType: "image/png", buffer: Buffer.alloc(BIG) });
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("alert")).toHaveText(MESSAGE);
+    await expect(page.getByTestId("image-upload")).toBeEnabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    for (const target of [".md-rich", ".cm-content"]) {
+      await page.evaluate(
+        ({ size, selector }) => {
+          const data = new DataTransfer();
+          data.items.add(new File([new Uint8Array(size)], "huge.png", { type: "image/png" }));
+          document.querySelector(selector)!.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+        },
+        { size: BIG, selector: target },
+      );
+      await expect(page.getByTestId("toast").filter({ hasText: MESSAGE }).first()).toBeVisible();
+    }
+    await expect(page.getByTestId("image-upload-placeholder")).toHaveCount(0);
+    await expect(page.locator(".md-rich img")).toHaveCount(0);
+    expect(await codeText(page)).not.toContain("![");
+    expect(sent).toEqual([]);
+    await user.context.close();
+  });
 });

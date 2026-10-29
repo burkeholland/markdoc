@@ -1,3 +1,4 @@
+import { IMAGE_TOO_LARGE_MESSAGE } from "@/lib/image-limits";
 import { handler, json, requireAccess, HttpError, NUL_MESSAGE, nulFree, ValidationError } from "@/server/http";
 import { AssetError, MAX_ASSET_BYTES, normalizeMime, putAsset, type StoredAsset } from "@/server/assets";
 import { activityActor, recordActivity } from "@/server/activity";
@@ -24,7 +25,7 @@ function assetName(name: string): string {
 /** Accept either a multipart form with a `file` field or a raw image body (`Content-Type: image/*`, `?name=`). */
 async function readUpload(req: Request): Promise<Upload> {
   const declared = Number(req.headers.get("content-length") ?? 0);
-  if (declared > MAX_ASSET_BYTES + 4096) throw new HttpError(413, "Images must be 5 MB or smaller");
+  if (declared > MAX_ASSET_BYTES + 4096) throw new HttpError(413, IMAGE_TOO_LARGE_MESSAGE);
 
   const contentType = normalizeMime(req.headers.get("content-type"));
   if (contentType === "multipart/form-data") {

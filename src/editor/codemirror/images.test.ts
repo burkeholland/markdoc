@@ -6,6 +6,7 @@ import { yCollab } from "y-codemirror.next";
 import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 import { codeImageUpload } from "./images";
+import { IMAGE_TOO_LARGE_MESSAGE, MAX_IMAGE_BYTES } from "@/lib/image-limits";
 import type { ImageUploader } from "../prosemirror/images";
 
 interface TestSession {
@@ -248,5 +249,32 @@ describe("codeImageUpload", () => {
     expect(first.ytext.toString()).toBe("First");
     expect(second.view.state.doc.toString()).toBe("Second ![Current](/current)");
     expect(secondError).not.toHaveBeenCalled();
+  });
+});
+
+describe("codeImageUpload size check (#2345)", () => {
+  const sized = (bytes: number, name: string) => new File([new Uint8Array(bytes)], name, { type: "image/png" });
+
+  it.each([
+    ["paste", (view: EditorView, files: File[]) => paste(view, files)],
+    ["drop", (view: EditorView, files: File[]) => drop(view, files, 0)],
+  ] as const)("refuses a picture over 5 MB on %s at once, without a request", async (_how, send) => {
+    const upload = vi.fn<ImageUploader>();
+    const { view, onError } = makeEditor("text", upload);
+    const big = sized(MAX_IMAGE_BYTES + 1, "big.png");
+    expect(send(view, [big])).toBe(true);
+    expect(upload).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(IMAGE_TOO_LARGE_MESSAGE, big);
+    await flush();
+    expect(view.state.doc.toString()).toBe("text");
+  });
+
+  it("uploads a picture of exactly 5 MB and the small ones beside a refused one", () => {
+    const upload = vi.fn<ImageUploader>(() => new Promise(() => {}));
+    const { view, onError } = makeEditor("text", upload);
+    const big = sized(MAX_IMAGE_BYTES + 1, "big.png");
+    expect(paste(view, [sized(MAX_IMAGE_BYTES, "exact.png"), big, pngFile("small.png")])).toBe(true);
+    expect(upload.mock.calls.map(([file]) => file.name)).toEqual(["exact.png", "small.png"]);
+    expect(onError).toHaveBeenCalledExactlyOnceWith(IMAGE_TOO_LARGE_MESSAGE, big);
   });
 });

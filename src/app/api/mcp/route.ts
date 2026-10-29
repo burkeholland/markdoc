@@ -1,9 +1,11 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { readRequestBody } from "@modelcontextprotocol/sdk/server/requestBody.js";
 import { handler, json, HttpError, resolveBearer } from "@/server/http";
 import { recordMcpActivity } from "@/server/tokens";
 import { mcpActivityIn } from "./activity";
 import { AGENT_DOCS_URL } from "@/lib/mcp";
 import { mcpPublicOrigin, mcpRestOrigin } from "@/server/mcp-origin";
+import { MCP_MAX_REQUEST_BODY_BYTES, mcpBodyTooLargeMessage } from "@/server/mcp-body";
 import { createClient, createMarkdocServer, listToolNames, SERVER_INFO } from "../../../../mcp/tools.mjs";
 
 /**
@@ -30,12 +32,25 @@ function bearerToken(req: Request): string | null {
   return authorization.slice(7).trim() || null;
 }
 
+const tooLarge = () => json({ jsonrpc: "2.0", error: { code: -32000, message: mcpBodyTooLargeMessage() }, id: null }, { status: 413 });
+
 /** Resolve the caller and hand the request to a fresh MCP server + transport. */
-async function serve(req: Request): Promise<Response> {
+async function serve(incoming: Request): Promise<Response> {
+  let req = incoming;
   const token = bearerToken(req);
   if (!token) throw unauthorized("Authorization: Bearer <token> is required.");
   const actor = await resolveBearer(token, req.headers);
   if (!actor) throw unauthorized("This endpoint is for API tokens (agents).");
+  // Read the body once, under our bound (#2289), before anything parses it: the activity check below
+  // would otherwise buffer a body of any size. A Content-Length over the bound is refused unread.
+  if (req.method === "POST") {
+    const body = await readRequestBody(req, MCP_MAX_REQUEST_BODY_BYTES);
+    if (body.tooLarge) {
+      void req.body?.cancel().catch(() => {});
+      return tooLarge();
+    }
+    req = new Request(req.url, { method: req.method, headers: req.headers, body: body.text });
+  }
   // The Settings checklist reads these: connected (tools/list) and working (tools/call). Off the hot path.
   for (const kind of await mcpActivityIn(req)) void recordMcpActivity(actor.tokenId, kind).catch(() => {});
 
@@ -46,10 +61,19 @@ async function serve(req: Request): Promise<Response> {
   });
   const server = createMarkdocServer(client);
   // MCP clients are not browsers: no Origin header, any Host (LAN IP, tunnel) — so no DNS-rebinding checks.
-  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true, enableDnsRebindingProtection: false });
+  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true, enableDnsRebindingProtection: false,
+    // Our bound, not the SDK default (#2289): see src/server/mcp-body.ts.
+    maxRequestBodySize: MCP_MAX_REQUEST_BODY_BYTES,
+  });
   await server.connect(transport);
   try {
-    return await transport.handleRequest(req);
+    const res = await transport.handleRequest(req);
+    // Unreachable after the read above; kept so the SDK's bare 413 can never reach an agent.
+    if (res.status === 413) {
+      void res.body?.cancel().catch(() => {});
+      return tooLarge();
+    }
+    return res;
   } finally {
     // Stateless: nothing to keep between requests; with JSON responses the body is complete by now.
     void server.close().catch(() => {});
