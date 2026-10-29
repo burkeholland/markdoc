@@ -526,6 +526,39 @@ describe("POST /api/import/file", () => {
     }
   });
 
+  it("refuses a body declared over 10 MB with a plain 413 instead of a cut multipart body (#2340)", async () => {
+    actor = owner;
+    try {
+      const res = await POST(
+        new Request("http://localhost:3700/api/import/file", {
+          method: "POST",
+          headers: { "Content-Type": "multipart/form-data; boundary=x", "Content-Length": String(10 * 1024 * 1024 + 1) },
+          body: "--x--",
+        }),
+      );
+      expect(res.status).toBe(413);
+      expect(((await res.json()) as { error: string }).error).toMatch(/larger than 10 MB/);
+    } finally {
+      actor = null;
+    }
+  });
+
+  it("refuses a binary file renamed .md and creates nothing (#2419)", async () => {
+    actor = owner;
+    try {
+      const db = await getDb();
+      const before = (await db.select().from(schema.documents)).length;
+      const form = new FormData();
+      form.append("files", new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...bytes("notreally")])], "fake.md"));
+      const res = await post(form);
+      expect(res.status).toBe(415);
+      expect(await res.json()).toEqual({ error: "“fake.md” doesn't look like a text or Markdown file" });
+      expect((await db.select().from(schema.documents)).length).toBe(before);
+    } finally {
+      actor = null;
+    }
+  });
+
   it("rejects unsupported types and non-multipart bodies, and imports JSON text", async () => {
     actor = owner;
     try {

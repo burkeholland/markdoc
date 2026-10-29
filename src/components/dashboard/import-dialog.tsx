@@ -454,6 +454,14 @@ export function ImportDialog({ open, onOpenChange, items, ignored, footer }: Imp
   );
 }
 
+/**
+ * Whether a finished import should open its document straight away: only one file, imported, with nothing
+ * to tell. Otherwise the dialog stays with its rows (failures, or warnings such as a refused image) and Open links.
+ */
+export function shouldOpenImported(documents: ImportedDocument[], failed: FailedImport[]): boolean {
+  return documents.length === 1 && failed.length === 0 && documents[0].warnings.length === 0;
+}
+
 export interface UseFileImportOptions {
   /**
    * Called after each upload attempt. After a retry, the arguments describe the current result for the
@@ -794,7 +802,19 @@ export function useFileImport(options: UseFileImportOptions = {}) {
     setOpen(true);
     let completedResult: { documents: ImportedDocument[]; failed: FailedImport[] } | null = null;
     try {
-      const rawResult: unknown = await uploadImportBatch(documents, images);
+      // Rows settle one by one as each file's request answers (a single file has nothing to show yet).
+      const onProgress: Parameters<typeof uploadImportBatch>[2] = (index, outcome) => {
+        if (!ownsUpload(ownership)) return;
+        const file = documents[index];
+        const row: ImportItem =
+          "document" in outcome
+            ? { name: file.name, status: "done", id: outcome.document.id, title: outcome.document.title, warnings: outcome.document.warnings }
+            : { name: file.name, status: "error", warnings: [], error: apiErrorText(outcome.error, "Import failed") };
+        replaceItems(itemsRef.current.map((item, i) => (i === index ? row : item)));
+      };
+      const rawResult: unknown = documents.length > 1
+        ? await uploadImportBatch(documents, images, onProgress)
+        : await uploadImportBatch(documents, images);
       if (!ownsUpload(ownership)) return;
       // `created` holds only the successes, so walk it with a cursor and let `failed[].index` claim its file.
       const { documents: created, failed, failedAt } = normalizeImportBatchResult(rawResult, documents);

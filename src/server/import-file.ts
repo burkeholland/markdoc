@@ -14,6 +14,7 @@ import { IMPORT_EXTENSIONS_LIST, importFormatFor, type ImportFormat } from "@/li
 
 // The extension map lives in `@/lib/import-extensions` (shared with the dashboard's import dialog);
 // re-exported here so the route, the tests and the docs keep their `@/server/import-file` names.
+import { looksBinary, notTextMessage } from "@/lib/import-sniff";
 export { IMPORT_EXTENSIONS, IMPORT_EXTENSIONS_LIST, fileExtension, importFormatFor, type ImportFormat } from "@/lib/import-extensions";
 
 export const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
@@ -261,12 +262,13 @@ export function validateImportFiles(files: { name: string; size: number }[]): vo
  * Decode an uploaded file: UTF-16 when it starts with a `FF FE` / `FE FF` byte-order mark (Word's
  * "Unicode" text export, PowerShell's default redirection), UTF-8 otherwise. `TextDecoder` drops the
  * BOM itself. The result still containing U+0000 means the bytes were not text (a binary renamed
- * `.md`, UTF-16 without a BOM): Postgres `text` cannot store it, so it is refused as `415`.
+ * `.md`, UTF-16 without a BOM), as do a known binary signature or mostly undecodable bytes ({@link looksBinary}): Postgres `text` cannot store it, so it is refused as `415`.
  */
 export function decodeImportBytes(name: string, bytes: Uint8Array): string {
   const encoding = bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le" : bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : "utf-8";
+  if (looksBinary(bytes)) throw new ImportError(415, notTextMessage(name));
   const text = new TextDecoder(encoding, { fatal: false }).decode(bytes);
-  if (text.includes("\0")) throw new ImportError(415, `“${name}” is not a text file`);
+  if (text.includes("\0")) throw new ImportError(415, notTextMessage(name));
   return text;
 }
 
