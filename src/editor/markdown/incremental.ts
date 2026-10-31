@@ -11,20 +11,32 @@ export interface ChangeSpan {
   newTo: number;
 }
 
-/** Smallest span that turns `oldText` into `newText` (common prefix and suffix trimmed). */
+/** Characters compared per native string comparison when skipping the common prefix/suffix. */
+const SCAN_CHUNK = 256;
+
+/**
+ * Smallest span that turns `oldText` into `newText` (common prefix and suffix trimmed).
+ * The scans compare chunks with native string equality first (#2417): a character loop over a
+ * 250 KB document cost about a millisecond per keystroke.
+ */
 export function textChangeSpan(oldText: string, newText: string): ChangeSpan | null {
   if (oldText === newText) return null;
   const max = Math.min(oldText.length, newText.length);
   let prefix = 0;
+  while (prefix + SCAN_CHUNK <= max && oldText.slice(prefix, prefix + SCAN_CHUNK) === newText.slice(prefix, prefix + SCAN_CHUNK)) prefix += SCAN_CHUNK;
   while (prefix < max && oldText.charCodeAt(prefix) === newText.charCodeAt(prefix)) prefix++;
+  const limit = max - prefix;
+  const oldEnd = oldText.length;
+  const newEnd = newText.length;
   let suffix = 0;
   while (
-    suffix < max - prefix &&
-    oldText.charCodeAt(oldText.length - 1 - suffix) === newText.charCodeAt(newText.length - 1 - suffix)
+    suffix + SCAN_CHUNK <= limit &&
+    oldText.slice(oldEnd - suffix - SCAN_CHUNK, oldEnd - suffix) === newText.slice(newEnd - suffix - SCAN_CHUNK, newEnd - suffix)
   ) {
-    suffix++;
+    suffix += SCAN_CHUNK;
   }
-  return { from: prefix, oldTo: oldText.length - suffix, newTo: newText.length - suffix };
+  while (suffix < limit && oldText.charCodeAt(oldEnd - 1 - suffix) === newText.charCodeAt(newEnd - 1 - suffix)) suffix++;
+  return { from: prefix, oldTo: oldEnd - suffix, newTo: newEnd - suffix };
 }
 
 /** Constructs whose meaning depends on text anywhere else in the document (link reference definitions, footnotes). */
@@ -81,8 +93,19 @@ function endsInUnclosedFence(node: Md.Node, region: string): boolean {
 
 function countNewlines(text: string, end: number): number {
   let n = 0;
-  for (let i = 0; i < end; i++) if (text.charCodeAt(i) === 10) n++;
+  for (let i = text.indexOf("\n"); i !== -1 && i < end; i = text.indexOf("\n", i + 1)) n++;
   return n;
+}
+
+/**
+ * Zero-based line of `lineStartOffset` (a line start at or before `start`, a node's start) read off
+ * that position, so the region's line number does not need a newline count over the text before it.
+ */
+function lineNumberAt(start: NonNullable<Md.Node["position"]>["start"] | undefined, text: string, lineStartOffset: number): number | null {
+  if (!start?.line || start.offset === undefined || start.offset < lineStartOffset) return null;
+  const newline = text.indexOf("\n", lineStartOffset);
+  if (newline !== -1 && newline < start.offset) return null;
+  return start.line - 1;
 }
 
 function lineStart(text: string, offset: number): number {
@@ -162,6 +185,42 @@ function shiftMdast<T extends Md.Node>(node: T, offset: number, lines: number): 
 }
 
 /**
+ * Top-level mdast nodes whose positions have not been shifted yet: `nodes[i]` belongs at
+ * `offsets[i]` characters and `lines[i]` lines from where its own positions say. Typing near the
+ * top of a long document moves every later node, and copying all of their subtrees on each
+ * keystroke was a large share of its cost (#2417); the copies are made when the tree is read.
+ */
+interface PendingTree {
+  root: Md.Root;
+  nodes: Md.RootContent[];
+  offsets: Float64Array;
+  lines: Float64Array;
+}
+
+const pendingTrees = new WeakMap<ParseResult, PendingTree>();
+
+function pendingTree(result: ParseResult): PendingTree {
+  const pending = pendingTrees.get(result);
+  if (pending) return pending;
+  const n = result.tree.children.length;
+  return { root: result.tree, nodes: result.tree.children, offsets: new Float64Array(n), lines: new Float64Array(n) };
+}
+
+function materialize(pending: PendingTree): Md.Root {
+  const children = pending.nodes.map((node, i) =>
+    pending.offsets[i] === 0 && pending.lines[i] === 0 ? node : shiftMdast(node, pending.offsets[i], pending.lines[i]),
+  );
+  return { ...pending.root, children };
+}
+
+/** Start position of top-level node `i` of a pending tree, with its pending shift applied. */
+function pendingStart(pending: PendingTree, i: number): NonNullable<Md.Node["position"]>["start"] | undefined {
+  const start = pending.nodes[i]?.position?.start;
+  if (!start) return undefined;
+  return { line: start.line ? start.line + pending.lines[i] : 0, column: start.column, offset: (start.offset ?? 0) + pending.offsets[i] };
+}
+
+/**
  * Parse a region on its own; `followed` means more document comes after it. `definitions`
  * are the definition blocks found elsewhere in the document: micromark only reads `[label]`
  * and `[^note]` as references when a matching definition exists, so they are appended after
@@ -222,7 +281,8 @@ function parseRegion(region: string, followed: boolean, definitions: readonly st
 export function reparseRange(prev: ParseResult, oldText: string, newText: string, span: ChangeSpan): ParseResult | null {
   const blocks = prev.map.blocks;
   const n = blocks.length;
-  if (n === 0 || n !== prev.doc.childCount || n !== prev.tree.children.length || oldText.trim() === "" || newText.trim() === "") return null;
+  const prevTree = pendingTree(prev);
+  if (n === 0 || n !== prev.doc.childCount || n !== prevTree.nodes.length || oldText.trim() === "" || newText.trim() === "") return null;
   if (hasFrontmatter(oldText) !== hasFrontmatter(newText)) return null;
   const delta = span.newTo - span.oldTo;
 
@@ -265,11 +325,14 @@ export function reparseRange(prev: ParseResult, oldText: string, newText: string
   // it must not be shadowed by an earlier definition outside the region.
   const regionIds = definitionIds(region);
   const definitions: string[] = [];
-  for (let i = 0; i < n; i++) {
+  // Every definition contains "]:"; a native substring search rules out most documents and blocks
+  // without running the definition pattern over each block (#2417).
+  const mayDefine = oldText.includes("]:");
+  for (let i = 0; i < n && mayDefine; i++) {
     if (i >= a && i <= b) continue;
     const node = prev.doc.child(i);
     const text = oldText.slice(blocks[i].from, blocks[i].to);
-    if (node.type !== schema.nodes.link_definition && node.type !== schema.nodes.footnote_definition && !hasDefinition(text)) continue;
+    if (node.type !== schema.nodes.link_definition && node.type !== schema.nodes.footnote_definition && (!text.includes("]:") || !hasDefinition(text))) continue;
     if (i < a && regionIds.size > 0) for (const id of definitionIds(text)) if (regionIds.has(id)) return null;
     definitions.push(text);
   }
@@ -336,7 +399,7 @@ export function reparseRange(prev: ParseResult, oldText: string, newText: string
     }
   }
 
-  const lineOffset = countNewlines(newText, regionFrom);
+  const lineOffset = lineNumberAt(pendingStart(prevTree, a), oldText, regionFrom) ?? countNewlines(newText, regionFrom);
   // Outside the change span the two texts are identical, so only the span moves line numbers.
   const lineDelta = countNewlines(newText.slice(span.from, span.newTo), span.newTo - span.from) - countNewlines(oldText.slice(span.from, span.oldTo), span.oldTo - span.from);
   const headings: HeadingInfo[] = [];
@@ -346,17 +409,49 @@ export function reparseRange(prev: ParseResult, oldText: string, newText: string
 
   // The mdast follows the same splice: nodes before the region are shared, the region's are moved
   // to their place in the document, the ones after it by the size of the change.
-  const mdastChildren: Md.RootContent[] = prev.tree.children.slice(0, a);
-  for (const node of sub.mdast) mdastChildren.push(shiftMdast(node, regionFrom, lineOffset));
-  for (let i = b + 1; i < n; i++) mdastChildren.push(shiftMdast(prev.tree.children[i], delta, lineDelta));
-  const tree: Md.Root = { ...prev.tree, children: mdastChildren };
-  if (prev.tree.position) {
-    tree.position = {
-      start: prev.tree.position.start,
-      end: { line: countNewlines(newText, newText.length) + 1, column: newText.length - lineStart(newText, newText.length) + 1, offset: newText.length },
+  const sizeAfter = n - b - 1;
+  const total = a + sub.mdast.length + sizeAfter;
+  const tree: PendingTree = {
+    root: prevTree.root,
+    nodes: prevTree.nodes.slice(0, a),
+    offsets: new Float64Array(total),
+    lines: new Float64Array(total),
+  };
+  tree.offsets.set(prevTree.offsets.subarray(0, a));
+  tree.lines.set(prevTree.lines.subarray(0, a));
+  for (const node of sub.mdast) {
+    tree.offsets[tree.nodes.length] = regionFrom;
+    tree.lines[tree.nodes.length] = lineOffset;
+    tree.nodes.push(node);
+  }
+  for (let i = b + 1; i < n; i++) {
+    tree.offsets[tree.nodes.length] = prevTree.offsets[i] + delta;
+    tree.lines[tree.nodes.length] = prevTree.lines[i] + lineDelta;
+    tree.nodes.push(prevTree.nodes[i]);
+  }
+  const rootPosition = prevTree.root.position;
+  if (rootPosition) {
+    tree.root = {
+      ...prevTree.root,
+      position: {
+        start: rootPosition.start,
+        end: { line: rootPosition.end.line + lineDelta, column: newText.length - lineStart(newText, newText.length) + 1, offset: newText.length },
+      },
     };
   }
 
   const doc = schema.nodes.doc.create(null, children);
-  return { doc, map: buildSourceMap(doc, newBlocks, segments), headings, tree };
+  let materialized: Md.Root | undefined;
+  const result = { doc, map: buildSourceMap(doc, newBlocks, segments), headings } as ParseResult;
+  Object.defineProperty(result, "tree", {
+    configurable: true,
+    enumerable: true,
+    get: () => (materialized ??= materialize(tree)),
+    set: (value: Md.Root) => {
+      materialized = value;
+      pendingTrees.delete(result);
+    },
+  });
+  pendingTrees.set(result, tree);
+  return result;
 }

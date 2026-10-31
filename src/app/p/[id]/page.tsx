@@ -3,7 +3,8 @@ import type { Metadata } from "next";
 import { currentUser, getEffectiveDocumentAccess } from "@/server/http";
 import { canComment, getUserById } from "@/server/documents";
 import { documentMetadata, documentTitle, liveTextForRequest } from "@/server/document-metadata";
-import { contentHash, renderMarkdownBody } from "@/server/export/html";
+import { contentHash } from "@/server/export/html";
+import { renderReaderBody } from "@/server/export/reader-body-cache";
 import { ReaderPage } from "@/components/reader/reader-page";
 import { computeStats } from "@/editor/stats";
 import { UnrenderableDocumentError, UNRENDERABLE_MESSAGE } from "@/editor/markdown/renderable";
@@ -35,7 +36,8 @@ export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">)
   const { doc, role } = access;
   const [live, owner] = await Promise.all([liveTextForRequest(id), getUserById(doc.ownerId)]);
   // Pending suggestions are editor business; the audience reads the clean text.
-  const body = await renderMarkdownBody(live.clean, { assetBaseUrl: "", linkCards: true }).catch((err: unknown) => {
+  const hash = contentHash(live.clean);
+  const body = await renderReaderBody(live.clean, hash).catch((err: unknown) => {
     if (!(err instanceof UnrenderableDocumentError)) throw err;
     return { html: `<p><em>${UNRENDERABLE_MESSAGE}: it contains more unmatched brackets or emphasis markers than the renderer accepts. Open it in the editor to fix the source.</em></p>`, headings: [] };
   });
@@ -47,7 +49,7 @@ export default async function PublicReaderPage({ params }: PageProps<"/p/[id]">)
       title={title}
       html={body.html}
       headings={body.headings}
-      initialHash={contentHash(live.clean)}
+      initialHash={hash}
       updatedAt={doc.updatedAt.toISOString()}
       readingMinutes={computeStats(live.clean).readingMinutes}
       owner={owner ? { name: owner.name ?? owner.login ?? "Owner", image: owner.image ?? null } : null}

@@ -1,12 +1,13 @@
-// Large-document typing + scroll measurement (#2401): ~3000 lines / ~42k words.
-// BASE_URL=http://localhost:3000 npx tsx scripts/perf-large-doc.mts [--profile]
+// Large-document typing + scroll + reader measurement (#2401, #2417, #2418): ~3000 lines / ~42k words.
+// BASE_URL=http://localhost:3000 npx tsx scripts/perf-large-doc.mts [--profile] [--trace]
+import { gzipSync } from "node:zlib";
 import { chromium, type Page } from "@playwright/test";
 
 const base = process.env.BASE_URL ?? "http://localhost:3000";
 const profile = process.argv.includes("--profile");
 const words = "the quick brown fox jumps over the lazy dog while markdown editors render long documents".split(" ");
 const line = (i: number) => Array.from({ length: 28 }, (_, w) => words[(i * 7 + w) % words.length]).join(" ");
-const lines: string[] = ["# Large document", ""];
+const lines: string[] = [`# Large document ${Date.now().toString(36)}`, ""];
 for (let i = 0; lines.length < 3000; i++) {
   if (i % 20 === 0) lines.push(`## Section ${i / 20}`, "");
   lines.push(i % 9 === 0 ? `- ${line(i)} **bold** and \`code\`` : `${line(i)} [link](https://example.com/${i}).`, "");
@@ -15,16 +16,20 @@ const content = lines.join("\n");
 
 const pct = (v: number[], q: number) => [...v].sort((a, b) => a - b)[Math.max(0, Math.ceil(v.length * q) - 1)];
 
-async function typingLatency(page: Page, n = 40): Promise<{ p50: number; p90: number }> {
+// Keystroke→next frame p50/p90, and the renderer main thread's busy time per keystroke from a trace
+// (`mainMsPerKey`): the frame latency cannot go below one frame, the busy time shows the work itself.
+async function typingLatency(page: Page, n = 40): Promise<{ p50: number; p90: number; mainMsPerKey: number }> {
   const out: number[] = [];
+  await browser.startTracing(page, { categories: ["devtools.timeline", "toplevel"] });
   for (let i = 0; i < n; i++) {
     await page.evaluate(() => {
-      (window as unknown as { __t: number[] }).__t = [];
+      const w = window as unknown as { __t: number[] };
+      w.__t = [];
       document.addEventListener(
         "beforeinput",
         () => {
           const s = performance.now();
-          requestAnimationFrame(() => setTimeout(() => (window as unknown as { __t: number[] }).__t.push(performance.now() - s), 0));
+          requestAnimationFrame(() => setTimeout(() => w.__t.push(performance.now() - s), 0));
         },
         { capture: true, once: true },
       );
@@ -34,7 +39,15 @@ async function typingLatency(page: Page, n = 40): Promise<{ p50: number; p90: nu
     out.push(await page.evaluate(() => (window as unknown as { __t: number[] }).__t[0]));
     await page.waitForTimeout(30);
   }
-  return { p50: Math.round(pct(out, 0.5)), p90: Math.round(pct(out, 0.9)) };
+  const events = (JSON.parse((await browser.stopTracing()).toString()) as { traceEvents: { name: string; ph: string; dur?: number; tid: number; pid: number; args?: { name?: string } }[] }).traceEvents;
+  const mains = new Set(events.filter((e) => e.ph === "M" && e.name === "thread_name" && e.args?.name === "CrRendererMain").map((e) => `${e.pid}:${e.tid}`));
+  const perThread = new Map<string, number>();
+  for (const e of events) {
+    const key = `${e.pid}:${e.tid}`;
+    if (e.name === "ThreadControllerImpl::RunTask" && e.ph === "X" && mains.has(key)) perThread.set(key, (perThread.get(key) ?? 0) + (e.dur ?? 0) / 1000);
+  }
+  const busy = Math.max(0, ...perThread.values());
+  return { p50: Math.round(pct(out, 0.5)), p90: Math.round(pct(out, 0.9)), mainMsPerKey: Math.round((busy / n) * 10) / 10 };
 }
 
 async function cpuProfile<T>(page: Page, label: string, fn: () => Promise<T>): Promise<T> {
@@ -90,10 +103,11 @@ const box = (await page.locator(".md-rich").evaluateHandle((dom) => {
   return dom;
 }).then((h) => h.asElement()!.boundingBox()))!;
 await page.mouse.move(box.x + box.width / 2, box.y + 300);
-const verifyRuns = () => page.evaluate(() => (window as unknown as { __markdocSession: { binding: { verifyStats: { runs: number } } } }).__markdocSession.binding.verifyStats.runs);
+const verifyRuns = () => page.evaluate(() => (window as unknown as { __markdocSession: { binding: { verifyStats: { runs: number } } } }).__markdocSession?.binding.verifyStats.runs ?? 0);
 await page.evaluate(() => {
   const w = window as unknown as { __dbg: string[]; __markdocSession: { binding: { verifyParse: () => boolean } } };
   w.__dbg = [];
+  if (!w.__markdocSession) return;
   const b = w.__markdocSession.binding;
   const orig = b.verifyParse.bind(b);
   b.verifyParse = () => (w.__dbg.push(`verify@${Math.round(performance.now())}`), orig());
@@ -125,7 +139,16 @@ if (trace) {
 }
 console.log(await page.evaluate(() => (window as unknown as { __dbg: string[] }).__dbg.join(" ")));
 const lt = await page.evaluate(() => (window as unknown as { __lt: number[] }).__lt);
-const html = await page.request.get(`${base}/p/${id}`);
+const readerStart = performance.now();
+const html = await page.request.get(`${base}/p/${id}`, { headers: { "accept-encoding": "identity" } });
+const readerMs = Math.round(performance.now() - readerStart);
+const readerBody = await html.body();
+const repeats: number[] = [];
+for (let i = 0; i < 5; i++) {
+  const t = performance.now();
+  await (await page.request.get(`${base}/p/${id}`)).body();
+  repeats.push(performance.now() - t);
+}
 console.log(
   JSON.stringify({
     words: (content.match(/\S+/g) ?? []).length,
@@ -136,6 +159,10 @@ console.log(
     scrollLongTasks: lt.length,
     verifyRunsDuringScroll: (await verifyRuns()) - verifyBefore,
     readerStatus: html.status(),
+    readerKB: Math.round(readerBody.length / 1024),
+    readerGzipKB: Math.round(gzipSync(readerBody).length / 1024),
+    readerMs,
+    readerRepeatMs: Math.round(pct(repeats, 0.5)),
   }),
 );
 await browser.close();

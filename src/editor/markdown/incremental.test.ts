@@ -248,4 +248,46 @@ describe("reparseRange", () => {
     expect(textChangeSpan("aaa", "aa")).toEqual({ from: 2, oldTo: 3, newTo: 2 });
     expect(textChangeSpan("", "x")).toEqual({ from: 0, oldTo: 0, newTo: 1 });
   });
+
+  const naiveSpan = (a: string, b: string) => {
+    if (a === b) return null;
+    const max = Math.min(a.length, b.length);
+    let p = 0;
+    while (p < max && a[p] === b[p]) p++;
+    let q = 0;
+    while (q < max - p && a[a.length - 1 - q] === b[b.length - 1 - q]) q++;
+    return { from: p, oldTo: a.length - q, newTo: b.length - q };
+  };
+
+  it("computes change spans across chunk boundaries in long texts (#2417)", () => {
+    const base = Array.from({ length: 2000 }, (_, i) => `line ${i % 7}`).join("\n");
+    for (const at of [0, 1, 255, 256, 257, 511, 512, 4096, base.length - 300, base.length - 256, base.length - 1, base.length]) {
+      for (const [insert, remove] of [["x", 0], ["", 1], ["line 3\nline 4", 3]] as const) {
+        const next = base.slice(0, at) + insert + base.slice(Math.min(base.length, at + remove));
+        expect(textChangeSpan(base, next)).toEqual(naiveSpan(base, next));
+      }
+    }
+    // A repeated character is ambiguous; the span is still the minimal one.
+    const run = "a".repeat(1000);
+    expect(textChangeSpan(run, run + "a")).toEqual({ from: 1000, oldTo: 1000, newTo: 1001 });
+    expect(textChangeSpan(run + "b" + run, run + run)).toEqual({ from: 1000, oldTo: 1001, newTo: 1000 });
+  });
+
+  it("keeps the mdast exact over many keystrokes in a long document without reading it in between (#2417)", () => {
+    const lines: string[] = ["# Title", ""];
+    for (let i = 0; i < 120; i++) lines.push(i % 10 === 0 ? `## Section ${i}` : i % 3 === 0 ? `- item ${i} **bold**` : `Paragraph ${i} with [a link](https://example.com/${i}).`, "");
+    let text = lines.join("\n");
+    let result = parseMarkdown(text);
+    const edits = [3, text.length - 5, Math.floor(text.length / 2), 3, text.length - 5];
+    for (const [k, at] of edits.entries()) {
+      for (let i = 0; i < 6; i++) {
+        const pos = Math.min(at + i, text.length);
+        const next = k % 2 === 0 && i === 5 ? text.slice(0, pos) + "\n\nnew paragraph\n\n" + text.slice(pos) : text.slice(0, pos) + "x" + text.slice(pos);
+        const inc = reparseRange(result, text, next, textChangeSpan(text, next)!);
+        text = next;
+        result = inc ?? parseMarkdown(text);
+      }
+    }
+    expect(plain(result)).toEqual(plain(parseMarkdown(text)));
+  });
 });
