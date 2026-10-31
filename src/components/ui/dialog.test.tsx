@@ -1483,7 +1483,7 @@ describe("DialogContent header wrapping", () => {
     expect(content).toHaveAttribute("aria-describedby", description.id);
     expect(document.getElementById(heading.id)).toBe(heading);
     expect(document.getElementById(description.id)).toBe(description);
-    expect(currentHeader.className).toBe("mb-4 flex items-start justify-between gap-4");
+    expect(currentHeader.className).toBe("dialog-header mb-4 flex items-start justify-between gap-4");
     expect(currentHeader).toHaveAttribute("data-focus-skip");
     expect(group.className).toBe("min-w-0");
     expect(heading.className).toBe("text-lg font-semibold text-ink wrap-anywhere");

@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 /* ---------------- Dialog ---------------- */
 
 const OVERLAY_CLASS_NAME = "dialog-overlay animate-fade-in";
-const HEADER_CLASS_NAME = "mb-4 flex items-start justify-between gap-4";
+const HEADER_CLASS_NAME = "dialog-header mb-4 flex items-start justify-between gap-4";
 const TITLE_GROUP_CLASS_NAME = "min-w-0";
 const TITLE_CLASS_NAME = "text-lg font-semibold text-ink wrap-anywhere";
 const DESCRIPTION_CLASS_NAME = "mt-1 text-sm text-ink-3 wrap-anywhere";

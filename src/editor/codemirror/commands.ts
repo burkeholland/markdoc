@@ -34,6 +34,12 @@ function wordRangeAt(state: EditorState, pos: number): { from: number; to: numbe
   return { from: line.from + from, to: line.from + to };
 }
 
+/** Length of the `*` run at the end (fromEnd) or start of text. */
+function starRun(text: string, fromEnd: boolean): number {
+  const match = fromEnd ? /\*+$/.exec(text) : /^\*+/.exec(text);
+  return match ? match[0].length : 0;
+}
+
 const inlineCodeParser = markdown({ base: markdownLanguage, addKeymap: false, extensions: [pathologicalParagraphs] }).language.parser;
 
 /** Wrap or unwrap the selection (or the word at the cursor) with an inline marker. */
@@ -98,8 +104,14 @@ export function toggleInlineMark(marker: InlineMarker) {
           };
         }
       }
+      // Italic is on only when the surrounding `*` run is odd; `**` alone is bold (#2259).
+      const italicRun = (run: number) => marker !== "*" || run % 2 === 1;
+      const runBefore = starRun(state.sliceDoc(Math.max(0, from - 64), from), true);
+      const runAfter = starRun(state.sliceDoc(to, to + 64), false);
+      const innerLead = starRun(inner, false);
+      const innerTrail = starRun(inner, true);
       // Unwrap when the selection is wrapped or contains the marker at both ends.
-      if (before === marker && after === marker) {
+      if (before === marker && after === marker && italicRun(runBefore) && italicRun(runAfter)) {
         return {
           changes: [
             { from: from - len, to: from, insert: "" },
@@ -108,7 +120,7 @@ export function toggleInlineMark(marker: InlineMarker) {
           range: orientedRange(from - len, to - len),
         };
       }
-      if (inner.length >= len * 2 && inner.startsWith(marker) && inner.endsWith(marker)) {
+      if (inner.length >= len * 2 && inner.startsWith(marker) && inner.endsWith(marker) && (marker !== "*" || (inner.length > 2 && italicRun(innerLead) && italicRun(innerTrail)))) {
         return {
           changes: { from, to, insert: inner.slice(len, inner.length - len) },
           range: orientedRange(from, to - len * 2),
