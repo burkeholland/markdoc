@@ -3508,3 +3508,12 @@ describe("npm audit process", () => {
     }
   });
 });
+
+// Every "resolved" in the committed lock must be the package feed's address. A lock written against another registry
+// (for example a cloud sandbox's) passes npm ci but is refused at release as invalid_lock; relock through the feed.
+describe("committed package-lock.json", () => {
+  it("has no lock problems", async () => {
+    const lockPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package-lock.json");
+    expect(packageLockProblems(await fs.readFile(lockPath, "utf8"))).toEqual([]);
+  });
+});
