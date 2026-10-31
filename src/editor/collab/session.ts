@@ -741,6 +741,21 @@ export class CollabSession {
 
   private static readonly WAKE_EVENTS = ["online", "focus", "visibilitychange", "pageshow"] as const;
 
+  /** The browser reports no network; the socket may not have noticed yet, so the pill must not say "Unsaved changes". */
+  private browserOffline = typeof navigator !== "undefined" && navigator.onLine === false;
+
+  private onBrowserOffline = () => {
+    if (this.browserOffline) return;
+    this.browserOffline = true;
+    this.notify();
+  };
+
+  private onBrowserOnline = () => {
+    if (!this.browserOffline) return;
+    this.browserOffline = false;
+    this.notify();
+  };
+
   /** Coming back online, to the tab or from sleep: retry at once instead of waiting out the backoff. */
   private onWindowWake = () => {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
@@ -751,11 +766,15 @@ export class CollabSession {
   private registerWindowListeners() {
     if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
     for (const event of CollabSession.WAKE_EVENTS) window.addEventListener(event, this.onWindowWake);
+    window.addEventListener("offline", this.onBrowserOffline);
+    window.addEventListener("online", this.onBrowserOnline);
   }
 
   private unregisterWindowListeners() {
     if (typeof window === "undefined" || typeof window.removeEventListener !== "function") return;
     for (const event of CollabSession.WAKE_EVENTS) window.removeEventListener(event, this.onWindowWake);
+    window.removeEventListener("offline", this.onBrowserOffline);
+    window.removeEventListener("online", this.onBrowserOnline);
   }
 
   /** Abandon a connection attempt that is still "connecting" after {@link CONNECT_ATTEMPT_TIMEOUT_MS}. */
@@ -938,7 +957,7 @@ export class CollabSession {
   get saveState(): SaveState {
     if (this.authError || this.accessChange?.kind === "removed") return "error";
     if (this.status === "connecting") return this.everConnected ? "reconnecting" : "connecting";
-    if (this.status !== "connected") return "offline";
+    if (this.status !== "connected" || this.browserOffline) return "offline";
     if (!this.synced) return "saving";
     if (!this.contentReady) return "saving";
     if (this.persistence.state !== "saved") return this.persistence.state;

@@ -228,6 +228,27 @@ describe("CollabSession reconnect across a server restart (#190)", () => {
     session.destroy();
   });
 
+  it("shows offline as soon as the browser loses its network, before the socket notices (#2420)", async () => {
+    const window = Object.assign(new EventTarget(), { location: { protocol: "http:", host: "localhost" } });
+    vi.stubGlobal("window", window);
+    const session = makeSession();
+    const p = lastProvider();
+    p.opts.onStatus({ status: "connected" });
+    const before = session.saveState;
+    expect(before).not.toBe("offline");
+    const listener = vi.fn();
+    const unsubscribe = session.subscribe(listener);
+    window.dispatchEvent(new Event("offline"));
+    expect(session.saveState).toBe("offline");
+    await Promise.resolve();
+    expect(listener).toHaveBeenCalled();
+    window.dispatchEvent(new Event("online"));
+    expect(session.saveState).toBe(before);
+    unsubscribe();
+    session.destroy();
+    vi.unstubAllGlobals();
+  });
+
   it("says the edits are kept on this device once the connection has been down for a while", () => {
     const session = makeSession();
     const p = lastProvider();
