@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 import { api, type NotificationDto } from "@/lib/api";
 import type { NotificationKind } from "@/server/db/schema";
 
@@ -514,16 +514,6 @@ export function useUnreadRefs(documentId: string): Set<string> {
     .map((n) => n.refId)
     .join("\u0000");
   return new Set(key ? key.split("\u0000") : []);
-}
-
-/** Re-fetch soon after something that probably produced a notification for someone else (no-op for the actor, cheap). */
-export function useNotificationsRefresh() {
-  return useCallback(() => void refreshNotifications(), []);
-}
-
-/** Mount once per page to keep polling alive even when no bell is rendered (e.g. the dashboard). */
-export function useNotificationsPolling() {
-  useEffect(() => subscribe(() => {}), []);
 }
 
 export function sentence(n: Pick<NotificationDto, "kind" | "documentTitle" | "snippet">): string {

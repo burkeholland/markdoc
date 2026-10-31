@@ -1,6 +1,6 @@
 import { toggleMark, setBlockType, wrapIn, lift } from "prosemirror-commands";
 import { wrapInList, liftListItem, sinkListItem, splitListItem } from "prosemirror-schema-list";
-import { TextSelection, NodeSelection, type Command, type EditorState, type Transaction } from "prosemirror-state";
+import { TextSelection, NodeSelection, type Command, type EditorState } from "prosemirror-state";
 import { Fragment, type Attrs, type MarkType, type NodeType, type Node as PMNode } from "prosemirror-model";
 import { liftTarget } from "prosemirror-transform";
 import {
@@ -615,10 +615,6 @@ export const exitTableOnArrowDown: Command = (state, dispatch, view) => {
   if (view && !view.endOfTextblock("down")) return false;
   return exitTableBelow(state, dispatch);
 };
-
-export function selectAllText(state: EditorState): Transaction {
-  return state.tr.setSelection(TextSelection.create(state.doc, 1, state.doc.content.size - 1));
-}
 
 /* ---------- Entering blocks with the keyboard (task #437) ---------- */
 

@@ -303,5 +303,3 @@ const marks: Record<string, MarkSpec> = {
 };
 
 export const schema = new Schema({ nodes, marks });
-
-export type MarkdownSchema = typeof schema;

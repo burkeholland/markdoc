@@ -69,21 +69,6 @@ export const KNOWN_USER_FOREIGN_KEYS = [
   "webhook.user_id",
 ] as const;
 
-export const USER_IDENTITY_CLASSIFICATIONS = [
-  ...KNOWN_USER_FOREIGN_KEYS,
-  // Consent stays bound to its original publisher, even when disabled; this is not a user FK.
-  "gist_auto_update.publisher_id",
-  "document.last_edited_by",
-  "collaborator.added_by",
-  "version.created_by",
-  "required_version_intent.created_by",
-  "activity.actor_id",
-  "collaborator.login",
-  "notification.user_login",
-  "notification.actor_login",
-  "document.ystate identity metadata",
-] as const;
-
 const APPLICATION_DEPENDENCY_LABELS = [
   "document.owner_id",
   "star.user_id",

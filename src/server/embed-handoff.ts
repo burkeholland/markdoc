@@ -65,11 +65,6 @@ export function consumeHandoff(nonce: string, parentOrigin: string, now = Date.n
   return { ok: false, reason: "unknown" };
 }
 
-/** Live nonces (tests). */
-export function handoffCount(): number {
-  return store.live.size;
-}
-
 /** Tests only. */
 export function resetHandoffs() {
   store.live.clear();
