@@ -2391,3 +2391,31 @@ describe("bare source list markers", () => {
         }
       });
     });
+
+describe("toggleInlineMark: italic next to bold (#2259)", () => {
+  const cases: Array<[string, string, number, number, string]> = [
+    ["word inside bold", "a **Target** b", 4, 10, "a ***Target*** b"],
+    ["whole bold span", "a **Target** b", 2, 12, "a ***Target*** b"],
+    ["caret inside bold word", "a **Target** b", 7, 7, "a ***Target*** b"],
+    ["word inside bold italic", "a ***x*** b", 5, 6, "a **x** b"],
+    ["whole bold italic span", "a ***x*** b", 2, 9, "a **x** b"],
+    ["word inside italic", "a *x* b", 3, 4, "a x b"],
+    ["whole italic span", "a *x* b", 2, 5, "a x b"],
+    ["caret inside italic word", "a *xyz* b", 4, 4, "a xyz b"],
+  ];
+  for (const [name, doc, anchor, head, expected] of cases) {
+    it(name, () => {
+      withEditor(doc, EditorSelection.single(anchor, head), (view) => {
+        expect(toggleInlineMark("*")(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(expected);
+      });
+    });
+  }
+
+  it("bold on a bold italic word still removes only the bold", () => {
+    withEditor("a ***x*** b", EditorSelection.single(5, 6), (view) => {
+      toggleInlineMark("**")(view);
+      expect(view.state.doc.toString()).toBe("a *x* b");
+    });
+  });
+});

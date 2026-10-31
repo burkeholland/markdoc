@@ -243,13 +243,22 @@ export function TitleEditor({ session, fallback, compact }: { session: CollabSes
         if (!canEdit || event.button !== 0) return;
         setStoredEdit((current) => current ?? { generation: {}, session, draft: title });
       }}
-      className={cn("group flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left", canEdit && "hover:bg-surface-3")}
+      className={cn("group flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left max-md:px-1", canEdit && "hover:bg-surface-3")}
       title={canEdit ? "Rename" : title}
       data-testid="title"
     >
       {/* Phones render `compact` only after hydration; the `max-md:` rules make the server markup match its size and
           set of controls so the header does not shift when the breakpoint flips (#1470). */}
-      <span className={cn("doc-title truncate font-semibold leading-8 text-ink", compact ? "text-lg" : "text-lg md:text-[22px]")}>{title}</span>
+      {/* Phones: the right-hand controls leave ~80 px, so the title wraps to two smaller lines instead of "Long …" (#2415). */}
+      <span
+        className={cn(
+          "doc-title truncate font-semibold leading-8 text-ink max-md:line-clamp-2 max-md:whitespace-normal max-md:wrap-break-word max-md:text-[15px] max-md:leading-[18px]",
+          compact ? "text-lg" : "text-lg md:text-[22px]",
+        )}
+        data-testid="title-text"
+      >
+        {title}
+      </span>
       {canEdit && !compact && <Pencil size={15} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100 max-md:hidden" />}
     </button>
   );
