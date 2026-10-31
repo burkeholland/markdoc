@@ -188,13 +188,13 @@ test.describe("slash command menu", () => {
     // The pane is read-only, so the keystroke changes nothing.
     expect(await codeText(page)).toBe("Intro paragraph.\n");
 
-    // In the Markdown pane a slash is just a slash.
+    // In the Markdown pane a slash inside a word is just a slash (slash-source.spec.ts covers the source menu).
     await page.getByTestId("preview-mode-toggle").click();
     await page.locator(".cm-content").click();
     await page.keyboard.press("End");
-    await page.keyboard.type(" /head");
+    await page.keyboard.type(" and/head");
     await expect(page.getByTestId("slash-menu")).toHaveCount(0);
-    await expect.poll(() => codeText(page)).toContain(" /head");
+    await expect.poll(() => codeText(page)).toContain(" and/head");
 
     await user.context.close();
   });

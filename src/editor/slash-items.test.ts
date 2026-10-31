@@ -45,7 +45,7 @@ describe("slash items", () => {
   });
 
   it("'tab' finds the table", () => {
-    expect(ids("tab")).toEqual(["table"]);
+    expect(ids("tab")).toEqual(["table", "toc"]);
   });
 
   it("'todo' and 'check' find the task list via keywords", () => {

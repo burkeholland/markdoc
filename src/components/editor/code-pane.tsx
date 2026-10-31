@@ -11,6 +11,7 @@ import { setHighlights, type SourceHighlight } from "@/editor/codemirror/highlig
 import { collectHighlights } from "@/editor/prosemirror/highlights";
 import type { NoticeAction } from "@/editor/markdown/tsv";
 import type { HighlightClickHandler } from "@/editor/highlight-activation";
+import type { SlashMenuHandlers } from "@/editor/prosemirror/slash-menu";
 
 function sameHighlights(a: SourceHighlight[], b: SourceHighlight[]): boolean {
   if (a.length !== b.length) return false;
@@ -38,6 +39,8 @@ export interface CodePaneProps {
   /** A dropped .md/.txt file and the source offset under the pointer. */
   onMarkdownFileDrop?: (file: File, at: number) => void;
   lineWrapping: boolean;
+  /** Slash command menu plumbing (stable object; see SlashMenuController). */
+  slashMenu?: SlashMenuHandlers;
 }
 
 interface CodePaneHandlers {
@@ -61,7 +64,7 @@ interface CodePaneVisit {
   lastHighlights: SourceHighlight[] | null;
 }
 
-export function CodePane({ session, onReady, onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop, lineWrapping }: CodePaneProps) {
+export function CodePane({ session, onReady, onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop, lineWrapping, slashMenu }: CodePaneProps) {
   const host = useRef<HTMLDivElement>(null);
   const authority = useRef<CodePaneVisit | null>(null);
   const handlers = useRef<CodePaneHandlers>({ onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop });
@@ -108,6 +111,7 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
       onMarkdownFileDrop: (file, at) => {
         if (hasAuthority()) handlers.current.onMarkdownFileDrop?.(file, at);
       },
+      slashMenu,
     });
     const view = new EditorView({
       state: EditorState.create({ doc: session.ytext.toString(), extensions: setup.extensions }),
