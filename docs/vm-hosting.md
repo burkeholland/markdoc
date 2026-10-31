@@ -466,7 +466,9 @@ Some advisories have no patched version to upgrade to. So that such an advisory
 does not block every release until upstream ships a fix,
 `scripts/lib/dependency-policy.ts` holds one list, `ACCEPTED_ADVISORIES`, next
 to `BLOCKED_DEPENDENCIES`. Each entry names one advisory on one package at one
-version, with an expiry date and a reason. The list is code: a change to it
+version, with an expiry date and a reason. A package locked at several versions
+needs one entry per version for the same advisory; each lock node must match
+one of them. The list is code: a change to it
 goes through a pull request and a review like any other change. No environment
 variable, flag or command-line option can add an entry, widen one or move the
 clock.
@@ -478,14 +480,19 @@ when `braces` left the lock; see
 [The fast-glob override](#the-fast-glob-override). Production entries for
 `body-parser` and `fast-uri` (MCP SDK, #2391 and #2392) were added on 2026-10-25 and
 deleted when those packages left the lock; see
-[The MCP SDK stand-ins](#the-mcp-sdk-stand-ins). The list is empty. A new entry adds a row
+[The MCP SDK stand-ins](#the-mcp-sdk-stand-ins). `GHSA-g3hv-75wg-m249` on
+`minimatch` (dev-only: eslint and typescript-eslint) was added on 2026-10-31
+because every patched `minimatch` (11.0.1 and later) was then newer than the
+7-day rule of the deploy machine's feed. Remove both entries once 11.0.1 is at
+least 7 days old (after 2026-11-03) and a `minimatch` override can land. A new entry adds a row
 here in the same pull request; a test in
 `scripts/lib/dependency-policy.test.ts` fails while this table and the list do
 not hold the same entries:
 
 | Advisory | Package | Version | Expires (UTC) | Reason |
 | --- | --- | --- | --- | --- |
-| (no entries) | | | | |
+| `GHSA-g3hv-75wg-m249` | `minimatch` | `3.1.5` | `2026-11-14` | Dev-only; every patched version is under 7 days old (added 2026-10-31) |
+| `GHSA-g3hv-75wg-m249` | `minimatch` | `10.2.6` | `2026-11-14` | Dev-only; every patched version is under 7 days old (added 2026-10-31) |
 
 **Production entries.** An entry may set `production: true`. Only such an
 entry may match lock nodes that production installs; every other entry still
@@ -509,7 +516,10 @@ is `rejected`, exactly as if the list did not exist:
 2. Every other reported package is there only because it depends, directly or
    through other such packages, on an accepted one. A package with any advisory
    of its own that is not listed, or that names a package the audit does not
-   report, is rejected.
+   report, is rejected. Packages that name each other (`eslint` and
+   `@eslint-community/eslint-utils` do) stand when none has an advisory of its
+   own, all are outside production, and their dependencies lead to an accepted
+   one.
 3. Every lock node of every reported package is outside production in the
    same sense. A lock in which the mark and the dependencies disagree about
    any entry never gets this far: it is `invalid_lock`.

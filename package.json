@@ -141,7 +141,8 @@
       "ajv": "npm:content-type@1.0.5",
       "ajv-formats": "npm:content-type@1.0.5",
       "express": "npm:content-type@1.0.5",
-      "express-rate-limit": "npm:content-type@1.0.5"
+      "express-rate-limit": "npm:content-type@1.0.5",
+      "@hono/node-server": "2.1.5"
     },
     "@next/eslint-plugin-next": {
       "fast-glob": "npm:tinyglobby@0.2.17"

@@ -1618,7 +1618,8 @@ describe("accepted advisories (#2260)", () => {
       expect(item.reason.length).toBeGreaterThan(0);
       expect(item.reason).not.toContain("\n");
     }
-    expect(new Set(ACCEPTED_ADVISORIES.map((item) => item.advisory)).size).toBe(ACCEPTED_ADVISORIES.length);
+    const keys = ACCEPTED_ADVISORIES.map((item) => `${item.advisory} ${item.package} ${item.version}`);
+    expect(new Set(keys).size).toBe(ACCEPTED_ADVISORIES.length);
   });
 
   // Built from whatever the real list holds, with the clock set from each entry, so it proves the real list is the
@@ -1743,6 +1744,40 @@ describe("accepted advisories (#2260)", () => {
     ["an advisory id in upper case", { advisory: "GHSA-VFJ7-8CJW-P6XM" }],
   ])("rejects, exactly as before, when the list entry has %s", (_case, change) => {
     expect(evaluateBraces({ ...bracesCase(), advisories: [{ ...TEST_ADVISORY, ...change }] })).toEqual(BRACES_REJECTED);
+  });
+
+  it("accepts a package locked at two versions only when each version has its own entry", () => {
+    const fixture = bracesCase();
+    fixture.packages.push({ name: "micromatch/node_modules/braces", version: "3.0.2", flags: { dev: true } });
+    fixture.audit.vulnerabilities.braces.nodes.push("node_modules/micromatch/node_modules/braces");
+    expect(evaluateBraces(fixture)).toMatchObject({ status: "rejected" });
+    fixture.advisories = [{ ...TEST_ADVISORY }, { ...TEST_ADVISORY, version: "3.0.2" }];
+    expect(evaluateBraces(fixture)).toMatchObject({
+      status: "accepted",
+      exceptions: [ACCEPTED_EXCEPTION, { ...ACCEPTED_EXCEPTION, version: "3.0.2" }],
+    });
+  });
+
+  // eslint and @eslint-community/eslint-utils name each other in the audit of main's lock on 2026-10-31.
+  function cycleCase(aVia: string[], flags: Record<string, unknown> = { dev: true }): BracesCase {
+    const fixture = bracesCase();
+    fixture.packages.push({ name: "cycle-a", version: "1.0.0", flags }, { name: "cycle-b", version: "1.0.0", flags: { dev: true } });
+    const entry = (name: string, via: string[]): AuditFixtureEntry => ({
+      ...fixture.audit.vulnerabilities.micromatch, name, via, effects: [], range: "*", nodes: [`node_modules/${name}`],
+    });
+    fixture.audit.vulnerabilities["cycle-a"] = entry("cycle-a", aVia);
+    fixture.audit.vulnerabilities["cycle-b"] = entry("cycle-b", ["cycle-a"]);
+    fixture.audit.metadata.vulnerabilities = { ...fixture.audit.metadata.vulnerabilities, high: 7, total: 7 };
+    return fixture;
+  }
+
+  it("accepts a dev-only cycle of dependents that leads to an accepted advisory", () => {
+    expect(evaluateBraces(cycleCase(["cycle-b", "micromatch"]))).toMatchObject({ status: "accepted" });
+  });
+
+  it("rejects a cycle that leads to no accepted advisory, or that production installs", () => {
+    expect(evaluateBraces(cycleCase(["cycle-b"]))).toMatchObject({ status: "rejected" });
+    expect(evaluateBraces(cycleCase(["cycle-b", "micromatch"], {}))).toMatchObject({ status: "rejected" });
   });
 
   it("rejects an advisory id that does not fit the pattern even when the audit carries the same text", () => {

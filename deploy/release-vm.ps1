@@ -462,11 +462,11 @@ function Get-ReleaseAcceptedDependencyAdvisories($Report, [datetime]$UtcToday = 
         $exception['expires'] -isnot [string] -or $exception['expires'] -cnotmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z') {
       Stop-VmRelease $invalid
     }
-    # The date must be a real calendar day that is today or later in UTC, and each advisory may appear once.
+    # The date must be a real calendar day that is today or later in UTC, and each advisory may appear once per package version.
     $expires = [datetime]::MinValue
     if (-not [datetime]::TryParseExact($exception['expires'], 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture,
           [Globalization.DateTimeStyles]::None, [ref]$expires) -or
-        $expires -lt $UtcToday.Date -or -not $advisories.Add($exception['advisory'])) {
+        $expires -lt $UtcToday.Date -or -not $advisories.Add("$($exception['advisory']) $($exception['package']) $($exception['version'])")) {
       Stop-VmRelease $invalid
     }
     $covered = @($packages | Where-Object {
