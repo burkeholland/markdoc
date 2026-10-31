@@ -10,6 +10,8 @@ import { DownloadMenu } from "./download-menu";
 import { ReaderScrollableRegions } from "./scrollable-regions";
 import { ReaderCopyLink } from "./copy-link";
 import { ReaderLinkCards } from "./link-cards";
+import { ReaderBody } from "./reader-body";
+import { stashReaderBody } from "./reader-body-handoff";
 
 export interface ReaderPageProps {
   docId: string;
@@ -100,16 +102,7 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
               )}
             </div>
           </header>
-          {/* Safe to inject: `html` is the output of renderMarkdownBody, which runs rehype-sanitize
-              (GitHub's default schema) before slugging/highlighting, so scripts, handlers and
-              javascript: URLs never reach this point. */}
-          <div
-            className="reader-body"
-            data-testid="reader-body"
-            data-reader-overflow-root
-            data-hide-first-h1={hideFirstH1 || undefined}
-            dangerouslySetInnerHTML={{ __html: html }}
-          />
+          <ReaderBody bodyKey={stashReaderBody(html)} empty={html.length === 0} hideFirstH1={hideFirstH1} />
           <ReaderScrollableRegions contentKey={initialHash} />
           <ReaderLinkCards contentKey={initialHash} />
           <footer className="reader-footer mt-16 border-t border-line pt-5 text-xs text-ink-4">
