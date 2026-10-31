@@ -338,9 +338,9 @@ cleanup
 $script:sha = '0123456789abcdef0123456789abcdef01234567'
 $script:digest = 'sha256:' + ('a' * 64)
 $script:PreSubmissionDeadlineSeconds = 900
-$script:AcrBuildSubmissionTimeoutSeconds = 90
+$script:AcrBuildSubmissionTimeoutSeconds = 300
 $script:AcrBuildTimeoutSeconds = 900
-$script:BuildPhaseDeadlineSeconds = 1140
+$script:BuildPhaseDeadlineSeconds = 1350
 $script:PostBuildVerificationDeadlineSeconds = 180
 $script:VmPhaseDeadlineSeconds = 2400
 $script:PublicHealthDeadlineSeconds = 30
@@ -768,13 +768,13 @@ $pollCases += @(
   @{ Name = 'poll-show-wrong-digest-after-miss'; Command = 'acr task show-run'; Stage = 'immutable image identity'; Calls = 2; Misses = @(1); Category = 'server_error'; Status = '503'; ExitCode = 1; Reason = 'The exact tag digest does not match this successful build run.' },
   @{ Name = 'poll-list-foreign-exception'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 1; Reason = 'Unexpected IOException; raw output withheld.' },
   @{ Name = 'poll-list-terminal-exception'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); ExitCode = 124; Reason = 'Terminal poll failure.' },
-  @{ Name = 'poll-list-deadline-before'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 0; Misses = @(); StartAt = 1140; Budget = 1140; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-list-deadline-during'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 1138; EndAt = 1140; Budget = 1140; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-list-deadline-after-miss'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(1); StartAt = 1134; AfterMiss = 1140; Budget = 1140; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-show-budget-during'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 1138; EndAt = 1140; Budget = 1140; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-show-budget-after-miss'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(1); StartAt = 1134; AfterMiss = 1140; Budget = 1140; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-show-success-at-budget'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 1130; EndAt = 1140; Budget = 1140; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
-  @{ Name = 'poll-list-success-at-budget'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 1130; EndAt = 1140; Budget = 1140; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' }
+  @{ Name = 'poll-list-deadline-before'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 0; Misses = @(); StartAt = 1350; Budget = 1350; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-list-deadline-during'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 1348; EndAt = 1350; Budget = 1350; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-list-deadline-after-miss'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(1); StartAt = 1344; AfterMiss = 1350; Budget = 1350; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-show-budget-during'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 1348; EndAt = 1350; Budget = 1350; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-show-budget-after-miss'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(1); StartAt = 1344; AfterMiss = 1350; Budget = 1350; Category = 'server_error'; Status = '503'; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-show-success-at-budget'; Command = 'acr task show-run'; Stage = 'ACR build completion'; Calls = 1; Misses = @(); StartAt = 1340; EndAt = 1350; Budget = 1350; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' },
+  @{ Name = 'poll-list-success-at-budget'; Command = 'acr task list-runs'; Stage = 'ACR build reconciliation'; Calls = 1; Misses = @(); StartAt = 1340; EndAt = 1350; Budget = 1350; ExitCode = 124; Reason = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.' }
 )
 $digestCases = @(
   @{ Name = 'digest-server-success'; Category = 'server_error'; Status = '503'; Calls = 2; Retry = 1; Success = $true },
@@ -898,7 +898,7 @@ try {
     $script:clockCount = 0
     $script:cleanupCount = 0
     $script:PreSubmissionDeadlineSeconds = 900
-    $script:BuildPhaseDeadlineSeconds = 1140
+    $script:BuildPhaseDeadlineSeconds = 1350
     $script:PostBuildVerificationDeadlineSeconds = 180
     $script:VmPhaseDeadlineSeconds = 2400
     $script:PublicHealthDeadlineSeconds = 30
