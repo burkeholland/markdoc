@@ -702,8 +702,8 @@ ambiguous evidence, invalid identities, unknown or failed statuses and digest
 checks. No build submission or VM command is retried.
 
 Both poll calls retain their 30-second per-call limit and use one
-1,140-second outer phase watchdog that starts before unique-tag creation and
-the log lines preceding the single ACR submission. The 90-second native-command
+1,350-second outer phase watchdog that starts before unique-tag creation and
+the log lines preceding the single ACR submission. The 300-second native-command
 timeout for submission, the 900-second ACR service timeout, wrapper/local work,
 unique-tag reconciliation and terminal run evidence all consume that same
 clock; no fixed reconciliation reserve is guaranteed. Successful run `ch2g`
@@ -873,9 +873,9 @@ The entrypoint uses these distinct timing boundaries:
 | Boundary | Kind | Anchor and value | Controlled work and limits |
 | --- | --- | --- | --- |
 | Pre-submission | Outer phase watchdog | Release orchestration entry, 900 seconds | Native commands are capped by remaining time and the phase is checked before submission. Synchronous PowerShell, .NET and file work between checks is outside termination control. |
-| ACR submission | Native-command timeout | Local submission child, up to 90 seconds within the build watchdog | The local CLI process is killed on timeout; accepted cloud work is not cancelled. |
+| ACR submission | Native-command timeout | Local submission child, up to 300 seconds within the build watchdog | The local CLI process is killed on timeout; accepted cloud work is not cancelled. |
 | ACR service run | Service timeout | The one build requests 900 seconds | ACR applies this service limit. It does not reserve time inside the local build watchdog. |
-| Build evidence | Outer phase watchdog and polling bound | Before tag creation, 1,140 seconds; at most 132 reconciliation polls | Tag/log setup, wrapper overhead, submission, reconciliation and completion polling share the clock. A requested sleep starts only when it fits the floored remaining time; any deadline overrun is rejected immediately afterward. No polling reserve is guaranteed. |
+| Build evidence | Outer phase watchdog and polling bound | Before tag creation, 1,350 seconds; at most 132 reconciliation polls | Tag/log setup, wrapper overhead, submission, reconciliation and completion polling share the clock. A requested sleep starts only when it fits the floored remaining time; any deadline overrun is rejected immediately afterward. No polling reserve is guaranteed. |
 | Post-build proof | Outer phase watchdog | After terminal build evidence, 180 seconds | Digest lookup/retry and final source checks share the clock. Synchronous parsing and validation are checked afterward rather than forcibly terminated. |
 | VM/result | CLI invocation cap and post-return elapsed assertion | Before the one VM invocation, 2,400 seconds | The local CLI child uses the remaining time. Result parsing, WAL evidence and local-health validation are followed by an elapsed check; the guest is not terminated by the local cap. |
 | Public health | HTTP request timeout and post-return elapsed assertion | After exact guest result proof, 20-second request within a 30-second elapsed check | `Invoke-RestMethod -TimeoutSec` limits the HTTP request. Synchronous JSON parsing and health validation run before the elapsed assertion. |

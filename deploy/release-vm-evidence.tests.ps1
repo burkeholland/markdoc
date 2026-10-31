@@ -175,9 +175,9 @@ function Test-ReleaseBoundaryInvariants([hashtable]$Sources) {
   $timeouts = @([regex]::Matches($workflow, '(?m)^\s+timeout-minutes: (?<minutes>[0-9]+)\s*$') |
     ForEach-Object { [int]$_.Groups['minutes'].Value })
   if ((Get-SourceConstant $release 'PreSubmissionDeadlineSeconds') -ne 900 -or
-      (Get-SourceConstant $release 'AcrBuildSubmissionTimeoutSeconds') -ne 90 -or
+      (Get-SourceConstant $release 'AcrBuildSubmissionTimeoutSeconds') -ne 300 -or
       (Get-SourceConstant $release 'AcrBuildTimeoutSeconds') -ne 900 -or
-      (Get-SourceConstant $release 'BuildPhaseDeadlineSeconds') -ne 1140 -or
+      (Get-SourceConstant $release 'BuildPhaseDeadlineSeconds') -ne 1350 -or
       (Get-SourceConstant $release 'PostBuildVerificationDeadlineSeconds') -ne 180 -or
       (Get-SourceConstant $release 'VmPhaseDeadlineSeconds') -ne 2400 -or
       (Get-SourceConstant $release 'PublicHealthDeadlineSeconds') -ne 30 -or
@@ -248,9 +248,9 @@ $boundarySources = @{ Release = $releaseSource; Workflow = $workflowSource; Read
 Assert-True (Test-ReleaseBoundaryInvariants $boundarySources) 'Release boundary implementation and documentation must describe only enforced behavior.'
 $boundaryMutations = @(
   @{ Name = 'pre-submission-watchdog'; Change = { param($s) $s.Release = $s.Release.Replace('$PreSubmissionDeadlineSeconds = 900', '$PreSubmissionDeadlineSeconds = 899') } },
-  @{ Name = 'build-submission-timeout'; Change = { param($s) $s.Release = $s.Release.Replace('$AcrBuildSubmissionTimeoutSeconds = 90', '$AcrBuildSubmissionTimeoutSeconds = 91') } },
+  @{ Name = 'build-submission-timeout'; Change = { param($s) $s.Release = $s.Release.Replace('$AcrBuildSubmissionTimeoutSeconds = 300', '$AcrBuildSubmissionTimeoutSeconds = 301') } },
   @{ Name = 'acr-service-timeout'; Change = { param($s) $s.Release = $s.Release.Replace('$AcrBuildTimeoutSeconds = 900', '$AcrBuildTimeoutSeconds = 901') } },
-  @{ Name = 'build-watchdog'; Change = { param($s) $s.Release = $s.Release.Replace('$BuildPhaseDeadlineSeconds = 1140', '$BuildPhaseDeadlineSeconds = 1139') } },
+  @{ Name = 'build-watchdog'; Change = { param($s) $s.Release = $s.Release.Replace('$BuildPhaseDeadlineSeconds = 1350', '$BuildPhaseDeadlineSeconds = 1349') } },
   @{ Name = 'post-build-watchdog'; Change = { param($s) $s.Release = $s.Release.Replace('$PostBuildVerificationDeadlineSeconds = 180', '$PostBuildVerificationDeadlineSeconds = 179') } },
   @{ Name = 'vm-cli-cap'; Change = { param($s) $s.Release = $s.Release.Replace('$VmPhaseDeadlineSeconds = 2400', '$VmPhaseDeadlineSeconds = 2399') } },
   @{ Name = 'public-health-elapsed-check'; Change = { param($s) $s.Release = $s.Release.Replace('$PublicHealthDeadlineSeconds = 30', '$PublicHealthDeadlineSeconds = 29') } },

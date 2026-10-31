@@ -12,12 +12,12 @@ $ErrorActionPreference = 'Stop'
 # Cooperative outer phase watchdogs. Native calls and sleeps consume their
 # remaining time, but synchronous PowerShell/.NET work is checked, not killed.
 $PreSubmissionDeadlineSeconds = 900
-$BuildPhaseDeadlineSeconds = 1140
+$BuildPhaseDeadlineSeconds = 1350
 $PostBuildVerificationDeadlineSeconds = 180
 $VmPhaseDeadlineSeconds = 2400
 $PublicHealthDeadlineSeconds = 30
 # Native/service boundaries within those watchdogs.
-$AcrBuildSubmissionTimeoutSeconds = 90
+$AcrBuildSubmissionTimeoutSeconds = 300
 $AcrBuildTimeoutSeconds = 900
 $CleanupChildTimeoutSeconds = 30
 
