@@ -1,6 +1,13 @@
 import type { Command } from "prosemirror-state";
 import type { EditorView } from "prosemirror-view";
+import type { EditorView as SourceView } from "@codemirror/view";
 import { insertHorizontalRule, insertTable, insertText, setHeadingLevel, toggleBlockquote, toggleCodeBlock, toggleList } from "./prosemirror/commands";
+import { insertFootnote, insertTableOfContents } from "./prosemirror/slash-commands";
+import { LOREM_IPSUM, calloutKind } from "./slash-blocks";
+// Type only: the source commands reach the menu at run time through `CodeApi.slash`, so CodeMirror stays in its lazy chunk.
+import type * as SourceSlash from "./codemirror/slash-commands";
+
+export type SourceSlashCommands = typeof SourceSlash;
 
 /**
  * Everything a slash item may need from its host. The rich pane supplies the
@@ -8,7 +15,8 @@ import { insertHorizontalRule, insertTable, insertText, setHeadingLevel, toggleB
  * lives outside the editor.
  */
 export interface SlashContext {
-  view: EditorView;
+  /** The rich editor; null when the item was picked in the source editor. */
+  view: EditorView | null;
   openImage: () => void;
   /** Opens "Video or post from a link" (#2317). */
   openCard: () => void;
@@ -24,6 +32,8 @@ export interface SlashContext {
 export interface SlashWhere {
   inTable: boolean;
   canComment: boolean;
+  /** The caret is in the Markdown source editor; items without a `source` command are hidden there. */
+  source?: boolean;
 }
 
 export type SlashGroup = "Basic" | "Lists" | "Blocks" | "Insert";
@@ -45,6 +55,8 @@ interface SlashItemBase {
   hint?: string;
   /** Hides the item in contexts where it cannot be inserted. */
   available?: (where: SlashWhere) => boolean;
+  /** The same edit in the source editor, as Markdown text. Items with `run` work in both editors. */
+  source?: (cm: SourceSlashCommands, arg: string) => (view: SourceView) => boolean;
 }
 
 /**
@@ -54,19 +66,37 @@ interface SlashItemBase {
  * `run` (dialogs, comments) after the `/query` has been removed.
  */
 export type SlashItem = SlashItemBase &
-  ({ command: (arg: string) => Command; run?: undefined } | { run: (ctx: SlashContext, arg: string) => void; command?: undefined });
+  (
+    | { command: (arg: string) => Command; run?: undefined }
+    | { run: (ctx: SlashContext, arg: string) => void; command?: undefined }
+    // Source-only items (see `source`).
+    | { source: NonNullable<SlashItemBase["source"]>; command?: undefined; run?: undefined }
+  );
 
 const notInTable = (w: SlashWhere) => !w.inTable;
 
 export const SLASH_ITEMS: readonly SlashItem[] = [
-  { id: "text", title: "Text", keywords: ["paragraph", "plain", "p"], icon: "Type", group: "Basic", command: () => setHeadingLevel(0) },
-  { id: "heading1", title: "Heading 1", keywords: ["h1", "title"], icon: "Heading1", group: "Basic", available: notInTable, command: () => setHeadingLevel(1) },
-  { id: "heading2", title: "Heading 2", keywords: ["h2", "subtitle"], icon: "Heading2", group: "Basic", available: notInTable, command: () => setHeadingLevel(2) },
-  { id: "heading3", title: "Heading 3", keywords: ["h3"], icon: "Heading3", group: "Basic", available: notInTable, command: () => setHeadingLevel(3) },
-  { id: "bullet", title: "Bullet list", keywords: ["unordered", "ul", "list"], icon: "List", group: "Lists", available: notInTable, command: () => toggleList("bullet") },
-  { id: "numbered", title: "Numbered list", keywords: ["ordered", "ol", "list"], icon: "ListOrdered", group: "Lists", available: notInTable, command: () => toggleList("ordered") },
-  { id: "task", title: "Task list", keywords: ["todo", "check", "checkbox", "checklist", "list"], icon: "ListChecks", group: "Lists", available: notInTable, command: () => toggleList("task") },
-  { id: "quote", title: "Quote", keywords: ["blockquote", "citation"], icon: "Quote", group: "Blocks", available: notInTable, command: () => toggleBlockquote() },
+  { id: "text", title: "Text", keywords: ["paragraph", "plain", "p"], icon: "Type", group: "Basic", command: () => setHeadingLevel(0), source: (cm) => cm.heading(0) },
+  { id: "heading1", title: "Heading 1", keywords: ["h1", "title"], icon: "Heading1", group: "Basic", available: notInTable, command: () => setHeadingLevel(1), source: (cm) => cm.heading(1) },
+  { id: "heading2", title: "Heading 2", keywords: ["h2", "subtitle"], icon: "Heading2", group: "Basic", available: notInTable, command: () => setHeadingLevel(2), source: (cm) => cm.heading(2) },
+  { id: "heading3", title: "Heading 3", keywords: ["h3"], icon: "Heading3", group: "Basic", available: notInTable, command: () => setHeadingLevel(3), source: (cm) => cm.heading(3) },
+  { id: "bullet", title: "Bullet list", keywords: ["unordered", "ul", "list"], icon: "List", group: "Lists", available: notInTable, command: () => toggleList("bullet"), source: (cm) => cm.linePrefix("bullet") },
+  { id: "numbered", title: "Numbered list", keywords: ["ordered", "ol", "list"], icon: "ListOrdered", group: "Lists", available: notInTable, command: () => toggleList("ordered"), source: (cm) => cm.linePrefix("ordered") },
+  { id: "task", title: "Task list", keywords: ["todo", "check", "checkbox", "checklist", "list"], icon: "ListChecks", group: "Lists", available: notInTable, command: () => toggleList("task"), source: (cm) => cm.linePrefix("task") },
+  { id: "quote", title: "Quote", keywords: ["blockquote", "citation"], icon: "Quote", group: "Blocks", available: notInTable, command: () => toggleBlockquote(), source: (cm) => cm.linePrefix("quote") },
+  {
+    // GitHub alerts (fancygist's `/alerts`). Source only: the rich editor shows `[!NOTE]` as text and would escape it.
+    id: "callout",
+    title: "Callout",
+    description: "Note, tip, important, warning or caution",
+    keywords: ["alert", "alerts", "admonition", "note", "tip", "important", "warning", "caution"],
+    icon: "Info",
+    group: "Blocks",
+    acceptsArg: true,
+    hint: "kind",
+    available: (w) => !!w.source && !w.inTable,
+    source: (cm, arg) => cm.callout(calloutKind(arg)),
+  },
   {
     id: "code",
     title: "Code block",
@@ -77,9 +107,21 @@ export const SLASH_ITEMS: readonly SlashItem[] = [
     hint: "language",
     available: notInTable,
     command: (arg) => toggleCodeBlock(arg.trim() || null),
+    source: (cm, arg) => cm.codeBlock(arg.trim()),
   },
-  { id: "divider", title: "Divider", keywords: ["hr", "rule", "separator", "line"], icon: "Minus", group: "Blocks", available: notInTable, command: () => insertHorizontalRule() },
-  { id: "table", title: "Table", keywords: ["grid", "rows", "columns"], icon: "Table", group: "Blocks", available: notInTable, command: () => insertTable(3, 3) },
+  { id: "divider", title: "Divider", keywords: ["hr", "rule", "separator", "line"], icon: "Minus", group: "Blocks", available: notInTable, command: () => insertHorizontalRule(), source: (cm) => cm.divider },
+  { id: "table", title: "Table", keywords: ["grid", "rows", "columns"], icon: "Table", group: "Blocks", available: notInTable, command: () => insertTable(3, 3), source: (cm) => cm.table },
+  {
+    id: "toc",
+    title: "Table of contents",
+    description: "Links to every heading in the document",
+    keywords: ["toc", "contents", "outline", "index"],
+    icon: "ListTree",
+    group: "Blocks",
+    available: notInTable,
+    command: () => insertTableOfContents,
+    source: (cm) => cm.tableOfContents,
+  },
   { id: "image", title: "Image", keywords: ["picture", "photo", "img", "upload"], icon: "Image", group: "Insert", run: (ctx) => ctx.openImage() },
   { id: "link", title: "Link", keywords: ["url", "href", "anchor"], icon: "Link", group: "Insert", run: (ctx) => ctx.openLink() },
   {
@@ -104,7 +146,9 @@ export const SLASH_ITEMS: readonly SlashItem[] = [
     available: (w) => w.canComment,
     run: (ctx) => ctx.startComment(),
   },
-  { id: "date", title: "Date", keywords: ["today", "now", "time"], icon: "Calendar", group: "Insert", command: () => insertText(todayIso()) },
+  { id: "date", title: "Date", keywords: ["today", "now", "time"], icon: "Calendar", group: "Insert", command: () => insertText(todayIso()), source: (cm) => cm.text(todayIso()) },
+  { id: "footnote", title: "Footnote", keywords: ["reference", "citation", "note", "fn"], icon: "Superscript", group: "Insert", available: notInTable, command: () => insertFootnote, source: (cm) => cm.footnote },
+  { id: "lorem", title: "Placeholder text", keywords: ["lorem", "ipsum", "dummy", "dummytext", "filler"], icon: "TextQuote", group: "Insert", command: () => insertText(LOREM_IPSUM), source: (cm) => cm.text(LOREM_IPSUM) },
   {
     id: "agent",
     title: "Connect an AI agent",
@@ -150,6 +194,6 @@ export function filterSlashItems(query: string, items: readonly SlashItem[] = SL
   const hasArg = arg.length > 0 || /\s$/.test(query.trimStart()) && word.length > 0;
   const order = new Map(SLASH_GROUPS.map((g, i) => [g, i]));
   return items
-    .filter((item) => (!where || !item.available || item.available(where)) && (!hasArg || item.acceptsArg) && matches(item, word))
+    .filter((item) => (!where || !item.available || item.available(where)) && (!where?.source || !item.command || item.source) && (!hasArg || item.acceptsArg) && matches(item, word))
     .sort((a, b) => (order.get(a.group) ?? 0) - (order.get(b.group) ?? 0));
 }

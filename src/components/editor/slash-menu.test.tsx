@@ -11,7 +11,7 @@ import type { CollabSession } from "@/editor/collab/session";
 import { MarkdownBinding, markdownBindingPlugin } from "@/editor/sync/markdown-binding";
 import { editablePlugin } from "@/editor/prosemirror/editable";
 import { slashMenuPlugin, slashMenuState, type SlashState } from "@/editor/prosemirror/slash-menu";
-import { SLASH_ITEMS } from "@/editor/slash-items";
+import { SLASH_ITEMS, filterSlashItems } from "@/editor/slash-items";
 
 vi.mock("./use-session", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./use-session")>();
@@ -120,6 +120,8 @@ function press(view: EditorView, key: string, init: KeyboardEventInit = {}): Key
   return event;
 }
 
+/** Every item the rich editor offers outside a table (the source-only Callout is not among them). */
+const RICH_ITEMS = filterSlashItems("", SLASH_ITEMS, { inTable: false, canComment: true });
 const menu = () => screen.queryByTestId("slash-menu");
 const row = (id: string) => screen.getByTestId(`slash-item-${id}`);
 const selected = () => screen.getAllByRole("option").filter((option) => option.getAttribute("aria-selected") === "true").map((option) => option.getAttribute("data-testid"));
@@ -194,7 +196,7 @@ describe("slash menu: what it shows", () => {
     typeAt(view, WORLD, "/");
     expect(menu()).toHaveAttribute("role", "listbox");
     expect(menu()).toHaveAccessibleName("Insert block");
-    expect(rowIds()).toEqual(SLASH_ITEMS.map((item) => item.id));
+    expect(rowIds()).toEqual(RICH_ITEMS.map((item) => item.id));
     expect(selected()).toEqual(["slash-item-text"]);
     act(() => view.dispatch(view.state.tr.delete(WORLD, WORLD + 1)));
     expect(menu()).toBeNull();
@@ -220,7 +222,7 @@ describe("slash menu: what it shows", () => {
   it("gives every label and description a hover title with its full text", () => {
     const { view } = mount();
     typeAt(view, WORLD, "/");
-    for (const item of SLASH_ITEMS) {
+    for (const item of RICH_ITEMS) {
       const titles = [...row(item.id).querySelectorAll("[title]")].map((element) => [element.getAttribute("title"), element.textContent]);
       expect(titles, item.id).toEqual([[item.title, item.title], ...(item.description ? [[item.description, item.description]] : [])]);
     }
@@ -251,7 +253,7 @@ describe("slash menu: what it shows", () => {
       if (cell < 0 && node.isTextblock && node.textContent === "1") cell = pos + 1;
     });
     typeAt(view, cell + 1, " /");
-    expect(rowIds()).toEqual(["text", "image", "link", "comment", "date", "agent"]);
+    expect(rowIds()).toEqual(["text", "image", "link", "comment", "date", "lorem", "agent"]);
   });
 
   it("stays closed for a person who may not edit, and leaves the keys to the editor", () => {

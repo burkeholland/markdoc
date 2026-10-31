@@ -35,6 +35,8 @@ import type { ImageUploader } from "../prosemirror/images";
 import type { NoticeAction } from "../markdown/tsv";
 import { preserveInactiveUndoScroll } from "./undo-scroll";
 import { sourceLinks } from "./links";
+import { sourceSlashMenu } from "./slash-menu";
+import type { SlashMenuHandlers } from "../prosemirror/slash-menu";
 import type { HighlightClickHandler } from "../highlight-activation";
 
 export interface CodeEditorHandlers {
@@ -48,6 +50,8 @@ export interface CodeEditorHandlers {
   onNotice?: (message: string, action?: NoticeAction) => void;
   /** A dropped .md/.txt file with the source offset under the pointer. */
   onMarkdownFileDrop?: MarkdownFileDropHandler;
+  /** Slash command menu (`/`) state and navigation; when absent the menu is disabled. */
+  slashMenu?: SlashMenuHandlers;
 }
 
 export interface CodeEditorSetup {
@@ -124,6 +128,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     editable.of([EditorState.readOnly.of(!session.canEdit), EditorView.editable.of(session.canEdit)]),
     suggesting.of(session.mode === "suggesting" ? suggestingMode(session) : []),
     formattingKeymap,
+    handlers.slashMenu ? sourceSlashMenu(handlers.slashMenu) : [],
     handlers.uploadImage ? codeImageUpload(session, handlers.uploadImage, { onError: handlers.onImageError }) : [],
     codePasteGuard({ onNotice: handlers.onNotice, undoManager: session.undoManager }),
     handlers.onMarkdownFileDrop ? codeMarkdownFileDrop(handlers.onMarkdownFileDrop) : [],

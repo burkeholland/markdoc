@@ -1,6 +1,8 @@
 import type { StateEffect } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import * as commands from "./commands";
+import * as slash from "./slash-commands";
+import { applySourceSlash, closeSourceSlashMenu, sourceSlashState } from "./slash-menu";
 
 /**
  * The CodeMirror *values* the rest of the editor needs while the code pane is mounted. The pane hands
@@ -14,11 +16,17 @@ export interface CodeApi {
   scrollIntoView(pos: number, opts: { y: "center" | "start"; yMargin?: number }): StateEffect<unknown>;
   /** The Markdown source commands (`@/editor/codemirror/commands`). */
   commands: typeof commands;
+  /** The source side of the slash items (`@/editor/codemirror/slash-commands`). */
+  slash: typeof slash;
+  /** The source `/` menu's range and actions (`@/editor/codemirror/slash-menu`). */
+  slashMenu: { state: typeof sourceSlashState; apply: typeof applySourceSlash; close: typeof closeSourceSlashMenu };
 }
 
 export function createCodeApi(): CodeApi {
   return {
     scrollIntoView: (pos, opts) => EditorView.scrollIntoView(pos, opts),
     commands,
+    slash,
+    slashMenu: { state: sourceSlashState, apply: applySourceSlash, close: closeSourceSlashMenu },
   };
 }

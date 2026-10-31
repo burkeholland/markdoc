@@ -159,6 +159,7 @@ function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = 
           view.focus();
           return;
         }
+        if (!item.run) return;
         item.run({ view, openImage: ctx.openImage, openCard: () => ctx.setDialog("card"), openLink: ctx.openLink, startComment: ctx.startComment, connectAgent: () => ctx.connectAgent?.(), where: ctx.slashWhere }, "");
       },
     }));

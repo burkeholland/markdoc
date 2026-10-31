@@ -434,6 +434,10 @@ describe("slash menu undo", () => {
     divider: "Hello\n\nWorld\n\n---",
     table: /^Hello\n\nWorld\n\n\| Column 1 \| Column 2 \| Column 3 \|\n/,
     date: /^Hello\n\n\d{4}-\d{2}-\d{2}World$/,
+    // No headings in the document: the query goes and nothing is inserted.
+    toc: "Hello\n\nWorld",
+    footnote: /^Hello\n\n\[\^1\]World\n\n\[\^1\]:/,
+    lorem: /^Hello\n\nLorem ipsum dolor sit amet, .*pariatur\.World$/,
   };
 
   const commandItems = SLASH_ITEMS.filter((item) => item.command);

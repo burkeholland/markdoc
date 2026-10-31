@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { EditorView } from "prosemirror-view";
+import type { EditorView as SourceView } from "@codemirror/view";
+import type { CodeApi } from "@/editor/codemirror/api";
 import { TextSelection } from "prosemirror-state";
-import { Bot, Calendar, Heading1, Heading2, Heading3, Image, Link, List, ListChecks, ListOrdered, MessageSquarePlus, Minus, Quote, SquareCode, SquarePlay, Table, Type, type LucideIcon } from "lucide-react";
+import { Bot, Calendar, Heading1, Heading2, Heading3, Image, Info, Link, List, ListChecks, ListOrdered, ListTree, MessageSquarePlus, Minus, Quote, SquareCode, SquarePlay, Superscript, Table, TextQuote, Type, type LucideIcon } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { tableAt } from "@/editor/prosemirror/commands";
 import { applySlashCommand, applySlashItem, closeSlashMenu, type SlashKey, type SlashMenuHandlers, type SlashState } from "@/editor/prosemirror/slash-menu";
@@ -12,7 +14,7 @@ import { cn } from "@/lib/utils";
 import { clampToViewport } from "@/lib/viewport";
 import { useSessionValue } from "./use-session";
 
-const ICONS: Record<string, LucideIcon> = { Type, Heading1, Heading2, Heading3, List, ListOrdered, ListChecks, Quote, SquareCode, Minus, Table, Image, SquarePlay, Link, MessageSquarePlus, Calendar, Bot };
+const ICONS: Record<string, LucideIcon> = { Type, Heading1, Heading2, Heading3, List, ListOrdered, ListChecks, Quote, Info, SquareCode, Minus, Table, ListTree, Image, SquarePlay, Link, MessageSquarePlus, Calendar, Superscript, TextQuote, Bot };
 
 const MENU_WIDTH = 288;
 const ROW_HEIGHT = 36;
@@ -81,12 +83,19 @@ function selectCurrentBlock(view: EditorView) {
 
 const noServerState = () => null;
 
+/** The Markdown source editor and its lazily loaded CodeMirror helpers, for the source pane's menu. */
+export interface SlashSourceSurface {
+  view: SourceView | null;
+  api: CodeApi | null;
+}
+
 /**
- * The `/` menu of the rich pane. Plain handlers on purpose (#2334): a key or a click is acted on at
+ * The `/` menu of the rich pane, or of the source pane when `source` is given. Plain handlers on purpose (#2334): a key or a click is acted on at
  * once, from the plugin's current state, with no check of how the event or the menu's DOM looks.
  */
 export function SlashMenu({
   view,
+  source,
   session,
   controller,
   containerRef,
@@ -97,6 +106,8 @@ export function SlashMenu({
   onConnectAgent,
 }: {
   view: EditorView | null;
+  /** Makes this the source pane's menu; `view` is then ignored for edits. */
+  source?: SlashSourceSurface;
   session: CollabSession;
   controller: SlashMenuController;
   containerRef: React.RefObject<HTMLElement | null>;
@@ -117,9 +128,23 @@ export function SlashMenu({
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const canCreateComment = useSessionValue(session, (s) => s.canCreateComment);
 
-  const where: SlashWhere = useMemo(() => ({ inTable: !!(view && state && tableAt(view.state)), canComment: canCreateComment }), [view, state, canCreateComment]);
+  const menuId = useId();
+  const sourceView = source?.view ?? null;
+  const sourceApi = source?.api ?? null;
+  const ready = source ? !!sourceView && !!sourceApi : !!view;
+  const currentWhere = (): SlashWhere =>
+    source
+      ? { inTable: !!(sourceView && sourceApi?.slash.inTable(sourceView.state)), canComment: session.canCreateComment, source: true }
+      : { inTable: !!(view && tableAt(view.state)), canComment: session.canCreateComment };
+  const where: SlashWhere = useMemo(
+    () =>
+      source
+        ? { inTable: !!(sourceView && sourceApi && state && sourceApi.slash.inTable(sourceView.state)), canComment: canCreateComment, source: true }
+        : { inTable: !!(view && state && tableAt(view.state)), canComment: canCreateComment },
+    [source, sourceView, sourceApi, view, state, canCreateComment],
+  );
   const items = useMemo(() => (state ? filterSlashItems(state.query, SLASH_ITEMS, where) : []), [state, where]);
-  const open = !!state && canEdit && !!view;
+  const open = !!state && canEdit && ready;
   const index = Math.min(highlight, Math.max(0, items.length - 1));
 
   const moveHighlight = (next: number) => {
@@ -141,7 +166,40 @@ export function SlashMenu({
     });
   }, [controller]);
 
+  const pickSource = (item: SlashItem | undefined, cm: SourceView, api: CodeApi) => {
+    if (!item) return api.slashMenu.close(cm);
+    if (!session.contentReady || !(item.id === "comment" ? session.canCreateComment : session.canEdit)) return;
+    const arg = splitSlashQuery(controller.getState()?.query ?? "").arg;
+    if (item.source) {
+      api.slashMenu.apply(cm, item.source(api.slash, arg), session.undoManager);
+      cm.focus();
+      return;
+    }
+    const run = item.run;
+    if (!run) return;
+    api.slashMenu.apply(cm, null, session.undoManager);
+    run(
+      {
+        view: null,
+        where: currentWhere(),
+        openImage: onImage,
+        openCard: onCard,
+        openLink: onLink,
+        startComment: () => {
+          api.slash.selectLine(cm);
+          onComment();
+        },
+        connectAgent: onConnectAgent,
+      },
+      arg,
+    );
+  };
+
   const pick = (item: SlashItem | undefined) => {
+    if (source) {
+      if (sourceView && sourceApi) pickSource(item, sourceView, sourceApi);
+      return;
+    }
     if (!view) return;
     // "No matches" + Enter: the menu closes and the typed text stays.
     if (!item) return closeSlashMenu(view);
@@ -154,6 +212,7 @@ export function SlashMenu({
       return;
     }
     const run = item.run;
+    if (!run) return;
     const context = {
       view,
       where: { inTable: !!tableAt(view.state), canComment: session.canCreateComment },
@@ -175,8 +234,8 @@ export function SlashMenu({
    */
   const takeKey = (key: SlashKey): boolean => {
     const current = controller.getState();
-    if (!view || !current || !session.canEdit) return false;
-    const live = filterSlashItems(current.query, SLASH_ITEMS, { inTable: !!tableAt(view.state), canComment: session.canCreateComment });
+    if (!ready || !current || !session.canEdit) return false;
+    const live = filterSlashItems(current.query, SLASH_ITEMS, currentWhere());
     const last = Math.max(0, live.length - 1);
     const at = Math.min(highlightRef.current, last);
     if (key === "Enter" || key === "Tab") {
@@ -199,6 +258,30 @@ export function SlashMenu({
     takeKeyRef.current = takeKey;
   });
   useLayoutEffect(() => controller.setKeyHandler((key) => takeKeyRef.current(key)), [controller]);
+
+  // The editor keeps the focus, so it is the combobox that owns the list: screen readers follow the
+  // highlighted option through aria-activedescendant.
+  const editorDom = source ? (sourceView?.contentDOM ?? null) : (view?.dom ?? null);
+  const shown = open && !!pos;
+  const activeId = shown && items.length > 0 ? `${menuId}-option-${index}` : null;
+  useLayoutEffect(() => {
+    if (!editorDom) return;
+    if (!shown) {
+      editorDom.removeAttribute("aria-controls");
+      editorDom.removeAttribute("aria-activedescendant");
+      return;
+    }
+    editorDom.setAttribute("aria-controls", menuId);
+    if (activeId) editorDom.setAttribute("aria-activedescendant", activeId);
+    else editorDom.removeAttribute("aria-activedescendant");
+  }, [editorDom, shown, activeId, menuId]);
+  useEffect(
+    () => () => {
+      editorDom?.removeAttribute("aria-controls");
+      editorDom?.removeAttribute("aria-activedescendant");
+    },
+    [editorDom],
+  );
 
   // Keep the highlighted row visible while navigating with the keyboard.
   useEffect(() => {
@@ -235,9 +318,11 @@ export function SlashMenu({
       ref={listRef}
       className="touch-target scrollbar-thin absolute z-40 overflow-y-auto rounded-lg border border-line bg-surface py-1 shadow-xl animate-fade-in"
       style={{ left: pos.left, top: pos.top, width: pos.width, maxHeight: Math.min(MENU_MAX_HEIGHT, pos.maxHeight) }}
+      id={menuId}
       role="listbox"
       aria-label="Insert block"
       data-testid="slash-menu"
+      data-surface={source ? "source" : "rich"}
       // The editor keeps the focus and the caret while the pointer works in the menu; without this
       // the editor blurs on mousedown and the plugin closes the menu before the click arrives.
       onMouseDown={(event) => event.preventDefault()}
@@ -248,8 +333,8 @@ export function SlashMenu({
         </div>
       )}
       {groups.map((g) => (
-        <div key={g.group}>
-          <div className="px-3 pb-0.5 pt-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-3">{g.group}</div>
+        <div key={g.group} role="group" aria-label={g.group}>
+          <div aria-hidden="true" className="px-3 pb-0.5 pt-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-3">{g.group}</div>
           {g.items.map((item) => {
             const i = indexOf.get(item.id) ?? 0;
             const Icon = ICONS[item.icon] ?? Type;
@@ -258,8 +343,10 @@ export function SlashMenu({
               <button
                 key={item.id}
                 type="button"
+                id={`${menuId}-option-${i}`}
                 role="option"
                 aria-selected={active}
+                tabIndex={-1}
                 data-index={i}
                 data-testid={`slash-item-${item.id}`}
                 className={cn("flex w-full items-center gap-3 px-3 text-left text-sm text-ink-2", active && "bg-accent-soft text-ink")}

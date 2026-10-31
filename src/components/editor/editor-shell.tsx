@@ -2178,6 +2178,8 @@ export function EditorShell({
     };
   }, [previewPresentation]);
   const slashMenu = useSlashMenuController();
+  const sourceSlashMenu = useSlashMenuController();
+  const codeColumnRef = useRef<HTMLDivElement>(null);
   const isOwner = role === "owner";
   useEffect(() => {
     actions.setRichScroller(richScroller);
@@ -3412,7 +3414,7 @@ export function EditorShell({
               <>
                 {/* `layout` (not `shownLayout`): before hydration it is always "split", so the phone's first paint already
                     hides the code column and the rich column's `flex-1 basis-0` fills the width, as after hydration (#1470). */}
-                <div className={cn(CODE_COLUMN_BOX, showRich ? CODE_COLUMN_SPLIT : "flex-1", !showCode && "hidden", layout === "split" && "max-md:hidden")} data-testid="code-column">
+                <div ref={codeColumnRef} className={cn(CODE_COLUMN_BOX, showRich ? CODE_COLUMN_SPLIT : "flex-1", !showCode && "hidden", layout === "split" && "max-md:hidden")} data-testid="code-column">
                   {showLoading && showRichPlaceholder && (
                     <div className="absolute inset-0 z-10 flex items-center justify-center bg-surface text-sm text-ink-3" data-testid="doc-loading" aria-busy="true">
                       Loading…
@@ -3430,9 +3432,22 @@ export function EditorShell({
                         onNotice={onNotice}
                         onMarkdownFileDrop={onCodeFileDrop}
                         lineWrapping={lineWrapping}
+                        slashMenu={sourceSlashMenu.handlers}
                       />
                     )}
                   </div>
+                  <SlashMenu
+                    view={null}
+                    source={{ view: codeView, api: codeApi }}
+                    session={session}
+                    controller={sourceSlashMenu}
+                    containerRef={codeColumnRef}
+                    onImage={openImage}
+                    onCard={openCard}
+                    onLink={openLink}
+                    onComment={startComment}
+                    onConnectAgent={openConnectAgent}
+                  />
                 </div>
                 <div className={cn(RICH_COLUMN_BOX, showCode ? RICH_COLUMN_SPLIT : "flex-1", !showRich && "hidden")} data-testid="rich-column">
                   <div className={PANE_LABEL_ROW_BOX}>
