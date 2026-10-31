@@ -6,7 +6,13 @@
   Mutating release, not infrastructure setup. Requires an already authenticated Azure CLI.
   No write is resubmitted on failure. Stopping this command does not cancel cloud work.
 #>
-param([string]$ExpectedCommit = $env:RELEASE_SHA)
+param(
+  [string]$ExpectedCommit = $env:RELEASE_SHA,
+  # Enterprise is the release target; Professional is the pre-cutover stack, kept for rollback.
+  [ValidateSet('Enterprise', 'Professional')][string]$Target = 'Enterprise',
+  # Origin for the final public health check. Defaults to the target's own public origin.
+  [string]$PublicOrigin = ''
+)
 
 $ErrorActionPreference = 'Stop'
 # Cooperative outer phase watchdogs. Native calls and sleeps consume their
@@ -572,7 +578,37 @@ function Get-ReleasePublicHealth([string]$Origin, [int]$TimeoutSeconds) {
     ConvertTo-Json -Depth 5 -Compress
 }
 
-function Invoke-MarkdocVmRelease([string]$Commit) {
+function Get-MarkdocReleaseTarget([string]$Name, [string]$PublicOrigin = '') {
+  $targets = @{
+    Enterprise = @{
+      Subscription = 'f40011a4-4708-4843-9b04-e1eac4ad0ebf'
+      Acr = 'markdocacr7nkilqfckcukm'
+      VmOrigin = 'https://markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com'
+      # Until markdoc.app points at this VM, its Azure name proxies /api/health to the app.
+      Origin = 'https://markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com'
+    }
+    Professional = @{
+      Subscription = '332d0c98-694c-48a0-91f3-465de6ac30a5'
+      Acr = 'markdocacrmnd542unepl56'
+      VmOrigin = 'https://markdoc-burkeholland.eastus2.cloudapp.azure.com'
+      # The VM hostname 308-redirects here, so public health must hit the canonical origin directly.
+      Origin = 'https://markdoc.app'
+    }
+  }
+  if (-not $targets.ContainsKey($Name)) { Stop-VmRelease "Unknown release target '$Name'." 2 }
+  $selected = $targets[$Name]
+  if ($PublicOrigin) {
+    if ($PublicOrigin -notmatch '^https://[a-z0-9.-]+$') { Stop-VmRelease 'PublicOrigin must be an https origin without a path.' 2 }
+    $selected.Origin = $PublicOrigin
+  }
+  $selected.Name = $Name
+  $selected.Tenant = 'f1fde69f-c8d3-4b94-adeb-02d045b37f6a'
+  $selected.Group = 'markdoc-rg'
+  $selected.Registry = "$($selected.Acr).azurecr.io"
+  return $selected
+}
+
+function Invoke-MarkdocVmRelease([string]$Commit, [string]$TargetName = 'Enterprise', [string]$OriginOverride = '') {
   $releaseClock = [Diagnostics.Stopwatch]::StartNew()
   $preSubmissionDeadlineMessage = 'Pre-submission deadline exceeded; no build was submitted.'
   $buildDeadlineMessage = 'Build phase deadline exceeded; remote build may continue. No VM command was sent.'
@@ -580,16 +616,16 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
   $vmDeadlineMessage = 'VM/result verification deadline exceeded; guest work may continue and public health was not accepted.'
   $healthDeadlineMessage = 'Public health deadline exceeded; guest deployment may be active.'
   $sourceRoot = (Get-Item -LiteralPath (Join-Path $PSScriptRoot '..')).FullName
-  $subscription = '332d0c98-694c-48a0-91f3-465de6ac30a5'
-  $tenant = 'f1fde69f-c8d3-4b94-adeb-02d045b37f6a'
-  $group = 'markdoc-rg'
-  $acr = 'markdocacrmnd542unepl56'
-  $registry = 'markdocacrmnd542unepl56.azurecr.io'
+  $target = Get-MarkdocReleaseTarget $TargetName $OriginOverride
+  $subscription = $target.Subscription
+  $tenant = $target.Tenant
+  $group = $target.Group
+  $acr = $target.Acr
+  $registry = $target.Registry
   $vm = 'markdoc-pg'
   $publicIp = 'markdoc-web-ip'
-  $vmOrigin = 'https://markdoc-burkeholland.eastus2.cloudapp.azure.com'
-  # The VM hostname now 308-redirects here, so public health must hit the canonical origin directly.
-  $origin = 'https://markdoc.app'
+  $vmOrigin = $target.VmOrigin
+  $origin = $target.Origin
   $resourceRoot = "/subscriptions/$subscription/resourceGroups/$group/providers"
   $vmId = "$resourceRoot/Microsoft.Compute/virtualMachines/$vm"
   $nativeScope = @('--subscription', $subscription, '--resource-group', $group)
@@ -846,7 +882,7 @@ function Invoke-MarkdocVmRelease([string]$Commit) {
 }
 
 try {
-  Invoke-MarkdocVmRelease $ExpectedCommit
+  Invoke-MarkdocVmRelease $ExpectedCommit $Target $PublicOrigin
 } catch [InvalidOperationException] {
   if ($_.Exception.Data.Contains('ReleaseExitCode')) { exit $_.Exception.Data['ReleaseExitCode'] }
   throw

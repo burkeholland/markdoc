@@ -92,7 +92,7 @@ async function main() {
     console.log(JSON.stringify({
       runId: mode === 'wrong-identity' ? 'other' : 'build123', status,
       runErrorMessage: status === 'Failed' ? 'npm error code ECONNRESET password=FAKE_BUILD_SECRET_2254 APP_SECRET=FAKE_APP_SECRET_2254 NPM_TOKEN=FAKE_NPM_TOKEN_2254 "private_key":"FAKE_JSON_SECRET_2254" https://registry.example.test/?token=FAKE_URL_SECRET_2254' : null,
-      outputImages: [{ registry: 'markdocacrmnd542unepl56.azurecr.io', repository: 'markdoc', tag: env.MARKDOC_POLL_SHA,
+      outputImages: [{ registry: 'markdocacr7nkilqfckcukm.azurecr.io', repository: 'markdoc', tag: env.MARKDOC_POLL_SHA,
         digest: mode === 'wrong-digest-after-miss' ? 'sha256:' + 'b'.repeat(64) : env.MARKDOC_POLL_DIGEST }]
     }));
   }
@@ -244,6 +244,21 @@ foreach ($statement in $ast.EndBlock.Statements) {
   }
 }
 
+$enterprise = Get-MarkdocReleaseTarget 'Enterprise'
+Assert-Equal 'f40011a4-4708-4843-9b04-e1eac4ad0ebf' $enterprise.Subscription 'Enterprise target must pin its subscription.'
+Assert-Equal 'markdocacr7nkilqfckcukm.azurecr.io' $enterprise.Registry 'Enterprise target must use its own registry.'
+Assert-Equal 'https://markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com' $enterprise.Origin 'Enterprise health defaults to its Azure name until cutover.'
+$professional = Get-MarkdocReleaseTarget 'Professional'
+Assert-Equal '332d0c98-694c-48a0-91f3-465de6ac30a5' $professional.Subscription 'Professional target must keep the old subscription.'
+Assert-Equal 'markdocacrmnd542unepl56.azurecr.io' $professional.Registry 'Professional target must keep the old registry.'
+Assert-Equal 'https://markdoc.app' $professional.Origin 'Professional health stays on the canonical origin.'
+Assert-Equal 'https://markdoc.app' (Get-MarkdocReleaseTarget 'Enterprise' 'https://markdoc.app').Origin 'PublicOrigin must override the health origin.'
+foreach ($bad in @(@('Other', ''), @('Enterprise', 'http://markdoc.app'), @('Enterprise', 'https://markdoc.app/x'))) {
+  try { [void](Get-MarkdocReleaseTarget $bad[0] $bad[1]); throw "Expected rejection of $($bad -join ' ')." } catch [InvalidOperationException] {
+    Assert-Equal 2 $_.Exception.Data['ReleaseExitCode'] 'Invalid target input must exit 2 before any Azure call.'
+  }
+}
+
 # Exercise the real native boundary with harmless local children, never Azure.
 $native = ${function:Invoke-ReleaseNative}
 $pollNativeSource = $native.ToString()
@@ -345,9 +360,9 @@ $script:PostBuildVerificationDeadlineSeconds = 180
 $script:VmPhaseDeadlineSeconds = 2400
 $script:PublicHealthDeadlineSeconds = 30
 $script:CleanupChildTimeoutSeconds = 30
-$script:subscription = '332d0c98-694c-48a0-91f3-465de6ac30a5'
+$script:subscription = 'f40011a4-4708-4843-9b04-e1eac4ad0ebf'
 $script:tenant = 'f1fde69f-c8d3-4b94-adeb-02d045b37f6a'
-$script:registry = 'markdocacrmnd542unepl56.azurecr.io'
+$script:registry = 'markdocacr7nkilqfckcukm.azurecr.io'
 $script:resourceRoot = "/subscriptions/$subscription/resourceGroups/markdoc-rg/providers"
 $script:calls = [Collections.Generic.List[object]]::new()
 $script:messages = [Collections.Generic.List[string]]::new()
@@ -535,7 +550,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
     Assert-True ($Arguments -contains '--resource-group' -and $Arguments -contains 'markdoc-rg') 'Every resource operation must pin the hyphenated group.'
   }
   if ($commandKey.StartsWith('acr show ')) {
-    $info = @{ id = "$script:resourceRoot/Microsoft.ContainerRegistry/registries/markdocacrmnd542unepl56"; loginServer = $script:registry }
+    $info = @{ id = "$script:resourceRoot/Microsoft.ContainerRegistry/registries/markdocacr7nkilqfckcukm"; loginServer = $script:registry }
     if ($script:scenario -eq 'wrong-registry') { $info.loginServer = 'different.azurecr.io' }
     return ConvertTo-Json -InputObject $info -Compress
   }
@@ -547,7 +562,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
   if ($commandKey -ceq 'network public-ip show') {
     $info = @{
       id = "$script:resourceRoot/Microsoft.Network/publicIPAddresses/markdoc-web-ip"
-      fqdn = 'markdoc-burkeholland.eastus2.cloudapp.azure.com'
+      fqdn = 'markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com'
       configuration = "$script:resourceRoot/Microsoft.Network/networkInterfaces/markdoc-pg-nic/ipConfigurations/primary"
     }
     if ($script:scenario -eq 'old-origin') { $info.fqdn = 'retired.azurecontainerapps.io' }
@@ -697,7 +712,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
 
 function Get-ReleasePublicHealth([string]$Origin, [int]$TimeoutSeconds) {
   $script:publicCount++
-  Assert-Equal 'https://markdoc.app' $Origin 'Public health must use the exact stable origin.'
+  Assert-Equal 'https://markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com' $Origin 'Public health must use the exact stable origin.'
   Assert-True ($TimeoutSeconds -gt 0 -and $TimeoutSeconds -le 20) 'Public health must have a bounded timeout.'
   Assert-True (($script:messages -join "`n") -match 'guest ready; waiting') 'Public health must follow guest readiness.'
   Assert-True (($script:messages -join "`n") -notmatch 'Release complete:') 'Completion must not precede public health.'
@@ -1004,7 +1019,7 @@ try {
       }
       Assert-True ($log.Contains('ACR image build failed; run ID build123; status Failed; no VM command was sent.')) "Failed ACR run identity and status were not surfaced for $case. Log: $log"
       Assert-True ($log -match 'ACR error: npm error code ECONNRESET password=\[redacted\] APP_SECRET=\[redacted\] NPM_TOKEN=\[redacted\] private_key=\[redacted\] \[URL\]') "Safe ACR error message was not surfaced for $case. Log: $log"
-      Assert-True ($log.Contains('az acr task logs --registry markdocacrmnd542unepl56 --run-id build123 --resource-group markdoc-rg --subscription 332d0c98-694c-48a0-91f3-465de6ac30a5')) "Read-only ACR log command was not surfaced for $case. Log: $log"
+      Assert-True ($log.Contains('az acr task logs --registry markdocacr7nkilqfckcukm --run-id build123 --resource-group markdoc-rg --subscription f40011a4-4708-4843-9b04-e1eac4ad0ebf')) "Read-only ACR log command was not surfaced for $case. Log: $log"
       Assert-Equal 0 $invocations.Count "Failed ACR run must not reach the VM for $case."
       if ($case -eq 'build-failed-direct') {
         Assert-Equal 0 @($script:calls | Where-Object { ($_.Arguments | Select-Object -First 3) -join ' ' -ceq 'acr task list-runs' }).Count 'A run ID from the build submission must skip reconciliation.'
