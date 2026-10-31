@@ -69,7 +69,16 @@ export interface ListedAdvisory extends AcceptedAdvisory {
 // in acceptedAudit below and in docs/vm-hosting.md. This list is code: a change goes through a pull request, and no
 // environment variable, flag or option can add to it. Delete an entry as soon as the lock has a patched version or
 // no longer has the package.
-export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [];
+export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [
+  // Added 2026-10-31. Remove once minimatch 11.0.1 is at least 7 days old (after 2026-11-03) and the override can land.
+  ...["3.1.5", "10.2.6"].map((version) => ({
+    advisory: "GHSA-g3hv-75wg-m249",
+    package: "minimatch",
+    version,
+    expires: "2026-11-14",
+    reason: "Dev-only (eslint and typescript-eslint); every patched minimatch is newer than the 7-day feed rule.",
+  })),
+];
 
 // What tests may set about the accepted-advisory rule: the clock that decides expiry and the list itself. These are
 // function parameters only. The command line and the release never pass them, so they use the real clock and
@@ -698,26 +707,35 @@ function acceptedAudit(
   for (const entry of audit.entries) {
     let allProduction = entry.advisories.length > 0;
     for (const advisory of entry.advisories) {
-      const listed = advisories.find((item) =>
+      // A package locked at more than one version needs one entry per version, all for the same advisory.
+      const listedAll = advisories.filter((item) =>
         advisory.url === ADVISORY_URL_PREFIX + item.advisory
         && advisory.name === item.package
         && entry.name === item.package);
+      const listedFor = (node: LockedPackage) => listedAll.find((item) => item.version === node.version);
       if (
-        !listed
+        listedAll.length === 0
         || advisory.severity === "critical"
-        || !ACCEPTED_ADVISORY_ID_PATTERN.test(listed.advisory)
-        || !ACCEPTED_PACKAGE_PATTERN.test(listed.package)
-        || !validPackageVersion(listed.version)
+        || listedAll.some((listed) => !ACCEPTED_ADVISORY_ID_PATTERN.test(listed.advisory)
+          || !ACCEPTED_PACKAGE_PATTERN.test(listed.package)
+          || !validPackageVersion(listed.version)
+          // Written so that an expiry date or a clock that is not a number is rejected too.
+          || !(now < expiryEndMs(listed.expires)))
         // Read from the lock itself, so a node of the package that npm left out of its report is checked too.
-        || !lock.packages.every((node) => !isLockedPackage(node, listed.package)
-          || ((listed.production === true || isOutsideProduction(node)) && node.version === listed.version))
-        // Written so that an expiry date or a clock that is not a number is rejected too.
-        || !(now < expiryEndMs(listed.expires))
+        || !lock.packages.every((node) => {
+          if (!isLockedPackage(node, entry.name)) return true;
+          const listed = listedFor(node);
+          return listed !== undefined && (listed.production === true || isOutsideProduction(node));
+        })
       ) {
         return null;
       }
-      if (listed.production !== true) allProduction = false;
-      matched.add(listed);
+      for (const node of lock.packages) {
+        const listed = isLockedPackage(node, entry.name) ? listedFor(node) : undefined;
+        if (!listed) continue;
+        if (listed.production !== true) allProduction = false;
+        matched.add(listed);
+      }
     }
     if (allProduction) productionListed.add(entry.name);
   }
@@ -741,6 +759,36 @@ function acceptedAudit(
       grew = true;
     }
   }
+  // What is left is in, or depends on, a cycle (eslint and @eslint-community/eslint-utils name each other). Such an
+  // entry stands only if it has no advisory of its own, every node is outside production, it names only reported
+  // packages, and its dependencies lead to an entry that stood above.
+  const reported = new Map(audit.entries.map((entry) => [entry.name, entry]));
+  const leftOver = audit.entries.filter((entry) => !standing.has(entry.name));
+  const reachesStanding = (start: string): boolean => {
+    const seen = new Set<string>();
+    const queue = [start];
+    while (queue.length > 0) {
+      const name = queue.pop() as string;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      for (const next of reported.get(name)?.dependsOn ?? []) {
+        if (standing.has(next)) return true;
+        queue.push(next);
+      }
+    }
+    return false;
+  };
+  for (const entry of leftOver) {
+    if (
+      entry.advisories.length > 0
+      || !entry.nodes.every(isOutsideProduction)
+      || !entry.dependsOn.every((name) => reported.has(name) && name !== entry.name)
+      || !reachesStanding(entry.name)
+    ) {
+      return null;
+    }
+  }
+  for (const entry of leftOver) standing.add(entry.name);
   if (standing.size !== audit.entries.length) return null;
 
   const packages = audit.entries
