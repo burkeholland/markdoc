@@ -4,14 +4,14 @@ import { WebSocket } from "ws";
 /**
  * Per-connection flood protection for the collaboration socket (issue #2285).
  *
- * - Token buckets on message count and on bytes. A person typing sends a few messages a second; a large
- *   paste or the first sync of a big document is one or a few large messages, which the byte burst covers
- *   (it is larger than `maxPayload`). A connection that drains a bucket is closed with 4429.
+ * - A per-message size cap plus token buckets on message count and bytes. A person typing sends a few
+ *   messages a second; a large paste or first sync fits inside the byte burst. Rate abuse closes with 4429.
  * - Backpressure: a connection whose outgoing buffer passes `maxBufferedBytes` (it sends but does not
  *   read) is closed with 4430 instead of buffered without end.
  * - Incoming messages are handled in time slices so one connection's backlog yields to the event loop.
  */
 export interface FloodLimits {
+  maxMessageBytes: number;
   messagesPerSecond: number;
   messageBurst: number;
   bytesPerSecond: number;
@@ -21,6 +21,8 @@ export interface FloodLimits {
 }
 
 export const DEFAULT_FLOOD_LIMITS: FloodLimits = {
+  // Leaves headroom for Yjs framing around the tested 8 MiB paste.
+  maxMessageBytes: 16 * 1024 * 1024,
   messagesPerSecond: 300,
   messageBurst: 1_500,
   bytesPerSecond: 4 * 1024 * 1024,
@@ -29,8 +31,10 @@ export const DEFAULT_FLOOD_LIMITS: FloodLimits = {
   sliceMs: 10,
 };
 
+export const MESSAGE_TOO_LARGE = { code: 1009, reason: "Message too big" } as const;
 export const RATE_LIMITED = { code: 4429, reason: "Rate limit exceeded" } as const;
 export const SEND_BUFFER_FULL = { code: 4430, reason: "Send buffer full" } as const;
+const ABUSE_CLOSE_GRACE_MS = 500;
 
 class TokenBucket {
   private tokens: number;
@@ -59,7 +63,7 @@ export interface FloodGuard {
 }
 
 export function createFloodGuard(
-  socket: Pick<WebSocket, "readyState" | "bufferedAmount" | "close" | "terminate">,
+  socket: Pick<WebSocket, "readyState" | "bufferedAmount" | "close" | "send" | "terminate">,
   handle: (bytes: Uint8Array) => void,
   limits: Partial<FloodLimits> = {},
   now: () => number = () => performance.now(),
@@ -73,37 +77,58 @@ export function createFloodGuard(
   let closed = false;
   let spentThisTick = 0;
   let tickReset: ReturnType<typeof setImmediate> | undefined;
+  let closeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const terminate = () => {
+    closeTimer = undefined;
+    if (socket.readyState === WebSocket.CLOSED) return;
+    try {
+      socket.terminate();
+    } catch {
+      // already gone
+    }
+  };
+  const isSocketClosed = () => socket.readyState === WebSocket.CLOSED;
 
   const shut = (why: { code: number; reason: string }) => {
     if (closed) return;
     closed = true;
     dispose();
     try {
-      if (socket.readyState === WebSocket.OPEN) socket.close(why.code, why.reason);
-      else socket.terminate();
-    } catch {
-      try {
-        socket.terminate();
-      } catch {
-        // already gone
+      if (socket.readyState !== WebSocket.OPEN) {
+        terminate();
+        return;
       }
+      socket.close(why.code, why.reason);
+      if (!isSocketClosed()) {
+        closeTimer = setTimeout(terminate, ABUSE_CLOSE_GRACE_MS);
+        closeTimer.unref?.();
+      }
+    } catch {
+      terminate();
     }
   };
 
   const overBuffered = () => {
     if (socket.bufferedAmount > l.maxBufferedBytes) {
-      // A close frame would queue behind the full buffer; the peer is not reading, so drop it.
-      closed = true;
-      dispose();
-      try {
-        socket.terminate();
-      } catch {
-        // already gone
-      }
+      shut(SEND_BUFFER_FULL);
       return true;
     }
     return false;
   };
+  const checkBackpressure = () => {
+    if (closed) return false;
+    return !overBuffered();
+  };
+
+  // Hocuspocus sends both async replies and broadcasts through the socket, not the receive callback.
+  socket.send = new Proxy(socket.send, {
+    apply(send, thisArg, args) {
+      const result = Reflect.apply(send, thisArg, args);
+      checkBackpressure();
+      return result;
+    },
+  });
 
   const drain = () => {
     scheduled = undefined;
@@ -126,7 +151,8 @@ export function createFloodGuard(
   const dispose = () => {
     if (scheduled) clearImmediate(scheduled);
     if (tickReset) clearImmediate(tickReset);
-    scheduled = tickReset = undefined;
+    if (closeTimer) clearTimeout(closeTimer);
+    scheduled = tickReset = closeTimer = undefined;
     queue = [];
     head = 0;
   };
@@ -134,11 +160,15 @@ export function createFloodGuard(
   return {
     receive(data) {
       if (closed) return false;
+      if (overBuffered()) return false;
+      if (data.byteLength > l.maxMessageBytes) {
+        shut(MESSAGE_TOO_LARGE);
+        return false;
+      }
       if (!messages.take(1) || !bytes.take(data.byteLength)) {
         shut(RATE_LIMITED);
         return false;
       }
-      if (overBuffered()) return false;
       if (!scheduled && spentThisTick < l.sliceMs) {
         const start = now();
         handle(data);
