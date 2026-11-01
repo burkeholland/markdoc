@@ -1259,7 +1259,9 @@ logical backups (`markdoc-logical-backup.timer`, 03:30 UTC), two-minute backup
 monitoring, and a weekly isolated restore check
 (`markdoc-restore-check.timer`, Sunday 05:00 UTC, two-hour service timeout).
 Those schedules are configuration, not evidence that the timers are currently
-installed, enabled or succeeding.
+installed, enabled or succeeding. The pgBackRest repository lives at
+`repo1-path=/markdoc-ent` in the backup container. The `/markdoc` prefix there
+holds a stale stanza from the pre-Enterprise cluster and must not be reused.
 
 The September 6 lead readback supplied these **file-stat observations only**:
 
