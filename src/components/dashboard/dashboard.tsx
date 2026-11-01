@@ -47,6 +47,7 @@ type SearchDoc = SearchResultDto;
 
 const SEARCH_DEBOUNCE_MS = 250;
 const MIN_QUERY_LENGTH = 2;
+const DASHBOARD_SEARCH_STORAGE_KEY = "markdoc:dashboardSearch";
 const STARRED_STRIP_MAX = 6;
 const DASHBOARD_GROUPS = ["Recent", "Create", "Navigation", "Account"] as const;
 const SEARCH_SHORTCUT_BLOCKED = 'input, textarea, select, dialog, [role="dialog"], [data-testid="command-palette"], [contenteditable]:not([contenteditable="false"])';
@@ -65,6 +66,29 @@ function readSortCookie(): string | null {
 function writeSortCookie(sort: DashboardSort) {
   const secure = window.location.protocol === "https:" ? "; Secure" : "";
   document.cookie = `${SORT_COOKIE}=${sort}; Path=/; Max-Age=${SORT_COOKIE_MAX_AGE}; SameSite=Lax${secure}`;
+}
+
+function dashboardSearchStorageKey(userId: string): string {
+  return `${DASHBOARD_SEARCH_STORAGE_KEY}:${userId}`;
+}
+
+function readDashboardSearch(userId: string): string {
+  try {
+    return window.sessionStorage.getItem(dashboardSearchStorageKey(userId)) ?? "";
+  } catch (error) {
+    console.error("Could not restore dashboard search", error);
+    return "";
+  }
+}
+
+function writeDashboardSearch(userId: string, query: string) {
+  try {
+    const key = dashboardSearchStorageKey(userId);
+    if (query) window.sessionStorage.setItem(key, query);
+    else window.sessionStorage.removeItem(key);
+  } catch (error) {
+    console.error("Could not persist dashboard search", error);
+  }
 }
 
 /** Most recently opened first; never-opened documents follow, most recently edited first. */
@@ -375,6 +399,12 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     void signOutSafely();
   }, []);
   const [query, setQuery] = useState("");
+  const queryRestored = useRef(false);
+  useLayoutEffect(() => {
+    if (queryRestored.current) return;
+    queryRestored.current = true;
+    setQuery(readDashboardSearch(user.id));
+  }, [user.id]);
   const searchRef = useRef<HTMLInputElement>(null);
   const searchResultListRef = useRef<HTMLUListElement>(null);
   const documentsHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -1076,6 +1106,18 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     const q = trimmed.toLowerCase();
     return documents.filter((d) => matchesFilter(d) && (!q || d.title.toLowerCase().includes(q))).sort(compareDocs(sort));
   }, [documents, serverResults, trimmed, filter, sort, user.id, starStates, folderSelection, deletedIds]);
+  const searchAnnouncement =
+    filter === "trash" || !trimmed
+      ? ""
+      : pending
+        ? "Searching documents…"
+        : currentSearchError
+          ? filtered.length === 0
+            ? `No title matches for "${trimmed}".`
+            : `${filtered.length} title ${filtered.length === 1 ? "match" : "matches"} for "${trimmed}".`
+          : filtered.length === 0
+            ? `No results for "${trimmed}".`
+            : `${filtered.length} result${filtered.length === 1 ? "" : "s"} for "${trimmed}".`;
 
   const starred = useMemo(() => documents.filter((d) => d.starred).sort(compareDocs(sort)), [documents, sort]);
   const showStrip = filter === "all" && !trimmed && starred.length > 0;
@@ -1248,11 +1290,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       }),
     [create, listDocs, router, pickFile, changeFilter],
   );
+  const updateSearch = (next: string) => {
+    setQuery(next);
+    writeDashboardSearch(user.id, next);
+  };
   const changeSearch = (event: ReactChangeEvent<HTMLInputElement>) => {
-    setQuery(event.target.value);
+    updateSearch(event.target.value);
   };
   const clearSearch = () => {
-    setQuery("");
+    updateSearch("");
     searchRef.current?.focus();
   };
   // Escape clears the box, then leaves it. ArrowDown/ArrowUp move from the box to the first/last search result.
@@ -1260,7 +1306,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     if (event.repeat || event.nativeEvent.isComposing) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      if (query) setQuery("");
+      if (query) updateSearch("");
       else event.currentTarget.blur();
       return;
     }
@@ -1383,6 +1429,9 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       <ImportDialog open={fileImport.open} onOpenChange={fileImport.setOpen} items={fileImport.items} ignored={fileImport.ignored} />
       <main className="min-h-screen bg-surface-2">
         <h1 className="sr-only">Documents</h1>
+        <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-testid="search-status">
+          {searchAnnouncement}
+        </div>
         <header className="app-header sticky top-0 z-10 border-b border-line bg-surface/90 backdrop-blur">
           <div className="safe-x mx-auto flex h-16 max-w-6xl items-center gap-3 sm:gap-4 sm:[--safe-pad:1.5rem]">
             <Link href="/" className="flex items-center gap-2.5" aria-label="Markdoc — all documents">

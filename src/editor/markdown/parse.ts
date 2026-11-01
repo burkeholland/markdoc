@@ -1,9 +1,6 @@
 import { Mark, type Node as PMNode } from "prosemirror-model";
-import { fromMarkdown } from "mdast-util-from-markdown";
-import { gfm } from "micromark-extension-gfm";
-import { gfmFromMarkdown } from "mdast-util-gfm";
-import { frontmatter } from "micromark-extension-frontmatter";
-import { frontmatterFromMarkdown } from "mdast-util-frontmatter";
+import { parseMdast } from "./mdast";
+export { hasFrontmatter, parseMdast } from "./mdast";
 import type * as Md from "mdast";
 import { schema } from "./schema";
 import { buildSourceMap, type BlockRange, type Segment, type SourceMap } from "./sourcemap";
@@ -566,29 +563,6 @@ class Converter {
     ensurePositions(parent.children, bounds.from, bounds.to);
     for (const child of parent.children) this.inline(child, marks, b);
   }
-}
-
-/** Opening `---` on the first line and a closing `---` line somewhere after it. */
-const CLOSED_FRONTMATTER = /^---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---[ \t]*(?:\r?\n|$)/;
-
-/**
- * True when the text starts with complete YAML front matter. The frontmatter
- * extension is only enabled in that case: when a document starts with a `---`
- * that is never closed (a thematic break), the extension's failed attempt
- * breaks list parsing for the rest of the document.
- */
-export function hasFrontmatter(src: string): boolean {
-  return src.startsWith("---") && CLOSED_FRONTMATTER.test(src);
-}
-
-export function parseMdast(src: string): Md.Root {
-  if (hasFrontmatter(src)) {
-    return fromMarkdown(src, {
-      extensions: [gfm(), frontmatter(["yaml"])],
-      mdastExtensions: [gfmFromMarkdown(), frontmatterFromMarkdown(["yaml"])],
-    });
-  }
-  return fromMarkdown(src, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] });
 }
 
 /**

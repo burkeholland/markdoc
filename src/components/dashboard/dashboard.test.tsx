@@ -874,6 +874,7 @@ function shortcutEvent(init: KeyboardEventInit) {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  window.sessionStorage.clear();
   Object.defineProperty(Element.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   searchDocuments.mockReset();
   searchDocuments.mockImplementation(async (query) => ({ query, documents: [] }));
@@ -2015,12 +2016,63 @@ describe("dashboard search controls", () => {
     expect(search).toHaveValue("zzzz-no-match");
     expect(screen.getByTestId("empty-state")).toHaveTextContent('No matches for "zzzz-no-match"');
     expect(screen.queryByTestId("document-list")).toBeNull();
+    expect(screen.getByTestId("search-status")).toHaveTextContent('No results for "zzzz-no-match".');
 
     await dispatchSearchAction(() => {
       fireEvent.change(search, { target: { value: "" } });
     });
     expect(within(screen.getByTestId("document-list")).getAllByRole("link")).toHaveLength(DOCUMENTS.length);
   });
+
+  it("announces result changes without moving focus from the search field", async () => {
+    searchDocuments.mockResolvedValueOnce({
+      query: "alpha",
+      documents: [result("alpha-title", "Alpha planning", "Plan for launch")],
+    });
+    renderDashboard();
+    const search = screen.getByRole("textbox", { name: "Search documents" });
+    search.focus();
+
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "alpha" } });
+    });
+    await settleSearch();
+    const status = screen.getByTestId("search-status");
+    expect(status).toHaveAttribute("role", "status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveTextContent('1 result for "alpha".');
+    expect(search).toHaveFocus();
+
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "no-match" } });
+    });
+    await settleSearch();
+    expect(screen.getByTestId("search-status")).toHaveTextContent('No results for "no-match".');
+    expect(search).toHaveFocus();
+  });
+
+  it("restores the query and matching results after returning to the dashboard", async () => {
+    searchDocuments.mockImplementation(async (query) => ({
+      query,
+      documents: query === "notes" ? [result("notes", "Meeting notes", "Revisit mobile layout")] : [],
+    }));
+    const firstDashboard = renderDashboard();
+    const search = screen.getByRole("textbox", { name: "Search documents" });
+
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "notes" } });
+    });
+    expect(window.sessionStorage.length).toBe(1);
+
+    firstDashboard.unmount();
+    renderDashboard();
+    expect(screen.getByRole("textbox", { name: "Search documents" })).toHaveValue("notes");
+
+    await settleSearch();
+    expect(searchDocuments).toHaveBeenCalledTimes(1);
+    expect(within(screen.getByTestId("document-list")).getByRole("link", { name: /Meeting notes/ })).toBeInTheDocument();
+  });
+
   it("filters on typing and runs the two-step Escape in Strict Mode", async () => {
     const host = document.createElement("div");
     document.body.append(host);

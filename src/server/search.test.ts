@@ -104,7 +104,25 @@ describe("searchDocumentsForUser", () => {
 
 describe("contentSnippet", () => {
   it("returns the whole text without ellipses when it is short", () => {
-    expect(contentSnippet("# Hi\n\nA  short\nnote about cats.", "cats")).toBe("# Hi A short note about cats.");
+    expect(contentSnippet("# Hi\n\nA  short\nnote about cats.", "cats")).toBe("Hi A short note about cats.");
+  });
+
+  it("returns readable snippets without Markdown block or inline syntax", () => {
+    const markdown = [
+      "# Meeting notes",
+      "",
+      "## Decisions",
+      "",
+      "- Revisit **mobile** layout with [the design team](https://example.test).",
+      "",
+      "```ts",
+      "const plan = ready;",
+      "```",
+    ].join("\n");
+
+    expect(contentSnippet(markdown, "revisit mobile")).toBe(
+      "Meeting notes Decisions Revisit mobile layout with the design team. const plan = ready;",
+    );
   });
 
   it("returns null when there is no match", () => {

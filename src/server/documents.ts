@@ -5,6 +5,7 @@ import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema
 import { encodeSeedState } from "@/server/collab/seed";
 import { boundTitle } from "@/server/document-title";
 import { excerptOf, excerptOfPrefix } from "@/editor/stats";
+import { plainTextFromMarkdown } from "@/editor/markdown/mdast";
 
 export { DOCUMENT_TITLE_MAX, boundTitle } from "@/server/document-title";
 export type { Tx } from "@/server/db";
@@ -371,9 +372,9 @@ export interface SearchResult extends DocumentSummary {
 const SNIPPET_BEFORE = 50;
 const SNIPPET_LENGTH = 120;
 
-/** ~120 characters of whitespace-collapsed content around the first case-insensitive match of `needle`, or null. */
+/** ~120 characters of plain text around the first case-insensitive match of `needle`, or null. */
 export function contentSnippet(content: string, needle: string): string | null {
-  const flat = content.replace(/\s+/g, " ").trim();
+  const flat = plainTextFromMarkdown(content);
   const idx = flat.search(new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
   if (idx < 0) return null;
   let start = Math.max(0, idx - SNIPPET_BEFORE);
