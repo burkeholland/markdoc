@@ -48,7 +48,7 @@ pg1-path=${PG_DATA}
 
 [global]
 repo1-type=azure
-repo1-path=/markdoc
+repo1-path=/markdoc-ent
 repo1-azure-account=${STORAGE_ACCOUNT}
 repo1-azure-container=${STORAGE_CONTAINER}
 repo1-azure-key-type=auto
