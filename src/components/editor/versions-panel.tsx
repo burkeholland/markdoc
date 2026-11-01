@@ -474,14 +474,19 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
           </div>
         )}
         {error && <div className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-danger wrap-anywhere">{error}</div>}
+        {versions?.length && (
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {compareHint ?? ""}
+          </span>
+        )}
         {versions?.length && compare.length === 0 && (
           <div id="compare-instruction" className="mb-3 rounded-lg bg-accent-soft px-3 py-2 text-xs text-ink-2" data-testid="compare-instruction">
-            Select two versions below to compare their changes.
+            <span className="font-medium">Compare versions:</span> select any two below.
           </div>
         )}
         {compareHint && (
-          <div id="compare-hint" className="mb-3 flex items-center justify-between rounded-lg bg-accent-soft px-3 py-1.5 text-xs text-ink-2" data-testid="compare-hint">
-            <span>{compareHint}</span>
+          <div className="mb-3 flex items-center justify-between rounded-lg bg-accent-soft px-3 py-1.5 text-xs text-ink-2" data-testid="compare-hint">
+            <span id="compare-hint">{compareHint}</span>
             <button
               type="button"
               className="text-accent hover:underline"
@@ -520,18 +525,16 @@ function VersionsPanelForDocument({ session, onClose, onPreview, refreshKey }: V
                     >
                       <div className="flex items-start gap-2">
                         <label
-                          className="-mx-[5px] flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center"
-                          title="Select two versions to compare"
+                          className="-mx-1 -mt-1 flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center"
                           data-testid="version-compare-target"
                         >
                           <input
                             type="checkbox"
-                            className="h-3.5 w-3.5 shrink-0 cursor-pointer accent-accent"
+                            className="h-4 w-4 shrink-0 cursor-pointer accent-accent"
                             checked={compare.includes(row.id)}
                             onChange={() => toggleCompare(row)}
                             aria-label={`Compare v${row.number}`}
                             aria-describedby={compareHint ? "compare-hint" : "compare-instruction"}
-                            title="Select two versions to compare"
                             data-testid="version-compare"
                           />
                         </label>
