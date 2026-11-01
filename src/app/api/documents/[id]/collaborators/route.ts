@@ -5,6 +5,7 @@ import { activityActor, recordActivity } from "@/server/activity";
 import { notifyShare } from "@/server/notifications";
 import { listMentionableAgents } from "@/server/agents";
 import { changeCollaboratorAccess } from "@/server/collab/authorization";
+import { getFolderCollaboratorRole, getFolderForOwner } from "@/server/folders";
 import { warnTail } from "@/server/warnings";
 import { GITHUB_LOGIN_MAX_LENGTH, GITHUB_LOGIN_RE } from "@/lib/github-login";
 
@@ -13,11 +14,14 @@ type Params = { params: Promise<{ id: string }> };
 /** Owner, collaborators and the agents that can be @-mentioned here (present now or active in the last 30 days). */
 export const GET = handler(async (_req: Request, { params }: Params) => {
   const { id } = await params;
-  const { doc } = await requireAccess(id, "view");
+  const { doc, user } = await requireAccess(id, "view");
   const [owner, collaborators, agents] = await Promise.all([getUserById(doc.ownerId), listCollaborators(id), listMentionableAgents(id)]);
+  const hasFolderAccess = !!doc.folderId && !!user && (user.id === doc.ownerId || (user.login ? await getFolderCollaboratorRole(doc.folderId, user.login) : null));
+  const folder = hasFolderAccess && doc.folderId ? await getFolderForOwner(doc.folderId, doc.ownerId) : null;
   return json({
     owner: owner ? { login: owner.login, name: owner.name, image: owner.image } : null,
     linkAccess: doc.linkAccess,
+    folder: folder ? { id: folder.id, name: folder.name } : null,
     collaborators: collaborators.map((c) => ({ ...c, createdAt: c.createdAt.toISOString() })),
     agents,
   });

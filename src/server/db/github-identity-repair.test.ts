@@ -60,7 +60,7 @@ describe("GitHub identity repair", () => {
         mode: "dry-run",
         committed: false,
         verified: true,
-        schema: { tables: 25, userForeignKeys: 12 },
+        schema: { tables: 26, userForeignKeys: 12 },
         selection: {
           normalizedLoginUsers: 2,
           targetGithubAccounts: 1,
@@ -76,12 +76,13 @@ describe("GitHub identity repair", () => {
       });
       expect(Object.keys(report.tables).sort()).toEqual([...REPAIR_SCHEMA_TABLES]);
       expect(report.dependencies["collaborator.login"]).toBe(1);
+      expect(report.dependencies["folder_collaborator.login"]).toBe(1);
       expect(report.dependencies["notification.user_login"]).toBe(1);
       expect(report.dependencies["notification.actor_login"]).toBe(1);
       expect(
         Object.entries(report.dependencies).every(
           ([label, count]) =>
-            ["collaborator.login", "notification.user_login", "notification.actor_login"].includes(label) ||
+            ["collaborator.login", "folder_collaborator.login", "notification.user_login", "notification.actor_login"].includes(label) ||
             count === 0,
         ),
       ).toBe(true);
@@ -772,6 +773,13 @@ async function seedAllApplicationTables(database: PGlite): Promise<void> {
      VALUES ('preserved-identifier', 'preserved-verification-secret', now() + interval '1 day')`,
   );
   await database.query(`INSERT INTO folder (id, name, owner_id) VALUES ('preserved-folder', 'Preserved', $1)`, [LEGACY_ID]);
+  await database.query(
+    `INSERT INTO folder_collaborator (folder_id, login, added_by)
+     VALUES
+       ('preserved-folder', 'other-user', $1),
+       ('preserved-folder', $2, $1)`,
+    [LEGACY_ID, LOGIN.toUpperCase()],
+  );
 }
 
 function identityYState(

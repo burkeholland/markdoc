@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
-import { BookOpen, Bot, Check, ChevronRight, Copy, Globe, Link2, Loader2, Lock, Trash2 } from "lucide-react";
+import { BookOpen, Bot, Check, ChevronRight, Copy, Folder, Globe, Link2, Loader2, Lock, Trash2 } from "lucide-react";
 import type { DocumentDto } from "@/server/dto";
 import type { Role } from "@/server/db/schema";
 import { ApiError, api, apiErrorText, type CollaboratorDto } from "@/lib/api";
@@ -31,7 +31,7 @@ const LINK_OPTIONS: readonly { value: LinkAccess; label: string; description: st
 type ListState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "loaded"; documentId: string; owner: Owner | null; collaborators: CollaboratorDto[] };
+  | { status: "loaded"; documentId: string; owner: Owner | null; collaborators: CollaboratorDto[]; folder: People["folder"] };
 
 const ERROR_CLASS = "rounded-lg bg-red-50 px-3 py-2 text-sm text-danger wrap-anywhere dark:bg-red-950/40";
 
@@ -138,7 +138,7 @@ export const ShareDialog = memo(function ShareDialog({
 
   /** Shows a list the server just sent. "Already has access" is only true while the person is in the list it points to. */
   const showPeople = useCallback((documentId: string, res: People) => {
-    setList({ status: "loaded", documentId, owner: res.owner, collaborators: res.collaborators });
+    setList({ status: "loaded", documentId, owner: res.owner, collaborators: res.collaborators, folder: res.folder });
     setRefused((current) => (current && !res.collaborators.some((c) => c.login === current.login) ? null : current));
   }, []);
 
@@ -172,6 +172,7 @@ export const ShareDialog = memo(function ShareDialog({
 
   const collaborators = list.status === "loaded" ? list.collaborators : [];
   const owner = list.status === "loaded" ? list.owner : null;
+  const folder = list.status === "loaded" ? list.folder : null;
 
   const add = async (event: FormEvent) => {
     event.preventDefault();
@@ -347,6 +348,15 @@ export const ShareDialog = memo(function ShareDialog({
                   {addNote}
                 </p>
               )}
+            </div>
+          )}
+
+          {folder && (
+            <div className="flex items-start gap-2.5 rounded-xl border border-line bg-surface-2 px-3 py-2.5 text-xs text-ink-3" data-testid="folder-inherited-access">
+              <Folder size={14} className="mt-0.5 shrink-0 text-ink-2" aria-hidden="true" />
+              <p>
+                People shared with <span className="font-medium text-ink-2">{folder.name}</span> also have access to this document. Manage folder access from its menu on the dashboard.
+              </p>
             </div>
           )}
 

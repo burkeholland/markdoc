@@ -217,6 +217,59 @@ test.describe("folders", () => {
     await expect(page.getByTestId("trash-card").filter({ hasText: "Doomed" })).toBeVisible();
   });
 
+  test("shares a folder role with every current and future document", async ({ browser }) => {
+    const page = user.page;
+    const recipient = await signIn(browser, uniqueLogin("folder-recipient"));
+    try {
+      const currentIds = [
+        await createDocument(page, "# Folder note\n", "Folder note"),
+        await createDocument(page, "# Second note\n", "Second note"),
+      ];
+      await goHome(page);
+      await newFolder(page, "Project files");
+      const folderId = await chip(page, "Project files").getAttribute("data-folder-id");
+      if (!folderId) throw new Error("folder chip has no folder id");
+
+      for (const title of ["Folder note", "Second note"]) {
+        await cardItem(page, title).getByTestId("document-menu").click();
+        await page.getByTestId("move-to-folder").click();
+      }
+
+      await page.getByTestId("folder-menu").click();
+      await page.getByRole("menuitem", { name: "Share…" }).click();
+      const dialog = page.getByTestId("folder-share-dialog");
+      await expect(dialog).toBeVisible();
+      await dialog.getByTestId("share-login").fill(recipient.login);
+      await dialog.getByLabel("Role for new folder collaborator").selectOption("commenter");
+      await dialog.getByTestId("folder-share-add").click();
+      await expect(dialog.getByText(`@${recipient.login}`)).toBeVisible();
+      await expect(dialog.getByLabel(`Role for ${recipient.login}`)).toHaveValue("commenter");
+      if (process.env.SHOT_DIR) await page.getByRole("dialog").screenshot({ path: `${process.env.SHOT_DIR}/folder-sharing-dialog.png` });
+
+      const futureId = await createDocument(page, "# Added later\n", "Added later");
+      const moved = await page.request.post("/api/documents/move", { data: { documentIds: [futureId], folderId } });
+      expect(moved.ok()).toBeTruthy();
+      expect(await moved.json()).toMatchObject({ moved: [futureId] });
+
+      await goHome(recipient.page);
+      const sharedFolder = recipient.page.getByTestId("shared-folder-chip").filter({ hasText: "Project files" });
+      await expect(sharedFolder).toContainText("3");
+      await sharedFolder.click();
+      await expect(card(recipient.page, "Folder note")).toBeVisible();
+      await expect(card(recipient.page, "Second note")).toBeVisible();
+      await expect(card(recipient.page, "Added later")).toBeVisible();
+
+      for (const id of [...currentIds, futureId]) {
+        const access = await recipient.page.request.get(`/api/documents/${id}`);
+        expect(access.ok()).toBeTruthy();
+        expect(await access.json()).toMatchObject({ role: "commenter" });
+      }
+      if (process.env.SHOT_DIR) await recipient.page.screenshot({ path: `${process.env.SHOT_DIR}/folder-shared-with-me.png` });
+    } finally {
+      await recipient.context.close();
+    }
+  });
+
   test("offers no folder controls on a document owned by someone else", async ({ browser }) => {
     const page = user.page;
     const owner = await signIn(browser, uniqueLogin("owner"));

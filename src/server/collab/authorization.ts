@@ -1,5 +1,5 @@
 import { OutgoingMessage, type Connection } from "@hocuspocus/server";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import * as Y from "yjs";
 import { getDb, schema } from "@/server/db";
 import { canEdit, getDocumentAccess, getUserById } from "@/server/documents";
@@ -411,6 +411,14 @@ interface AccessTransition {
   what: string;
 }
 
+interface MultiDocumentAccessTransition {
+  docIds: readonly string[];
+  select: (docId: string, connections: Connection<CollabContext>[]) => Promise<Connection<CollabContext>[]> | Connection<CollabContext>[];
+  gate: boolean;
+  mutation: () => Promise<void>;
+  what: string;
+}
+
 /**
  * Apply an access database mutation without losing edits and without accepting any after access ended:
  * pause the affected connections (their messages wait, none is refused), let the message already being
@@ -422,19 +430,34 @@ interface AccessTransition {
  * connection is never paused by two changes at once. `waitForCollabAccessChange` awaits the same queue.
  */
 async function transitionAccess({ docId, select, gate, mutation, what }: AccessTransition): Promise<void> {
-  const key = docId;
-  const previous = state.transitions.get(key) ?? Promise.resolve();
+  return transitionAccessMany({
+    docIds: [docId],
+    select: (_id, connections) => select(connections),
+    gate,
+    mutation,
+    what,
+  });
+}
+
+/** Multi-document variant used by folder roles, whose single row changes access to every document in that folder. */
+async function transitionAccessMany({ docIds, select, gate, mutation, what }: MultiDocumentAccessTransition): Promise<void> {
+  const keys = [...new Set(docIds)].sort();
+  if (keys.length === 0) {
+    await mutation();
+    return;
+  }
+  const previous = Promise.all(keys.map((key) => state.transitions.get(key) ?? Promise.resolve()));
   let release!: () => void;
   const settled = new Promise<void>((resolve) => {
     release = resolve;
   });
   const queued = previous.catch(() => undefined).then(() => settled);
-  state.transitions.set(key, queued);
+  for (const key of keys) state.transitions.set(key, queued);
   state.revision++;
 
   await previous.catch(() => undefined);
   const collab = getCollab();
-  const document = collab?.documents.get(docId);
+  const documents = new Map(keys.map((docId) => [docId, collab?.documents.get(docId)]));
   let connections: Connection<CollabContext>[] = [];
   let paused: Connection<CollabContext>[] = [];
 
@@ -443,16 +466,21 @@ async function transitionAccess({ docId, select, gate, mutation, what }: AccessT
 
   try {
     // Inside the `try`: a lookup that fails must still let the next change, and new connections, go on.
-    connections = await select(document?.getConnections() ?? []);
+    const selected = await Promise.all(keys.map(async (docId) => select(docId, documents.get(docId)?.getConnections() ?? [])));
+    connections = [...new Set(selected.flat())];
     if (gate) paused = connections;
     for (const connection of paused) pause(connection);
     // Not `waitForPendingMessages`: the messages behind the one being handled wait for this change to end.
     await Promise.all(connections.map(handled));
-    if (collab && document) {
-      const pendingStore = collab.debouncer.executeNow(`onStoreDocument-${docId}`);
-      if (pendingStore) await pendingStore;
-      await document.saveMutex.waitForUnlock();
-    }
+    await Promise.all(
+      keys.map(async (docId) => {
+        const document = documents.get(docId);
+        if (!collab || !document) return;
+        const pendingStore = collab.debouncer.executeNow(`onStoreDocument-${docId}`);
+        if (pendingStore) await pendingStore;
+        await document.saveMutex.waitForUnlock();
+      }),
+    );
 
     try {
       await mutation();
@@ -479,8 +507,34 @@ async function transitionAccess({ docId, select, gate, mutation, what }: AccessT
   } finally {
     for (const connection of paused) resume(connection);
     release();
-    if (state.transitions.get(key) === queued) state.transitions.delete(key);
+    for (const key of keys) if (state.transitions.get(key) === queued) state.transitions.delete(key);
   }
+}
+
+/** Serialize folder moves and share changes before their document-level transitions begin. */
+async function withAccessLocks<T>(keys: readonly string[], work: () => Promise<T>): Promise<T> {
+  const unique = [...new Set(keys)].sort();
+  if (unique.length === 0) return work();
+  const previous = Promise.all(unique.map((key) => state.transitions.get(key) ?? Promise.resolve()));
+  let release!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.catch(() => undefined).then(() => settled);
+  for (const key of unique) state.transitions.set(key, queued);
+  state.revision++;
+  await previous.catch(() => undefined);
+  try {
+    return await work();
+  } finally {
+    release();
+    for (const key of unique) if (state.transitions.get(key) === queued) state.transitions.delete(key);
+  }
+}
+
+/** Keep folder deletion and folder membership mutations ordered with moves and role changes. */
+export async function withFolderAccessLock<T>(folderId: string, work: () => Promise<T>): Promise<T> {
+  return withAccessLocks([`folder:${folderId}`], work);
 }
 
 /**
@@ -505,30 +559,81 @@ export async function changeCollaboratorAccess(
   });
 }
 
+/** Apply one folder-role change to every live document connection the role could affect. */
+export async function changeFolderCollaboratorAccess(
+  folderId: string,
+  login: string,
+  newRole: Exclude<Role, "owner"> | null,
+  mutation: () => Promise<void>,
+): Promise<void> {
+  const normalizedLogin = login.trim().replace(/^@/, "").toLowerCase();
+  await withAccessLocks([`folder:${folderId}`], async () => {
+    const db = await getDb();
+    const documents = await db.select({ id: schema.documents.id }).from(schema.documents).where(eq(schema.documents.folderId, folderId));
+    await transitionAccessMany({
+      docIds: documents.map(({ id }) => id),
+      select: (_docId, connections) => connections.filter((connection) => loginOf(connection.context as CollabContext) === normalizedLogin),
+      gate: !newRole || !canEdit(newRole),
+      mutation,
+      what: "folder collaborator",
+    });
+  });
+}
+
+/** Re-resolve every live connection when an owner moves documents into or out of a shared folder. */
+export async function changeDocumentFolderAccess(documentIds: readonly string[], targetFolderId: string | null, mutation: () => Promise<void>): Promise<void> {
+  if (documentIds.length === 0) {
+    await mutation();
+    return;
+  }
+  const db = await getDb();
+  const folderLock = (id: string) => `folder:${id}`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const current = await db
+      .select({ id: schema.documents.id, folderId: schema.documents.folderId })
+      .from(schema.documents)
+      .where(inArray(schema.documents.id, [...documentIds]));
+    const keys = [...new Set([targetFolderId, ...current.map(({ folderId }) => folderId)].filter((id): id is string => id !== null).map(folderLock))];
+    const completed = await withAccessLocks(keys, async () => {
+      const latest = documentIds.length > 0
+        ? await db
+            .select({ id: schema.documents.id, folderId: schema.documents.folderId })
+            .from(schema.documents)
+            .where(inArray(schema.documents.id, [...documentIds]))
+        : [];
+      const lockedFolders = new Set(keys);
+      if (latest.some(({ folderId }) => folderId !== null && !lockedFolders.has(folderLock(folderId)))) return false;
+      await transitionAccessMany({
+        docIds: documentIds,
+        select: (_docId, connections) => connections,
+        gate: true,
+        mutation,
+        what: "document folder",
+      });
+      return true;
+    });
+    if (completed) return;
+  }
+  throw new Error("Document folders kept changing while they were moved");
+}
+
 /**
  * Apply a link-access database mutation to a document. Every live connection whose access derives
- * from the link — neither the owner nor an explicit collaborator, anonymous visitors included — is
+ * from the link — neither the owner, direct collaborator nor folder sharee, anonymous visitors included — is
  * paused, flushed and re-resolved: a closed link disconnects them (4401), a downgraded link makes
- * them read-only, and edits accepted before the change are kept. Owner and collaborators are untouched.
+ * them read-only, and edits accepted before the change are kept. Other access sources are untouched.
  */
 export async function changeLinkAccess(docId: string, newLinkAccess: LinkAccess, mutation: () => Promise<void>): Promise<void> {
   await transitionAccess({
     docId,
     select: async (connections) => {
       if (connections.length === 0) return [];
-      const db = await getDb();
-      const [doc] = await db.select({ ownerId: schema.documents.ownerId }).from(schema.documents).where(eq(schema.documents.id, docId));
-      const collaborators = await db
-        .select({ login: schema.collaborators.login })
-        .from(schema.collaborators)
-        .where(eq(schema.collaborators.documentId, docId));
-      const explicit = new Set(collaborators.map((row) => row.login.toLowerCase()));
-      return connections.filter((connection) => {
+      const access = await Promise.all(connections.map(async (connection) => {
         const context = connection.context as CollabContext;
-        if (doc && context.userId === doc.ownerId) return false;
-        const login = loginOf(context);
-        return !(login && explicit.has(login));
-      });
+        const user = context.userId.startsWith("anon-") ? null : { id: context.userId, login: context.login ?? null };
+        return [connection, await getDocumentAccess(docId, user)] as const;
+      }));
+      return access.filter(([, current]) => current?.source === "link").map(([connection]) => connection);
     },
     // Only "edit" admits link visitors as editors; every other value can take editing away.
     gate: newLinkAccess !== "edit",

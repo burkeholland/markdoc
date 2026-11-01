@@ -1,15 +1,19 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DocumentSummaryDto, FolderDto } from "@/lib/api";
+import type { CollaboratorDto, DocumentSummaryDto, FolderDto } from "@/lib/api";
 
 type ListResponse = { folders: FolderDto[] };
 type MoveResponse = { moved: string[] };
+type FolderPeople = { owner: { login: string | null; name: string | null; image: string | null } | null; collaborators: CollaboratorDto[] };
 
 const listFolders = vi.fn<() => Promise<ListResponse>>();
 const createFolder = vi.fn<(name: string) => Promise<{ folder: FolderDto }>>();
 const renameFolder = vi.fn<(id: string, name: string) => Promise<{ folder: FolderDto }>>();
 const deleteFolder = vi.fn<(id: string) => Promise<{ ok: true; trashed: number }>>();
+const listFolderCollaborators = vi.fn<(id: string) => Promise<FolderPeople>>();
+const addFolderCollaborator = vi.fn<(id: string, login: string, role: "editor" | "commenter" | "viewer", options?: { change?: boolean }) => Promise<{ ok: true; login: string; role: string; pending: boolean }>>();
+const removeFolderCollaborator = vi.fn<(id: string, login: string) => Promise<{ ok: true }>>();
 const moveDocuments = vi.fn<(ids: readonly string[], folderId: string | null) => Promise<MoveResponse>>();
 const router = { push: vi.fn(), replace: vi.fn(), refresh: vi.fn(), prefetch: vi.fn(), back: vi.fn(), forward: vi.fn() };
 
@@ -33,6 +37,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
       folders: {
         list: () => listFolders(),
         create: (name: string) => createFolder(name),
+        collaborators: (id: string) => listFolderCollaborators(id),
+        addCollaborator: (id: string, login: string, role: "editor" | "commenter" | "viewer", options?: { change?: boolean }) =>
+          addFolderCollaborator(id, login, role, options),
+        removeCollaborator: (id: string, login: string) => removeFolderCollaborator(id, login),
         rename: (id: string, name: string) => renameFolder(id, name),
         delete: (id: string) => deleteFolder(id),
       },
@@ -43,6 +51,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
 const { Dashboard } = await import("./dashboard");
 
 const USER = { id: "owner", name: "Owner", login: "owner", image: null };
+
+function person(login: string, role: CollaboratorDto["role"]): CollaboratorDto {
+  return { login, role, name: login === "bob" ? "Bob Example" : null, image: null, createdAt: "2026-09-01T12:00:00.000Z" };
+}
 
 function doc(id: string, title: string, folderId: string | null = null, ownerId = USER.id): DocumentSummaryDto {
   return {
@@ -64,11 +76,22 @@ function doc(id: string, title: string, folderId: string | null = null, ownerId 
     gistId: null,
     starred: false,
     folderId,
+    folderName: null,
   };
 }
 
 function folder(id: string, name: string, documentCount = 0): FolderDto {
-  return { id, name, documentCount, createdAt: "2026-09-01T12:00:00.000Z", updatedAt: "2026-09-01T12:00:00.000Z" };
+  return {
+    id,
+    name,
+    documentCount,
+    createdAt: "2026-09-01T12:00:00.000Z",
+    updatedAt: "2026-09-01T12:00:00.000Z",
+    ownerId: USER.id,
+    ownerName: USER.name,
+    ownerLogin: USER.login,
+    role: "owner",
+  };
 }
 
 /** Render the dashboard and wait for the folder fetch to settle, so the rail is populated. */
@@ -101,6 +124,9 @@ beforeEach(() => {
   createFolder.mockReset();
   renameFolder.mockReset();
   deleteFolder.mockReset();
+  listFolderCollaborators.mockReset().mockResolvedValue({ owner: null, collaborators: [] });
+  addFolderCollaborator.mockReset().mockResolvedValue({ ok: true, login: "bob", role: "commenter", pending: false });
+  removeFolderCollaborator.mockReset().mockResolvedValue({ ok: true });
   moveDocuments.mockReset();
   for (const fn of Object.values(router)) fn.mockReset();
 });
@@ -116,6 +142,44 @@ describe("the folder rail", () => {
     expect(recipes).toHaveTextContent("Recipes");
     expect(recipes).toHaveTextContent("2");
     expect(travel).toHaveTextContent("Travel");
+  });
+
+  it("lists shared folders without offering owner actions", async () => {
+    const shared = { ...folder("shared", "Planning", 1), ownerId: "alice", ownerName: "Alice", ownerLogin: "alice", role: "viewer" as const };
+    listFolders.mockResolvedValue({ folders: [shared] });
+    await mount([doc("shared-doc", "Roadmap", "shared", "alice")]);
+
+    const chip = await screen.findByTestId("shared-folder-chip");
+    expect(chip).toHaveTextContent("Planning");
+    expect(chip).toHaveAttribute("title", "Shared by @alice · viewer");
+    expect(screen.getAllByText("Shared with me")).toHaveLength(2);
+    expect(screen.queryByTestId("folder-menu")).not.toBeInTheDocument();
+
+    fireEvent.click(chip);
+    expect(cardTitles()).toEqual(["Roadmap"]);
+  });
+
+  it("manages the roles on every document from an owner's folder menu", async () => {
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes")] });
+    listFolderCollaborators.mockResolvedValue({
+      owner: { login: "owner", name: "Owner", image: null },
+      collaborators: [person("bob", "viewer")],
+    });
+    await mount([]);
+
+    openMenu(screen.getByTestId("folder-menu"));
+    fireEvent.click(await screen.findByText("Share…"));
+    expect(await screen.findByTestId("folder-share-dialog")).toBeInTheDocument();
+    expect(screen.getByText("Everyone you add gets this role on every document in the folder, including new ones.")).toBeInTheDocument();
+    expect(await screen.findByText("@bob")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Role for bob" }), { target: { value: "commenter" } });
+    await waitFor(() => expect(addFolderCollaborator).toHaveBeenCalledWith("f1", "bob", "commenter", { change: true }));
+    expect(screen.getByRole("combobox", { name: "Role for bob" })).toHaveValue("commenter");
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove bob" }));
+    await waitFor(() => expect(removeFolderCollaborator).toHaveBeenCalledWith("f1", "bob"));
+    expect(screen.queryByText("@bob")).not.toBeInTheDocument();
   });
 
   it("counts only the owner's unfiled documents under 'Not in a folder'", async () => {

@@ -1090,8 +1090,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       if (filter === "shared" && d.ownerId === user.id) return false;
       if (filter === "starred" && !d.starred) return false;
       // A folder selection narrows the list the same way a chip does. "All documents" (`null`) keeps
-      // everything; `TOP_LEVEL` keeps what is not filed, which includes documents shared with this
-      // person — their `folderId` is always null, since the folder would be someone else's (#2377).
+      // everything; `TOP_LEVEL` keeps documents whose folder is not visible to this person.
       if (folderSelection === TOP_LEVEL && d.folderId !== null) return false;
       if (typeof folderSelection === "string" && d.folderId !== folderSelection) return false;
       return true;

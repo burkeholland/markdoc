@@ -81,6 +81,7 @@ export async function deleteAccount(user: { id: string; login: string | null }):
       const login = user.login.toLowerCase();
       await tx.delete(schema.notifications).where(eq(schema.notifications.userLogin, login));
       await tx.delete(schema.collaborators).where(sql`lower(${schema.collaborators.login}) = ${login}`);
+      await tx.delete(schema.folderCollaborators).where(sql`lower(${schema.folderCollaborators.login}) = ${login}`);
     }
     const documents = await tx
       .select({ id: schema.documents.id })

@@ -46,8 +46,8 @@ describe("legacy ownership transfer", () => {
     }
     expect(declared.sort()).toEqual([...TRANSFER_USER_FOREIGN_KEYS]);
     expect([...TRANSFER_USER_FOREIGN_KEYS]).toEqual([...TRANSFER_USER_FOREIGN_KEYS].sort());
-    expect(TRANSFER_SOFT_USER_REFERENCES).toHaveLength(4);
-    expect(TRANSFER_LOGIN_REFERENCES).toHaveLength(3);
+    expect(TRANSFER_SOFT_USER_REFERENCES).toHaveLength(5);
+    expect(TRANSFER_LOGIN_REFERENCES).toHaveLength(4);
   });
 
   it("dry-runs the production shape as counts only and writes nothing", async () => {
@@ -65,7 +65,7 @@ describe("legacy ownership transfer", () => {
         committed: false,
         verified: true,
         transferId: null,
-        schema: { userForeignKeys: 12, softUserReferences: 4, loginReferences: 3, rollbackTableReady: true },
+        schema: { userForeignKeys: 12, softUserReferences: 5, loginReferences: 4, rollbackTableReady: true },
         selection: {
           sourceUsers: 1,
           sourceLoginLength: SOURCE_LOGIN.length,
@@ -120,6 +120,7 @@ describe("legacy ownership transfer", () => {
            (SELECT COUNT(*) FROM document WHERE owner_id = $1 OR last_edited_by = $1) +
            (SELECT COUNT(*) FROM version WHERE created_by = $1) +
            (SELECT COUNT(*) FROM collaborator WHERE added_by = $1 OR lower(login) = $2) +
+           (SELECT COUNT(*) FROM folder_collaborator WHERE added_by = $1 OR lower(login) = $2) +
            (SELECT COUNT(*) FROM star WHERE user_id = $1) +
            (SELECT COUNT(*) FROM recent WHERE user_id = $1) +
            (SELECT COUNT(*) FROM api_token WHERE user_id = $1) +
@@ -134,6 +135,13 @@ describe("legacy ownership transfer", () => {
         [SOURCE_ID, SOURCE_LOGIN],
       );
       expect(references.rows[0].count).toBe("0");
+      const folderRoles = await fixture.database.query<{ folder_id: string; login: string; role: string; added_by: string }>(
+        `SELECT folder_id, login, role, added_by FROM folder_collaborator ORDER BY folder_id`,
+      );
+      expect(folderRoles.rows).toEqual([
+        { folder_id: "fold-other", login: TARGET_LOGIN, role: "editor", added_by: OTHER_ID },
+        { folder_id: "fold-other-move", login: TARGET_LOGIN, role: "viewer", added_by: TARGET_ID },
+      ]);
       // Rows that never mentioned the source user are byte-for-byte unchanged.
       for (const table of ALL_TABLES) {
         if (table === "ownership_transfer") continue;

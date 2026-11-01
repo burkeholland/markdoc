@@ -10,15 +10,18 @@ process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.DATABASE_URL;
 
 const { getDb, schema } = await import("./db");
-const { createDocument, deleteDocument, listDocumentsForUser, listTrashForUser } = await import("./documents");
+const { createDocument, deleteDocument, getDocumentAccess, listDocumentsForUser, listTrashForUser, updateDocument } = await import("./documents");
 const {
+  addFolderCollaborator,
   boundFolderName,
   createFolder,
   deleteFolder,
   FOLDER_NAME_MAX,
+  getFolderCollaboratorRole,
   getFolderForOwner,
   listFoldersForUser,
   moveDocumentsToFolder,
+  removeFolderCollaborator,
   renameFolder,
 } = await import("./folders");
 
@@ -108,6 +111,74 @@ describe("renaming folders", () => {
     const id = await newFolder(alice, "Alice only");
     expect(await renameFolder(id, bob, "Bob's now")).toEqual({ outcome: "not-found" });
     expect((await getFolderForOwner(id, alice))?.name).toBe("Alice only");
+  });
+});
+
+describe("sharing folders", () => {
+  it("grants access to current and future documents, and moving a document out revokes it", async () => {
+    const folder = await newFolder(alice, "Shared work");
+    const current = await newDoc(alice, "Current");
+    await moveDocumentsToFolder([current], folder, alice);
+    expect(await addFolderCollaborator(folder, " @BOB ", "commenter", alice)).toEqual({ outcome: "written" });
+    const bobUser = { id: bob, login: "bob", name: "Bob", image: null };
+
+    expect(await getFolderCollaboratorRole(folder, "bob")).toBe("commenter");
+    expect(await getDocumentAccess(current, bobUser)).toMatchObject({ role: "commenter", source: "folder" });
+    expect((await listFoldersForUser(bob, "bob")).find((item) => item.id === folder)).toMatchObject({
+      ownerId: alice,
+      ownerLogin: "alice",
+      role: "commenter",
+      documentCount: 1,
+    });
+    expect((await listDocumentsForUser(bobUser)).find((item) => item.id === current)).toMatchObject({
+      role: "commenter",
+      folderId: folder,
+      folderName: "Shared work",
+    });
+
+    const future = await newDoc(alice, "Future");
+    await moveDocumentsToFolder([future], folder, alice);
+    expect(await getDocumentAccess(future, bobUser)).toMatchObject({ role: "commenter", source: "folder" });
+
+    await moveDocumentsToFolder([current], null, alice);
+    expect(await getDocumentAccess(current, bobUser)).toBeNull();
+    expect((await listDocumentsForUser(bobUser)).some((item) => item.id === current)).toBe(false);
+    expect((await listDocumentsForUser(bobUser)).find((item) => item.id === future)?.folderName).toBe("Shared work");
+  });
+
+  it("keeps the strongest direct role, and does not expose a folder to direct-only collaborators", async () => {
+    const folder = await newFolder(alice, "Folder role isolation");
+    const inFolder = await newDoc(alice, "In folder");
+    const folderStronger = await newDoc(alice, "Folder role is stronger");
+    const directOnly = await newDoc(alice, "Direct only");
+    await moveDocumentsToFolder([inFolder, folderStronger], folder, alice);
+    await updateDocument(directOnly, { linkAccess: "edit" });
+    const db = await getDb();
+    await db.insert(schema.collaborators).values([
+      { documentId: inFolder, login: "bob", role: "editor" },
+      { documentId: folderStronger, login: "bob", role: "viewer" },
+      { documentId: directOnly, login: "bob", role: "viewer" },
+    ]);
+    await addFolderCollaborator(folder, "bob", "commenter", alice);
+
+    expect(await getDocumentAccess(inFolder, { id: bob, login: "bob" })).toMatchObject({ role: "editor", source: "collaborator" });
+    expect(await getDocumentAccess(folderStronger, { id: bob, login: "bob" })).toMatchObject({ role: "commenter", source: "folder" });
+    expect(await getDocumentAccess(directOnly, { id: bob, login: "bob" })).toMatchObject({ role: "viewer", source: "collaborator" });
+    const summaries = await listDocumentsForUser({ id: bob, login: "bob", name: "Bob", image: null });
+    expect(summaries.find((item) => item.id === inFolder)).toMatchObject({ folderId: folder, folderName: "Folder role isolation" });
+    expect(summaries.find((item) => item.id === folderStronger)).toMatchObject({ role: "commenter", folderId: folder, folderName: "Folder role isolation" });
+    expect(summaries.find((item) => item.id === directOnly)).toMatchObject({ folderId: null, folderName: null });
+
+    expect(await addFolderCollaborator(folder, "bob", "editor", alice)).toEqual({ outcome: "refused", role: "commenter" });
+    expect(await addFolderCollaborator(folder, "bob", "editor", alice, { change: true })).toEqual({ outcome: "written" });
+    expect(await getDocumentAccess(inFolder, { id: bob, login: "bob" })).toMatchObject({ role: "editor", source: "collaborator" });
+    expect(await getDocumentAccess(folderStronger, { id: bob, login: "bob" })).toMatchObject({ role: "editor", source: "folder" });
+    expect(await removeFolderCollaborator(folder, "bob")).toBe(true);
+    expect(await getDocumentAccess(inFolder, { id: bob, login: "bob" })).toMatchObject({ role: "editor", source: "collaborator" });
+    expect(await getDocumentAccess(folderStronger, { id: bob, login: "bob" })).toMatchObject({ role: "viewer", source: "collaborator" });
+    const afterRemoval = await listDocumentsForUser({ id: bob, login: "bob", name: "Bob", image: null });
+    expect(afterRemoval.find((item) => item.id === inFolder)).toMatchObject({ folderId: null, folderName: null });
+    expect(afterRemoval.find((item) => item.id === folderStronger)).toMatchObject({ folderId: null, folderName: null });
   });
 });
 

@@ -1,6 +1,7 @@
-import { and, asc, eq, gt, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { createTwoFilesPatch } from "diff";
 import { getDb, schema } from "@/server/db";
+import { effectiveRoleSql } from "@/server/document-access";
 import type { SessionUser } from "@/server/documents";
 import { contentHash } from "@/server/export/html";
 import { agentMentionSlug, parseAgentMentions } from "@/editor/collab/mentions";
@@ -502,20 +503,21 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
   const events: AgentEvent[] = [];
   const next: CursorState = { ...cursor, h: null };
   const login = user.login?.toLowerCase() ?? "";
+  const memberAccess = effectiveRoleSql(schema.documents, { id: user.id, login, signedIn: true }, { includeLink: false });
+  const mentionAccess = effectiveRoleSql(schema.documents, { id: user.id, login, signedIn: true });
 
   if (login) {
     const mentions = await db
       .select({ n: schema.notifications, title: schema.documents.title })
       .from(schema.notifications)
       .innerJoin(schema.documents, eq(schema.documents.id, schema.notifications.documentId))
-      .leftJoin(schema.collaborators, and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)))
       .where(
         and(
           eq(schema.notifications.userLogin, login),
           eq(schema.notifications.kind, "mention"),
           gt(schema.notifications.createdAt, new Date(cursor.n)),
           isNull(schema.documents.deletedAt),
-          or(eq(schema.documents.ownerId, user.id), ne(schema.documents.linkAccess, "private"), sql`${schema.collaborators.login} is not null`),
+          sql`${mentionAccess.role} is not null`,
         ),
       )
       .orderBy(asc(schema.notifications.createdAt))
@@ -540,13 +542,12 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
     .select({ activity: schema.activity })
     .from(schema.activity)
     .innerJoin(schema.documents, eq(schema.documents.id, schema.activity.documentId))
-    .leftJoin(schema.collaborators, and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)))
     .where(
       and(
         eq(schema.activity.action, "review.create"),
         gte(schema.activity.createdAt, new Date(cursor.a)),
         isNull(schema.documents.deletedAt),
-        or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`),
+        sql`${memberAccess.role} is not null`,
       ),
     )
     .orderBy(asc(schema.activity.createdAt), asc(schema.activity.id))
@@ -570,13 +571,12 @@ export async function collectUserEvents(user: SessionUser & { agent?: string }, 
     .from(schema.agentRequests)
     .innerJoin(schema.documents, eq(schema.documents.id, schema.agentRequests.documentId))
     .leftJoin(schema.users, eq(schema.users.id, schema.agentRequests.userId))
-    .leftJoin(schema.collaborators, and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)))
     .where(
       and(
         gt(schema.agentRequests.createdAt, new Date(cursor.r)),
         inArray(schema.agentRequests.status, ["open", "claimed"]),
         sql`${schema.documents.deletedAt} is null`,
-        or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`),
+        sql`${memberAccess.role} is not null`,
         addressedToMe ? or(ownUnaddressed, addressedToMe) : ownUnaddressed,
       ),
     )

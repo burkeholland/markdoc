@@ -90,6 +90,7 @@ function doc(id: string, title: string, excerpt = ""): DocumentSummaryDto {
     gistId: null,
     starred: false,
     folderId: null,
+    folderName: null,
   };
 }
 
@@ -108,6 +109,10 @@ function folder(id: string, name: string, documentCount: number): FolderDto {
     documentCount,
     createdAt: "2026-09-01T12:00:00.000Z",
     updatedAt: "2026-09-07T12:00:00.000Z",
+    ownerId: USER.id,
+    ownerName: USER.name,
+    ownerLogin: USER.login,
+    role: "owner",
   };
 }
 

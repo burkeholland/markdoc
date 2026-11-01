@@ -1,6 +1,7 @@
 import * as Y from "yjs";
 import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
+import { accessibleLoginsForDocument, effectiveRoleSql } from "@/server/document-access";
 import type { NotificationKind } from "@/server/db/schema";
 import { parseAgentMentions, parseMentions } from "@/editor/collab/mentions";
 import { readReply, readReplySuggestionDecision, type CommentReply } from "@/editor/collab/comments";
@@ -99,22 +100,7 @@ export async function notifyMany(logins: Iterable<string | null | undefined>, in
 
 async function mentionRecipientsWithAccess(docId: string, logins: string[]): Promise<string[]> {
   if (logins.length === 0) return [];
-  const db = await getDb();
-  const [document] = await db
-    .select({ linkAccess: schema.documents.linkAccess, ownerLogin: schema.users.login })
-    .from(schema.documents)
-    .leftJoin(schema.users, eq(schema.users.id, schema.documents.ownerId))
-    .where(and(eq(schema.documents.id, docId), isNull(schema.documents.deletedAt)))
-    .limit(1);
-  if (!document) return [];
-  if (document.linkAccess !== "private") return logins;
-
-  const collaborators = await db
-    .select({ login: schema.collaborators.login })
-    .from(schema.collaborators)
-    .where(and(eq(schema.collaborators.documentId, docId), inArray(schema.collaborators.login, logins)));
-  const allowed = new Set(collaborators.map(({ login }) => login.toLowerCase()));
-  if (document.ownerLogin) allowed.add(document.ownerLogin.toLowerCase());
+  const allowed = await accessibleLoginsForDocument(docId, logins);
   return logins.filter((login) => allowed.has(login));
 }
 
@@ -185,12 +171,8 @@ export interface NotificationPage {
 const userWhere = (login: string) => eq(schema.notifications.userLogin, login.toLowerCase());
 
 const mentionDocumentAccessWhere = (login: string) => {
-  const normalized = login.toLowerCase();
-  return or(
-    ne(schema.documents.linkAccess, "private"),
-    sql`exists (select 1 from ${schema.users} where ${schema.users.id} = ${schema.documents.ownerId} and lower(${schema.users.login}) = ${normalized})`,
-    sql`exists (select 1 from ${schema.collaborators} where ${schema.collaborators.documentId} = ${schema.documents.id} and lower(${schema.collaborators.login}) = ${normalized})`,
-  );
+  const access = effectiveRoleSql(schema.documents, { login, signedIn: true });
+  return sql`${access.role} is not null`;
 };
 
 const visibleNotificationWhere = (login: string) =>
