@@ -14,10 +14,12 @@ import { remoteCursorsPlugin } from "./remote-cursors";
 import { richHighlightsPlugin, richSuggestingPlugin, type HighlightHandlers } from "./highlights";
 import { smartPastePlugin } from "./paste";
 import { imageUploadPlugin, type ImageUploader } from "./images";
+import { videoUploadPlugin } from "./videos";
+import type { VideoUploader } from "@/lib/video-limits";
 import { markdownFileDropPlugin, type MarkdownFileDropHandler } from "./file-drop";
 import { slashMenuPlugin, type SlashMenuHandlers } from "./slash-menu";
 import { editablePlugin, isEditable } from "./editable";
-import { richLinksPlugin } from "./links";
+import { richLinksPlugin, typedCardLinkOnEnter } from "./links";
 import { headingFoldPlugin } from "./heading-fold";
 import { owningVerticalScroller } from "./scroller";
 import type { NoticeAction } from "../markdown/tsv";
@@ -63,6 +65,9 @@ export interface RichEditorHandlers extends HighlightHandlers {
   /** Uploads a pasted or dropped image file; when absent, image files are left to the browser. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
+  /** Uploads a pasted or dropped MP4/WebM video file. */
+  uploadVideo?: VideoUploader;
+  onVideoError?: (message: string) => void;
   /** Non-blocking notice for the user (a toast), e.g. when pasted text had to be inserted as code. */
   onNotice?: (message: string, action?: NoticeAction) => void;
   /** A dropped .md/.txt file with the position under the pointer; when absent the browser handles the drop. */
@@ -316,7 +321,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
     "Mod-Alt-ArrowLeft": guard(addColumnBefore),
     "Mod-Alt-Backspace": guard(deleteRow),
     "Mod-Alt-Shift-Backspace": guard(deleteColumn),
-    Enter: guard(chainCommands(addRowOnEnterAtEnd, enter)),
+    Enter: guard(chainCommands(addRowOnEnterAtEnd, typedCardLinkOnEnter(session), enter)),
     "Shift-Enter": guard(lineBreak),
     "Mod-Enter": guard(chainCommands(exitCode, exitTableBelow, toggleTaskAtCaret, insertHardBreak())),
     // Not guarded: commenters get the selection bubble too, so Esc must collapse their selection as well.
@@ -346,6 +351,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
       richSuggestingPlugin(session),
       markdownInputRules(),
       ...(handlers.uploadImage ? [imageUploadPlugin(session, handlers.uploadImage, { onError: handlers.onImageError })] : []),
+      ...(handlers.uploadVideo ? [videoUploadPlugin(session, handlers.uploadVideo, { onError: handlers.onVideoError })] : []),
       ...(handlers.onMarkdownFileDrop ? [markdownFileDropPlugin(handlers.onMarkdownFileDrop)] : []),
       smartPastePlugin(session, { onNotice: handlers.onNotice }),
       shortcuts,

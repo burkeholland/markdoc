@@ -25,7 +25,7 @@ export function renderReaderBody(markdown: string, hash: string): Promise<Render
     cache.set(hash, hit);
     return hit;
   }
-  const pending = renderMarkdownBody(markdown, { assetBaseUrl: "", linkCards: true });
+  const pending = renderMarkdownBody(markdown, { assetBaseUrl: "", linkCards: true, videoPlayback: true });
   cache.set(hash, pending);
   pending.then(
     (body) => {

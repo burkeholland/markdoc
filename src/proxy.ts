@@ -87,6 +87,7 @@ export const FRAME_ANCESTORS_NONE = "frame-ancestors 'none'";
  * for every page is the policy that does not depend on how a page was reached.
  */
 export const CARD_FRAME_SOURCES = `frame-src ${CARD_FRAME_HOSTS.join(" ")}`;
+export const PAGE_MEDIA_SOURCES = "media-src 'self' blob:";
 
 /**
  * Only pages get the frame policy. `/api/*` responses keep their own headers — `/api/assets/[id]` sets
@@ -118,8 +119,8 @@ export async function proxy(request: NextRequest) {
     && pathname === `/d/${embed.documentId}`
     && request.nextUrl.searchParams.get("embed") === "1";
   const withFramePolicy = (response: NextResponse) => {
-    if (isEmbeddedDocument) response.headers.set("Content-Security-Policy", `frame-ancestors ${embed.parentOrigin}; ${CARD_FRAME_SOURCES}`);
-    else if (framePolicyApplies(pathname)) response.headers.set("Content-Security-Policy", `${FRAME_ANCESTORS_NONE}; ${CARD_FRAME_SOURCES}`);
+    if (isEmbeddedDocument) response.headers.set("Content-Security-Policy", `frame-ancestors ${embed.parentOrigin}; ${CARD_FRAME_SOURCES}; ${PAGE_MEDIA_SOURCES}`);
+    else if (framePolicyApplies(pathname)) response.headers.set("Content-Security-Policy", `${FRAME_ANCESTORS_NONE}; ${CARD_FRAME_SOURCES}; ${PAGE_MEDIA_SOURCES}`);
     return response;
   };
   if (!hasSessionCookie(cookieHeader)) return withFramePolicy(NextResponse.next());

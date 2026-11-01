@@ -4,6 +4,7 @@ import { getDb, schema } from "@/server/db";
 import { readLiveText } from "@/server/livedoc";
 import { DEMO_LOGIN } from "@/server/demo-auth";
 import { HttpError, type Actor } from "@/server/http";
+import { deleteVideoStorageForDocument, scheduleVideoStorageCleanup } from "@/server/video-assets";
 
 /** A file or folder name that is safe on Windows, macOS and Linux; empty input becomes `fallback`. */
 export function sanitizePathSegment(value: string, fallback: string): string {
@@ -81,6 +82,14 @@ export async function deleteAccount(user: { id: string; login: string | null }):
       await tx.delete(schema.notifications).where(eq(schema.notifications.userLogin, login));
       await tx.delete(schema.collaborators).where(sql`lower(${schema.collaborators.login}) = ${login}`);
     }
+    const documents = await tx
+      .select({ id: schema.documents.id })
+      .from(schema.documents)
+      .where(eq(schema.documents.ownerId, user.id))
+      .orderBy(asc(schema.documents.id))
+      .for("update");
+    for (const { id } of documents) await deleteVideoStorageForDocument(id, tx);
     await tx.delete(schema.users).where(eq(schema.users.id, user.id));
   });
+  scheduleVideoStorageCleanup();
 }

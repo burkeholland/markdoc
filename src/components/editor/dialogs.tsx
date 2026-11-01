@@ -15,6 +15,7 @@ import { gridCell, type GridCell } from "@/lib/a11y";
 import { apiErrorText } from "@/lib/api";
 import { findReplaceShortcut, shortcut } from "@/lib/utils";
 import { IMAGE_TOO_LARGE_MESSAGE, isImageTooLarge } from "@/lib/image-limits";
+import { isAbortError, videoFileError, type UploadedVideo, type VideoUploader } from "@/lib/video-limits";
 
 /**
  * Editor actions picked in a dialog run after the dialog has closed and let go of focus (see
@@ -172,6 +173,16 @@ const IMAGE_TITLE = "Insert image";
 const IMAGE_DESCRIPTION =
   "Paste the address of an image or upload one. Alt text describes the image for people who can't see it.";
 const IMAGE_FILE_ACCEPT = "image/png,image/jpeg,image/gif,image/webp,image/svg+xml";
+const FILE_READ_ERROR_MESSAGE = "Could not read the selected file. Please choose it again.";
+
+function readSelectedFile(input: HTMLInputElement): { file: File | null; error: string | null } {
+  try {
+    return { file: input.files?.[0] ?? null, error: null };
+  } catch {
+    input.value = "";
+    return { file: null, error: FILE_READ_ERROR_MESSAGE };
+  }
+}
 
 function imageUploadErrorText(error: unknown) {
   try {
@@ -236,14 +247,21 @@ export const ImageDialog = memo(function ImageDialog({
 
   const startUpload = (file: File, input: HTMLInputElement) => {
     if (!onUpload || activeUpload.current) return;
-    if (isImageTooLarge(file)) {
+    let fallbackAlt: string;
+    try {
+      if (isImageTooLarge(file)) {
+        input.value = "";
+        update((current) => ({ ...current, error: IMAGE_TOO_LARGE_MESSAGE }));
+        return;
+      }
+      fallbackAlt = file.name.replace(/\.[a-z0-9]{2,5}$/i, "");
+    } catch {
       input.value = "";
-      update((current) => ({ ...current, error: IMAGE_TOO_LARGE_MESSAGE }));
+      update((current) => ({ ...current, error: FILE_READ_ERROR_MESSAGE }));
       return;
     }
     const token = Symbol("image-upload");
     activeUpload.current = token;
-    const fallbackAlt = file.name.replace(/\.[a-z0-9]{2,5}$/i, "");
     const altRevision = draft.altRevision;
     update((current) => ({ ...current, error: null, upload: token }));
     const settle = (result: { url: string; alt?: string } | null, error: unknown) => {
@@ -311,8 +329,12 @@ export const ImageDialog = memo(function ImageDialog({
                     disabled={uploading}
                     onChange={(e) => {
                       const input = e.currentTarget;
-                      const file = input.files?.[0];
-                      if (file) startUpload(file, input);
+                      const selection = readSelectedFile(input);
+                      if (selection.error) {
+                        update((current) => ({ ...current, error: selection.error }));
+                        return;
+                      }
+                      if (selection.file) startUpload(selection.file, input);
                     }}
                     data-testid="image-file"
                   />
@@ -353,6 +375,205 @@ export const ImageDialog = memo(function ImageDialog({
               Cancel
             </button>
             <button type="submit" className="btn btn-primary" disabled={submitDisabled} data-testid="image-submit">
+              Insert
+            </button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+});
+
+interface VideoDraft {
+  readonly visit: DialogActionVisit;
+  readonly open: boolean;
+  readonly file: File | null;
+  readonly fileName: string | null;
+  readonly uploaded: UploadedVideo | null;
+  readonly upload: symbol | null;
+  readonly canceling: boolean;
+  readonly progress: { uploaded: number; total: number } | null;
+  readonly error: string | null;
+}
+
+function videoDraft(visit: DialogActionVisit, open: boolean): VideoDraft {
+  return { visit, open, file: null, fileName: null, uploaded: null, upload: null, canceling: false, progress: null, error: null };
+}
+
+export const VideoDialog = memo(function VideoDialog({
+  open,
+  onOpenChange,
+  onSubmit,
+  onUpload,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: (video: UploadedVideo) => void;
+  onUpload?: VideoUploader;
+}) {
+  const visit = useMemo<DialogActionVisit>(() => ({ onOpenChange, onSubmit, onUpload }), [onOpenChange, onSubmit, onUpload]);
+  const activeVisit = useActiveVisit(visit);
+  const [storedDraft, setDraft] = useState<VideoDraft>(() => videoDraft(visit, open));
+  let draft = storedDraft;
+  if (draft.visit !== visit || draft.open !== open) {
+    draft = videoDraft(visit, open);
+    setDraft(draft);
+  }
+  const after = useAfterClose(visit, activeVisit);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const activeUpload = useRef<{ token: symbol; controller: AbortController } | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      activeUpload.current?.controller.abort();
+      activeUpload.current = null;
+    }
+    return () => {
+      activeUpload.current?.controller.abort();
+      activeUpload.current = null;
+    };
+  }, [open, visit]);
+
+  const update = (change: (current: VideoDraft) => VideoDraft) =>
+    setDraft((current) => (current.visit === visit && current.open ? change(current) : current));
+  const uploading = draft.upload !== null;
+  const percent = draft.progress?.total
+    ? Math.min(100, Math.floor((draft.progress.uploaded / draft.progress.total) * 100))
+    : 0;
+
+  const startUpload = (file: File, input: HTMLInputElement) => {
+    if (!onUpload || activeUpload.current) return;
+    let name: string;
+    let size: number;
+    let validationError: string | null;
+    try {
+      name = file.name;
+      size = file.size;
+      validationError = videoFileError({ name, size, type: file.type });
+    } catch {
+      input.value = "";
+      update((current) => ({ ...current, file: null, fileName: null, uploaded: null, error: FILE_READ_ERROR_MESSAGE }));
+      return;
+    }
+    if (validationError) {
+      input.value = "";
+      update((current) => ({ ...current, file: null, fileName: null, uploaded: null, error: validationError }));
+      return;
+    }
+    const token = Symbol("video-upload");
+    const controller = new AbortController();
+    activeUpload.current = { token, controller };
+    update((current) => ({ ...current, file, fileName: name, uploaded: null, error: null, upload: token, canceling: false, progress: { uploaded: 0, total: size } }));
+
+    const settle = (result: UploadedVideo | null, error: unknown) => {
+      if (activeUpload.current?.token !== token) return;
+      activeUpload.current = null;
+      input.value = "";
+      update((current) => {
+        if (current.upload !== token) return current;
+        if (!result) {
+          return {
+            ...current,
+            upload: null,
+            canceling: false,
+            progress: null,
+            error: isAbortError(error) ? null : apiErrorText(error, "Video upload failed"),
+          };
+        }
+        return { ...current, uploaded: result, upload: null, canceling: false, progress: null, error: null };
+      });
+    };
+
+    void Promise.resolve()
+      .then(() =>
+        onUpload(file, controller.signal, (uploaded, total) =>
+          update((current) => (current.upload === token ? { ...current, progress: { uploaded, total } } : current)),
+        ),
+      )
+      .then(
+        (result) => settle(result, null),
+        (error: unknown) => settle(null, error),
+      );
+  };
+
+  const cancelUpload = () => {
+    const active = activeUpload.current;
+    if (!active || draft.canceling) return;
+    active.controller.abort();
+    update((current) => (current.upload === active.token ? { ...current, canceling: true } : current));
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent title="Insert video" description="Upload an MP4 or WebM video up to 100 MB." onClosed={after.onClosed}>
+        <form
+          className="flex flex-col gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!draft.uploaded || uploading || !open) return;
+            after.defer(() => onSubmit(draft.uploaded!));
+            onOpenChange(false);
+          }}
+        >
+          <label className="flex flex-col gap-1 text-sm font-medium text-ink-2">
+            Video file
+            <div className="flex gap-2">
+              <input
+                ref={fileInput}
+                type="file"
+                accept="video/mp4,video/webm,.mp4,.webm"
+                className="hidden"
+                disabled={uploading}
+                onChange={(event) => {
+                  const input = event.currentTarget;
+                  const selection = readSelectedFile(input);
+                  if (selection.error) {
+                    update((current) => ({ ...current, error: selection.error }));
+                    return;
+                  }
+                  if (selection.file) startUpload(selection.file, input);
+                }}
+                data-testid="video-file"
+              />
+              {onUpload && (
+                <button
+                  type="button"
+                  className="btn btn-outline shrink-0"
+                  onClick={() => fileInput.current?.click()}
+                  disabled={uploading}
+                  data-testid="video-upload"
+                >
+                  Choose…
+                </button>
+              )}
+            </div>
+          </label>
+          {draft.file && !uploading && !draft.error && (
+            <p className="text-sm text-ink-3" data-testid="video-file-name">
+              {draft.uploaded ? `${draft.uploaded.name} is ready to insert.` : draft.fileName}
+            </p>
+          )}
+          {uploading && (
+            <div className="flex flex-col gap-2 rounded-lg border border-line bg-surface-2 p-3" data-testid="video-upload-progress">
+              <div className="flex items-center justify-between gap-3 text-sm text-ink-2">
+                <span className="min-w-0 truncate">{draft.canceling ? "Cancelling upload…" : `Uploading ${draft.fileName ?? "video"} (${percent}%)`}</span>
+                <button type="button" className="btn btn-ghost shrink-0" onClick={cancelUpload} disabled={draft.canceling} data-testid="video-cancel">
+                  {draft.canceling ? "Cancelling…" : "Cancel upload"}
+                </button>
+              </div>
+              <progress className="w-full" value={draft.progress?.uploaded ?? 0} max={draft.progress?.total ?? 1} aria-label="Video upload progress" />
+            </div>
+          )}
+          {draft.error && (
+            <div className="text-sm text-danger wrap-anywhere" role="alert" data-testid="video-upload-error">
+              {draft.error}
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-1">
+            <button type="button" className="btn btn-ghost" onClick={() => onOpenChange(false)}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={uploading || !draft.uploaded} data-testid="video-submit">
               Insert
             </button>
           </div>

@@ -1,5 +1,6 @@
 import { handler, json, readJson, requireUser, HttpError } from "@/server/http";
 import { deleteAccount, isDemoAccount, requireBrowserSession } from "@/server/account";
+import { VideoAssetError } from "@/server/video-assets";
 import { activeWebhooksFor, startWebhookDispatcher } from "@/server/webhooks";
 import { agentMentionSlug } from "@/editor/collab/mentions";
 import { isAgentMentionUnique } from "@/server/tokens";
@@ -44,6 +45,11 @@ export const DELETE = handler(async (req: Request) => {
   const expected = user.login ?? "";
   if (!expected || confirm.toLowerCase() !== expected.toLowerCase()) throw new HttpError(400, "Confirmation does not match your login");
   if (isDemoAccount(user.login)) throw new HttpError(403, "The shared demo account cannot be deleted");
-  await deleteAccount({ id: user.id, login: user.login });
+  try {
+    await deleteAccount({ id: user.id, login: user.login });
+  } catch (error) {
+    if (error instanceof VideoAssetError) throw new HttpError(error.status, error.message);
+    throw error;
+  }
   return json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
 });

@@ -30,6 +30,7 @@ import {
   Strikethrough,
   SquareCode,
   SquarePlay,
+  Video,
   MessageSquarePlus,
 } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
@@ -116,6 +117,7 @@ export const Toolbar = memo(function Toolbar({
   format,
   onComment,
   onImage,
+  onVideo,
   onCard,
   onTable,
 }: {
@@ -124,6 +126,7 @@ export const Toolbar = memo(function Toolbar({
   format: FormatState;
   onComment: () => void;
   onImage: () => void;
+  onVideo: () => void;
   /** Opens "Video or post from a link" (#2317). */
   onCard: () => void;
   onTable: () => void;
@@ -339,6 +342,9 @@ export const Toolbar = memo(function Toolbar({
         </ToolButton>
         <ToolButton label="Image" disabled={dis} onClick={run("edit", onImage)} testId="tb-image">
           <ImageIcon size={18} />
+        </ToolButton>
+        <ToolButton label="Upload video" disabled={dis} onClick={run("edit", onVideo)} testId="tb-video">
+          <Video size={18} />
         </ToolButton>
         <ToolButton label="Video or post from a link" disabled={dis} onClick={run("edit", onCard)} testId="tb-card">
           <SquarePlay size={18} />

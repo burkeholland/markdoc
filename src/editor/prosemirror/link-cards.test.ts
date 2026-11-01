@@ -28,9 +28,11 @@ import { CARD_FRAME_HOSTS, MAX_CARD_FRAMES } from "../markdown/link-cards";
 import { EditorActions } from "@/components/editor/actions";
 import { CARD_FRAME_DELAY_MS, createNodeViews } from "./nodeviews";
 import { createRichEditorState, setEditable } from "./setup";
+import { typedCardCandidateKey } from "./links";
 import { refreshRichHighlights } from "./highlights";
 import { cardLinkParagraph, insertLinkCard, selectedCard, showCardAsText, showLinkAsCard, showSelectedCardAsText } from "./commands";
 import { LINK_CARDS_STORAGE_KEY } from "../../lib/link-cards-setting";
+import { markdownBindingKey } from "../sync/markdown-binding";
 
 // jsdom has no layout: ProseMirror asks a Range for its boxes when it scrolls the selection into view.
 Range.prototype.getClientRects ??= () => [] as unknown as DOMRectList;
@@ -835,9 +837,12 @@ describe("link cards in the rich pane (#2317)", () => {
     });
     const off = () => localStorage.setItem(LINK_CARDS_STORAGE_KEY, "off");
     /** Type `link` at the end of the document, as a person does: character by character into the preview. */
-    function typeAtEnd(view: EditorView, link: string) {
+    async function typeAtEnd(view: EditorView, link: string) {
       view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.doc.content.size - 1)));
-      for (const char of link) view.dispatch(view.state.tr.insertText(char));
+      for (const char of link) {
+        view.dispatch(view.state.tr.insertText(char));
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+      }
     }
 
     it("off: a known link pasted on an empty line stays the link it is, written in angle brackets", () => {
@@ -858,17 +863,27 @@ describe("link cards in the rich pane (#2317)", () => {
       }
     });
 
-    it("Enter never makes a card, with the setting on or off: a typed link, a link shown as text, <link> and [link](link) stay links", () => {
+    it("Enter converts only a newly typed link when enabled; shown-as-text and old links stay links", async () => {
       for (const setting of ["on", "off"]) {
         localStorage.setItem(LINK_CARDS_STORAGE_KEY, setting);
 
-        // Typed key by key alone on its line: the text keeps it in angle brackets, and Enter adds a line.
+        // Typed key by key on its own line: Enter converts only when the setting is on.
         const typed = open("Intro");
         typed.view.dispatch(typed.view.state.tr.insert(typed.view.state.doc.content.size, schema.nodes.paragraph.create()));
-        typeAtEnd(typed.view, VIDEO);
+        await typeAtEnd(typed.view, VIDEO);
+        expect(typedCardCandidateKey.getState(typed.view.state)?.text).toBe(VIDEO);
         typed.key("Enter");
-        expect(typed.shape(), setting).toBe(`p(Intro) | p(${VIDEO}) | p()`);
-        expect(typed.text(), setting).toContain(`<${VIDEO}>`);
+        if (setting === "on") {
+          expect(typed.shape(), setting).toBe(`p(Intro) | card(${VIDEO}) | p()`);
+          expect(typed.text(), setting).toBe(`Intro\n\n${VIDEO}`);
+        } else {
+          expect(typed.shape(), setting).toBe(`p(Intro) | p(${VIDEO}) | p()`);
+          expect(typed.text(), setting).toContain(`<${VIDEO}>`);
+        }
+        if (setting === "on") {
+          typed.session.undo();
+          expect(typed.shape()).toBe(`p(Intro) | p(${VIDEO}) | p()`);
+        }
 
         // A card, "Show as text" (which leaves the caret at the end of the link), then Enter: the choice holds.
         const shown = open(`Intro\n\n${VIDEO}\n\nOutro`);
@@ -888,6 +903,55 @@ describe("link cards in the rich pane (#2317)", () => {
           expect(old.cards(), `${setting} ${source}`).toHaveLength(0);
         }
       }
+    });
+
+    it("keeps a typed URL intact in lists, quotes, table cells and headings (#2353)", () => {
+      const url = "https://example.com/a-long-path";
+      const examples = [
+        ["list item", "- Link: "],
+        ["quote", "> Link: "],
+        ["table cell", "| Label |\n| --- |\n| Link: |"],
+        ["heading", "# Link: "],
+      ] as const;
+
+      for (const [label, source] of examples) {
+        const editor = open(source);
+        let end = 0;
+        editor.view.state.doc.descendants((node, pos) => {
+          if (node.isTextblock) end = pos + node.nodeSize - 1;
+        });
+        editor.view.dispatch(editor.view.state.tr.setSelection(TextSelection.create(editor.view.state.doc, end)));
+        for (const char of url) editor.view.dispatch(editor.view.state.tr.insertText(char));
+
+        expect(editor.text(), label).toContain(url);
+        expect(editor.text(), label).not.toContain("<https://example.com");
+        expect(editor.text(), label).not.toContain("[https://example.com");
+        const linkedText: string[] = [];
+        editor.view.state.doc.descendants((node) => {
+          if (node.isText && schema.marks.link.isInSet(node.marks)) linkedText.push(node.text!);
+        });
+        expect(linkedText, label).toEqual([]);
+      }
+    });
+
+    it("does not convert a URL appended to existing text, or a link restored through undo/redo or remote edits", async () => {
+      localStorage.setItem(LINK_CARDS_STORAGE_KEY, "on");
+      const inline = open("Link: ");
+      await typeAtEnd(inline.view, VIDEO);
+      inline.key("Enter");
+      expect(inline.shape()).toBe(`p(Link: ${VIDEO}) | p()`);
+
+      const restored = open("");
+      await typeAtEnd(restored.view, VIDEO);
+      restored.session.undo();
+      restored.session.redo();
+      restored.key("Enter");
+      expect(restored.shape()).toBe(`p(${VIDEO}) | p()`);
+
+      const remote = open("");
+      remote.view.dispatch(remote.view.state.tr.insertText(VIDEO).setMeta(markdownBindingKey, { remote: true }));
+      remote.key("Enter");
+      expect(remote.shape()).toBe(`p(${VIDEO}) | p()`);
     });
 
     it("someone who cannot edit gets nothing from Enter", () => {

@@ -18,6 +18,7 @@ export interface SlashContext {
   /** The rich editor; null when the item was picked in the source editor. */
   view: EditorView | null;
   openImage: () => void;
+  openVideo: () => void;
   /** Opens "Video or post from a link" (#2317). */
   openCard: () => void;
   openLink: () => void;
@@ -125,8 +126,8 @@ export const SLASH_ITEMS: readonly SlashItem[] = [
   { id: "image", title: "Image", keywords: ["picture", "photo", "img", "upload"], icon: "Image", group: "Insert", run: (ctx) => ctx.openImage() },
   { id: "link", title: "Link", keywords: ["url", "href", "anchor"], icon: "Link", group: "Insert", run: (ctx) => ctx.openLink() },
   {
-    // After Link, so "/link" still offers Link first. A card is a block of its own at the top level of the document
-    // (#2317), so it is not offered in a table.
+    // After Link, so "/link" still offers Link first; before Upload video, so "/video" opens the card.
+    // A card is a block of its own at the top level of the document (#2317), so it is not offered in a table.
     id: "card",
     title: "Video or post from a link",
     description: "Paste a link and it becomes a card",
@@ -136,6 +137,7 @@ export const SLASH_ITEMS: readonly SlashItem[] = [
     available: notInTable,
     run: (ctx) => ctx.openCard(),
   },
+  { id: "video", title: "Upload video", keywords: ["mp4", "webm", "movie", "clip", "upload"], icon: "Video", group: "Insert", available: notInTable, run: (ctx) => ctx.openVideo() },
   {
     id: "comment",
     title: "Comment",

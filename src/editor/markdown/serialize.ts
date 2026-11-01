@@ -196,6 +196,10 @@ const nodes: Record<string, NodeSerializer> = {
     state.text(String(node.attrs.url), false);
     state.closeBlock(node);
   },
+  video(state, node) {
+    state.write(`[${(state as State).escImageAlt(String(node.attrs.name || "Video"))}](${escapeDestination(String(node.attrs.src))})`);
+    state.closeBlock(node);
+  },
   image(state, node) {
     state.write(
       "![" +
@@ -406,4 +410,3 @@ export function serializeBlocks(blocks: PMNode[]): string {
   if (blocks.length === 0) return "";
   return markdownSerializer.serialize(schema.nodes.doc.create(null, blocks));
 }
-

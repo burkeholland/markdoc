@@ -4,13 +4,12 @@
  * never parsed as a URL (a URL parser forgives too much: upper case, user names, ports, back slashes).
  *
  * The frame address is never copied from the link. It is the provider's fixed host plus a path built from
- * the parts a pattern captured, and every captured part comes from a small alphabet (letters, digits,
- * `_`, `-`).
+ * captured ids and fixed path segments; no captured part can add a host, query key, or script.
  *
  * Packages only, no `@/` alias, and only syntax Node can strip: the reader's render worker will import
  * this file too (see `src/server/export/render-markdown.ts`).
  */
-export type CardProviderId = "youtube" | "x";
+export type CardProviderId = "youtube" | "x" | "facebook" | "linkedin" | "vimeo" | "loom" | "tiktok";
 
 /** How the frame is sized: a 16 by 9 player, or a tall box that scrolls inside (a post has no fixed height). */
 export type CardKind = "video" | "post";
@@ -34,9 +33,9 @@ export interface LinkCard {
 export const CARD_SANDBOX = "allow-scripts allow-popups allow-popups-to-escape-sandbox";
 
 /**
- * The same plus the provider's own origin, for the providers whose embed page stays blank without it
- * (measured: YouTube and X). That is safe only because the frame is never the app's own origin: with
- * its own origin and scripts a frame could lift its sandbox. `link-card-frame.ts` refuses to make one.
+ * The same plus the provider's own origin, when an embed page needs its origin context. That is safe
+ * only because the frame is never the app's own origin: with its own origin and scripts a frame could
+ * lift its sandbox. `link-card-frame.ts` refuses to make one.
  */
 export const CARD_SANDBOX_OWN_ORIGIN = "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox";
 
@@ -54,9 +53,11 @@ export const MAX_CARD_URL_LENGTH = 512;
 
 /**
  * Everything a card link may contain at all: `https`, a lower-case host, then unreserved characters and
- * `% / ? & = +`. No spaces, quotes, angle brackets, back slashes, `@`, `:`, `#` or non-ASCII.
+ * `% / ? & = + : @`. No spaces, quotes, angle brackets, back slashes, `#` or non-ASCII. `:` is needed for
+ * LinkedIn's `urn:li:*` post addresses and `@` for TikTok's username path; each provider still has its own
+ * anchored pattern.
  */
-const SAFE_URL = /^https:\/\/[a-z0-9.-]+\/[A-Za-z0-9\-._~%/?&=+]*$/;
+const SAFE_URL = /^https:\/\/[a-z0-9.-]+\/[A-Za-z0-9\-._~%/?&=+:@]*$/;
 
 /**
  * The first of two checks, each of which alone refuses a link that is not a card: the link is short and
@@ -85,7 +86,7 @@ function queryValue(query: string | undefined, key: string): string | null {
 interface Rule {
   pattern: RegExp;
   /** The card for a match: its label and the path (starting with `/`) on the provider's frame host. */
-  card: (match: RegExpExecArray) => { label: string; framePath: string } | null;
+  card: (match: RegExpExecArray) => { label: string; framePath: string; kind?: CardKind } | null;
 }
 
 interface Provider {
@@ -102,14 +103,27 @@ interface Provider {
 
 const YOUTUBE_ID = "([A-Za-z0-9_-]{11})";
 
-/** `t=90`, `t=90s` or `start=90` becomes `?start=90`; any other form is dropped. */
+/** A YouTube timestamp in seconds or `1h2m3s` form, or null when it is not a timestamp. */
+function youtubeTimestampSeconds(value: string): number | null {
+  const numeric = /^([0-9]{1,6})s?$/.exec(value);
+  if (numeric) return Number(numeric[1]);
+  const parts = /^(?:(\d{1,3})h)?(?:(\d{1,3})m)?(?:(\d{1,3})s)?$/.exec(value);
+  if (!parts || !(parts[1] || parts[2] || parts[3])) return null;
+  const seconds = Number(parts[1] ?? 0) * 3600 + Number(parts[2] ?? 0) * 60 + Number(parts[3] ?? 0);
+  return Number.isSafeInteger(seconds) && seconds <= 999999 ? seconds : null;
+}
+
+/** `t=90`, `t=1m30s` or `start=90` becomes `?start=90`; any other form is dropped. */
 function youtubeStart(query: string | undefined): string {
   const value = queryValue(query, "t") ?? queryValue(query, "start");
-  const seconds = value ? /^([0-9]{1,6})s?$/.exec(value) : null;
-  return seconds ? `?start=${seconds[1]}` : "";
+  const seconds = value ? youtubeTimestampSeconds(value) : null;
+  return seconds === null ? "" : `?start=${seconds}`;
 }
 
 const youtubeVideo = (id: string, query: string | undefined) => ({ label: "YouTube video", framePath: `/embed/${id}${youtubeStart(query)}` });
+const numericId = "([0-9]{1,20})";
+const facebookPostFrame = (href: string, kind: "post" | "video") =>
+  `/plugins/${kind}.php?href=${encodeURIComponent(href)}&show_text=true&width=500`;
 
 const PROVIDERS: readonly Provider[] = [
   {
@@ -146,6 +160,121 @@ const PROVIDERS: readonly Provider[] = [
       },
     ],
   },
+  {
+    id: "facebook",
+    name: "Facebook",
+    kind: "post",
+    frameHost: "https://www.facebook.com",
+    ownOrigin: true,
+    rules: [
+      {
+        pattern: new RegExp(`^https://(?:www\\.)?facebook\\.com/([A-Za-z0-9._-]{1,100})/(posts|videos)/${numericId}${QUERY}$`),
+        card: (m) => {
+          const kind = m[2] === "videos" ? "video" : "post";
+          const href = `https://www.facebook.com/${m[1]}/${m[2]}/${m[3]}`;
+          return { label: kind === "video" ? "Facebook video" : "Facebook post", kind, framePath: facebookPostFrame(href, kind) };
+        },
+      },
+      {
+        pattern: new RegExp(`^https://(?:www\\.)?facebook\\.com/watch/?${QUERY}$`),
+        card: (m) => {
+          const id = queryValue(m[1], "v");
+          return id && /^[0-9]{1,20}$/.test(id)
+            ? { label: "Facebook video", kind: "video", framePath: facebookPostFrame(`https://www.facebook.com/watch/?v=${id}`, "video") }
+            : null;
+        },
+      },
+      {
+        pattern: new RegExp(`^https://(?:www\\.)?facebook\\.com/reel/${numericId}/?${QUERY}$`),
+        card: (m) => ({
+          label: "Facebook video",
+          kind: "video",
+          framePath: facebookPostFrame(`https://www.facebook.com/reel/${m[1]}`, "video"),
+        }),
+      },
+      {
+        pattern: new RegExp(`^https://(?:www\\.)?facebook\\.com/permalink\\.php${QUERY}$`),
+        card: (m) => {
+          const story = queryValue(m[1], "story_fbid");
+          const page = queryValue(m[1], "id");
+          return story && page && /^[0-9]{1,20}$/.test(story) && /^[0-9]{1,20}$/.test(page)
+            ? { label: "Facebook post", kind: "post", framePath: facebookPostFrame(`https://www.facebook.com/permalink.php?story_fbid=${story}&id=${page}`, "post") }
+            : null;
+        },
+      },
+    ],
+  },
+  {
+    id: "linkedin",
+    name: "LinkedIn",
+    kind: "post",
+    frameHost: "https://www.linkedin.com",
+    ownOrigin: true,
+    rules: [
+      {
+        pattern: new RegExp(`^https://(?:www\\.)?linkedin\\.com/feed/update/urn:li:(activity|share|ugcPost):${numericId}/?${QUERY}$`),
+        card: (m) => ({ label: "LinkedIn post", framePath: `/embed/feed/update/urn:li:${m[1]}:${m[2]}` }),
+      },
+      {
+        pattern: new RegExp(`^https://(?:www\\.)?linkedin\\.com/posts/[A-Za-z0-9_-]{1,120}_activity-${numericId}(?:-[A-Za-z0-9_-]{1,120})?${QUERY}$`),
+        card: (m) => ({ label: "LinkedIn post", framePath: `/embed/feed/update/urn:li:activity:${m[1]}` }),
+      },
+    ],
+  },
+  {
+    id: "vimeo",
+    name: "Vimeo",
+    kind: "video",
+    frameHost: "https://player.vimeo.com",
+    ownOrigin: true,
+    rules: [
+      {
+        pattern: new RegExp(`^https://(?:www\\.)?vimeo\\.com/${numericId}(?:/([A-Za-z0-9]{1,64}))?${QUERY}$`),
+        card: (m) => {
+          const queryHash = queryValue(m[3], "h");
+          const hash = queryHash ?? m[2];
+          return { label: "Vimeo video", framePath: `/video/${m[1]}${hash && /^[A-Za-z0-9]{1,64}$/.test(hash) ? `?h=${hash}` : ""}` };
+        },
+      },
+      {
+        pattern: new RegExp(`^https://player\\.vimeo\\.com/video/${numericId}${QUERY}$`),
+        card: (m) => {
+          const hash = queryValue(m[2], "h");
+          return { label: "Vimeo video", framePath: `/video/${m[1]}${hash && /^[A-Za-z0-9]{1,64}$/.test(hash) ? `?h=${hash}` : ""}` };
+        },
+      },
+    ],
+  },
+  {
+    id: "loom",
+    name: "Loom",
+    kind: "video",
+    frameHost: "https://www.loom.com",
+    ownOrigin: true,
+    rules: [
+      {
+        pattern: /^https:\/\/(?:www\.)?loom\.com\/share\/([A-Za-z0-9_-]{16,64})(?:\?[A-Za-z0-9\-._~%&=+]*)?$/,
+        card: (m) => ({ label: "Loom video", framePath: `/embed/${m[1]}` }),
+      },
+    ],
+  },
+  {
+    id: "tiktok",
+    name: "TikTok",
+    kind: "video",
+    frameHost: "https://www.tiktok.com",
+    ownOrigin: true,
+    rules: [
+      {
+        pattern: /^https:\/\/www\.tiktok\.com\/@[A-Za-z0-9._-]{1,24}\/video\/([0-9]{10,25})(?:\?[A-Za-z0-9\-._~%&=+]*)?$/,
+        card: (m) => ({ label: "TikTok video", framePath: `/player/v1/${m[1]}` }),
+      },
+      {
+        pattern: /^https:\/\/www\.tiktok\.com\/player\/v1\/([0-9]{10,25})(?:\?[A-Za-z0-9\-._~%&=+]*)?$/,
+        card: (m) => ({ label: "TikTok video", framePath: `/player/v1/${m[1]}` }),
+      },
+    ],
+  },
 ];
 
 /** The sites a link can be a card for, by name, in the order of the list. */
@@ -171,7 +300,7 @@ export function matchLinkCard(url: string): LinkCard | null {
       return {
         provider: provider.id,
         label: card.label,
-        kind: provider.kind,
+        kind: card.kind ?? provider.kind,
         frameUrl: provider.frameHost + card.framePath,
         sandbox: provider.ownOrigin ? CARD_SANDBOX_OWN_ORIGIN : CARD_SANDBOX,
       };

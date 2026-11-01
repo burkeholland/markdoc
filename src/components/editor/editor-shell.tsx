@@ -16,7 +16,8 @@ import type { HeadingInfo } from "@/editor/markdown/parse";
 import { decideInsert, wrapInCodeFence } from "@/editor/markdown/renderable";
 import { activateHighlight } from "@/editor/highlight-activation";
 import { api, ApiError, apiErrorText, type SyncStatusDto, type VersionSummary } from "@/lib/api";
-import { uploadAsset } from "@/lib/api";
+import { uploadAsset, uploadVideoAsset } from "@/lib/api";
+import type { UploadedVideo } from "@/lib/video-limits";
 import { copyText } from "@/lib/clipboard";
 import { readDownloadFilename } from "@/lib/download-filename";
 import { isManagedGithubLogin } from "@/lib/github-login";
@@ -112,6 +113,7 @@ const CommitDialog = lazyOnFirstUse(loadGitHubDialog, (m) => m.CommitDialog);
 const SyncDialog = lazyOnFirstUse(loadSyncDialog, (m) => m.SyncDialog);
 const LinkDialog = lazyOnFirstUse(loadDialogs, (m) => m.LinkDialog);
 const ImageDialog = lazyOnFirstUse(loadDialogs, (m) => m.ImageDialog);
+const VideoDialog = lazyOnFirstUse(loadDialogs, (m) => m.VideoDialog);
 const TableDialog = lazyOnFirstUse(loadDialogs, (m) => m.TableDialog);
 const CardDialog = lazyOnFirstUse(loadCardDialog, (m) => m.CardDialog);
 const NameVersionDialog = lazyOnFirstUse(loadDialogs, (m) => m.NameVersionDialog);
@@ -2590,7 +2592,13 @@ export function EditorShell({
 
   // Pasted, dropped and dialog-chosen images all go through the document's asset store.
   const uploadImage = useCallback((file: File) => uploadAsset(doc.id, file), [doc.id]);
+  const uploadVideo = useCallback(
+    (file: File, signal: AbortSignal, onProgress: (uploadedBytes: number, totalBytes: number) => void) =>
+      uploadVideoAsset(doc.id, file, signal, onProgress),
+    [doc.id],
+  );
   const onImageError = useCallback((message: string) => toast(`Image upload failed: ${message}`, "error"), [toast]);
+  const onVideoError = useCallback((message: string) => toast(`Video upload failed: ${message}`, "error"), [toast]);
   const onNotice = useCallback((message: string, action?: NoticeAction) => toast(message, "info", action), [toast]);
 
   // A .md/.txt file dropped on either pane: ask whether to replace, insert at the drop point or open as a new document.
@@ -2889,6 +2897,9 @@ export function EditorShell({
   const openImage = useCallback(() => {
     if (session.canEdit) setDialog("image");
   }, [session]);
+  const openVideo = useCallback(() => {
+    if (session.canEdit) setDialog("video");
+  }, [session]);
   const openTable = useCallback(() => {
     if (session.canEdit) setDialog("table");
   }, [session]);
@@ -3182,7 +3193,7 @@ export function EditorShell({
   // format change) does not re-render the closed ones.
   const dialogOpenChange = useMemo(() => {
     const make = (kind: Exclude<DialogKind, null>) => (open: boolean) => setDialog(open ? kind : null);
-    return { share: make("share"), publish: make("publish"), link: make("link"), image: make("image"), card: make("card"), table: make("table"), shortcuts: make("shortcuts") };
+    return { share: make("share"), publish: make("publish"), link: make("link"), image: make("image"), video: make("video"), card: make("card"), table: make("table"), shortcuts: make("shortcuts") };
   }, []);
   const onPublishDocChange = useCallback((d: DocumentDto) => {
     setDoc(d);
@@ -3191,6 +3202,7 @@ export function EditorShell({
   const applyLink = useCallback((href: string, text: string) => actions.applyLink(href, text), [actions]);
   const removeLink = useCallback(() => actions.removeLink(), [actions]);
   const insertImage = useCallback((src: string, alt: string) => actions.insertImage(src, alt), [actions]);
+  const insertVideo = useCallback((video: UploadedVideo) => actions.insertVideo(video.url, video.name), [actions]);
   const insertTable = useCallback((rows: number, cols: number) => actions.insertTable(rows, cols), [actions]);
   const insertCard = useCallback((url: string) => actions.insertCard(url), [actions]);
   const closeFileDrop = useCallback(() => setFileDrop(null), []);
@@ -3256,6 +3268,7 @@ export function EditorShell({
     sync: useEverTrue(syncOpen),
     link: useEverTrue(dialog === "link"),
     image: useEverTrue(dialog === "image"),
+    video: useEverTrue(dialog === "video"),
     table: useEverTrue(dialog === "table"),
     card: useEverTrue(dialog === "card"),
     versionName: useEverTrue(dialog === "versionName"),
@@ -3335,7 +3348,7 @@ export function EditorShell({
           connectAgentNonce={connectAgentNonce}
           embed={embed}
         />
-        <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onCard={openCard} onTable={openTable} />
+        <Toolbar session={session} actions={actions} format={format} onComment={startComment} onImage={openImage} onVideo={openVideo} onCard={openCard} onTable={openTable} />
         {!isPhone && <HintBar session={session} actions={actions} onConnectAgent={openConnectAgent} onComment={startMentionComment} />}
         {findOpen && (
           <FindBar
@@ -3429,6 +3442,8 @@ export function EditorShell({
                         onHighlightClick={onHighlightClick}
                         uploadImage={uploadImage}
                         onImageError={onImageError}
+                        uploadVideo={uploadVideo}
+                        onVideoError={onVideoError}
                         onNotice={onNotice}
                         onMarkdownFileDrop={onCodeFileDrop}
                         lineWrapping={lineWrapping}
@@ -3443,6 +3458,7 @@ export function EditorShell({
                     controller={sourceSlashMenu}
                     containerRef={codeColumnRef}
                     onImage={openImage}
+                    onVideo={openVideo}
                     onCard={openCard}
                     onLink={openLink}
                     onComment={startComment}
@@ -3472,7 +3488,7 @@ export function EditorShell({
                     )}
                     <SelectionBubble view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} onComment={startComment} onLink={openLink} />
                     <TableMenu view={richView} session={session} actions={actions} format={format} containerRef={richScrollRef} />
-                    <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onCard={openCard} onLink={openLink} onComment={startComment} onConnectAgent={openConnectAgent} />
+                    <SlashMenu view={richView} session={session} controller={slashMenu} containerRef={richScrollRef} onImage={openImage} onVideo={openVideo} onCard={openCard} onLink={openLink} onComment={startComment} onConnectAgent={openConnectAgent} />
                     <RichPane
                       session={session}
                       hidden={showRichPlaceholder}
@@ -3483,6 +3499,8 @@ export function EditorShell({
                       onCommentShortcut={startComment}
                       uploadImage={uploadImage}
                       onImageError={onImageError}
+                      uploadVideo={uploadVideo}
+                      onVideoError={onVideoError}
                       onNotice={onNotice}
                       onMarkdownFileDrop={onRichFileDrop}
                       slashMenu={slashMenu.handlers}
@@ -3556,6 +3574,7 @@ export function EditorShell({
         )}
         {everOpened.link && <LinkDialog open={dialog === "link"} onOpenChange={dialogOpenChange.link} initial={linkInitial} onSubmit={applyLink} onRemove={removeLink} />}
         {everOpened.image && <ImageDialog open={dialog === "image"} onOpenChange={dialogOpenChange.image} onSubmit={insertImage} onUpload={uploadImage} />}
+        {everOpened.video && <VideoDialog open={dialog === "video"} onOpenChange={dialogOpenChange.video} onSubmit={insertVideo} onUpload={uploadVideo} />}
         {everOpened.fileDrop && <FileDropDialog pending={fileDrop} onClose={closeFileDrop} canEdit={canEdit} onReplace={replaceAll} onInsert={insertAt} onError={fileDropError} />}
         {everOpened.table && <TableDialog open={dialog === "table"} onOpenChange={dialogOpenChange.table} onSubmit={insertTable} />}
         {everOpened.card && <CardDialog open={dialog === "card"} onOpenChange={dialogOpenChange.card} onSubmit={insertCard} />}

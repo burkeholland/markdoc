@@ -65,7 +65,7 @@ describe("legacy ownership transfer", () => {
         committed: false,
         verified: true,
         transferId: null,
-        schema: { userForeignKeys: 11, softUserReferences: 4, loginReferences: 3, rollbackTableReady: true },
+        schema: { userForeignKeys: 12, softUserReferences: 4, loginReferences: 3, rollbackTableReady: true },
         selection: {
           sourceUsers: 1,
           sourceLoginLength: SOURCE_LOGIN.length,
@@ -111,6 +111,10 @@ describe("legacy ownership transfer", () => {
       const after = await snapshot(fixture.database);
       expect(after.user.some((row) => row.includes(SOURCE_ID))).toBe(false);
       expect(after.document.filter((row) => row.includes(`"owner_id": "${TARGET_ID}"`))).toHaveLength(9);
+      const transferredVideo = await fixture.database.query<{ user_id: string }>(
+        `SELECT user_id FROM video_upload WHERE id = 'video-upload-legacy'`,
+      );
+      expect(transferredVideo.rows).toEqual([{ user_id: TARGET_ID }]);
       const references = await fixture.database.query<{ count: string }>(
         `SELECT (
            (SELECT COUNT(*) FROM document WHERE owner_id = $1 OR last_edited_by = $1) +
@@ -120,6 +124,7 @@ describe("legacy ownership transfer", () => {
            (SELECT COUNT(*) FROM recent WHERE user_id = $1) +
            (SELECT COUNT(*) FROM api_token WHERE user_id = $1) +
            (SELECT COUNT(*) FROM asset WHERE user_id = $1) +
+           (SELECT COUNT(*) FROM video_upload WHERE user_id = $1) +
            (SELECT COUNT(*) FROM agent_request WHERE user_id = $1) +
            (SELECT COUNT(*) FROM review WHERE user_id = $1) +
            (SELECT COUNT(*) FROM webhook WHERE user_id = $1) +

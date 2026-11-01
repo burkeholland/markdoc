@@ -50,7 +50,7 @@ function mount(doc = "Hello\n\n") {
   });
   views.push(view);
   const session = { contentReady: true, canEdit: true, canComment: true, canCreateComment: true, undoManager: { stopCapturing: vi.fn() } };
-  const callbacks = { onImage: vi.fn(), onCard: vi.fn(), onLink: vi.fn(), onComment: vi.fn(), onConnectAgent: vi.fn() };
+  const callbacks = { onImage: vi.fn(), onVideo: vi.fn(), onCard: vi.fn(), onLink: vi.fn(), onComment: vi.fn(), onConnectAgent: vi.fn() };
   render(
     <SlashMenu view={null} source={{ view, api }} session={session as unknown as CollabSession} controller={controller} containerRef={{ current: container }} {...callbacks} />,
     { container: document.body.appendChild(container) },

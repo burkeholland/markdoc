@@ -7,6 +7,7 @@ import type { CollabSession } from "@/editor/collab/session";
 import { createCodeApi, type CodeApi } from "@/editor/codemirror/api";
 import { createCodeEditorSetup, type CodeEditorSetup } from "@/editor/codemirror/setup";
 import type { ImageUploader } from "@/editor/prosemirror/images";
+import type { VideoUploader } from "@/lib/video-limits";
 import { setHighlights, type SourceHighlight } from "@/editor/codemirror/highlights";
 import { collectHighlights } from "@/editor/prosemirror/highlights";
 import type { NoticeAction } from "@/editor/markdown/tsv";
@@ -35,6 +36,9 @@ export interface CodePaneProps {
   /** Uploads a pasted or dropped image and returns its URL. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
+  /** Uploads a pasted or dropped MP4/WebM video file. */
+  uploadVideo?: VideoUploader;
+  onVideoError?: (message: string) => void;
   onNotice?: (message: string, action?: NoticeAction) => void;
   /** A dropped .md/.txt file and the source offset under the pointer. */
   onMarkdownFileDrop?: (file: File, at: number) => void;
@@ -48,6 +52,8 @@ interface CodePaneHandlers {
   onHighlightClick: CodePaneProps["onHighlightClick"];
   uploadImage: CodePaneProps["uploadImage"];
   onImageError: CodePaneProps["onImageError"];
+  uploadVideo: CodePaneProps["uploadVideo"];
+  onVideoError: CodePaneProps["onVideoError"];
   onNotice: CodePaneProps["onNotice"];
   onMarkdownFileDrop: CodePaneProps["onMarkdownFileDrop"];
 }
@@ -64,14 +70,14 @@ interface CodePaneVisit {
   lastHighlights: SourceHighlight[] | null;
 }
 
-export function CodePane({ session, onReady, onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop, lineWrapping, slashMenu }: CodePaneProps) {
+export function CodePane({ session, onReady, onSelection, onHighlightClick, uploadImage, onImageError, uploadVideo, onVideoError, onNotice, onMarkdownFileDrop, lineWrapping, slashMenu }: CodePaneProps) {
   const host = useRef<HTMLDivElement>(null);
   const authority = useRef<CodePaneVisit | null>(null);
-  const handlers = useRef<CodePaneHandlers>({ onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop });
+  const handlers = useRef<CodePaneHandlers>({ onSelection, onHighlightClick, uploadImage, onImageError, uploadVideo, onVideoError, onNotice, onMarkdownFileDrop });
 
   useLayoutEffect(() => {
-    handlers.current = { onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop };
-  }, [onSelection, onHighlightClick, uploadImage, onImageError, onNotice, onMarkdownFileDrop]);
+    handlers.current = { onSelection, onHighlightClick, uploadImage, onImageError, uploadVideo, onVideoError, onNotice, onMarkdownFileDrop };
+  }, [onSelection, onHighlightClick, uploadImage, onImageError, uploadVideo, onVideoError, onNotice, onMarkdownFileDrop]);
 
   useLayoutEffect(() => {
     const mountedHost = host.current;
@@ -104,6 +110,15 @@ export function CodePane({ session, onReady, onSelection, onHighlightClick, uplo
         : undefined,
       onImageError: (message) => {
         if (hasAuthority()) handlers.current.onImageError?.(message);
+      },
+      uploadVideo: handlers.current.uploadVideo
+        ? (file, signal, onProgress) => {
+            if (!hasAuthority()) return Promise.reject(new Error("Code editor visit is no longer active"));
+            return handlers.current.uploadVideo!(file, signal, onProgress);
+          }
+        : undefined,
+      onVideoError: (message) => {
+        if (hasAuthority()) handlers.current.onVideoError?.(message);
       },
       onNotice: (message, action) => {
         if (hasAuthority()) handlers.current.onNotice?.(message, action);

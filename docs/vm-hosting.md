@@ -1059,6 +1059,7 @@ The app's own limits are all below that. Sizes are the request's
 | Route | Carries | The app's limit | Enforced | Largest body at the limit |
 | --- | --- | --- | --- | --- |
 | `POST /api/documents/:id/assets` | one picture, multipart `file` or a raw image body | 5 MiB (`MAX_ASSET_BYTES`) | the route, from `Content-Length`, then `src/server/assets.ts` on the bytes: `413 { error: "Images must be 5 MB or smaller" }` | 5,243,062 bytes for a 5 MiB `photo.png` (182 bytes of multipart frame); 5,243,256 with a 204-character file name |
+| `PUT /api/documents/:id/assets/videos/:uploadId/parts/:index` | one raw video upload chunk | 4 MiB (`VIDEO_CHUNK_BYTES`; 100 MiB per video across chunks) | the route checks the exact chunk length; the first chunk must have an MP4 or WebM container header | 4,194,304 bytes |
 | `PUT /api/documents/:id/content`, `POST /api/documents`, `POST /api/documents/:id/suggest` | a document's text as JSON | 2,000,000 characters, not bytes | the route's schema, after the body is read: `400` | 2,000,014 bytes for ASCII; 6,000,014 bytes for 2,000,000 CJK characters (three bytes each), answered `200` |
 | `POST /api/mcp` | one JSON-RPC request | 4 MiB (4,194,304 bytes), the MCP SDK's default | the SDK, after the token is checked: `413` JSON-RPC | 4,194,304 bytes answered `200`; 4,194,305 answered `413` |
 | `POST /api/import/file`, JSON | one text | 2 MiB of UTF-8 (`MAX_IMPORT_BYTES`) | `src/server/import-file.ts`: `413 { error: "Content is larger than 2 MB" }` | 2,097,186 bytes |

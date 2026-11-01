@@ -306,7 +306,7 @@ export const apiTokens = pgTable(
   (t) => [index("api_token_user_idx").on(t.userId), uniqueIndex("api_token_user_mention_slug_unique").on(t.userId, t.mentionSlug)],
 );
 
-/** Binary assets (images) embedded in documents. Bytes live in the database behind src/server/assets.ts. */
+/** Binary assets embedded in documents. Image bytes live in PostgreSQL; video bytes use external blob storage. */
 export const assets = pgTable(
   "asset",
   {
@@ -318,11 +318,63 @@ export const assets = pgTable(
     name: text("name").notNull(),
     mime: text("mime").notNull(),
     size: integer("size").notNull(),
-    sha256: text("sha256").notNull(),
-    data: bytea("data").notNull(),
+    sha256: text("sha256"),
+    data: bytea("data"),
+    storageKey: text("storage_key"),
     createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("asset_document_idx").on(t.documentId), uniqueIndex("asset_document_sha_idx").on(t.documentId, t.sha256)],
+);
+
+/** Metadata for a resumable video upload; video bytes never enter the asset table. */
+export const videoUploads = pgTable(
+  "video_upload",
+  {
+    id: text("id").primaryKey(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => users.id, { onDelete: "set null" }),
+    name: text("name").notNull(),
+    mime: text("mime").notNull(),
+    size: integer("size").notNull(),
+    chunkCount: integer("chunk_count").notNull(),
+    storageKey: text("storage_key").notNull(),
+    state: text("state").notNull().default("uploading"),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("video_upload_created_idx").on(t.createdAt), index("video_upload_document_idx").on(t.documentId)],
+);
+
+/** Per-chunk checksums make retrying an already-uploaded part safe and deterministic. */
+export const videoUploadParts = pgTable(
+  "video_upload_part",
+  {
+    uploadId: text("upload_id")
+      .notNull()
+      .references(() => videoUploads.id, { onDelete: "cascade" }),
+    partIndex: integer("part_index").notNull(),
+    size: integer("size").notNull(),
+    sha256: text("sha256").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.uploadId, t.partIndex] })],
+);
+
+/** Fixed database-backed leases enforce one anonymous streaming cap across all app instances. */
+export const videoStreamSlots = pgTable("video_stream_slot", {
+  id: integer("id").primaryKey(),
+  leaseId: text("lease_id"),
+  leaseUntil: timestamp("lease_until", { mode: "date", withTimezone: true }).notNull(),
+});
+
+/** Durable outbox for external video blobs whose document or upload rows have been removed. */
+export const videoStorageCleanup = pgTable(
+  "video_storage_cleanup",
+  {
+    storageKey: text("storage_key").primaryKey(),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("video_storage_cleanup_created_idx").on(t.createdAt)],
 );
 
 export type Asset = typeof assets.$inferSelect;

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { unzipSync, strFromU8 } from "fflate";
 
@@ -15,11 +15,28 @@ vi.mock("@/server/session-cookie", () => ({ decodeEmbedSession: async () => null
 
 const { getDb, schema } = await import("@/server/db");
 const { createDocument } = await import("@/server/documents");
+const { beginVideoUpload, sweepVideoStorageCleanup } = await import("@/server/video-assets");
+const { setVideoStorageForTests } = await import("@/server/video-storage");
 const { createFolder, moveDocumentsToFolder } = await import("@/server/folders");
 const { createApiToken } = await import("@/server/tokens");
 const { exportPaths, sanitizePathSegment } = await import("@/server/account");
 const me = await import("@/app/api/me/route");
 const exportAll = await import("@/app/api/me/export/route");
+type VideoStorage = import("@/server/video-storage").VideoStorage;
+
+function storageWithDiscards(discarded: string[]): VideoStorage {
+  return {
+    async putChunk() {},
+    async complete() {},
+    async clearParts() {},
+    async discard(key) {
+      discarded.push(key);
+    },
+    async stream() {
+      return new ReadableStream<Uint8Array>();
+    },
+  };
+}
 
 let sequence = 0;
 async function makeUser(login = `account-user-${++sequence}`): Promise<Actor> {
@@ -35,6 +52,8 @@ beforeEach(() => {
   actor = null;
   requestHeaders = new Headers();
 });
+
+afterEach(() => setVideoStorageForTests(null));
 
 describe("export paths", () => {
   it("sanitizes names and keeps them unique case-insensitively", () => {
@@ -104,16 +123,71 @@ describe("DELETE /api/me", () => {
     const mine = await createDocument({ ownerId: actor.id, title: "Mine", content: "x" });
     const theirs = await createDocument({ ownerId: other.id, title: "Theirs", content: "y" });
     const db = await getDb();
+    const videoId = "0123456789abcdef";
+    const discarded: string[] = [];
+    setVideoStorageForTests(storageWithDiscards(discarded));
+    await db.insert(schema.assets).values({
+      id: videoId,
+      documentId: mine.id,
+      name: "clip.mp4",
+      mime: "video/mp4",
+      size: 12,
+      data: null,
+      storageKey: `videos/${videoId}`,
+    });
     await db.insert(schema.collaborators).values({ documentId: theirs.id, login: actor.login.toUpperCase(), role: "editor" });
     await db.insert(schema.notifications).values({ id: `n-${sequence}`, userLogin: actor.login, documentId: theirs.id, kind: "share", refId: theirs.id });
 
     const res = await del({ confirm: ` ${actor.login.toUpperCase()} ` });
+    await sweepVideoStorageCleanup();
     expect(res.status).toBe(200);
     expect(await db.select().from(schema.users).where(eq(schema.users.id, actor.id))).toHaveLength(0);
     expect(await db.select().from(schema.documents).where(eq(schema.documents.id, mine.id))).toHaveLength(0);
     expect(await db.select().from(schema.documents).where(eq(schema.documents.id, theirs.id))).toHaveLength(1);
     expect(await db.select().from(schema.collaborators).where(eq(schema.collaborators.documentId, theirs.id))).toHaveLength(0);
     expect(await db.select().from(schema.notifications).where(eq(schema.notifications.userLogin, actor.login))).toHaveLength(0);
+    expect(discarded).toEqual([`videos/${videoId}`]);
+  });
+
+  it("returns 409 and preserves the account while a video upload is finalizing", async () => {
+    actor = await makeUser();
+    const first = await createDocument({ ownerId: actor.id, title: "Earlier video", content: "" });
+    const second = await createDocument({ ownerId: actor.id, title: "Finalizing", content: "" });
+    const [assetDocument, finalizingDocument] = [first, second].sort((a, b) => a.id.localeCompare(b.id));
+    const discarded: string[] = [];
+    setVideoStorageForTests(storageWithDiscards(discarded));
+    const videoId = "1123456789abcdef";
+    const db = await getDb();
+    await db.insert(schema.assets).values({
+      id: videoId,
+      documentId: assetDocument.id,
+      userId: actor.id,
+      name: "clip.mp4",
+      mime: "video/mp4",
+      size: 12,
+      sha256: null,
+      data: null,
+      storageKey: `videos/${videoId}`,
+    });
+    const { uploadId } = await beginVideoUpload({
+      documentId: finalizingDocument.id,
+      userId: actor.id,
+      name: "clip.mp4",
+      mime: "video/mp4",
+      size: 12,
+    });
+    await db.update(schema.videoUploads).set({ state: "completing" }).where(eq(schema.videoUploads.id, uploadId));
+
+    const response = await del({ confirm: actor.login });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: "A video upload is being finalized" });
+    expect(await db.select().from(schema.users).where(eq(schema.users.id, actor.id))).toHaveLength(1);
+    expect(await db.select().from(schema.documents).where(eq(schema.documents.id, assetDocument.id))).toHaveLength(1);
+    expect(await db.select().from(schema.documents).where(eq(schema.documents.id, finalizingDocument.id))).toHaveLength(1);
+    expect(await db.select().from(schema.assets).where(eq(schema.assets.id, videoId))).toHaveLength(1);
+    expect(await db.select().from(schema.videoStorageCleanup)).toHaveLength(0);
+    expect(discarded).toEqual([]);
   });
 
   it("refuses the shared demo account", async () => {

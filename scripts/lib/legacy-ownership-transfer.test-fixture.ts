@@ -30,6 +30,8 @@ export const FIXTURE_TABLES = [
   "user",
   "verificationToken",
   "version",
+  "video_upload",
+  "video_upload_part",
   "webhook",
   "webhook_delivery",
 ] as const;
@@ -48,6 +50,7 @@ export const FIXTURE_EXPECTED_DRY_RUN: Record<(typeof TRANSFER_COUNT_LABELS)[num
   "recent.user_id deduplicated": 1,
   "api_token.user_id moved": 1,
   "asset.user_id moved": 1,
+  "video_upload.user_id moved": 1,
   "agent_request.user_id moved": 1,
   "review.user_id moved": 1,
   "webhook.user_id moved": 1,
@@ -114,6 +117,8 @@ export async function seedLegacyOwnershipFixture(q: FixtureQuery): Promise<void>
 
   await q(`INSERT INTO api_token (id, user_id, name, mention_slug, prefix, token_hash) VALUES ('tok-legacy', $1, 'Copilot', 'copilot', 'mk_l', 'hash-legacy'), ('tok-target', $2, 'Reviewer', 'reviewer', 'mk_t', 'hash-target')`, [sourceId, targetId]);
   await q(`INSERT INTO asset (id, document_id, user_id, name, mime, size, sha256, data) VALUES ('asset-legacy', 'doc-a', $1, 'a.png', 'image/png', 1, 'sha-a', $3), ('asset-target', 'doc-t1', $2, 't.png', 'image/png', 1, 'sha-t', $3)`, [sourceId, targetId, Buffer.from([1])]);
+  await q(`INSERT INTO video_upload (id, document_id, user_id, name, mime, size, chunk_count, storage_key, state) VALUES ('video-upload-legacy', 'doc-a', $1, 'walkthrough.webm', 'video/webm', 2, 1, 'legacy/video/walkthrough.webm', 'complete')`, [sourceId]);
+  await q(`INSERT INTO video_upload_part (upload_id, part_index, size, sha256) VALUES ('video-upload-legacy', 0, 2, 'video-chunk-sha')`);
   await q(`INSERT INTO agent_request (id, document_id, user_id, instruction) VALUES ('req-legacy', 'doc-a', $1, 'tidy'), ('req-target', 'doc-t1', $2, 'tidy')`, [sourceId, targetId]);
   await q(`INSERT INTO review (id, document_id, user_id, author_name) VALUES ('rev-legacy', 'doc-b', $1, 'Legacy Dev'), ('rev-target', 'doc-t2', $2, 'Target')`, [sourceId, targetId]);
   await q(`INSERT INTO webhook (id, user_id, url, secret) VALUES ('hook-legacy', $1, 'https://example.test/legacy', 'legacy-hook-secret'), ('hook-target', $2, 'https://example.test/target', 'target-hook-secret')`, [sourceId, targetId]);

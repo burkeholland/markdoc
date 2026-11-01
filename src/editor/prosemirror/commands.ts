@@ -17,6 +17,7 @@ import {
 import { findParentNode } from "./utils";
 import { schema } from "../markdown/schema";
 import { matchLinkCard } from "../markdown/link-cards";
+import { parseVideoAssetUrl } from "../markdown/video";
 
 export { toggleMark, wrapInList, liftListItem, sinkListItem, splitListItem };
 
@@ -236,6 +237,26 @@ export function insertImage(src: string, alt = "", title: string | null = null):
     if (dispatch) {
       const node = schema.nodes.image.create({ src, alt, title });
       dispatch(state.tr.replaceSelectionWith(node, false).scrollIntoView());
+    }
+    return true;
+  };
+}
+
+/** Insert a completed local video upload as a block, then leave a paragraph ready for typing. */
+export function insertVideoAsset(src: string, name: string): Command {
+  return (state, dispatch) => {
+    if (!parseVideoAssetUrl(src)) return false;
+    if (dispatch) {
+      const { $to } = state.selection;
+      const tr = state.tr;
+      const video = schema.nodes.video.create({ src, name: name || "Video" });
+      const replaceParagraph = $to.depth === 1 && $to.parent.type === schema.nodes.paragraph && $to.parent.content.size === 0;
+      const pos = replaceParagraph ? $to.before(1) : $to.after(1);
+      if (replaceParagraph) tr.replaceWith(pos, pos + $to.parent.nodeSize, video);
+      else tr.insert(pos, video);
+      tr.insert(pos + video.nodeSize, schema.nodes.paragraph.create());
+      tr.setSelection(TextSelection.create(tr.doc, pos + video.nodeSize + 1));
+      dispatch(tr.scrollIntoView());
     }
     return true;
   };

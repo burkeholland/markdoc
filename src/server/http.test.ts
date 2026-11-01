@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_VIDEO_BYTES, VIDEO_CHUNK_BYTES } from "@/lib/video-limits";
 
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
@@ -166,8 +167,19 @@ describe("route classes and caller keys", () => {
     expect(routeClass("POST", "/api/import")).toBe("create");
     expect(routeClass("POST", "/api/import/file")).toBe("create");
     expect(routeClass("POST", "/api/documents/abc/assets")).toBe("create");
+    expect(routeClass("POST", "/api/documents/abc/assets/videos")).toBe("create");
+    expect(routeClass("PUT", "/api/documents/abc/assets/videos/0123456789abcdef/parts/0")).toBe("videoUpload");
+    expect(routeClass("POST", "/api/documents/abc/assets/videos/0123456789abcdef/complete")).toBe("videoUpload");
+    expect(routeClass("DELETE", "/api/documents/abc/assets/videos/0123456789abcdef")).toBe("videoUpload");
     expect(routeClass("POST", "/api/documents/abc/duplicate")).toBe("create");
     expect(routeClass("DELETE", "/api/documents/abc")).toBe("write");
+  });
+
+  it("budgets every chunk and terminal request for a maximum video upload", () => {
+    const chunks = Math.ceil(MAX_VIDEO_BYTES / VIDEO_CHUNK_BYTES);
+    const requestsPerFile = chunks + 1;
+    expect(RATE_LIMITS.videoUpload.burst).toBe(requestsPerFile * RATE_LIMITS.create.burst);
+    expect(RATE_LIMITS.videoUpload.perMinute).toBe(requestsPerFile * RATE_LIMITS.create.perMinute);
   });
 
   it("keys verified tokens by token id and everything unverified by client address (#2323)", async () => {

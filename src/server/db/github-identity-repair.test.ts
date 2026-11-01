@@ -60,7 +60,7 @@ describe("GitHub identity repair", () => {
         mode: "dry-run",
         committed: false,
         verified: true,
-        schema: { tables: 21, userForeignKeys: 11 },
+        schema: { tables: 25, userForeignKeys: 12 },
         selection: {
           normalizedLoginUsers: 2,
           targetGithubAccounts: 1,
@@ -278,6 +278,17 @@ describe("GitHub identity repair", () => {
                    VALUES ('duplicate-asset', 'legacy-document', $1, 'asset', 'text/plain', 0, 'case-sha', $2)`,
           values: [DUPLICATE_ID, Buffer.alloc(0)],
           cleanup: `DELETE FROM asset WHERE id = 'duplicate-asset'`,
+        },
+        {
+          label: "video_upload.user_id",
+          insert: `INSERT INTO video_upload (
+                     id, document_id, user_id, name, mime, size, chunk_count, storage_key
+                   ) VALUES (
+                     'duplicate-video-upload', 'legacy-document', $1, 'video.webm',
+                     'video/webm', 0, 1, 'fixture/video.webm'
+                   )`,
+          values: [DUPLICATE_ID],
+          cleanup: `DELETE FROM video_upload WHERE id = 'duplicate-video-upload'`,
         },
         {
           label: "agent_request.user_id",
@@ -707,6 +718,19 @@ async function seedAllApplicationTables(database: PGlite): Promise<void> {
     `INSERT INTO asset (id, document_id, user_id, name, mime, size, sha256, data)
      VALUES ('preserved-asset', 'preserved-document', $1, 'private-name', 'text/plain', 1, 'private-sha', $2)`,
     [LEGACY_ID, Buffer.from("x")],
+  );
+  await database.query(
+    `INSERT INTO video_upload (id, document_id, user_id, name, mime, size, chunk_count, storage_key)
+     VALUES ('preserved-video-upload', 'preserved-document', $1, 'private-video.webm', 'video/webm', 1, 1, 'fixture/video.webm')`,
+    [LEGACY_ID],
+  );
+  await database.query(
+    `INSERT INTO video_upload_part (upload_id, part_index, size, sha256)
+     VALUES ('preserved-video-upload', 0, 1, 'private-video-part-sha')`,
+  );
+  await database.query(
+    `INSERT INTO video_storage_cleanup (storage_key)
+     VALUES ('videos/pending-cleanup')`,
   );
   await database.query(
     `INSERT INTO notification (id, user_login, document_id, kind, actor_login, ref_id, snippet)

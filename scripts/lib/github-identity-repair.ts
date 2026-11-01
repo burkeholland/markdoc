@@ -33,6 +33,10 @@ export const REPAIR_SCHEMA_TABLES = [
   "user",
   "verificationToken",
   "version",
+  "video_storage_cleanup",
+  "video_stream_slot",
+  "video_upload",
+  "video_upload_part",
   "webhook",
   "webhook_delivery",
 ] as const;
@@ -54,6 +58,9 @@ export const REPAIR_APPLICATION_TABLES = [
   "review",
   "star",
   "version",
+  "video_storage_cleanup",
+  "video_upload",
+  "video_upload_part",
   "webhook",
   "webhook_delivery",
 ] as const satisfies readonly RepairSchemaTable[];
@@ -69,6 +76,7 @@ export const KNOWN_USER_FOREIGN_KEYS = [
   "review.user_id",
   "session.userId",
   "star.user_id",
+  "video_upload.user_id",
   "webhook.user_id",
 ] as const;
 
@@ -93,6 +101,7 @@ const APPLICATION_DEPENDENCY_LABELS = [
   "recent.user_id",
   "api_token.user_id",
   "asset.user_id",
+  "video_upload.user_id",
   "agent_request.user_id",
   "review.user_id",
   "webhook.user_id",
@@ -113,6 +122,7 @@ const APPLICATION_DEPENDENCY_LABELS = [
   "star.document_id via duplicate-owned document",
   "recent.document_id via duplicate-owned document",
   "asset.document_id via duplicate-owned document",
+  "video_upload.document_id via duplicate-owned document",
   "notification.document_id via duplicate-owned document",
   "activity.document_id via duplicate-owned document",
   "agent_request.document_id via duplicate-owned document",
@@ -404,6 +414,16 @@ const SAFE_STATE_QUERIES: Record<RepairSchemaTable, string> = {
                    id, document_id, number::text AS number, kind, created_by,
                    commit_sha, created_at::text AS created_at
               FROM version`,
+  video_storage_cleanup: `SELECT xmin::text AS row_version,
+                                 storage_key, created_at::text AS created_at
+                            FROM video_storage_cleanup`,
+  video_stream_slot: `SELECT id FROM video_stream_slot`,
+  video_upload: `SELECT xmin::text AS row_version,
+                        id, document_id, user_id, state, created_at::text AS created_at
+                   FROM video_upload`,
+  video_upload_part: `SELECT xmin::text AS row_version,
+                             upload_id, part_index, size, sha256
+                        FROM video_upload_part`,
   webhook: `SELECT xmin::text AS row_version,
                     id, user_id, document_ids, active, failures,
                     created_at::text AS created_at
@@ -833,6 +853,7 @@ async function collectApplicationDependencies(
     { label: "recent.user_id", query: "SELECT COUNT(*)::text AS count FROM recent WHERE user_id = $1", values: [duplicateId] },
     { label: "api_token.user_id", query: "SELECT COUNT(*)::text AS count FROM api_token WHERE user_id = $1", values: [duplicateId] },
     { label: "asset.user_id", query: "SELECT COUNT(*)::text AS count FROM asset WHERE user_id = $1", values: [duplicateId] },
+    { label: "video_upload.user_id", query: "SELECT COUNT(*)::text AS count FROM video_upload WHERE user_id = $1", values: [duplicateId] },
     { label: "agent_request.user_id", query: "SELECT COUNT(*)::text AS count FROM agent_request WHERE user_id = $1", values: [duplicateId] },
     { label: "review.user_id", query: "SELECT COUNT(*)::text AS count FROM review WHERE user_id = $1", values: [duplicateId] },
     { label: "webhook.user_id", query: "SELECT COUNT(*)::text AS count FROM webhook WHERE user_id = $1", values: [duplicateId] },
@@ -910,6 +931,13 @@ async function collectApplicationDependencies(
       label: "asset.document_id via duplicate-owned document",
       query: `SELECT COUNT(*)::text AS count
                 FROM asset a JOIN document d ON d.id = a.document_id
+               WHERE d.owner_id = $1`,
+      values: [duplicateId],
+    },
+    {
+      label: "video_upload.document_id via duplicate-owned document",
+      query: `SELECT COUNT(*)::text AS count
+                FROM video_upload v JOIN document d ON d.id = v.document_id
                WHERE d.owner_id = $1`,
       values: [duplicateId],
     },

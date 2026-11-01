@@ -5,6 +5,15 @@ import { CARD_FRAME_HOSTS, matchLinkCard, MAX_CARD_FRAMES, type LinkCard } from 
 
 const TWEET = "https://x.com/jack/status/20";
 const VIDEO = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s";
+const LINKS_BY_HOST: Record<string, string> = {
+  "https://www.youtube-nocookie.com": VIDEO,
+  "https://platform.twitter.com": TWEET,
+  "https://www.facebook.com": "https://www.facebook.com/markdoc/posts/1234567890",
+  "https://www.linkedin.com": "https://www.linkedin.com/feed/update/urn:li:activity:1234567890123456789",
+  "https://player.vimeo.com": "https://vimeo.com/123456789",
+  "https://www.loom.com": "https://www.loom.com/share/e5d19b462fa64f1287a385bcb140837e",
+  "https://www.tiktok.com": "https://www.tiktok.com/@burkeholland/video/7060000000000000000",
+};
 
 /** A document that writes down the order in which a new element's attributes are set. */
 function recordingDocument(origin: string) {
@@ -64,8 +73,9 @@ describe("the one place a frame is made (#2317)", () => {
     const card = matchLinkCard(VIDEO)!;
     // An app that is served from a frame host would frame itself with its own origin and scripts: refused.
     for (const host of CARD_FRAME_HOSTS) {
-      const own = matchLinkCard(host === "https://platform.twitter.com" ? TWEET : VIDEO)!;
-      expect(createCardFrame(own, VIDEO, recordingDocument(host).doc), host).toBeNull();
+      const link = LINKS_BY_HOST[host]!;
+      const own = matchLinkCard(link)!;
+      expect(createCardFrame(own, link, recordingDocument(host).doc), host).toBeNull();
     }
     // Every origin a Markdoc really has is another origin, and gets its frame.
     for (const origin of ["https://markdoc.app", "http://localhost:3000", "http://127.0.0.1:3941", "http://markdoc:3000", "http://markdoc.local", "http://192.168.1.20:3000", "https://www.youtube.com", "https://x.com"]) {

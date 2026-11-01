@@ -37,7 +37,7 @@ async function openDialog(onSubmit = vi.fn<(url: string) => void>()) {
 describe("Insert: Video or post from a link (#2317)", () => {
   it("is a named dialog that says which sites work, with the caret in its one field", async () => {
     const { dialog, field } = await openDialog();
-    expect(dialog.textContent).toContain("Paste a link to a video or post on YouTube or X. It becomes a card on a line of its own.");
+    expect(dialog.textContent).toContain("Paste a link to a video or post on YouTube, X, Facebook, LinkedIn, Vimeo, Loom or TikTok. It becomes a card on a line of its own.");
     await waitFor(() => expect(document.activeElement).toBe(field));
     expect(field.value).toBe("");
     expect(field.getAttribute("aria-invalid")).toBeNull();
@@ -76,7 +76,7 @@ describe("Insert: Video or post from a link (#2317)", () => {
       await user.type(field, link);
       await user.keyboard("{Enter}");
       const alert = await screen.findByRole("alert");
-      expect(alert.textContent, link).toBe("Markdoc cannot show this link as a card. Use the link to one video or post on YouTube or X, starting with https://.");
+      expect(alert.textContent, link).toBe("Markdoc cannot show this link as a card. Use the link to one video or post on YouTube, X, Facebook, LinkedIn, Vimeo, Loom or TikTok, starting with https://.");
       expect(field.getAttribute("aria-invalid"), link).toBe("true");
       expect(field.getAttribute("aria-describedby"), link).toBe(alert.id);
       expect(screen.getByRole("dialog")).toBeTruthy();

@@ -24,6 +24,7 @@ import { sourceHighlights, highlightClickHandler } from "./highlights";
 import { suggestingMode } from "./suggesting";
 import { toggleInlineMark, setHeading, toggleLinePrefix } from "./commands";
 import { codeImageUpload } from "./images";
+import { codeVideoUpload } from "./videos";
 import { codePasteGuard } from "./paste-guard";
 import { pathologicalParagraphs } from "./pathological";
 import { codeMarkdownFileDrop } from "./file-drop";
@@ -32,6 +33,7 @@ import { createMarkdownEditingKeymap } from "./continue-markup";
 import { markdownTyping } from "./markdown-typing";
 import { remoteCaretInteractions } from "./remote-cursors";
 import type { ImageUploader } from "../prosemirror/images";
+import type { VideoUploader } from "@/lib/video-limits";
 import type { NoticeAction } from "../markdown/tsv";
 import { preserveInactiveUndoScroll } from "./undo-scroll";
 import { sourceLinks } from "./links";
@@ -46,6 +48,9 @@ export interface CodeEditorHandlers {
   /** Uploads a pasted or dropped image file; when absent, image files are left to the browser. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
+  /** Uploads a pasted or dropped MP4/WebM video file. */
+  uploadVideo?: VideoUploader;
+  onVideoError?: (message: string) => void;
   /** Non-blocking notice for the user (a toast), e.g. when pasted text had to be inserted as code. */
   onNotice?: (message: string, action?: NoticeAction) => void;
   /** A dropped .md/.txt file with the source offset under the pointer. */
@@ -130,6 +135,7 @@ export function createCodeEditorSetup(session: CollabSession, handlers: CodeEdit
     formattingKeymap,
     handlers.slashMenu ? sourceSlashMenu(handlers.slashMenu) : [],
     handlers.uploadImage ? codeImageUpload(session, handlers.uploadImage, { onError: handlers.onImageError }) : [],
+    handlers.uploadVideo ? codeVideoUpload(session, handlers.uploadVideo, { onError: handlers.onVideoError }) : [],
     codePasteGuard({ onNotice: handlers.onNotice, undoManager: session.undoManager }),
     handlers.onMarkdownFileDrop ? codeMarkdownFileDrop(handlers.onMarkdownFileDrop) : [],
     // No searchKeymap: Mod-F is handled by the shared find bar in the editor shell.

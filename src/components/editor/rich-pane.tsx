@@ -5,6 +5,7 @@ import { EditorView } from "prosemirror-view";
 import type { CollabSession } from "@/editor/collab/session";
 import { createRichEditorState, setEditable } from "@/editor/prosemirror/setup";
 import type { ImageUploader } from "@/editor/prosemirror/images";
+import type { VideoUploader } from "@/lib/video-limits";
 import type { SlashMenuHandlers } from "@/editor/prosemirror/slash-menu";
 import { createNodeViews } from "@/editor/prosemirror/nodeviews";
 import { refreshRichHighlights } from "@/editor/prosemirror/highlights";
@@ -22,6 +23,9 @@ export interface RichPaneProps {
   /** Uploads a pasted or dropped image and returns its URL. */
   uploadImage?: ImageUploader;
   onImageError?: (message: string) => void;
+  /** Uploads a pasted or dropped MP4/WebM video file. */
+  uploadVideo?: VideoUploader;
+  onVideoError?: (message: string) => void;
   onNotice?: (message: string, action?: NoticeAction) => void;
   /** A dropped .md/.txt file and the ProseMirror position under the pointer. */
   onMarkdownFileDrop?: (file: File, pos: number) => void;
@@ -38,6 +42,8 @@ interface RichPaneHandlers {
   onCommentShortcut: RichPaneProps["onCommentShortcut"];
   uploadImage: RichPaneProps["uploadImage"];
   onImageError: RichPaneProps["onImageError"];
+  uploadVideo: RichPaneProps["uploadVideo"];
+  onVideoError: RichPaneProps["onVideoError"];
   onNotice: RichPaneProps["onNotice"];
   onMarkdownFileDrop: RichPaneProps["onMarkdownFileDrop"];
 }
@@ -54,14 +60,14 @@ interface RichViewVisit {
   retired: boolean;
 }
 
-export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop, slashMenu, hidden = false }: RichPaneProps) {
+export function RichPane({ session, onReady, onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, uploadVideo, onVideoError, onNotice, onMarkdownFileDrop, slashMenu, hidden = false }: RichPaneProps) {
   // Source offset of the code pane's cursor while the code pane is active (for the focus block).
   const focusSource = useSessionValue(session, (s) => (s.activeSurface === "code" ? s.localCursor.code : null));
   const canEdit = useSessionValue(session, (s) => s.canEdit);
   const host = useRef<HTMLDivElement>(null);
   const activeVisit = useRef<RichViewVisit | null>(null);
   const readyVisit = useRef<RichViewVisit | null>(null);
-  const nextHandlers = { onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, onNotice, onMarkdownFileDrop };
+  const nextHandlers = { onSelection, onHighlightClick, onLinkShortcut, onCommentShortcut, uploadImage, onImageError, uploadVideo, onVideoError, onNotice, onMarkdownFileDrop };
 
   useLayoutEffect(() => {
     const visit = activeVisit.current;
@@ -103,6 +109,14 @@ export function RichPane({ session, onReady, onSelection, onHighlightClick, onLi
           }
         : undefined,
       onImageError: (message) => currentHandlers()?.onImageError?.(message),
+      uploadVideo: uploadVideo
+        ? (file, signal, onProgress) => {
+            const handler = currentHandlers()?.uploadVideo;
+            if (!handler) throw new Error("Rich editor view is no longer current");
+            return handler(file, signal, onProgress);
+          }
+        : undefined,
+      onVideoError: (message) => currentHandlers()?.onVideoError?.(message),
       onNotice: (message, action) => currentHandlers()?.onNotice?.(message, action),
       onMarkdownFileDrop: (file, pos) => currentHandlers()?.onMarkdownFileDrop?.(file, pos),
       getFocusSource: () => (isCurrent() && visit.session.activeSurface === "code" ? visit.focusSource : null),

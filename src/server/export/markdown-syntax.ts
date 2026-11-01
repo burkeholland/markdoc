@@ -18,6 +18,7 @@ import type { Root } from "mdast";
 import type { Element, Root as HastRoot } from "hast";
 // The extension is required: in development Node loads the render worker straight from source.
 import { cardLinkText, matchLinkCard, MAX_CARD_URL_LENGTH } from "../../editor/markdown/link-cards.ts";
+import { parseVideoAssetUrl } from "../../editor/markdown/video.ts";
 
 /** Same front matter tokenizer as the editor's parser, so `---` blocks are not rendered as text or rules. */
 const remarkFrontmatter: Plugin<[], Root> = function () {
@@ -100,16 +101,66 @@ export const rehypeLinkCards: Plugin<[], HastRoot> = function () {
   };
 };
 
+const remarkMarkVideoLinks: Plugin<[], Root> = function () {
+  return (tree) => {
+    for (const node of tree.children) {
+      if (node.type !== "paragraph" || node.children.length !== 1) continue;
+      const link = node.children[0];
+      if (link.type !== "link" || link.title || link.children.length !== 1 || link.children[0].type !== "text") continue;
+      const name = link.children[0].value.trim();
+      if (!name || name === link.url || !parseVideoAssetUrl(link.url)) continue;
+      node.data = {
+        ...node.data,
+        hProperties: { ...node.data?.hProperties, dataVideoSrc: link.url, dataVideoName: name },
+      };
+    }
+  };
+};
+
+const rehypeVideoLinks: Plugin<[string, boolean], HastRoot> = function (base, playback) {
+  const prefix = base.replace(/\/+$/, "");
+  return (tree) => {
+    tree.children.forEach((node, index) => {
+      if (node.type !== "element" || node.tagName !== "p") return;
+      const src = node.properties.dataVideoSrc;
+      const name = node.properties.dataVideoName;
+      delete node.properties.dataVideoSrc;
+      delete node.properties.dataVideoName;
+      if (typeof src !== "string" || typeof name !== "string") return;
+      const ref = parseVideoAssetUrl(src);
+      if (!ref) return;
+      const absolute = prefix + src;
+      const link = element("a", { href: absolute, className: ["md-video-link"] }, [text(name)]);
+      if (!playback) {
+        tree.children[index] = element("p", { className: ["md-video-fallback"] }, [link]);
+        return;
+      };
+      tree.children[index] = element("figure", { className: ["md-video"] }, [
+        element(
+          "video",
+          { controls: true, playsInline: true, preload: "metadata", ariaLabel: name },
+          [element("source", { src: absolute, type: ref.mime }, []), link],
+        ),
+        element("figcaption", {}, [text(name)]),
+      ]);
+    });
+  };
+}
+
 export interface ReaderHtmlOptions {
+  /** Origin (and optional base path) used to make local asset links absolute. */
+  assetBaseUrl?: string;
   /** Turn a known link alone on its line into a card (the reader page and the editor's stand-in; not the exports yet). */
   linkCards?: boolean;
+  /** Turn a named link to a local MP4/WebM asset into a playable block; exports leave a named link instead. */
+  videoPlayback?: boolean;
 }
 
 /**
  * A processor that parses Markdown (`parse` gives the Markdown tree) and turns it into the sanitized HTML
  * tree the reader page renders (`run`); `.use()` more plugins to finish the page.
  */
-export function readerHtml({ linkCards = false }: ReaderHtmlOptions = {}) {
+export function readerHtml({ assetBaseUrl = "", linkCards = false, videoPlayback = false }: ReaderHtmlOptions = {}) {
   const none: Plugin<[], Root> = () => undefined;
   const noneAfter: Plugin<[], HastRoot> = () => undefined;
   return unified()
@@ -117,7 +168,9 @@ export function readerHtml({ linkCards = false }: ReaderHtmlOptions = {}) {
     .use(remarkFrontmatter)
     .use(remarkGfm)
     .use(linkCards ? remarkMarkLinkCards : none)
+    .use(remarkMarkVideoLinks)
     .use(remarkRehype, { handlers: { yaml: () => undefined, toml: () => undefined } })
     .use(rehypeSanitize, sanitizeSchema)
-    .use(linkCards ? rehypeLinkCards : noneAfter);
+    .use(linkCards ? rehypeLinkCards : noneAfter)
+    .use(rehypeVideoLinks, assetBaseUrl, videoPlayback);
 }

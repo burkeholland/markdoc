@@ -21,12 +21,19 @@ import * as currentSchema from "./schema";
 
 const LEDGER_0018_TIME = "1788050213330";
 const LEDGER_0019_TIME = "1788219322678";
-const LEDGER_0023_TIME = "1791835745783";
+const LEDGER_0026_TIME = "1793561186226";
 const MIGRATION_TEST_TIMEOUT_MS = 60_000;
 // Tables that arrived after 0020 are absent from the ledger-0018 fixture this file models:
-// gist_auto_update (0020), required_version_intent (0022) and folder (0023).
+// gist_auto_update (0020), required_version_intent (0022), folder (0023), and video tables (0024-0026).
 const PRE_0020_TABLES = APPLICATION_TABLES.filter(
-  (table) => table !== "gist_auto_update" && table !== "required_version_intent" && table !== "folder",
+  (table) =>
+    table !== "gist_auto_update" &&
+    table !== "required_version_intent" &&
+    table !== "folder" &&
+    table !== "video_storage_cleanup" &&
+    table !== "video_stream_slot" &&
+    table !== "video_upload" &&
+    table !== "video_upload_part",
 );
 
 const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
@@ -139,7 +146,7 @@ describe("pending production migrations", () => {
         await migrate(database, { migrationsFolder: path.resolve("drizzle") });
         await migrate(database, { migrationsFolder: path.resolve("drizzle") });
 
-        await expectLedger(client, 24, LEDGER_0023_TIME);
+        await expectLedger(client, 27, LEDGER_0026_TIME);
         expect(await applicationDataState(client, projection)).toEqual(before);
         await expectCurrentSchema(client);
         await expectServingSourceCompatibility(client);
@@ -343,6 +350,10 @@ async function expectCurrentSchema(client: PGlite): Promise<void> {
     currentSchema.apiTokens,
     currentSchema.agentRequests,
     currentSchema.gistAutoUpdates,
+    currentSchema.videoUploads,
+    currentSchema.videoUploadParts,
+    currentSchema.videoStreamSlots,
+    currentSchema.videoStorageCleanup,
   ]
     .flatMap((table) => {
       const config = getTableConfig(table);
@@ -375,7 +386,10 @@ async function expectCurrentSchema(client: PGlite): Promise<void> {
        JOIN pg_class relation ON relation.oid = attribute.attrelid
        JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
       WHERE namespace.nspname = 'public'
-        AND relation.relname IN ('api_token', 'agent_request', 'gist_auto_update')
+        AND relation.relname IN (
+          'api_token', 'agent_request', 'gist_auto_update',
+          'video_upload', 'video_upload_part', 'video_stream_slot', 'video_storage_cleanup'
+        )
         AND attribute.attnum > 0
         AND NOT attribute.attisdropped`,
   );
@@ -387,7 +401,12 @@ async function expectCurrentSchema(client: PGlite): Promise<void> {
     ),
   ).toEqual(expectedColumns);
 
-  const expectedIndexes = [currentSchema.agentRequests, currentSchema.gistAutoUpdates]
+  const expectedIndexes = [
+    currentSchema.agentRequests,
+    currentSchema.gistAutoUpdates,
+    currentSchema.videoUploads,
+    currentSchema.videoStorageCleanup,
+  ]
     .flatMap((table) => getTableConfig(table).indexes.map((index) => index.config.name))
     .sort();
   const indexes = await client.query<{ indexname: string }>(
@@ -399,7 +418,10 @@ async function expectCurrentSchema(client: PGlite): Promise<void> {
           'agent_request_status_created_idx',
           'agent_request_document_thread_idx',
           'agent_request_agent_status_idx',
-          'gist_auto_update_due_idx'
+          'gist_auto_update_due_idx',
+          'video_storage_cleanup_created_idx',
+          'video_upload_created_idx',
+          'video_upload_document_idx'
         )
       ORDER BY indexname`,
   );

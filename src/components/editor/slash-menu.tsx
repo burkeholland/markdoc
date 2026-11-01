@@ -5,7 +5,7 @@ import type { EditorView } from "prosemirror-view";
 import type { EditorView as SourceView } from "@codemirror/view";
 import type { CodeApi } from "@/editor/codemirror/api";
 import { TextSelection } from "prosemirror-state";
-import { Bot, Calendar, Heading1, Heading2, Heading3, Image, Info, Link, List, ListChecks, ListOrdered, ListTree, MessageSquarePlus, Minus, Quote, SquareCode, SquarePlay, Superscript, Table, TextQuote, Type, type LucideIcon } from "lucide-react";
+import { Bot, Calendar, Heading1, Heading2, Heading3, Image, Info, Link, List, ListChecks, ListOrdered, ListTree, MessageSquarePlus, Minus, Quote, SquareCode, SquarePlay, Superscript, Table, TextQuote, Type, Video, type LucideIcon } from "lucide-react";
 import type { CollabSession } from "@/editor/collab/session";
 import { tableAt } from "@/editor/prosemirror/commands";
 import { applySlashCommand, applySlashItem, closeSlashMenu, type SlashKey, type SlashMenuHandlers, type SlashState } from "@/editor/prosemirror/slash-menu";
@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
 import { clampToViewport } from "@/lib/viewport";
 import { useSessionValue } from "./use-session";
 
-const ICONS: Record<string, LucideIcon> = { Type, Heading1, Heading2, Heading3, List, ListOrdered, ListChecks, Quote, Info, SquareCode, Minus, Table, ListTree, Image, SquarePlay, Link, MessageSquarePlus, Calendar, Superscript, TextQuote, Bot };
+const ICONS: Record<string, LucideIcon> = { Type, Heading1, Heading2, Heading3, List, ListOrdered, ListChecks, Quote, Info, SquareCode, Minus, Table, ListTree, Image, SquarePlay, Video, Link, MessageSquarePlus, Calendar, Superscript, TextQuote, Bot };
 
 const MENU_WIDTH = 288;
 const ROW_HEIGHT = 36;
@@ -100,6 +100,7 @@ export function SlashMenu({
   controller,
   containerRef,
   onImage,
+  onVideo,
   onCard,
   onLink,
   onComment,
@@ -112,6 +113,7 @@ export function SlashMenu({
   controller: SlashMenuController;
   containerRef: React.RefObject<HTMLElement | null>;
   onImage: () => void;
+  onVideo: () => void;
   /** `/video`: opens "Video or post from a link" (#2317). */
   onCard: () => void;
   onLink: () => void;
@@ -183,6 +185,7 @@ export function SlashMenu({
         view: null,
         where: currentWhere(),
         openImage: onImage,
+        openVideo: onVideo,
         openCard: onCard,
         openLink: onLink,
         startComment: () => {
@@ -217,6 +220,7 @@ export function SlashMenu({
       view,
       where: { inTable: !!tableAt(view.state), canComment: session.canCreateComment },
       openImage: onImage,
+      openVideo: onVideo,
       openCard: onCard,
       openLink: onLink,
       startComment: () => {
