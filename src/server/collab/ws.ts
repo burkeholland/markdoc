@@ -4,7 +4,7 @@ import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Hocuspocus } from "@hocuspocus/server";
 import type { CollabContext, CollabPreAuthentication } from "./hocuspocus";
-import { createFloodGuard, type FloodLimits } from "./flood-guard";
+import { createFloodGuard, DEFAULT_FLOOD_LIMITS, type FloodLimits } from "./flood-guard";
 import { rejectUnparseableUpgrade } from "../../../server/request-guards";
 
 export const COLLAB_PATH = "/collab";
@@ -293,8 +293,9 @@ export function protectUpgradePath(server: HttpServer, path = COLLAB_PATH): () =
 export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabContext>, options: AttachOptions = {}) {
   const path = options.path ?? COLLAB_PATH;
   const pendingAuthentication = new Set<CollabPreAuthenticationDeadline>();
+  const floodLimits = { ...DEFAULT_FLOOD_LIMITS, ...options.floodLimits };
   const wss = Object.assign(
-    new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 * 1024 }),
+    new WebSocketServer({ noServer: true, maxPayload: floodLimits.maxMessageBytes }),
     {
       getPendingAuthenticationCount: () => pendingAuthentication.size,
       /** Closes the established collaboration sockets; call after the documents have been stored. */
@@ -320,7 +321,7 @@ export function attachCollab(server: HttpServer, hocuspocus: Hocuspocus<CollabCo
     const context = {} as CollabContext;
     context.preAuthentication = deadline;
     const connection = hocuspocus.handleConnection(socket, request ?? toWebRequest(req), context);
-    const guard = createFloodGuard(socket, (bytes) => connection.handleMessage(bytes), options.floodLimits);
+    const guard = createFloodGuard(socket, (bytes) => connection.handleMessage(bytes), floodLimits);
     socket.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
       const bytes = Array.isArray(data)
         ? new Uint8Array(Buffer.concat(data))
