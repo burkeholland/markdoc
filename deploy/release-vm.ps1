@@ -585,7 +585,7 @@ function Get-MarkdocReleaseTarget([string]$Name, [string]$PublicOrigin = '') {
       Acr = 'markdocacr7nkilqfckcukm'
       VmOrigin = 'https://markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com'
       # Until markdoc.app points at this VM, its Azure name proxies /api/health to the app.
-      Origin = 'https://markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com'
+      Origin = 'https://markdoc.app'
     }
     Professional = @{
       Subscription = '332d0c98-694c-48a0-91f3-465de6ac30a5'

@@ -677,9 +677,9 @@ releases to subscription `f40011a4-4708-4843-9b04-e1eac4ad0ebf` (Visual Studio
 Enterprise Subscription), ACR `markdocacr7nkilqfckcukm` /
 `markdocacr7nkilqfckcukm.azurecr.io`, public IP DNS name
 `markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com` (`40.70.205.22`),
-and checks public health at that Azure name, whose nginx block proxies only
-`/api/health` to the app until `markdoc.app` points at this VM. After the DNS
-cutover pass `-PublicOrigin https://markdoc.app`. `-Target Professional` keeps
+and checks public health at `https://markdoc.app` (DNS cut over to this VM on
+2026-11-01). `-PublicOrigin <https origin>` overrides the health origin, e.g.
+the Azure name, whose nginx block proxies `/api/health` to the app. `-Target Professional` keeps
 the pre-cutover stack for rollback: subscription
 `332d0c98-694c-48a0-91f3-465de6ac30a5`, ACR
 `markdocacrmnd542unepl56` / `markdocacrmnd542unepl56.azurecr.io`, DNS name

@@ -247,12 +247,12 @@ foreach ($statement in $ast.EndBlock.Statements) {
 $enterprise = Get-MarkdocReleaseTarget 'Enterprise'
 Assert-Equal 'f40011a4-4708-4843-9b04-e1eac4ad0ebf' $enterprise.Subscription 'Enterprise target must pin its subscription.'
 Assert-Equal 'markdocacr7nkilqfckcukm.azurecr.io' $enterprise.Registry 'Enterprise target must use its own registry.'
-Assert-Equal 'https://markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com' $enterprise.Origin 'Enterprise health defaults to its Azure name until cutover.'
+Assert-Equal 'https://markdoc.app' $enterprise.Origin 'Enterprise health uses the canonical origin after cutover.'
 $professional = Get-MarkdocReleaseTarget 'Professional'
 Assert-Equal '332d0c98-694c-48a0-91f3-465de6ac30a5' $professional.Subscription 'Professional target must keep the old subscription.'
 Assert-Equal 'markdocacrmnd542unepl56.azurecr.io' $professional.Registry 'Professional target must keep the old registry.'
 Assert-Equal 'https://markdoc.app' $professional.Origin 'Professional health stays on the canonical origin.'
-Assert-Equal 'https://markdoc.app' (Get-MarkdocReleaseTarget 'Enterprise' 'https://markdoc.app').Origin 'PublicOrigin must override the health origin.'
+Assert-Equal 'https://markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com' (Get-MarkdocReleaseTarget 'Enterprise' 'https://markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com').Origin 'PublicOrigin must override the health origin.'
 foreach ($bad in @(@('Other', ''), @('Enterprise', 'http://markdoc.app'), @('Enterprise', 'https://markdoc.app/x'))) {
   try { [void](Get-MarkdocReleaseTarget $bad[0] $bad[1]); throw "Expected rejection of $($bad -join ' ')." } catch [InvalidOperationException] {
     Assert-Equal 2 $_.Exception.Data['ReleaseExitCode'] 'Invalid target input must exit 2 before any Azure call.'
@@ -712,7 +712,7 @@ function Invoke-ReleaseNative([string]$Command, [string[]]$Arguments, [string]$D
 
 function Get-ReleasePublicHealth([string]$Origin, [int]$TimeoutSeconds) {
   $script:publicCount++
-  Assert-Equal 'https://markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com' $Origin 'Public health must use the exact stable origin.'
+  Assert-Equal 'https://markdoc.app' $Origin 'Public health must use the exact stable origin.'
   Assert-True ($TimeoutSeconds -gt 0 -and $TimeoutSeconds -le 20) 'Public health must have a bounded timeout.'
   Assert-True (($script:messages -join "`n") -match 'guest ready; waiting') 'Public health must follow guest readiness.'
   Assert-True (($script:messages -join "`n") -notmatch 'Release complete:') 'Completion must not precede public health.'
