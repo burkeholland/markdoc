@@ -146,9 +146,9 @@ const accepted = [
 ];
 
 describe("infra/nginx-markdoc.conf client_max_body_size", () => {
-  it("has one server block that proxies to the app and two that redirect to it over TLS", () => {
-    expect(proxying.map(serverName)).toEqual(["markdoc.app"]);
-    expect(tlsServers.map(serverName)).toEqual(["markdoc.app", "www.markdoc.app", "markdoc-burkeholland.eastus2.cloudapp.azure.com"]);
+  it("has one server block that proxies to the app and two that redirect to it over TLS (the Azure name proxies only /api/health)", () => {
+    expect(proxying.map(serverName)).toEqual(["markdoc.app", "markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com"]);
+    expect(tlsServers.map(serverName)).toEqual(["markdoc.app", "www.markdoc.app", "markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com"]);
   });
 
   it.each(tlsServers.map((server) => [serverName(server), server] as const))("is set once in the %s server block, not left at nginx's 1 MB default", (_name, server) => {
@@ -198,7 +198,7 @@ describe("infra/nginx-server-names-hash.conf (#2346)", () => {
     ]);
     expect(serverNamesHashConfig.blocks).toHaveLength(0);
     expect(every(serverNamesHashConfig, "server_names_hash_bucket_size")).toHaveLength(1);
-    expect(tlsServers.some((server) => serverName(server).includes("markdoc-burkeholland.eastus2.cloudapp.azure.com"))).toBe(true);
+    expect(tlsServers.some((server) => serverName(server).includes("markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com"))).toBe(true);
   });
 });
 

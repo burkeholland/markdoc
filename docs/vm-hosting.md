@@ -27,7 +27,7 @@ release, a readable recovered database or full database health.
 
 | Item | Recorded value and evidence |
 | --- | --- |
-| Public origin | `https://markdoc.app` (apex, Cloudflare DNS-only A record to `markdoc-web-ip` = `20.62.106.80`). The Azure DNS label `markdoc-burkeholland.eastus2.cloudapp.azure.com` on `markdoc-web-ip` stays in place and only redirects to it; see [Public domain](#public-domain-markdocapp). No former Container Apps endpoint is a fallback. |
+| Public origin | `https://markdoc.app` (apex, Cloudflare DNS-only A record to `markdoc-web-ip` = `20.62.106.80` on the Professional subscription until the Enterprise cutover; the Enterprise VM is `40.70.205.22`). The Azure DNS label `markdoc-burkeholland.eastus2.cloudapp.azure.com` on `markdoc-web-ip` stays in place and only redirects to it; see [Public domain](#public-domain-markdocapp). No former Container Apps endpoint is a fallback. |
 | Resource group and VM | `markdoc-rg` (hyphen), `markdoc-pg`; supplied metadata says Linux, provisioning `Succeeded`, VM agent enabled, and `markdoc-web-ip` attached to `markdoc-pg-nic/primary`. |
 | Azure context | Lead confirmed tenant `f1fde69f-c8d3-4b94-adeb-02d045b37f6a` and enabled subscription `332d0c98-694c-48a0-91f3-465de6ac30a5`. This is not proof of guest command access or workflow identity permissions. |
 | Application service | Lead observed `markdoc-app.service` loaded, active, running at `/etc/systemd/system/markdoc-app.service`; systemd working directory empty. Source writes a Docker unit with host networking, 768 MiB memory and 0.6 CPU; unit contents/resource limits were not read back. |
@@ -672,14 +672,21 @@ directory or ignored local files, supplies the build and guest script.
 `RELEASE_VERSION` is a Board label; image `APP_VERSION` remains the full SHA.
 `RELEASE_PREVIOUS_SHA` does not request an automatic rollback.
 
-All nonsecret defaults are already wired: subscription
-`332d0c98-694c-48a0-91f3-465de6ac30a5`, tenant
-`f1fde69f-c8d3-4b94-adeb-02d045b37f6a`, resource group `markdoc-rg`, ACR
-`markdocacrmnd542unepl56` / `markdocacrmnd542unepl56.azurecr.io`, VM `markdoc-pg`,
-public IP `markdoc-web-ip` (DNS name
-`markdoc-burkeholland.eastus2.cloudapp.azure.com`), and public health at
-`https://markdoc.app`. The Azure hostname now redirects to `markdoc.app`, so the
-release checks health there directly and still refuses redirects.
+All nonsecret defaults are already wired. `-Target Enterprise` (the default)
+releases to subscription `f40011a4-4708-4843-9b04-e1eac4ad0ebf` (Visual Studio
+Enterprise Subscription), ACR `markdocacr7nkilqfckcukm` /
+`markdocacr7nkilqfckcukm.azurecr.io`, public IP DNS name
+`markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com` (`40.70.205.22`),
+and checks public health at `https://markdoc.app` (DNS cut over to this VM on
+2026-11-01). `-PublicOrigin <https origin>` overrides the health origin, e.g.
+the Azure name, whose nginx block proxies `/api/health` to the app. `-Target Professional` keeps
+the pre-cutover stack for rollback: subscription
+`332d0c98-694c-48a0-91f3-465de6ac30a5`, ACR
+`markdocacrmnd542unepl56` / `markdocacrmnd542unepl56.azurecr.io`, DNS name
+`markdoc-burkeholland.eastus2.cloudapp.azure.com`, health at
+`https://markdoc.app`. Both use tenant `f1fde69f-c8d3-4b94-adeb-02d045b37f6a`,
+resource group `markdoc-rg`, VM `markdoc-pg` and public IP `markdoc-web-ip`.
+The release checks health directly and still refuses redirects.
 The command rejects another subscription/tenant/cloud, registry, VM/NIC/IP
 association or public origin. It neither signs in interactively nor changes
 the active account. The guest still uses its managed identity and existing
@@ -961,7 +968,7 @@ HTTPS for it: the certificate must exist before anyone opens the site.
 | --- | --- |
 | DNS (Cloudflare, **DNS only**, grey cloud) | `A markdoc.app -> 20.62.106.80`, `CNAME www -> markdoc.app`. The Cloudflare proxy must stay off: certbot validates over plain HTTP on the VM, and nginx terminates TLS itself. |
 | Certificates | Let's Encrypt `markdoc.app` (covers `markdoc.app` and `www.markdoc.app`) plus the existing `markdoc-burkeholland.eastus2.cloudapp.azure.com`; both renew through `certbot.timer`. |
-| nginx | [`infra/nginx-markdoc.conf`](../infra/nginx-markdoc.conf) is the source for `/etc/nginx/sites-available/markdoc`. [`infra/nginx-server-names-hash.conf`](../infra/nginx-server-names-hash.conf) sets `server_names_hash_bucket_size 128` at HTTP scope and is installed under `/etc/nginx/conf.d/`. `markdoc.app` proxies to the app on `127.0.0.1:3000`; `www.markdoc.app`, the Azure name and plain HTTP redirect to `https://markdoc.app` with the same path and query (`301` for pages, `308` for `/api/*` so writes keep their method). The three TLS server blocks set `client_max_body_size 10m`: see [Request body size](#request-body-size-nginx). |
+| nginx | [`infra/nginx-markdoc.conf`](../infra/nginx-markdoc.conf) is the source for `/etc/nginx/sites-available/markdoc`. [`infra/nginx-server-names-hash.conf`](../infra/nginx-server-names-hash.conf) sets `server_names_hash_bucket_size 128` at HTTP scope and is installed under `/etc/nginx/conf.d/`. `markdoc.app` proxies to the app on `127.0.0.1:3000`; `www.markdoc.app`, the Azure name and plain HTTP redirect to `https://markdoc.app` with the same path and query (`301` for pages, `308` for `/api/*` so writes keep their method), except `GET /api/health` on the Azure name (`markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com` since the Enterprise move), which is proxied so a release can check this VM before and after DNS points at it. The three TLS server blocks set `client_max_body_size 10m`: see [Request body size](#request-body-size-nginx). |
 | App environment (`/etc/markdoc/markdoc.env`) | `AUTH_URL=https://markdoc.app`, `MARKDOC_URL=https://markdoc.app`, `MARKDOC_CANONICAL_HOST=markdoc.app`. |
 | GitHub OAuth app | Homepage URL `https://markdoc.app`, authorization callback URL `https://markdoc.app/api/auth/callback/github`. |
 
@@ -982,7 +989,7 @@ Rollback before step 6: restore both backups, `nginx -t && systemctl reload ngin
 nginx 1.24 on the Ubuntu 24.04 VM rejects the long Azure `server_name` in
 `infra/nginx-markdoc.conf` with the default bucket size of `64`. In nginx's
 error, `: 64` reports the current size, not the recommended setting; raise it
-to the next power of two, `128`, for this 47-character name. The
+to the next power of two, `128`, for this 47-character name (56 characters for the Enterprise name). The
 repository ships
 [`infra/nginx-server-names-hash.conf`](../infra/nginx-server-names-hash.conf)
 for `/etc/nginx/conf.d/markdoc-server-names-hash.conf`. Ubuntu's packaged
