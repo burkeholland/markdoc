@@ -200,6 +200,17 @@ describe("infra/nginx-server-names-hash.conf (#2346)", () => {
     expect(every(serverNamesHashConfig, "server_names_hash_bucket_size")).toHaveLength(1);
     expect(tlsServers.some((server) => serverName(server).includes("markdoc-burkeholland-ent-f40011a4.eastus2.cloudapp.azure.com"))).toBe(true);
   });
+
+  it("documents installation through Ubuntu's stock nginx.conf include before testing the site", () => {
+    const docs = read("docs", "vm-hosting.md");
+    expect(docs).toContain("Ubuntu 24.04's stock `nginx.conf`");
+    expect(docs).toContain("includes `conf.d/*.conf` inside `http {}`");
+    expect(docs).toContain("sudo install -o root -g root -m 0644 /tmp/markdoc-server-names-hash.conf /etc/nginx/conf.d/markdoc-server-names-hash.conf");
+    expect(docs).toContain("Only uncommented directives match.");
+    expect(docs).toContain("raise that existing");
+    expect(docs).toContain("rather than adding a duplicate.");
+    expect(docs).toContain("sudo nginx -t && sudo systemctl reload nginx");
+  });
 });
 
 describe("the app limits the nginx value follows", () => {

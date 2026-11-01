@@ -1496,23 +1496,30 @@ describe("VersionsPanel · compare target", () => {
     render(<VersionsPanel session={session} onClose={vi.fn()} onPreview={onPreview} refreshKey={0} />);
 
     expect(await screen.findByTestId("compare-instruction")).toHaveTextContent(
-      "Select two versions below to compare their changes.",
+      "Compare versions: select any two below.",
     );
     const draft = await screen.findByRole("checkbox", { name: "Compare v1" });
     const earlier = await screen.findByRole("checkbox", { name: "Compare v0" });
+    const status = screen.getByRole("status");
+    expect(status).toBeEmptyDOMElement();
     for (const checkbox of [draft, earlier]) {
-      expect(checkbox).toHaveClass("h-3.5", "w-3.5");
-      expect(checkbox.closest("label")).toHaveClass("h-6", "w-6");
+      expect(checkbox).toHaveClass("h-4", "w-4");
+      expect(checkbox.closest("label")).toHaveClass("h-8", "w-8");
       expect(checkbox).toHaveAttribute("aria-describedby", "compare-instruction");
     }
 
     fireEvent.click(draft.closest("label")!);
     expect(draft).toBeChecked();
     expect(earlier).not.toBeChecked();
+    expect(status).toHaveTextContent("Select one more version to compare");
+    expect(draft).toHaveAttribute("aria-describedby", "compare-hint");
+    expect(status).not.toHaveTextContent("Clear");
 
     fireEvent.click(earlier.closest("label")!);
     expect(draft).toBeChecked();
     expect(earlier).toBeChecked();
+    expect(status).toHaveTextContent("Comparing two versions");
+    expect(status).not.toHaveTextContent("Clear");
     await waitFor(() =>
       expect(onPreview).toHaveBeenLastCalledWith(
         expect.objectContaining({

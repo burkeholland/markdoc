@@ -986,11 +986,12 @@ Rollback before step 6: restore both backups, `nginx -t && systemctl reload ngin
 
 ## Server-name hash bucket (nginx)
 
-nginx 1.24 on the Ubuntu 24.04 VM rejects the long Azure `server_name` in
-`infra/nginx-markdoc.conf` with the default bucket size of `64`. In nginx's
-error, `: 64` reports the current size, not the recommended setting; raise it
-to the next power of two, `128`, for this 47-character name (56 characters for the Enterprise name). The
-repository ships
+With Ubuntu 24.04's stock `nginx.conf`, nginx 1.24 rejects the Azure
+`server_name` in `infra/nginx-markdoc.conf` with
+`could not build server_names_hash, you should increase server_names_hash_bucket_size: 64`.
+The `64` in the error is the current default, not the recommended setting; raise
+it to `128` for the current 60-character Enterprise name (the retired Azure
+name was 47 characters). The repository ships
 [`infra/nginx-server-names-hash.conf`](../infra/nginx-server-names-hash.conf)
 for `/etc/nginx/conf.d/markdoc-server-names-hash.conf`. Ubuntu's packaged
 `nginx.conf` includes `conf.d/*.conf` inside `http {}`. Merging this file does
@@ -1002,12 +1003,15 @@ Before enabling the Markdoc site or running `nginx -t` against its long server
 name, inspect the effective configuration:
 
 ```sh
-sudo nginx -T 2>&1 | grep -n -B 3 -A 3 'server_names_hash_bucket_size'
+sudo nginx -T 2>&1 | grep -n -B 3 -A 3 -E '^[[:space:]]*server_names_hash_bucket_size[[:space:]]'
 ```
 
-If a directive already exists, verify it is in the `http` context and is `128`
-or larger; `64` is insufficient for this name. Do not install a duplicate or
-overwrite an existing file. If none exists, copy the checked-in snippet to the VM as
+Only uncommented directives match. Ubuntu's stock `nginx.conf` has a commented
+example value of `64`; that is not an active setting, so no output is expected
+on a stock VM. If an active directive exists, verify it is in the `http`
+context. Keep a value of `128` or larger; if it is lower, raise that existing
+directive to `128` rather than adding a duplicate. If there is no active
+directive, copy the checked-in snippet to the VM as
 `/tmp/markdoc-server-names-hash.conf`, then install and validate it:
 
 ```sh

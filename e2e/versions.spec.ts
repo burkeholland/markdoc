@@ -98,7 +98,7 @@ test.describe("version compare", () => {
     await expect(panel.getByTestId("version-restore")).toHaveCount(0);
     await expect(panel.getByTestId("version-rename-input")).toHaveCount(0);
     await expect(panel.getByTestId("compare-hint")).toHaveCount(0);
-    await expect(panel.getByTestId("compare-instruction")).toHaveText("Select two versions below to compare their changes.");
+    await expect(panel.getByTestId("compare-instruction")).toHaveText("Compare versions: select any two below.");
     await expect(panel.getByTestId("version-compare").first()).toHaveAttribute("aria-describedby", "compare-instruction");
     await expect(panel.locator('input[type="checkbox"]:checked')).toHaveCount(0);
 
