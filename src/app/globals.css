@@ -1558,6 +1558,50 @@ body {
     width: max(100%, 44px);
     height: max(100%, 44px);
   }
+  .layout-segment-option:first-child.tap-target::after {
+    left: auto;
+    right: 0;
+    transform: translateY(-50%);
+  }
+  .layout-segment-option:last-child.tap-target::after {
+    left: 0;
+    transform: translateY(-50%);
+  }
+}
+
+@media (max-width: 767.98px) and (pointer: coarse) {
+  .editor-header-layout {
+    gap: 0.25rem;
+  }
+  .editor-header-right {
+    gap: 0.5rem;
+  }
+  .editor-header-right[data-phone-actions="embed"] {
+    min-width: 120px;
+  }
+  .editor-header-right[data-phone-actions="signed-in"] {
+    min-width: 208px;
+  }
+  .editor-header-right[data-phone-actions="anonymous"] {
+    min-width: 164px;
+  }
+  .layout-segment {
+    margin-left: 5px;
+    margin-right: 1px;
+  }
+  .editor-header-title {
+    margin-right: 12px;
+    min-height: 44px;
+  }
+  .header-save-button.tap-target::after {
+    left: auto;
+    right: 0;
+    transform: translateY(-50%);
+  }
+  .editor-header-action.tap-target::after {
+    left: 0;
+    transform: translateY(-50%);
+  }
 }
 
 /* Horizontal toolbar strip on phones: no wrap, no scrollbar. `useToolbarOverflow` sets data-overflow on
