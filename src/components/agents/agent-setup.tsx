@@ -32,6 +32,8 @@ interface CreatedKey {
 export interface AgentSetupProps {
   origin: string;
   tokens: ApiTokenDto[] | null;
+  /** Heading level for setup content; defaults to 3 inside the agent dialog. */
+  headingLevel?: 3 | 4;
   /** Re-reads the key list. Also called on a timer while waiting for the agent to connect. */
   reload: () => Promise<void>;
   /** The document the agent will join. Without one (Settings) the last step is a general check-in. */
@@ -40,8 +42,9 @@ export interface AgentSetupProps {
   onKeyCreated?: () => void;
 }
 
-function Step({ n, title, state, children }: { n: number; title: string; state: "idle" | "active" | "done"; children: ReactNode }) {
+function Step({ n, title, state, children, headingLevel }: { n: number; title: string; state: "idle" | "active" | "done"; children: ReactNode; headingLevel: 3 | 4 }) {
   const id = useId();
+  const Heading = headingLevel === 3 ? "h3" : "h4";
   return (
     <section className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-x-3" aria-labelledby={id}>
       <span
@@ -56,16 +59,16 @@ function Step({ n, title, state, children }: { n: number; title: string; state: 
         {state === "done" ? <Check size={13} strokeWidth={3} /> : n}
       </span>
       <div className="min-w-0">
-        <h3 id={id} className="text-sm font-semibold leading-6 text-ink">
+        <Heading id={id} className="text-sm font-semibold leading-6 text-ink">
           {title}
-        </h3>
+        </Heading>
         <div className="mt-1.5 flex flex-col gap-2.5">{children}</div>
       </div>
     </section>
   );
 }
 
-export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentSetupProps) {
+export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated, headingLevel = 3 }: AgentSetupProps) {
   const uid = useId();
   const optionsId = `${uid}-options`;
   const [scope, setScope] = useState<TokenScopeName>("comment");
@@ -134,7 +137,7 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentS
     return (
       <div className="flex flex-col gap-5" data-testid="agent-setup" data-state="connected">
         <ConnectedBanner names={[row.name]} lastSeen={lastSeenAt(row)} />
-        <InviteBlock doc={doc} />
+        <InviteBlock doc={doc} headingLevel={headingLevel} />
         <div className="border-t border-line pt-4">
           <button
             type="button"
@@ -154,7 +157,7 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentS
 
   return (
     <div className="flex flex-col gap-5" data-testid="agent-setup" data-state={created ? "waiting" : "new"}>
-      <Step n={1} title="Add Markdoc to your agent" state="active">
+      <Step n={1} title="Add Markdoc to your agent" state="active" headingLevel={headingLevel}>
         {created ? (
           <>
             <p className="text-sm text-ink-2">Paste this into your agent&apos;s MCP config. It is the same for every MCP client.</p>
@@ -255,7 +258,7 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated }: AgentS
         )}
       </Step>
 
-      <Step n={2} title={inviteTitle(doc)} state="idle">
+      <Step n={2} title={inviteTitle(doc)} state="idle" headingLevel={headingLevel}>
         {created ? <InviteBody doc={doc} primary={false} /> : <p className="text-xs text-ink-3">Once your agent is connected, you get a sentence to paste into it.</p>}
       </Step>
 

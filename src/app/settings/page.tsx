@@ -42,13 +42,14 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         </div>
       </header>
       <div className="mx-auto max-w-4xl px-6 py-8">
+        <h1 className="mb-8 text-2xl font-semibold text-ink">Settings</h1>
         <section aria-labelledby="settings-account" className="mb-10" data-testid="settings-account">
           <h2 id="settings-account" className="mb-1 text-lg font-semibold text-ink">Account</h2>
           <p className="mb-4 text-sm text-ink-3">Applies wherever you sign in.</p>
           <AccountSettings login={session.user.login ?? null} name={session.user.name ?? null} image={session.user.image ?? null} isDemo={isDemoAccount(session.user.login)} />
-          <div className="mt-8">
-            <AgentsPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} initialTokens={tokens} />
-          </div>
+        </section>
+        <section aria-labelledby="settings-agents" className="mb-10" data-testid="settings-agents">
+          <AgentsPanel origin={origin} userLogin={session.user.login ?? session.user.name ?? "you"} next={next} initialTokens={tokens} />
           <div className="mt-6">
             <AdvancedSettings />
           </div>

@@ -56,13 +56,14 @@ export function InviteBody({ doc, primary }: { doc?: DocRef; primary: boolean })
 }
 
 /** The invite as its own section, for a screen where the agent is already connected. */
-export function InviteBlock({ doc }: { doc?: DocRef }) {
+export function InviteBlock({ doc, headingLevel = 3 }: { doc?: DocRef; headingLevel?: 3 | 4 }) {
   const headingId = useId();
+  const Heading = headingLevel === 3 ? "h3" : "h4";
   return (
     <section className="flex flex-col gap-2.5" aria-labelledby={headingId} data-testid="agent-invite">
-      <h3 id={headingId} className="text-sm font-semibold text-ink">
+      <Heading id={headingId} className="text-sm font-semibold text-ink">
         {inviteTitle(doc)}
-      </h3>
+      </Heading>
       <InviteBody doc={doc} primary />
     </section>
   );
