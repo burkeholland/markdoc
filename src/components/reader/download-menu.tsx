@@ -113,14 +113,14 @@ export function DownloadMenu({ docId }: { docId: string }) {
       onKeyDown={onRootKeyDown}
       onBlur={onRootBlur}
     >
-      <a href={exportHref(docId, "md")} className="btn btn-sm btn-outline reader-split-main gap-1.5" aria-label="Download Markdown" data-testid="reader-download">
+      <a href={exportHref(docId, "md")} className="btn btn-sm btn-outline reader-split-main gap-1.5 tap-target relative" aria-label="Download Markdown" data-testid="reader-download">
         <Download size={14} />
         <span className="hidden sm:inline">Download</span>
       </a>
       <button
         ref={toggleRef}
         type="button"
-        className="btn btn-sm btn-outline reader-split-more"
+        className="btn btn-sm btn-outline reader-split-more tap-target relative"
         aria-label="Download as…"
         aria-expanded={open}
         aria-controls={LIST_ID}
