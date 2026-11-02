@@ -215,7 +215,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
         <PopoverTrigger asChild>
           <button
             type="button"
-            className="icon-btn relative"
+            className="icon-btn relative tap-target editor-header-action"
             aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}
             data-testid="notifications-bell"
             data-unread={unreadCount}

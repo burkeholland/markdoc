@@ -154,7 +154,7 @@ export function SaveIndicator({ session, compact }: { session: CollabSession; co
     >
       <button
         type="button"
-        className="tap-target relative inline-flex min-h-6 min-w-6 items-center justify-center gap-1.5"
+        className="header-save-button tap-target relative inline-flex min-h-6 min-w-6 items-center justify-center gap-1.5"
         disabled={!canEdit || manualPending}
         aria-busy={manualPending || undefined}
         aria-label="Save document"
@@ -213,7 +213,7 @@ export function TitleEditor({ session, fallback, compact }: { session: CollabSes
     setStoredEdit((current) => (current?.generation === generation ? null : current));
   };
 
-  const inputClassName = "h-9 min-w-[12rem] max-w-[28rem] rounded-lg border border-accent bg-surface px-2 text-[22px] font-semibold text-ink outline-none ring-2 ring-accent/20";
+  const inputClassName = "h-9 max-md:h-11 min-w-[12rem] max-w-[28rem] rounded-lg border border-accent bg-surface px-2 text-[22px] font-semibold text-ink outline-none ring-2 ring-accent/20";
   if (edit) {
     const generation = edit.generation;
     return (
@@ -243,7 +243,7 @@ export function TitleEditor({ session, fallback, compact }: { session: CollabSes
         if (!canEdit || event.button !== 0) return;
         setStoredEdit((current) => current ?? { generation: {}, session, draft: title });
       }}
-      className={cn("group flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left max-md:px-1", canEdit && "hover:bg-surface-3")}
+      className={cn("group editor-header-title flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left max-md:px-0.5", canEdit && "hover:bg-surface-3")}
       title={canEdit ? "Rename" : title}
       data-testid="title"
     >
@@ -972,7 +972,7 @@ export function LayoutSegment({ layout, onLayout }: { layout: Layout; onLayout: 
   };
 
   return (
-    <div className="inline-flex h-9 shrink-0 rounded-lg border border-line-2 bg-surface p-0.5 md:hidden" role="radiogroup" aria-label="Pane" data-testid="layout-segment">
+    <div className="layout-segment inline-flex h-9 shrink-0 rounded-lg border border-line-2 bg-surface p-0.5 md:hidden" role="radiogroup" aria-label="Pane" data-testid="layout-segment">
       {LAYOUT_SEGMENT_OPTIONS.map((option, index) => {
         const checked = option.value === layout;
         return (
@@ -987,7 +987,7 @@ export function LayoutSegment({ layout, onLayout }: { layout: Layout; onLayout: 
             aria-label={option.label}
             title={option.label}
             tabIndex={checked ? 0 : -1}
-            className={cn("inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors", checked ? "bg-accent-soft text-accent" : "text-ink-3 hover:text-ink")}
+            className={cn("layout-segment-option tap-target relative inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors", checked ? "bg-accent-soft text-accent" : "text-ink-3 hover:text-ink")}
             onClick={() => onLayout(option.value)}
             onKeyDown={(event) => onKeyDown(event, index)}
             data-testid={`layout-segment-${option.value}`}
@@ -1274,11 +1274,12 @@ export const Header = memo(function Header(props: HeaderProps) {
     : session.user.login
       ? "max-md:min-w-[calc(11.75rem+2px)]" // segment + bell + comments + ⋮: 190 px
       : "max-md:min-w-[calc(9.25rem+2px)]"; // segment + comments + ⋮: 150 px
+  const phoneActions = embed ? "embed" : session.user.login ? "signed-in" : "anonymous";
 
   return (
-    <header className={HEADER_BOX} data-testid="header" data-embed={embed || undefined}>
+    <header className={cn(HEADER_BOX, "editor-header-layout")} data-testid="header" data-embed={embed || undefined}>
       {compact ? (
-        <button type="button" className="icon-btn h-9 w-9 shrink-0" onClick={props.onOutline} aria-label="Outline" title="Outline" data-testid="outline-button">
+        <button type="button" className="icon-btn h-9 w-9 shrink-0 tap-target relative" onClick={props.onOutline} aria-label="Outline" title="Outline" data-testid="outline-button">
           <PanelLeft size={20} />
         </button>
       ) : embed ? (
@@ -1287,7 +1288,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         </span>
       ) : (
         // Below `md` the same 36 px box as the outline button that replaces it after hydration (#1470).
-        <Link href="/" className="icon-btn h-9 w-9 shrink-0 md:h-10 md:w-10" aria-label="Back to documents" title="All documents">
+        <Link href="/" className="icon-btn h-9 w-9 shrink-0 md:h-10 md:w-10 tap-target relative" aria-label="Back to documents" title="All documents">
           <Logo className="h-8 w-8" />
         </Link>
       )}
@@ -1296,7 +1297,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         {!embed && !compact && <HeaderStar docId={doc.id} ready={settled} />}
         <SaveIndicator session={session} compact={compact} />
       </div>
-      <div className={cn("flex shrink-0 items-center gap-1 md:gap-3", phoneRightMinWidth)} data-testid="header-right">
+      <div className={cn("editor-header-right flex shrink-0 items-center gap-1 md:gap-3", phoneRightMinWidth)} data-testid="header-right" data-phone-actions={phoneActions}>
         <LayoutSegment layout={props.layout} onLayout={props.onLayout} />
         <div className="hidden items-center gap-3 md:flex">
           <ModeSwitcher session={session} />
@@ -1313,7 +1314,7 @@ export const Header = memo(function Header(props: HeaderProps) {
         <Tip label={props.commentsOpen ? "Hide comments" : "Show comments"} shortcut={shortcut("Mod-Alt-M")}>
           <button
             type="button"
-            className="icon-btn relative"
+            className="icon-btn relative tap-target editor-header-action"
             onClick={(event) => props.onToggleComments(event.detail === 0)}
             data-active={props.commentsOpen}
             aria-label="Comments"
@@ -1331,7 +1332,7 @@ export const Header = memo(function Header(props: HeaderProps) {
           <MenuTrigger asChild>
             <button
               type="button"
-              className="icon-btn"
+              className="icon-btn relative tap-target editor-header-action"
               aria-label="More"
               data-testid="more-menu"
             >
