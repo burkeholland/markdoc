@@ -8,12 +8,14 @@ import { ApiError, api, apiErrorText, type CollaboratorDto } from "@/lib/api";
 import { useCopy } from "@/lib/hooks";
 import { Avatar, Dialog, DialogContent } from "@/components/ui/primitives";
 import { CollaboratorLoginInput, isValidLogin, type CollaboratorLoginInputHandle } from "@/components/editor/collaborator-login-input";
+import { markNotificationRead } from "@/lib/notifications-store";
 import { cn } from "@/lib/utils";
 
 type CollaboratorRole = Exclude<Role, "owner">;
 type LinkAccess = DocumentDto["linkAccess"];
 type Owner = { login: string | null; name: string | null; image: string | null };
 type People = Awaited<ReturnType<typeof api.documents.collaborators>>;
+type AccessRequest = { login: string; name: string | null; notificationId: string | null };
 
 const ROLE_OPTIONS: readonly { value: CollaboratorRole; label: string }[] = [
   { value: "editor", label: "Editor" },
@@ -88,6 +90,8 @@ export const ShareDialog = memo(function ShareDialog({
   isOwner,
   onDocChange,
   onConnectAgent,
+  accessRequest,
+  onAccessRequestClosed,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -96,6 +100,8 @@ export const ShareDialog = memo(function ShareDialog({
   onDocChange: (doc: DocumentDto) => void;
   /** Shows the "Connect an AI agent" row; called once Share has closed. */
   onConnectAgent?: () => void;
+  accessRequest?: AccessRequest | null;
+  onAccessRequestClosed?: () => void;
 }) {
   const [list, setList] = useState<ListState>({ status: "loading" });
   const [retry, setRetry] = useState(0);
@@ -108,6 +114,8 @@ export const ShareDialog = memo(function ShareDialog({
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyLogins, setBusyLogins] = useState<ReadonlySet<string>>(new Set());
   const [linkBusy, setLinkBusy] = useState(false);
+  const [requestBusy, setRequestBusy] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
   const [origin, setOrigin] = useState("");
   const previewId = useId();
   const roleSelect = useRef<HTMLSelectElement>(null);
@@ -115,6 +123,7 @@ export const ShareDialog = memo(function ShareDialog({
   const focusRole = useCallback(() => roleSelect.current?.focus(), []);
   const loginInput = useRef<CollaboratorLoginInputHandle>(null);
   const addButton = useRef<HTMLButtonElement>(null);
+  const resolvingRequest = useRef(false);
   // What is shown under the field answers the handle that was submitted: it goes when the text changes.
   const changeLogin = useCallback((value: string) => {
     setLogin(value);
@@ -135,6 +144,10 @@ export const ShareDialog = memo(function ShareDialog({
     setAddError(null);
     setRefused(null);
   }, [open, doc.id]);
+  useEffect(() => {
+    if (!open || !accessRequest) return;
+    setRequestError(null);
+  }, [open, doc.id, accessRequest]);
 
   /** Shows a list the server just sent. "Already has access" is only true while the person is in the list it points to. */
   const showPeople = useCallback((documentId: string, res: People) => {
@@ -144,7 +157,7 @@ export const ShareDialog = memo(function ShareDialog({
 
   // A response that arrives after the dialog closed, or for another document, is dropped.
   useEffect(() => {
-    if (!open) return;
+    if (!open || accessRequest) return;
     let stale = false;
     const documentId = doc.id;
     setList((current) => (current.status === "loaded" && current.documentId === documentId ? current : { status: "loading" }));
@@ -159,7 +172,7 @@ export const ShareDialog = memo(function ShareDialog({
     return () => {
       stale = true;
     };
-  }, [open, doc.id, retry, showPeople]);
+  }, [open, doc.id, retry, showPeople, accessRequest]);
 
   const setBusy = useCallback((who: string, busy: boolean) => {
     setBusyLogins((current) => {
@@ -276,10 +289,41 @@ export const ShareDialog = memo(function ShareDialog({
     }
   };
 
+  const resolveAccessRequest = async (grant: boolean) => {
+    if (!accessRequest || resolvingRequest.current) return;
+    resolvingRequest.current = true;
+    setRequestBusy(true);
+    setRequestError(null);
+    const documentId = doc.id;
+    const login = accessRequest.login.replace(/^@/, "");
+    try {
+      if (grant) await api.documents.addCollaborator(documentId, login, "viewer");
+      if (accessRequest.notificationId) void markNotificationRead(accessRequest.notificationId);
+      if (currentDoc.current === documentId) onOpenChange(false);
+    } catch (e) {
+      if (currentDoc.current === documentId) {
+        const refusal = refusalOf(e);
+        if (refusal?.login.toLowerCase() === login.toLowerCase()) {
+          if (accessRequest.notificationId) void markNotificationRead(accessRequest.notificationId);
+          onOpenChange(false);
+        } else {
+          setRequestError(apiErrorText(e, "Could not grant access."));
+        }
+      }
+    } finally {
+      resolvingRequest.current = false;
+      setRequestBusy(false);
+    }
+  };
+
   const linkOption = LINK_OPTIONS.find((option) => option.value === doc.linkAccess) ?? LINK_OPTIONS[0];
   const restricted = doc.linkAccess === "private";
   const editorLink = `${origin}/d/${doc.id}`;
   const readerLink = `${origin}/p/${doc.id}`;
+  const requestLogin = accessRequest?.login.replace(/^@/, "") ?? "";
+  const requestName = accessRequest?.name?.trim();
+  const requestLabel = requestName ? `${requestName} (@${requestLogin})` : `@${requestLogin}`;
+  const validRequestLogin = Boolean(accessRequest && isValidLogin(requestLogin));
   const excluded = [...(owner?.login ? [owner.login] : []), ...collaborators.map((c) => c.login)];
   // The role comes from the person's row when it is listed, so the sentence and the row below never disagree.
   const refusedRole = refused ? (collaborators.find((c) => c.login === refused.login)?.role ?? refused.role) : null;
@@ -296,16 +340,56 @@ export const ShareDialog = memo(function ShareDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        title={`Share “${doc.title}”`}
-        description="Add people by GitHub handle. They sign in with GitHub."
+        title={accessRequest ? "Access request" : `Share “${doc.title}”`}
+        description={accessRequest ? `${requestLabel} requested access to “${doc.title}”.` : "Add people by GitHub handle. They sign in with GitHub."}
         className="max-h-[calc(100dvh-2rem)] overflow-y-auto"
         onClosed={() => {
+          if (accessRequest) onAccessRequestClosed?.();
           if (!connectAfterClose.current) return;
           connectAfterClose.current = false;
           onConnectAgent?.();
         }}
       >
-        <div className="flex flex-col gap-5" data-testid="share-presentation">
+        {accessRequest ? (
+          <div className="flex flex-col gap-4" data-testid="access-request">
+            <p className="text-sm text-ink-2">Granting gives view access only.</p>
+            {!validRequestLogin && <div className={ERROR_CLASS} role="alert">This request does not include a valid GitHub handle.</div>}
+            {requestError && <div className={ERROR_CLASS} role="alert" data-testid="access-request-error">{requestError}</div>}
+            {!isOwner && <p className="text-sm text-ink-3">Only the document owner can respond to this request.</p>}
+            <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+              {isOwner ? (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-outline shrink-0 aria-disabled:opacity-50"
+                    aria-disabled={requestBusy || undefined}
+                    aria-busy={requestBusy || undefined}
+                    onClick={() => void resolveAccessRequest(false)}
+                    data-testid="access-request-deny"
+                  >
+                    Deny request
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary shrink-0 gap-1.5 aria-disabled:opacity-50"
+                    disabled={!validRequestLogin}
+                    aria-disabled={requestBusy || undefined}
+                    aria-busy={requestBusy || undefined}
+                    onClick={() => void resolveAccessRequest(true)}
+                    data-testid="access-request-grant"
+                  >
+                    {requestBusy && <Loader2 size={16} className="animate-spin" aria-hidden="true" />}
+                    Grant view access
+                  </button>
+                </>
+              ) : (
+                <button type="button" className="btn btn-primary shrink-0" onClick={() => onOpenChange(false)}>
+                  Done
+                </button>
+              )}
+            </div>
+          </div>
+        ) : <div className="flex flex-col gap-5" data-testid="share-presentation">
           {isOwner && (
             <div className="flex flex-col gap-2">
               <form className="flex gap-2" onSubmit={(e) => void add(e)} onKeyDownCapture={ignoreRepeatedEnter}>
@@ -542,7 +626,7 @@ export const ShareDialog = memo(function ShareDialog({
               Done
             </button>
           </div>
-        </div>
+        </div>}
       </DialogContent>
     </Dialog>
   );

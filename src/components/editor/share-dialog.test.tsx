@@ -13,6 +13,9 @@ vi.mock("@/lib/clipboard", async (importOriginal) => {
   return { ...actual, copyText: vi.fn() };
 });
 
+const notifications = vi.hoisted(() => ({ markNotificationRead: vi.fn() }));
+vi.mock("@/lib/notifications-store", () => notifications);
+
 type CollaboratorsResponse = Awaited<ReturnType<typeof api.documents.collaborators>>;
 type Role = CollaboratorDto["role"];
 
@@ -62,6 +65,7 @@ function renderShare({
   onOpenChange = vi.fn(),
   onDocChange = vi.fn(),
   onConnectAgent,
+  accessRequest,
 }: {
   open?: boolean;
   document?: DocumentDto;
@@ -69,6 +73,7 @@ function renderShare({
   onOpenChange?: (open: boolean) => void;
   onDocChange?: (document: DocumentDto) => void;
   onConnectAgent?: () => void;
+  accessRequest?: { login: string; name: string | null; notificationId: string | null };
 } = {}) {
   return {
     onOpenChange,
@@ -81,6 +86,7 @@ function renderShare({
         isOwner={isOwner}
         onDocChange={onDocChange}
         onConnectAgent={onConnectAgent}
+        accessRequest={accessRequest}
       />,
     ),
   };
@@ -103,6 +109,7 @@ beforeEach(() => {
   vi.spyOn(api.documents, "removeCollaborator").mockResolvedValue({ ok: true });
   vi.spyOn(api.documents, "patch").mockResolvedValue({ document: doc({ linkAccess: "view" }) });
   vi.mocked(copyText).mockResolvedValue(true);
+  notifications.markNotificationRead.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -111,6 +118,83 @@ afterEach(() => {
 });
 
 describe("ShareDialog", () => {
+  describe("access requests", () => {
+    const request = { login: "zoe", name: "Zoe Example", notificationId: "request-one" };
+
+    it("shows a compact requester-specific decision without loading the share settings", () => {
+      renderShare({ accessRequest: request });
+
+      expect(screen.getByRole("dialog", { name: "Access request" })).toBeVisible();
+      expect(screen.getByText("Zoe Example (@zoe) requested access to “Launch Plan”.")).toBeInTheDocument();
+      expect(screen.getByText("Granting gives view access only.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Deny request" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Grant view access" })).toBeInTheDocument();
+      expect(screen.queryByTestId("share-presentation")).not.toBeInTheDocument();
+      expect(api.documents.collaborators).not.toHaveBeenCalled();
+      expect(notifications.markNotificationRead).not.toHaveBeenCalled();
+    });
+
+    it("grants view access and marks the request read only after the grant succeeds", async () => {
+      const onOpenChange = vi.fn();
+      renderShare({ accessRequest: request, onOpenChange });
+
+      fireEvent.click(screen.getByTestId("access-request-grant"));
+
+      await waitFor(() => expect(api.documents.addCollaborator).toHaveBeenCalledExactlyOnceWith("doc-1", "zoe", "viewer"));
+      expect(notifications.markNotificationRead).toHaveBeenCalledExactlyOnceWith(request.notificationId);
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    it("denies by dismissing the request without adding the requester", () => {
+      const onOpenChange = vi.fn();
+      renderShare({ accessRequest: request, onOpenChange });
+
+      fireEvent.click(screen.getByTestId("access-request-deny"));
+
+      expect(notifications.markNotificationRead).toHaveBeenCalledExactlyOnceWith(request.notificationId);
+      expect(api.documents.addCollaborator).not.toHaveBeenCalled();
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    it("keeps a failed grant open and unread so it can be retried", async () => {
+      const onOpenChange = vi.fn();
+      vi.mocked(api.documents.addCollaborator).mockRejectedValueOnce(apiMessage(500, "Access service unavailable"));
+      renderShare({ accessRequest: request, onOpenChange });
+
+      fireEvent.click(screen.getByTestId("access-request-grant"));
+
+      expect(await screen.findByTestId("access-request-error")).toHaveTextContent("Access service unavailable");
+      expect(notifications.markNotificationRead).not.toHaveBeenCalled();
+      expect(onOpenChange).not.toHaveBeenCalled();
+    });
+
+    it("resolves the request when the requester already has access", async () => {
+      const onOpenChange = vi.fn();
+      vi.mocked(api.documents.addCollaborator).mockRejectedValueOnce(
+        new ApiError(409, "zoe already has access as viewer", undefined, {
+          code: "already-collaborator",
+          login: "zoe",
+          role: "viewer",
+        }),
+      );
+      renderShare({ accessRequest: request, onOpenChange });
+
+      fireEvent.click(screen.getByTestId("access-request-grant"));
+
+      await waitFor(() => expect(notifications.markNotificationRead).toHaveBeenCalledExactlyOnceWith(request.notificationId));
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    it("does not offer a decision to a non-owner", () => {
+      renderShare({ accessRequest: request, isOwner: false });
+
+      expect(screen.queryByTestId("access-request-grant")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("access-request-deny")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Done" })).toBeInTheDocument();
+      expect(notifications.markNotificationRead).not.toHaveBeenCalled();
+    });
+  });
+
   it("shows a loading state, then people with access or an empty list", async () => {
     const firstLoad = deferred<CollaboratorsResponse>();
     vi.mocked(api.documents.collaborators).mockReturnValueOnce(firstLoad.promise);

@@ -90,6 +90,14 @@ const SHARE: NotificationDto = {
   refId: "document-shared:carol",
   snippet: "viewer",
 };
+const ACCESS_REQUEST: NotificationDto = {
+  ...ITEM,
+  id: "notification-access-request",
+  kind: "access.request",
+  documentId: "document-requested",
+  documentTitle: "Requested plan",
+  snippet: "Please let me view this",
+};
 const PAGE_ITEMS: NotificationDto[] = Array.from({ length: 14 }, (_, index) => ({
   ...ITEM,
   id: `notification-page-${index + 1}`,
@@ -315,6 +323,17 @@ describe("opening and closing the popover", () => {
 });
 
 describe("opening a notification", () => {
+  it("leaves an unread access request unread while opening it", () => {
+    const onOpen = vi.fn();
+    openBell({ ...EMPTY, items: [ACCESS_REQUEST], unreadCount: 1, loaded: true }, { onOpen });
+
+    fireEvent.click(rows()[0]!);
+
+    expect(store.markNotificationRead).not.toHaveBeenCalled();
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith(ACCESS_REQUEST);
+    expect(popover()).toBeNull();
+  });
+
   it.each([
     ["an unread mention", ITEM],
     ["a read reply", { ...ITEM_TWO, readAt: READ_AT }],

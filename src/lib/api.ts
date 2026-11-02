@@ -108,7 +108,7 @@ export interface NotificationDto {
   documentTitle: string;
   actorLogin: string | null;
   actorName: string | null;
-  /** Thread, reply or suggestion id; `<docId>:<login>` for shares. */
+  /** Thread, reply or suggestion id; `<docId>:<login>` for shares and access requests. */
   refId: string;
   snippet: string;
   createdAt: string;
