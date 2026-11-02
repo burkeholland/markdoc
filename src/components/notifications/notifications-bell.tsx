@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { AtSign, Bell, Bot, CheckCheck, KeyRound, CircleCheck, ClipboardCheck, Reply, RotateCcw, ThumbsDown, ThumbsUp, UserPlus, WebhookOff } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger, Tip } from "@/components/ui/primitives";
 import { RelativeTime } from "@/components/ui/relative-time";
@@ -151,6 +151,7 @@ function NotificationItem({
 /** Bell with an unread badge; the popover lists the latest notifications. */
 export function NotificationsBell({ currentDocId, onOpen, ready = true }: NotificationsBellProps) {
   const { items, unreadCount, loaded, loading, loadError, readAllPending, readError, readErrorPending } = useNotifications(ready);
+  const titleId = useId();
   const [open, setOpen] = useState(false);
   // The rows are worded for the document that is open, so the popover closes when another one is opened in place.
   const [listedDocId, setListedDocId] = useState(currentDocId);
@@ -238,6 +239,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
         align="end"
         collisionPadding={8}
         className="w-[min(380px,calc(100vw-16px))] p-0"
+        aria-labelledby={titleId}
         data-testid="notifications-popover"
         onKeyDown={cancelHeldPress}
         onFocus={(event) => {
@@ -254,7 +256,7 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
         }}
       >
         <div className="flex h-10 items-center justify-between border-b border-line px-3">
-          <span className="text-sm font-semibold text-ink">Notifications</span>
+          <span id={titleId} className="text-sm font-semibold text-ink">Notifications</span>
           {unreadCount > 0 && (
             <span className="text-xs text-ink-4" data-testid="notifications-unread-count">
               {unreadCount} unread

@@ -188,6 +188,13 @@ describe("opening and closing the popover", () => {
     expect(trigger()).toHaveAttribute("aria-expanded", "false");
   });
 
+  it("names the dialog after its visible heading", () => {
+    openBell(THREE);
+
+    const dialog = screen.getByRole("dialog", { name: "Notifications" });
+    expect(dialog).toHaveAccessibleName("Notifications");
+  });
+
   it("closes on Escape from a row and returns focus to the bell", async () => {
     openBell(THREE);
     await settle();

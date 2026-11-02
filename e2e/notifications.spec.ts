@@ -71,6 +71,7 @@ test.describe("notifications", () => {
     await bell.click();
     const popover = alice.page.getByTestId("notifications-popover");
     await expect(popover).toBeVisible();
+    await expect(alice.page.getByRole("dialog", { name: "Notifications" })).toBeVisible();
     // Earlier (read) notifications from other specs may be listed too; the new one is first and the only unread one.
     await expect(popover.locator("[data-testid=notification-item][data-unread=true]")).toHaveCount(1);
     const item = popover.getByTestId("notification-item").first();

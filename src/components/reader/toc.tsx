@@ -135,7 +135,7 @@ export function ReaderToc({ headings }: { headings: RenderedHeading[] }) {
       <ol
         ref={listRef}
         id="reader-toc-list"
-        className={cn("reader-toc-list mt-2 flex-col gap-0.5 lg:mt-0 lg:flex", open ? "flex" : "hidden")}
+        className={cn("reader-toc-list mt-2 flex-col gap-0.5 lg:mt-0 lg:max-h-[calc(100dvh-8rem)] lg:overflow-y-auto lg:overscroll-contain lg:flex", open ? "flex" : "hidden")}
       >
         {headings.map((heading) => (
           <li key={heading.id}>
