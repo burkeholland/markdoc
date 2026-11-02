@@ -69,7 +69,7 @@ function isPointerClick(event: ReactMouseEvent) {
 /**
  * Unread notifications of the current user (mentions, replies, resolutions, suggestion decisions,
  * shares), shown at the top of the dashboard. Renders nothing when there is nothing to show.
- * Clicking one marks it read and opens the document on the relevant thread.
+ * Clicking one marks it read and opens the relevant document or thread. Access requests stay unread until answered.
  *
  * One gesture is one action: a repeated click and the repeats of a held Enter or Space are ignored. The
  * store shares one in-flight request per notification.
@@ -150,7 +150,9 @@ export function NotificationsStrip() {
   const open = (notification: NotificationDto, event: ReactMouseEvent) => {
     if (opening || isRepeatedClick(event)) return;
     setOpened({ rows: unread, unreadCount });
-    void markNotificationRead(notification.id);
+    if (notification.kind !== "access.request" || !notification.actorLogin) {
+      void markNotificationRead(notification.id);
+    }
     router.push(notificationHref(notification));
   };
 

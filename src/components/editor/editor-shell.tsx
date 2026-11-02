@@ -1746,6 +1746,12 @@ export function EditorShell({
   }, []);
   const [lineWrapping, setLineWrapping] = useState(true);
   const [dialog, setDialog] = useState<DialogKind>(null);
+  const [accessRequest, setAccessRequest] = useState<{
+    documentId: string;
+    login: string;
+    name: string | null;
+    notificationId: string | null;
+  } | null>(null);
   const [commitOpen, setCommitOpen] = useState(false);
   const [publishingOwner, setPublishingOwner] = useState<PublishPullOwner | null>(null);
   const [documentMutationOwner, setDocumentMutationOwner] = useState<DocumentMutationOwner | null>(null);
@@ -1760,6 +1766,11 @@ export function EditorShell({
       },
     };
   }, [editorIdentity]);
+  useEffect(() => {
+    if (!accessRequest || accessRequest.documentId === doc.id) return;
+    setAccessRequest(null);
+    setDialog((current) => (current === "share" ? null : current));
+  }, [accessRequest, doc.id]);
   const publishPullOwnerRef = useRef<PublishPullOwner | null>(null);
   const documentMutationOwnerRef = useRef<DocumentMutationOwner | null>(null);
   const documentMutationSequence = useRef(0);
@@ -2844,6 +2855,16 @@ export function EditorShell({
       }
       if (n.kind === "share") return;
       if (n.kind === "access.request") {
+        setAccessRequest(
+          !n.readAt && n.actorLogin
+            ? {
+                documentId: doc.id,
+                login: n.actorLogin,
+                name: n.actorName,
+                notificationId: n.id,
+              }
+            : null,
+        );
         setDialog("share");
         return;
       }
@@ -2882,15 +2903,29 @@ export function EditorShell({
       .catch(() => undefined);
   }, [doc.id]);
   const toggleActivity = useCallback(() => setSidePanel((p) => (p === "activity" ? null : "activity")), []);
-  const openShare = useCallback(() => setDialog("share"), []);
-  // `/d/<id>?share=1` (from an access-request notification) opens the share dialog once.
+  const clearAccessRequest = useCallback(() => setAccessRequest(null), []);
+  const openShare = useCallback(() => {
+    setAccessRequest(null);
+    setDialog("share");
+  }, []);
+  // Notification links are consumed once; old `?share=1` links still open the generic Share dialog.
   useEffect(() => {
     const url = new URL(window.location.href);
+    const requestLogin = url.searchParams.get("accessRequest");
+    if (requestLogin) {
+      const notificationId = url.searchParams.get("notification");
+      url.searchParams.delete("accessRequest");
+      url.searchParams.delete("notification");
+      window.history.replaceState(window.history.state, "", url.toString());
+      setAccessRequest({ documentId: doc.id, login: requestLogin, name: null, notificationId });
+      setDialog("share");
+      return;
+    }
     if (url.searchParams.get("share") !== "1") return;
     url.searchParams.delete("share");
     window.history.replaceState(window.history.state, "", url.toString());
     setDialog("share");
-  }, []);
+  }, [doc.id]);
   const openPublish = useCallback(() => setDialog("publish"), []);
   const openShortcuts = useCallback(() => setDialog("shortcuts"), []);
   const openPalette = useCallback(() => setPaletteOpen(true), []);
@@ -3564,7 +3599,7 @@ export function EditorShell({
 
         {!embed && (
           <>
-            {everOpened.share && <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} onConnectAgent={openConnectAgent} />}
+            {everOpened.share && <ShareDialog open={dialog === "share"} onOpenChange={dialogOpenChange.share} doc={docView} isOwner={isOwner} onDocChange={setDoc} onConnectAgent={openConnectAgent} accessRequest={accessRequest?.documentId === doc.id ? accessRequest : null} onAccessRequestClosed={clearAccessRequest} />}
             {everOpened.publish && (
               <GitHubDialog open={dialog === "publish"} onOpenChange={dialogOpenChange.publish} doc={docView} onDocChange={onPublishDocChange} githubAvailable={githubAvailable} githubConfigured={githubConfigured} managedAccount={isManagedGithubLogin(user.login)} isOwner={isOwner} />
             )}

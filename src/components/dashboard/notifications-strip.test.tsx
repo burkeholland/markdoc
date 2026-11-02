@@ -65,6 +65,14 @@ const SHARE: NotificationDto = {
   readAt: null,
 };
 const READ: NotificationDto = { ...ITEM, id: "notification-read", readAt: "2026-09-07T12:10:00.000Z" };
+const ACCESS_REQUEST: NotificationDto = {
+  ...ITEM,
+  id: "notification-access-request",
+  kind: "access.request",
+  documentId: "document-requested",
+  documentTitle: "Requested plan",
+  snippet: "Please let me view this",
+};
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -213,6 +221,17 @@ describe("notification strip presentation", () => {
 });
 
 describe("notification strip actions", () => {
+  it("keeps an unread access request unread and opens its decision prompt", async () => {
+    await mountStrip([ACCESS_REQUEST]);
+
+    fireEvent.click(opens()[0]!);
+
+    expect(notificationApi.read).not.toHaveBeenCalled();
+    expect(router.push).toHaveBeenCalledExactlyOnceWith(
+      `/d/${ACCESS_REQUEST.documentId}?accessRequest=${ACCESS_REQUEST.actorLogin}&notification=${ACCESS_REQUEST.id}`,
+    );
+  });
+
   it.each([
     ["a mention", ITEM, `/d/${ITEM.documentId}?thread=${ITEM.refId}`],
     ["a share", SHARE, `/d/${SHARE.documentId}`],

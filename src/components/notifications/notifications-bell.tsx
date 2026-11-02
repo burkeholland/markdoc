@@ -43,7 +43,7 @@ export function actorLabel(n: Pick<NotificationDto, "actorName" | "actorLogin">)
 export interface NotificationsBellProps {
   /** Document currently open, so same-document items can be opened in place. */
   currentDocId?: string;
-  /** Called after the item is marked read; the caller navigates or opens the thread. */
+  /** Called after opening the item; unread access requests stay unread until the owner responds. */
   onOpen: (n: NotificationDto) => void;
   /** False while the page is still opening: the bell renders without fetching or polling yet. */
   ready?: boolean;
@@ -188,7 +188,9 @@ export function NotificationsBell({ currentDocId, onOpen, ready = true }: Notifi
   // Closing on the click removes the rows, so one notification is opened once; the store also shares one
   // in-flight request per notification.
   const openNotification = (notification: NotificationDto) => {
-    void markNotificationRead(notification.id);
+    if (notification.kind !== "access.request" || notification.readAt || !notification.actorLogin) {
+      void markNotificationRead(notification.id);
+    }
     setOpen(false);
     onOpen(notification);
   };
