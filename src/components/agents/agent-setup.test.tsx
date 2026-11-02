@@ -70,7 +70,7 @@ describe("AgentSetup", () => {
     render(<Harness doc={DOC} />);
     expect(screen.queryByRole("radiogroup")).toBeNull();
     expect(screen.getByRole("button", { name: /create access key/i })).toBeEnabled();
-    expect(screen.getByTestId("agent-key-summary")).toHaveTextContent("Comment & suggest · all your documents · expires in 90 days");
+    expect(screen.getByTestId("agent-key-summary")).toHaveTextContent("Comment & suggest · this document only · expires in 90 days");
     expect(screen.queryByTestId("agent-setup-snippet")).toBeNull();
     expect(screen.queryByTestId("agent-invite-prompt")).toBeNull();
     expect(screen.getByText(/once your agent is connected/i)).toBeInTheDocument();
@@ -82,7 +82,7 @@ describe("AgentSetup", () => {
     createKey();
     const snippet = await screen.findByTestId("agent-setup-snippet");
 
-    expect(server.creates).toEqual([{ name: "AI agent", expiresInDays: 90, scope: "comment", documentIds: null }]);
+    expect(server.creates).toEqual([{ name: "AI agent", expiresInDays: 90, scope: "comment", documentIds: ["doc1"] }]);
     expect(JSON.parse(snippet.textContent ?? "")).toEqual({ mcpServers: { markdoc: { type: "http", url: `${ORIGIN}/api/mcp`, headers: { Authorization: "Bearer " + SECRET } } } });
     expect(screen.getByText(/shown only once/i)).toBeInTheDocument();
     expect(screen.getByTestId("agent-connection")).toHaveAttribute("data-state", "waiting");
@@ -94,8 +94,8 @@ describe("AgentSetup", () => {
   it("sends the chosen options: access level, this document only, expiry and name", async () => {
     render(<Harness doc={DOC} />);
     fireEvent.click(screen.getByTestId("agent-options-toggle"));
+    expect(screen.getByTestId("agent-only-doc")).toBeChecked();
     fireEvent.click(screen.getByTestId("agent-scope-read"));
-    fireEvent.click(screen.getByTestId("agent-only-doc"));
     fireEvent.change(screen.getByTestId("agent-expires"), { target: { value: "never" } });
     fireEvent.change(screen.getByTestId("agent-key-name"), { target: { value: "My laptop" } });
     expect(screen.getByTestId("agent-key-summary")).toHaveTextContent("Read only · this document only · never expires");
@@ -105,10 +105,27 @@ describe("AgentSetup", () => {
     expect(server.creates[0]).toEqual({ name: "My laptop", expiresInDays: null, scope: "read", documentIds: ["doc1"] });
   });
 
-  it("offers no 'only this document' choice when there is no document", () => {
+  it("requires an explicit choice to grant access to all documents from the editor", async () => {
+    render(<Harness doc={DOC} />);
+    fireEvent.click(screen.getByTestId("agent-options-toggle"));
+    const onlyThisDoc = screen.getByTestId("agent-only-doc");
+    expect(onlyThisDoc).toBeChecked();
+
+    fireEvent.click(onlyThisDoc);
+    expect(screen.getByTestId("agent-key-summary")).toHaveTextContent("Comment & suggest · all your documents · expires in 90 days");
+    createKey();
+    await screen.findByTestId("agent-setup-snippet");
+    expect(server.creates[0]).toEqual({ name: "AI agent", expiresInDays: 90, scope: "comment", documentIds: null });
+  });
+
+  it("keeps all-document access in Settings when there is no document to scope", async () => {
     render(<Harness />);
+    expect(screen.getByTestId("agent-key-summary")).toHaveTextContent("Comment & suggest · all your documents · expires in 90 days");
     fireEvent.click(screen.getByTestId("agent-options-toggle"));
     expect(screen.queryByTestId("agent-only-doc")).toBeNull();
+    createKey();
+    await screen.findByTestId("agent-setup-snippet");
+    expect(server.creates[0]).toEqual({ name: "AI agent", expiresInDays: 90, scope: "comment", documentIds: null });
   });
 
   it("names the key so it does not collide with one you already have", async () => {

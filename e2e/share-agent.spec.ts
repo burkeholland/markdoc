@@ -103,7 +103,10 @@ test.describe("share dialog", () => {
     await expect(setup).toHaveAttribute("data-state", "new");
     await expect(setup.getByRole("radiogroup", { name: "Agent" })).toHaveCount(0);
     await expect(setup.getByRole("heading", { name: "Add Markdoc to your agent" })).toBeVisible();
-    await expect(setup.getByTestId("agent-key-summary")).toHaveText("Comment & suggest · all your documents · expires in 90 days");
+    await expect(setup.getByTestId("agent-key-summary")).toHaveText("Comment & suggest · this document only · expires in 90 days");
+    await setup.getByTestId("agent-options-toggle").click();
+    await expect(setup.getByTestId("agent-only-doc")).toBeChecked();
+    await setup.getByTestId("agent-options-toggle").click();
     await expect(setup.getByTestId("agent-setup-snippet")).toHaveCount(0);
     await expect(setup).toContainText("Once your agent is connected, you get a sentence to paste into it.");
     await expect(setup.getByTestId("agent-docs-link")).toHaveAttribute("href", AGENT_DOCS_URL);
@@ -112,7 +115,7 @@ test.describe("share dialog", () => {
 
     // One click makes the key, with the defaults.
     const [request] = await Promise.all([postsToTokens(page), setup.getByTestId("agent-create-key").click()]);
-    expect(request.postDataJSON()).toEqual({ name: "AI agent", expiresInDays: 90, scope: "comment", documentIds: null });
+    expect(request.postDataJSON()).toEqual({ name: "AI agent", expiresInDays: 90, scope: "comment", documentIds: [id] });
     await expect(setup).toHaveAttribute("data-state", "waiting");
     const snippet = setup.getByTestId("agent-setup-snippet");
     await expect(snippet).toBeVisible();
@@ -152,14 +155,14 @@ test.describe("share dialog", () => {
     await expect(dialog.getByTestId("agent-setup-snippet")).toHaveCount(0);
     expect(await page.locator("body").innerText()).not.toContain(key);
 
-    // The default is really comment-scoped and covers every document: reading works, rewriting is a 403 that says what to do.
+    // The default is comment-scoped to this document: reading works, rewriting is a 403 that says what to do.
     const auth = { Authorization: bearer(key), "Content-Type": "application/json" };
     expect((await page.request.get(`${origin}/api/documents/${id}/content`, { headers: auth })).status()).toBe(200);
     const refused = await page.request.put(`${origin}/api/documents/${id}/content`, { headers: auth, data: { content: "# Rewritten\n" } });
     expect(refused.status()).toBe(403);
     expect(((await refused.json()) as { error: string }).error).toBe("This token is comment-scoped; create a full-access token at /settings to rewrite documents");
     const who = (await (await page.request.get(`${origin}/api/me`, { headers: auth })).json()) as { scope: string; documentIds: string[] | null };
-    expect(who).toMatchObject({ scope: "comment", documentIds: null });
+    expect(who).toMatchObject({ scope: "comment", documentIds: [id] });
     await context.close();
   });
 
@@ -225,7 +228,7 @@ test.describe("share dialog", () => {
     const options = setup.getByTestId("agent-options");
     await expect(options.getByRole("radio")).toHaveCount(3);
     await expect(options.getByTestId("agent-scope-comment")).toBeChecked();
-    await expect(options.getByTestId("agent-only-doc")).not.toBeChecked();
+    await expect(options.getByTestId("agent-only-doc")).toBeChecked();
     await options.getByTestId("agent-scope-read").check();
     await options.getByTestId("agent-only-doc").check();
     await options.getByTestId("agent-key-name").fill("Read bot");

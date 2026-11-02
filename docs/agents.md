@@ -44,7 +44,7 @@ The recommended pattern is **agent proposes, human decides**: the agent drafts o
 
 Later visits skip ahead: when a key that reaches this document has already been used by an agent, the dialog opens on the connected banner and the sentence, with **Connect another agent** and **Manage keys** beside them. A key limited to other documents does not count, so the steps show again.
 
-The default key can **comment and suggest**, works in **all your documents** and **expires in 90 days**. **Change**, next to the button, shows the options: the access level, **Only this document** (in the editor's dialogs), a name and an expiry (30 days, 90 days, 1 year or never). Names must stay distinct by their @mention form (`Copilot CLI` and `copilot-cli` clash): a taken name is refused on the spot, with what you typed left in the field. In the interface an API token is called a *key*; the REST API and the MCP tools still say token.
+The default key can **comment and suggest**, works **only in the current document** when connected from an editor, and **expires in 90 days**. **Change**, next to the button, shows the options: the access level, **Only this document** (checked by default in the editor; uncheck it to allow all your documents), a name and an expiry (30 days, 90 days, 1 year or never). From **Settings**, where no document is selected, the default key works in all your documents. Names must stay distinct by their @mention form (`Copilot CLI` and `copilot-cli` clash): a taken name is refused on the spot, with what you typed left in the field. In the interface an API token is called a *key*; the REST API and the MCP tools still say token.
 
 A key is never wider than you and can be narrower:
 
@@ -73,7 +73,7 @@ Markdoc serves the Model Context Protocol itself at `/api/mcp` (Streamable HTTP)
 | Copilot app | `MARKDOC_URL` and `MARKDOC_TOKEN` for the environment that launches the app, plus the extension install [below](#inside-the-copilot-app). |
 | Other | The generic block below, and a stdio block for clients that cannot speak HTTP. |
 
-The generic block for other Streamable HTTP clients; substitute your key for `MARKDOC_TOKEN` in the Authorization header:
+The generic block for other Streamable HTTP clients; replace `MARKDOC_TOKEN` with your access key and keep the `Bearer` prefix in the Authorization header:
 
 ```json
 {
@@ -81,7 +81,7 @@ The generic block for other Streamable HTTP clients; substitute your key for `MA
     "markdoc": {
       "type": "http",
       "url": "http://<machine-name>:3000/api/mcp",
-      "headers": { "Authorization": "Bearer mdk_…" },
+      "headers": { "Authorization": "Bearer MARKDOC_TOKEN" },
       "tools": ["*"]
     }
   }
