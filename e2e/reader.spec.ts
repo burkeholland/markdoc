@@ -53,6 +53,48 @@ test.describe("reader view", () => {
     await owner.context.close();
   });
 
+  test("a long desktop contents list scrolls independently within the viewport", async ({ browser }, testInfo) => {
+    const owner = await signIn(browser, "reader-toc-scroll");
+    const sections = Array.from(
+      { length: 40 },
+      (_, index) => `## Section ${index + 1}\n\nSection ${index + 1} has enough content to make the reader scroll.`,
+    ).join("\n\n");
+    const id = await createDocument(owner.page, `# Long reader\n\n${sections}`, "Long reader");
+    await setLinkAccess(owner.page, id, "view");
+
+    const anon = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+    const page = await anon.newPage();
+    await page.goto(`/p/${id}`);
+    await expect(page.getByTestId("reader-title")).toHaveText("Long reader");
+
+    const list = page.locator("#reader-toc-list");
+    const metrics = await list.evaluate((element: HTMLElement) => {
+      const style = getComputedStyle(element);
+      return {
+        maxHeight: style.maxHeight,
+        overflowY: style.overflowY,
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+      };
+    });
+    expect(metrics.maxHeight).not.toBe("none");
+    expect(metrics.overflowY).toBe("auto");
+    expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+
+    const pageScrollTop = await page.evaluate(() => window.scrollY);
+    const bounds = await list.boundingBox();
+    expect(bounds).not.toBeNull();
+    await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+    await page.mouse.wheel(0, 1000);
+    await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    expect(await page.evaluate(() => window.scrollY)).toBe(pageScrollTop);
+    await expect(page.getByTestId("reader-toc-entry").last()).toBeInViewport();
+
+    await page.screenshot({ path: testInfo.outputPath("reader-toc-independent-scroll.png") });
+    await anon.close();
+    await owner.context.close();
+  });
+
   test("mobile reader header controls have 44px touch targets without visible clutter", async ({ browser }, testInfo) => {
     const context = await browser.newContext({
       ...devices["iPhone 13"],

@@ -35,6 +35,16 @@ describe("ReaderToc real input", () => {
     expect(toggle).toHaveAttribute("aria-controls", "reader-toc-list");
   });
 
+  it("bounds the desktop contents list and lets it scroll independently", () => {
+    const { list } = setup();
+
+    expect(list).toHaveClass(
+      "lg:max-h-[calc(100dvh-8rem)]",
+      "lg:overflow-y-auto",
+      "lg:overscroll-contain",
+    );
+  });
+
   it("toggles the disclosure on a synthetic click", () => {
     const { toggle, list } = setup();
     fireEvent.click(toggle);
