@@ -3,6 +3,7 @@ import { Decoration, DecorationSet } from "prosemirror-view";
 import type { Node as PMNode } from "prosemirror-model";
 import * as Y from "yjs";
 import type { CollabSession } from "../collab/session";
+import { isSameAccount } from "../collab/identity";
 import { isIdle } from "../collab/follow";
 import { isRefresh, scheduleRefresh } from "./refresh";
 
@@ -17,6 +18,7 @@ type RelJSON = Parameters<typeof Y.createRelativePositionFromJSON>[0];
 
 interface CaretFlags {
   userId: string;
+  sameAccount: boolean;
   following: boolean;
   flash: boolean;
   idle: boolean;
@@ -39,6 +41,7 @@ function caretWidget(session: CollabSession, color: string, name: string, flags:
   caret.className = "md-remote-caret";
   caret.style.borderColor = color;
   caret.dataset.userId = flags.userId;
+  if (flags.sameAccount) caret.dataset.sameAccount = "";
   if (flags.following) caret.dataset.following = "";
   if (flags.flash) caret.dataset.flash = "";
   if (flags.idle) caret.dataset.idle = "";
@@ -53,21 +56,26 @@ function caretWidget(session: CollabSession, color: string, name: string, flags:
     glyph.innerHTML = BOT_SVG;
     label.appendChild(glyph);
   }
-  label.appendChild(document.createTextNode(name));
-  // The label is the one part of a remote caret the user can click: it starts following.
-  label.style.pointerEvents = "auto";
-  label.style.cursor = "pointer";
-  label.title = flags.agent ? `Follow ${name} (agent)` : `Follow ${name}`;
+  label.appendChild(document.createTextNode(flags.sameAccount ? `${name} (you in another tab)` : name));
+  label.style.pointerEvents = flags.sameAccount ? "none" : "auto";
+  label.style.cursor = flags.sameAccount ? "default" : "pointer";
+  label.title = flags.sameAccount
+    ? `${name} is your cursor in another tab`
+    : flags.agent
+      ? `Follow ${name} (agent)`
+      : `Follow ${name}`;
   const onMouseDown = (e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
   };
-  label.addEventListener("mousedown", onMouseDown);
-  label.addEventListener("click", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    session.follow(flags.userId);
-  });
+  if (!flags.sameAccount) {
+    label.addEventListener("mousedown", onMouseDown);
+    label.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      session.follow(flags.userId);
+    });
+  }
   caret.appendChild(label);
   return caret;
 }
@@ -124,6 +132,7 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
     const $head = doc.resolve(head);
     const flags: CaretFlags = {
       userId,
+      sameAccount: isSameAccount(session.user.id, user?.id),
       following: session.followUserId === userId,
       flash: session.flashUserId === userId,
       idle: isIdle(typeof state.lastActive === "number" ? state.lastActive : null, now),
@@ -139,7 +148,7 @@ function buildDecorations(session: CollabSession, doc: PMNode): DecorationSet {
     }
     decorations.push(
       Decoration.widget(head, () => caretWidget(session, color, name, flags), {
-        key: `caret-${clientId}-${color}-${name}-${flags.following ? "f" : ""}${flags.flash ? "x" : ""}${flags.idle ? "i" : ""}${flags.agent ? "a" : ""}${flags.afterPicture ? "p" : ""}`,
+        key: `caret-${clientId}-${color}-${name}-${flags.sameAccount ? "s" : ""}${flags.following ? "f" : ""}${flags.flash ? "x" : ""}${flags.idle ? "i" : ""}${flags.agent ? "a" : ""}${flags.afterPicture ? "p" : ""}`,
         side: 1,
         ignoreSelection: true,
         caret: true,
@@ -162,7 +171,7 @@ function sameCursor(current: CursorState | undefined, anchor: Y.RelativePosition
 }
 
 /**
- * Shows other users' carets and selections in the rich editor and publishes
+ * Shows each remote tab's caret and selection in the rich editor and publishes
  * the local selection as a source-text position, so a caret in either pane
  * appears in both panes of every collaborator.
  */

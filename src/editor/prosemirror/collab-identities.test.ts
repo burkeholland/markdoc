@@ -28,10 +28,20 @@ import { richHighlightsPlugin } from "./highlights";
 import { remoteCursorsPlugin } from "./remote-cursors";
 import { REFRESH_META } from "./refresh";
 import { createRichEditorState } from "./setup";
+import { EditorState as CodeEditorState } from "@codemirror/state";
+import { EditorView as CodeEditorView } from "@codemirror/view";
+import { yCollab } from "y-codemirror.next";
+import { remoteCaretInteractions } from "../codemirror/remote-cursors";
 
 const SOURCE = "alpha beta gamma";
 const localUser = makeCollabUser("local", "Local");
 const remoteUser = makeCollabUser("remote", "Remote");
+
+function normalizedColor(color: string): string {
+  const element = document.createElement("span");
+  element.style.backgroundColor = color;
+  return element.style.backgroundColor;
+}
 
 interface RemoteClient {
   doc: Y.Doc;
@@ -42,6 +52,7 @@ interface RemoteClient {
 describe("collaborative relative-position decorations", () => {
   const sessions: CollabSession[] = [];
   const views: EditorView[] = [];
+  const codeViews: CodeEditorView[] = [];
   const remotes: RemoteClient[] = [];
   let frames: { id: number; callback: FrameRequestCallback }[];
   let nextFrame: number;
@@ -60,6 +71,7 @@ describe("collaborative relative-position decorations", () => {
   });
 
   afterEach(() => {
+    for (const view of codeViews) view.destroy();
     for (const view of views) view.destroy();
     for (const session of sessions) session.destroy();
     for (const remote of remotes) {
@@ -69,10 +81,10 @@ describe("collaborative relative-position decorations", () => {
     vi.unstubAllGlobals();
   });
 
-  function openSession(held = false): CollabSession {
+  function openSession(held = false, user = localUser): CollabSession {
     const session = new CollabSession({
       docId: "relative-position-test",
-      user: localUser,
+      user,
       role: "owner",
       getToken: async () => "test-token",
       autoConnect: false,
@@ -110,9 +122,17 @@ describe("collaborative relative-position decorations", () => {
     Y.applyUpdate(session.ydoc, Y.encodeStateAsUpdate(remote.doc, vector));
   }
 
-  function publishCursor(session: CollabSession, remote: RemoteClient, id: string, anchor: number, head: number) {
+  function publishCursor(
+    session: CollabSession,
+    remote: RemoteClient,
+    id: string,
+    anchor: number,
+    head: number,
+    name = id,
+    color = remoteUser.color,
+  ) {
     remote.awareness.setLocalState({
-      user: { ...remoteUser, id, name: id },
+      user: { ...remoteUser, id, name, color },
       cursor: {
         anchor: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(remote.text, anchor)),
         head: Y.relativePositionToJSON(Y.createRelativePositionFromTypeIndex(remote.text, head)),
@@ -317,6 +337,117 @@ describe("collaborative relative-position decorations", () => {
     });
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(frames).toHaveLength(scheduledBefore);
+  });
+
+  it("deduplicates same-account presence without dropping either tab cursor", async () => {
+    const session = openSession();
+    const firstTab = join(session);
+    const secondTab = join(session);
+    publishCursor(session, firstTab, localUser.id, 4, 4, localUser.name, localUser.color);
+    publishCursor(session, secondTab, localUser.id, 11, 11, localUser.name, localUser.color);
+
+    expect(session.presence()).toHaveLength(1);
+    expect(session.presence()[0]).toMatchObject({ id: localUser.id, isLocal: true });
+
+    const { view } = createView(session, [remoteCursorsPlugin(session)]);
+    await flushRefreshes();
+    const richCarets = Array.from(view.dom.querySelectorAll<HTMLElement>(".md-remote-caret"));
+    expect(richCarets).toHaveLength(2);
+    expect(richCarets.map((caret) => view.posAtDOM(caret, 0))).toEqual([5, 12]);
+    expect(richCarets.map((caret) => caret.querySelector(".md-remote-caret-label")?.textContent)).toEqual([
+      "Local (you in another tab)",
+      "Local (you in another tab)",
+    ]);
+    expect(richCarets.map((caret) => caret.hasAttribute("data-same-account"))).toEqual([true, true]);
+    const follow = vi.spyOn(session, "follow");
+    richCarets[0].querySelector(".md-remote-caret-label")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(follow).not.toHaveBeenCalled();
+
+    const codeView = new CodeEditorView({
+      state: CodeEditorState.create({
+        doc: SOURCE,
+        extensions: [
+          yCollab(session.ytext, session.awareness, { undoManager: session.undoManager }),
+          remoteCaretInteractions(session),
+        ],
+      }),
+      parent: document.createElement("div"),
+    });
+    codeViews.push(codeView);
+    codeView.dispatch({ selection: { anchor: 1 } });
+    await flushRefreshes();
+    const codeCarets = Array.from(codeView.dom.querySelectorAll<HTMLElement>(".cm-ySelectionCaret"));
+    expect(codeCarets).toHaveLength(2);
+    expect(codeCarets.map((caret) => caret.querySelector(".cm-ySelectionInfo")?.textContent)).toEqual([
+      "Local (you in another tab)",
+      "Local (you in another tab)",
+    ]);
+    expect(codeCarets.map((caret) => caret.hasAttribute("data-same-account"))).toEqual([true, true]);
+  });
+
+  it("keeps anonymous collaborators separate and their cursors followable", async () => {
+    const localAnonymous = makeCollabUser("anonymous-local", "Anonymous");
+    const firstGuest = makeCollabUser("anonymous-first-guest", "Anonymous");
+    const secondGuest = makeCollabUser("anonymous-second-guest", "Anonymous");
+    const expectedGuestByColor = new Map([
+      [normalizedColor(firstGuest.color), firstGuest.id],
+      [normalizedColor(secondGuest.color), secondGuest.id],
+    ]);
+    expect(expectedGuestByColor.size).toBe(2);
+
+    const session = openSession(false, localAnonymous);
+    const firstRemote = join(session);
+    const secondRemote = join(session);
+    publishCursor(session, firstRemote, firstGuest.id, 4, 4, firstGuest.name, firstGuest.color);
+    publishCursor(session, secondRemote, secondGuest.id, 12, 12, secondGuest.name, secondGuest.color);
+
+    expect(session.presence()).toHaveLength(3);
+
+    const { view } = createView(session, [remoteCursorsPlugin(session)]);
+    await flushRefreshes();
+    const richCarets = Array.from(view.dom.querySelectorAll<HTMLElement>(".md-remote-caret"));
+    expect(richCarets).toHaveLength(2);
+    expect(richCarets.map((caret) => caret.querySelector(".md-remote-caret-label")?.textContent)).toEqual([
+      "Anonymous",
+      "Anonymous",
+    ]);
+    expect(richCarets.map((caret) => caret.dataset.userId).sort()).toEqual([firstGuest.id, secondGuest.id].sort());
+    expect(richCarets.map((caret) => caret.hasAttribute("data-same-account"))).toEqual([false, false]);
+    const follow = vi.spyOn(session, "follow");
+    for (const caret of richCarets) {
+      follow.mockClear();
+      caret.querySelector(".md-remote-caret-label")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(follow).toHaveBeenCalledWith(caret.dataset.userId);
+    }
+
+    const codeView = new CodeEditorView({
+      state: CodeEditorState.create({
+        doc: SOURCE,
+        extensions: [
+          yCollab(session.ytext, session.awareness, { undoManager: session.undoManager }),
+          remoteCaretInteractions(session),
+        ],
+      }),
+      parent: document.createElement("div"),
+    });
+    codeViews.push(codeView);
+    codeView.dispatch({ selection: { anchor: 1 } });
+    await flushRefreshes();
+    const codeCarets = Array.from(codeView.dom.querySelectorAll<HTMLElement>(".cm-ySelectionCaret"));
+    expect(codeCarets).toHaveLength(2);
+    expect(codeCarets.map((caret) => caret.querySelector(".cm-ySelectionInfo")?.textContent)).toEqual([
+      "Anonymous",
+      "Anonymous",
+    ]);
+    expect(codeCarets.map((caret) => caret.hasAttribute("data-same-account"))).toEqual([false, false]);
+    for (const caret of codeCarets) {
+      const expectedId = expectedGuestByColor.get(normalizedColor(caret.style.backgroundColor));
+      expect(expectedId).toBeDefined();
+      expect(caret.dataset.userId).toBe(expectedId);
+      follow.mockClear();
+      caret.querySelector(".cm-ySelectionInfo")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(follow).toHaveBeenCalledWith(expectedId);
+    }
   });
 
   it("does not invalidate relative positions for binding-owned pure insertions", () => {

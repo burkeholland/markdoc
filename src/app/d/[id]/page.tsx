@@ -7,6 +7,7 @@ import { getGitHubToken } from "@/server/documents";
 import { publicDocument } from "@/server/dto";
 import { documentMetadata, liveTextForRequest } from "@/server/document-metadata";
 import { renderMarkdownBody } from "@/server/export/html";
+import { createAnonymousUserId } from "@/editor/collab/identity";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +38,7 @@ export default async function DocumentPage({ params }: PageProps<"/d/[id]">) {
       doc={publicDocument(access.doc)}
       role={access.role}
       user={{
-        id: user?.id ?? "anonymous",
+        id: user?.id ?? createAnonymousUserId(),
         name: user?.name ?? user?.login ?? "Anonymous",
         login: user?.login ?? null,
         image: user?.image ?? null,

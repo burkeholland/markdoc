@@ -1353,7 +1353,7 @@ export class CollabSession {
         ownerName: u.isAgent === true && typeof u.userName === "string" && u.userName ? u.userName : null,
       };
       const existing = byUser.get(u.id);
-      if (!existing || (existing.cursor === null && cursor !== null) || entry.isLocal) byUser.set(u.id, entry);
+      if (!existing || entry.isLocal || (!existing.isLocal && existing.cursor === null && cursor !== null)) byUser.set(u.id, entry);
     });
     return Array.from(byUser.values()).sort((a, b) => (a.isLocal ? -1 : b.isLocal ? 1 : a.name.localeCompare(b.name)));
   }

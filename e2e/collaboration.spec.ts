@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures";
-import { signIn, createDocument, openDocument, shareWith, codeText, richText, suggestionInsertTexts, focusRichEnd, focusCodeEnd, selectTextInRich, ensureCommentsOpen, budgetMs, type User } from "./helpers";
+import { signIn, createDocument, openDocument, shareWith, codeText, richText, suggestionInsertTexts, focusRichEnd, focusCodeEnd, selectTextInRich, ensureCommentsOpen, budgetMs, uniqueLogin, type User } from "./helpers";
 import { LONG_DOC, h2Texts } from "./fixtures/burke-scale";
 
 test.describe("collaboration between two users", () => {
@@ -189,6 +189,28 @@ test.describe("collaboration between two users", () => {
   });
 });
 
+test.describe("same-account browser tabs", () => {
+  test("keeps one collaborator entry while showing both editor cursors", async ({ browser }) => {
+    const account = await signIn(browser, uniqueLogin("same-account-tabs"));
+    const documentId = await createDocument(account.page, "# Shared tabs\n\nTwo tabs in one account.\n", "Shared tabs");
+    const secondTab = await account.context.newPage();
+    try {
+      await openDocument(account.page, documentId);
+      await openDocument(secondTab, documentId);
+      await focusRichEnd(secondTab);
+
+      await expect(account.page.getByTestId("presence")).toHaveAttribute("aria-label", /1 person here: .* \(you\)$/);
+      await expect(account.page.getByTestId("presence").getByTestId("presence-avatar")).toHaveCount(1);
+      await expect(account.page.locator(".md-remote-caret-label").first()).toHaveText(/you in another tab/);
+      await expect(account.page.locator(".cm-ySelectionInfo").first()).toHaveText(/you in another tab/);
+      await account.page.screenshot({ path: "test-results/same-account-tab-presence.png" });
+    } finally {
+      await secondTab.close();
+      await account.context.close();
+    }
+  });
+});
+
 /**
  * The same presence / cross-surface / caret checks on the Burke-scale document (~12k words, 40 H2
  * sections; e2e/fixtures/burke-scale.ts). The small-document suite above keeps the assertions that
@@ -246,5 +268,4 @@ test.describe("collaboration on a Burke-scale document", () => {
     await expect(bob.page.locator(".md-remote-caret-label").first()).toHaveText("alice-scale");
   });
 });
-
 

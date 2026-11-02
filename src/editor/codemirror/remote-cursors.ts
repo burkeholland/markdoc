@@ -1,14 +1,42 @@
 import { ViewPlugin, type EditorView, type ViewUpdate } from "@codemirror/view";
 import type { CollabSession } from "../collab/session";
+import { isSameAccount } from "../collab/identity";
 import { isIdle } from "../collab/follow";
 
+function colorKey(color: string): string {
+  const element = document.createElement("span");
+  element.style.backgroundColor = color;
+  return element.style.backgroundColor;
+}
+
+function matchingUserId(session: CollabSession, caret: HTMLElement, name: string): string | null {
+  const caretColor = colorKey(caret.style.backgroundColor);
+  if (!caretColor) return null;
+
+  const matchingIds = new Set<string>();
+  session.awareness.getStates().forEach((state, clientId) => {
+    if (clientId === session.ydoc.clientID) return;
+    const user = state.user as { id?: unknown; name?: unknown; color?: unknown } | undefined;
+    const cursor = state.cursor as { anchor?: unknown; head?: unknown } | undefined;
+    if (
+      !cursor?.anchor ||
+      !cursor.head ||
+      typeof user?.id !== "string" ||
+      user.name !== name ||
+      typeof user.color !== "string" ||
+      colorKey(user.color) !== caretColor
+    ) return;
+    matchingIds.add(user.id);
+  });
+  return matchingIds.size === 1 ? matchingIds.values().next().value ?? null : null;
+}
+
 /**
- * Presence interactions on the remote carets y-codemirror.next draws in the code pane:
- * clicking a caret label starts following that user, and the caret elements get the same
- * `data-following` / `data-flash` / `data-idle` attributes as the rich pane's carets.
+ * Presence interactions on y-codemirror.next's remote carets: collaborator labels start
+ * following that user, while same-account tabs stay visible but aren't treated as collaborators.
  *
- * y-codemirror's widgets know only the user's name and colour, so carets are matched to
- * presence entries by name.
+ * y-codemirror exposes only the user's name and colour; awareness IDs are used when that pair
+ * identifies one collaborator unambiguously.
  */
 export function remoteCaretInteractions(session: CollabSession) {
   return ViewPlugin.fromClass(
@@ -52,7 +80,11 @@ export function remoteCaretInteractions(session: CollabSession) {
         if (!label) return;
         e.preventDefault();
         e.stopPropagation();
-        const user = session.presence().find((u) => !u.isLocal && u.name === label.textContent);
+        const caret = label.closest<HTMLElement>(".cm-ySelectionCaret");
+        if (!caret || caret.hasAttribute("data-same-account")) return;
+        const userId = caret.dataset.userId;
+        if (!userId) return;
+        const user = session.presence().find((u) => !u.isLocal && u.id === userId);
         if (user) session.follow(user.id);
       };
 
@@ -63,8 +95,36 @@ export function remoteCaretInteractions(session: CollabSession) {
         const now = Date.now();
         carets.forEach((caret) => {
           const label = caret.querySelector<HTMLElement>(".cm-ySelectionInfo");
-          const user = users.find((u) => u.name === label?.textContent);
-          if (!user) return;
+          if (!label) return;
+          const name = label.dataset.originalName ?? label.textContent ?? "";
+          const userId = matchingUserId(session, caret, name);
+          if (userId && isSameAccount(session.user.id, userId)) {
+            label.dataset.originalName = name;
+            label.textContent = `${name} (you in another tab)`;
+            label.style.pointerEvents = "none";
+            label.style.cursor = "default";
+            label.title = `${name} is your cursor in another tab`;
+            caret.dataset.userId = userId;
+            caret.dataset.sameAccount = "";
+            return;
+          }
+          if (label.dataset.originalName !== undefined) {
+            label.textContent = label.dataset.originalName;
+            delete label.dataset.originalName;
+          }
+          delete caret.dataset.sameAccount;
+          const user = users.find((u) => u.id === userId);
+          if (!user) {
+            delete caret.dataset.userId;
+            toggle(caret, "following", false);
+            toggle(caret, "flash", false);
+            toggle(caret, "idle", false);
+            toggle(caret, "agent", false);
+            label.style.pointerEvents = "none";
+            label.style.cursor = "default";
+            label.title = "";
+            return;
+          }
           caret.dataset.userId = user.id;
           toggle(caret, "following", session.followUserId === user.id);
           toggle(caret, "flash", session.flashUserId === user.id);
