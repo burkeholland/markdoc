@@ -33,8 +33,12 @@ function doc(overrides: Partial<DocumentDto> = {}): DocumentDto {
   } as DocumentDto;
 }
 
-function people(collaborators: CollaboratorDto[] = [alice], ownerValue = owner): CollaboratorsResponse {
-  return { owner: ownerValue, linkAccess: "private", collaborators, agents: [] };
+function people(
+  collaborators: CollaboratorDto[] = [alice],
+  ownerValue = owner,
+  folder: CollaboratorsResponse["folder"] = null,
+): CollaboratorsResponse {
+  return { owner: ownerValue, linkAccess: "private", folder, collaborators, agents: [] };
 }
 
 function apiMessage(status: number, message: string) {
@@ -128,6 +132,18 @@ describe("ShareDialog", () => {
     );
 
     expect(await screen.findByText("Nobody else has been added yet.")).toBeInTheDocument();
+  });
+
+  it("explains that folder access is inherited without mixing it into direct collaborators", async () => {
+    vi.mocked(api.documents.collaborators).mockResolvedValueOnce(people([alice], owner, { id: "folder-1", name: "Planning" }));
+
+    renderShare();
+    await loadedRows();
+
+    expect(screen.getByTestId("folder-inherited-access")).toHaveTextContent(
+      "People shared with Planning also have access to this document.",
+    );
+    expect(screen.getAllByTestId("collaborator-row")).toHaveLength(1);
   });
 
   it("keeps the loading row a real list item so the people list stays a valid list for axe", async () => {

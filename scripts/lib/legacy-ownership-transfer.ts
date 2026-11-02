@@ -46,6 +46,7 @@ export const TRANSFER_USER_FOREIGN_KEYS = [
 export const TRANSFER_SOFT_USER_REFERENCES = [
   "document.last_edited_by",
   "collaborator.added_by",
+  "folder_collaborator.added_by",
   "version.created_by",
   "activity.actor_id",
 ] as const;
@@ -53,6 +54,7 @@ export const TRANSFER_SOFT_USER_REFERENCES = [
 /** Columns keyed by GitHub login rather than user id; they follow the source login to the target login. */
 export const TRANSFER_LOGIN_REFERENCES = [
   "collaborator.login",
+  "folder_collaborator.login",
   "notification.user_login",
   "notification.actor_login",
 ] as const;
@@ -65,6 +67,10 @@ export const TRANSFER_COUNT_LABELS = [
   "collaborator.login moved",
   "collaborator.login deduplicated",
   "collaborator.login owner_deleted",
+  "folder_collaborator.added_by updated",
+  "folder_collaborator.login moved",
+  "folder_collaborator.login deduplicated",
+  "folder_collaborator.login owner_deleted",
   "star.user_id moved",
   "star.user_id deduplicated",
   "recent.user_id moved",
@@ -677,6 +683,9 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
   const deletedCollaborators = new Set<string>();
   const movedCollaborators = new Map<string, string>();
   const collaboratorKey = (documentId: string, login: string) => `${documentId}\0${login}`;
+  const deletedFolderCollaborators = new Set<string>();
+  const movedFolderCollaborators = new Map<string, string>();
+  const folderCollaboratorKey = (folderId: string, login: string) => `${folderId}\0${login}`;
   if (sourceLogin !== targetLogin) {
     const collaborators = await client.query<{ row: Row; document_id: string; login: string; owner_id: string }>(
       `SELECT to_jsonb(c) AS row, c.document_id, c.login, d.owner_id FROM collaborator c JOIN document d ON d.id = c.document_id
@@ -714,6 +723,49 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
       deletedCollaborators.add(collaboratorKey(documentId, login));
     }
 
+    const folderCollaborators = await client.query<{ row: Row; folder_id: string; login: string; owner_id: string }>(
+      `SELECT to_jsonb(fc) AS row, fc.folder_id, fc.login, f.owner_id
+         FROM folder_collaborator fc JOIN folder f ON f.id = fc.folder_id
+        WHERE lower(btrim(fc.login)) = $1 ORDER BY fc.folder_id, fc.login`,
+      [sourceLogin],
+    );
+    for (const { row, folder_id: folderId, login, owner_id: ownerId } of folderCollaborators.rows) {
+      const key = { folder_id: folderId, login };
+      if (ownerId === target.id || ownerId === source.id) {
+        add({ kind: "delete", table: "folder_collaborator", key, row, label: "folder_collaborator.login owner_deleted" });
+        deletedFolderCollaborators.add(folderCollaboratorKey(folderId, login));
+        continue;
+      }
+      const duplicate = await countWhere(
+        client,
+        `SELECT COUNT(*)::text AS count FROM folder_collaborator WHERE folder_id = $1 AND lower(btrim(login)) = $2`,
+        [folderId, targetLogin],
+      );
+      if (duplicate) {
+        add({ kind: "delete", table: "folder_collaborator", key, row, label: "folder_collaborator.login deduplicated" });
+        deletedFolderCollaborators.add(folderCollaboratorKey(folderId, login));
+      } else {
+        update("folder_collaborator", key, "login", login, targetLogin, "folder_collaborator.login moved");
+        movedFolderCollaborators.set(folderCollaboratorKey(folderId, login), targetLogin);
+      }
+    }
+    const folderOwnerRows = await client.query<{ row: Row; folder_id: string; login: string }>(
+      `SELECT to_jsonb(fc) AS row, fc.folder_id, fc.login
+         FROM folder_collaborator fc JOIN folder f ON f.id = fc.folder_id
+        WHERE f.owner_id = $1 AND lower(btrim(fc.login)) = $2 ORDER BY fc.folder_id, fc.login`,
+      [source.id, targetLogin],
+    );
+    for (const { row, folder_id: folderId, login } of folderOwnerRows.rows) {
+      add({
+        kind: "delete",
+        table: "folder_collaborator",
+        key: { folder_id: folderId, login },
+        row,
+        label: "folder_collaborator.login owner_deleted",
+      });
+      deletedFolderCollaborators.add(folderCollaboratorKey(folderId, login));
+    }
+
     const notifications = await client.query<{ row: Row; id: string; kind: string; ref_id: string; user_login: string }>(
       `SELECT to_jsonb(n) AS row, n.id, n.kind, n.ref_id, n.user_login FROM notification n WHERE lower(btrim(n.user_login)) = $1 ORDER BY n.id`,
       [sourceLogin],
@@ -747,6 +799,23 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
     if (deletedCollaborators.has(identity)) continue;
     const login = movedCollaborators.get(identity) ?? row.login;
     update("collaborator", { document_id: row.document_id, login }, "added_by", source.id, target.id, "collaborator.added_by updated");
+  }
+  const folderAddedBy = await client.query<{ folder_id: string; login: string }>(
+    `SELECT folder_id, login FROM folder_collaborator WHERE added_by = $1 ORDER BY folder_id, login`,
+    [source.id],
+  );
+  for (const row of folderAddedBy.rows) {
+    const identity = folderCollaboratorKey(row.folder_id, row.login);
+    if (deletedFolderCollaborators.has(identity)) continue;
+    const login = movedFolderCollaborators.get(identity) ?? row.login;
+    update(
+      "folder_collaborator",
+      { folder_id: row.folder_id, login },
+      "added_by",
+      source.id,
+      target.id,
+      "folder_collaborator.added_by updated",
+    );
   }
 
   return { entries, operations };
@@ -925,6 +994,7 @@ async function countResidualReferences(
     `SELECT COUNT(*) FROM session WHERE "userId" = $1`,
     `SELECT COUNT(*) FROM document WHERE owner_id = $1 OR last_edited_by = $1`,
     `SELECT COUNT(*) FROM collaborator WHERE added_by = $1`,
+    `SELECT COUNT(*) FROM folder_collaborator WHERE added_by = $1`,
     `SELECT COUNT(*) FROM version WHERE created_by = $1`,
     `SELECT COUNT(*) FROM star WHERE user_id = $1`,
     `SELECT COUNT(*) FROM recent WHERE user_id = $1`,
@@ -940,6 +1010,7 @@ async function countResidualReferences(
   for (const query of idQueries) total += await countWhere(client, `${query.replace("COUNT(*)", "COUNT(*)::text AS count")}`, [sourceId]);
   if (sourceLogin !== targetLogin) {
     total += await countWhere(client, `SELECT COUNT(*)::text AS count FROM collaborator WHERE lower(btrim(login)) = $1`, [sourceLogin]);
+    total += await countWhere(client, `SELECT COUNT(*)::text AS count FROM folder_collaborator WHERE lower(btrim(login)) = $1`, [sourceLogin]);
     total += await countWhere(
       client,
       `SELECT COUNT(*)::text AS count FROM notification WHERE lower(btrim(user_login)) = $1 OR lower(btrim(actor_login)) = $1`,

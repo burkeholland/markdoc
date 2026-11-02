@@ -21,10 +21,11 @@ import * as currentSchema from "./schema";
 
 const LEDGER_0018_TIME = "1788050213330";
 const LEDGER_0019_TIME = "1788219322678";
-const LEDGER_0026_TIME = "1793561186226";
+const LEDGER_0027_TIME = "1793588943431";
 const MIGRATION_TEST_TIMEOUT_MS = 60_000;
 // Tables that arrived after 0020 are absent from the ledger-0018 fixture this file models:
-// gist_auto_update (0020), required_version_intent (0022), folder (0023), and video tables (0024-0026).
+// gist_auto_update (0020), required_version_intent (0022), folder (0023), video tables (0024-0026),
+// and folder_collaborator (0027).
 const PRE_0020_TABLES = APPLICATION_TABLES.filter(
   (table) =>
     table !== "gist_auto_update" &&
@@ -33,7 +34,8 @@ const PRE_0020_TABLES = APPLICATION_TABLES.filter(
     table !== "video_storage_cleanup" &&
     table !== "video_stream_slot" &&
     table !== "video_upload" &&
-    table !== "video_upload_part",
+    table !== "video_upload_part" &&
+    table !== "folder_collaborator",
 );
 
 const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
@@ -146,7 +148,7 @@ describe("pending production migrations", () => {
         await migrate(database, { migrationsFolder: path.resolve("drizzle") });
         await migrate(database, { migrationsFolder: path.resolve("drizzle") });
 
-        await expectLedger(client, 27, LEDGER_0026_TIME);
+        await expectLedger(client, 28, LEDGER_0027_TIME);
         expect(await applicationDataState(client, projection)).toEqual(before);
         await expectCurrentSchema(client);
         await expectServingSourceCompatibility(client);

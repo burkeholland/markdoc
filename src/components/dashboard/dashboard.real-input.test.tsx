@@ -52,6 +52,7 @@ const doc = (id: string, title: string, deletedAt: string | null = null): Docume
   gistId: null,
   starred: false,
   folderId: null,
+  folderName: null,
 });
 
 beforeEach(() => {

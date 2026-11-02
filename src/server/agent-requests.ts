@@ -2,6 +2,7 @@ import * as Y from "yjs";
 import { and, desc, eq, gt, inArray, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 import { getDb, schema } from "@/server/db";
 import type { AgentRequest, AgentRequestMode, AgentRequestResult, AgentRequestSelection, AgentRequestStatus, Role } from "@/server/db/schema";
+import { effectiveRoleSql } from "@/server/document-access";
 import { canComment, canEdit } from "@/server/documents";
 import { HttpError, type Actor } from "@/server/http";
 import { activityActor, clip, recordActivity } from "@/server/activity";
@@ -175,18 +176,17 @@ async function findAddresseeToken(agent: RequestAddressee) {
 }
 
 /**
- * Whether `user` is a member of the document — its owner or a collaborator row, any role: the predicate
+ * Whether `user` is a member of the document — its owner, direct collaborator, or folder sharee, any role: the predicate
  * `listRequestsForUser` scopes the inbox with (link access does not count there either), so a request is only
  * addressed where its addressee's token will ever list it.
  */
 async function isDocumentMember(docId: string, user: { id: string; login: string | null }): Promise<boolean> {
   const db = await getDb();
-  const login = user.login?.toLowerCase() ?? "";
+  const memberAccess = effectiveRoleSql(schema.documents, { id: user.id, login: user.login, signedIn: true }, { includeLink: false });
   const rows = await db
     .select({ id: schema.documents.id })
     .from(schema.documents)
-    .leftJoin(schema.collaborators, and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)))
-    .where(and(eq(schema.documents.id, docId), or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`)))
+    .where(and(eq(schema.documents.id, docId), sql`${memberAccess.role} is not null`))
     .limit(1);
   return rows.length > 0;
 }
@@ -424,14 +424,14 @@ export async function listRequests(docId: string, opts: { status?: AgentRequestS
 }
 
 /**
- * Requests across every document the user owns or collaborates on (link-shared documents are not
+ * Requests across every document the user owns, collaborates on, or has through a folder role (link-shared documents are not
  * included: an agent only works where its human is a member), narrowed to what the caller may work:
  * requests addressed to the token it calls with, plus its own user's unaddressed ones. This is how
  * agents find work.
  */
 export async function listRequestsForUser(user: Actor, opts: { status?: AgentRequestStatus | AgentRequestStatus[]; limit?: number } = {}): Promise<AgentRequestItem[]> {
   const db = await getDb();
-  const login = user.login?.toLowerCase() ?? "";
+  const memberAccess = effectiveRoleSql(schema.documents, { id: user.id, login: user.login, signedIn: true }, { includeLink: false });
   const statuses: AgentRequestStatus[] = opts.status ? (Array.isArray(opts.status) ? opts.status : [opts.status]) : ["open"];
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
   const rows = await db
@@ -444,12 +444,11 @@ export async function listRequestsForUser(user: Actor, opts: { status?: AgentReq
     .from(schema.agentRequests)
     .innerJoin(schema.documents, eq(schema.documents.id, schema.agentRequests.documentId))
     .leftJoin(schema.users, eq(schema.users.id, schema.agentRequests.userId))
-    .leftJoin(schema.collaborators, and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)))
     .where(
       and(
         inArray(schema.agentRequests.status, statuses),
         sql`${schema.documents.deletedAt} is null`,
-        or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`),
+        sql`${memberAccess.role} is not null`,
         requestVisibleTo(user),
       ),
     )

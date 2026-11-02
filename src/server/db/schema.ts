@@ -88,9 +88,8 @@ export type TokenScope = "read" | "comment" | "full";
 /**
  * A folder groups its owner's documents. One level only: a folder never holds another folder (#2377).
  *
- * A folder is an organizing layer and nothing more — it carries no access of its own, so a document's
- * `folder_id` never widens who can read it. Sharing a folder is #2380, and that is the change that has
- * to teach `getDocumentAccess()` and `visibleDocuments()` about folders.
+ * A folder is an organizing layer. Its collaborator rows grant a role on every current and future
+ * document in the folder; the document's effective role is derived from its current `folder_id`.
  */
 export const folders = pgTable(
   "folder",
@@ -201,6 +200,24 @@ export const collaborators = pgTable(
     // Login-first lookups ("every document shared with me") in visibleDocuments() and
     // collectUserEvents() cannot use the (document_id, login) primary key.
     index("collaborator_login_idx").on(t.login),
+  ],
+);
+
+export const folderCollaborators = pgTable(
+  "folder_collaborator",
+  {
+    folderId: text("folder_id")
+      .notNull()
+      .references(() => folders.id, { onDelete: "cascade" }),
+    /** GitHub login of the collaborator (they may not have signed in yet). */
+    login: text("login").notNull(),
+    role: text("role").$type<Exclude<Role, "owner">>().notNull().default("editor"),
+    addedBy: text("added_by"),
+    createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.folderId, t.login] }),
+    index("folder_collaborator_login_idx").on(t.login),
   ],
 );
 
@@ -613,6 +630,7 @@ export type OwnershipTransfer = typeof ownershipTransfers.$inferSelect;
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;
 export type Folder = typeof folders.$inferSelect;
+export type FolderCollaborator = typeof folderCollaborators.$inferSelect;
 export type Version = typeof versions.$inferSelect;
 export type Collaborator = typeof collaborators.$inferSelect;
 export type User = typeof users.$inferSelect;

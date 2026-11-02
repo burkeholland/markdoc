@@ -1,7 +1,8 @@
 import { and, desc, eq, getTableColumns, ilike, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { customAlphabet } from "nanoid";
 import { getDb, schema, type Db, type Tx } from "@/server/db";
-import type { Document, LinkAccess, Role, StorageKind } from "@/server/db/schema";
+import type { Document, Role, StorageKind } from "@/server/db/schema";
+import { effectiveRoleForDocument, effectiveRoleSql, type AccessSource } from "@/server/document-access";
 import { encodeSeedState } from "@/server/collab/seed";
 import { boundTitle } from "@/server/document-title";
 import { excerptOf, excerptOfPrefix } from "@/editor/stats";
@@ -60,6 +61,7 @@ export interface AccessDocument extends DocumentMeta {
 export interface DocumentAccess {
   doc: AccessDocument;
   role: Role;
+  source: AccessSource;
 }
 
 export function canEdit(role: Role): boolean {
@@ -72,19 +74,6 @@ export function canComment(role: Role): boolean {
 
 export function isOwner(role: Role): boolean {
   return role === "owner";
-}
-
-function roleFromLink(linkAccess: LinkAccess, signedIn: boolean): Role | null {
-  switch (linkAccess) {
-    case "private":
-      return null;
-    case "view":
-      return "viewer";
-    case "comment":
-      return signedIn ? "commenter" : "viewer";
-    case "edit":
-      return signedIn ? "editor" : "viewer";
-  }
 }
 
 export interface AccessOptions {
@@ -110,16 +99,8 @@ export async function getDocumentAccess(docId: string, user: SessionUser | null,
     .where(eq(schema.documents.id, docId));
   if (!doc) return null;
   if (doc.deletedAt && !allowDeleted) return null;
-  if (user && doc.ownerId === user.id) return { doc, role: "owner" };
-  if (user?.login) {
-    const [collab] = await db
-      .select()
-      .from(schema.collaborators)
-      .where(and(eq(schema.collaborators.documentId, docId), eq(schema.collaborators.login, user.login.toLowerCase())));
-    if (collab) return { doc, role: collab.role };
-  }
-  const linkRole = roleFromLink(doc.linkAccess, !!user);
-  return linkRole ? { doc, role: linkRole } : null;
+  const access = await effectiveRoleForDocument(doc, user, db);
+  return access ? { doc, ...access } : null;
 }
 
 /**
@@ -175,11 +156,10 @@ export interface DocumentSummary {
   lastOpenedAt: Date | null;
   /** When the document was moved to the trash; null for live documents. */
   deletedAt: Date | null;
-  /**
-   * The folder this document is filed in, or null for the top level. Only ever a folder of the
-   * document's owner, so this is null on a document shared with the current user (#2377).
-   */
+  /** The folder this document is filed in, visible to its owner and people with a folder role. */
   folderId: string | null;
+  /** Folder name for the owner and people with a role through that folder; direct collaborators do not see it. */
+  folderName: string | null;
 }
 
 /** The card excerpt: the document's first prose, Markdown removed (see `excerptOf`). */
@@ -211,16 +191,20 @@ const summaryColumns = {
   gistId: schema.documents.gistId,
   deletedAt: schema.documents.deletedAt,
   folderId: schema.documents.folderId,
+  folderName: schema.folders.name,
   // One character more than the bound, so a prefix longer than the bound is known to be cut short.
   contentHead: sql<string>`left(${schema.documents.content}, ${EXCERPT_PREFIX_CHARS + 1})`,
 };
 
-type SummaryDoc = { [K in keyof typeof summaryColumns]: K extends keyof Document ? Document[K] : string };
+type SummaryDoc = {
+  [K in keyof typeof summaryColumns]: K extends keyof Document ? Document[K] : K extends "folderName" ? string | null : string;
+};
 
 interface VisibleRow {
   doc: SummaryDoc;
   owner: { name: string | null; login: string | null } | null;
-  collabRole: Role | null;
+  effectiveRole: Role | null;
+  folderRole: Exclude<Role, "owner"> | null;
   starred: boolean | null;
   lastOpenedAt: Date | null;
 }
@@ -232,26 +216,25 @@ interface VisibleRow {
  * short excerpt. `extra` adds `document` columns to `doc` for the one caller that needs more (search).
  */
 function visibleDocuments<E extends Partial<typeof schema.documents._.columns> = Record<never, never>>(db: Awaited<ReturnType<typeof getDb>>, user: SessionUser, extra?: E) {
-  const login = user.login?.toLowerCase() ?? "";
+  const access = effectiveRoleSql(schema.documents, { id: user.id, login: user.login, signedIn: true });
+  const memberAccess = effectiveRoleSql(schema.documents, { id: user.id, login: user.login, signedIn: true }, { includeLink: false });
   const query = db
     .select({
       doc: { ...summaryColumns, ...(extra ?? ({} as E)) },
       owner: { name: schema.users.name, login: schema.users.login },
-      collabRole: schema.collaborators.role,
+      effectiveRole: access.role,
+      folderRole: access.folderRole,
       starred: schema.stars.starred,
       lastOpenedAt: schema.recents.openedAt,
     })
     .from(schema.documents)
     .leftJoin(schema.users, eq(schema.users.id, schema.documents.ownerId))
-    .leftJoin(
-      schema.collaborators,
-      and(eq(schema.collaborators.documentId, schema.documents.id), eq(schema.collaborators.login, login)),
-    )
+    .leftJoin(schema.folders, eq(schema.folders.id, schema.documents.folderId))
     .leftJoin(schema.stars, and(eq(schema.stars.documentId, schema.documents.id), eq(schema.stars.userId, user.id)))
     .leftJoin(schema.recents, and(eq(schema.recents.documentId, schema.documents.id), eq(schema.recents.userId, user.id)));
   const openedViaLink = and(isNotNull(schema.recents.documentId), ne(schema.documents.linkAccess, "private"));
   const visible = and(
-    or(eq(schema.documents.ownerId, user.id), sql`${schema.collaborators.login} is not null`, openedViaLink),
+    or(sql`${memberAccess.role} is not null`, openedViaLink),
     isNull(schema.documents.deletedAt),
   )!;
   const starredOnly = eq(schema.stars.starred, true);
@@ -284,7 +267,7 @@ async function excerptsFor(db: Awaited<ReturnType<typeof getDb>>, rows: VisibleR
   return excerpts;
 }
 
-function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow, user: SessionUser, excerpt: string): DocumentSummary {
+function toSummary({ doc, owner, effectiveRole, folderRole, starred, lastOpenedAt }: VisibleRow, user: SessionUser, excerpt: string): DocumentSummary {
   return {
     id: doc.id,
     title: doc.title,
@@ -294,10 +277,7 @@ function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow
     ownerId: doc.ownerId,
     ownerName: owner?.name ?? null,
     ownerLogin: owner?.login ?? null,
-    role:
-      doc.ownerId === user.id
-        ? "owner"
-        : (collabRole ?? (lastOpenedAt ? roleFromLink(doc.linkAccess, true) : null) ?? "viewer"),
+    role: effectiveRole ?? "viewer",
     excerpt,
     repoOwner: doc.repoOwner,
     repoName: doc.repoName,
@@ -306,9 +286,8 @@ function toSummary({ doc, owner, collabRole, starred, lastOpenedAt }: VisibleRow
     starred: starred === true,
     lastOpenedAt: lastOpenedAt ?? null,
     deletedAt: doc.deletedAt ?? null,
-    // A folder belongs to one person. Reporting an owner's folder id to a collaborator would leak
-    // which folder the owner files it under, and the collaborator could not resolve the id anyway.
-    folderId: doc.ownerId === user.id ? (doc.folderId ?? null) : null,
+    folderId: doc.ownerId === user.id || folderRole ? (doc.folderId ?? null) : null,
+    folderName: doc.ownerId === user.id || folderRole ? (doc.folderName ?? null) : null,
   };
 }
 

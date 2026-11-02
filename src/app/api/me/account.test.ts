@@ -135,7 +135,10 @@ describe("DELETE /api/me", () => {
       data: null,
       storageKey: `videos/${videoId}`,
     });
+    const sharedFolder = await createFolder(other.id, "Shared work");
+    if (sharedFolder.outcome !== "ok") throw new Error("folder not created");
     await db.insert(schema.collaborators).values({ documentId: theirs.id, login: actor.login.toUpperCase(), role: "editor" });
+    await db.insert(schema.folderCollaborators).values({ folderId: sharedFolder.folder.id, login: actor.login.toUpperCase(), role: "viewer" });
     await db.insert(schema.notifications).values({ id: `n-${sequence}`, userLogin: actor.login, documentId: theirs.id, kind: "share", refId: theirs.id });
 
     const res = await del({ confirm: ` ${actor.login.toUpperCase()} ` });
@@ -145,6 +148,7 @@ describe("DELETE /api/me", () => {
     expect(await db.select().from(schema.documents).where(eq(schema.documents.id, mine.id))).toHaveLength(0);
     expect(await db.select().from(schema.documents).where(eq(schema.documents.id, theirs.id))).toHaveLength(1);
     expect(await db.select().from(schema.collaborators).where(eq(schema.collaborators.documentId, theirs.id))).toHaveLength(0);
+    expect(await db.select().from(schema.folderCollaborators).where(eq(schema.folderCollaborators.folderId, sharedFolder.folder.id))).toHaveLength(0);
     expect(await db.select().from(schema.notifications).where(eq(schema.notifications.userLogin, actor.login))).toHaveLength(0);
     expect(discarded).toEqual([`videos/${videoId}`]);
   });

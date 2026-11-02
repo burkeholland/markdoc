@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { handler, HttpError, json, readJson, requireUser } from "@/server/http";
-import { deleteFolder, FOLDER_NAME_MAX, getFolderForOwner, renameFolder } from "@/server/folders";
+import { deleteFolder, FOLDER_NAME_MAX, getFolderForUser, renameFolder } from "@/server/folders";
 import { folderDto } from "@/server/dto";
 
 type Params = { params: Promise<{ id: string }> };
@@ -39,11 +39,11 @@ export const DELETE = handler(async (_req: Request, { params }: Params) => {
   return json({ ok: true, trashed });
 });
 
-/** One folder, for a deep link to it. */
+/** One owned or shared folder, for a deep link to it. */
 export const GET = handler(async (_req: Request, { params }: Params) => {
   const { id } = await params;
   const user = await requireUser();
-  const folder = await getFolderForOwner(id, user.id);
+  const folder = await getFolderForUser(id, user.id, user.login);
   if (!folder) throw new HttpError(404, "No such folder");
-  return json({ folder: folderDto({ ...folder, documentCount: 0 }) });
+  return json({ folder: folderDto(folder) });
 });

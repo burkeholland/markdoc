@@ -22,6 +22,7 @@ export const REPAIR_SCHEMA_TABLES = [
   "collaborator",
   "document",
   "folder",
+  "folder_collaborator",
   "gist_auto_update",
   "notification",
   "ownership_transfer",
@@ -51,6 +52,7 @@ export const REPAIR_APPLICATION_TABLES = [
   "collaborator",
   "document",
   "folder",
+  "folder_collaborator",
   "gist_auto_update",
   "notification",
   "recent",
@@ -86,10 +88,12 @@ export const USER_IDENTITY_CLASSIFICATIONS = [
   "gist_auto_update.publisher_id",
   "document.last_edited_by",
   "collaborator.added_by",
+  "folder_collaborator.added_by",
   "version.created_by",
   "required_version_intent.created_by",
   "activity.actor_id",
   "collaborator.login",
+  "folder_collaborator.login",
   "notification.user_login",
   "notification.actor_login",
   "document.ystate identity metadata",
@@ -97,6 +101,7 @@ export const USER_IDENTITY_CLASSIFICATIONS = [
 
 const APPLICATION_DEPENDENCY_LABELS = [
   "document.owner_id",
+  "folder.owner_id",
   "star.user_id",
   "recent.user_id",
   "api_token.user_id",
@@ -108,15 +113,18 @@ const APPLICATION_DEPENDENCY_LABELS = [
   "gist_auto_update.publisher_id",
   "document.last_edited_by",
   "collaborator.added_by",
+  "folder_collaborator.added_by",
   "version.created_by",
   "required_version_intent.created_by",
   "activity.actor_id",
   "collaborator.login",
+  "folder_collaborator.login",
   "notification.user_login",
   "notification.actor_login",
   "document.ystate identity metadata",
   "gist_auto_update.document_id via duplicate-owned document",
   "collaborator.document_id via duplicate-owned document",
+  "folder_collaborator.folder_id via duplicate-owned folder",
   "version.document_id via duplicate-owned document",
   "required_version_intent.document_id via duplicate-owned document",
   "star.document_id via duplicate-owned document",
@@ -374,6 +382,10 @@ const SAFE_STATE_QUERIES: Record<RepairSchemaTable, string> = {
                   created_at::text AS created_at,
                   updated_at::text AS updated_at
              FROM folder`,
+  folder_collaborator: `SELECT xmin::text AS row_version,
+                              folder_id, login, role, added_by,
+                              created_at::text AS created_at
+                         FROM folder_collaborator`,
   gist_auto_update: `SELECT xmin::text AS row_version,
                            document_id, publisher_id, gist_id, filename, account_login, is_public,
                            enabled, generation, queued_version, synced_version, active_version, status,
@@ -813,6 +825,7 @@ async function selectAndValidateInitialState(
   );
   const preservedLoginReferences = new Set<ApplicationDependencyLabel>([
     "collaborator.login",
+    "folder_collaborator.login",
     "notification.user_login",
     "notification.actor_login",
   ]);
@@ -849,6 +862,7 @@ async function collectApplicationDependencies(
     values: unknown[];
   }> = [
     { label: "document.owner_id", query: "SELECT COUNT(*)::text AS count FROM document WHERE owner_id = $1", values: [duplicateId] },
+    { label: "folder.owner_id", query: "SELECT COUNT(*)::text AS count FROM folder WHERE owner_id = $1", values: [duplicateId] },
     { label: "star.user_id", query: "SELECT COUNT(*)::text AS count FROM star WHERE user_id = $1", values: [duplicateId] },
     { label: "recent.user_id", query: "SELECT COUNT(*)::text AS count FROM recent WHERE user_id = $1", values: [duplicateId] },
     { label: "api_token.user_id", query: "SELECT COUNT(*)::text AS count FROM api_token WHERE user_id = $1", values: [duplicateId] },
@@ -860,6 +874,7 @@ async function collectApplicationDependencies(
     { label: "gist_auto_update.publisher_id", query: "SELECT COUNT(*)::text AS count FROM gist_auto_update WHERE publisher_id = $1", values: [duplicateId] },
     { label: "document.last_edited_by", query: "SELECT COUNT(*)::text AS count FROM document WHERE last_edited_by = $1", values: [duplicateId] },
     { label: "collaborator.added_by", query: "SELECT COUNT(*)::text AS count FROM collaborator WHERE added_by = $1", values: [duplicateId] },
+    { label: "folder_collaborator.added_by", query: "SELECT COUNT(*)::text AS count FROM folder_collaborator WHERE added_by = $1", values: [duplicateId] },
     { label: "version.created_by", query: "SELECT COUNT(*)::text AS count FROM version WHERE created_by = $1", values: [duplicateId] },
     { label: "required_version_intent.created_by", query: "SELECT COUNT(*)::text AS count FROM required_version_intent WHERE created_by = $1", values: [duplicateId] },
     {
@@ -873,6 +888,11 @@ async function collectApplicationDependencies(
     {
       label: "collaborator.login",
       query: "SELECT COUNT(*)::text AS count FROM collaborator WHERE lower(btrim(login)) = $1",
+      values: [expectedLogin],
+    },
+    {
+      label: "folder_collaborator.login",
+      query: "SELECT COUNT(*)::text AS count FROM folder_collaborator WHERE lower(btrim(login)) = $1",
       values: [expectedLogin],
     },
     {
@@ -897,6 +917,13 @@ async function collectApplicationDependencies(
       query: `SELECT COUNT(*)::text AS count
                 FROM collaborator c JOIN document d ON d.id = c.document_id
                WHERE d.owner_id = $1`,
+      values: [duplicateId],
+    },
+    {
+      label: "folder_collaborator.folder_id via duplicate-owned folder",
+      query: `SELECT COUNT(*)::text AS count
+                FROM folder_collaborator fc JOIN folder f ON f.id = fc.folder_id
+               WHERE f.owner_id = $1`,
       values: [duplicateId],
     },
     {

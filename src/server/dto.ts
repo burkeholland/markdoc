@@ -1,4 +1,5 @@
 import type { Document } from "@/server/db/schema";
+import type { Role } from "@/server/db/schema";
 import type { DocumentMeta } from "@/server/documents";
 import { githubUrlFor } from "@/server/publish";
 
@@ -36,12 +37,26 @@ export function publicDocument(doc: PublicDocumentSource) {
 export type FolderDto = ReturnType<typeof folderDto>;
 
 /** A folder as the dashboard sees it. Dates as ISO strings, like every other DTO here. */
-export function folderDto(folder: { id: string; name: string; documentCount: number; createdAt: Date; updatedAt: Date }) {
+export function folderDto(folder: {
+  id: string;
+  name: string;
+  documentCount: number;
+  createdAt: Date;
+  updatedAt: Date;
+  ownerId: string;
+  ownerName?: string | null;
+  ownerLogin?: string | null;
+  role?: Role;
+}) {
   return {
     id: folder.id,
     name: folder.name,
     documentCount: folder.documentCount,
     createdAt: folder.createdAt.toISOString(),
     updatedAt: folder.updatedAt.toISOString(),
+    ownerId: folder.ownerId,
+    ownerName: folder.ownerName ?? null,
+    ownerLogin: folder.ownerLogin ?? null,
+    role: folder.role ?? "owner",
   };
 }

@@ -57,8 +57,9 @@ const { attachCollab } = await import("./collab/ws");
 const { signCollabToken } = await import("./collab/token");
 const { registerCollab } = await import("./collab/registry");
 const { createDocument, deleteDocument, removeCollaborator, updateDocument, upsertCollaborator } = await import("./documents");
+const { addFolderCollaborator, createFolder, moveDocumentsToFolder, removeFolderCollaborator } = await import("./folders");
 const authorization = await import("./collab/authorization");
-const { changeCollaboratorAccess, changeLinkAccess, collabAccessChangeBlocks } = authorization;
+const { changeCollaboratorAccess, changeFolderCollaboratorAccess, changeLinkAccess, collabAccessChangeBlocks } = authorization;
 const { createApiToken, revokeApiToken } = await import("./tokens");
 const { ClientDocumentPersistence } = await import("@/editor/collab/persistence");
 const { documentStoreSnapshot } = await import("./collab/autosave");
@@ -223,12 +224,14 @@ describe("an access change while the person types (issue #2281)", () => {
     link?: LinkAccess;
     /** The person's collaborator row, or null when they come in through the link only. */
     row?: Role | null;
+    /** A role granted by the document's folder, or null when there is no folder role. */
+    folderRole?: Role | null;
     /** Connect the person through an API token (an agent) instead of a browser session. */
     agent?: boolean;
   }
 
   /** An owner and one person on a fresh document, both connected and in sync. */
-  async function scene({ link = "edit", row = "editor", agent = false }: SceneOptions = {}) {
+  async function scene({ link = "edit", row = "editor", folderRole, agent = false }: SceneOptions = {}) {
     const tag = `${Date.now().toString(36)}${(serial += 1)}`;
     const db = await getDb();
     const [owner] = await db.insert(schema.users).values({ name: "Owner", login: `pause-owner-${tag}`, email: `pause-owner-${tag}@example.com` }).returning();
@@ -236,7 +239,15 @@ describe("an access change while the person types (issue #2281)", () => {
     const doc = await createDocument({ ownerId: owner.id, content: "Start" });
     if (link !== "private") await updateDocument(doc.id, { linkAccess: link });
     if (row) await upsertCollaborator(doc.id, person.login!, row, owner.id);
-    const startsAs = row ?? (link === "edit" ? "editor" : link === "comment" ? "commenter" : "viewer");
+    let folderId: string | null = null;
+    if (folderRole) {
+      const created = await createFolder(owner.id, `pause-folder-${tag}`);
+      if (created.outcome !== "ok") throw new Error(`could not create access-test folder: ${created.outcome}`);
+      folderId = created.folder.id;
+      await moveDocumentsToFolder([doc.id], folderId, owner.id);
+      await addFolderCollaborator(folderId, person.login!, folderRole, owner.id);
+    }
+    const startsAs = row ?? folderRole ?? (link === "edit" ? "editor" : link === "comment" ? "commenter" : "viewer");
     const apiToken = agent ? await createApiToken(person.id, `Agent ${tag}`, { scope: "full", documentIds: [doc.id] }) : null;
     const ownerClient = connect(await signCollabToken({ userId: owner.id, docId: doc.id, role: "owner", name: "Owner", login: owner.login, avatar: null }), doc.id);
     const personClient = connect(
@@ -261,6 +272,7 @@ describe("an access change while the person types (issue #2281)", () => {
       owner,
       person,
       doc,
+      folderId,
       apiToken,
       ownerClient,
       personClient,
@@ -307,6 +319,14 @@ describe("an access change while the person types (issue #2281)", () => {
     slowChange((mutation) => changeCollaboratorAccess(s.doc.id, s.login, null, mutation), () => removeCollaborator(s.doc.id, s.login), options);
   const setRow = (s: Scene, role: Role, options?: { fail?: boolean }) =>
     slowChange((mutation) => changeCollaboratorAccess(s.doc.id, s.login, role, mutation), () => (options?.fail ? Promise.resolve() : upsertCollaborator(s.doc.id, s.login, role, s.owner.id)), options);
+  const removeFolderRole = (s: Scene, options?: { fail?: boolean }) => {
+    if (!s.folderId) throw new Error("this scene has no folder");
+    return slowChange(
+      (mutation) => changeFolderCollaboratorAccess(s.folderId!, s.login, null, mutation),
+      () => (options?.fail ? Promise.resolve() : removeFolderCollaborator(s.folderId!, s.login)),
+      options,
+    );
+  };
   const setLink = (s: Scene, link: LinkAccess, options?: { fail?: boolean }) =>
     slowChange((mutation) => changeLinkAccess(s.doc.id, link, mutation), () => (options?.fail ? Promise.resolve() : updateDocument(s.doc.id, { linkAccess: link })), options);
 
@@ -512,6 +532,27 @@ describe("an access change while the person types (issue #2281)", () => {
       // No full sync is asked of someone who cannot edit.
       expect(s.personClient.got.step1).toBe(1);
       expect(s.live.store.pendingStructs).toBeNull();
+    });
+
+    it("removing a folder role closes the live document connection after its accepted edits are stored", async () => {
+      const s = await scene({ link: "private", row: null, folderRole: "editor" });
+      s.personClient.type(" before");
+      await eventually(() => s.serverText() === "Start before", "the key typed before the change");
+
+      const change = removeFolderRole(s);
+      await change.written;
+      s.personClient.type(" after");
+      await eventually(() => s.waiting() === 1, "the key to reach the server");
+      expect(s.serverText()).toBe("Start before");
+
+      change.finish();
+      await withTimeout(change.done, "the folder role removal");
+      expect(s.live.hasConnection(s.connection)).toBe(false);
+      expect(s.connection.readOnly).toBe(true);
+      await eventually(() => s.waiting() === 0, "the waiting key to be refused");
+      expect(s.serverText()).toBe("Start before");
+      expect(s.ownerClient.text()).toBe("Start before");
+      expect(await s.stored()).toBe("Start before");
     });
 
     it("a change that fails after its write went through: the connection gets the access the database has, not the one it had", async () => {

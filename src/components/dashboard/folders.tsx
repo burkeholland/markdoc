@@ -1,12 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { Check, Folder, FolderPlus, MoreVertical, Pencil, Trash2, X } from "lucide-react";
-import { api, apiErrorText, type FolderDto } from "@/lib/api";
+import { Check, Folder, FolderPlus, MoreVertical, Pencil, Share2, Trash2, Users, X } from "lucide-react";
+import { ApiError, api, apiErrorText, type CollaboratorDto, type FolderDto } from "@/lib/api";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
 import { FOLDER_NAME_MAX } from "@/lib/folder-name";
 import { cn } from "@/lib/utils";
+import type { Role } from "@/server/db/schema";
+import { Avatar } from "@/components/ui/primitives";
+import { CollaboratorLoginInput, isValidLogin, type CollaboratorLoginInputHandle } from "@/components/editor/collaborator-login-input";
 
 /**
  * The id of the folder being browsed, or one of the two pseudo-selections. `null` is "All documents"
@@ -170,7 +173,15 @@ function byName(a: FolderDto, b: FolderDto): number {
 function sameFolders(a: readonly FolderDto[], b: readonly FolderDto[]): boolean {
   return (
     a.length === b.length &&
-    a.every((folder, i) => folder.id === b[i].id && folder.name === b[i].name && folder.documentCount === b[i].documentCount)
+    a.every(
+      (folder, i) =>
+        folder.id === b[i].id &&
+        folder.name === b[i].name &&
+        folder.documentCount === b[i].documentCount &&
+        folder.role === b[i].role &&
+        folder.ownerId === b[i].ownerId &&
+        folder.ownerLogin === b[i].ownerLogin,
+    )
   );
 }
 
@@ -210,8 +221,11 @@ export interface FolderRailProps {
  */
 export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }: FolderRailProps) {
   const { folders, selection, select } = state;
+  const ownedFolders = folders.filter((folder) => folder.role === "owner");
+  const sharedFolders = folders.filter((folder) => folder.role !== "owner");
   const [naming, setNaming] = React.useState<{ mode: "create" } | { mode: "rename"; folder: FolderDto } | null>(null);
   const [confirmDelete, setConfirmDelete] = React.useState<FolderDto | null>(null);
+  const [sharing, setSharing] = React.useState<FolderDto | null>(null);
   const [dropTarget, setDropTarget] = React.useState<string | null | typeof TOP_LEVEL>(null);
 
   // A dragover fires continuously over a target's children, and dragleave fires when crossing between
@@ -267,7 +281,7 @@ export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }:
         >
           Not in a folder <span className="text-ink-4">{unfiledCount}</span>
         </button>
-        {folders.map((folder) => (
+        {ownedFolders.map((folder) => (
           <span key={folder.id} className="inline-flex shrink-0 items-center">
             <button
               type="button"
@@ -298,6 +312,10 @@ export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }:
               </MenuTrigger>
               <MenuContent className="w-44">
                 <MenuLabel>{folder.name}</MenuLabel>
+                <MenuItem icon={<Share2 size={14} />} onSelect={() => setSharing(folder)}>
+                  Share…
+                </MenuItem>
+                <MenuSeparator />
                 <MenuItem icon={<Pencil size={14} />} onSelect={() => setNaming({ mode: "rename", folder })}>
                   Rename…
                 </MenuItem>
@@ -309,6 +327,27 @@ export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }:
             </Menu>
           </span>
         ))}
+        {sharedFolders.length > 0 && (
+          <>
+            <span className="px-1 text-[11px] font-medium text-ink-4">Shared with me</span>
+            {sharedFolders.map((folder) => (
+              <button
+                key={folder.id}
+                type="button"
+                className={chipClass(sameSelection(selection, folder.id), false)}
+                onClick={() => select(folder.id)}
+                aria-pressed={sameSelection(selection, folder.id)}
+                title={`Shared by ${folder.ownerLogin ? `@${folder.ownerLogin}` : folder.ownerName ?? "another person"} · ${folder.role}`}
+                data-testid="shared-folder-chip"
+                data-folder-id={folder.id}
+              >
+                <Users size={13} className="shrink-0" />
+                <span className="max-w-40 truncate">{folder.name}</span>
+                <span className="text-ink-4">{folder.documentCount}</span>
+              </button>
+            ))}
+          </>
+        )}
         <button
           type="button"
           className={cn(CHIP_CLASS, "border-dashed border-line-2 text-ink-3 hover:border-accent hover:text-accent")}
@@ -327,6 +366,7 @@ export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }:
         onCancel={() => setNaming(null)}
         onSubmit={submitName}
       />
+      <FolderShareDialog folder={sharing} onOpenChange={(open) => !open && setSharing(null)} />
 
       <Dialog open={confirmDelete !== null} onOpenChange={(open) => !open && setConfirmDelete(null)}>
         <DialogContent
@@ -396,7 +436,7 @@ function NameDialog({
     <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
       <DialogContent
         title={mode === "rename" ? "Rename folder" : "New folder"}
-        description={mode === "rename" ? undefined : "Folders hold your own documents. Sharing a folder is not here yet."}
+        description={mode === "rename" ? undefined : "Organize your documents, then share a folder from its menu."}
       >
         <form
           onSubmit={(event) => {
@@ -429,6 +469,238 @@ function NameDialog({
   );
 }
 
+type FolderRole = Exclude<Role, "owner">;
+type FolderPeople = Awaited<ReturnType<typeof api.folders.collaborators>>;
+
+const FOLDER_ROLE_OPTIONS: readonly { value: FolderRole; label: string }[] = [
+  { value: "editor", label: "Editor" },
+  { value: "commenter", label: "Commenter" },
+  { value: "viewer", label: "Viewer" },
+];
+
+function folderShareRefusal(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 409 || error.body?.code !== "already-collaborator") return null;
+  const { login, role } = error.body;
+  if (typeof login !== "string" || !FOLDER_ROLE_OPTIONS.some((option) => option.value === role)) return null;
+  const label = FOLDER_ROLE_OPTIONS.find((option) => option.value === role)?.label;
+  return `@${login} already has access as ${label}. Change the role in the list below.`;
+}
+
+function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null; onOpenChange: (open: boolean) => void }) {
+  const [people, setPeople] = React.useState<FolderPeople | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+  const [retry, setRetry] = React.useState(0);
+  const [login, setLogin] = React.useState("");
+  const [role, setRole] = React.useState<FolderRole>("editor");
+  const [adding, setAdding] = React.useState(false);
+  const [addError, setAddError] = React.useState<string | null>(null);
+  const [addNote, setAddNote] = React.useState<string | null>(null);
+  const [actionError, setActionError] = React.useState<string | null>(null);
+  const [busyLogins, setBusyLogins] = React.useState<ReadonlySet<string>>(new Set());
+  const roleSelect = React.useRef<HTMLSelectElement>(null);
+  const loginInput = React.useRef<CollaboratorLoginInputHandle>(null);
+  const currentFolder = React.useRef<string | null>(folder?.id ?? null);
+  const focusRole = React.useCallback(() => roleSelect.current?.focus(), []);
+  const folderId = folder?.id ?? null;
+
+  React.useEffect(() => {
+    currentFolder.current = folder?.id ?? null;
+  }, [folder?.id]);
+
+  React.useEffect(() => {
+    if (!folderId) return;
+    let stale = false;
+    setLoading(true);
+    setLoadError(null);
+    api.folders.collaborators(folderId).then(
+      (result) => {
+        if (!stale) setPeople(result);
+      },
+      (error: unknown) => {
+        if (!stale) setLoadError(apiErrorText(error, "Could not load folder access."));
+      },
+    ).finally(() => {
+      if (!stale) setLoading(false);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [folderId, retry]);
+
+  const setBusy = React.useCallback((who: string, busy: boolean) => {
+    setBusyLogins((current) => {
+      const next = new Set(current);
+      if (busy) next.add(who);
+      else next.delete(who);
+      return next;
+    });
+  }, []);
+
+  const refresh = async (folderId: string) => {
+    try {
+      const result = await api.folders.collaborators(folderId);
+      if (currentFolder.current === folderId) setPeople(result);
+    } catch (error) {
+      if (currentFolder.current === folderId) setLoadError(apiErrorText(error, "Could not refresh folder access."));
+    }
+  };
+
+  const add = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const target = folder;
+    const handle = login.trim();
+    if (!target || !isValidLogin(handle) || adding) return;
+    setAdding(true);
+    setAddError(null);
+    setAddNote(null);
+    try {
+      const result = await api.folders.addCollaborator(target.id, handle, role);
+      if (currentFolder.current !== target.id) return;
+      setLogin("");
+      if (result.pending) setAddNote(`@${result.login} gets access on their first sign-in. Check the spelling.`);
+      await refresh(target.id);
+    } catch (error) {
+      if (currentFolder.current !== target.id) return;
+      setAddError(folderShareRefusal(error) ?? apiErrorText(error, "Could not share this folder."));
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const changeRole = async (person: CollaboratorDto, next: FolderRole) => {
+    const target = folder;
+    if (!target || busyLogins.has(person.login)) return;
+    setBusy(person.login, true);
+    setActionError(null);
+    try {
+      await api.folders.addCollaborator(target.id, person.login, next, { change: true });
+      if (currentFolder.current === target.id) {
+        setPeople((current) =>
+          current ? { ...current, collaborators: current.collaborators.map((item) => (item.login === person.login ? { ...item, role: next } : item)) } : current,
+        );
+      }
+    } catch (error) {
+      if (currentFolder.current === target.id) setActionError(apiErrorText(error, `Could not change ${person.login}'s role.`));
+    } finally {
+      setBusy(person.login, false);
+    }
+  };
+
+  const remove = async (person: CollaboratorDto) => {
+    const target = folder;
+    if (!target || busyLogins.has(person.login)) return;
+    setBusy(person.login, true);
+    setActionError(null);
+    try {
+      await api.folders.removeCollaborator(target.id, person.login);
+      if (currentFolder.current === target.id) {
+        setPeople((current) =>
+          current ? { ...current, collaborators: current.collaborators.filter((item) => item.login !== person.login) } : current,
+        );
+      }
+    } catch (error) {
+      if (currentFolder.current === target.id) setActionError(apiErrorText(error, `Could not remove ${person.login}.`));
+    } finally {
+      setBusy(person.login, false);
+    }
+  };
+
+  const excluded = [...(people?.owner?.login ? [people.owner.login] : []), ...(people?.collaborators ?? []).map((person) => person.login)];
+
+  return (
+    <Dialog open={folder !== null} onOpenChange={onOpenChange}>
+      <DialogContent
+        title={`Share “${folder?.name ?? "folder"}”`}
+        description="Everyone you add gets this role on every document in the folder, including new ones."
+        className="max-h-[calc(100dvh-2rem)] overflow-y-auto"
+      >
+        <div className="flex flex-col gap-4" data-testid="folder-share-dialog">
+          <form className="flex gap-2" onSubmit={(event) => void add(event)}>
+            <CollaboratorLoginInput
+              ref={loginInput}
+              value={login}
+              onChange={(value) => {
+                setLogin(value);
+                setAddError(null);
+              }}
+              exclude={excluded}
+              onPick={focusRole}
+            />
+            <select ref={roleSelect} className="select" value={role} onChange={(event) => setRole(event.target.value as FolderRole)} aria-label="Role for new folder collaborator">
+              {FOLDER_ROLE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+            <button type="submit" className="btn btn-primary" disabled={!isValidLogin(login) || adding} data-testid="folder-share-add">
+              {adding ? "Adding…" : "Add"}
+            </button>
+          </form>
+          {addError && <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-danger dark:bg-red-950/40" role="alert">{addError}</p>}
+          {addNote && <p className="text-xs text-ink-3" role="status">{addNote}</p>}
+          <section aria-label="People with folder access">
+            {loading ? (
+              <p className="py-4 text-center text-sm text-ink-3" role="status">Loading…</p>
+            ) : loadError ? (
+              <div className="rounded-lg bg-red-50 px-3 py-3 text-sm text-danger dark:bg-red-950/40" role="alert">
+                {loadError}
+                <button type="button" className="btn btn-outline btn-sm ml-2" onClick={() => setRetry((value) => value + 1)}>Retry</button>
+              </div>
+            ) : (
+              <ul className="flex flex-col divide-y divide-line rounded-xl border border-line">
+                {people?.owner && (
+                  <li className="flex items-center gap-3 px-3 py-2.5">
+                    <Avatar name={people.owner.name ?? people.owner.login ?? "Owner"} src={people.owner.image} size={32} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-ink">{people.owner.name ?? people.owner.login}</div>
+                      {people.owner.login && <div className="truncate text-xs text-ink-3">@{people.owner.login}</div>}
+                    </div>
+                    <span className="text-xs font-medium text-ink-3">Owner</span>
+                  </li>
+                )}
+                {(people?.collaborators ?? []).map((person) => (
+                  <li key={person.login} className="flex items-center gap-3 px-3 py-2.5" aria-busy={busyLogins.has(person.login) || undefined}>
+                    <Avatar name={person.name ?? person.login} src={person.image ?? `https://avatars.githubusercontent.com/${person.login}?s=64`} size={32} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-ink">{person.name ?? person.login}</div>
+                      <div className="truncate text-xs text-ink-3">@{person.login}</div>
+                    </div>
+                    <select
+                      className="select h-8 text-xs"
+                      value={person.role}
+                      aria-label={`Role for ${person.login}`}
+                      aria-disabled={busyLogins.has(person.login) || undefined}
+                      onChange={(event) => void changeRole(person, event.target.value as FolderRole)}
+                    >
+                      {FOLDER_ROLE_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="icon-btn h-8 w-8 text-ink-3 hover:text-danger"
+                      aria-label={`Remove ${person.login}`}
+                      aria-disabled={busyLogins.has(person.login) || undefined}
+                      onClick={() => void remove(person)}
+                    >
+                      <Trash2 size={15} aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+                {people?.collaborators.length === 0 && <li className="px-3 py-3 text-sm text-ink-3">No one else has access yet.</li>}
+              </ul>
+            )}
+            {actionError && <p className="mt-2 text-sm text-danger" role="alert">{actionError}</p>}
+          </section>
+          <div className="flex justify-end">
+            <button type="button" className="btn btn-primary" onClick={() => onOpenChange(false)}>Done</button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /**
  * The "Move to" rows for one document's card menu. A Radix dropdown, so arrow keys and Enter work
  * without any key handling of our own — the issue's "the menu must also work from the keyboard".
@@ -446,6 +718,7 @@ export function MoveToItems({
   currentFolderId: string | null | undefined;
   onMove: (folderId: string | null) => void;
 }) {
+  const ownedFolders = folders.filter((folder) => folder.role === "owner");
   const here = (folderId: string | null) => currentFolderId !== undefined && currentFolderId === folderId;
   return (
     <>
@@ -458,7 +731,7 @@ export function MoveToItems({
       >
         Not in a folder
       </MenuItem>
-      {folders.map((folder) => (
+      {ownedFolders.map((folder) => (
         <MenuItem
           key={folder.id}
           icon={here(folder.id) ? <Check size={14} /> : <Folder size={14} />}
@@ -470,7 +743,7 @@ export function MoveToItems({
           <span className="truncate">{folder.name}</span>
         </MenuItem>
       ))}
-      {folders.length === 0 && <MenuItem disabled>No folders yet</MenuItem>}
+      {ownedFolders.length === 0 && <MenuItem disabled>No folders yet</MenuItem>}
     </>
   );
 }

@@ -48,6 +48,7 @@ export const APPLICATION_TABLES = [
   "collaborator",
   "document",
   "folder",
+  "folder_collaborator",
   "gist_auto_update",
   "notification",
   "ownership_transfer",

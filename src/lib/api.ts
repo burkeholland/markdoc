@@ -251,6 +251,7 @@ export const api = {
       request<{
         owner: { login: string | null; name: string | null; image: string | null } | null;
         linkAccess: DocumentDto["linkAccess"];
+        folder: { id: string; name: string } | null;
         collaborators: CollaboratorDto[];
         /** Agents that can be @-mentioned here: `login` is `<ownerLogin>/<slug>` (see src/server/agents.ts `MentionableAgent`). */
         agents: { name: string; login: string; ownerLogin: string; ownerName: string | null; present: boolean; collaboratorsMayAsk: boolean }[];
@@ -311,6 +312,18 @@ export const api = {
   folders: {
     list: () => request<{ folders: FolderDto[] }>("/api/folders", { cache: "no-store" }),
     create: (name: string) => request<{ folder: FolderDto }>("/api/folders", { method: "POST", body: JSON.stringify({ name }) }),
+    collaborators: (id: string) =>
+      request<{
+        owner: { login: string | null; name: string | null; image: string | null } | null;
+        collaborators: CollaboratorDto[];
+      }>(`/api/folders/${id}/collaborators`),
+    addCollaborator: (id: string, login: string, role: Exclude<Role, "owner">, options: { change?: boolean } = {}) =>
+      request<{ ok: true; login: string; role: string; pending: boolean }>(`/api/folders/${id}/collaborators`, {
+        method: "POST",
+        body: JSON.stringify(options.change ? { login, role, change: true } : { login, role }),
+      }),
+    removeCollaborator: (id: string, login: string) =>
+      request<{ ok: true }>(`/api/folders/${id}/collaborators`, { method: "DELETE", body: JSON.stringify({ login }) }),
     rename: (id: string, name: string) =>
       request<{ folder: FolderDto }>(`/api/folders/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
     /** Deleting a folder sends its documents to the trash; `trashed` is how many moved. */
