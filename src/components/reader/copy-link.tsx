@@ -839,7 +839,7 @@ export function ReaderCopyLink({ docId }: { docId: string }) {
       <button
         ref={captureButton}
         type="button"
-        className="btn btn-sm btn-outline h-11 w-11 shrink-0 gap-1.5 p-0 sm:h-8 sm:w-auto sm:px-3"
+        className="btn btn-sm btn-outline h-11 w-11 shrink-0 gap-1.5 p-0 sm:h-8 sm:w-auto sm:px-3 tap-target relative"
         aria-label={link.label}
         disabled={!origin}
         onClick={onClick}

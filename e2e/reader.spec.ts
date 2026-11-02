@@ -1,5 +1,6 @@
+import { devices } from "@playwright/test";
 import { test, expect } from "./fixtures";
-import { signIn, createDocument, openDocument, focusCodeEnd, codeText } from "./helpers";
+import { signIn, createDocument, openDocument, focusCodeEnd, codeText, cssPx, devLogin, uniqueLogin } from "./helpers";
 
 const CONTENT = ["# Reader Title", "", "Intro paragraph for the reader.", "", "## First Section", "", "Some text in the first section.", "", "## Second Section", "", "```ts", "const x = 1;", "```", ""].join("\n");
 
@@ -50,6 +51,66 @@ test.describe("reader view", () => {
 
     await anon.close();
     await owner.context.close();
+  });
+
+  test("mobile reader header controls have 44px touch targets without visible clutter", async ({ browser }, testInfo) => {
+    const context = await browser.newContext({
+      ...devices["iPhone 13"],
+      viewport: { width: 375, height: 812 },
+      deviceScaleFactor: 1,
+    });
+    const page = await context.newPage();
+    await devLogin(page, uniqueLogin("reader-touch-targets"));
+    await page.waitForLoadState("networkidle");
+    const id = await createDocument(page, CONTENT, "Reader Title");
+    await setLinkAccess(page, id, "view");
+    await page.goto(`/p/${id}`);
+    await expect(page.getByTestId("reader-title")).toHaveText("Reader Title");
+    await page.waitForLoadState("networkidle");
+
+    const header = page.getByTestId("reader-header");
+    await page.screenshot({
+      path: testInfo.outputPath("reader-header-mobile.png"),
+      clip: { x: 0, y: 0, width: 375, height: 56 },
+      scale: "css",
+    });
+
+    const controls = [
+      { label: "All documents", locator: header.getByRole("link", { name: "All documents", exact: true }) },
+      { label: "Edit", locator: header.getByTestId("open-in-editor") },
+      { label: "Copy link", locator: header.getByTestId("reader-copy-link") },
+      { label: "Download Markdown", locator: header.getByTestId("reader-download") },
+      { label: "Download as", locator: header.getByTestId("reader-download-menu") },
+    ];
+    for (const { label, locator } of controls) {
+      await expect(locator).toBeVisible();
+      const target = await locator.evaluate((element) => {
+        const after = getComputedStyle(element, "::after");
+        return {
+          width: Number.parseFloat(after.width),
+          height: Number.parseFloat(after.height),
+          content: after.content,
+        };
+      });
+      expect(target.content, `${label} touch target`).not.toBe("none");
+      expect(target.width, `${label} touch target width`).toBeGreaterThanOrEqual(44);
+      expect(target.height, `${label} touch target height`).toBeGreaterThanOrEqual(44);
+    }
+
+    await expect(header.getByText("Edit", { exact: true })).toBeVisible();
+    await expect(header.getByText("Open in editor", { exact: true })).toBeHidden();
+    await expect(header.getByText("Copy link", { exact: true })).toBeHidden();
+    await expect(header.getByText("Download", { exact: true })).toBeHidden();
+    const headerBox = await header.boundingBox();
+    expect(headerBox).not.toBeNull();
+    expect(cssPx(headerBox!.height)).toBe(56);
+    const widths = await page.evaluate(() => ({
+      scroll: document.documentElement.scrollWidth,
+      client: document.documentElement.clientWidth,
+    }));
+    expect(widths.scroll).toBeLessThanOrEqual(widths.client);
+
+    await context.close();
   });
 
   test("download menu lists Markdown, HTML and PDF links, is keyboard-operable and closes on Escape and outside click", async ({ browser }) => {

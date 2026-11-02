@@ -42,7 +42,7 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
         Skip to article
       </a>
       <header className="reader-chrome sticky top-0 z-10 flex h-14 shrink-0 items-center gap-3 border-b border-line bg-surface/90 px-4 backdrop-blur" data-testid="reader-header">
-        <Link href={signedIn ? "/" : "/login"} className="icon-btn h-9 w-9 shrink-0" aria-label={signedIn ? "All documents" : "Sign in to Markdoc"}>
+        <Link href={signedIn ? "/" : "/login"} className="icon-btn h-9 w-9 shrink-0 tap-target relative" aria-label={signedIn ? "All documents" : "Sign in to Markdoc"}>
           <Logo className="h-7 w-7" />
         </Link>
         <a
@@ -55,7 +55,7 @@ export function ReaderPage({ docId, title, html, headings, initialHash, updatedA
         </a>
         <div className="flex shrink-0 items-center gap-2">
           {canOpenEditor && (
-            <Link href={`/d/${docId}`} className="btn btn-sm btn-outline gap-1.5" data-testid="open-in-editor">
+            <Link href={`/d/${docId}`} className="btn btn-sm btn-outline gap-1.5 tap-target relative" data-testid="open-in-editor">
               <PenLine size={14} />
               <span className="hidden sm:inline">Open in editor</span>
               <span className="sm:hidden">Edit</span>

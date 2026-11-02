@@ -2012,6 +2012,18 @@ body {
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
 }
+/* Keep the split-button hit areas separate by growing them away from their shared seam. */
+@media (pointer: coarse) {
+  .reader-split-main.tap-target::after {
+    left: auto;
+    right: 1px;
+    transform: translateY(-50%);
+  }
+  .reader-split-more.tap-target::after {
+    left: 0;
+    transform: translateY(-50%);
+  }
+}
 /* The document's own leading h1 repeats the page title shown above the byline. */
 .reader-body[data-hide-first-h1="true"] > h1:first-child {
   display: none;
