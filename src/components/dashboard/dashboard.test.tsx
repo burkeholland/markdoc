@@ -785,7 +785,7 @@ function accountTrigger(host: ParentNode = document): HTMLButtonElement {
   return trigger;
 }
 
-function accountMenuItem(name: "Agents & API tokens" | "Sign out") {
+function accountMenuItem(name: "Settings" | "Sign out") {
   const item = screen.getByRole("menuitem", { name });
   if (!(item instanceof HTMLDivElement)) {
     throw new Error(`The ${name} Account item was not a div`);
@@ -959,7 +959,7 @@ describe("dashboard Account menu identity titles", () => {
     expect(menu.className).toBe(
       "menu animate-fade-in max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto w-56",
     );
-    const settings = accountMenuItem("Agents & API tokens");
+    const settings = accountMenuItem("Settings");
     const signOut = accountMenuItem("Sign out");
     expect([...menu.children]).toEqual([metadata, settings, signOut]);
     expect(within(menu).getAllByRole("menuitem")).toEqual([settings, signOut]);
@@ -981,7 +981,7 @@ describe("dashboard Account menu identity titles", () => {
   }
 
   async function closeAccount() {
-    fireEvent.keyDown(accountMenuItem("Agents & API tokens"), { key: "Escape", code: "Escape" });
+    fireEvent.keyDown(accountMenuItem("Settings"), { key: "Escape", code: "Escape" });
     await act(async () => {
       vi.advanceTimersByTime(0);
       await Promise.resolve();
@@ -1036,7 +1036,7 @@ describe("dashboard Account menu identity titles", () => {
     expect(accountTrigger().firstElementChild).toBe(avatar);
     expect(screen.queryByRole("tooltip")).toBeNull();
 
-    fireEvent.click(accountMenuItem("Agents & API tokens"));
+    fireEvent.click(accountMenuItem("Settings"));
     expect(router.push).toHaveBeenCalledExactlyOnceWith("/settings");
     expect(signOutSafely).not.toHaveBeenCalled();
     expect(screen.queryByRole("menu")).toBeNull();
@@ -1190,7 +1190,7 @@ describe("dashboard Account menu directional publication", () => {
       expect(router.push).not.toHaveBeenCalled();
       expect(signOutSafely).not.toHaveBeenCalled();
 
-      const settings = accountMenuItem("Agents & API tokens");
+      const settings = accountMenuItem("Settings");
       settings.focus();
       fireEvent.keyDown(settings, { key: "Escape", code: "Escape" });
       await act(async () => {
@@ -1219,7 +1219,7 @@ describe("dashboard Account menu directional publication", () => {
   });
 
   it.each([
-    ["ArrowDown", "Agents & API tokens"],
+    ["ArrowDown", "Settings"],
     ["ArrowUp", "Sign out"],
   ] as const)(
     "opens with %s and focuses only %s through direct-root Strict Mode replay",
@@ -1504,7 +1504,7 @@ describe("dashboard Account menu directional publication", () => {
     const root = createRoot(host);
 
     const closeWithEscape = async () => {
-      const item = accountMenuItem("Agents & API tokens");
+      const item = accountMenuItem("Settings");
       item.focus();
       fireEvent.keyDown(item, { key: "Escape", code: "Escape" });
       await act(async () => {
@@ -1539,15 +1539,15 @@ describe("dashboard Account menu directional publication", () => {
       trigger.focus();
       fireEvent.keyDown(trigger, { key: "Enter", code: "Enter" });
       expect(screen.getByRole("menu")).toBeInTheDocument();
-      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
+      expect(accountMenuItem("Settings")).toHaveFocus();
       await closeWithEscape();
 
       trigger = accountTrigger(host);
       trigger.focus();
       fireEvent.keyDown(trigger, { key: " ", code: "Space" });
       expect(screen.getByRole("menu")).toBeInTheDocument();
-      expect(accountMenuItem("Agents & API tokens")).toHaveFocus();
-      fireEvent.click(accountMenuItem("Agents & API tokens"));
+      expect(accountMenuItem("Settings")).toHaveFocus();
+      fireEvent.click(accountMenuItem("Settings"));
       expect(router.push).toHaveBeenCalledExactlyOnceWith("/settings");
       expect(screen.queryByRole("menu")).toBeNull();
 

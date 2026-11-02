@@ -81,7 +81,9 @@ describe("AgentsPanel", () => {
     routeTokens([]);
     renderPanel({ initialTokens: [] });
 
-    expect(screen.getByRole("heading", { name: "Connect an agent" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "AI agents", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Connect an agent", level: 3 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Add Markdoc to your agent", level: 4 })).toBeInTheDocument();
     expect(screen.getByTestId("agent-setup")).toBeInTheDocument();
     expect(screen.queryByTestId("keys-card")).toBeNull();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/tokens", expect.anything()));
@@ -97,6 +99,7 @@ describe("AgentsPanel", () => {
     expect(screen.queryByTestId("agent-setup")).toBeNull();
     expect(screen.getByTestId("agent-setup-toggle")).toHaveTextContent("Set up");
     expect(screen.getByTestId("keys-card")).toHaveTextContent("Claude Desktop");
+    expect(screen.getByRole("heading", { name: "Your keys", level: 3 })).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId("agent-setup-toggle"));
     expect(screen.getByTestId("agent-setup")).toBeInTheDocument();

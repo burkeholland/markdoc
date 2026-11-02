@@ -29,7 +29,7 @@ export function AgentsPanel({ origin, userLogin, next, initialTokens }: AgentsPa
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-xl font-semibold text-ink">AI agents</h1>
+        <h2 id="settings-agents" className="text-xl font-semibold text-ink">AI agents</h2>
         <p className="mt-1 max-w-2xl text-sm leading-6 text-ink-3">
           Connect any MCP client. It reads your documents, comments and suggests edits; you accept or reject each change. Its work shows up
           as <strong className="font-medium text-ink-2">{userLogin} via AI agent</strong> (or whatever you name it).
@@ -43,9 +43,9 @@ export function AgentsPanel({ origin, userLogin, next, initialTokens }: AgentsPa
 
       <section id="connect" className="rounded-2xl border border-line bg-surface p-5" aria-labelledby="connect-heading" data-testid="agent-connect-section">
         <div className="flex items-center justify-between gap-3">
-          <h2 id="connect-heading" className="text-base font-semibold text-ink">
+          <h3 id="connect-heading" className="text-base font-semibold text-ink">
             {hasKeys ? "Connect another agent" : "Connect an agent"}
-          </h2>
+          </h3>
           {hasKeys && (
             <button type="button" className="btn btn-outline btn-sm" aria-expanded={showSetup} onClick={() => setExpanded((value) => !value)} data-testid="agent-setup-toggle">
               {showSetup ? "Hide" : "Set up"}
@@ -54,7 +54,7 @@ export function AgentsPanel({ origin, userLogin, next, initialTokens }: AgentsPa
         </div>
         {showSetup && (
           <div className="mt-4">
-            <AgentSetup origin={liveOrigin} tokens={keys.tokens} reload={keys.reload} onKeyCreated={() => setExpanded(true)} />
+            <AgentSetup origin={liveOrigin} tokens={keys.tokens} reload={keys.reload} onKeyCreated={() => setExpanded(true)} headingLevel={4} />
           </div>
         )}
       </section>

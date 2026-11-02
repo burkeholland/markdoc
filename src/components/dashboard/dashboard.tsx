@@ -16,7 +16,7 @@ import {
 } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, MoreVertical, PenLine, RotateCcw, Scale, Search, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
+import { BookOpen, CalendarCheck, ChevronDown, DraftingCompass, File, FilePlus2, FolderOpen, GitBranch, LayoutTemplate, ListChecks, Loader2, LogOut, MoreVertical, PenLine, RotateCcw, Scale, Search, Settings, FileText, Sparkles, Star, Trash2, Users, X } from "lucide-react";
 import { api, apiErrorText, type DocumentSummaryDto, type SearchResultDto } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { RelativeTime } from "@/components/ui/relative-time";
@@ -1481,8 +1481,8 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                   <div className="truncate text-sm font-medium text-ink" title={user.name}>{user.name}</div>
                   {user.login && <div className="truncate text-xs text-ink-3" title={`@${user.login}`}>@{user.login}</div>}
                 </div>
-                <MenuItem ref={accountSettingsRef} icon={<Bot size={15} />} onSelect={openAccountSettings}>
-                  Agents &amp; API tokens
+                <MenuItem ref={accountSettingsRef} icon={<Settings size={15} />} onSelect={openAccountSettings}>
+                  Settings
                 </MenuItem>
                 <MenuItem ref={accountSignOutRef} icon={<LogOut size={15} />} onSelect={signOutAccount}>
                   Sign out

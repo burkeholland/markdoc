@@ -261,7 +261,7 @@ export function KeysList({ tokens, error, reload, patch }: ApiTokens) {
 
   return (
     <div className="rounded-2xl border border-line bg-surface" id="tokens" data-testid="keys-card">
-      <h2 className="border-b border-line px-5 py-3 text-sm font-semibold text-ink">Your keys</h2>
+      <h3 className="border-b border-line px-5 py-3 text-sm font-semibold text-ink">Your keys</h3>
 
       {replaced && (
         <div className="m-5 flex flex-col gap-2 rounded-xl border border-line bg-surface-2 p-3" role="status" data-testid="key-replaced">
