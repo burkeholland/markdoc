@@ -10,6 +10,7 @@
 
 import { splitGraphemes } from "unicode-segmenter/grapheme";
 import { countWords } from "../lib/word-count";
+import { matchLinkCard, MAX_CARD_URL_LENGTH } from "./markdown/link-cards";
 
 export interface DocStats {
   words: number;
@@ -274,6 +275,11 @@ function compute(markdown: string): DocStats {
       continue;
     }
     if (line.trim() === "") {
+      flush();
+      continue;
+    }
+    const bareCardUrl = line.endsWith("\r") ? line.slice(0, -1) : line;
+    if (bareCardUrl.length <= MAX_CARD_URL_LENGTH && bareCardUrl.startsWith("https://") && matchLinkCard(bareCardUrl)) {
       flush();
       continue;
     }

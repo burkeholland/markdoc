@@ -85,7 +85,7 @@ function mount({ markdown = "Hello\n\nWorld", strict = false, canEdit = true, ca
   const controller = createSlashMenuController();
   const { view, ytext, editorKeys } = makeEditor(markdown, controller);
   const session = { contentReady: true, canEdit, canComment, canCreateComment: canComment, undoManager: { stopCapturing: vi.fn<() => void>() } };
-  const callbacks = { onImage: vi.fn<() => void>(), onCard: vi.fn<() => void>(), onLink: vi.fn<() => void>(), onComment: vi.fn<() => void>(), onConnectAgent: vi.fn<() => void>() };
+  const callbacks = { onImage: vi.fn<() => void>(), onVideo: vi.fn<() => void>(), onCard: vi.fn<() => void>(), onLink: vi.fn<() => void>(), onComment: vi.fn<() => void>(), onConnectAgent: vi.fn<() => void>() };
   const ui = (current: EditorView | null) => {
     const menu = <SlashMenu view={current} session={session as unknown as CollabSession} controller={controller} containerRef={containerRef} {...callbacks} />;
     return strict ? <StrictMode>{menu}</StrictMode> : menu;

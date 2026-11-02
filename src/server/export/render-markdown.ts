@@ -33,6 +33,8 @@ export interface RenderFragmentOptions {
   assetBaseUrl: string;
   /** A known link alone on its line becomes a card (#2317); see `readerHtml`. */
   linkCards?: boolean;
+  /** Named document-local video links become native players in the live reader. */
+  videoPlayback?: boolean;
 }
 
 export interface RenderedFragment {
@@ -126,10 +128,10 @@ function rehypeCollectHeadings(sink: RenderedHeading[]): (tree: HastRoot) => voi
  * slug ids, hljs classes, asset URLs made absolute. CPU-bound and synchronous apart from the
  * unified plumbing; callers on the server go through `render-pool.ts` instead.
  */
-export async function renderMarkdownFragment(markdown: string, { assetBaseUrl, linkCards = false }: RenderFragmentOptions): Promise<RenderedFragment> {
+export async function renderMarkdownFragment(markdown: string, { assetBaseUrl, linkCards = false, videoPlayback = false }: RenderFragmentOptions): Promise<RenderedFragment> {
   const headings: RenderedHeading[] = [];
   const assetIds: string[] = [];
-  const file = await readerHtml({ linkCards })
+  const file = await readerHtml({ assetBaseUrl, linkCards, videoPlayback })
     .use(() => rehypeLabelTaskCheckboxes())
     .use(rehypeSlug)
     .use(() => rehypeCollectHeadings(headings))
@@ -141,7 +143,7 @@ export async function renderMarkdownFragment(markdown: string, { assetBaseUrl, l
 }
 
 /** A job for the worker: render `markdown`, or with `preview` find its link preview text (`previewText`). */
-export type WorkerTask = { markdown: string; assetBaseUrl: string; linkCards?: boolean } | { markdown: string; preview: true };
+export type WorkerTask = { markdown: string; assetBaseUrl: string; linkCards?: boolean; videoPlayback?: boolean } | { markdown: string; preview: true };
 
 export type WorkerRequest = WorkerTask & { id: number };
 
@@ -149,7 +151,7 @@ export type WorkerResponse = { id: number; ok: true; result: RenderedFragment | 
 
 function runTask(task: WorkerTask): Promise<RenderedFragment | string> {
   if ("preview" in task) return new Promise((resolve) => resolve(previewText(task.markdown)));
-  return renderMarkdownFragment(task.markdown, { assetBaseUrl: task.assetBaseUrl, linkCards: task.linkCards });
+  return renderMarkdownFragment(task.markdown, { assetBaseUrl: task.assetBaseUrl, linkCards: task.linkCards, videoPlayback: task.videoPlayback });
 }
 
 if (!isMainThread && parentPort && (workerData as { role?: string } | null)?.role === WORKER_ROLE) {

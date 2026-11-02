@@ -418,7 +418,12 @@ Two version-producing calls on one document at the same time (an agent's `PUT /c
 | Method & path | Body | Access | Purpose |
 | --- | --- | --- | --- |
 | `POST /api/documents/:id/assets` | multipart `file` field, or a raw image body with `Content-Type: image/png` and `?name=shot.png` | edit | Upload an image (PNG, JPEG, GIF, WebP, SVG; ≤ 5 MB). The stored type comes from the file's own bytes, not from the declared one (multipart: the file part's type; raw body: `Content-Type`): a PNG sent as `image/jpeg` is stored and served as `image/png`, the response's `mime` says so and `name` stays as sent. Bytes that are none of the five types, an SVG sent as another type and another type sent as SVG are `415 { error }` with a message that says what was wrong (`This file was sent as PNG but its content is SVG. …`); SVG must be text with an `<svg>` root (not compressed `.svgz`), and SVG with scripts or event handlers is `400 { error }` under any declared type. Nothing is stored for a refused file. Returns `201 { id, url, name, mime, size, alt, warnings? }`; put `![alt](url)` in the Markdown. Identical bytes within a document share one asset, also when uploaded at the same time. `warnings: ["activity-not-recorded"]` means the asset is stored and only the feed row is missing. |
-| `GET /api/assets/:id` | | view (owning document) | The image bytes; shared links included. |
+| `POST /api/documents/:id/assets/videos` | `{ name, mime, size }` | edit | Begin an MP4/WebM upload up to 100 MiB; returns `201 { uploadId, chunkCount, chunkSize }`. |
+| `PUT /api/documents/:id/assets/videos/:uploadId/parts/:index` | one raw video chunk | edit | Upload the exact expected chunk (at most 4 MiB; the first chunk must begin with the matching MP4/WebM container header). Video bytes stay outside PostgreSQL. |
+| `POST /api/documents/:id/assets/videos/:uploadId/complete` | | edit | Finalize the upload and return `201 { id, documentId, name, mime, size, url, alt }`; insert `[name](url)` in the Markdown. |
+| `DELETE /api/documents/:id/assets/videos/:uploadId` | | edit | Cancel an upload and remove its stored chunks; finalizing uploads return `409`. |
+| `GET`/`HEAD /api/assets/:id` | | view (owning document) | The image bytes; shared links included. |
+| `GET`/`HEAD /api/assets/:id.mp4` or `.webm` | optional `Range: bytes=start-end` | view (owning document) | Stream the video with byte-range playback; invalid ranges return `416`. |
 
 ### Sharing and GitHub
 
@@ -480,7 +485,7 @@ Every `/api/*` route spends one request from a budget, counted **per token** (a 
 | --- | --- | --- | --- |
 | read | `GET`/`HEAD`/`OPTIONS`, and JSON-RPC posts to `/api/mcp` (each tool call is also counted at the REST route it uses) | 60 | 600 / min |
 | write | every other method | 30 | 120 / min |
-| create | `POST /api/documents`, `POST /api/import`, `POST /api/import/file`, `POST /api/documents/:id/assets`, `POST /api/documents/:id/duplicate` | 20 | 20 / min |
+| create | `POST /api/documents`, `POST /api/import`, `POST /api/import/file`, `POST /api/documents/:id/assets`, `POST /api/documents/:id/assets/videos`, `POST /api/documents/:id/assets/videos/:uploadId/complete`, `POST /api/documents/:id/duplicate` | 20 | 20 / min |
 | failed auth | bearer tokens that do not resolve, per IP — the 31st wrong token in a minute (and any token from that IP until one failure refills) is refused before the database is asked | 30 | 30 / min |
 
 Every response carries `X-RateLimit-Limit` (the burst) and `X-RateLimit-Remaining`. Past the budget the answer is `429 { error, retryAfter }` with a `Retry-After` header (whole seconds); nothing was done — wait that long and send the request again. `/api/health` and the collaboration WebSocket are never limited. Operators: `RATE_LIMIT=off` disables the limiter (the e2e dev server and `npm run dev:port` do this by default); Behind a reverse proxy the per-IP buckets use the last `X-Forwarded-For` entry, else `X-Real-IP`, when the connection comes from loopback or `TRUST_PROXY=1` is set; see `clientIp()` in `src/server/rate-limit.ts` and `docs/vm-hosting.md`.

@@ -2,6 +2,7 @@ import { Schema, type NodeSpec, type MarkSpec, type DOMOutputSpec } from "prosem
 import { tableNodes } from "prosemirror-tables";
 import { safeLinkHref } from "../links";
 import { matchLinkCard } from "./link-cards";
+import { parseVideoAssetUrl } from "./video";
 
 /**
  * ProseMirror schema for GitHub Flavored Markdown.
@@ -196,6 +197,43 @@ const nodes: Record<string, NodeSpec> = {
       },
     ],
     toDOM: (node) => ["div", { class: "md-link-card", "data-link-card": node.attrs.url, contenteditable: "false" }, String(node.attrs.url)],
+  },
+
+  /** Uploaded videos are a single block; Markdown stores them as a named local asset link. */
+  video: {
+    attrs: { src: {}, name: { default: "Video" } },
+    group: "block",
+    atom: true,
+    selectable: true,
+    draggable: true,
+    leafText: (node) => String(node.attrs.name),
+    parseDOM: [
+      {
+        tag: "figure[data-markdoc-video]",
+        getAttrs: (dom) => {
+          const el = dom as HTMLElement;
+          const src = el.getAttribute("data-markdoc-video") ?? "";
+          return parseVideoAssetUrl(src) ? { src, name: el.getAttribute("data-video-name") || "Video" } : false;
+        },
+      },
+    ],
+    toDOM: (node) => {
+      const src = String(node.attrs.src);
+      const ref = parseVideoAssetUrl(src);
+      if (!ref) return ["figure", { class: "md-video", contenteditable: "false" }, "Unsupported video link"];
+      const name = String(node.attrs.name || "Video");
+      return [
+        "figure",
+        { class: "md-video", "data-markdoc-video": src, "data-video-name": name, contenteditable: "false" },
+        [
+          "video",
+          { controls: true, playsinline: true, preload: "metadata", "aria-label": name },
+          ["source", { src, type: ref.mime }],
+          ["a", { href: src }, name],
+        ],
+        ["figcaption", {}, name],
+      ];
+    },
   },
 
   /** `[label]: url "title"` reference definition. */

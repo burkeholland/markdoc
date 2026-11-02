@@ -7,6 +7,7 @@ import { buildSourceMap, type BlockRange, type Segment, type SourceMap } from ".
 import { findUnrenderableRanges, type UnrenderableRange } from "./renderable";
 import { CELL_END_SPACE } from "./cell-space";
 import { matchLinkCard, MAX_CARD_URL_LENGTH } from "./link-cards";
+import { parseVideoAssetUrl } from "./video";
 
 export interface HeadingInfo {
   level: number;
@@ -267,6 +268,8 @@ class Converter {
   block(node: Md.RootContent, topLevel: boolean): PMNode | null {
     switch (node.type) {
       case "paragraph": {
+        const video = topLevel ? this.videoLink(node) : null;
+        if (video) return schema.nodes.video.create(video);
         const cardUrl = topLevel ? this.cardUrl(node) : null;
         if (cardUrl) return schema.nodes.link_card.create({ url: cardUrl });
         return schema.nodes.paragraph.create(null, this.inlineContent(node, topLevel));
@@ -328,6 +331,15 @@ class Converter {
         return schema.nodes.paragraph.create(null, b.nodes);
       }
     }
+  }
+
+  private videoLink(node: Md.Paragraph): { src: string; name: string } | null {
+    if (node.children.length !== 1) return null;
+    const link = node.children[0];
+    if (link.type !== "link" || link.title || link.children.length !== 1 || link.children[0].type !== "text") return null;
+    const name = link.children[0].value.trim();
+    if (!name || name === link.url || !parseVideoAssetUrl(link.url)) return null;
+    return { src: link.url, name };
   }
 
   /**

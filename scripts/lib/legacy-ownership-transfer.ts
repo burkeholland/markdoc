@@ -38,6 +38,7 @@ export const TRANSFER_USER_FOREIGN_KEYS = [
   "review.user_id",
   "session.userId",
   "star.user_id",
+  "video_upload.user_id",
   "webhook.user_id",
 ] as const;
 
@@ -70,6 +71,7 @@ export const TRANSFER_COUNT_LABELS = [
   "recent.user_id deduplicated",
   "api_token.user_id moved",
   "asset.user_id moved",
+  "video_upload.user_id moved",
   "agent_request.user_id moved",
   "review.user_id moved",
   "webhook.user_id moved",
@@ -602,6 +604,7 @@ async function buildPlan(client: LegacyOwnershipTransferQueryClient, selection: 
     { table: "document", column: "owner_id", label: "document.owner_id moved" },
     { table: "api_token", column: "user_id", label: "api_token.user_id moved" },
     { table: "asset", column: "user_id", label: "asset.user_id moved" },
+    { table: "video_upload", column: "user_id", label: "video_upload.user_id moved" },
     { table: "agent_request", column: "user_id", label: "agent_request.user_id moved" },
     { table: "review", column: "user_id", label: "review.user_id moved" },
     { table: "webhook", column: "user_id", label: "webhook.user_id moved" },
@@ -927,6 +930,7 @@ async function countResidualReferences(
     `SELECT COUNT(*) FROM recent WHERE user_id = $1`,
     `SELECT COUNT(*) FROM api_token WHERE user_id = $1`,
     `SELECT COUNT(*) FROM asset WHERE user_id = $1`,
+    `SELECT COUNT(*) FROM video_upload WHERE user_id = $1`,
     `SELECT COUNT(*) FROM agent_request WHERE user_id = $1`,
     `SELECT COUNT(*) FROM review WHERE user_id = $1`,
     `SELECT COUNT(*) FROM webhook WHERE user_id = $1`,

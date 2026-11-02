@@ -40,6 +40,7 @@ import {
 import { attachRequestLog } from "./request-log";
 import { serveStaticBrotli } from "./static-brotli";
 import { startGistAutoUpdateWorker, stopGistAutoUpdateWorker } from "@/server/gist-auto-update";
+import { startVideoUploadSweeper, stopVideoUploadSweeper } from "@/server/video-assets";
 import { createShutdownOwner } from "./shutdown";
 import { assertDemoAuthSafe } from "@/server/demo-auth";
 
@@ -217,13 +218,17 @@ async function closeRuntimeDatabase(): Promise<void> {
 
 function startRuntimePublishing() {
   startGistAutoUpdateWorker();
+  startVideoUploadSweeper();
   runtime.publishing = true;
 }
 
 const shutdownOwner = createShutdownOwner({
   stopIntake: stopRuntimeIntake,
   stopPublishing: async () => {
-    if (runtime.publishing) await stopGistAutoUpdateWorker();
+    if (runtime.publishing) {
+      stopVideoUploadSweeper();
+      await stopGistAutoUpdateWorker();
+    }
   },
   stopCollaboration: async () => {
     // Store the documents first, then close the sockets that are left (#2355): until they close,

@@ -66,6 +66,8 @@ describe("the allow-list: which links are cards", () => {
     ["https://m.youtube.com/watch?v=dQw4w9WgXcQ", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"],
     ["https://www.youtube.com/watch?list=PL123&v=dQw4w9WgXcQ&t=10s", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=10"],
     ["https://www.youtube.com/watch?v=dQw4w9WgXcQ&start=75", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=75"],
+    ["https://youtu.be/dQw4w9WgXcQ?t=1m30s", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=90"],
+    ["https://youtu.be/dQw4w9WgXcQ?t=1h2m3s", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=3723"],
     ["https://www.youtube.com/watch?v=dQw4w9WgXcQ&pp=ygUEdGVzdA%3D%3D", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"],
     ["https://youtu.be/dQw4w9WgXcQ", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"],
     ["https://youtu.be/dQw4w9WgXcQ?si=abc_DEF-123&t=90", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=90"],
@@ -74,17 +76,49 @@ describe("the allow-list: which links are cards", () => {
     ["https://www.youtube.com/live/dQw4w9WgXcQ?feature=share", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"],
     ["https://www.youtube.com/embed/dQw4w9WgXcQ", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"],
     ["https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", "youtube", "YouTube video", "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ"],
+    ["https://www.facebook.com/markdoc/posts/1234567890", "facebook", "Facebook post", "https://www.facebook.com/plugins/post.php?href=https%3A%2F%2Fwww.facebook.com%2Fmarkdoc%2Fposts%2F1234567890&show_text=true&width=500"],
+    ["https://facebook.com/markdoc/videos/1234567890", "facebook", "Facebook video", "https://www.facebook.com/plugins/video.php?href=https%3A%2F%2Fwww.facebook.com%2Fmarkdoc%2Fvideos%2F1234567890&show_text=true&width=500"],
+    ["https://www.facebook.com/watch/?v=1234567890&ref=sharing", "facebook", "Facebook video", "https://www.facebook.com/plugins/video.php?href=https%3A%2F%2Fwww.facebook.com%2Fwatch%2F%3Fv%3D1234567890&show_text=true&width=500"],
+    ["https://www.facebook.com/reel/1234567890", "facebook", "Facebook video", "https://www.facebook.com/plugins/video.php?href=https%3A%2F%2Fwww.facebook.com%2Freel%2F1234567890&show_text=true&width=500"],
+    ["https://www.facebook.com/permalink.php?story_fbid=1234567890&id=42", "facebook", "Facebook post", "https://www.facebook.com/plugins/post.php?href=https%3A%2F%2Fwww.facebook.com%2Fpermalink.php%3Fstory_fbid%3D1234567890%26id%3D42&show_text=true&width=500"],
+    ["https://www.linkedin.com/feed/update/urn:li:activity:1234567890123456789/", "linkedin", "LinkedIn post", "https://www.linkedin.com/embed/feed/update/urn:li:activity:1234567890123456789"],
+    ["https://linkedin.com/feed/update/urn:li:ugcPost:1234567890123456789", "linkedin", "LinkedIn post", "https://www.linkedin.com/embed/feed/update/urn:li:ugcPost:1234567890123456789"],
+    ["https://www.linkedin.com/posts/burkeholland_activity-1234567890123456789-sample", "linkedin", "LinkedIn post", "https://www.linkedin.com/embed/feed/update/urn:li:activity:1234567890123456789"],
+    ["https://vimeo.com/123456789", "vimeo", "Vimeo video", "https://player.vimeo.com/video/123456789"],
+    ["https://www.vimeo.com/123456789/abc123?share=copy", "vimeo", "Vimeo video", "https://player.vimeo.com/video/123456789?h=abc123"],
+    ["https://vimeo.com/123456789?autoplay=1&h=abc123", "vimeo", "Vimeo video", "https://player.vimeo.com/video/123456789?h=abc123"],
+    ["https://player.vimeo.com/video/123456789?h=abc123", "vimeo", "Vimeo video", "https://player.vimeo.com/video/123456789?h=abc123"],
+    ["https://www.loom.com/share/e5d19b462fa64f1287a385bcb140837e", "loom", "Loom video", "https://www.loom.com/embed/e5d19b462fa64f1287a385bcb140837e"],
+    ["https://loom.com/share/e5d19b462fa64f1287a385bcb140837e?sid=abc123", "loom", "Loom video", "https://www.loom.com/embed/e5d19b462fa64f1287a385bcb140837e"],
+    ["https://www.tiktok.com/@burkeholland/video/7060000000000000000", "tiktok", "TikTok video", "https://www.tiktok.com/player/v1/7060000000000000000"],
+    ["https://www.tiktok.com/player/v1/7060000000000000000", "tiktok", "TikTok video", "https://www.tiktok.com/player/v1/7060000000000000000"],
   ])("%s is a card", (url, provider, label, frameUrl) => {
-    expect(matchLinkCard(url)).toEqual({ provider, label, frameUrl, kind: provider === "x" ? "post" : "video", sandbox: "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox" });
+    const kind = provider === "x" || (provider === "facebook" && label === "Facebook post") || provider === "linkedin" ? "post" : "video";
+    expect(matchLinkCard(url)).toEqual({ provider, label, frameUrl, kind, sandbox: "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox" });
     expect(hasCardLinkShape(url)).toBe(true);
   });
 
-  it("keeps only a start time from the query, and only as whole seconds", () => {
+  it.each([
+    ["a Facebook lookalike host", "https://facebook.com.evil.example/markdoc/posts/123"],
+    ["an unlisted Facebook mobile host", "https://m.facebook.com/markdoc/posts/123"],
+    ["a LinkedIn lookalike host", "https://linkedin.com.evil.example/feed/update/urn:li:activity:123"],
+    ["a malformed LinkedIn activity", "https://www.linkedin.com/feed/update/urn:li:activity:123/extra"],
+    ["a Vimeo lookalike host", "https://vimeo.com.evil.example/123456789"],
+    ["a Vimeo path with a redirect suffix", "https://player.vimeo.com/video/123456789/redirect"],
+    ["a Loom lookalike host", "https://loom.com.evil.example/share/e5d19b462fa64f1287a385bcb140837e"],
+    ["a Loom id that is too short", "https://www.loom.com/share/short"],
+    ["a TikTok lookalike host", "https://tiktok.com.evil.example/@burke/video/7060000000000000000"],
+    ["a TikTok id that is too short", "https://www.tiktok.com/@burke/video/123"],
+  ])("does not turn %s into a card", (_what, url) => {
+    expect(matchLinkCard(url)).toBeNull();
+  });
+
+  it("keeps only a start time from the query, normalized to whole seconds", () => {
     const frame = (query: string) => matchLinkCard(`https://youtu.be/dQw4w9WgXcQ${query}`)?.frameUrl;
     const plain = "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ";
     expect(frame("?t=0")).toBe(`${plain}?start=0`);
     expect(frame("?t=999999s")).toBe(`${plain}?start=999999`);
-    for (const dropped of ["?t=1m30s", "?t=1234567", "?t=-5", "?t=5.5", "?t=", "?t", "?t=5&t=6", "?autoplay=1", "?list=PL1&index=2", "?start=1e3", "?t=%31"]) {
+    for (const dropped of ["?t=1234567", "?t=-5", "?t=5.5", "?t=", "?t", "?t=5&t=6", "?autoplay=1", "?list=PL1&index=2", "?start=1e3", "?t=%31"]) {
       expect(frame(dropped), dropped).toBe(plain);
     }
     // `t` given twice is no `t`; a single `start` then counts.
@@ -193,6 +227,10 @@ describe("the allow-list: which links are cards", () => {
   // a character or a shape that no card link may have at all, and the first check refuses it already.
   const WELL_FORMED = new Set([
     "another site whose name starts like the provider's",
+    "the card link as the path of another site",
+    "the card link as a query value of another site",
+    "an encoded line break after the id",
+    "the provider's own redirect page",
     "the provider as a subdomain label of another site",
     "a longer host name that ends like the provider's",
     "a host one letter longer",
@@ -211,6 +249,7 @@ describe("the allow-list: which links are cards", () => {
     "a shorts id one character short",
     "an embed id one character long",
     "a no-cookie id one character short",
+    "a channel, not a video",
     "dot segments after the id",
     "a trailing slash",
     "an extra path segment",
@@ -224,6 +263,7 @@ describe("the allow-list: which links are cards", () => {
     "a video id one character short",
     "a video id one character long",
     "a path as the video id",
+    "dot segments after an embed id",
     "an encoded video id",
     "no video id",
     "another YouTube page with a video id in its query",
@@ -297,27 +337,34 @@ describe("the frame address", () => {
     "https://www.youtube.com/live/dQw4w9WgXcQ",
     "https://www.youtube.com/embed/dQw4w9WgXcQ?autoplay=1",
     "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?autoplay=1",
+    "https://www.facebook.com/markdoc/posts/1234567890?ref=sharing",
+    "https://www.facebook.com/watch/?v=1234567890&autoplay=1",
+    "https://www.facebook.com/reel/1234567890",
+    "https://www.linkedin.com/feed/update/urn:li:activity:1234567890123456789/",
+    "https://www.linkedin.com/posts/burkeholland_activity-1234567890123456789-sample",
+    "https://vimeo.com/123456789/abc123?share=copy&autoplay=1",
+    "https://www.loom.com/share/e5d19b462fa64f1287a385bcb140837e",
+    "https://www.tiktok.com/@burkeholland/video/7060000000000000000?is_from_webapp=1",
   ];
 
-  it("starts with one of the fixed hosts and carries nothing but the id and a start time", () => {
+  it("starts with one of the fixed hosts and carries only validated provider data", () => {
     for (const url of LINKS) {
       const card = matchLinkCard(url)!;
       expect(card, url).not.toBeNull();
       expect(CARD_FRAME_HOSTS.filter((host) => card.frameUrl.startsWith(`${host}/`)), url).toHaveLength(1);
-      expect(card.frameUrl, url).toMatch(
-        card.provider === "x"
-          ? /^https:\/\/platform\.twitter\.com\/embed\/Tweet\.html\?id=[0-9]{1,20}&dnt=true$/
-          : /^https:\/\/www\.youtube-nocookie\.com\/embed\/[A-Za-z0-9_-]{11}(\?start=[0-9]{1,6})?$/,
-      );
-      // A URL parser agrees about where the frame goes.
-      expect(CARD_FRAME_HOSTS, url).toContain(new URL(card.frameUrl).origin);
+      const frameUrl = new URL(card.frameUrl);
+      expect(CARD_FRAME_HOSTS, url).toContain(frameUrl.origin);
+      expect(frameUrl.username + frameUrl.password, url).toBe("");
+      expect(frameUrl.protocol, url).toBe("https:");
+      expect(card.frameUrl, url).not.toContain("evil.example");
+      expect(card.frameUrl, url).not.toMatch(/[<>"'`]/);
     }
   });
 
   it("names its sites for the Settings row and the Insert dialog, one name per frame host", () => {
-    expect(CARD_PROVIDER_NAMES).toEqual(["YouTube", "X"]);
+    expect(CARD_PROVIDER_NAMES).toEqual(["YouTube", "X", "Facebook", "LinkedIn", "Vimeo", "Loom", "TikTok"]);
     expect(CARD_PROVIDER_NAMES).toHaveLength(CARD_FRAME_HOSTS.length);
-    expect(cardProviderList()).toBe("YouTube or X");
+    expect(cardProviderList()).toBe("YouTube, X, Facebook, LinkedIn, Vimeo, Loom or TikTok");
     expect(cardProviderList([])).toBe("");
     expect(cardProviderList(["YouTube"])).toBe("YouTube");
     expect(cardProviderList(["YouTube", "X", "Vimeo"])).toBe("YouTube, X or Vimeo");
@@ -337,7 +384,7 @@ describe("the frame address", () => {
         expect(card.sandbox.split(" "), url).not.toContain(never);
       }
       expect(card.sandbox.split(" ")).toContain("allow-scripts");
-      expect(card.kind, url).toBe(card.provider === "x" ? "post" : "video");
+      expect(card.kind, url).toBe(card.provider === "x" || (card.provider === "facebook" && card.label === "Facebook post") || card.provider === "linkedin" ? "post" : "video");
     }
     for (const never of ["autoplay", "camera", "microphone", "geolocation", "display-capture", "payment", "clipboard", "*"]) expect(CARD_FRAME_ALLOW).not.toContain(never);
     expect(cardFrameTitle(matchLinkCard(TWEET)!, TWEET)).toBe("Post on X: x.com/jack/status/20");
@@ -345,7 +392,15 @@ describe("the frame address", () => {
   });
 
   it("the fixed hosts are public https hosts, so none of them can be the app's own", () => {
-    expect([...CARD_FRAME_HOSTS]).toEqual(["https://www.youtube-nocookie.com", "https://platform.twitter.com"]);
+    expect([...CARD_FRAME_HOSTS]).toEqual([
+      "https://www.youtube-nocookie.com",
+      "https://platform.twitter.com",
+      "https://www.facebook.com",
+      "https://www.linkedin.com",
+      "https://player.vimeo.com",
+      "https://www.loom.com",
+      "https://www.tiktok.com",
+    ]);
     for (const host of CARD_FRAME_HOSTS) {
       const url = new URL(host);
       // An origin and nothing else: https, the default port, no path, no user name.

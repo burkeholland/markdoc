@@ -7,6 +7,7 @@ import type { CollabSession, Surface } from "@/editor/collab/session";
 import type { CodeApi } from "@/editor/codemirror/api";
 import { schema } from "@/editor/markdown/schema";
 import { matchLinkCard } from "@/editor/markdown/link-cards";
+import { videoAssetMarkdownLink } from "@/editor/markdown/video";
 import * as pm from "@/editor/prosemirror/commands";
 import { findParentNode } from "@/editor/prosemirror/utils";
 
@@ -47,7 +48,7 @@ export const EMPTY_FORMAT: FormatState = {
 
 export type TableCommand = "rowBefore" | "rowAfter" | "colBefore" | "colAfter" | "deleteRow" | "deleteColumn" | "deleteTable";
 
-export type DialogKind = "link" | "image" | "card" | "table" | "share" | "publish" | "shortcuts" | "versionName" | null;
+export type DialogKind = "link" | "image" | "video" | "card" | "table" | "share" | "publish" | "shortcuts" | "versionName" | null;
 
 /**
  * Toolbar and shortcut actions that apply to whichever surface the user is
@@ -289,6 +290,18 @@ export class EditorActions {
     if (!a) return;
     if (a.kind === "code") return void a.api.commands.insertImage(a.view, src, alt);
     this.runPm(pm.insertImage(src, alt));
+  }
+
+  insertVideo(src: string, name: string) {
+    if (!this.guard()) return;
+    const a = this.active;
+    if (!a) return;
+    if (a.kind === "code") {
+      const link = videoAssetMarkdownLink(name, src);
+      if (link) a.api.commands.insertBlock(a.view, link);
+      return;
+    }
+    this.runPm(pm.insertVideoAsset(src, name));
   }
 
   insertTable(rows: number, cols: number) {
@@ -636,4 +649,3 @@ function withinMiddle(top: number, height: number, viewport: number): boolean {
   const margin = viewport * 0.2;
   return top >= margin && top + height <= viewport - margin;
 }
-

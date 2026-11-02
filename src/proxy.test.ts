@@ -11,7 +11,9 @@ const { proxy, framePolicyApplies, FRAME_ANCESTORS_NONE, CARD_FRAME_SOURCES } = 
 const { CARD_FRAME_HOSTS } = await import("@/editor/markdown/link-cards");
 // #2317: every page may frame the hosts on the link card list and nothing else. The list is the same on
 // every page because a document is opened from the dashboard without a page load, under the dashboard's policy.
-const CARDS = "frame-src https://www.youtube-nocookie.com https://platform.twitter.com";
+const CARDS = "frame-src https://www.youtube-nocookie.com https://platform.twitter.com https://www.facebook.com https://www.linkedin.com https://player.vimeo.com https://www.loom.com https://www.tiktok.com";
+const PAGE_MEDIA = "media-src 'self' blob:";
+const PAGE_POLICY = `${CARDS}; ${PAGE_MEDIA}`;
 const { EMBED_SESSION_COOKIE, SESSION_COOKIE, SECURE_SESSION_COOKIE, STALE_SESSION_MESSAGE, findStaleSessionCookie, stripCookies, hasSessionCookie, logAuthError } = await import("@/server/session-cookie");
 
 const OLD_SECRET = "old-secret-old-secret-old-secret-old";
@@ -121,7 +123,7 @@ describe("proxy: stale session cookie", () => {
     });
     const cookie = `${EMBED_SESSION_COOKIE}=${token}`;
     const res = await proxy(request(cookie, {}, "/d/doc-1?embed=1"));
-    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors http://127.0.0.1:4749; ${CARDS}`);
+    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors http://127.0.0.1:4749; ${PAGE_POLICY}`);
     expect(setCookies(res)).toHaveLength(0);
 
     const asset = await proxy(request(cookie, {}, "/api/assets/asset-1"));
@@ -172,10 +174,10 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
     "/embedded",
   ];
 
-  it.each(PAGES)("a plain page %s refuses to be framed, and may itself frame the card hosts only", async (path) => {
+  it.each(PAGES)("a plain page %s refuses to be framed and allows only approved frames and media", async (path) => {
     const res = await proxy(request(undefined, {}, path));
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors 'none'; ${CARDS}`);
+    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors 'none'; ${PAGE_POLICY}`);
     expect(FRAME_ANCESTORS_NONE).toBe("frame-ancestors 'none'");
     expect(ownHeaders(res)).toEqual(["content-security-policy"]);
   });
@@ -183,7 +185,7 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
   it("the frame list does not depend on the page: the dashboard has the editor's (a document is opened from it without a page load)", async () => {
     const policies = new Set<string | null>();
     for (const path of PAGES) policies.add((await proxy(request(undefined, {}, path))).headers.get("content-security-policy"));
-    expect([...policies]).toEqual([`frame-ancestors 'none'; ${CARDS}`]);
+    expect([...policies]).toEqual([`frame-ancestors 'none'; ${PAGE_POLICY}`]);
     // Signed in or not, with a session cookie the server cannot read or with none.
     for (const cookie of [undefined, `${SESSION_COOKIE}=not-a-jwt`]) {
       const dashboard = await proxy(request(cookie, {}, "/"));
@@ -217,7 +219,7 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
 
   it("the embedded document keeps exactly frame-ancestors <parentOrigin>, and may frame the card hosts like any editor", async () => {
     const res = await proxy(request(await embedCookie(), {}, "/d/doc-1?embed=1"));
-    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors ${PARENT}; ${CARDS}`);
+    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors ${PARENT}; ${PAGE_POLICY}`);
     expect(res.headers.get("content-security-policy")).not.toContain("'none'");
     expect(ownHeaders(res)).toEqual(["content-security-policy"]);
   });
@@ -235,7 +237,7 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
       ["/login?next=%2Fd%2Fdoc-1", false],
     ] as const) {
       const res = await proxy(request(withCookie ? cookie : undefined, {}, path));
-      expect(res.headers.get("content-security-policy"), path).toBe(`frame-ancestors 'none'; ${CARDS}`);
+      expect(res.headers.get("content-security-policy"), path).toBe(`frame-ancestors 'none'; ${PAGE_POLICY}`);
     }
   });
 
@@ -247,7 +249,7 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
       maxAge: -60,
     });
     const res = await proxy(request(`${EMBED_SESSION_COOKIE}=${token}`, {}, "/d/doc-1?embed=1"));
-    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors 'none'; ${CARDS}`);
+    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors 'none'; ${PAGE_POLICY}`);
   });
 
   it.each(["/api/health", "/api/assets/asset-1", "/api/documents/abc", "/api/mcp", "/embed/some-nonce"])(
@@ -270,7 +272,7 @@ describe("proxy: frame policy (Content-Security-Policy)", () => {
   it("the response that clears a stale session cookie is a page response too", async () => {
     const res = await proxy(request(`${SESSION_COOKIE}=not-a-jwt`, {}, "/d/doc-1"));
     expect(setCookies(res)).toHaveLength(1);
-    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors 'none'; ${CARDS}`);
+    expect(res.headers.get("content-security-policy")).toBe(`frame-ancestors 'none'; ${PAGE_POLICY}`);
   });
 
   it("the canonical-host 308 carries no frame policy (a redirect has no document to frame)", async () => {

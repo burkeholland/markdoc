@@ -59,6 +59,10 @@ export const APPLICATION_TABLES = [
   "user",
   "verificationToken",
   "version",
+  "video_storage_cleanup",
+  "video_stream_slot",
+  "video_upload",
+  "video_upload_part",
   "webhook",
   "webhook_delivery",
 ] as const;
@@ -582,9 +586,17 @@ async function loadDatabaseData(connection: SqlConnection, shape: DatabaseShape)
       }
     } else if (table === "asset") {
       for (const row of rows) {
-        const bytes = asBytes(row.data, "asset.data");
-        assetBytes += bytes.byteLength;
-        assetDigests.push(hashCanonical(["asset", row.id, bytes]));
+        if (row.data === null && typeof row.storage_key === "string") {
+          if (typeof row.size !== "number" || !Number.isSafeInteger(row.size) || row.size < 0) {
+            throw new Error("External asset size was not returned as a non-negative integer");
+          }
+          assetBytes += row.size;
+          assetDigests.push(hashCanonical(["external-asset", row.id, row.storage_key, row.size]));
+        } else {
+          const bytes = asBytes(row.data, "asset.data");
+          assetBytes += bytes.byteLength;
+          assetDigests.push(hashCanonical(["asset", row.id, bytes]));
+        }
       }
     }
   }

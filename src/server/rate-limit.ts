@@ -1,3 +1,5 @@
+import { MAX_VIDEO_BYTES, VIDEO_CHUNK_BYTES } from "@/lib/video-limits";
+
 /**
  * In-memory rate limiting for `/api/*`. One token bucket per (caller, route class): the bucket
  * holds `burst` tokens and refills at `perMinute`, so a caller can spend a short burst and then
@@ -6,7 +8,7 @@
  * swept every minute.
  */
 
-export type RouteClass = "read" | "write" | "create";
+export type RouteClass = "read" | "write" | "create" | "videoUpload";
 
 export interface Limit {
   /** Sustained rate: tokens added per minute. */
@@ -15,18 +17,25 @@ export interface Limit {
   burst: number;
 }
 
+const SWEEP_INTERVAL_MS = 60_000;
+const CREATE_LIMIT: Limit = { perMinute: 20, burst: 20 };
+const MAX_VIDEO_UPLOAD_REQUESTS_PER_FILE = Math.ceil(MAX_VIDEO_BYTES / VIDEO_CHUNK_BYTES) + 1;
+
 export const RATE_LIMITS: Record<RouteClass | "authFail", Limit> = {
   /** GET/HEAD/OPTIONS on any `/api/*` route, and JSON-RPC posts to `/api/mcp` (the tools are counted at the REST routes they call). */
   read: { perMinute: 600, burst: 60 },
   /** Every other method. */
   write: { perMinute: 120, burst: 30 },
-  /** Routes that create documents or store files: `POST /api/documents`, `/api/import/*`, `POST …/assets`, `POST …/duplicate`. */
-  create: { perMinute: 20, burst: 20 },
+  /** Routes that create documents or store files, including the first request for a video upload. */
+  create: CREATE_LIMIT,
+  /** Each allowed create burst can upload the maximum file size in 25 chunks plus one completion/cancellation request. */
+  videoUpload: {
+    perMinute: MAX_VIDEO_UPLOAD_REQUESTS_PER_FILE * CREATE_LIMIT.perMinute,
+    burst: MAX_VIDEO_UPLOAD_REQUESTS_PER_FILE * CREATE_LIMIT.burst,
+  },
   /** Bearer tokens that did not resolve, per client IP. */
   authFail: { perMinute: 30, burst: 30 },
 };
-
-const SWEEP_INTERVAL_MS = 60_000;
 
 interface Bucket {
   tokens: number;
@@ -173,7 +182,17 @@ export function ipKey(headers: Headers): string {
   return `ip:${clientIp(headers)}`;
 }
 
-const CREATE_PATHS = [/^\/api\/documents\/?$/, /^\/api\/import(\/|$)/, /^\/api\/documents\/[^/]+\/assets\/?$/, /^\/api\/documents\/[^/]+\/duplicate\/?$/];
+const CREATE_PATHS = [
+  /^\/api\/documents\/?$/,
+  /^\/api\/import(\/|$)/,
+  /^\/api\/documents\/[^/]+\/assets\/?$/,
+  /^\/api\/documents\/[^/]+\/assets\/videos\/?$/,
+  /^\/api\/documents\/[^/]+\/duplicate\/?$/,
+];
+
+const VIDEO_UPLOAD_CHUNK_PATH = /^\/api\/documents\/[^/]+\/assets\/videos\/[0-9a-z]{16}\/parts\/\d+\/?$/;
+const VIDEO_UPLOAD_COMPLETE_PATH = /^\/api\/documents\/[^/]+\/assets\/videos\/[0-9a-z]{16}\/complete\/?$/;
+const VIDEO_UPLOAD_CANCEL_PATH = /^\/api\/documents\/[^/]+\/assets\/videos\/[0-9a-z]{16}\/?$/;
 
 /** Which budget a request spends: reads are cheap, writes dearer, creating documents/files dearest. */
 export function routeClass(method: string, pathname: string): RouteClass {
@@ -181,6 +200,13 @@ export function routeClass(method: string, pathname: string): RouteClass {
   if (m === "GET" || m === "HEAD" || m === "OPTIONS") return "read";
   // The MCP transport is a carrier: each tool call hits a REST route below with the same token and is counted there.
   if (/^\/api\/mcp\/?$/.test(pathname)) return "read";
+  if (
+    (m === "PUT" && VIDEO_UPLOAD_CHUNK_PATH.test(pathname)) ||
+    (m === "POST" && VIDEO_UPLOAD_COMPLETE_PATH.test(pathname)) ||
+    (m === "DELETE" && VIDEO_UPLOAD_CANCEL_PATH.test(pathname))
+  ) {
+    return "videoUpload";
+  }
   if (m === "POST" && CREATE_PATHS.some((re) => re.test(pathname))) return "create";
   return "write";
 }

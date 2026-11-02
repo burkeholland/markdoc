@@ -12,7 +12,7 @@ describe("slash items", () => {
       expect(item.icon.length).toBeGreaterThan(0);
       expect(SLASH_GROUPS).toContain(item.group);
     }
-    expect(SLASH_ITEMS.map((i) => i.id)).toEqual(expect.arrayContaining(["text", "heading1", "heading2", "heading3", "bullet", "numbered", "task", "quote", "code", "divider", "table", "image", "link", "comment", "date", "agent"]));
+    expect(SLASH_ITEMS.map((i) => i.id)).toEqual(expect.arrayContaining(["text", "heading1", "heading2", "heading3", "bullet", "numbered", "task", "quote", "code", "divider", "table", "image", "video", "link", "comment", "date", "agent"]));
   });
 
   it("'ag' finds Comment (mention an agent there) and then 'Connect an AI agent' (the /agent item); 'keep' finds the /agent item alone", () => {
@@ -78,19 +78,27 @@ describe("slash items", () => {
     expect(splitSlashQuery("Heading")).toEqual({ word: "heading", arg: "" });
   });
 
-  it("offers 'Video or post from a link' in the Insert group, after Image and Link, and hands off to its dialog (#2317)", () => {
+  it("offers 'Video or post from a link' after Link and before Upload video, and hands off to its dialog (#2317)", () => {
     const card = SLASH_ITEMS.find((i) => i.id === "card")!;
+    const video = SLASH_ITEMS.find((i) => i.id === "video")!;
     expect(card.title).toBe("Video or post from a link");
     expect(card.description).toBe("Paste a link and it becomes a card");
     expect(card.group).toBe("Insert");
     expect(card.icon).toBe("SquarePlay");
+    expect(video.title).toBe("Upload video");
+    expect(video.group).toBe("Insert");
+    expect(video.icon).toBe("Video");
     const insert = SLASH_ITEMS.filter((i) => i.group === "Insert").map((i) => i.id);
-    expect(insert.slice(0, 3)).toEqual(["image", "link", "card"]);
+    expect(insert).toEqual(["image", "link", "card", "video", "comment", "date", "footnote", "lorem", "agent"]);
     // What a person would type to find it.
     for (const word of ["video", "post", "youtube", "tweet", "twitter", "x", "embed", "card", "media"]) expect(ids(word), word).toContain("card");
+    expect(ids("video")).toEqual(["card", "video"]);
     // "/link" still offers Link first, so Enter there does what it always did.
     expect(ids("link")).toEqual(["link", "card"]);
     expect(ids("image")).toEqual(["image"]);
+    expect(ids("mp4")).toEqual(["video"]);
+    expect(ids("", { inTable: true, canComment: true })).not.toContain("video");
+    expect(ids("", { inTable: false, canComment: true })).toContain("video");
     // A card is a block of its own at the top of the document: not offered inside a table.
     expect(ids("", { inTable: true, canComment: true })).not.toContain("card");
     expect(ids("", { inTable: false, canComment: true })).toContain("card");

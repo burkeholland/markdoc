@@ -6,6 +6,15 @@ import { encodeSeedState } from "@/server/collab/seed";
 import { boundTitle } from "@/server/document-title";
 import { excerptOf, excerptOfPrefix } from "@/editor/stats";
 import { plainTextFromMarkdown } from "@/editor/markdown/mdast";
+import {
+  copyVideoBlob,
+  deleteVideoStorageForDocument,
+  failVideoCopyReservations,
+  finalizeVideoCopyReservations,
+  registerVideoCopyReservations,
+  scheduleVideoStorageCleanup,
+  videoStorageKey,
+} from "@/server/video-assets";
 
 export { DOCUMENT_TITLE_MAX, boundTitle } from "@/server/document-title";
 export type { Tx } from "@/server/db";
@@ -552,18 +561,43 @@ export async function purgeDocument(docId: string): Promise<void> {
   const db = await getDb();
   const { evictLiveDocument } = await import("@/server/livedoc");
   await evictLiveDocument(docId, "trashed");
-  await db.delete(schema.documents).where(eq(schema.documents.id, docId));
+  await db.transaction(async (tx) => {
+    const [document] = await tx.select({ id: schema.documents.id }).from(schema.documents).where(eq(schema.documents.id, docId)).for("update");
+    if (!document) return;
+    await deleteVideoStorageForDocument(docId, tx);
+    await tx.delete(schema.documents).where(eq(schema.documents.id, docId));
+  });
+  scheduleVideoStorageCleanup();
 }
 
 /** Purge documents that have been in the trash longer than `days`. Returns how many were removed. */
 export async function purgeTrashOlderThan(days = TRASH_RETENTION_DAYS, now = new Date()): Promise<number> {
   const db = await getDb();
   const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
-  const rows = await db
-    .delete(schema.documents)
-    .where(and(isNotNull(schema.documents.deletedAt), lt(schema.documents.deletedAt, cutoff)))
-    .returning();
-  return rows.length;
+  const candidates = await db
+    .select({ id: schema.documents.id })
+    .from(schema.documents)
+    .where(and(isNotNull(schema.documents.deletedAt), lt(schema.documents.deletedAt, cutoff)));
+  let removed = 0;
+  for (const { id } of candidates) {
+    const purged = await db.transaction(async (tx) => {
+      const [document] = await tx
+        .select({ id: schema.documents.id })
+        .from(schema.documents)
+        .where(and(eq(schema.documents.id, id), isNotNull(schema.documents.deletedAt), lt(schema.documents.deletedAt, cutoff)))
+        .for("update");
+      if (!document) return false;
+      await deleteVideoStorageForDocument(id, tx);
+      const rows = await tx
+        .delete(schema.documents)
+        .where(and(eq(schema.documents.id, id), isNotNull(schema.documents.deletedAt), lt(schema.documents.deletedAt, cutoff)))
+        .returning();
+      return rows.length > 0;
+    });
+    if (purged) removed++;
+  }
+  scheduleVideoStorageCleanup();
+  return removed;
 }
 
 const ASSET_URL_RE = /\/api\/assets\/([0-9a-z]+)/g;
@@ -597,22 +631,68 @@ export async function duplicateDocument(docId: string, userId: string, options: 
   const assets = referenced.size > 0 ? (await db.select().from(schema.assets).where(eq(schema.assets.documentId, docId))).filter((a) => referenced.has(a.id)) : [];
   const idMap = new Map(assets.map((a) => [a.id, assetNanoid()]));
   const content = text.replace(ASSET_URL_RE, (m, id: string) => (idMap.has(id) ? `/api/assets/${idMap.get(id)}` : m));
+  const videoReservations = assets
+    .filter((asset) => asset.storageKey)
+    .map((asset) => {
+      const id = idMap.get(asset.id)!;
+      return {
+        id,
+        documentId: docId,
+        userId,
+        name: asset.name,
+        mime: asset.mime,
+        size: asset.size,
+        storageKey: videoStorageKey(id),
+      };
+    });
 
   // Row, copied assets and first version land together or not at all (audit #1202 F9): a failure after
   // the row insert used to leave "Copy of …" on the dashboard with asset URLs that 404, and the retry made a second copy.
-  return db.transaction(async (tx) => {
-    const [doc] = await tx
-      .insert(schema.documents)
-      .values({ id: newId, title, ownerId: userId, content, ystate: encodeSeedState(content, title), storage: "local", lastEditedBy: userId })
-      .returning();
-    if (assets.length > 0) {
-      await tx
-        .insert(schema.assets)
-        .values(assets.map((a) => ({ id: idMap.get(a.id)!, documentId: newId, userId, name: a.name, mime: a.mime, size: a.size, sha256: a.sha256, data: a.data })));
+  try {
+    await registerVideoCopyReservations(videoReservations);
+    for (const asset of assets) {
+      if (!asset.storageKey) continue;
+      await copyVideoBlob(asset.storageKey, idMap.get(asset.id)!, asset.size);
     }
-    await addVersion({ documentId: newId, content, kind: "named", createdBy: userId, title: options.versionTitle ?? `Copied from ${sourceTitle}` }, tx);
-    return doc;
-  });
+    return await db.transaction(async (tx) => {
+      const [doc] = await tx
+        .insert(schema.documents)
+        .values({ id: newId, title, ownerId: userId, content, ystate: encodeSeedState(content, title), storage: "local", lastEditedBy: userId })
+        .returning();
+      if (assets.length > 0) {
+        await tx
+          .insert(schema.assets)
+          .values(
+            assets.map((a) => ({
+              id: idMap.get(a.id)!,
+              documentId: newId,
+              userId,
+              name: a.name,
+              mime: a.mime,
+              size: a.size,
+              sha256: a.sha256,
+              data: a.data,
+              storageKey: a.storageKey ? videoStorageKey(idMap.get(a.id)!) : null,
+            })),
+          );
+      }
+      await addVersion({ documentId: newId, content, kind: "named", createdBy: userId, title: options.versionTitle ?? `Copied from ${sourceTitle}` }, tx);
+      await finalizeVideoCopyReservations(
+          videoReservations.map(({ id }) => id),
+          tx,
+      );
+      return doc;
+    });
+  } catch (error) {
+    if (videoReservations.length > 0) {
+      try {
+          await failVideoCopyReservations(videoReservations);
+      } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], "Document copy failed and copied videos could not be queued for cleanup");
+      }
+    }
+    throw error;
+  }
 }
 
 const assetNanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);

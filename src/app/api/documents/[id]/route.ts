@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { handler, json, readJson, requireAccess, actorName, HttpError } from "@/server/http";
 import { boundTitle, deleteDocument, DOCUMENT_TITLE_MAX, purgeDocument, updateDocument } from "@/server/documents";
+import { VideoAssetError } from "@/server/video-assets";
 import { changeLinkAccess } from "@/server/collab/authorization";
 import { META_KEY, type CollabContext } from "@/server/collab/hocuspocus";
 import { mutateLiveDoc, readLiveDoc } from "@/server/livedoc";
@@ -87,7 +88,12 @@ export const DELETE = handler(async (req: Request, { params }: Params) => {
   const permanent = /^(1|true)$/.test(new URL(req.url).searchParams.get("permanent") ?? "");
   if (permanent) {
     await requireAccess(id, "own", { allowDeleted: true });
-    await purgeDocument(id);
+    try {
+      await purgeDocument(id);
+    } catch (error) {
+      if (error instanceof VideoAssetError) throw new HttpError(error.status, error.message);
+      throw error;
+    }
     return json({ ok: true, permanent: true });
   }
   await requireAccess(id, "own");

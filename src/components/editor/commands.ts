@@ -160,7 +160,7 @@ function slashCommands(ctx: EditorCommandContext, items: readonly SlashItem[] = 
           return;
         }
         if (!item.run) return;
-        item.run({ view, openImage: ctx.openImage, openCard: () => ctx.setDialog("card"), openLink: ctx.openLink, startComment: ctx.startComment, connectAgent: () => ctx.connectAgent?.(), where: ctx.slashWhere }, "");
+        item.run({ view, openImage: ctx.openImage, openVideo: () => ctx.setDialog("video"), openCard: () => ctx.setDialog("card"), openLink: ctx.openLink, startComment: ctx.startComment, connectAgent: () => ctx.connectAgent?.(), where: ctx.slashWhere }, "");
       },
     }));
 }

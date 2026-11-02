@@ -70,6 +70,7 @@ export const STATIC_SEGMENTS: ReadonlySet<string> = new Set([
   "move",
   // src/app/api/documents/[id]/*
   "activity",
+  "access-request",
   "collab-token",
   "collaborators",
   "comments",
@@ -78,6 +79,7 @@ export const STATIC_SEGMENTS: ReadonlySet<string> = new Set([
   "export",
   "gist-auto-update",
   "link",
+  "parts",
   "publish",
   "pull",
   "restore",
@@ -87,6 +89,7 @@ export const STATIC_SEGMENTS: ReadonlySet<string> = new Set([
   "suggestions",
   "sync",
   "versions",
+  "videos",
   // src/app/api/documents/[id]/requests/[rid]/* and versions/[vid]/*
   "cancel",
   "claim",

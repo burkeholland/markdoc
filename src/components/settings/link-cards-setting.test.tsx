@@ -21,7 +21,7 @@ describe("the Settings row for link cards (#2317)", () => {
     expect(screen.getByRole("heading", { level: 3, name: "Turn links to known sites into cards" })).toBeTruthy();
     const description = document.getElementById(toggle.getAttribute("aria-describedby")!)!;
     expect(description.textContent).toBe(
-      'A link to YouTube or X that you paste on an empty line becomes a card that shows the video or post. Off: it stays a link. Cards already in a document stay, and the toolbar button "Video or post from a link" can still add one. The choice is saved in this browser.',
+      'When on, a link to YouTube, X, Facebook, LinkedIn, Vimeo, Loom or TikTok pasted on an empty line becomes a card. Type a link on its own line and press Enter to turn it into one. Off: pasted and typed links stay text. Existing cards stay, and the toolbar button "Video or post from a link" can still add one. The choice is saved in this browser.',
     );
     // Nothing is written until the person chooses.
     expect(localStorage.getItem(LINK_CARDS_STORAGE_KEY)).toBeNull();

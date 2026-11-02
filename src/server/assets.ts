@@ -290,7 +290,7 @@ const dbStore: AssetStore = {
   async get(id) {
     const db = await getDb();
     const [row] = await db.select().from(schema.assets).where(eq(schema.assets.id, id));
-    if (!row) return null;
+    if (!row?.data || row.storageKey) return null;
     return { mime: row.mime, bytes: row.data, size: row.size, documentId: row.documentId, name: row.name };
   },
 
@@ -300,7 +300,7 @@ const dbStore: AssetStore = {
       .select()
       .from(schema.assets)
       .where(and(eq(schema.assets.id, id), eq(schema.assets.documentId, documentId)));
-    if (!row) return null;
+    if (!row?.data || row.storageKey) return null;
     return { mime: row.mime, bytes: row.data, size: row.size, documentId: row.documentId, name: row.name };
   },
 };

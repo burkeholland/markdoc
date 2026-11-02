@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, apiErrorText, UPLOAD_TOO_LARGE_MESSAGE, uploadAsset } from "./api";
+import { api, ApiError, apiErrorText, UPLOAD_TOO_LARGE_MESSAGE, uploadAsset, uploadVideoAsset } from "./api";
 import { IMPORT_REQUEST_TOO_LARGE, uploadImportBatch } from "./import-upload";
 import { IMAGE_TOO_LARGE_MESSAGE, MAX_IMAGE_BYTES } from "./image-limits";
+import { VIDEO_CHUNK_BYTES, VIDEO_TOO_LARGE_MESSAGE } from "./video-limits";
 
 const FALLBACK = "Could not add collaborator";
 const fetchMock = vi.fn<typeof fetch>();
@@ -335,6 +336,58 @@ describe("uploadAsset", () => {
   it("does not change what another request says for the same 413 page", async () => {
     respond(NGINX_413, { status: 413 });
     expect((await captureError(api.documents.list())).message).toBe("Request failed (413)");
+  });
+});
+
+describe("uploadVideoAsset", () => {
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+  it("uploads bounded chunks, reports byte progress, and returns the completed asset", async () => {
+    const file = new File([new Uint8Array(VIDEO_CHUNK_BYTES + 2)], "clip.webm", { type: "video/webm" });
+    const asset = { id: "0123456789abcdef", url: "/api/assets/0123456789abcdef.webm", name: "clip.webm", mime: "video/webm", size: file.size };
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ uploadId: "0123456789abcdef", chunkCount: 2, chunkSize: VIDEO_CHUNK_BYTES }, 201))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+      .mockResolvedValueOnce(jsonResponse(asset, 201));
+    const progress = vi.fn();
+
+    expect(await uploadVideoAsset("document-one", file, new AbortController().signal, progress)).toEqual(asset);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/documents/document-one/assets/videos",
+      "/api/documents/document-one/assets/videos/0123456789abcdef/parts/0",
+      "/api/documents/document-one/assets/videos/0123456789abcdef/parts/1",
+      "/api/documents/document-one/assets/videos/0123456789abcdef/complete",
+    ]);
+    const firstChunk = fetchMock.mock.calls[1][1]?.body;
+    const secondChunk = fetchMock.mock.calls[2][1]?.body;
+    expect(firstChunk instanceof Blob ? firstChunk.size : -1).toBe(VIDEO_CHUNK_BYTES);
+    expect(secondChunk instanceof Blob ? secondChunk.size : -1).toBe(2);
+    expect(fetchMock.mock.calls.every(([, init]) => init?.credentials === "same-origin")).toBe(true);
+    expect(progress.mock.calls).toEqual([[0, file.size], [VIDEO_CHUNK_BYTES, file.size], [file.size, file.size]]);
+  });
+
+  it("cancels the server upload when a chunk fails", async () => {
+    const file = new File(["video"], "clip.webm", { type: "video/webm" });
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ uploadId: "0123456789abcdef", chunkCount: 1, chunkSize: VIDEO_CHUNK_BYTES }, 201))
+      .mockResolvedValueOnce(jsonResponse({ error: "Chunk rejected" }, 500))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+    const error = await captureError(uploadVideoAsset("document-one", file, new AbortController().signal, vi.fn()));
+    expect(error instanceof ApiError).toBe(true);
+    expect(error.message).toBe("Chunk rejected");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[2][0]).toBe("/api/documents/document-one/assets/videos/0123456789abcdef");
+    expect(fetchMock.mock.calls[2][1]?.method).toBe("DELETE");
+  });
+
+  it("refuses oversized files without sending a request", async () => {
+    const file = new File([new Uint8Array(100 * 1024 * 1024 + 1)], "large.webm", { type: "video/webm" });
+    await expect(uploadVideoAsset("document-one", file, new AbortController().signal, vi.fn())).rejects.toThrow(VIDEO_TOO_LARGE_MESSAGE);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

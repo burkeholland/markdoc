@@ -54,6 +54,7 @@ describe("routeShape", () => {
   it("keeps the static segments of the API tree", () => {
     expect(routeShape(`/api/documents/${DOCUMENT_ID}/collaborators`)).toBe("/api/documents/:id/collaborators");
     expect(routeShape(`/api/documents/${DOCUMENT_ID}/gist-auto-update?preview=1`)).toBe("/api/documents/:id/gist-auto-update");
+    expect(routeShape(`/api/documents/${DOCUMENT_ID}/assets/videos/${DOCUMENT_ID}/parts/0`)).toBe("/api/documents/:id/assets/videos/:id/parts/:id");
     expect(routeShape("/api/notifications/read-all")).toBe("/api/notifications/read-all");
     expect(routeShape("/api/embed/handoff")).toBe("/api/embed/handoff");
     expect(routeShape("/api/mcp")).toBe("/api/mcp");

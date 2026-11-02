@@ -827,6 +827,9 @@ describe("ImageDialog exact Strict Mode ownership", () => {
         );
       });
       expect(onUpload).not.toHaveBeenCalled();
+      expect(screen.getByTestId("image-upload-error")).toHaveTextContent(
+        "Could not read the selected file. Please choose it again.",
+      );
 
       await act(async () => {});
       Object.defineProperty(input, "files", {

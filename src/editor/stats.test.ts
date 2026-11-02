@@ -53,6 +53,15 @@ describe("computeStats", () => {
     expect(computeStats("Use `npm ci` now.").words).toBe(4);
   });
 
+  it("keeps a YouTube card and its plain-link form out of the word count", () => {
+    const url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    const card = computeStats(`Intro\n\n${url}\n\nOutro`);
+    const plainLink = computeStats(`Intro\n\n<${url}>\n\nOutro`);
+
+    expect(card).toEqual(plainLink);
+    expect(card.words).toBe(2);
+  });
+
   it("counts marked heading, prose, link and inline-code words without counting excluded regions", () => {
     const heading = "nai\u0308ve";
     const prose = "\u0915\u093F\u0924\u093E\u092C cafe\u0301 re\u0301sume\u0301.";

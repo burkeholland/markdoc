@@ -56,6 +56,7 @@ function setup({
   };
   const onComment = vi.fn();
   const onImage = vi.fn();
+  const onVideo = vi.fn();
   const onCard = vi.fn();
   const onTable = vi.fn();
   const toolbar = (
@@ -65,12 +66,13 @@ function setup({
       format={format}
       onComment={onComment}
       onImage={onImage}
+      onVideo={onVideo}
       onCard={onCard}
       onTable={onTable}
     />
   );
   const result = render(strict ? <StrictMode>{toolbar}</StrictMode> : toolbar);
-  return { ...result, session, actions, onComment, onImage, onCard, onTable };
+  return { ...result, session, actions, onComment, onImage, onVideo, onCard, onTable };
 }
 
 const button = (name: string) => screen.getByRole("button", { name });

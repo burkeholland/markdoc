@@ -5,6 +5,17 @@ import type { ReviewDto } from "@/server/reviews";
 import type { GistAutoUpdatePreview, GistAutoUpdateSettings, GistAutoUpdateStatus } from "@/lib/gist-auto-update";
 import { readJsonResponse } from "@/lib/json-response";
 import { IMAGE_TOO_LARGE_MESSAGE, isImageTooLarge } from "./image-limits";
+import {
+  isHevcMp4,
+  videoFileError,
+  videoMimeForFile,
+  VIDEO_CHUNK_BYTES,
+  VIDEO_HEVC_MESSAGE,
+  VIDEO_TOO_LARGE_MESSAGE,
+  VIDEO_UNSUPPORTED_MESSAGE,
+  type UploadedVideo,
+  type VideoUploader,
+} from "./video-limits";
 
 export class ApiError extends Error {
   constructor(
@@ -379,4 +390,80 @@ export async function uploadAsset(documentId: string, file: File): Promise<Uploa
   form.append("file", file, file.name);
   const res = await fetch(`/api/documents/${documentId}/assets`, { method: "POST", body: form, credentials: "same-origin" });
   return readApiResponse<UploadedAsset>(res, res.status === 413 ? UPLOAD_TOO_LARGE_MESSAGE : undefined);
+}
+
+/** Upload a video in bounded chunks so the proxy never needs to accept the entire file as one body. */
+export async function uploadVideoAsset(documentId: string, file: File, signal: AbortSignal, onProgress: Parameters<VideoUploader>[2]): Promise<UploadedVideo> {
+  const validationError = videoFileError(file);
+  if (validationError) throw new Error(validationError);
+  const mime = videoMimeForFile(file);
+  if (!mime) throw new Error(VIDEO_UNSUPPORTED_MESSAGE);
+  if (mime === "video/mp4" && await isHevcMp4(file)) throw new Error(VIDEO_HEVC_MESSAGE);
+  if (signal.aborted) throw signal.reason;
+
+  const base = `/api/documents/${encodeURIComponent(documentId)}/assets/videos`;
+  let uploadId: string | null = null;
+  let completed = false;
+  try {
+    const startedResponse = await fetch(base, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: file.name, mime, size: file.size }),
+      credentials: "same-origin",
+      signal,
+    });
+    const started = await readApiResponse<{ uploadId: string; chunkCount: number; chunkSize: number }>(
+      startedResponse,
+      startedResponse.status === 413 ? VIDEO_TOO_LARGE_MESSAGE : undefined,
+    );
+    if (!/^[0-9a-z]{16}$/.test(started.uploadId)) {
+      throw new Error("The server returned invalid video upload details");
+    }
+    uploadId = started.uploadId;
+    if (
+      started.chunkSize !== VIDEO_CHUNK_BYTES ||
+      !Number.isInteger(started.chunkCount) ||
+      started.chunkCount !== Math.ceil(file.size / VIDEO_CHUNK_BYTES)
+    ) {
+      throw new Error("The server returned invalid video upload details");
+    }
+    onProgress(0, file.size);
+
+    for (let index = 0; index < started.chunkCount; index++) {
+      if (signal.aborted) throw signal.reason;
+      const start = index * started.chunkSize;
+      const end = Math.min(file.size, start + started.chunkSize);
+      const response = await fetch(`${base}/${uploadId}/parts/${index}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file.slice(start, end),
+        credentials: "same-origin",
+        signal,
+      });
+      await readApiResponse<{ ok: true }>(response, response.status === 413 ? VIDEO_TOO_LARGE_MESSAGE : undefined);
+      onProgress(end, file.size);
+    }
+
+    if (signal.aborted) throw signal.reason;
+    const completedResponse = await fetch(`${base}/${uploadId}/complete`, { method: "POST", credentials: "same-origin", signal });
+    const asset = await readApiResponse<UploadedVideo>(completedResponse);
+    completed = true;
+    return asset;
+  } catch (error) {
+    if (uploadId && !completed) {
+      try {
+        const cancelResponse = await fetch(`${base}/${uploadId}`, {
+          method: "DELETE",
+          credentials: "same-origin",
+          signal: AbortSignal.timeout(15_000),
+        });
+        await readApiResponse<{ ok: true }>(cancelResponse);
+      } catch (cleanupError) {
+        const originalMessage = apiErrorText(error, "Video upload failed");
+        const cleanupMessage = apiErrorText(cleanupError, "Upload cleanup failed");
+        throw new Error(`${originalMessage}; ${cleanupMessage}`);
+      }
+    }
+    throw error;
+  }
 }
