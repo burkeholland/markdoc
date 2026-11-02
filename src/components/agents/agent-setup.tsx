@@ -72,7 +72,7 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated, headingL
   const uid = useId();
   const optionsId = `${uid}-options`;
   const [scope, setScope] = useState<TokenScopeName>("comment");
-  const [onlyThisDoc, setOnlyThisDoc] = useState(false);
+  const [onlyThisDoc, setOnlyThisDoc] = useState(Boolean(doc));
   const [expires, setExpires] = useState<ExpiryValue>("90");
   const [typedName, setTypedName] = useState<string | null>(null);
   const [optionsOpen, setOptionsOpen] = useState(false);

@@ -14,7 +14,7 @@ import { createClient, createMarkdocServer, listToolNames, SERVER_INFO } from ".
  * token instead of a checkout. Stateless: one transport per request, no session ids.
  *
  *   { "mcpServers": { "markdoc": { "type": "http", "url": "<origin>/api/mcp",
- *                                  "headers": { "Authorization": "Bearer mdk_…" } } } }
+ *                                  "headers": { "Authorization": "Bearer MARKDOC_TOKEN" } } } }
  *
  * Auth is the same token resolver as every `/api/*` route. The tools call the REST API back at the
  * server-controlled `MARKDOC_INTERNAL_URL`, `MARKDOC_URL`, or loopback `PORT`, forwarding the
@@ -23,7 +23,7 @@ import { createClient, createMarkdocServer, listToolNames, SERVER_INFO } from ".
 export const dynamic = "force-dynamic";
 
 const TOOL_NAMES = listToolNames();
-const TOKEN_HINT = "Create a token at /settings (Agents & API access → Create a token) and send it as Authorization: Bearer <token>.";
+const TOKEN_HINT = "Create an access key at /settings (AI agents → Create access key) and send it as Authorization: Bearer <token>";
 const unauthorized = (why: string) => new HttpError(401, `${why} ${TOKEN_HINT}`, { docs: AGENT_DOCS_URL, settings: "/settings#tokens" });
 
 function bearerToken(req: Request): string | null {
@@ -97,7 +97,7 @@ export const GET = handler(async (req: Request) => {
     transport: "streamable-http",
     tools: TOOL_NAMES.length,
     docs: AGENT_DOCS_URL,
-    auth: "Authorization: Bearer <token> — create one at /settings",
+    auth: "Authorization: Bearer <token> — create an access key at /settings (AI agents → Create access key)",
   });
 });
 

@@ -21,4 +21,10 @@ describe("docs/agents.md MCP tool count", () => {
     expect(sentence?.[1].toLowerCase(), `docs say "${sentence?.[0]}" but there are ${names.length} tools (${expected})`).toBe(expected);
     for (const name of names) expect(docs, `${name} missing from the tools table`).toContain(`\`${name}\``);
   });
+
+  it("shows the required Bearer scheme in the generic MCP config", async () => {
+    const docs = await readFile(fileURLToPath(new URL("../../../../docs/agents.md", import.meta.url)), "utf8");
+    const genericConfig = docs.match(/The generic block for other Streamable HTTP clients[\s\S]*?```json([\s\S]*?)```/);
+    expect(genericConfig?.[1]).toContain('"Authorization": "Bearer MARKDOC_TOKEN"');
+  });
 });

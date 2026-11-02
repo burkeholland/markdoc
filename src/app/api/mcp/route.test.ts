@@ -151,11 +151,13 @@ describe("/api/mcp", () => {
   it("GET without MCP headers answers a small JSON card (no auth needed)", async () => {
     const res = await call("GET");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { name: string; version: string; tools: number; docs: string };
+    const body = (await res.json()) as { name: string; version: string; tools: number; docs: string; auth: string };
     expect(body.name).toBe("markdoc");
     expect(body.tools).toBe(listToolNames().length);
     expect(body.tools).toBe(27);
     expect(body.docs).toContain("docs/agents");
+    expect(body.auth).toContain("Authorization: Bearer <token>");
+    expect(body.auth).toContain("AI agents → Create access key");
   });
 
   it("GET as an SSE stream and DELETE are 405 (stateless transport), with or without a token", async () => {
@@ -177,6 +179,9 @@ describe("/api/mcp", () => {
     const res = await call("POST", { headers: { "Content-Type": "application/json", Accept: MCP_ACCEPT }, body: rpc("tools/list") });
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: string; settings: string };
+    expect(body.error).toContain("Authorization: Bearer <token> is required.");
+    expect(body.error).toContain("AI agents → Create access key");
+    expect(body.error).toContain("send it as Authorization: Bearer <token>");
     expect(body.error).toContain("/settings");
     expect(body.settings).toBe("/settings#tokens");
   });
