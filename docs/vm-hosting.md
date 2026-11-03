@@ -854,11 +854,11 @@ or service. Either refusal produces an operation-bound disk-space status;
 the existing app is not restarted or rolled back when it was never changed.
 
 After the new app passes local health/version checks, bounded image retention
-keeps the new image, the image it replaced, and protected historical image
-`21546bc69066d93d3c7844af139e7925b3b838c4c63bb6fd87ae840abfb7c313`.
-Only older images with a Markdoc registry reference and no running or stopped
-container using them are eligible. Retention uses individual `docker rmi`
-commands, never force, system/volume pruning or rollback-bundle deletion.
+preserves the new image and the image it replaced. Other Markdoc images are
+eligible for removal only when their repository digest or tag matches and no
+running or stopped container uses them; this also works for untagged
+(`<none>`) images. Retention uses individual `docker rmi` commands, never
+force, system/volume pruning or rollback-bundle deletion.
 A retention failure produces a fixed warning that the terminal command prints;
 it does **not** roll back a healthy release. Reconcile that warning and free
 capacity before another release.
