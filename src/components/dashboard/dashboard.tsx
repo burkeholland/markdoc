@@ -399,6 +399,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     void signOutSafely();
   }, []);
   const [query, setQuery] = useState("");
+  const updateSearch = useCallback((next: string) => {
+    setQuery(next);
+    writeDashboardSearch(user.id, next);
+  }, [user.id]);
   const queryRestored = useRef(false);
   useLayoutEffect(() => {
     if (queryRestored.current) return;
@@ -563,7 +567,10 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
     const leavingTrash = previous === "trash" && next !== "trash";
     const enteringTrash = previous !== "trash" && next === "trash";
     filterRef.current = next;
-    if (enteringTrash) trashVisitId.current += 1;
+    if (enteringTrash) {
+      trashVisitId.current += 1;
+      updateSearch("");
+    }
     if (leavingTrash) {
       trashRequestId.current += 1;
       trashRequestPending.current = false;
@@ -574,7 +581,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       replaceTrashError(null);
     }
     setFilter(next);
-  }, [replaceTrashError]);
+  }, [replaceTrashError, updateSearch]);
 
   useEffect(() => {
     if (filter !== "trash") return;
@@ -806,6 +813,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   };
 
   const trimmed = query.trim();
+  const contentSearchLimited = trimmed.length > 0 && trimmed.length < MIN_QUERY_LENGTH;
 
   const retireSearchDebounce = useCallback((owner: SearchDebounceOwner) => {
     if (owner.timer !== null) {
@@ -840,6 +848,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       owner.active &&
       owner.target === window &&
       owner.input.isConnected &&
+      !owner.input.disabled &&
       searchRef.current === owner.input &&
       searchShortcutOwnerRef.current === owner &&
       searchAuthorityRef.current === owner.authority &&
@@ -1108,7 +1117,11 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
   const searchAnnouncement =
     filter === "trash" || !trimmed
       ? ""
-      : pending
+      : contentSearchLimited
+        ? filtered.length === 0
+          ? `No title matches for "${trimmed}". Content search starts at ${MIN_QUERY_LENGTH} characters.`
+          : `${filtered.length} title ${filtered.length === 1 ? "match" : "matches"} for "${trimmed}". Content search starts at ${MIN_QUERY_LENGTH} characters.`
+        : pending
         ? "Searching documents…"
         : currentSearchError
           ? filtered.length === 0
@@ -1289,10 +1302,6 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       }),
     [create, listDocs, router, pickFile, changeFilter],
   );
-  const updateSearch = (next: string) => {
-    setQuery(next);
-    writeDashboardSearch(user.id, next);
-  };
   const changeSearch = (event: ReactChangeEvent<HTMLInputElement>) => {
     updateSearch(event.target.value);
   };
@@ -1358,7 +1367,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       : currentSearchError
         ? `No title matches for "${trimmed}"`
         : trimmed
-          ? `No matches for "${trimmed}"`
+          ? `${contentSearchLimited ? "No title matches" : "No matches"} for "${trimmed}"`
           : selectedFolderIsEmpty
             ? "This folder is empty"
             : selectedFolderFilterEmptyState
@@ -1378,7 +1387,9 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
       : currentSearchError
         ? "Content results are unavailable. Retry the search above."
         : trimmed
-          ? "Try a different search."
+          ? contentSearchLimited
+            ? `Content search starts at ${MIN_QUERY_LENGTH} characters.`
+            : "Try a different search."
           : selectedFolderIsEmpty
             ? "Create a document above, then move it here from its card menu, or drag an existing card onto this folder."
             : selectedFolderFilterEmptyState
@@ -1442,14 +1453,15 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               <input
                 ref={searchRef}
                 className={cn("input pl-9", query && searching ? "pr-16" : query ? "pr-9" : "pr-9 sm:pr-12")}
-                placeholder="Search documents"
-                aria-label="Search documents"
+                placeholder={filter === "trash" ? "Search unavailable in Trash" : "Search documents"}
+                aria-label={filter === "trash" ? "Search unavailable in Trash" : "Search documents"}
                 value={query}
                 onChange={changeSearch}
                 onKeyDown={keyDownSearch}
+                disabled={filter === "trash"}
                 data-testid="search"
               />
-              {!query && (
+              {filter !== "trash" && !query && (
                 <span className="pointer-events-none absolute right-3 top-2 hidden text-ink-4 sm:block" aria-hidden="true">
                   <Kbd>/</Kbd>
                 </span>
@@ -1657,6 +1669,12 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
               </div>
             </div>
           </div>
+
+          {filter !== "trash" && contentSearchLimited && filtered.length > 0 && (
+            <p className="mb-3 text-xs text-ink-3" data-testid="search-content-hint">
+              Content search starts at {MIN_QUERY_LENGTH} characters.
+            </p>
+          )}
 
           {currentSearchError && (
             <div
