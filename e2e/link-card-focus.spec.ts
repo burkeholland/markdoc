@@ -247,6 +247,8 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     }
     await focusRichEnd(page);
     await coverFor(page, VIDEO_FRAME).focus();
+    await coverFor(page, VIDEO_FRAME).evaluate((proxy) => proxy.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "mouse", bubbles: true, cancelable: true })));
+    await expect.poll(() => keyboardPlace(page)).toBe("cover");
     await coverFor(page, VIDEO_FRAME).evaluate((proxy) => proxy.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
     await expect.poll(() => keyboardPlace(page)).toBe("cover");
     await coverFor(page, VIDEO_FRAME).evaluate((proxy: HTMLButtonElement) => proxy.click());
@@ -260,7 +262,7 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await focusRichEnd(page);
     await page.evaluate((selector) => {
       const proxy = document.querySelector<HTMLElement>(selector)!;
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", repeat: true, bubbles: true, cancelable: true }));
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
       proxy.focus();
     }, `.md-rich .md-link-card-frame:has(iframe[src="${VIDEO_FRAME}"]) [data-card-cover]`);
     await expect.poll(() => keyboardPlace(page)).toBe("cover");
@@ -318,7 +320,17 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await focusRichEnd(page);
 
     // Pen follows the same explicit rule and cannot borrow the earlier mouse activation.
-    await coverFor(page, VIDEO_FRAME).dispatchEvent("pointerdown", { pointerType: "pen", bubbles: true, cancelable: true });
+    const pen = await context.newCDPSession(page);
+    try {
+      const entry = (await coverFor(page, VIDEO_FRAME).boundingBox())!;
+      const x = entry.x + entry.width / 2;
+      const y = entry.y + entry.height / 2;
+      await pen.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, pointerType: "pen" });
+      await pen.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1, pointerType: "pen" });
+      await pen.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1, pointerType: "pen" });
+    } finally {
+      await pen.detach();
+    }
     await expect.poll(() => keyboardPlace(page)).toBe(`frame ${VIDEO_FRAME}`);
     expect((await inFrame()).clicks).toBe(0);
     await expect(notice(page)).toHaveCount(0);
@@ -337,6 +349,7 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await openDocument(page, id);
     await openDocument(other.page, id);
     await frameReady(page, TWEET_FRAME);
+    const frameLoadsBeforeFocusAttempts = sites.frames.filter((url) => url === TWEET_FRAME).length;
 
     // The preview: the owner's caret is in the middle of the paragraph.
     await focusRichEnd(page);
@@ -353,6 +366,7 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await theirs;
     await expect.poll(() => codeText(page)).toContain("ZYXWVUTSalpha12 omega");
     await expect.poll(() => codeText(other.page)).toContain("ZYXWVUTSalpha12 omega");
+    await frameReady(page, TWEET_FRAME);
 
     // The Markdown pane, the same way.
     await focusCodeEnd(page);
@@ -366,9 +380,9 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
     await more;
     await expect.poll(() => codeText(page)).toContain("alpha1234 omega");
     await expect.poll(() => codeText(other.page)).toContain("alpha1234 omega");
-    // Two tries by now: the frame is still there, and it got no key.
+    // Both untrusted focus attempts were quarantined, reloading the same frame without delivering a key.
     await expect(frame(page, TWEET_FRAME)).toHaveCount(1);
-    expect(sites.grabs.filter((url) => url === TWEET_FRAME)).toHaveLength(2);
+    await expect.poll(() => sites.frames.filter((url) => url === TWEET_FRAME).length).toBe(frameLoadsBeforeFocusAttempts + 2);
     expect((await frameCounts(page, ".md-rich", TWEET_FRAME)).keys).toBe(0);
     expect(sites.refused).toEqual([]);
     expect(otherSites.refused).toEqual([]);
@@ -626,13 +640,20 @@ test.describe("link cards: the keyboard stays with the person (#2338)", () => {
 
   test("accessibility: the card that was turned off, light and dark; its button by keyboard", async ({ browser, baseURL }) => {
     const { page, context } = await signIn(browser, uniqueLogin("guard-axe"));
-    const sites = await standInWithKeyboard(context, baseURL!, (url) => (url === TWEET_FRAME ? 150 : 0));
+    const sites = await standInWithKeyboard(context, baseURL!);
     const id = await createDocument(page, DOC, "Turned off");
     for (const theme of ["light", "dark"] as const) {
       await openDocument(page, id);
       await setTheme(page, theme);
       await frameReady(page, TWEET_FRAME);
       await focusRichEnd(page);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await takeFocusOnce(page, ".md-rich", TWEET_FRAME);
+        if (attempt < 2) {
+          await expect.poll(() => keyboardPlace(page)).toBe("preview");
+          await frameReady(page, TWEET_FRAME);
+        }
+      }
       await expect(notice(page)).toHaveCount(1, { timeout: 15_000 });
       // The iframe is intentionally removed from direct Tab order because the adjacent parent-owned
       // button is its accessible keyboard proxy and immediately focuses it after a verified Tab.
