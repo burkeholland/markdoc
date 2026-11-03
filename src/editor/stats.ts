@@ -111,11 +111,12 @@ function stripAngleTags(s: string): string {
 /**
  * Turn one Markdown line into prose: drop block markers (heading, list, quote, table pipes),
  * images (or keep their alt text with `imageAlt`), link URLs, emphasis and inline code
- * delimiters. Returns the prose text and whether the line was a heading.
+ * delimiters. Returns the prose text and whether the line was a heading or list item.
  */
-function proseOfLine(line: string, imageAlt = false): { text: string; heading: boolean } {
+function proseOfLine(line: string, imageAlt = false): { text: string; heading: boolean; listItem: boolean } {
   let s = line;
   let heading = false;
+  let listItem = false;
   // Block quotes (possibly nested), then heading markers, list bullets, task boxes.
   s = s.replace(/^\s{0,3}(?:>\s?)+/, "");
   const h = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/.exec(s);
@@ -123,10 +124,14 @@ function proseOfLine(line: string, imageAlt = false): { text: string; heading: b
     heading = true;
     s = h[2];
   } else {
-    s = s.replace(/^\s*(?:[-*+]|\d{1,9}[.)])\s+(?:\[[ xX]\]\s+)?/, "");
+    const list = /^\s*(?:[-*+]|\d{1,9}[.)])\s+(?:\[[ xX]\]\s+)?/.exec(s);
+    listItem = list !== null;
+    if (list) s = s.slice(list[0].length);
   }
   // Horizontal rules, table separator rows.
-  if (/^\s*(?:[-*_]\s*){3,}$/.test(s) || /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(s)) return { text: "", heading };
+  if (/^\s*(?:[-*_]\s*){3,}$/.test(s) || /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(s)) {
+    return { text: "", heading, listItem };
+  }
   // Table pipes become spaces so cells stay separate words.
   if (s.includes("|")) s = s.replace(/\|/g, " ");
   // Images are dropped (or reduced to their alt text); links keep their text; reference definitions vanish.
@@ -134,12 +139,12 @@ function proseOfLine(line: string, imageAlt = false): { text: string; heading: b
   s = stripLinkLike(s, "![", "[", "]", imageAlt);
   s = stripLinkLike(s, "[", "(", ")", true);
   s = stripLinkLike(s, "[", "[", "]", true);
-  if (/^\s{0,3}\[[^\]]+\]:\s*\S+/.test(s)) return { text: "", heading };
+  if (/^\s{0,3}\[[^\]]+\]:\s*\S+/.test(s)) return { text: "", heading, listItem };
   s = stripAngleTags(s);
   s = s.replace(/`+/g, "");
   s = s.replace(/(\*\*|__|~~|\*|_)/g, "");
   s = s.replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, "$1");
-  return { text: s, heading };
+  return { text: s, heading, listItem };
 }
 
 /**
@@ -164,9 +169,10 @@ function closesFence(line: string, fence: string): boolean {
 /**
  * A complete-grapheme prefix within `max` UTF-16 code units, for the dashboard card under the title:
  * front matter and fenced code are skipped, headings are passed over (the title is already on
- * the card), images become their alt text, links their text, table cells are joined by spaces
- * and the remaining Markdown punctuation is removed. A document with no prose at all falls back
- * to its heading text. Linear in the input and stops once `max` code units are collected.
+ * the card), list items are separated with a middle dot, images become their alt text, links
+ * their text, table cells are joined by spaces and the remaining Markdown punctuation is removed.
+ * A document with no prose at all falls back to its heading text. Linear in the input and stops
+ * once `max` code units are collected.
  */
 export function excerptOf(markdown: string, max = 160): string {
   return collectExcerpt(markdown, max).text;
@@ -210,14 +216,14 @@ function collectExcerpt(markdown: string, max: number): { text: string; saturate
       continue;
     }
     if (line.trim() === "") continue;
-    const { text, heading } = proseOfLine(line, true);
+    const { text, heading, listItem } = proseOfLine(line, true);
     const t = text.replace(/\s+/g, " ").trim();
     if (t === "") continue;
     if (heading) {
-      if (headingsOnly.length < max) headingsOnly += (headingsOnly ? " " : "") + t;
+      if (headingsOnly.length < max) headingsOnly += (headingsOnly ? " · " : "") + t;
       continue;
     }
-    out += (out ? " " : "") + t;
+    out += (out ? (listItem ? " · " : " ") : "") + t;
   }
   const prose = out || headingsOnly;
   let end = 0;

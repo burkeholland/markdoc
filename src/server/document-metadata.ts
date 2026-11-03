@@ -39,11 +39,12 @@ export async function documentDescription(live: Pick<LiveText, "clean"> | null):
 /**
  * Metadata for a document page, shared by `/d/[id]` and `/p/[id]`. Link unfurlers (Slack, Teams, X,
  * iMessage) fetch anonymously, so what they show is exactly what an anonymous visitor may know:
- * without access (`doc` null) the result is the bare `{ title: "Document" }` it always was (the page
- * then redirects or 404s) and the root layout's generic card stands; with access the card carries the
- * document's title and first lines. `og:image` is only set with `cardImage`: on the document pages the
- * `opengraph-image.tsx` next to each page supplies it (and `og:image:width/height`, `twitter:image`)
- * with the same access check; the sign-in page has no such file and points at the document's.
+ * without access (`doc` null), no document details are exposed: `/d` keeps the generic `Document`
+ * title and `/p` uses the not-found title; the root layout's generic card stands. With access the
+ * card carries the document's title and first lines. `og:image` is only set with `cardImage`: the
+ * `opengraph-image.tsx` next to each document page supplies it (and `og:image:width/height`,
+ * `twitter:image`) with the same access check; the sign-in page has no such file and points at the
+ * document's.
  */
 export async function documentMetadata(
   doc: MetadataDocument | null,
@@ -51,7 +52,7 @@ export async function documentMetadata(
   path: "/d" | "/p",
   { cardImage = false }: { cardImage?: boolean } = {},
 ): Promise<Metadata> {
-  if (!doc) return { title: "Document" };
+  if (!doc) return { title: path === "/p" ? "Page not found" : "Document" };
   const title = documentTitle(doc, live);
   const description = await documentDescription(live);
   const image = `${path}/${doc.id}/opengraph-image`;
