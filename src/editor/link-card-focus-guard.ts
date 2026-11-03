@@ -9,12 +9,13 @@
  * them within `CARD_FOCUS_WINDOW_MS`, in a row or not: three in a row, or ten in a minute.
  *
  * A move of focus into a frame is meant only when the parent page saw a fresh action for that exact
- * frame. A see-through button covers every guarded frame while the keyboard is in the page. Mouse, pen
- * and touch presses on it are consumed, then focus the frame. The same button is the frame's place in
- * sequential keyboard navigation: an unmodified, non-repeated Tab or Shift+Tab that focuses it
- * immediately enters that frame. Enter and Space on the focused button enter it; browser
- * accessibility activation uses the button click. The capability is tied to one guarded frame,
- * expires after `MOVE_FRESH_MS`, and is consumed by the first focus decision.
+ * frame. A see-through button covers every guarded frame while the keyboard is in the page. Trusted
+ * mouse, pen and touch presses on it are consumed, then focus the frame. The same button is the frame's
+ * place in sequential keyboard navigation: an unmodified, non-repeated Tab or Shift+Tab that focuses
+ * it immediately enters that frame. Enter and Space on the focused button enter it; browser
+ * accessibility activation uses a trusted button click. Synthetic events never grant permission. The
+ * capability is tied to one guarded frame, expires after `MOVE_FRESH_MS`, and is consumed by the first
+ * focus decision.
  *
  * Pointer presence, pointer movement, elapsed quiet time, and provider messages never authorize focus.
  * The first press is therefore a deliberate security cost: it gives the frame the keyboard but does not
@@ -85,6 +86,7 @@ function seenIn(doc: Document): Seen {
   doc.addEventListener(
     "keydown",
     (event) => {
+      if (!event.isTrusted) return;
       seen.lastKey = event;
       seen.lastKeyAt = event.timeStamp;
     },
@@ -93,6 +95,7 @@ function seenIn(doc: Document): Seen {
   doc.addEventListener(
     "pointerdown",
     (event) => {
+      if (!event.isTrusted) return;
       seen.pointerType = event.pointerType;
     },
     true,
@@ -170,7 +173,10 @@ function pageGuard(doc: Document): PageGuard | null {
     cover.setAttribute("aria-label", CARD_ENTER_FRAME_LABEL);
     cover.addEventListener("pointerdown", (event) => {
       event.preventDefault();
-      if (event.pointerType !== "mouse" && event.pointerType !== "pen" && event.pointerType !== "touch") return;
+      if (
+        !event.isTrusted ||
+        (event.pointerType !== "mouse" && event.pointerType !== "pen" && event.pointerType !== "touch")
+      ) return;
       enter(guarded, event.timeStamp, event.pointerType, true);
     });
     cover.addEventListener("pointerup", (event) => {
@@ -181,7 +187,15 @@ function pageGuard(doc: Document): PageGuard | null {
     });
     cover.addEventListener("keydown", (event) => {
       const wasPrevented = event.defaultPrevented;
-      if (wasPrevented || event.repeat || event.ctrlKey || event.altKey || event.metaKey || doc.activeElement !== cover) return;
+      if (
+        !event.isTrusted ||
+        wasPrevented ||
+        event.repeat ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.metaKey ||
+        doc.activeElement !== cover
+      ) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       // ProseMirror prevents the later native button click while the event bubbles. Activate at the
       // button itself, before that editor handling, and prevent Space from scrolling the page.
@@ -195,13 +209,21 @@ function pageGuard(doc: Document): PageGuard | null {
         removeCover(guarded);
         return;
       }
-      // Browser accessibility activation is a click with no pointer click count.
-      if (wasPrevented || event.detail !== 0 || event.ctrlKey || event.altKey || event.metaKey || doc.activeElement !== cover) return;
+      // Browser accessibility activation is a trusted click with no pointer click count.
+      if (
+        !event.isTrusted ||
+        wasPrevented ||
+        event.detail !== 0 ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.metaKey ||
+        doc.activeElement !== cover
+      ) return;
       enter(guarded, event.timeStamp, "keyboard");
     });
     cover.addEventListener("focus", (event) => {
       const key = seen.lastKey;
-      if (!key || key === guard.usedTab) return;
+      if (!key || key === guard.usedTab || !key.isTrusted) return;
       guard.usedTab = key;
       const age = key ? event.timeStamp - key.timeStamp : Infinity;
       if (key.key !== "Tab" || key.repeat || key.defaultPrevented || key.ctrlKey || key.altKey || key.metaKey || age < 0 || age > MOVE_FRESH_MS) return;

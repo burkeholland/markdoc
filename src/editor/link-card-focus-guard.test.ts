@@ -16,9 +16,36 @@ function at<E extends Event>(event: E, ms: number): E {
   Object.defineProperty(event, "timeStamp", { value: ms });
   return event;
 }
-const key = (target: Element, name: string, ms: number, init: KeyboardEventInit = {}) => target.dispatchEvent(at(new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true, ...init }), ms));
-const pointer = (target: Element, type: string, ms: number, pointerType = "mouse") => {
+
+function markJsdomEventTrusted(event: Event) {
+  const implementation = Object.getOwnPropertySymbols(event)
+    .map((symbol) => (event as unknown as Record<symbol, unknown>)[symbol])
+    .find(
+      (candidate): candidate is { isTrusted: boolean } =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "isTrusted" in candidate &&
+        candidate.isTrusted === false,
+    );
+  const descriptor = implementation ? Object.getOwnPropertyDescriptor(implementation, "isTrusted") : undefined;
+  if (!implementation || !descriptor?.writable) throw new Error("Unable to set jsdom's internal event trust slot");
+  Object.defineProperty(implementation, "isTrusted", {
+    configurable: true,
+    enumerable: true,
+    get: () => true,
+    set: () => undefined,
+  });
+  if (!event.isTrusted) throw new Error("The jsdom event trust slot did not update");
+}
+
+const key = (target: Element, name: string, ms: number, init: KeyboardEventInit = {}, trusted = true) => {
+  const event = at(new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true, ...init }), ms);
+  if (trusted) markJsdomEventTrusted(event);
+  return target.dispatchEvent(event);
+};
+const pointer = (target: Element, type: string, ms: number, pointerType = "mouse", trusted = true) => {
   const event = at(new PointerEvent(type, { pointerType, bubbles: type !== "pointerenter" && type !== "pointerleave", cancelable: true }), ms);
+  if (trusted) markJsdomEventTrusted(event);
   target.dispatchEvent(event);
   return event;
 };
@@ -192,7 +219,7 @@ describe("the focus guard of a card's frame (#2338)", () => {
       editor.focus();
       grab(frame, 1000);
       grab(frame, 1100);
-      enterByTab(made, editor, 2000);
+      enterByCover(made, 2000);
       expect(document.activeElement).toBe(frame);
       editor.focus();
       grab(frame, 3000);
@@ -347,7 +374,10 @@ describe("the focus guard of a card's frame (#2338)", () => {
   });
 
   describe("a finger: the page gets no pointer event on a frame for a touch", () => {
-    const press = (target: Element, kind: string, ms: number) => target.dispatchEvent(at(new PointerEvent("pointerdown", { pointerType: kind, bubbles: true, cancelable: true }), ms));
+    const press = (target: Element, kind: string, ms: number) => {
+      const event = pointer(target, "pointerdown", ms, kind);
+      return !event.defaultPrevented;
+    };
 
     it("after a touch press in the page, every move into a frame is given back, also long after the last key, and such a move never counts", () => {
       const { frame, box, turnOff } = make();
@@ -497,7 +527,10 @@ describe("the focus guard of a card's frame (#2338)", () => {
   });
 
   describe(`a frame that takes the keyboard slowly: ${CARD_FOCUS_TRIES_IN_WINDOW} moves that count within ${CARD_FOCUS_WINDOW_MS / 1000} s turn it off, in a row or not`, () => {
-    const press = (target: Element, kind: string, ms: number) => target.dispatchEvent(at(new PointerEvent("pointerdown", { pointerType: kind, bubbles: true, cancelable: true }), ms));
+    const press = (target: Element, kind: string, ms: number) => {
+      const event = pointer(target, "pointerdown", ms, kind);
+      return !event.defaultPrevented;
+    };
     /** With a finger: a move right after a key counts. */
     const counted = (frame: HTMLIFrameElement, ms: number) => {
       key(editor, "a", ms - 50);
@@ -644,7 +677,10 @@ describe("the focus guard of a card's frame (#2338)", () => {
   });
 
   describe("what the page saw before there was a card, and between two cards", () => {
-    const press = (target: Element, kind: string, ms: number) => target.dispatchEvent(at(new PointerEvent("pointerdown", { pointerType: kind, bubbles: true, cancelable: true }), ms));
+    const press = (target: Element, kind: string, ms: number) => {
+      const event = pointer(target, "pointerdown", ms, kind);
+      return !event.defaultPrevented;
+    };
 
     it("keys and presses are written down from the moment the code is loaded: two listeners on the document, none on the window", async () => {
       const onDocument = vi.spyOn(document, "addEventListener");
@@ -830,17 +866,41 @@ describe("the focus guard of a card's frame (#2338)", () => {
       expect(document.activeElement).toBe(editor);
     });
 
-    it("a click or Enter on a directly focused proxy enters the frame", () => {
+    it("a trusted click or Enter on a directly focused proxy enters the frame", () => {
       const made = make();
       editor.focus();
-      cover(made.box)!.focus();
-      cover(made.box)!.click();
+      const entry = cover(made.box)!;
+      entry.focus();
+      const click = new MouseEvent("click", { bubbles: true, cancelable: true });
+      markJsdomEventTrusted(click);
+      entry.dispatchEvent(click);
       expect(document.activeElement).toBe(made.frame);
       const other = make();
       editor.focus();
-      cover(other.box)!.focus();
-      cover(other.box)!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      const otherEntry = cover(other.box)!;
+      otherEntry.focus();
+      key(otherEntry, "Enter", 1000);
       expect(document.activeElement).toBe(other.frame);
+    });
+
+    it("untrusted pointer, keyboard, and click events cannot activate a focused proxy", () => {
+      const made = make();
+      const entry = cover(made.box)!;
+      editor.focus();
+      entry.focus();
+      pointer(entry, "pointerdown", 1000, "mouse", false);
+      expect(document.activeElement).toBe(entry);
+      entry.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      expect(document.activeElement).toBe(entry);
+      entry.click();
+      expect(document.activeElement).toBe(entry);
+
+      editor.focus();
+      key(editor, "Tab", 2000, {}, false);
+      entry.focus();
+      expect(document.activeElement).toBe(entry);
+      grab(made.frame, 2002);
+      expect(document.activeElement).toBe(editor);
     });
 
     it("a Tab capability is exact: another frame racing it is rejected", () => {

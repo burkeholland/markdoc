@@ -1,6 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
+import { lastSeenAt } from "../src/lib/agent-keys";
 import { signIn, createDocument, openDocument, selectTextInRich, shareWith, mintToken, reloadHydrated, waitForHydration, type MintedToken, type User } from "./helpers";
 
 // The Settings test makes and mints keys; capture must not retain their credentials. Worker-scoped options
@@ -233,7 +234,7 @@ test.describe("onboarding: Settings agent setup", () => {
     await waitForHydration(page);
 
     // No keys yet: the page is the setup steps and nothing else (no empty table, no folded "Set up" button).
-    await expect(page.getByRole("heading", { name: "AI agents", level: 1 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "AI agents", level: 2 })).toBeVisible();
     const setup = page.getByTestId("agent-setup");
     await expect(setup).toHaveAttribute("data-state", "new");
     await expect(page.getByTestId("agent-setup-toggle")).toHaveCount(0);
@@ -253,7 +254,7 @@ test.describe("onboarding: Settings agent setup", () => {
 
     const minted = await mintToken(page, "Copilot CLI", { expiresInDays: 30 });
     const readUsage = async () => (await (await page.request.get("/api/tokens")).json()) as {
-      tokens: { lastMcpSeenAt: string | null; lastMcpCallAt: string | null }[];
+      tokens: { lastMcpSeenAt: string | null; lastUsedAt: string | null; lastMcpCallAt: string | null }[];
     };
     const headers = { Authorization: ["Bearer", minted.token].join(" "), "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
     const listed = await page.request.post("/api/mcp", { headers, data: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} } });
@@ -271,7 +272,7 @@ test.describe("onboarding: Settings agent setup", () => {
     const discovered = await readUsage();
     expect(discovered.tokens[0].lastMcpSeenAt).toMatch(/^\d{4}-/);
     expect(discovered.tokens[0].lastMcpCallAt).toBeNull();
-    await expect(row.getByTestId("key-last-request").locator("time")).toHaveAttribute("datetime", discovered.tokens[0].lastMcpSeenAt!);
+    await expect(row.getByTestId("key-last-request").locator("time")).toHaveAttribute("datetime", lastSeenAt(discovered.tokens[0])!);
     await expect(row.getByTestId("key-last-tool-call")).toHaveText("Never");
     // The secret is not recoverable from the page: only a short prefix is shown.
     expect(await page.locator("body").innerText()).not.toContain(minted.token);
@@ -285,7 +286,7 @@ test.describe("onboarding: Settings agent setup", () => {
     expect(tokens.tokens[0].lastMcpCallAt).toMatch(/^\d{4}-/);
     await reloadHydrated(page);
     await row.getByTestId("key-manage").click();
-    await expect(row.getByTestId("key-last-request").locator("time")).toHaveAttribute("datetime", tokens.tokens[0].lastMcpSeenAt!);
+    await expect(row.getByTestId("key-last-request").locator("time")).toHaveAttribute("datetime", lastSeenAt(tokens.tokens[0])!);
     await expect(row.getByTestId("key-last-tool-call").locator("time")).toHaveAttribute("datetime", tokens.tokens[0].lastMcpCallAt!);
 
     // "Set up" brings the steps back for another agent; it shows no config until a new key is made, and never this key.
