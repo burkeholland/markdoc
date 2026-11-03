@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useSyncExternalStore } from "react";
-import { api, type NotificationDto } from "@/lib/api";
+import { api, type NotificationDto, type NotificationsPageDto } from "@/lib/api";
 import type { NotificationKind } from "@/server/db/schema";
 
 export const NOTIFICATIONS_POLL_MS = 30_000;
@@ -151,8 +151,14 @@ export function refreshNotifications(): Promise<void> {
       cache = { items: page.items, unreadCount: page.unreadCount };
       cacheRevision++;
       for (const operation of operations()) {
-        if (operation.id < owner.id) operation.superseded = true;
-        else if (!operation.superseded) operation.cacheRevision = cacheRevision;
+        if (operation.id < owner.id) {
+          const confirmed = confirmedReadScope(operation, page);
+          if (confirmed) {
+            reconcileOperation(operation, confirmed);
+            if (!hasRemainingEffect(operation)) operation.superseded = true;
+          }
+        }
+        if (!operation.superseded) operation.cacheRevision = cacheRevision;
       }
       const readError = state.readError && state.readError.operationId > owner.id ? state.readError : null;
       publish({ loaded: true, loadError: false, readError });
@@ -281,6 +287,24 @@ function hasRemainingEffect(operation: ReadOperation): boolean {
   if (operation.scope.kind === "all") return cache.unreadCount > 0;
   if (operation.scope.kind === "ids") return operation.scope.ids.size > 0;
   return operation.scope.refIds.size > 0 && (operation.optimisticIds.size > 0 || cache.unreadCount > 0);
+}
+
+function confirmedReadScope(operation: ReadOperation, page: NotificationsPageDto): OperationScope | null {
+  if (operation.operation === "all") return page.unreadCount === 0 ? { kind: "all" } : null;
+  if (operation.operation === "single") {
+    const id = operation.notificationId;
+    return id && page.items.some((notification) => notification.id === id && notification.readAt)
+      ? { kind: "ids", ids: new Set([id]) }
+      : null;
+  }
+  const scope = operation.scope;
+  if (scope.kind !== "refs" || !operation.documentId) return null;
+  const refIds = new Set(
+    page.items
+      .filter((notification) => notification.readAt && notification.documentId === operation.documentId && scope.refIds.has(notification.refId))
+      .map((notification) => notification.refId),
+  );
+  return refIds.size > 0 ? { kind: "refs", documentId: operation.documentId, refIds } : null;
 }
 
 function commitRead(pred: (notification: NotificationDto) => boolean, scope: OperationScope, all = false): NotificationReadError | null {

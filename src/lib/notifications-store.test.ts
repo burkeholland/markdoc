@@ -588,6 +588,38 @@ describe("notification read ownership", () => {
     expect(result.current.readError).toBeNull();
   });
 
+  it("keeps a read optimistic when a later poll still contains the stale unread row", async () => {
+    const read = deferred<{ ok: true; changed: boolean }>();
+    const poll = deferred<NotificationsPageDto>();
+    notificationApi.read.mockReturnValueOnce(read.promise);
+    const { store, result } = await mountLoaded({ items: [ITEM], unreadCount: 1 });
+    notificationApi.list.mockReturnValueOnce(poll.promise);
+
+    let readOperation!: Promise<void>;
+    let refresh!: Promise<void>;
+    act(() => {
+      readOperation = store.markNotificationRead(ITEM.id);
+      refresh = store.refreshNotifications();
+    });
+
+    await act(async () => {
+      poll.resolve({ items: [ITEM], unreadCount: 1 });
+      await refresh;
+    });
+
+    expect(result.current.items[0]?.readAt).not.toBeNull();
+    expect(result.current.unreadCount).toBe(0);
+
+    await act(async () => {
+      read.resolve({ ok: true, changed: true });
+      await readOperation;
+    });
+
+    expect(result.current.items[0]?.readAt).not.toBeNull();
+    expect(result.current.unreadCount).toBe(0);
+    expect(result.current.readError).toBeNull();
+  });
+
   it("does not let an older poll supersede a read started after it", async () => {
     const poll = deferred<NotificationsPageDto>();
     const read = deferred<{ ok: true; changed: boolean }>();
