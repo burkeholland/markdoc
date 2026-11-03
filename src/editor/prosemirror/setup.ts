@@ -373,7 +373,7 @@ export function createRichEditorState(session: CollabSession, handlers: RichEdit
           },
           attributes: (state) => ({
             class: "md-rich" + (state.doc.childCount > 1 || state.doc.textContent.length > 0 ? " md-has-content" : ""),
-            "data-placeholder": "Start writing…",
+            "data-placeholder": "Start writing. Use the toolbar, Markdown shortcuts, or edit the source on the left.",
             spellcheck: "true",
             role: "textbox",
             "aria-multiline": "true",

@@ -423,10 +423,7 @@ export interface CreateDocumentInput {
   githubSha?: string | null;
 }
 
-export const DEFAULT_CONTENT = `# Untitled
-
-Start writing. Use the toolbar, Markdown shortcuts, or edit the source on the left.
-`;
+export const DEFAULT_CONTENT = "";
 
 /** First `# ` heading with inline markup stripped, else `fallback`; clipped to {@link DOCUMENT_TITLE_MAX}. */
 export function titleFromContent(content: string, fallback = "Untitled"): string {

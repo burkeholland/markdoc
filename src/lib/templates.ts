@@ -41,10 +41,7 @@ export const TEMPLATES: Template[] = [
     description: "An empty page with a title.",
     icon: "File",
     title: "Untitled",
-    content: `# Untitled
-
-Start writing. Use the toolbar, Markdown shortcuts, or edit the source on the left.
-`,
+    content: "",
   },
   {
     id: "meeting-notes",

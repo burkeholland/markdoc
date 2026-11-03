@@ -24,9 +24,10 @@ test.describe("single user editing", () => {
     await page.waitForURL(/\/d\//);
     await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
     await expect(page.getByTestId("outline")).toBeVisible();
-    await expect(page.locator(".cm-content")).toContainText("# Untitled");
-    await expect(page.locator(".md-rich h1")).toHaveText("Untitled");
-    await expect(page.getByTestId("word-count")).toContainText("words");
+    await expect(page.locator(".cm-placeholder")).toHaveText("Start writing Markdown…");
+    await expect(page.locator(".md-rich")).toHaveAttribute("data-placeholder", "Start writing. Use the toolbar, Markdown shortcuts, or edit the source on the left.");
+    await expect(page.locator(".md-rich h1")).toHaveCount(0);
+    await expect(page.getByTestId("word-count")).toHaveText("0 words");
     await user.context.close();
   });
 
