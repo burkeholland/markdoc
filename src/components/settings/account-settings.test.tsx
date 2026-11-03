@@ -44,7 +44,9 @@ describe("the Account section of Settings (#2402)", () => {
     const user = userEvent.setup();
     fetchMock.mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
     render(<AccountSettings login="octocat" name="Mona" image={null} isDemo={false} />);
-    await user.click(screen.getByTestId("account-delete"));
+    const deleteButton = screen.getByTestId("account-delete");
+    expect(deleteButton).toHaveClass("btn-danger");
+    await user.click(deleteButton);
     const submit = await screen.findByTestId("delete-account-submit");
     expect(submit).toBeDisabled();
     await user.type(screen.getByLabelText(/to confirm/), "octo");
@@ -69,9 +71,12 @@ describe("the Account section of Settings (#2402)", () => {
     expect(clearAllLocalDocuments).not.toHaveBeenCalled();
   });
 
-  it("does not offer deletion for the shared demo account", () => {
+  it("shows deletion as neutral and unavailable for the shared demo account", () => {
     render(<AccountSettings login="markdoc-demo" name="Demo User" image={null} isDemo />);
-    expect(screen.getByTestId("account-delete")).toBeDisabled();
+    const deleteButton = screen.getByTestId("account-delete");
+    expect(deleteButton).toBeDisabled();
+    expect(deleteButton).toHaveClass("btn-outline");
+    expect(deleteButton).not.toHaveClass("btn-danger");
     expect(screen.getByText("The shared demo account cannot be deleted.")).toBeTruthy();
   });
 });
