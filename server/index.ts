@@ -37,6 +37,7 @@ import {
   installOtherUpgradeListeners,
   STARTING_UPGRADE_ANSWER,
 } from "./request-guards";
+import { sendStartingResponse } from "./starting-page";
 import { attachRequestLog } from "./request-log";
 import { serveStaticBrotli } from "./static-brotli";
 import { startGistAutoUpdateWorker, stopGistAutoUpdateWorker } from "@/server/gist-auto-update";
@@ -319,8 +320,7 @@ async function main() {
     attachRequestErrorGuards(req, res);
     setSecurityHeaders(req, res);
     if (requestHandler) return requestHandler(req, res);
-    res.statusCode = 503;
-    res.end("starting");
+    sendStartingResponse(req, res);
   });
   runtime.server = server;
   // Start accepting TCP connections before Next prepares. Reject upgrades promptly while starting:
