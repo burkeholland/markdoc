@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, apiErrorText, type ApiTokenDto } from "@/lib/api";
 
+export const API_TOKENS_POLL_MS = 5_000;
+
 export interface ApiTokens {
   /** null until the first response; a failed refresh keeps the last good list. */
   tokens: ApiTokenDto[] | null;
@@ -40,7 +42,27 @@ export function useApiTokens(active = true, initial: ApiTokenDto[] | null = null
   }, []);
 
   useEffect(() => {
-    if (active) void reload();
+    if (!active) return;
+    void reload();
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const poll = () => {
+      if (document.visibilityState === "visible") void reload();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void reload();
+        timer ??= setInterval(poll, API_TOKENS_POLL_MS);
+      } else if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    if (document.visibilityState === "visible") timer = setInterval(poll, API_TOKENS_POLL_MS);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      if (timer !== null) clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [active, reload]);
 
   const patch = useCallback((id: string, changes: Partial<ApiTokenDto>) => {

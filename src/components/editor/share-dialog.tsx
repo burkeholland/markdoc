@@ -297,19 +297,21 @@ export const ShareDialog = memo(function ShareDialog({
     const documentId = doc.id;
     const login = accessRequest.login.replace(/^@/, "");
     try {
-      if (grant) await api.documents.addCollaborator(documentId, login, "viewer");
-      if (accessRequest.notificationId) void markNotificationRead(accessRequest.notificationId);
-      if (currentDoc.current === documentId) onOpenChange(false);
-    } catch (e) {
-      if (currentDoc.current === documentId) {
-        const refusal = refusalOf(e);
-        if (refusal?.login.toLowerCase() === login.toLowerCase()) {
-          if (accessRequest.notificationId) void markNotificationRead(accessRequest.notificationId);
-          onOpenChange(false);
-        } else {
-          setRequestError(apiErrorText(e, "Could not grant access."));
+      if (grant) {
+        try {
+          await api.documents.addCollaborator(documentId, login, "viewer");
+        } catch (e) {
+          const refusal = refusalOf(e);
+          if (refusal?.login.toLowerCase() !== login.toLowerCase()) {
+            if (currentDoc.current === documentId) setRequestError(apiErrorText(e, "Could not grant access."));
+            return;
+          }
         }
       }
+      if (accessRequest.notificationId) await markNotificationRead(accessRequest.notificationId);
+      if (currentDoc.current === documentId) onOpenChange(false);
+    } catch (e) {
+      if (currentDoc.current === documentId) setRequestError(apiErrorText(e, "Could not mark this request as resolved."));
     } finally {
       resolvingRequest.current = false;
       setRequestBusy(false);

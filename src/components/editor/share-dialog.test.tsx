@@ -142,10 +142,30 @@ describe("ShareDialog", () => {
 
       await waitFor(() => expect(api.documents.addCollaborator).toHaveBeenCalledExactlyOnceWith("doc-1", "zoe", "viewer"));
       expect(notifications.markNotificationRead).toHaveBeenCalledExactlyOnceWith(request.notificationId);
-      expect(onOpenChange).toHaveBeenCalledWith(false);
+      await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
     });
 
-    it("denies by dismissing the request without adding the requester", () => {
+    it("waits for the notification read to finish before closing after a grant", async () => {
+      const read = deferred<void>();
+      const onOpenChange = vi.fn();
+      notifications.markNotificationRead.mockReturnValueOnce(read.promise);
+      renderShare({ accessRequest: request, onOpenChange });
+
+      fireEvent.click(screen.getByTestId("access-request-grant"));
+
+      await waitFor(() => expect(api.documents.addCollaborator).toHaveBeenCalledExactlyOnceWith("doc-1", "zoe", "viewer"));
+      expect(notifications.markNotificationRead).toHaveBeenCalledExactlyOnceWith(request.notificationId);
+      expect(onOpenChange).not.toHaveBeenCalled();
+
+      await act(async () => {
+        read.resolve(undefined);
+        await read.promise;
+      });
+
+      await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    });
+
+    it("denies by dismissing the request without adding the requester", async () => {
       const onOpenChange = vi.fn();
       renderShare({ accessRequest: request, onOpenChange });
 
@@ -153,7 +173,7 @@ describe("ShareDialog", () => {
 
       expect(notifications.markNotificationRead).toHaveBeenCalledExactlyOnceWith(request.notificationId);
       expect(api.documents.addCollaborator).not.toHaveBeenCalled();
-      expect(onOpenChange).toHaveBeenCalledWith(false);
+      await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
     });
 
     it("keeps a failed grant open and unread so it can be retried", async () => {
@@ -182,7 +202,7 @@ describe("ShareDialog", () => {
       fireEvent.click(screen.getByTestId("access-request-grant"));
 
       await waitFor(() => expect(notifications.markNotificationRead).toHaveBeenCalledExactlyOnceWith(request.notificationId));
-      expect(onOpenChange).toHaveBeenCalledWith(false);
+      await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
     });
 
     it("does not offer a decision to a non-owner", () => {
