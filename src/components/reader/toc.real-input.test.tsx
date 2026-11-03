@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReaderToc } from "./toc";
 
 const HEADINGS = [
@@ -9,7 +9,11 @@ const HEADINGS = [
   { id: "outro", level: 2, text: "Outro" },
 ];
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 function setup() {
   const view = render(
@@ -43,6 +47,37 @@ describe("ReaderToc real input", () => {
       "lg:overflow-y-auto",
       "lg:overscroll-contain",
     );
+  });
+
+  it("keeps the active entry visible by scrolling only the contents list", () => {
+    const rect = (top: number, bottom: number): DOMRect => ({
+      x: 0,
+      y: top,
+      width: 0,
+      height: bottom - top,
+      top,
+      right: 0,
+      bottom,
+      left: 0,
+      toJSON: () => ({}),
+    });
+    vi.stubGlobal("IntersectionObserver", undefined);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.id === "reader-toc-list") return rect(100, 300);
+      if (this.matches('a[data-testid="reader-toc-entry"][href="#outro"]')) return rect(320, 340);
+      if (this.matches('a[data-testid="reader-toc-entry"]')) return rect(120, 140);
+      return rect(0, 20);
+    });
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.id === "reader-toc-list" ? 200 : 0;
+    });
+    const articleScrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+
+    const { list, entries } = setup();
+
+    expect(entries[2]).toHaveAttribute("aria-current", "location");
+    expect(list.scrollTop).toBe(40);
+    expect(articleScrollTo).not.toHaveBeenCalled();
   });
 
   it("toggles the disclosure on a synthetic click", () => {

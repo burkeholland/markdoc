@@ -70,6 +70,20 @@ export function ReaderToc({ headings }: { headings: RenderedHeading[] }) {
   const toggleRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLOListElement>(null);
 
+  useEffect(() => {
+    const list = listRef.current;
+    const activeEntry = list?.querySelector<HTMLAnchorElement>('[aria-current="location"]');
+    if (!list || !activeEntry || list.clientHeight === 0) return;
+
+    const listRect = list.getBoundingClientRect();
+    const entryRect = activeEntry.getBoundingClientRect();
+    if (entryRect.top < listRect.top) {
+      list.scrollTop -= listRect.top - entryRect.top;
+    } else if (entryRect.bottom > listRect.bottom) {
+      list.scrollTop += entryRect.bottom - listRect.bottom;
+    }
+  }, [active]);
+
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (!open || event.altKey || event.ctrlKey || event.metaKey) return;
     const anchors = Array.from(listRef.current?.querySelectorAll<HTMLAnchorElement>("a[href]") ?? []);
