@@ -73,7 +73,7 @@ function ToolButton({
     <Tip label={label} shortcut={keys ? shortcut(keys) : undefined}>
       <button
         type="button"
-        className={cn("icon-btn", ariaDisabled && "cursor-default opacity-40 hover:bg-transparent hover:text-ink-2")}
+        className={cn("icon-btn tap-target relative", ariaDisabled && "cursor-default opacity-40 hover:bg-transparent hover:text-ink-2")}
         data-active={active ? "true" : undefined}
         disabled={disabled}
         aria-disabled={ariaDisabled || undefined}
@@ -258,7 +258,7 @@ export const Toolbar = memo(function Toolbar({
           <MenuTrigger asChild onKeyDown={onHeadingKeyDown}>
             <button
               type="button"
-              className="icon-btn w-auto gap-1 px-2.5 font-semibold"
+              className="icon-btn tap-target relative w-auto gap-1 px-2.5 font-semibold"
               disabled={dis}
               onMouseDown={(e) => e.preventDefault()}
               aria-label="Text style"
@@ -373,7 +373,7 @@ export const Toolbar = memo(function Toolbar({
         <Tip label="Add comment" shortcut={shortcut("Mod-Alt-M")}>
           <button
             type="button"
-            className={cn("btn btn-sm gap-1.5", format.hasSelection ? "btn-outline text-ink" : "btn-ghost text-ink-3")}
+            className={cn("btn btn-sm tap-target relative gap-1.5", format.hasSelection ? "btn-outline text-ink" : "btn-ghost text-ink-3")}
             onMouseDown={(e) => e.preventDefault()}
             onClick={run("comment", onComment)}
             data-testid="tb-comment"

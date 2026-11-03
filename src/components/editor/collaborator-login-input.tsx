@@ -74,6 +74,7 @@ export function CollaboratorLoginInput({
   onChange,
   exclude,
   onPick,
+  className,
   ref,
 }: {
   value: string;
@@ -82,6 +83,7 @@ export function CollaboratorLoginInput({
   exclude: string[];
   /** Called after a suggestion fills the box, so the dialog can move focus on (e.g. to the role select). */
   onPick?: (login: string) => void;
+  className?: string;
   ref?: Ref<CollaboratorLoginInputHandle>;
 }) {
   const listId = useId();
@@ -382,7 +384,7 @@ export function CollaboratorLoginInput({
       <UserPlus size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-4" />
       <input
         ref={inputRef}
-        className="input pl-9"
+        className={cn("input pl-9", className)}
         placeholder="GitHub handle, e.g. octocat"
         aria-label="GitHub handle"
         value={value}

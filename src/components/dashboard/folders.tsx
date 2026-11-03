@@ -616,23 +616,26 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
         className="max-h-[calc(100dvh-2rem)] overflow-y-auto"
       >
         <div className="flex flex-col gap-4" data-testid="folder-share-dialog">
-          <form className="flex gap-2" onSubmit={(event) => void add(event)}>
-            <CollaboratorLoginInput
-              ref={loginInput}
-              value={login}
-              onChange={(value) => {
-                setLogin(value);
-                setAddError(null);
-              }}
-              exclude={excluded}
-              onPick={focusRole}
-            />
-            <select ref={roleSelect} className="select" value={role} onChange={(event) => setRole(event.target.value as FolderRole)} aria-label="Role for new folder collaborator">
+          <form className="flex flex-wrap gap-2" onSubmit={(event) => void add(event)}>
+            <div className="min-w-[12rem] flex-1 basis-full sm:basis-0">
+              <CollaboratorLoginInput
+                ref={loginInput}
+                className="h-11 sm:h-9"
+                value={login}
+                onChange={(value) => {
+                  setLogin(value);
+                  setAddError(null);
+                }}
+                exclude={excluded}
+                onPick={focusRole}
+              />
+            </div>
+            <select ref={roleSelect} className="select h-11 min-w-0 flex-1 sm:h-9 sm:flex-none" value={role} onChange={(event) => setRole(event.target.value as FolderRole)} aria-label="Role for new folder collaborator">
               {FOLDER_ROLE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
-            <button type="submit" className="btn btn-primary" disabled={!isValidLogin(login) || adding} data-testid="folder-share-add">
+            <button type="submit" className="btn btn-primary h-11 min-w-20 sm:h-9 sm:min-w-0" disabled={!isValidLogin(login) || adding} data-testid="folder-share-add">
               {adding ? "Adding…" : "Add"}
             </button>
           </form>
@@ -644,7 +647,7 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
             ) : loadError ? (
               <div className="rounded-lg bg-red-50 px-3 py-3 text-sm text-danger dark:bg-red-950/40" role="alert">
                 {loadError}
-                <button type="button" className="btn btn-outline btn-sm ml-2" onClick={() => setRetry((value) => value + 1)}>Retry</button>
+                <button type="button" className="btn btn-outline btn-sm ml-2 h-11 tap-target relative sm:h-8" onClick={() => setRetry((value) => value + 1)}>Retry</button>
               </div>
             ) : (
               <ul className="flex flex-col divide-y divide-line rounded-xl border border-line">
@@ -666,7 +669,7 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
                       <div className="truncate text-xs text-ink-3">@{person.login}</div>
                     </div>
                     <select
-                      className="select h-8 text-xs"
+                      className="select h-11 text-xs sm:h-8"
                       value={person.role}
                       aria-label={`Role for ${person.login}`}
                       aria-disabled={busyLogins.has(person.login) || undefined}
@@ -678,7 +681,7 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
                     </select>
                     <button
                       type="button"
-                      className="icon-btn h-8 w-8 text-ink-3 hover:text-danger"
+                      className="icon-btn tap-target relative h-8 w-8 text-ink-3 hover:text-danger"
                       aria-label={`Remove ${person.login}`}
                       aria-disabled={busyLogins.has(person.login) || undefined}
                       onClick={() => void remove(person)}
@@ -693,7 +696,7 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
             {actionError && <p className="mt-2 text-sm text-danger" role="alert">{actionError}</p>}
           </section>
           <div className="flex justify-end">
-            <button type="button" className="btn btn-primary" onClick={() => onOpenChange(false)}>Done</button>
+            <button type="button" className="btn btn-primary h-11 tap-target relative sm:h-9" onClick={() => onOpenChange(false)}>Done</button>
           </div>
         </div>
       </DialogContent>
