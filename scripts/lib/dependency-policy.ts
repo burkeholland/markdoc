@@ -9,15 +9,16 @@ export const AUDIT_ARGUMENTS = ["audit", "--package-lock-only", "--json"] as con
 export const MAX_AUDIT_JSON_BYTES = 1024 * 1024;
 export const MAX_AUDIT_AGE_MS = 5 * 60 * 1000;
 export const MAX_REPORTED_PACKAGES = 25;
-// Two full attempts plus the pause stay inside the release's 300 second preflight bound.
+// Two full attempts plus the longest pause stay inside the release's 300 second preflight bound.
 export const AUDIT_TIMEOUT_MS = 120_000;
 export const MAX_AUDIT_ATTEMPTS = 2;
 export const AUDIT_RETRY_DELAY_MS = 2_000;
+const AUDIT_RATE_LIMIT_RETRY_DELAY_MS = 10_000;
 export const MAX_FAILURE_STDERR_BYTES = 8 * 1024;
 // Every command_failed reason matches this, and deploy/release-vm.ps1 shows a reason only when it matches the same
 // pattern. Each part is fixed text, a number, a signal name or an error code, so no other text from npm fits.
 export const FAILURE_REASON_PATTERN =
-  /^npm audit (?:exit (?:0|[1-9][0-9]{0,9})|ended by signal SIG[A-Z0-9]{1,12}|ended without an exit code|timed out|could not start(?: \(E[A-Z0-9_]{1,24}\))?)(?:, npm code E[A-Z0-9_]{1,24})?(?: \(attempt [1-9] of [1-9]\))?$/;
+  /^npm audit (?:exit (?:0|[1-9][0-9]{0,9})|HTTP 429|ended by signal SIG[A-Z0-9]{1,12}|ended without an exit code|timed out|could not start(?: \(E[A-Z0-9_]{1,24}\))?)(?:, npm code E[A-Z0-9_]{1,24})?(?: \(attempt [1-9] of [1-9]\))?$/;
 
 const ERROR_CODE_PATTERN = /^E[A-Z0-9_]{1,24}$/;
 const NPM_ERROR_CODE_LINE_PATTERN = /^npm (?:error|ERR!) code (E[A-Z0-9_]{1,24})$/;
@@ -640,6 +641,28 @@ function parseNpmErrorJson(stdout: string): { code?: string } | null {
   return { code: typeof value.error.code === "string" ? value.error.code : undefined };
 }
 
+// Azure Artifacts can return a fetch-error envelope for a throttled audit instead of npm's usual { error: ... } JSON.
+// Retain only the fixed HTTP status; never copy its message, URI, headers or response body into the report.
+function npmAuditRateLimitStatus(stdout: string): 429 | undefined {
+  if (Buffer.byteLength(stdout, "utf8") > MAX_AUDIT_JSON_BYTES) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  if (
+    !isRecord(value)
+    || value.method !== "POST"
+    || typeof value.uri !== "string"
+    || !isRecord(value.headers)
+    || !isRecord(value.error)
+    || typeof value.message !== "string"
+    || !/^429 Too Many Requests - POST https:\/\/\S+(?:\s|$)/.test(value.message)
+  ) return undefined;
+  return 429;
+}
+
 // Built only from fixed text, the exit code, a signal name, error codes and the attempt number. No other text from
 // npm is used, so nothing npm printed (tokens, URLs, paths) can reach the report.
 function commandFailureReason(failure: { execution?: AuditExecutionResult; startError?: unknown }, attempt: number): string {
@@ -653,7 +676,9 @@ function commandFailureReason(failure: { execution?: AuditExecutionResult; start
   } else if (execution.stopped === "timeout") {
     reason = "npm audit timed out";
   } else if (isExitCode(execution.exitCode)) {
-    reason = `npm audit exit ${execution.exitCode}`;
+    reason = npmAuditRateLimitStatus(execution.stdout) === 429
+      ? "npm audit HTTP 429"
+      : `npm audit exit ${execution.exitCode}`;
   } else if (typeof execution.signal === "string" && SIGNAL_PATTERN.test(execution.signal)) {
     reason = `npm audit ended by signal ${execution.signal}`;
   } else {
@@ -873,6 +898,11 @@ function assessAuditExecution(
   });
   const malformed: AuditAssessment = { report: dependencyPolicyFailure("malformed_audit"), retryable: false };
   if (execution.stopped === "output_limit") return malformed;
+  if (
+    execution.stopped !== "timeout"
+    && execution.exitCode !== 0
+    && npmAuditRateLimitStatus(execution.stdout) === 429
+  ) return commandFailed(true);
   if (execution.stdout.length === 0) return execution.exitCode === 0 ? malformed : commandFailed(true);
   if (parseNpmErrorJson(execution.stdout)) return execution.exitCode === 0 ? malformed : commandFailed(true);
   const audit = parseAuditJson(execution.stdout, lock);
@@ -960,7 +990,10 @@ export async function runDependencyAudit(options: AcceptanceOptions & {
       : { report: commandFailedReport(commandFailureReason({ startError }, attempt)), retryable: true };
     if (!assessment.retryable || attempt >= MAX_AUDIT_ATTEMPTS) return assessment.report;
     options.onRetry?.(assessment.report.reason ?? "");
-    await sleep(options.retryDelayMs ?? AUDIT_RETRY_DELAY_MS);
+    const retryDelayMs = npmAuditRateLimitStatus(execution?.stdout ?? "") === 429
+      ? AUDIT_RATE_LIMIT_RETRY_DELAY_MS
+      : AUDIT_RETRY_DELAY_MS;
+    await sleep(options.retryDelayMs ?? retryDelayMs);
   }
 }
 

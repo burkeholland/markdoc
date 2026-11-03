@@ -1661,6 +1661,53 @@ describe("accepted advisories (#2260)", () => {
     }
   });
 
+  it("accepts the listed minimatch advisory when npm reports a wildcard range", () => {
+    const listed = ACCEPTED_ADVISORIES.find((item) =>
+      item.advisory === "GHSA-g3hv-75wg-m249" && item.package === "minimatch" && item.version === "3.1.5");
+    if (!listed) throw new Error("the listed minimatch advisory fixture is missing");
+    const lock = packageLock([{ name: "minimatch", version: "3.1.5", flags: { dev: true } }]);
+    const report = evaluateDependencyPolicy({
+      expectedLockSha256: packageLockSha256(lock),
+      packageLockText: lock,
+      execution: {
+        exitCode: 1,
+        stdout: JSON.stringify({
+          auditReportVersion: 2,
+          vulnerabilities: {
+            minimatch: {
+              name: "minimatch",
+              severity: "high",
+              isDirect: false,
+              via: [{
+                source: 1,
+                name: "minimatch",
+                dependency: "minimatch",
+                title: "Test advisory",
+                url: `https://github.com/advisories/${listed.advisory}`,
+                severity: "high",
+                range: "*",
+              }],
+              effects: [],
+              range: "*",
+              nodes: ["node_modules/minimatch"],
+              fixAvailable: false,
+            },
+          },
+          metadata: {
+            vulnerabilities: { info: 0, low: 0, moderate: 0, high: 1, critical: 0, total: 1 },
+            dependencies: { prod: 0, dev: 1, optional: 0, peer: 0, peerOptional: 0, total: 1 },
+          },
+        }),
+      },
+      now: Date.parse("2026-11-03T00:00:00.000Z"),
+      acceptedAdvisories: [listed],
+    });
+    expect(report).toMatchObject({
+      status: "accepted",
+      exceptions: [{ advisory: listed.advisory, package: "minimatch", version: "3.1.5", expires: "2026-11-14" }],
+    });
+  });
+
   // The table in docs/vm-hosting.md is where a person reads which advisories a release accepts, so it must hold the
   // real list row for row: an entry cannot be added, changed or brought back without its documented row. The test
   // reads no clock and needs no change when an entry and its row are added or deleted together.
@@ -3070,6 +3117,23 @@ describe("command failure reason", () => {
     expect(releaseScript).toContain(`$reason -cmatch '\\A${source.slice(1, -1)}\\z'`);
   });
 
+  it("documents the bounded registry rate-limit retry in both release guides", async () => {
+    const guides = await Promise.all([
+      fs.readFile(path.resolve("README.md"), "utf8"),
+      fs.readFile(path.resolve("docs", "vm-hosting.md"), "utf8"),
+    ]);
+    const retryPolicy =
+      "The preflight retries once after 10 seconds for the structured Azure Artifacts `429 Too Many Requests` response, "
+      + "or after 2 seconds when an attempt printed nothing on stdout or exactly npm's string-only `{\"error\":{...}}` "
+      + "object, and ended with an error exit or signal, a failed start or a timeout. A rate-limit response is never "
+      + "accepted as audit evidence; the retry must return a fresh, complete report.";
+    for (const guide of guides) {
+      const normalized = guide.replace(/\s+/g, " ");
+      expect(normalized).toContain(retryPolicy);
+      expect(normalized).toContain("the attempt ended (HTTP 429, exit code, signal name");
+    }
+  });
+
   it("names a start failure by its error code only", async () => {
     const error = Object.assign(new Error(`spawn failed near ${FAKE_NPM_TOKEN}`), { code: "ENOENT" });
     const { report } = await auditWith(vi.fn<AuditExecutor>().mockRejectedValue(error));
@@ -3226,6 +3290,16 @@ describe("npm error-only stdout (#2202)", () => {
   const errorOnly = (code = "ENOTFOUND") => JSON.stringify({
     error: { code, summary: LETTERS_ONLY_PAT, detail: `${BASE64_AUTH}\n${BASE64_PASSWORD}` },
   });
+  const rateLimitError = () => {
+    const uri = `https://registry.invalid/-/npm/v1/security/audits?token=${FAKE_NPM_TOKEN}`;
+    return JSON.stringify({
+      message: `429 Too Many Requests - POST ${uri} - Request was blocked`,
+      method: "POST",
+      uri,
+      headers: { "content-type": ["application/json"] },
+      error: { summary: "RequestBlockedException", detail: FAKE_NPM_TOKEN },
+    });
+  };
 
   async function fakeNpmAudit(
     responses: AuditExecutionResult[],
@@ -3260,6 +3334,37 @@ describe("npm error-only stdout (#2202)", () => {
     }
     return { calls, exitCode, printed, output };
   }
+
+  it("retries a registry 429, then accepts only the returned audit report", async () => {
+    const result = await fakeNpmAudit([
+      { exitCode: 1, stdout: rateLimitError() },
+      { exitCode: 0, stdout: auditJson() },
+    ]);
+    expect(result.calls).toBe(2);
+    expect(result.exitCode).toBe(0);
+    expect(result.printed).toBe(PASS_OUTPUT);
+    expect(result.output.warn).toHaveBeenCalledExactlyOnceWith(
+      "Dependency preflight audit failed (npm audit HTTP 429); retrying once.",
+    );
+    expect([result.printed, ...result.output.warn.mock.calls.map(([message]) => message)].join("\n"))
+      .not.toContain(FAKE_NPM_TOKEN);
+  });
+
+  it("fails closed when the registry remains rate limited", async () => {
+    const result = await fakeNpmAudit([{ exitCode: 1, stdout: rateLimitError() }]);
+    expect(result.calls).toBe(2);
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.printed)).toEqual({
+      status: "command_failed",
+      counts: ZERO_REPORT_COUNTS,
+      packages: [],
+      reason: "npm audit HTTP 429 (attempt 2 of 2)",
+    });
+    expect(result.printed).not.toContain(FAKE_NPM_TOKEN);
+    expect(result.output.warn).toHaveBeenCalledExactlyOnceWith(
+      "Dependency preflight audit failed (npm audit HTTP 429); retrying once.",
+    );
+  });
 
   it("retries ENOTFOUND, then returns the exact pass report", async () => {
     const result = await fakeNpmAudit([

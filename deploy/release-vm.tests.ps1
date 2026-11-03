@@ -258,6 +258,14 @@ foreach ($bad in @(@('Other', ''), @('Enterprise', 'http://markdoc.app'), @('Ent
     Assert-Equal 2 $_.Exception.Data['ReleaseExitCode'] 'Invalid target input must exit 2 before any Azure call.'
   }
 }
+$rateLimitedFailure = [InvalidOperationException]::new('Native output withheld.')
+$rateLimitedFailure.Data['ReleaseFailureOutput'] = '{"status":"command_failed","reason":"npm audit HTTP 429"}'
+Assert-Equal ' (status command_failed; reason: npm audit HTTP 429)' (Get-ReleaseDependencyFailureDetail $rateLimitedFailure) `
+  'The release may report only the allowlisted registry rate-limit status.'
+$unrecognizedFailure = [InvalidOperationException]::new('Native output withheld.')
+$unrecognizedFailure.Data['ReleaseFailureOutput'] = '{"status":"command_failed","reason":"npm audit HTTP 429 with extra detail"}'
+Assert-Equal '' (Get-ReleaseDependencyFailureDetail $unrecognizedFailure) `
+  'The release must withhold every unrecognized audit failure reason.'
 
 # Exercise the real native boundary with harmless local children, never Azure.
 $native = ${function:Invoke-ReleaseNative}
