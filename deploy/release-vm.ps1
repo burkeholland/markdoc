@@ -527,7 +527,7 @@ function Get-ReleaseDependencyFailureDetail([Exception]$Failure) {
     if ($status -cne 'command_failed') { return " (status $status)" }
     $reason = $report['reason']
     if ($reason -is [string] -and
-        $reason -cmatch '\Anpm audit (?:exit (?:0|[1-9][0-9]{0,9})|ended by signal SIG[A-Z0-9]{1,12}|ended without an exit code|timed out|could not start(?: \(E[A-Z0-9_]{1,24}\))?)(?:, npm code E[A-Z0-9_]{1,24})?(?: \(attempt [1-9] of [1-9]\))?\z') {
+        $reason -cmatch '\Anpm audit (?:exit (?:0|[1-9][0-9]{0,9})|HTTP 429|ended by signal SIG[A-Z0-9]{1,12}|ended without an exit code|timed out|could not start(?: \(E[A-Z0-9_]{1,24}\))?)(?:, npm code E[A-Z0-9_]{1,24})?(?: \(attempt [1-9] of [1-9]\))?\z') {
       return " (status $status; reason: $reason)"
     }
     return ''
