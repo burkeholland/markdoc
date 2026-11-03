@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
-import type { Page } from "@playwright/test";
-import { budgetMs, codeText, createDocument, focusRichEnd, openDocument, richText, shareWith, signIn } from "./helpers";
+import type { Browser, Page } from "@playwright/test";
+import { budgetMs, codeText, createDocument, focusCodeEnd, focusRichEnd, openDocument, richText, shareWith, signIn, waitForHydration } from "./helpers";
 import { CONTENT_AUTOSAVE_IDLE_MS } from "../src/lib/document-persistence";
 
 /** 40 letters at 120 ms each: about five seconds of typing at a normal pace. */
@@ -44,11 +44,31 @@ async function observePill(page: Page) {
 const pillChanges = (page: Page) => page.evaluate(() => (window as PillWindow).__pillChanges ?? []);
 const now = (page: Page) => page.evaluate(() => performance.now());
 
+async function setPageVisibility(page: Page, state: "visible" | "hidden") {
+  await page.evaluate((next) => {
+    if (document.visibilityState === next) return;
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => next });
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => next === "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, state);
+}
+
 async function storedAt(page: Page, docId: string): Promise<string> {
   const response = await page.request.get(`/api/documents/${docId}`);
   expect(response.ok()).toBe(true);
   const body = await response.json() as { document: { updatedAt: string } };
   return body.document.updatedAt;
+}
+
+async function signInDemo(browser: Browser) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto("/login");
+  await waitForHydration(page);
+  await page.getByTestId("demo-signin").click();
+  await page.waitForURL((url) => url.pathname === "/");
+  await page.waitForLoadState("networkidle");
+  return { context, page };
 }
 
 test("continuous typing stays dirty until actual trailing-idle persistence", async ({ browser }) => {
@@ -125,6 +145,56 @@ test("another user receives edits before the typing burst is persisted", async (
   } finally {
     await alice.context.close();
     await bob.context.close();
+  }
+});
+
+test("a passive same-account tab reports a remote edit as saved", async ({ browser }) => {
+  test.skip(Boolean(process.env.PROD_BASE_URL), "Requires the local demo account seeded by the E2E server");
+  const account = await signInDemo(browser);
+  const secondTab = await account.context.newPage();
+  try {
+    const welcome = account.page.getByTestId("document-card").filter({ hasText: "Welcome to Markdoc" });
+    await expect(welcome).toHaveCount(1);
+    const href = await welcome.getAttribute("href");
+    if (!href?.startsWith("/d/")) throw new Error("Demo Welcome document link was not found");
+    const docId = href.slice("/d/".length);
+    await account.page.setViewportSize({ width: 780, height: 480 });
+    await secondTab.setViewportSize({ width: 780, height: 480 });
+    await Promise.all([openDocument(account.page, docId), openDocument(secondTab, docId)]);
+    const before = await storedAt(account.page, docId);
+    await focusCodeEnd(secondTab);
+    await observePill(account.page);
+    await secondTab.bringToFront();
+    await setPageVisibility(account.page, "hidden");
+    expect(await account.page.evaluate(() => document.visibilityState)).toBe("hidden");
+
+    const remoteParagraph = "This paragraph was added from the other tab.";
+    await secondTab.keyboard.press("Enter");
+    await secondTab.keyboard.press("Enter");
+    await secondTab.keyboard.insertText(remoteParagraph);
+    await expect.poll(() => codeText(account.page)).toContain(remoteParagraph);
+    await expect(secondTab.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
+    expect(await storedAt(account.page, docId)).not.toBe(before);
+    await account.page.bringToFront();
+    await setPageVisibility(account.page, "visible");
+    await expect(account.page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
+    await expect(account.page.getByTestId("save-state")).toHaveAttribute("data-live-state", "saved");
+    await expect(account.page.getByTestId("save-state")).toContainText("Saved");
+    const states = (await pillChanges(account.page))
+      .filter((change) => change.attr === "data-state")
+      .map((change) => change.value);
+    expect(states).toContain("pending");
+    expect(states.at(-1)).toBe("saved");
+
+    await account.page.locator(".cm-scroller").evaluate((el) => { el.scrollTop = el.scrollHeight; });
+    await account.page.locator(".md-rich").evaluate((el) => { el.scrollTop = el.scrollHeight; });
+    await account.page.screenshot({ path: "test-results/same-account-passive-tab-saved.png" });
+    await secondTab.bringToFront();
+    await secondTab.locator(".cm-scroller").evaluate((el) => { el.scrollTop = el.scrollHeight; });
+    await secondTab.locator(".md-rich").evaluate((el) => { el.scrollTop = el.scrollHeight; });
+    await secondTab.screenshot({ path: "test-results/same-account-active-tab-saved.png" });
+  } finally {
+    await account.context.close();
   }
 });
 
