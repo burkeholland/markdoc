@@ -74,7 +74,6 @@ require_image_space() {
 retain_release_images() {
   local current_id="$1"
   local previous_id="$2"
-  local protected_id='sha256:21546bc69066d93d3c7844af139e7925b3b838c4c63bb6fd87ae840abfb7c313'
   local ids
   local candidate
   local references
@@ -87,14 +86,14 @@ retain_release_images() {
   [[ "$current_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
   [[ "$previous_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
   ids="$(timeout 15s docker images --no-trunc --format '{{.ID}}' | sort -u)" || return 1
-  for kept in "$current_id" "$previous_id" "$protected_id"; do
+  for kept in "$current_id" "$previous_id"; do
     grep -Fxq "$kept" <<<"$ids" || return 1
   done
   for candidate in $ids; do
     [ "$SECONDS" -lt "$deadline" ] || return 1
     [[ "$candidate" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
     case "$candidate" in
-      "$current_id"|"$previous_id"|"$protected_id") continue ;;
+      "$current_id"|"$previous_id") continue ;;
     esac
     references="$(timeout 15s docker image inspect \
       --format '{{range .RepoDigests}}{{println .}}{{end}}{{range .RepoTags}}{{println .}}{{end}}' \

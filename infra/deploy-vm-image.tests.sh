@@ -13,7 +13,6 @@ previous="sha256:$(printf 'b%.0s' {1..64})"
 old="sha256:$(printf 'c%.0s' {1..64})"
 used="sha256:$(printf 'd%.0s' {1..64})"
 other="sha256:$(printf 'e%.0s' {1..64})"
-protected='sha256:21546bc69066d93d3c7844af139e7925b3b838c4c63bb6fd87ae840abfb7c313'
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -38,7 +37,7 @@ docker() {
   printf '%s\n' "$*" >>"$test_dir/events"
   case "$1 $2" in
     'images --no-trunc')
-      printf '%s\n' "$current" "$previous" "$old" "$used" "$other" "$protected"
+      printf '%s\n' "$current" "$previous" "$old" "$used" "$other"
       ;;
     'image inspect')
       if [[ "$*" == *'{{.Id}}'* ]]; then
@@ -47,6 +46,7 @@ docker() {
         printf '%s\n' "${TEST_PREVIOUS_ID:-$previous}"
         return 0
       fi
+      # Markdoc inspections return only RepoDigests; their RepoTags are empty.
       case "${!#}" in
         "$other") printf 'another.example.test/unrelated:latest\n' ;;
         *) printf '%s/markdoc@%s\n' "$registry" "${!#}" ;;
@@ -72,7 +72,7 @@ docker() {
   esac
 }
 export -f df docker fail
-export test_dir current previous old used other protected registry
+export test_dir current previous old used other registry
 mkdir "$test_dir/bin"
 for command in df docker; do
   printf '#!/usr/bin/env bash\n%s "$@"\n' "$command" >"$test_dir/bin/$command"
@@ -145,7 +145,7 @@ assert_line "$test_dir/space" \
 
 : >"$test_dir/events"
 retain_release_images "$current" "$previous"
-assert_line "$test_dir/events" "rmi $old" 'unused old Markdoc image was not removed'
+assert_line "$test_dir/events" "rmi $old" 'untagged old Markdoc image was not removed by its repository digest'
 test "$(grep -c '^rmi ' "$test_dir/events")" = 1 ||
   fail 'retention removed a kept, used, or unrelated image'
 grep -Eq 'rmi .* (-f|--force)|system prune|volume prune' "$test_dir/events" &&
