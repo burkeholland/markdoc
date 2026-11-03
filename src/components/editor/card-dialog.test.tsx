@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useState } from "react";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CardDialog } from "./card-dialog";
@@ -43,6 +43,7 @@ describe("Insert: Video or post from a link (#2317)", () => {
     expect(field.getAttribute("aria-invalid")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByRole("button", { name: "Insert" }).getAttribute("type")).toBe("submit");
+    expect(screen.getByRole("button", { name: "Insert" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Cancel" }).getAttribute("type")).toBe("button");
     // Nothing in the dialog points at another site.
     expect(dialog.querySelectorAll("iframe, script, img, [src], a[href]")).toHaveLength(0);
@@ -69,17 +70,31 @@ describe("Insert: Video or post from a link (#2317)", () => {
     expect(onSubmit).toHaveBeenCalledWith(TWEET);
   });
 
+  it("enables Insert only after a supported link is entered", async () => {
+    const { user, field } = await openDialog();
+    const insert = screen.getByRole("button", { name: "Insert" });
+    expect(insert).toBeDisabled();
+
+    await user.type(field, "https://example.com/watch?v=abc");
+    expect(insert).toBeDisabled();
+
+    await user.clear(field);
+    await user.type(field, VIDEO);
+    expect(insert).toBeEnabled();
+  });
+
   it("a link that is not on the list is refused with a sentence, the dialog stays open and nothing is handed over", async () => {
     const { user, onSubmit, field } = await openDialog();
     for (const link of ["https://evil.example/watch?v=dQw4w9WgXcQ", "https://x.com.evil.example/jack/status/20", "http://x.com/jack/status/20", "javascript:alert(1)", "x.com/jack/status/20", `${TWEET} and more`]) {
       await user.clear(field);
       await user.type(field, link);
-      await user.keyboard("{Enter}");
+      fireEvent.submit(field.closest("form")!);
       const alert = await screen.findByRole("alert");
       expect(alert.textContent, link).toBe("Markdoc cannot show this link as a card. Use the link to one video or post on YouTube, X, Facebook, LinkedIn, Vimeo, Loom or TikTok, starting with https://.");
       expect(field.getAttribute("aria-invalid"), link).toBe("true");
       expect(field.getAttribute("aria-describedby"), link).toBe(alert.id);
       expect(screen.getByRole("dialog")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Insert" })).toBeDisabled();
     }
     expect(onSubmit).not.toHaveBeenCalled();
     // Typing again takes the message away.
@@ -89,8 +104,9 @@ describe("Insert: Video or post from a link (#2317)", () => {
   });
 
   it("an empty field asks for a link", async () => {
-    const { user, onSubmit } = await openDialog();
-    await user.click(screen.getByRole("button", { name: "Insert" }));
+    const { onSubmit, field } = await openDialog();
+    expect(screen.getByRole("button", { name: "Insert" })).toBeDisabled();
+    fireEvent.submit(field.closest("form")!);
     expect((await screen.findByRole("alert")).textContent).toBe("Paste a link first.");
     expect(onSubmit).not.toHaveBeenCalled();
   });

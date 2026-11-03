@@ -37,12 +37,12 @@ export class RateLimitError extends HttpError {
  * Resolve a bearer token, counting misses per IP: after too many wrong tokens from one address the
  * lookup is refused with `429` before touching the database.
  */
-export async function resolveBearer(token: string, h: Headers) {
+export async function resolveBearer(token: string, h: Headers, options: { recordUse?: boolean } = {}) {
   if (rateLimitingEnabled()) {
     const budget = failedAuthAllowed(h);
     if (!budget.ok) throw new RateLimitError("Too many failed authentication attempts.", budget);
   }
-  const actor = await resolveApiToken(token);
+  const actor = await resolveApiToken(token, options);
   if (!actor && rateLimitingEnabled()) recordFailedAuth(h);
   return actor;
 }
@@ -251,7 +251,7 @@ export async function rateLimitCaller(h: Headers): Promise<string> {
     if (authorization?.toLowerCase().startsWith("bearer ")) {
       const token = authorization.slice(7).trim();
       if (looksLikeApiToken(token)) {
-        const actor = failedAuthAllowed(h).ok ? await resolveApiToken(token) : null;
+        const actor = failedAuthAllowed(h).ok ? await resolveApiToken(token, { recordUse: false }) : null;
         return actor ? verifiedKey("tok", actor.tokenId) : ipKey(h);
       }
     }
