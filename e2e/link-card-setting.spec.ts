@@ -150,18 +150,20 @@ test.describe("link cards: the setting and Insert (#2317)", () => {
     await button.click();
     await expect(dialog(page)).toBeVisible();
     const field = dialog(page).getByRole("textbox", { name: "Link" });
+    const insert = dialog(page).getByRole("button", { name: "Insert" });
     await expect(field).toBeFocused();
     await expect.poll(() => codeText(page)).toBe("Intro");
 
-    // A link that is not on the list is refused in words, and the dialog stays.
+    // A link that is not on the list cannot be inserted.
     await page.keyboard.type("https://x.com.evil.example/jack/status/20");
-    await page.keyboard.press("Enter");
-    await expect(dialog(page).getByRole("alert")).toHaveText("Markdoc cannot show this link as a card. Use the link to one video or post on YouTube or X, starting with https://.");
-    await expect(field).toHaveAttribute("aria-invalid", "true");
+    await expect(insert).toBeDisabled();
+    await expect(dialog(page).getByRole("alert")).toHaveCount(0);
     await expect(cards(page)).toHaveCount(0);
+    if (process.env.SHOT_DIR) await dialog(page).screenshot({ path: `${process.env.SHOT_DIR}/unsupported-link-insert-disabled.png` });
 
     await field.fill(VIDEO);
     await expect(dialog(page).getByRole("alert")).toHaveCount(0);
+    await expect(insert).toBeEnabled();
     await page.keyboard.press("Enter");
     await expect(dialog(page)).toHaveCount(0);
     await expect(cards(page)).toHaveCount(1);

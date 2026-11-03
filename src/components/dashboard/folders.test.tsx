@@ -182,6 +182,34 @@ describe("the folder rail", () => {
     expect(screen.queryByText("@bob")).not.toBeInTheDocument();
   });
 
+  it("clears a pending invitation note after removing that collaborator and reopening the dialog", async () => {
+    const login = "dogfood-no-such-user-918273";
+    const note = `@${login} gets access on their first sign-in. Check the spelling.`;
+    const owner = { login: "owner", name: "Owner", image: null };
+    listFolders.mockResolvedValue({ folders: [folder("f1", "Recipes")] });
+    listFolderCollaborators
+      .mockResolvedValueOnce({ owner, collaborators: [] })
+      .mockResolvedValueOnce({ owner, collaborators: [person(login, "editor")] });
+    addFolderCollaborator.mockResolvedValue({ ok: true, login, role: "editor", pending: true });
+    await mount([]);
+
+    openMenu(screen.getByTestId("folder-menu"));
+    fireEvent.click(await screen.findByText("Share…"));
+    const shareDialog = await screen.findByTestId("folder-share-dialog");
+    fireEvent.change(within(shareDialog).getByRole("combobox", { name: "GitHub handle" }), { target: { value: login } });
+    fireEvent.click(within(shareDialog).getByRole("button", { name: "Add" }));
+    expect(await screen.findByText(note)).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: `Remove ${login}` }));
+    await waitFor(() => expect(screen.queryByText(note)).not.toBeInTheDocument());
+
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByTestId("folder-share-dialog")).not.toBeInTheDocument());
+    openMenu(screen.getByTestId("folder-menu"));
+    fireEvent.click(await screen.findByText("Share…"));
+    expect(within(await screen.findByTestId("folder-share-dialog")).queryByText(note)).not.toBeInTheDocument();
+  });
+
   it("counts only the owner's unfiled documents under 'Not in a folder'", async () => {
     await mount([
       doc("mine-unfiled", "Mine"),

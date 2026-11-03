@@ -217,6 +217,34 @@ test.describe("folders", () => {
     await expect(page.getByTestId("trash-card").filter({ hasText: "Doomed" })).toBeVisible();
   });
 
+  test("removing a pending folder invite clears its message when the dialog is reopened", async () => {
+    const page = user.page;
+    const login = uniqueLogin("no-such-user");
+    const folderName = "Pending invite";
+    const note = `@${login} gets access on their first sign-in. Check the spelling.`;
+    await goHome(page);
+    await newFolder(page, folderName);
+
+    await page.getByTestId("folder-menu").click();
+    await page.getByRole("menuitem", { name: "Share…" }).click();
+    const dialog = page.getByTestId("folder-share-dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.getByTestId("share-login").fill(login);
+    await dialog.getByTestId("folder-share-add").click();
+    await expect(dialog.getByText(note)).toBeVisible();
+    await dialog.getByRole("button", { name: `Remove ${login}` }).click();
+    await expect(dialog.getByText(note)).toHaveCount(0);
+    await expect(dialog.getByText("No one else has access yet.")).toBeVisible();
+
+    await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
+    await expect(dialog).toHaveCount(0);
+    await page.getByTestId("folder-menu").click();
+    await page.getByRole("menuitem", { name: "Share…" }).click();
+    await expect(dialog.getByText(note)).toHaveCount(0);
+    await expect(dialog.getByText("No one else has access yet.")).toBeVisible();
+    if (process.env.SHOT_DIR) await page.getByRole("dialog").screenshot({ path: `${process.env.SHOT_DIR}/folder-share-after-removal.png` });
+  });
+
   test("shares a folder role with every current and future document", async ({ browser }) => {
     const page = user.page;
     const recipient = await signIn(browser, uniqueLogin("folder-recipient"));

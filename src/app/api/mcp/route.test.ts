@@ -1,6 +1,8 @@
 import { createServer, type Server } from "node:http";
 import { describe, expect, it, beforeAll, vi } from "vitest";
 
+import { hasConnected } from "@/lib/agent-keys";
+
 process.env.PGLITE_DATA_DIR = "memory://";
 process.env.AUTH_SECRET = "test-secret-test-secret-test-secret";
 delete process.env.DATABASE_URL;
@@ -107,6 +109,24 @@ describe("/api/mcp records MCP activity on the token (Settings checklist)", () =
     } finally {
       sessionUser = null;
     }
+  });
+
+  it("does not mark an authenticated tools/list request as connected when HTTP negotiation rejects it", async () => {
+    const fresh = await createApiToken(userId, "Rejected client", 30);
+    const res = await call("POST", {
+      headers: { "Content-Type": "application/json", Accept: "application/json", ...bearer(fresh.token) },
+      body: rpc("tools/list"),
+    });
+    expect(res.status).toBe(406);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const row = (await listApiTokens(userId)).find((t) => t.id === fresh.id)!;
+    expect(row.lastMcpSeenAt).toBeNull();
+    expect(row.lastUsedAt).toBeNull();
+    expect(hasConnected({
+      lastMcpSeenAt: row.lastMcpSeenAt?.toISOString() ?? null,
+      lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+    })).toBe(false);
   });
 });
 

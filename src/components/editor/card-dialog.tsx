@@ -35,6 +35,7 @@ export const CardDialog = memo(function CardDialog({ open, onOpenChange, onSubmi
   const accepted = useRef<string | null>(null);
   const sites = cardProviderList();
   const link = draft.link.trim();
+  const card = matchLinkCard(link);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -52,7 +53,7 @@ export const CardDialog = memo(function CardDialog({ open, onOpenChange, onSubmi
           noValidate
           onSubmit={(event) => {
             event.preventDefault();
-            if (!matchLinkCard(link)) {
+            if (!card) {
               setDraft({ ...draft, refused: true });
               return;
             }
@@ -86,7 +87,7 @@ export const CardDialog = memo(function CardDialog({ open, onOpenChange, onSubmi
             <button type="button" className="btn btn-ghost" onClick={() => onOpenChange(false)}>
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary" data-testid="card-submit">
+            <button type="submit" className="btn btn-primary" data-testid="card-submit" disabled={!card}>
               Insert
             </button>
           </div>

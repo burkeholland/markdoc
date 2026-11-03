@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures";
 import type { Page } from "@playwright/test";
 import { AGENT_DOCS_URL } from "../src/lib/mcp";
-import { signIn, createDocument, openDocument, selectTextInRich, shareWith, mintToken, reloadHydrated, waitForHydration, type User } from "./helpers";
+import { signIn, createDocument, openDocument, selectTextInRich, shareWith, mintToken, reloadHydrated, waitForHydration, type MintedToken, type User } from "./helpers";
 
 // The Settings test makes and mints keys; capture must not retain their credentials. Worker-scoped options
 // (trace, screenshot, video) cannot be set inside a describe group, so this covers the whole file.
@@ -303,5 +303,31 @@ test.describe("onboarding: Settings agent setup", () => {
 
     await minted.revoke();
     await user.context.close();
+  });
+
+  test("a rejected tools/list request leaves its key disconnected", async ({ browser }) => {
+    const user = await signIn(browser, fresh("rejected"));
+    let minted: MintedToken | undefined;
+    try {
+      minted = await mintToken(user.page, "Rejected client", { expiresInDays: 30 });
+      const rejected = await user.page.request.post("/api/mcp", {
+        headers: {
+          Authorization: ["Bearer", minted.token].join(" "),
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        data: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+      });
+      expect(rejected.status()).toBe(406);
+
+      await user.page.goto("/settings");
+      await waitForHydration(user.page);
+      const row = user.page.getByTestId("key-row").filter({ hasText: minted.name });
+      await expect(row.getByTestId("key-status")).toContainText("Not connected yet");
+      if (process.env.SHOT_DIR) await row.screenshot({ path: `${process.env.SHOT_DIR}/mcp-key-not-connected.png` });
+    } finally {
+      await minted?.revoke();
+      await user.context.close();
+    }
   });
 });

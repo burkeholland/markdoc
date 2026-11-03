@@ -39,7 +39,7 @@ async function serve(incoming: Request): Promise<Response> {
   let req = incoming;
   const token = bearerToken(req);
   if (!token) throw unauthorized("Authorization: Bearer <token> is required.");
-  const actor = await resolveBearer(token, req.headers);
+  const actor = await resolveBearer(token, req.headers, { recordUse: false });
   if (!actor) throw unauthorized("This endpoint is for API tokens (agents).");
   // Read the body once, under our bound (#2289), before anything parses it: the activity check below
   // would otherwise buffer a body of any size. A Content-Length over the bound is refused unread.
@@ -51,8 +51,7 @@ async function serve(incoming: Request): Promise<Response> {
     }
     req = new Request(req.url, { method: req.method, headers: req.headers, body: body.text });
   }
-  // The Settings checklist reads these: connected (tools/list) and working (tools/call). Off the hot path.
-  for (const kind of await mcpActivityIn(req)) void recordMcpActivity(actor.tokenId, kind).catch(() => {});
+  const activity = await mcpActivityIn(req);
 
   const client = createClient({
     baseUrl: mcpRestOrigin(),
@@ -72,6 +71,10 @@ async function serve(incoming: Request): Promise<Response> {
     if (res.status === 413) {
       void res.body?.cancel().catch(() => {});
       return tooLarge();
+    }
+    // Authentication alone is not a connection; only record methods the transport accepted.
+    if (res.ok) {
+      for (const kind of activity) void recordMcpActivity(actor.tokenId, kind).catch(() => {});
     }
     return res;
   } finally {

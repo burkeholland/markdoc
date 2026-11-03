@@ -356,7 +356,7 @@ function noteTokenUse(tokenId: string): void {
 }
 
 /** Resolve a bearer token to the user it belongs to. Returns null for unknown, expired or revoked tokens. */
-export async function resolveApiToken(token: string): Promise<TokenActor | null> {
+export async function resolveApiToken(token: string, options: { recordUse?: boolean } = {}): Promise<TokenActor | null> {
   if (!looksLikeApiToken(token)) return null;
   const db = await getDb();
   const [row] = await db
@@ -365,7 +365,7 @@ export async function resolveApiToken(token: string): Promise<TokenActor | null>
     .innerJoin(schema.users, eq(schema.users.id, schema.apiTokens.userId))
     .where(eq(schema.apiTokens.tokenHash, hashToken(token)));
   const actor = row ? resolvedActor(row) : null;
-  if (actor) noteTokenUse(actor.tokenId);
+  if (actor && options.recordUse !== false) noteTokenUse(actor.tokenId);
   return actor;
 }
 

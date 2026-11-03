@@ -595,6 +595,7 @@ function FolderShareDialog({ folder, onOpenChange }: { folder: FolderDto | null;
     try {
       await api.folders.removeCollaborator(target.id, person.login);
       if (currentFolder.current === target.id) {
+        setAddNote(null);
         setPeople((current) =>
           current ? { ...current, collaborators: current.collaborators.filter((item) => item.login !== person.login) } : current,
         );
