@@ -739,7 +739,7 @@ export class CollabSession {
 
   private connectRequested = false;
 
-  private static readonly WAKE_EVENTS = ["online", "focus", "visibilitychange", "pageshow"] as const;
+  private static readonly WAKE_EVENTS = ["online", "focus", "pageshow"] as const;
 
   /** The browser reports no network; the socket may not have noticed yet, so the pill must not say "Unsaved changes". */
   private browserOffline = typeof navigator !== "undefined" && navigator.onLine === false;
@@ -756,16 +756,21 @@ export class CollabSession {
     this.notify();
   };
 
-  /** Coming back online, to the tab or from sleep: retry at once instead of waiting out the backoff. */
+  /** Retry disconnected sessions and reconcile a stale save state when the page wakes. */
   private onWindowWake = () => {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-    if (this.status === "connected" || !this.connectRequested) return;
+    if (this.status === "connected") {
+      this.persistence.refreshStatus();
+      return;
+    }
+    if (!this.connectRequested) return;
     this.restartConnection("window event");
   };
 
   private registerWindowListeners() {
     if (typeof window === "undefined" || typeof window.addEventListener !== "function") return;
     for (const event of CollabSession.WAKE_EVENTS) window.addEventListener(event, this.onWindowWake);
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onWindowWake);
     window.addEventListener("offline", this.onBrowserOffline);
     window.addEventListener("online", this.onBrowserOnline);
   }
@@ -773,6 +778,7 @@ export class CollabSession {
   private unregisterWindowListeners() {
     if (typeof window === "undefined" || typeof window.removeEventListener !== "function") return;
     for (const event of CollabSession.WAKE_EVENTS) window.removeEventListener(event, this.onWindowWake);
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onWindowWake);
     window.removeEventListener("offline", this.onBrowserOffline);
     window.removeEventListener("online", this.onBrowserOnline);
   }

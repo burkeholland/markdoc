@@ -79,17 +79,33 @@ export class ClientDocumentPersistence {
     if (this.disposed) return;
     this.connected = true;
     this.ready = false;
+    this.requestStatus();
+    if (this.composing) this.send({ type: "document-composition", docId: this.docId, active: true });
+  }
+
+  refreshStatus() {
+    if (
+      this.disposed || !this.connected ||
+      (this.state !== "saving" && this.state !== "error") ||
+      this.statusRequestId
+    ) return;
+    this.requestStatus();
+  }
+
+  private requestStatus() {
     // newId, not crypto.randomUUID: that function exists only on https and localhost. On a plain http
     // address (a name or number on the local network) it threw here and the document never reached "saved" (#2284).
-    this.statusRequestId = newId();
+    const requestId = newId();
+    this.statusRequestId = requestId;
     if (this.statusTimer) clearTimeout(this.statusTimer);
     this.statusTimer = setTimeout(() => {
       this.statusTimer = null;
+      if (this.statusRequestId !== requestId) return;
+      this.statusRequestId = null;
       this.error = "Save confirmation timed out. Retry saving.";
       this.changed();
     }, PERSISTENCE_REQUEST_TIMEOUT_MS);
-    this.send({ type: "document-persistence-status", docId: this.docId, requestId: this.statusRequestId });
-    if (this.composing) this.send({ type: "document-composition", docId: this.docId, active: true });
+    this.send({ type: "document-persistence-status", docId: this.docId, requestId });
   }
 
   disconnected() {
@@ -97,9 +113,7 @@ export class ClientDocumentPersistence {
     this.ready = false;
     this.epoch = null;
     this.sequence = -1;
-    this.statusRequestId = null;
-    if (this.statusTimer) clearTimeout(this.statusTimer);
-    this.statusTimer = null;
+    this.clearStatusRequest();
     this.rejectRequests(new Error("Disconnected before save was acknowledged. Changes remain pending."));
   }
 
@@ -161,12 +175,13 @@ export class ClientDocumentPersistence {
         request.resolve(message.saved);
       }
     }
-    if (message.sequence <= this.sequence) return;
+    if (message.sequence <= this.sequence) {
+      if (statusReply) this.clearStatusRequest(message.requestId);
+      return;
+    }
     this.sequence = message.sequence;
     this.ready = true;
-    if (this.statusTimer) clearTimeout(this.statusTimer);
-    this.statusTimer = null;
-    this.statusRequestId = null;
+    this.clearStatusRequest();
     this.serverState = message.state;
     this.error = message.error;
     if (snapshot && message.saved) {
@@ -181,6 +196,13 @@ export class ClientDocumentPersistence {
       }
     }
     this.changed();
+  }
+
+  private clearStatusRequest(requestId?: string) {
+    if (requestId !== undefined && requestId !== this.statusRequestId) return;
+    if (this.statusTimer) clearTimeout(this.statusTimer);
+    this.statusTimer = null;
+    this.statusRequestId = null;
   }
 
   /** Best-effort close hint only; the immediate IndexedDB journal and server queue remain authoritative. */

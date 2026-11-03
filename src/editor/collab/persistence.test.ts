@@ -70,6 +70,26 @@ describe("acknowledged content persistence", () => {
     expect(saved).toHaveBeenCalledTimes(1);
   });
 
+  it("refreshes a stale remote saving state from the server", () => {
+    const f = fixture();
+    f.sync();
+    f.client.receive(f.ack(0, {
+      revision: 1,
+      savedRevision: 0,
+      state: "saving",
+      saved: undefined,
+      snapshot: undefined,
+    }));
+    expect(f.client.state).toBe("saving");
+
+    f.client.refreshStatus();
+    const request = f.lastRequest();
+    expect(request.type).toBe("document-persistence-status");
+    if (!("requestId" in request)) throw new Error("Expected a persistence status request");
+    f.client.receive(f.ack(1, { requestId: request.requestId }));
+    expect(f.client.state).toBe("saved");
+  });
+
   it("old acknowledgements cannot mark newer inserts OR deletions saved", () => {
     const f = fixture();
     f.sync();

@@ -74,6 +74,47 @@ describe("content composition persistence ownership", () => {
     expect(states).toEqual(["pending", "error", "saved"]);
   });
 
+  it("refreshes a stale Saving state when the passive tab becomes visible", () => {
+    vi.useFakeTimers();
+    session = new CollabSession({
+      docId: "passive-save-refresh", user: makeCollabUser("local", "Local"), role: "owner",
+      getToken: async () => "local-test", autoConnect: false,
+    });
+    session.keepAlive();
+    session.status = WebSocketStatus.Connected;
+    session.synced = true;
+    session.persistence.synced();
+
+    const sendStateless = vi.mocked(session.provider.sendStateless);
+    const initialRequest = JSON.parse(sendStateless.mock.calls[0][0]) as PersistenceRequest;
+    if (!("requestId" in initialRequest)) throw new Error("Expected a persistence status request");
+    const saved: PersistenceMessage = {
+      type: "document-persistence", docId: session.docId, epoch: "fixture", sequence: 1,
+      revision: 0, savedRevision: 0, state: "saved", error: null, requestId: initialRequest.requestId,
+      saved: { docId: session.docId, version: "initial", contentHash: "initial", title: "Fixture", savedAt: new Date().toISOString() },
+      snapshot: Array.from(Y.encodeSnapshot(Y.snapshot(session.ydoc))),
+    };
+    session.persistence.receive(saved);
+    session.persistence.receive({
+      ...saved, sequence: 2, revision: 1, savedRevision: 0, state: "saving",
+      requestId: undefined, saved: undefined, snapshot: undefined,
+    });
+    expect(session.saveState).toBe("saving");
+
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+
+    expect(sendStateless).toHaveBeenCalledTimes(2);
+    const refreshRequest = JSON.parse(sendStateless.mock.calls[1][0]) as PersistenceRequest;
+    if (!("requestId" in refreshRequest)) throw new Error("Expected a persistence status request");
+    expect(refreshRequest.type).toBe("document-persistence-status");
+    session.persistence.receive({
+      ...saved, sequence: 3, revision: 1, savedRevision: 1, requestId: refreshRequest.requestId,
+      saved: { ...saved.saved!, version: "fixture:1" },
+    });
+    expect(session.saveState).toBe("saved");
+  });
+
   it("does not end rich composition when an unrelated source pane unmounts", () => {
     session = new CollabSession({
       docId: "composition", user: makeCollabUser("local", "Local"), role: "owner",
