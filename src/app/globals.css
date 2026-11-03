@@ -1558,6 +1558,16 @@ body {
     width: max(100%, 44px);
     height: max(100%, 44px);
   }
+  .document-selection-target {
+    right: 60px;
+  }
+  .tb-group {
+    gap: 2px;
+  }
+  .tb-group .icon-btn {
+    height: 2.625rem;
+    width: 2.625rem;
+  }
   .layout-segment-option:first-child.tap-target::after {
     left: auto;
     right: 0;

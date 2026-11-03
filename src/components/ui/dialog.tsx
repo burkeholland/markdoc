@@ -14,7 +14,7 @@ const TITLE_GROUP_CLASS_NAME = "min-w-0";
 const TITLE_CLASS_NAME = "text-lg font-semibold text-ink wrap-anywhere";
 const DESCRIPTION_CLASS_NAME = "mt-1 text-sm text-ink-3 wrap-anywhere";
 const HIDDEN_DESCRIPTION_CLASS_NAME = "sr-only";
-const CLOSE_CLASS_NAME = "icon-btn -mr-2 -mt-1 h-8 w-8 shrink-0";
+const CLOSE_CLASS_NAME = "icon-btn tap-target relative -mr-2 -mt-1 h-8 w-8 shrink-0";
 
 /** What had focus when a dialog opened. */
 interface Opener {

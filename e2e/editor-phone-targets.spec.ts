@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import { devices, type Browser, type Locator, type Page } from "@playwright/test";
-import { createDocument, cssPx, devLogin, uniqueLogin, waitForEditor } from "./helpers";
+import { createDocument, cssPx, devLogin, expectExpandedTouchTarget, uniqueLogin, waitForEditor } from "./helpers";
 
 const viewports = [
   { width: 360, height: 780 },
@@ -26,37 +26,6 @@ async function expectMinimumTarget(locator: Locator) {
   expect(cssPx(box.height)).toBeGreaterThanOrEqual(24);
 }
 
-async function expectExpandedTouchTarget(locator: Locator, label: string) {
-  await expect(locator).toBeVisible();
-  const target = await locator.evaluate((element) => {
-    const after = getComputedStyle(element, "::after");
-    const box = element.getBoundingClientRect();
-    const step = 0.5;
-    const y = box.top + box.height / 2;
-    let hitWidth = 0;
-    let currentWidth = 0;
-    for (let x = step / 2; x < document.documentElement.clientWidth; x += step) {
-      const hit = document.elementFromPoint(x, y)?.closest("button, a, [role=radio]");
-      if (hit === element) {
-        currentWidth += step;
-        hitWidth = Math.max(hitWidth, currentWidth);
-      } else {
-        currentWidth = 0;
-      }
-    }
-    return {
-      content: after.content,
-      width: Number.parseFloat(after.width),
-      height: Number.parseFloat(after.height),
-      hitWidth,
-    };
-  });
-  expect(target.content, `${label} touch target`).not.toBe("none");
-  expect(target.width, `${label} touch target width`).toBeGreaterThanOrEqual(44);
-  expect(target.height, `${label} touch target height`).toBeGreaterThanOrEqual(44);
-  expect(target.hitWidth, `${label} effective touch target width`).toBeGreaterThanOrEqual(44);
-}
-
 async function expectNoHorizontalOverflow(page: Page) {
   const widths = await page.evaluate(() => {
     const root = document.scrollingElement!;
@@ -78,6 +47,21 @@ test("mobile editor header controls have 44px touch targets without visible clut
   await page.goto(`/d/${documentId}`);
   await waitForEditor(page);
   await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+
+  const toolbar = page.getByTestId("toolbar");
+  for (const [label, locator] of [
+    ["Bold", page.getByTestId("tb-bold")],
+    ["Bulleted list", page.getByTestId("tb-bullet")],
+    ["Table", page.getByTestId("tb-table")],
+  ] as const) {
+    await expectExpandedTouchTarget(locator, label);
+  }
+  await toolbar.evaluate((element) => {
+    element.scrollLeft = 0;
+  });
+  if (process.env.SHOT_DIR) {
+    await toolbar.screenshot({ path: `${process.env.SHOT_DIR}/editor-toolbar-phone.png`, scale: "css" });
+  }
 
   const header = page.getByTestId("header");
   const navigation = header.locator('[data-testid="outline-button"]:visible, a[aria-label="Back to documents"]:visible').first();

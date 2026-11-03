@@ -307,7 +307,7 @@ const FILTER_GROUP_LABEL = "Document filters";
 
 function filterButtonClass(selected: boolean) {
   return cn(
-    "rounded-md px-2.5 py-1",
+    "tap-target relative min-h-11 min-w-11 rounded-md px-2.5 py-1 md:min-h-6 md:min-w-0",
     selected
       ? "bg-inverse text-white"
       : "text-ink-3 hover:text-ink",
@@ -350,7 +350,7 @@ function StarButton({ starred, pending, onToggle, className }: { starred: boolea
       aria-label={starred ? "Unstar" : "Star"}
       title={starred ? "Unstar" : "Star"}
       className={cn(
-        "flex h-7 w-7 items-center justify-center rounded-md transition hover:bg-surface-3 focus-visible:opacity-100",
+        "tap-target flex h-7 w-7 items-center justify-center rounded-md transition hover:bg-surface-3 focus-visible:opacity-100",
         starred ? "text-amber-500" : "text-ink-4 opacity-0 group-hover:opacity-100 hover:text-ink-2",
         className,
       )}
@@ -1788,7 +1788,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                           read its state. Shown once anything is selected, on hover, or on focus. */}
                       <label
                         className={cn(
-                          "tap-target absolute bottom-3 right-10 inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-md transition",
+                          "tap-target document-selection-target absolute bottom-3 right-10 inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-md transition",
                           "focus-within:opacity-100 group-hover:opacity-100",
                           selectedIds.has(d.id) ? "opacity-100" : "opacity-0",
                         )}
@@ -1807,7 +1807,7 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                         <MenuTrigger asChild>
                           <button
                             type="button"
-                            className="absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 opacity-0 transition hover:bg-surface-2 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+                            className="tap-target absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 opacity-0 transition hover:bg-surface-2 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
                             aria-label={`Actions for ${d.title}`}
                             data-testid="document-menu"
                             data-document-id={d.id}

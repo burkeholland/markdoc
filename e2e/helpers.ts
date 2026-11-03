@@ -1,4 +1,4 @@
-import { expect, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { expect, type Browser, type BrowserContext, type Locator, type Page } from "@playwright/test";
 
 export interface User {
   context: BrowserContext;
@@ -22,6 +22,38 @@ export { budgetMs, budgetScale } from "../scripts/lib/test-budget";
 // `boundingBox()` is CSS px computed from device px: at DPR 2/3 a 40 px control reads 39.99998 (#1350).
 // Assertions on minimum sizes (touch targets) compare whole CSS pixels; the fraction is rounding noise.
 export const cssPx = (n: number): number => Math.round(n);
+
+export async function expectExpandedTouchTarget(locator: Locator, label: string) {
+  await expect(locator).toBeVisible();
+  await locator.scrollIntoViewIfNeeded();
+  const target = await locator.evaluate((element) => {
+    const after = getComputedStyle(element, "::after");
+    const box = element.getBoundingClientRect();
+    const step = 0.5;
+    const y = box.top + box.height / 2;
+    let hitWidth = 0;
+    let currentWidth = 0;
+    for (let x = step / 2; x < document.documentElement.clientWidth; x += step) {
+      const hit = document.elementFromPoint(x, y)?.closest("button, a, [role=radio]");
+      if (hit === element) {
+        currentWidth += step;
+        hitWidth = Math.max(hitWidth, currentWidth);
+      } else {
+        currentWidth = 0;
+      }
+    }
+    return {
+      content: after.content,
+      width: Number.parseFloat(after.width),
+      height: Number.parseFloat(after.height),
+      hitWidth,
+    };
+  });
+  expect(target.content, `${label} touch target`).not.toBe("none");
+  expect(target.width, `${label} touch target width`).toBeGreaterThanOrEqual(44);
+  expect(target.height, `${label} touch target height`).toBeGreaterThanOrEqual(44);
+  expect(target.hitWidth, `${label} effective touch target width`).toBeGreaterThanOrEqual(44);
+}
 
 /**
  * A login of its own per run (`searcher-m1abc2de`). A test that asserts an exact count over the account's
