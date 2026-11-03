@@ -8,6 +8,23 @@ import { ReaderLinkCards } from "./link-cards";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+class IdleIntersectionObserver implements IntersectionObserver {
+  readonly root: Element | Document | null = null;
+  readonly rootMargin = "300px 0px";
+  readonly thresholds: ReadonlyArray<number> = [];
+
+  observe(target: Element) {
+    void target;
+  }
+  unobserve(target: Element) {
+    void target;
+  }
+  disconnect() {}
+  takeRecords(): IntersectionObserverEntry[] {
+    return [];
+  }
+}
+
 const TWEET = "https://x.com/jack/status/20";
 const VIDEO = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 
@@ -18,10 +35,14 @@ const card = (link: string, kind = "video", extra = "") =>
 
 describe("the published page's link cards get their frames in the browser (#2317)", () => {
   let root: Root | null = null;
+  beforeEach(() => {
+    vi.stubGlobal("IntersectionObserver", IdleIntersectionObserver);
+  });
   afterEach(() => {
     act(() => root?.unmount());
     root = null;
     document.body.replaceChildren();
+    vi.unstubAllGlobals();
   });
 
   /** The reader's body with `html` in it, and the component beside it, as on the page. */
@@ -162,6 +183,36 @@ describe("the published page's link cards get their frames in the browser (#2317
     root = createRoot(document.body.appendChild(document.createElement("div")));
     expect(() => act(() => root!.render(<ReaderLinkCards contentKey="x" />))).not.toThrow();
     expect(document.querySelectorAll("iframe")).toHaveLength(0);
+  });
+
+  it("a video whose provider cannot be reached shows a retry notice and keeps its original link", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("Failed to fetch"));
+    try {
+      const body = show(card(VIDEO));
+      const figure = body.querySelector("figure")!;
+      const frame = figure.querySelector<HTMLIFrameElement>("iframe")!;
+      await act(async () => {
+        frame.dispatchEvent(new Event("load"));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      let notice = figure.querySelector<HTMLElement>('[data-testid="link-card-unavailable"]')!;
+      expect(notice.querySelector("p")!.textContent).toBe("This video couldn't load.");
+      expect(notice.querySelector("button")!.textContent).toBe("Try again");
+      expect(figure.querySelector(".md-link-card-link")?.getAttribute("href")).toBe(VIDEO);
+
+      await act(async () => {
+        notice.querySelector("button")!.click();
+      });
+      const retryFrame = figure.querySelector<HTMLIFrameElement>("iframe")!;
+      await act(async () => {
+        retryFrame.dispatchEvent(new Event("load"));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      notice = figure.querySelector<HTMLElement>('[data-testid="link-card-unavailable"]')!;
+      expect(notice).not.toBeNull();
+    } finally {
+      fetch.mockRestore();
+    }
   });
 
   describe("the keyboard stays with the person (#2338)", () => {

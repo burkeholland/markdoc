@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
-import { cardLoadLabel, claimCardFrame, createCardFrame, releaseCardFrame } from "./link-card-frame";
+import { describe, expect, it, vi } from "vitest";
+import { cardLoadLabel, claimCardFrame, createCardFrame, createCardUnavailableNotice, releaseCardFrame, watchCardFrameAvailability } from "./link-card-frame";
 import { CARD_FRAME_HOSTS, matchLinkCard, MAX_CARD_FRAMES, type LinkCard } from "./markdown/link-cards";
 
 const TWEET = "https://x.com/jack/status/20";
@@ -14,6 +14,43 @@ const LINKS_BY_HOST: Record<string, string> = {
   "https://www.loom.com": "https://www.loom.com/share/e5d19b462fa64f1287a385bcb140837e",
   "https://www.tiktok.com": "https://www.tiktok.com/@burkeholland/video/7060000000000000000",
 };
+
+function stubIntersectionObserver() {
+  const observers: ControlledIntersectionObserver[] = [];
+  class ControlledIntersectionObserver implements IntersectionObserver {
+    readonly root: Element | Document | null;
+    readonly rootMargin: string;
+    readonly thresholds: ReadonlyArray<number>;
+
+    constructor(private readonly callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+      this.root = options?.root ?? null;
+      this.rootMargin = options?.rootMargin ?? "0px";
+      this.thresholds = typeof options?.threshold === "number" ? [options.threshold] : options?.threshold ?? [0];
+      observers.push(this);
+    }
+
+    observe(target: Element) {
+      void target;
+    }
+    unobserve(target: Element) {
+      void target;
+    }
+    disconnect() {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+
+    intersect(target: Element) {
+      const rect = target.getBoundingClientRect();
+      this.callback(
+        [{ boundingClientRect: rect, intersectionRatio: 1, intersectionRect: rect, isIntersecting: true, rootBounds: null, target, time: 0 }],
+        this,
+      );
+    }
+  }
+  vi.stubGlobal("IntersectionObserver", ControlledIntersectionObserver);
+  return observers;
+}
 
 /** A document that writes down the order in which a new element's attributes are set. */
 function recordingDocument(origin: string) {
@@ -105,6 +142,66 @@ describe("the one place a frame is made (#2317)", () => {
   it("names the button of a card past the limit after what it loads", () => {
     expect(cardLoadLabel(matchLinkCard(VIDEO)!)).toBe("Load video");
     expect(cardLoadLabel(matchLinkCard(TWEET)!)).toBe("Load post");
+  });
+
+  it("keeps a video frame hidden until its host responds, then shows a retry notice on network failure", async () => {
+    const card = matchLinkCard(VIDEO)!;
+    const frame = createCardFrame(card, VIDEO)!;
+    const box = document.body.appendChild(document.createElement("div"));
+    const onUnavailable = vi.fn();
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("Failed to fetch"));
+    const stop = watchCardFrameAvailability(frame, card, box, onUnavailable);
+    try {
+      box.appendChild(frame);
+      expect(box.getAttribute("data-checking")).toBe("");
+      frame.dispatchEvent(new Event("load"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetch).toHaveBeenCalledWith(card.frameUrl, expect.objectContaining({ method: "HEAD", mode: "no-cors" }));
+      expect(onUnavailable).toHaveBeenCalledOnce();
+      expect(box.hasAttribute("data-checking")).toBe(false);
+    } finally {
+      stop();
+      fetch.mockRestore();
+      box.remove();
+    }
+  });
+
+  it("checks a video as it nears the viewport even when the frame never fires load", async () => {
+    const observers = stubIntersectionObserver();
+    const card = matchLinkCard(VIDEO)!;
+    const frame = createCardFrame(card, VIDEO)!;
+    const box = document.body.appendChild(document.createElement("div"));
+    const onUnavailable = vi.fn();
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("Failed to fetch"));
+    const stop = watchCardFrameAvailability(frame, card, box, onUnavailable);
+    try {
+      box.appendChild(frame);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(observers).toHaveLength(1);
+      expect(observers[0].rootMargin).toBe("300px 0px");
+      observers[0].intersect(box);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetch).toHaveBeenCalledWith(card.frameUrl, expect.objectContaining({ method: "HEAD", mode: "no-cors" }));
+      expect(onUnavailable).toHaveBeenCalledOnce();
+      expect(box.hasAttribute("data-checking")).toBe(false);
+    } finally {
+      stop();
+      fetch.mockRestore();
+      vi.unstubAllGlobals();
+      box.remove();
+    }
+  });
+
+  it("provides a compact message and a retry button", () => {
+    const retry = vi.fn();
+    const notice = createCardUnavailableNotice(retry);
+    expect(notice.className).toBe("md-link-card-off");
+    expect(notice.querySelector("p")!.textContent).toBe("This video couldn't load.");
+    const button = notice.querySelector<HTMLButtonElement>("button")!;
+    expect(button.textContent).toBe("Try again");
+    expect(button.type).toBe("button");
+    button.click();
+    expect(retry).toHaveBeenCalledOnce();
   });
 
   it("a page has 20 places for frames that load by themselves; a place given back can be taken again", () => {

@@ -26,9 +26,133 @@ export function createCardFrame(card: LinkCard, url: string, doc: Document = doc
   return frame;
 }
 
+const CARD_FRAME_PROBE_TIMEOUT_MS = 5_000;
+const CARD_FRAME_PROBE_ROOT_MARGIN = "300px 0px";
+const loadedCardFrames = new WeakSet<HTMLIFrameElement>();
+
+async function cardFrameHostResponds(frameUrl: string, signal: AbortSignal): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CARD_FRAME_PROBE_TIMEOUT_MS);
+  const abort = () => controller.abort(signal.reason);
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  try {
+    await fetch(frameUrl, { method: "HEAD", mode: "no-cors", signal: controller.signal });
+    return true;
+  } catch (error) {
+    if (
+      signal.aborted ||
+      error instanceof TypeError ||
+      (error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError"))
+    ) {
+      return false;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    signal.removeEventListener("abort", abort);
+  }
+}
+
+/**
+ * Browsers disagree on whether a failed iframe fires `load`. Check a lazy video when it nears the
+ * viewport as well, and keep it hidden until a lightweight request confirms that its host is reachable.
+ */
+export function watchCardFrameAvailability(
+  frame: HTMLIFrameElement,
+  card: LinkCard,
+  box: HTMLElement,
+  onUnavailable: () => void,
+): () => void {
+  if (card.kind !== "video") return () => {};
+  let stopped = false;
+  let checked = false;
+  let generation = 0;
+  let request: AbortController | null = null;
+  let observer: IntersectionObserver | null = null;
+  box.setAttribute("data-checking", "");
+
+  const unavailable = () => {
+    if (stopped || !frame.isConnected) return;
+    stopped = true;
+    generation++;
+    observer?.disconnect();
+    request?.abort();
+    request = null;
+    box.removeAttribute("data-checking");
+    onUnavailable();
+  };
+  const check = () => {
+    if (stopped || checked || request || !frame.isConnected) return;
+    observer?.disconnect();
+    const current = ++generation;
+    const controller = new AbortController();
+    request = controller;
+    void cardFrameHostResponds(card.frameUrl, controller.signal).then((reachable) => {
+      if (stopped || controller.signal.aborted || current !== generation || !frame.isConnected) return;
+      request = null;
+      if (reachable) {
+        checked = true;
+        box.removeAttribute("data-checking");
+      } else unavailable();
+    }).catch((error: unknown) => {
+      if (stopped || controller.signal.aborted || current !== generation || !frame.isConnected) return;
+      request = null;
+      console.error("Could not verify the video embed host.", error);
+      unavailable();
+    });
+  };
+  const onLoad = () => {
+    loadedCardFrames.add(frame);
+    check();
+  };
+  const onError = () => unavailable();
+
+  frame.addEventListener("load", onLoad);
+  frame.addEventListener("error", onError);
+  if (typeof IntersectionObserver === "function") {
+    observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) check();
+    }, { rootMargin: CARD_FRAME_PROBE_ROOT_MARGIN });
+    observer.observe(box);
+  } else {
+    queueMicrotask(check);
+  }
+  if (loadedCardFrames.has(frame)) check();
+  return () => {
+    stopped = true;
+    generation++;
+    observer?.disconnect();
+    request?.abort();
+    request = null;
+    frame.removeEventListener("load", onLoad);
+    frame.removeEventListener("error", onError);
+    box.removeAttribute("data-checking");
+  };
+}
+
 /** "Load video", "Load post": the button on a card past the page's limit of frames. */
 export function cardLoadLabel(card: LinkCard): string {
   return card.kind === "video" ? "Load video" : "Load post";
+}
+
+export function createCardUnavailableNotice(onRetry: () => void, doc: Document = document): HTMLElement {
+  const notice = doc.createElement("div");
+  notice.className = "md-link-card-off";
+  notice.setAttribute("data-testid", "link-card-unavailable");
+  const words = doc.createElement("p");
+  words.textContent = "This video couldn't load.";
+  const retry = doc.createElement("button");
+  retry.type = "button";
+  retry.className = "md-link-card-load";
+  retry.textContent = "Try again";
+  retry.setAttribute("data-testid", "link-card-retry");
+  retry.addEventListener("click", (event) => {
+    event.preventDefault();
+    onRetry();
+  });
+  notice.append(words, retry);
+  return notice;
 }
 
 const loaded = new WeakMap<object, number>();

@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { cardLinkText, matchLinkCard, MAX_CARD_FRAMES } from "@/editor/markdown/link-cards";
-import { cardLoadLabel, createCardFrame } from "@/editor/link-card-frame";
+import { cardLoadLabel, createCardFrame, createCardUnavailableNotice, watchCardFrameAvailability } from "@/editor/link-card-frame";
 import { createTurnedOffNotice, guardCardFrame } from "@/editor/link-card-focus-guard";
 
 const ROOT_SELECTOR = "[data-reader-overflow-root]";
@@ -32,16 +32,26 @@ export function ReaderLinkCards({ contentKey }: { contentKey: string }) {
       if (!card || !box) continue;
       /** The frame's page may not take the keyboard by itself; one that keeps trying is turned off. */
       const watch = (frame: HTMLIFrameElement) => {
-        const stop = guardCardFrame(frame, () => {
+        let stop = () => {};
+        const stopAvailability = watchCardFrameAvailability(frame, card, box, () => {
           stop();
-          guards.delete(stop);
+          box.replaceChildren(createCardUnavailableNotice(add));
+        });
+        const stopFocusGuard = guardCardFrame(frame, () => {
+          stop();
           box.replaceChildren(createTurnedOffNotice(add));
         });
+        stop = () => {
+          stopAvailability();
+          stopFocusGuard();
+          guards.delete(stop);
+        };
         guards.add(stop);
       };
       const add = () => {
         const frame = createCardFrame(card, link);
         if (!frame) return;
+        if (card.kind === "video") box.setAttribute("data-checking", "");
         box.replaceChildren(frame);
         watch(frame);
       };

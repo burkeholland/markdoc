@@ -115,6 +115,7 @@ export async function standInWithKeyboard(context: BrowserContext, baseURL: stri
       const request = route.request();
       const url = request.url();
       if (url.startsWith("https://avatars.githubusercontent.com/")) return route.fulfill({ status: 200, contentType: "image/png", body: PIXEL });
+      if (request.method() === "HEAD" && FRAME_HOSTS.some((host) => url.startsWith(`${host}/`))) return route.fulfill({ status: 200, body: "" });
       if (request.isNavigationRequest() && request.frame().parentFrame() !== null && FRAME_HOSTS.some((host) => url.startsWith(`${host}/`))) {
         sites.frames.push(url);
         return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: standIn(grabEveryMs(url)) });
