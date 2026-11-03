@@ -116,6 +116,12 @@ describe("create paths are transactional and addVersion survives the number race
     ownerId = o.id;
   });
 
+  it("creates a blank document with no persisted prompt when content is omitted", async () => {
+    const doc = await createDocument({ ownerId });
+    expect(doc.title).toBe("Untitled");
+    expect(doc.content).toBe("");
+  });
+
   it("duplicateDocument: when copying the assets fails, neither the copy nor its version exists (F9)", async () => {
     const source = await createDocument({ ownerId, title: "F9 source", content: "# F9 source\n\nplaceholder\n" });
     const asset = await putAsset({ documentId: source.id, userId: ownerId, name: "dot.png", mime: "image/png", bytes: PNG });

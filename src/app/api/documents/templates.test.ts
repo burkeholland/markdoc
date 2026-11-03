@@ -38,6 +38,15 @@ describe("POST /api/documents with a template", () => {
     expect(doc?.content).not.toContain("{{");
   });
 
+  it("creates a blank template without persisting the editor prompt", async () => {
+    const res = await post({ template: "blank" });
+    expect(res.status).toBe(201);
+    const { document } = (await res.json()) as { document: { id: string; title: string } };
+    const doc = await getDocument(document.id);
+    expect(document.title).toBe("Untitled");
+    expect(doc?.content).toBe("");
+  });
+
   it("lets an explicit title or content win over the template", async () => {
     const res = await post({ template: "checklist", title: "Launch checklist" });
     expect(res.status).toBe(201);

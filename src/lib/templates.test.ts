@@ -18,13 +18,18 @@ describe("templates", () => {
       expect(t.id).toMatch(/^[a-z0-9-]+$/);
       expect(t.name.trim()).not.toBe("");
       expect(t.description.trim()).not.toBe("");
-      expect(t.content.trim()).not.toBe("");
+      if (t.id === BLANK_TEMPLATE_ID) expect(t.content).toBe("");
+      else expect(t.content.trim()).not.toBe("");
     }
   });
 
   it("finds templates by id", () => {
     expect(getTemplate("meeting-notes")?.name).toBe("Meeting notes");
     expect(getTemplate("nope")).toBeUndefined();
+  });
+
+  it("keeps the blank template body empty", () => {
+    expect(applyTemplate(getTemplate(BLANK_TEMPLATE_ID)!, VARS)).toEqual({ title: "Untitled", content: "" });
   });
 
   it("applyTemplate replaces every placeholder", () => {
@@ -47,8 +52,8 @@ describe("templates", () => {
     expect(todayIso(new Date("2026-01-05T23:59:00Z"))).toBe("2026-01-05");
   });
 
-  it("every template parses through the editor's Markdown parser with at least one heading", () => {
-    for (const t of TEMPLATES) {
+  it("every non-blank template parses through the editor's Markdown parser with at least one heading", () => {
+    for (const t of TEMPLATES.filter((template) => template.id !== BLANK_TEMPLATE_ID)) {
       const { content } = applyTemplate(t, VARS);
       const result = parseMarkdown(content);
       expect(result.doc.childCount, t.id).toBeGreaterThan(0);

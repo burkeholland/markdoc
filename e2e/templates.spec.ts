@@ -50,13 +50,52 @@ test.describe("templates", () => {
     await user.context.close();
   });
 
-  test("the plain New document button still creates a blank page", async ({ browser }) => {
+  test("the plain New document button creates an empty page with editor placeholders", async ({ browser }, testInfo) => {
     const user = await signIn(browser, "templater");
-    await user.page.getByTestId("new-document").click();
-    await user.page.waitForURL(/\/d\/[^/]+$/);
-    await expect(user.page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
-    await expect(user.page.getByTestId("title")).toHaveText("Untitled");
-    await user.context.close();
+    try {
+      const { page } = user;
+      await page.getByTestId("new-document").click();
+      await page.waitForURL(/\/d\/[^/]+$/);
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      await expect(page.getByTestId("title")).toHaveText("Untitled");
+      await expect(page.locator(".cm-placeholder")).toHaveText("Start writing Markdown…");
+      await expect(page.locator(".md-rich")).toHaveAttribute("data-placeholder", "Start writing. Use the toolbar, Markdown shortcuts, or edit the source on the left.");
+      await expect(page.getByTestId("word-count")).toHaveText("0 words");
+
+      const documentId = new URL(page.url()).pathname.split("/").at(-1)!;
+      const storedContent = async () => {
+        const response = await page.request.get(`/api/documents/${documentId}/content`);
+        expect(response.ok()).toBeTruthy();
+        return ((await response.json()) as { content: string }).content;
+      };
+      await expect.poll(storedContent).toBe("");
+
+      await reloadHydrated(page);
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      await expect(page.getByTestId("word-count")).toHaveText("0 words");
+      await expect.poll(storedContent).toBe("");
+      await page.screenshot({ path: testInfo.outputPath("blank-document-placeholder.png") });
+    } finally {
+      await user.context.close();
+    }
+  });
+
+  test("the Blank template also saves an empty document", async ({ browser }) => {
+    const user = await signIn(browser, "templater");
+    try {
+      const { page } = user;
+      await page.getByTestId("new-from-template").click();
+      await page.getByTestId("template-dialog").getByTestId("template-blank").click();
+      await page.waitForURL(/\/d\/[^/]+$/);
+      await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+      await expect(page.getByTestId("word-count")).toHaveText("0 words");
+      const documentId = new URL(page.url()).pathname.split("/").at(-1)!;
+      const response = await page.request.get(`/api/documents/${documentId}/content`);
+      expect(response.ok()).toBeTruthy();
+      expect(((await response.json()) as { content: string }).content).toBe("");
+    } finally {
+      await user.context.close();
+    }
   });
 
   test("the API accepts a template id and lists templates", async ({ browser }) => {
