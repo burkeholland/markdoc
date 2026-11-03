@@ -250,6 +250,25 @@ describe("grapheme excerpt", () => {
     expect(excerptOf("# cafe\u0301\n## Other", 4)).toBe("caf");
   });
 
+  it("separates list items and heading-only fallbacks in card excerpts", () => {
+    const markdown = `# Meeting notes
+
+## Agenda
+1. Roadmap review
+2. Bug triage
+3. Open questions
+
+## Decisions
+- Ship the reader view first.
+- Revisit mobile layout next sprint.
+`;
+
+    expect(excerptOf(markdown)).toBe(
+      "Roadmap review · Bug triage · Open questions · Ship the reader view first. · Revisit mobile layout next sprint.",
+    );
+    expect(excerptOf("# Agenda\n\n## Decisions")).toBe("Agenda · Decisions");
+  });
+
   it("keeps a saturated prefix conclusive when its last cluster is omitted", () => {
     const before = "a".repeat(159);
     const prefix = `# Heading\n${before}\u{1F600}\n`;

@@ -45,6 +45,14 @@ describe("documentMetadata", () => {
     expect(meta).not.toHaveProperty("twitter");
   });
 
+  it("uses the not-found title for an inaccessible public document without leaking its metadata", async () => {
+    const meta = await documentMetadata(null, null, "/p");
+    expect(meta).toEqual({ title: "Page not found" });
+    expect(meta).not.toHaveProperty("description");
+    expect(meta).not.toHaveProperty("openGraph");
+    expect(meta).not.toHaveProperty("twitter");
+  });
+
   it("builds title, description and both card blocks from the live text", async () => {
     const meta = await documentMetadata(doc(), live("Quarterly plan", "# Quarterly plan\n\nWe **ship** the [reader](x) first.\n\nThen the rest."), "/p");
     expect(meta.title).toBe("Quarterly plan");
