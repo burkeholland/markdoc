@@ -2029,6 +2029,35 @@ describe("dashboard search controls", () => {
     expect(within(screen.getByTestId("document-list")).getAllByRole("link")).toHaveLength(DOCUMENTS.length);
   });
 
+  it("explains when a one-character query only matches titles", async () => {
+    renderDashboard();
+    const search = screen.getByRole("textbox", { name: "Search documents" });
+
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "a" } });
+    });
+
+    expect(searchDocuments).not.toHaveBeenCalled();
+    expect(screen.getByTestId("search-content-hint")).toHaveTextContent("Content search starts at 2 characters.");
+    expect(screen.getByTestId("search-status")).toHaveTextContent(
+      '1 title match for "a". Content search starts at 2 characters.',
+    );
+    expect(within(screen.getByTestId("document-list")).getByRole("link", { name: /Alpha planning/ })).toBeInTheDocument();
+
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "z" } });
+    });
+
+    const emptyState = screen.getByTestId("empty-state");
+    expect(emptyState).toHaveTextContent('No title matches for "z"');
+    expect(emptyState).toHaveTextContent("Content search starts at 2 characters.");
+    expect(screen.getByTestId("search-status")).toHaveTextContent(
+      'No title matches for "z". Content search starts at 2 characters.',
+    );
+    expect(screen.queryByTestId("search-content-hint")).toBeNull();
+    expect(searchDocuments).not.toHaveBeenCalled();
+  });
+
   it("announces result changes without moving focus from the search field", async () => {
     searchDocuments.mockResolvedValueOnce({
       query: "alpha",
@@ -2076,6 +2105,52 @@ describe("dashboard search controls", () => {
     await settleSearch();
     expect(searchDocuments).toHaveBeenCalledTimes(1);
     expect(within(screen.getByTestId("document-list")).getByRole("link", { name: /Meeting notes/ })).toBeInTheDocument();
+  });
+
+  it("clears and disables global search while Trash is selected", async () => {
+    const pendingSearch = deferred<SearchResponse>();
+    searchDocuments.mockReturnValueOnce(pendingSearch.promise);
+    renderDashboard();
+    const search = screen.getByRole("textbox", { name: "Search documents" });
+
+    await dispatchSearchAction(() => {
+      fireEvent.change(search, { target: { value: "revisit mobile" } });
+    });
+    await settleSearch();
+
+    expect(searchDocuments).toHaveBeenCalledOnce();
+    const signal = searchDocuments.mock.calls[0][1]?.signal;
+    expect(signal?.aborted).toBe(false);
+
+    await dispatchSearchAction(openTrash);
+    await act(async () => {});
+
+    const trashSearch = screen.getByRole("textbox", { name: "Search unavailable in Trash" });
+    expect(trashSearch).toBeDisabled();
+    expect(trashSearch).toHaveValue("");
+    expect(trashSearch).toHaveAttribute("placeholder", "Search unavailable in Trash");
+    expect(screen.queryByText("/", { selector: "kbd" })).toBeNull();
+    expect(fireEvent.keyDown(document, { key: "/" })).toBe(true);
+    expect(trashSearch).not.toHaveFocus();
+    expect(window.sessionStorage.getItem("markdoc:dashboardSearch:owner")).toBeNull();
+    expect(signal?.aborted).toBe(true);
+    expect(screen.queryByTestId("search-content-hint")).toBeNull();
+
+    await act(async () => {
+      pendingSearch.resolve({
+        query: "revisit mobile",
+        documents: [result("stale-trash-search", "Stale search result", "Should not appear")],
+      });
+      await pendingSearch.promise;
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("Stale search result")).toBeNull();
+
+    await dispatchSearchAction(leaveTrash);
+    const activeSearch = screen.getByRole("textbox", { name: "Search documents" });
+    expect(activeSearch).toBeEnabled();
+    expect(activeSearch).toHaveValue("");
+    expect(searchDocuments).toHaveBeenCalledOnce();
   });
 
   it("filters on typing and runs the two-step Escape in Strict Mode", async () => {
