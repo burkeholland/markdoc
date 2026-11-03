@@ -1223,6 +1223,9 @@ body {
   height: 100%;
   width: 100%;
 }
+:is(.md-rich, .reader-body) .md-link-card-frame[data-checking] .md-link-card-iframe {
+  visibility: hidden;
+}
 :is(.md-rich, .reader-body) .md-link-card-load,
 .md-rich .md-link-card-as-text {
   background: var(--color-surface);

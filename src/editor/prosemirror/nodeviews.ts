@@ -4,7 +4,7 @@ import type { EditorView, NodeView, NodeViewConstructor, ViewMutationRecord } fr
 import { toggleTaskChecked, setCodeBlockLanguage, showCardAsText } from "./commands";
 import { normalizeLanguage } from "./code-highlight";
 import { cardLinkText, matchLinkCard, type LinkCard } from "../markdown/link-cards";
-import { cardLoadLabel, claimCardFrame, createCardFrame, releaseCardFrame } from "../link-card-frame";
+import { cardLoadLabel, claimCardFrame, createCardFrame, createCardUnavailableNotice, releaseCardFrame, watchCardFrameAvailability } from "../link-card-frame";
 import { createTurnedOffNotice, guardCardFrame } from "../link-card-focus-guard";
 import { safeLinkHref } from "../links";
 
@@ -272,16 +272,31 @@ class LinkCardView implements NodeView {
   private addFrame(card: LinkCard, url: string) {
     const frame = createCardFrame(card, url);
     if (!frame) return;
-    // The frame's page may not take the keyboard from the document by itself (#2338).
     this.unguard?.();
+    const stopAvailability = watchCardFrameAvailability(frame, card, this.frameBox, () => this.videoUnavailable(card, url));
     this.frameBox.replaceChildren(frame);
-    this.unguard = guardCardFrame(frame, () => this.turnOff(card, url));
+    // The frame's page may not take the keyboard from the document by itself (#2338).
+    const stopFocusGuard = guardCardFrame(frame, () => this.turnOff(card, url));
+    this.unguard = () => {
+      stopAvailability();
+      stopFocusGuard();
+    };
   }
 
   /** The frame kept taking the keyboard: it goes, and the card says so and offers to load it again. */
   private turnOff(card: LinkCard, url: string) {
     this.dropFrame();
     const notice = createTurnedOffNotice(() => {
+      this.load = null;
+      this.addFrame(card, url);
+    });
+    this.load = notice.querySelector("button");
+    this.frameBox.replaceChildren(notice);
+  }
+
+  private videoUnavailable(card: LinkCard, url: string) {
+    this.dropFrame();
+    const notice = createCardUnavailableNotice(() => {
       this.load = null;
       this.addFrame(card, url);
     });

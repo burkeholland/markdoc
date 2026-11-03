@@ -1,5 +1,6 @@
 import { expect, type BrowserContext, type Page } from "@playwright/test";
 import { waitForEditor, waitForHydration } from "./helpers";
+import { CARD_FRAME_HOSTS } from "../src/editor/markdown/link-cards";
 
 /**
  * Shared by the link card specs (#2317). No test touches the network: every request that leaves the app
@@ -7,6 +8,7 @@ import { waitForEditor, waitForHydration } from "./helpers";
  *
  * - A card's frame (a navigation to one of the two frame hosts) is answered by a local stand-in page
  *   and written down in `frames`.
+ * - A video frame's reachability check (HEAD) gets a local empty response.
  * - A person's avatar image from GitHub, the one request the app has always made to another site, is
  *   answered with a local 1 pixel image.
  * - Everything else is refused and written down in `refused`, which must stay empty.
@@ -16,7 +18,7 @@ export const VIDEO = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
 export const TWEET_FRAME = "https://platform.twitter.com/embed/Tweet.html?id=20&dnt=true";
 export const VIDEO_FRAME = "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ";
 export const FRAME_HOSTS = ["https://www.youtube-nocookie.com", "https://platform.twitter.com"];
-export const CARD_FRAME_SOURCES = `frame-src ${FRAME_HOSTS.join(" ")}`;
+export const CARD_FRAME_SOURCES = `frame-src ${CARD_FRAME_HOSTS.join(" ")}; media-src 'self' blob:`;
 export const SANDBOX = "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox";
 
 const PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
@@ -68,6 +70,7 @@ export async function standInForOtherSites(context: BrowserContext, baseURL: str
       const request = route.request();
       const url = request.url();
       if (url.startsWith("https://avatars.githubusercontent.com/")) return route.fulfill({ status: 200, contentType: "image/png", body: PIXEL });
+      if (request.method() === "HEAD" && FRAME_HOSTS.some((host) => url.startsWith(`${host}/`))) return route.fulfill({ status: 200, body: "" });
       if (request.isNavigationRequest() && request.frame().parentFrame() !== null && FRAME_HOSTS.some((host) => url.startsWith(`${host}/`))) {
         sites.frames.push(url);
         return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: STAND_IN });
@@ -106,6 +109,7 @@ export const frameElements = (page: Page, scope = "body") =>
  */
 export async function expectOnlyCardFrames(page: Page, expected: string[]) {
   await expect.poll(async () => (await frameElements(page)).map((frame) => frame.src), { timeout: 15_000 }).toEqual(expected);
+  await expect(page.locator(".md-link-card-frame[data-checking]")).toHaveCount(0);
   for (const frame of await frameElements(page)) {
     expect(frame.sandbox, frame.src!).toBe(SANDBOX);
     expect(frame.allow, frame.src!).toBe("fullscreen; picture-in-picture; encrypted-media");

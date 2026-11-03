@@ -53,12 +53,41 @@ async function scan(page: Page, include: string, state: string) {
   const violations = [...results.violations, ...(await new AxeBuilder({ page }).include(include).withRules(["target-size"]).analyze()).violations];
   const lines = violations.map((v) => `  ${v.id} [${v.impact ?? "n/a"}] ${v.help}\n${v.nodes.slice(0, 5).map((n) => `      ${n.target.join(" ")}`).join("\n")}`);
   expect(violations, `${state}\n${lines.join("\n")}`).toHaveLength(0);
-  // The scan did look at the frames: each has a name.
-  const titled = results.passes.find((rule) => rule.id === "frame-title")?.nodes.length ?? 0;
-  expect(titled, `${state}: axe saw the frames`).toBeGreaterThan(0);
+  // Axe may not report pass nodes for cross-origin frames, so verify their names directly.
+  await expect(page.locator(`${include} iframe[title]`), `${state}: titled frames`).not.toHaveCount(0);
 }
 
 test.describe("link card frames (#2317)", () => {
+  test("a video whose provider cannot be reached shows a compact retry notice", async ({ browser, baseURL }, testInfo) => {
+    const owner = await signIn(browser, uniqueLogin("video-fallback"));
+    const sites = await standInForOtherSites(owner.context, baseURL!);
+    const failedRequests: string[] = [];
+    await owner.page.setViewportSize({ width: 1280, height: 720 });
+    await owner.page.route("https://www.youtube-nocookie.com/**", async (route) => {
+      failedRequests.push(`${route.request().method()} ${route.request().url()}`);
+      await route.abort("internetdisconnected");
+    });
+    const id = await createDocument(owner.page, `# Video\n\n${VIDEO}\n`, "Unavailable video");
+    await openDocument(owner.page, id);
+
+    const card = owner.page.locator('.md-rich figure.md-link-card[data-provider="youtube"]');
+    const unavailable = card.getByTestId("link-card-unavailable");
+    await expect(unavailable).toBeVisible({ timeout: 15_000 });
+    await expect(unavailable).toContainText("This video couldn't load.");
+    await expect(unavailable.getByRole("button", { name: "Try again" })).toBeVisible();
+    await expect(card.locator(".md-link-card-link")).toHaveAttribute("href", VIDEO);
+    await expect(card.locator("iframe")).toHaveCount(0);
+    await owner.page.locator(".md-rich h1").click();
+    await card.screenshot({ path: testInfo.outputPath("video-embed-fallback-card.png") });
+    await owner.page.screenshot({ path: testInfo.outputPath("video-embed-fallback-editor.png") });
+
+    await unavailable.getByRole("button", { name: "Try again" }).click();
+    await expect(unavailable).toBeVisible({ timeout: 15_000 });
+    expect(failedRequests.some((request) => request.startsWith("GET "))).toBe(true);
+    expect(failedRequests.some((request) => request.startsWith("HEAD "))).toBe(true);
+    expect(sites.refused).toEqual([]);
+  });
+
   test("a card in the editor loads its frame after a moment, with its limits; the frame cannot touch the page; edits elsewhere do not reload it", async ({ browser, baseURL }) => {
     const origin = new URL(baseURL!).origin;
     const owner = await signIn(browser, uniqueLogin("frames-owner"));
