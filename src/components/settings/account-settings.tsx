@@ -13,6 +13,7 @@ const ROW = "flex flex-col items-start gap-4 rounded-2xl border border-line bg-s
 export function AccountSettings({ login, name, image, isDemo }: { login: string | null; name: string | null; image: string | null; isDemo: boolean }) {
   const [deleting, setDeleting] = useState(false);
   const display = name ?? login ?? "You";
+  const deleteDisabled = isDemo || !login;
   return (
     <div className="space-y-3">
       <div className={ROW} data-testid="account-identity-row">
@@ -50,7 +51,7 @@ export function AccountSettings({ login, name, image, isDemo }: { login: string 
             {isDemo ? "The shared demo account cannot be deleted." : "Permanently delete your account, your documents, folders, versions and API keys. This cannot be undone."}
           </p>
         </div>
-        <button type="button" className="btn btn-danger btn-sm shrink-0 gap-1.5" disabled={isDemo || !login} onClick={() => setDeleting(true)} data-testid="account-delete">
+        <button type="button" className={`btn ${deleteDisabled ? "btn-outline" : "btn-danger"} btn-sm shrink-0 gap-1.5`} disabled={deleteDisabled} onClick={() => setDeleting(true)} data-testid="account-delete">
           <Trash2 size={14} /> Delete account
         </button>
       </div>
