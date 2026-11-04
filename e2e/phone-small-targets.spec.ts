@@ -260,6 +260,10 @@ for (const viewport of VIEWPORTS) {
       expectSwitchGeometry(rollbackChecked, true, false, "rollback checked switch");
       expectWithin(unchecked.gaps.left, persistedChecked.gaps.right, "balanced unchecked/checked outer gaps");
 
+      const manageKeys = page.getByTestId("key-manage");
+      await manageKeys.click();
+      await expect(manageKeys).toHaveAttribute("aria-expanded", "false");
+
       // Setup: the account has a key, so the steps start folded behind "Set up".
       const setupToggle = page.getByTestId("agent-setup-toggle");
       await expectTarget(setupToggle, "Set up button", { height: 44 });
