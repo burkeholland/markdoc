@@ -75,7 +75,7 @@ function LinkRow({
       <code ref={code} className="min-w-0 flex-1 select-text truncate font-mono text-[11px] text-ink-2" title={url}>
         {url}
       </code>
-      <button type="button" className="btn btn-sm btn-ghost shrink-0 gap-1.5" onClick={copy} data-testid={copyTestId}>
+      <button type="button" className="btn btn-sm btn-ghost shrink-0 gap-1.5 max-sm:min-h-11" onClick={copy} data-testid={copyTestId}>
         {copied ? <Check size={14} className="text-success" aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
         {buttonText}
       </button>
@@ -345,6 +345,7 @@ export const ShareDialog = memo(function ShareDialog({
         title={accessRequest ? "Access request" : `Share “${doc.title}”`}
         description={accessRequest ? `${requestLabel} requested access to “${doc.title}”.` : "Add people by GitHub handle. They sign in with GitHub."}
         className="max-h-[calc(100dvh-2rem)] overflow-y-auto"
+        closeButtonClassName="max-sm:min-h-11 max-sm:min-w-11"
         onClosed={() => {
           if (accessRequest) onAccessRequestClosed?.();
           if (!connectAfterClose.current) return;
@@ -415,7 +416,7 @@ export const ShareDialog = memo(function ShareDialog({
                 <button
                   ref={addButton}
                   type="submit"
-                  className="btn btn-primary aria-disabled:opacity-50"
+                  className="btn btn-primary aria-disabled:opacity-50 max-sm:min-h-11"
                   disabled={!isValidLogin(login)}
                   aria-disabled={adding || undefined}
                   aria-busy={adding || undefined}
@@ -624,7 +625,7 @@ export const ShareDialog = memo(function ShareDialog({
           )}
 
           <div className="flex justify-end" data-testid="share-footer">
-            <button type="button" className="btn btn-primary shrink-0" onClick={() => onOpenChange(false)}>
+            <button type="button" className="btn btn-primary shrink-0 max-sm:min-h-11" onClick={() => onOpenChange(false)}>
               Done
             </button>
           </div>

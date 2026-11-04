@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures";
 import { devices, type Browser, type BrowserContext } from "@playwright/test";
-import { createDocument, devLogin, expectExpandedTouchTarget, uniqueLogin, waitForHydration } from "./helpers";
+import { createDocument, devLogin, expectExpandedTouchTarget, uniqueLogin, waitForEditor, waitForHydration } from "./helpers";
 
 const PHONE = { ...devices["iPhone 13"], viewport: { width: 375, height: 812 }, deviceScaleFactor: 1 };
 
@@ -111,6 +111,36 @@ test("folder-sharing controls remain readable and tappable at 375px", async ({ b
     }
   } finally {
     await recipientContext?.close();
+    await context.close();
+  }
+});
+
+test("document-sharing controls have 44px targets at 375px", async ({ browser }) => {
+  const { context, page } = await signInOnPhone(browser, "document-share-phone-targets");
+  try {
+    const id = await createDocument(page, "# Phone share\n\nA document to share.", "Phone share");
+    await page.goto(`/d/${id}`);
+    await waitForEditor(page);
+
+    await page.getByTestId("more-menu").click();
+    await page.getByTestId("menu-share").click();
+    const dialog = page.getByRole("dialog", { name: /share/i });
+    await expect(dialog).toBeVisible();
+
+    for (const [locator, label] of [
+      [dialog.getByRole("button", { name: "Close" }), "Close"],
+      [dialog.getByTestId("share-add"), "Add"],
+      [dialog.getByTestId("copy-link"), "Copy link"],
+      [dialog.getByTestId("share-footer").getByRole("button", { name: "Done" }), "Done"],
+    ] as const) {
+      const box = await locator.boundingBox();
+      expect(box, `${label} target`).not.toBeNull();
+      expect(box!.width, `${label} target width`).toBeGreaterThanOrEqual(44);
+      expect(box!.height, `${label} target height`).toBeGreaterThanOrEqual(44);
+    }
+
+    await expectNoHorizontalOverflow(page);
+  } finally {
     await context.close();
   }
 });
