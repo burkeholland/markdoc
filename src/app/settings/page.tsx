@@ -28,7 +28,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
   const next = nextParam && /^\/d\/[a-z0-9]+$/i.test(nextParam) ? nextParam : null;
   const tokens = (await listApiTokens(session.user.id)).map(serializeApiTokenMetadata);
   return (
-    <main className="min-h-screen bg-surface-2">
+    <main className="settings-page min-h-screen bg-surface-2">
       <header className="border-b border-line bg-surface">
         <div className="mx-auto flex h-16 max-w-4xl items-center gap-2 px-3 min-[390px]:gap-4 min-[390px]:px-6">
           <Link href="/" className="btn btn-ghost btn-sm -ml-2 shrink-0 gap-1.5" data-testid="settings-back">

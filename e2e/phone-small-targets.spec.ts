@@ -4,6 +4,7 @@ import { AGENT_DOCS_URL } from "../src/lib/mcp";
 import { createDocument, devLogin, mintToken, uniqueLogin, waitForEditor, waitForHydration } from "./helpers";
 
 const VIEWPORTS = [
+  { width: 375, height: 812 },
   { width: 360, height: 780 },
   { width: 393, height: 851 },
 ] as const;
@@ -149,14 +150,14 @@ async function openKeyDetails(page: Page) {
   const rows = page.getByTestId("key-row");
   await expect(rows).toHaveCount(1);
   const manage = rows.getByTestId("key-manage");
-  await expectTarget(manage, "Manage button", { height: 24 });
+  await expectTarget(manage, "Manage button", { height: 44 });
   await manage.click();
   await expect(manage).toHaveAttribute("aria-expanded", "true");
   return rows.getByTestId("key-may-ask");
 }
 
 for (const viewport of VIEWPORTS) {
-  test(`[2814] settings and editor targets stay usable at ${viewport.width}x${viewport.height}`, async ({ browser }) => {
+  test(`[2505, 2814] settings and editor targets stay usable at ${viewport.width}x${viewport.height}`, async ({ browser }, testInfo) => {
     const context = await browser.newContext({ viewport, serviceWorkers: "block" });
     let token: Awaited<ReturnType<typeof mintToken>> | undefined;
 
@@ -167,6 +168,17 @@ for (const viewport of VIEWPORTS) {
       token = await mintToken(page, `Phone target ${viewport.width}`);
       await page.goto("/settings");
       await waitForHydration(page);
+
+      await expectTarget(page.getByTestId("settings-back"), "Settings back link", { height: 44 });
+      await expectTarget(page.getByTestId("account-sign-out"), "Sign out button", { height: 44 });
+      await expectTarget(page.getByTestId("account-export"), "Export button", { height: 44 });
+      await expectTarget(page.getByTestId("account-delete"), "Delete account button", { height: 44 });
+      for (const preference of ["system", "light", "dark"]) {
+        await expectTarget(page.getByTestId(`theme-option-${preference}`), `${preference} theme option`, { height: 44 });
+      }
+      if (viewport.width === 375) {
+        await page.screenshot({ path: testInfo.outputPath("settings-375x812.png"), fullPage: true });
+      }
 
       let toggle = await openKeyDetails(page);
       await expectTarget(toggle, "key switch", { width: 44, height: 24 });
@@ -250,47 +262,52 @@ for (const viewport of VIEWPORTS) {
 
       // Setup: the account has a key, so the steps start folded behind "Set up".
       const setupToggle = page.getByTestId("agent-setup-toggle");
-      await expectTarget(setupToggle, "Set up button", { height: 24 });
+      await expectTarget(setupToggle, "Set up button", { height: 44 });
       await setupToggle.click();
       await expect(setupToggle).toHaveAttribute("aria-expanded", "true");
-      await expectTarget(page.getByTestId("agent-create-key"), "Create access key button", { height: 32 });
+      await expectTarget(page.getByTestId("agent-create-key"), "Create access key button", { height: 44 });
       const change = page.getByTestId("agent-options-toggle");
-      await expectTarget(change, "Change options button", { height: 24 });
+      await expectTarget(change, "Change options button", { height: 44 });
       await change.click();
       await expect(page.getByTestId("agent-options")).toBeVisible();
       const optionHeights: number[] = [];
       for (const scope of ["read", "comment", "full"]) {
-        optionHeights.push((await expectTarget(page.getByTestId(`agent-scope-${scope}`).locator(".."), `${scope} access row`, { height: 24 })).height);
+        optionHeights.push((await expectTarget(page.getByTestId(`agent-scope-${scope}`).locator(".."), `${scope} access row`, { height: 44 })).height);
       }
       const agentDocs = page.getByTestId("agent-docs-link");
-      const agentDocsBox = await expectTarget(agentDocs, "agent setup documentation link", { height: 24 });
+      const agentDocsBox = await expectTarget(agentDocs, "agent setup documentation link", { height: 44 });
+      if (viewport.width === 375) {
+        await page.screenshot({ path: testInfo.outputPath("settings-agent-setup-375x812.png"), fullPage: true });
+      }
       await expectLinkClick(page, agentDocs, AGENT_DOCS_URL);
 
       // One MCP config for every client: Create access key shows it, with a touch-sized copy
       // button, and the form-based fields (URL, Authorization header) folded behind a summary.
       await page.getByTestId("agent-create-key").click();
       await expect(page.getByTestId("agent-setup-snippet")).toContainText("mcpServers");
-      const copyConfigBox = await expectTarget(page.getByTestId("agent-setup-copy"), "copy MCP config button", { height: 32 });
+      const copyConfigBox = await expectTarget(page.getByTestId("agent-setup-copy"), "copy MCP config button", { height: 44 });
       const formSummary = page.getByTestId("agent-setup").locator("summary");
       await expect(formSummary).toHaveCount(1);
-      const formSummaryBox = await expectTarget(formSummary, "form fields summary", { height: 24 });
+      const formSummaryBox = await expectTarget(formSummary, "form fields summary", { height: 44 });
       await formSummary.click();
       await expect(page.getByTestId("agent-setup-fields")).toBeVisible();
-      const copyUrlBox = await expectTarget(page.getByRole("button", { name: "Copy server URL" }), "copy server URL button", { height: 32 });
-      const copyHeaderBox = await expectTarget(page.getByRole("button", { name: "Copy Authorization header" }), "copy Authorization header button", { height: 32 });
+      const copyUrlBox = await expectTarget(page.getByRole("button", { name: "Copy server URL" }), "copy server URL button", { height: 44 });
+      const copyHeaderBox = await expectTarget(page.getByRole("button", { name: "Copy Authorization header" }), "copy Authorization header button", { height: 44 });
 
       // Webhooks sit behind Advanced.
       const advanced = page.getByTestId("advanced-toggle");
-      await expectTarget(advanced, "Advanced toggle", { height: 24 });
+      await expectTarget(advanced, "Advanced toggle", { height: 44 });
       await advanced.click();
-      await page.getByTestId("webhook-add").click();
+      const addWebhook = page.getByTestId("webhook-add");
+      await expectTarget(addWebhook, "Add webhook button", { height: 44 });
+      await addWebhook.click();
       const eventCheckboxes = page.locator('[data-testid^="webhook-event-"]');
       await expect(eventCheckboxes).toHaveCount(7);
       const webhookHeights: number[] = [];
       for (let index = 0; index < (await eventCheckboxes.count()); index++) {
         const checkbox = eventCheckboxes.nth(index);
         const label = checkbox.locator("..");
-        const box = await expectTarget(label, `webhook event row ${index + 1}`, { height: 24 });
+        const box = await expectTarget(label, `webhook event row ${index + 1}`, { height: 44 });
         webhookHeights.push(box.height);
         const before = await checkbox.isChecked();
         await label.click();

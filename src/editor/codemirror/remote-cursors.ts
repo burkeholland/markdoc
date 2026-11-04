@@ -2,6 +2,7 @@ import { ViewPlugin, type EditorView, type ViewUpdate } from "@codemirror/view";
 import type { CollabSession } from "../collab/session";
 import { isSameAccount } from "../collab/identity";
 import { isIdle } from "../collab/follow";
+import { fitRemoteCaretLabels, watchRemoteCaretLabels } from "../collab/remote-caret-labels";
 
 function colorKey(color: string): string {
   const element = document.createElement("span");
@@ -42,10 +43,12 @@ export function remoteCaretInteractions(session: CollabSession) {
   return ViewPlugin.fromClass(
     class {
       private unsubscribe: () => void;
+      private stopWatchingLabels: () => void;
 
       constructor(private view: EditorView) {
         this.view.dom.addEventListener("mousedown", this.onMouseDown, true);
         this.view.dom.addEventListener("click", this.onClick, true);
+        this.stopWatchingLabels = watchRemoteCaretLabels(this.view.dom);
         this.unsubscribe = session.subscribe(() => this.sync());
         this.sync();
       }
@@ -60,6 +63,7 @@ export function remoteCaretInteractions(session: CollabSession) {
       destroy() {
         this.view.dom.removeEventListener("mousedown", this.onMouseDown, true);
         this.view.dom.removeEventListener("click", this.onClick, true);
+        this.stopWatchingLabels();
         this.unsubscribe();
       }
 
@@ -90,7 +94,10 @@ export function remoteCaretInteractions(session: CollabSession) {
 
       private sync() {
         const carets = this.view.contentDOM.querySelectorAll<HTMLElement>(".cm-ySelectionCaret");
-        if (carets.length === 0) return;
+        if (carets.length === 0) {
+          fitRemoteCaretLabels(this.view.dom);
+          return;
+        }
         const users = session.presence().filter((u) => !u.isLocal);
         const now = Date.now();
         carets.forEach((caret) => {
@@ -136,6 +143,7 @@ export function remoteCaretInteractions(session: CollabSession) {
             label.title = user.isAgent ? `Follow ${user.name} (agent)` : `Follow ${user.name}`;
           }
         });
+        fitRemoteCaretLabels(this.view.dom);
       }
     },
   );
