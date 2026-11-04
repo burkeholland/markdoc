@@ -5,6 +5,7 @@ import * as Y from "yjs";
 import type { CollabSession } from "../collab/session";
 import { isSameAccount } from "../collab/identity";
 import { isIdle } from "../collab/follow";
+import { fitRemoteCaretLabels, watchRemoteCaretLabels } from "../collab/remote-caret-labels";
 import { isRefresh, scheduleRefresh } from "./refresh";
 
 const key = new PluginKey<DecorationSet>("remoteCursors");
@@ -192,6 +193,7 @@ export function remoteCursorsPlugin(session: CollabSession): Plugin<DecorationSe
     },
     view(view) {
       const refresh = () => scheduleRefresh(view);
+      const stopWatchingLabels = watchRemoteCaretLabels(view.dom);
       let sessionSignature = `${session.followUserId ?? ""}:${session.flashUserId ?? ""}:${session.relativePositionVersion}`;
       const onAwareness = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }) => {
         if ([...added, ...updated, ...removed].some((id) => id !== session.ydoc.clientID)) refresh();
@@ -222,9 +224,11 @@ export function remoteCursorsPlugin(session: CollabSession): Plugin<DecorationSe
 
       return {
         update(v, prevState) {
+          fitRemoteCaretLabels(v.dom);
           if (v.state.selection !== prevState.selection || v.state.doc !== prevState.doc) publish();
         },
         destroy() {
+          stopWatchingLabels();
           session.awareness.off("change", onAwareness);
           unsubscribe();
           view.dom.removeEventListener("focus", onFocus);

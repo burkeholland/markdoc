@@ -17,7 +17,7 @@ export function AccountSettings({ login, name, image, isDemo }: { login: string 
   return (
     <div className="space-y-3">
       <div className={ROW} data-testid="account-identity-row">
-        <div className="flex min-w-0 items-center gap-3">
+        <div className="flex w-full min-w-0 items-center gap-3 sm:w-auto">
           {image ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={image} alt="" className="h-10 w-10 shrink-0 rounded-full" />
@@ -26,7 +26,7 @@ export function AccountSettings({ login, name, image, isDemo }: { login: string 
               {display.slice(0, 1).toUpperCase()}
             </span>
           )}
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="truncate text-base font-semibold text-ink" data-testid="account-name">{display}</p>
             {login && <p className="truncate text-sm text-ink-3" data-testid="account-login">Signed in as @{login}</p>}
           </div>
