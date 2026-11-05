@@ -79,6 +79,7 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated, headingL
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreatedKey | null>(null);
+  const [previousTokens, setPreviousTokens] = useState(tokens);
   const copyButton = useRef<HTMLButtonElement>(null);
   const submitting = useRef(false);
 
@@ -88,6 +89,12 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated, headingL
   const row = created ? tokens?.find((key) => key.id === created.id) : undefined;
   const connected = Boolean(row && hasConnected(row));
   const setup = mcpSetup({ origin, key: created?.key });
+
+  // Wait for a refreshed list: the creation response arrives before reload adds the new key.
+  if (tokens !== previousTokens) {
+    setPreviousTokens(tokens);
+    if (created && tokens !== null && !row) setCreated(null);
+  }
 
   // Watch for the agent's first request so the result of pasting the command shows up right here.
   useEffect(() => {
