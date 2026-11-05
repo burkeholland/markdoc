@@ -249,6 +249,30 @@
 .rich-column {
   background: var(--p-paper);
 }
+/* The preview font dropdown (preview-font-select.tsx): body text of the preview only; code stays mono. */
+.rich-column[data-preview-font="instrument-sans"] { --preview-font: var(--font-instrument-sans), var(--font-sans); }
+.rich-column[data-preview-font="inter"] { --preview-font: var(--font-inter), ui-sans-serif, system-ui, sans-serif; }
+.rich-column[data-preview-font="source-serif"] { --preview-font: var(--font-source-serif), Georgia, "Times New Roman", serif; }
+.rich-column[data-preview-font="plex-mono"] { --preview-font: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rich-column .md-rich,
+.rich-column .rich-placeholder {
+  font-family: var(--preview-font, var(--font-sans));
+}
+.preview-font-select {
+  height: 2rem;
+  max-width: 9rem;
+  border-radius: 0.5rem;
+  border: 0;
+  background: transparent;
+  padding: 0 0.5rem;
+  font-size: 13px;
+  color: var(--color-ink-3);
+  cursor: pointer;
+}
+.preview-font-select:hover {
+  background: var(--color-surface-2);
+  color: var(--color-ink);
+}
 .wordmark {
   font-family: var(--p-font-display);
   font-weight: 500;

@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, JetBrains_Mono, Fraunces } from "next/font/google";
+import { Inter, JetBrains_Mono, Fraunces, Instrument_Sans, Source_Serif_4, IBM_Plex_Mono } from "next/font/google";
 import { THEME_BOOT_SCRIPT } from "@/lib/theme";
 import { publicOrigin } from "@/server/public-origin";
 import { HydrationMarker } from "@/components/hydration-marker";
@@ -9,6 +9,10 @@ const inter = Inter({ variable: "--font-inter", subsets: ["latin"], display: "sw
 const mono = JetBrains_Mono({ variable: "--font-jetbrains-mono", subsets: ["latin"], display: "swap" });
 // Display face (--p-font-display in globals.css): wordmark, document titles, h1–h3 in the preview and reader.
 const fraunces = Fraunces({ variable: "--font-fraunces", subsets: ["latin"], display: "swap", axes: ["opsz", "SOFT"] });
+// The preview's font choices (src/lib/preview-font.ts); Inter is loaded above.
+const instrumentSans = Instrument_Sans({ variable: "--font-instrument-sans", subsets: ["latin"], display: "swap" });
+const sourceSerif = Source_Serif_4({ variable: "--font-source-serif", subsets: ["latin"], display: "swap" });
+const plexMono = IBM_Plex_Mono({ variable: "--font-plex-mono", subsets: ["latin"], weight: ["400", "500", "600"], display: "swap" });
 
 // The phase-1 look switch (`?brand=a|b`, task #398) is gone; a stored choice from then is dropped so it never lingers.
 const BRAND_CLEANUP_SCRIPT = `(function(){try{localStorage.removeItem("markdoc:brand");}catch(e){}})();`;
@@ -46,7 +50,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     // data-theme is set by the boot script before React runs, so the server markup never matches it.
-    <html lang="en" className={`${inter.variable} ${mono.variable} ${fraunces.variable} h-full antialiased`} suppressHydrationWarning>
+    <html lang="en" className={`${inter.variable} ${mono.variable} ${fraunces.variable} ${instrumentSans.variable} ${sourceSerif.variable} ${plexMono.variable} h-full antialiased`} suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT + BRAND_CLEANUP_SCRIPT }} />
       </head>
