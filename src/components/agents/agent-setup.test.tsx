@@ -112,6 +112,15 @@ describe("AgentSetup", () => {
     expect(screen.queryByTestId("agent-setup-snippet")).toBeNull();
   });
 
+  it("keeps the new config when an unrelated list update lands before the refresh", async () => {
+    const reload = vi.fn(async () => {});
+    const { rerender } = render(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    createKey();
+    await screen.findByTestId("agent-setup-snippet");
+    rerender(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    expect(screen.getByTestId("agent-setup-snippet")).toHaveTextContent(SECRET);
+  });
+
   it("stops setup polling when the created key disappears", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const reload = vi.fn(async () => {});
