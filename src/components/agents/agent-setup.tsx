@@ -93,14 +93,12 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated, headingL
 
   // The creation response arrives before reload adds the new key, and unrelated list updates can land first,
   // so only a key that has appeared in the list and then vanished counts as revoked.
+  if (created && row && !listed) setListed(true);
   if (tokens !== previousTokens) {
     setPreviousTokens(tokens);
-    if (created && tokens !== null) {
-      if (row) setListed(true);
-      else if (listed) {
-        setCreated(null);
-        setListed(false);
-      }
+    if (created && tokens !== null && !row && listed) {
+      setCreated(null);
+      setListed(false);
     }
   }
 

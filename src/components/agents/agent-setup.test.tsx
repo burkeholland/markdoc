@@ -121,6 +121,16 @@ describe("AgentSetup", () => {
     expect(screen.getByTestId("agent-setup-snippet")).toHaveTextContent(SECRET);
   });
 
+  it("clears a revoked key that was already listed when creation finished", async () => {
+    const reload = vi.fn(async () => {});
+    const { rerender } = render(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    createKey();
+    await screen.findByTestId("agent-setup-snippet");
+    rerender(<AgentSetup origin={ORIGIN} tokens={server.tokens} reload={reload} />);
+    rerender(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    expect(document.body.textContent).not.toContain(SECRET);
+  });
+
   it("stops setup polling when the created key disappears", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const reload = vi.fn(async () => {});
