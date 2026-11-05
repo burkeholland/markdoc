@@ -141,6 +141,44 @@ describe("AgentsPanel", () => {
     });
   });
 
+  it.each([false, true])("clears setup when its key is revoked (other key remains: %s)", async (keepOtherKey) => {
+    vi.stubGlobal("fetch", fetchMock);
+    const otherKeys = keepOtherKey ? [key({ id: "other", name: "Other agent" })] : [];
+    const listed = key({ id: "key-2", prefix: "mdk_created" });
+    let tokens = otherKeys;
+    fetchMock.mockImplementation((url, init) => {
+      const method = init?.method ?? "GET";
+      if (url === "/api/tokens" && method === "GET") return Promise.resolve(response({ tokens }));
+      if (url === "/api/tokens" && method === "POST") {
+        tokens = [...otherKeys, listed];
+        return Promise.resolve(response({ token: createdKey() }));
+      }
+      if (url === "/api/tokens/key-2" && method === "DELETE") {
+        tokens = otherKeys;
+        return Promise.resolve(response({ ok: true }));
+      }
+      return Promise.resolve(response({ error: "Unexpected request" }, 500));
+    });
+    renderPanel({ initialTokens: otherKeys });
+    if (keepOtherKey) fireEvent.click(screen.getByTestId("agent-setup-toggle"));
+    fireEvent.click(screen.getByTestId("agent-create-key"));
+    await screen.findByTestId("agent-setup-snippet");
+    const manage = await screen.findByRole("button", { name: "Manage Copilot CLI" });
+    fireEvent.click(manage);
+    const row = manage.closest("li")!;
+    fireEvent.click(within(row).getByTestId("key-revoke"));
+    fireEvent.click(within(row).getByTestId("key-revoke-confirm-button"));
+
+    await waitFor(() => expect(screen.getByTestId("agent-setup")).toHaveAttribute("data-state", "new"));
+    expect(screen.getByTestId("agent-create-key")).toBeEnabled();
+    expect(screen.queryByTestId("agent-setup-snippet")).toBeNull();
+    expect(screen.queryByTestId("agent-setup-header")).toBeNull();
+    expect(screen.queryByTestId("agent-connection")).toBeNull();
+    expect(screen.queryByText(/This contains your key/)).toBeNull();
+    expect(document.body.textContent).not.toContain("mdk_created_secret");
+    expect(screen.queryAllByTestId("key-row")).toHaveLength(otherKeys.length);
+  });
+
   it("renders the document back link only when next is provided", () => {
     vi.stubGlobal("fetch", fetchMock);
     routeTokens([]);
