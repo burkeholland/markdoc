@@ -188,6 +188,7 @@ export function DialogContent({
   description,
   children,
   className,
+  closeButtonClassName,
   wide,
   onClosed,
 }: {
@@ -195,6 +196,7 @@ export function DialogContent({
   description?: string;
   children: React.ReactNode;
   className?: string;
+  closeButtonClassName?: string;
   wide?: boolean;
   /**
    * Runs once the closed dialog has let go of focus. An action that must leave focus in the editor
@@ -287,7 +289,7 @@ export function DialogContent({
               <RadixDialog.Description className={HIDDEN_DESCRIPTION_CLASS_NAME}>{title}</RadixDialog.Description>
             )}
           </div>
-          <RadixDialog.Close type="button" className={CLOSE_CLASS_NAME} aria-label="Close">
+          <RadixDialog.Close type="button" className={cn(CLOSE_CLASS_NAME, closeButtonClassName)} aria-label="Close">
             <X size={16} />
           </RadixDialog.Close>
         </div>
