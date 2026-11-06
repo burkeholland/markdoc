@@ -21,11 +21,15 @@ az account set --subscription $sub
 $appId = az ad app create --display-name markdoc-github-deploy --query appId -o tsv
 az ad sp create --id $appId
 
-# 2. Federated credential: only the `production` environment of this repo can use it
+# 2. Federated credential: only the `production` environment of this repo can use it.
+#    This repo uses immutable OIDC subjects (repo and owner IDs), so the subject is not the plain repo name.
+$repoId  = gh api "repos/$repo" --jq .id
+$ownerId = gh api "repos/$repo" --jq .owner.id
+$subject = "repo:$($repo.Split('/')[0])@$ownerId/$($repo.Split('/')[1])@$repoId`:environment:production"
 @{
   name = 'github-production'
   issuer = 'https://token.actions.githubusercontent.com'
-  subject = "repo:${repo}:environment:production"
+  subject = $subject
   audiences = @('api://AzureADTokenExchange')
 } | ConvertTo-Json | Set-Content fic.json
 az ad app federated-credential create --id $appId --parameters fic.json
