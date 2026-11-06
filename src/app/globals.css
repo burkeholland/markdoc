@@ -256,7 +256,7 @@
 .rich-column[data-preview-font="plex-mono"] { --preview-font: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace; }
 .rich-column .md-rich,
 .rich-column .rich-placeholder {
-  font-family: var(--preview-font, var(--font-sans));
+  font-family: var(--preview-font, var(--font-instrument-sans), var(--font-sans));
 }
 .preview-font-trigger {
   display: inline-flex;
