@@ -20,6 +20,20 @@ async function expectNoHorizontalOverflow(page: import("@playwright/test").Page)
   expect(widths.scroll).toBeLessThanOrEqual(widths.client);
 }
 
+test("folder controls have 44px touch targets at 375px", async ({ browser }) => {
+  const { context, page } = await signInOnPhone(browser, "folder-phone-targets");
+  try {
+    await page.goto("/");
+    await waitForHydration(page);
+
+    await expectExpandedTouchTarget(page.getByTestId("folder-all"), "All documents");
+    await expectExpandedTouchTarget(page.getByTestId("folder-unfiled"), "Not in a folder");
+    await expectExpandedTouchTarget(page.getByTestId("new-folder"), "New folder");
+  } finally {
+    await context.close();
+  }
+});
+
 test("dashboard card and document filters have 44px targets at 375px", async ({ browser }) => {
   const { context, page } = await signInOnPhone(browser, "dashboard-phone-targets");
   try {
