@@ -191,7 +191,7 @@ function sameSelection(a: FolderSelection, b: FolderSelection): boolean {
 }
 
 const CHIP_CLASS =
-  "inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition focus-visible:border-accent";
+  "tap-target relative inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition focus-visible:border-accent";
 
 function chipClass(selected: boolean, dropActive: boolean): string {
   return cn(
