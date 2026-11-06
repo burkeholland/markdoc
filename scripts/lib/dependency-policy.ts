@@ -825,8 +825,11 @@ function acceptedAudit(
     .sort(comparePackageResults);
   // An accepted report never omits a package, so the release script can check all of them.
   if (packages.length > MAX_REPORTED_PACKAGES) return null;
+  // Only an exception that covers a package npm reported is listed: the release script rejects one that covers none, and
+  // a node npm left out was already checked against the listed versions above.
   const exceptions = advisories
-    .filter((item) => matched.has(item))
+    .filter((item) => matched.has(item)
+      && packages.some((pkg) => pkg.status === "accepted" && pkg.name === item.package && pkg.version === item.version))
     .map(({ advisory, package: name, version, expires }) => ({ advisory, package: name, version, expires }));
   return { packages, exceptions };
 }

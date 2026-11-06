@@ -1805,6 +1805,16 @@ describe("accepted advisories (#2260)", () => {
     });
   });
 
+  it("lists only the exceptions that cover a package the audit reported, though the lock has the other version too", () => {
+    const fixture = bracesCase();
+    fixture.packages.push({ name: "micromatch/node_modules/braces", version: "3.0.2", flags: { dev: true } });
+    fixture.advisories = [{ ...TEST_ADVISORY }, { ...TEST_ADVISORY, version: "3.0.2" }];
+    expect(evaluateBraces(fixture)).toMatchObject({ status: "accepted", exceptions: [ACCEPTED_EXCEPTION] });
+    // A lock node of an unlisted version is still refused, reported or not.
+    fixture.advisories = [{ ...TEST_ADVISORY }];
+    expect(evaluateBraces(fixture)).toEqual(BRACES_REJECTED);
+  });
+
   // eslint and @eslint-community/eslint-utils name each other in the audit of main's lock on 2026-10-31.
   function cycleCase(aVia: string[], flags: Record<string, unknown> = { dev: true }): BracesCase {
     const fixture = bracesCase();
