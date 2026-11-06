@@ -76,7 +76,7 @@ Assert-Equal '6.16.0' $currentLock['packages']['node_modules/qs']['version'] `
   'The current lock must retain the remediated qs version.'
 
 $workflowSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.github\workflows\deploy.yml') -Raw
-$checkout = $workflowSource.IndexOf('actions/checkout@v4')
+$checkout = $workflowSource.IndexOf('actions/checkout@v5')
 $setupNode = $workflowSource.IndexOf('actions/setup-node@v5')
 $azureLogin = $workflowSource.IndexOf('azure/login@v2')
 $release = $workflowSource.IndexOf('./deploy/release-vm.ps1')
