@@ -1,6 +1,6 @@
 import { devices } from "@playwright/test";
 import { test, expect } from "./fixtures";
-import { signIn, createDocument, openDocument, focusCodeEnd, codeText, cssPx, devLogin, uniqueLogin } from "./helpers";
+import { signIn, createDocument, openDocument, focusCodeEnd, codeText, cssPx, devLogin, expectExpandedTouchTarget, uniqueLogin } from "./helpers";
 
 const CONTENT = ["# Reader Title", "", "Intro paragraph for the reader.", "", "## First Section", "", "Some text in the first section.", "", "## Second Section", "", "```ts", "const x = 1;", "```", ""].join("\n");
 
@@ -138,6 +138,8 @@ test.describe("reader view", () => {
       expect(target.width, `${label} touch target width`).toBeGreaterThanOrEqual(44);
       expect(target.height, `${label} touch target height`).toBeGreaterThanOrEqual(44);
     }
+
+    await expectExpandedTouchTarget(page.getByTestId("reader-toc-toggle"), "Contents");
 
     await expect(header.getByText("Edit", { exact: true })).toBeVisible();
     await expect(header.getByText("Open in editor", { exact: true })).toBeHidden();
