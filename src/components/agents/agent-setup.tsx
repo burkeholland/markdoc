@@ -79,6 +79,8 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated, headingL
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreatedKey | null>(null);
+  const [previousTokens, setPreviousTokens] = useState(tokens);
+  const [listed, setListed] = useState(false);
   const copyButton = useRef<HTMLButtonElement>(null);
   const submitting = useRef(false);
 
@@ -88,6 +90,17 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated, headingL
   const row = created ? tokens?.find((key) => key.id === created.id) : undefined;
   const connected = Boolean(row && hasConnected(row));
   const setup = mcpSetup({ origin, key: created?.key });
+
+  // The creation response arrives before reload adds the new key, and unrelated list updates can land first,
+  // so only a key that has appeared in the list and then vanished counts as revoked.
+  if (created && row && !listed) setListed(true);
+  if (tokens !== previousTokens) {
+    setPreviousTokens(tokens);
+    if (created && tokens !== null && !row && listed) {
+      setCreated(null);
+      setListed(false);
+    }
+  }
 
   // Watch for the agent's first request so the result of pasting the command shows up right here.
   useEffect(() => {
@@ -114,6 +127,7 @@ export function AgentSetup({ origin, tokens, reload, doc, onKeyCreated, headingL
         scope,
         documentIds: onlyThisDoc && doc ? [doc.id] : null,
       });
+      setListed(false);
       setCreated({ id: res.token.id, key: res.token.token, name: res.token.name, scope: res.token.scope });
       onKeyCreated?.();
       void reload();

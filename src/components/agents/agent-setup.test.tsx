@@ -91,6 +91,61 @@ describe("AgentSetup", () => {
     expect(screen.queryByTestId("agent-create-key")).toBeNull();
   });
 
+  it("preserves the new config until the token list refreshes, then clears it if the key disappears", async () => {
+    const reload = vi.fn(async () => {});
+    const initialTokens: ApiTokenDto[] = [];
+    const { rerender } = render(<AgentSetup origin={ORIGIN} tokens={initialTokens} reload={reload} />);
+    createKey();
+    await screen.findByTestId("agent-setup-snippet");
+    expect(screen.getByTestId("agent-setup-snippet")).toHaveTextContent(SECRET);
+
+    rerender(<AgentSetup origin={ORIGIN} tokens={server.tokens} reload={reload} />);
+    expect(screen.getByTestId("agent-setup")).toHaveAttribute("data-state", "waiting");
+    rerender(<AgentSetup origin={ORIGIN} tokens={null} reload={reload} />);
+    expect(screen.getByTestId("agent-setup-snippet")).toHaveTextContent(SECRET);
+    rerender(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    expect(screen.getByTestId("agent-create-key")).toBeEnabled();
+    expect(document.body.textContent).not.toContain(SECRET);
+
+    // A later stale list must not bring the one-time credential back.
+    rerender(<AgentSetup origin={ORIGIN} tokens={server.tokens} reload={reload} />);
+    expect(screen.queryByTestId("agent-setup-snippet")).toBeNull();
+  });
+
+  it("keeps the new config when an unrelated list update lands before the refresh", async () => {
+    const reload = vi.fn(async () => {});
+    const { rerender } = render(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    createKey();
+    await screen.findByTestId("agent-setup-snippet");
+    rerender(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    expect(screen.getByTestId("agent-setup-snippet")).toHaveTextContent(SECRET);
+  });
+
+  it("clears a revoked key that was already listed when creation finished", async () => {
+    const reload = vi.fn(async () => {});
+    const { rerender } = render(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    createKey();
+    await screen.findByTestId("agent-setup-snippet");
+    rerender(<AgentSetup origin={ORIGIN} tokens={server.tokens} reload={reload} />);
+    rerender(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    expect(document.body.textContent).not.toContain(SECRET);
+  });
+
+  it("stops setup polling when the created key disappears", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const reload = vi.fn(async () => {});
+    const { rerender } = render(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    createKey();
+    await screen.findByTestId("agent-setup-snippet");
+    rerender(<AgentSetup origin={ORIGIN} tokens={server.tokens} reload={reload} />);
+    rerender(<AgentSetup origin={ORIGIN} tokens={[]} reload={reload} />);
+    reload.mockClear();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+    });
+    expect(reload).not.toHaveBeenCalled();
+  });
+
   it("sends the chosen options: access level, this document only, expiry and name", async () => {
     render(<Harness doc={DOC} />);
     fireEvent.click(screen.getByTestId("agent-options-toggle"));
