@@ -6,10 +6,10 @@
 export const PREVIEW_FONT_STORAGE_KEY = "markdoc:previewFont";
 
 export const PREVIEW_FONTS = [
-  { id: "instrument-sans", label: "Instrument Sans" },
-  { id: "inter", label: "Inter" },
-  { id: "source-serif", label: "Source Serif 4" },
-  { id: "plex-mono", label: "IBM Plex Mono" },
+  { id: "instrument-sans", label: "Instrument Sans", kind: "Sans", description: "Clean, modern, slightly warmer than Inter", family: 'var(--font-instrument-sans), var(--font-sans)' },
+  { id: "inter", label: "Inter", kind: "Sans", description: "Neutral and familiar, the classic UI sans", family: "var(--font-inter), ui-sans-serif, system-ui, sans-serif" },
+  { id: "source-serif", label: "Source Serif 4", kind: "Serif", description: "Book-like, made for long reading", family: 'var(--font-source-serif), Georgia, "Times New Roman", serif' },
+  { id: "plex-mono", label: "IBM Plex Mono", kind: "Mono", description: "Typewriter feel, great for specs and notes", family: "var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace" },
 ] as const;
 
 export type PreviewFont = (typeof PREVIEW_FONTS)[number]["id"];

@@ -258,20 +258,21 @@
 .rich-column .rich-placeholder {
   font-family: var(--preview-font, var(--font-sans));
 }
-.preview-font-select {
+.preview-font-trigger {
+  display: inline-flex;
   height: 2rem;
-  max-width: 9rem;
+  align-items: center;
+  gap: 0.125rem;
   border-radius: 0.5rem;
-  border: 0;
-  background: transparent;
   padding: 0 0.5rem;
   font-size: 13px;
-  color: var(--color-ink-3);
+  font-weight: 500;
+  color: var(--color-accent);
   cursor: pointer;
 }
-.preview-font-select:hover {
-  background: var(--color-surface-2);
-  color: var(--color-ink);
+.preview-font-trigger:hover,
+.preview-font-trigger[data-state="open"] {
+  background: var(--color-surface-3);
 }
 .wordmark {
   font-family: var(--p-font-display);

@@ -10,20 +10,34 @@ afterEach(() => {
   localStorage.clear();
 });
 
-describe("the preview font dropdown", () => {
-  it("defaults to Instrument Sans and writes nothing until a choice is made", () => {
+describe("the preview font menu", () => {
+  it("is an Aa button; the default is checked and nothing is stored until a choice is made", async () => {
+    const user = userEvent.setup();
     render(<PreviewFontSelect />);
-    expect((screen.getByRole("combobox", { name: "Preview font" }) as HTMLSelectElement).value).toBe("instrument-sans");
+    const trigger = screen.getByRole("button", { name: "Preview font" });
+    expect(trigger.textContent).toBe("Aa");
+    await user.click(trigger);
+    expect(screen.getByRole("menuitemradio", { name: /Instrument Sans/ }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("menuitemradio", { name: /Sans · Inter/ }).getAttribute("aria-checked")).toBe("false");
     expect(localStorage.getItem(PREVIEW_FONT_STORAGE_KEY)).toBeNull();
-    expect(readPreviewFont()).toBe(DEFAULT_PREVIEW_FONT);
   });
 
-  it("offers the four faces and stores the choice", async () => {
+  it("shows each option in its own face with a description", async () => {
+    const user = userEvent.setup();
     render(<PreviewFontSelect />);
-    const select = screen.getByRole("combobox", { name: "Preview font" }) as HTMLSelectElement;
-    expect([...select.options].map((o) => o.text)).toEqual(["Instrument Sans", "Inter", "Source Serif 4", "IBM Plex Mono"]);
-    await userEvent.setup().selectOptions(select, "source-serif");
-    expect(select.value).toBe("source-serif");
+    await user.click(screen.getByRole("button", { name: "Preview font" }));
+    expect(screen.getAllByRole("menuitemradio")).toHaveLength(4);
+    const serif = screen.getByTestId("preview-font-source-serif");
+    expect(serif.textContent).toContain("Book-like, made for long reading");
+    expect((serif.querySelector("span[style]") as HTMLElement).style.fontFamily).toContain("--font-source-serif");
+  });
+
+  it("works from the keyboard and stores the choice", async () => {
+    const user = userEvent.setup();
+    render(<PreviewFontSelect />);
+    screen.getByRole("button", { name: "Preview font" }).focus();
+    await user.keyboard("{Enter}");
+    await user.keyboard("{ArrowDown}{ArrowDown}{Enter}");
     expect(localStorage.getItem(PREVIEW_FONT_STORAGE_KEY)).toBe("source-serif");
     expect(readPreviewFont()).toBe("source-serif");
   });
