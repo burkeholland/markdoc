@@ -70,16 +70,7 @@ export interface ListedAdvisory extends AcceptedAdvisory {
 // in acceptedAudit below and in docs/vm-hosting.md. This list is code: a change goes through a pull request, and no
 // environment variable, flag or option can add to it. Delete an entry as soon as the lock has a patched version or
 // no longer has the package.
-export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [
-  // Added 2026-10-31. Remove once minimatch 11.0.1 is at least 7 days old (after 2026-11-03) and the override can land.
-  ...["3.1.5", "10.2.6"].map((version) => ({
-    advisory: "GHSA-g3hv-75wg-m249",
-    package: "minimatch",
-    version,
-    expires: "2026-11-14",
-    reason: "Dev-only (eslint and typescript-eslint); every patched minimatch is newer than the 7-day feed rule.",
-  })),
-];
+export const ACCEPTED_ADVISORIES: readonly ListedAdvisory[] = [];
 
 // What tests may set about the accepted-advisory rule: the clock that decides expiry and the list itself. These are
 // function parameters only. The command line and the release never pass them, so they use the real clock and

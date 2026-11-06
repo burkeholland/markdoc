@@ -1662,9 +1662,13 @@ describe("accepted advisories (#2260)", () => {
   });
 
   it("accepts the listed minimatch advisory when npm reports a wildcard range", () => {
-    const listed = ACCEPTED_ADVISORIES.find((item) =>
-      item.advisory === "GHSA-g3hv-75wg-m249" && item.package === "minimatch" && item.version === "3.1.5");
-    if (!listed) throw new Error("the listed minimatch advisory fixture is missing");
+    const listed = {
+      advisory: "GHSA-g3hv-75wg-m249",
+      package: "minimatch",
+      version: "3.1.5",
+      expires: "2026-11-14",
+      reason: "Test advisory",
+    };
     const lock = packageLock([{ name: "minimatch", version: "3.1.5", flags: { dev: true } }]);
     const report = evaluateDependencyPolicy({
       expectedLockSha256: packageLockSha256(lock),
