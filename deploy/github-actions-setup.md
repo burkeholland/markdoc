@@ -3,6 +3,8 @@
 **What you need to do:** (1) run the block below once, as an Owner of the Azure subscription; (2) run
 Actions → **Deploy to Azure (manual)** on `main`. That's it.
 
+> The one-time setup has already been run; these commands are kept for re-creating it.
+
 The **Deploy to Azure (manual)** workflow (`.github/workflows/deploy.yml`) runs `deploy/release-vm.ps1 -Target Enterprise`
 on a GitHub-hosted runner, so `npm audit` uses the public registry instead of the local policy-gated feed.
 It logs in to Azure with OIDC (no stored secret). Run once, as an Owner of the subscription, in `pwsh`:
@@ -35,7 +37,10 @@ az role assignment create --assignee $appId --role Contributor `
 
 # 4. GitHub `production` environment: limit it to main, keeping any settings it already has.
 #    (PUT replaces the environment's settings, so read them first and send them back.)
-$env0 = gh api "repos/$repo/environments/production" 2>$null | ConvertFrom-Json
+$raw = gh api "repos/$repo/environments/production" 2>&1
+$env0 = $null
+if ($LASTEXITCODE -eq 0) { $env0 = $raw | ConvertFrom-Json }
+elseif ("$raw" -notmatch 'HTTP 404') { throw "Could not read the production environment; aborting so its settings are not overwritten: $raw" }
 $body = @{
   wait_timer = if ($env0) { [int](($env0.protection_rules | Where-Object type -eq 'wait_timer').wait_timer) } else { 0 }
   prevent_self_review = $false
@@ -47,8 +52,20 @@ foreach ($rule in @($env0.protection_rules | Where-Object type -eq 'required_rev
   $body.reviewers = @($rule.reviewers | ForEach-Object { @{ type = $_.type; id = $_.reviewer.id } })
 }
 $body | ConvertTo-Json -Depth 5 | gh api -X PUT "repos/$repo/environments/production" --input -
-# Allow only main (a 422 "already exists" here is fine)
-gh api -X POST "repos/$repo/environments/production/deployment-branch-policies" -f name=main -f type=branch
+# Allow only the exact branch main: delete every other policy (branches and tags), then add main if missing
+$policies = gh api "repos/$repo/environments/production/deployment-branch-policies" --jq '.branch_policies'
+if ($LASTEXITCODE -ne 0) { throw 'Could not list deployment branch policies.' }
+$policies = @($policies | ConvertFrom-Json)
+foreach ($p in $policies) {
+  if (-not ($p.name -ceq 'main' -and $p.type -eq 'branch')) {
+    gh api -X DELETE "repos/$repo/environments/production/deployment-branch-policies/$($p.id)"
+    if ($LASTEXITCODE -ne 0) { throw "Could not delete policy $($p.name)." }
+  }
+}
+if (-not ($policies | Where-Object { $_.name -ceq 'main' -and $_.type -eq 'branch' })) {
+  gh api -X POST "repos/$repo/environments/production/deployment-branch-policies" -f name=main -f type=branch
+  if ($LASTEXITCODE -ne 0) { throw 'Could not add the main policy.' }
+}
 
 # 5. Variables (IDs are not secrets; no secrets are needed)
 gh variable set AZURE_CLIENT_ID       --env production --repo $repo --body $appId
