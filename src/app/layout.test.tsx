@@ -7,7 +7,7 @@ delete process.env.MARKDOC_URL;
 // next/font/google is filled in by Next's compiler; outside it the exports are empty.
 vi.mock("next/font/google", () => {
   const font = () => ({ className: "", variable: "", style: {} });
-  return { Inter: font, JetBrains_Mono: font, Fraunces: font };
+  return { Inter: font, JetBrains_Mono: font, Fraunces: font, Instrument_Sans: font, Source_Serif_4: font, IBM_Plex_Mono: font };
 });
 
 const { metadata } = await import("./layout");
