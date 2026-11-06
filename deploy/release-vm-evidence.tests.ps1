@@ -303,12 +303,12 @@ Assert-True ($workflowTriggers.Success -and
 Assert-True ($workflowSource -match '(?m)^\s+environment: production\s*$' -and
   $workflowSource -match '(?ms)^concurrency:\s*\r?\n\s+group: markdoc-production\s*\r?\n\s+cancel-in-progress: false\s*$') 'The workflow must retain the production environment and non-cancelling concurrency.'
 Assert-True ([regex]::Matches($workflowSource, 'uses: azure/login@v2').Count -eq 1 -and
-  [regex]::Matches($workflowSource, '\$\{\{\s*secrets\.').Count -eq 3 -and
-  $workflowSource -notmatch '\$\{\{\s*vars\.' -and
+  [regex]::Matches($workflowSource, '\$\{\{\s*vars\.').Count -eq 3 -and
+  $workflowSource -notmatch '\$\{\{\s*secrets\.' -and
   $workflowSource -match '(?m)^  id-token: write\s*$' -and
-  $workflowSource -match '(?m)^\s+client-id: \$\{\{ secrets\.AZURE_CLIENT_ID \}\}\s*$' -and
-  $workflowSource -match '(?m)^\s+tenant-id: \$\{\{ secrets\.AZURE_TENANT_ID \}\}\s*$' -and
-  $workflowSource -match '(?m)^\s+subscription-id: \$\{\{ secrets\.AZURE_SUBSCRIPTION_ID \}\}\s*$') 'The workflow must retain one OIDC login with only the established Azure identity.'
+  $workflowSource -match '(?m)^\s+client-id: \$\{\{ vars\.AZURE_CLIENT_ID \}\}\s*$' -and
+  $workflowSource -match '(?m)^\s+tenant-id: \$\{\{ vars\.AZURE_TENANT_ID \}\}\s*$' -and
+  $workflowSource -match '(?m)^\s+subscription-id: \$\{\{ vars\.AZURE_SUBSCRIPTION_ID \}\}\s*$') 'The workflow must retain one OIDC login with only the established Azure identity.'
 Assert-True ($workflowSource -notmatch '(?i)\bretr(?:y|ies)\b') 'The workflow must not add an automatic retry around the single guarded release.'
 Assert-True ($releaseSource -match '\$vmOrigin = ''https://markdoc-burkeholland\.eastus2\.cloudapp\.azure\.com''' -and
   $releaseSource -match '\$origin = ''https://markdoc\.app''' -and

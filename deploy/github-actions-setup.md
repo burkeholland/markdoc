@@ -1,5 +1,8 @@
 # Release from GitHub Actions: one-time setup
 
+**What you need to do:** (1) run the block below once, as an Owner of the Azure subscription; (2) run
+Actions → **Deploy to Azure (manual)** on `main`. That's it.
+
 The **Deploy to Azure (manual)** workflow (`.github/workflows/deploy.yml`) runs `deploy/release-vm.ps1 -Target Enterprise`
 on a GitHub-hosted runner, so `npm audit` uses the public registry instead of the local policy-gated feed.
 It logs in to Azure with OIDC (no stored secret). Run once, as an Owner of the subscription, in `pwsh`:
@@ -30,8 +33,24 @@ Remove-Item fic.json
 az role assignment create --assignee $appId --role Contributor `
   --scope "/subscriptions/$sub/resourceGroups/markdoc-rg"
 
-# 4. GitHub environment + variables (IDs are not secrets; no secrets are needed)
-gh api -X PUT "repos/$repo/environments/production"
+# 4. GitHub `production` environment: limit it to main, keeping any settings it already has.
+#    (PUT replaces the environment's settings, so read them first and send them back.)
+$env0 = gh api "repos/$repo/environments/production" 2>$null | ConvertFrom-Json
+$body = @{
+  wait_timer = if ($env0) { [int](($env0.protection_rules | Where-Object type -eq 'wait_timer').wait_timer) } else { 0 }
+  prevent_self_review = $false
+  reviewers = @()
+  deployment_branch_policy = @{ protected_branches = $false; custom_branch_policies = $true }
+}
+foreach ($rule in @($env0.protection_rules | Where-Object type -eq 'required_reviewers')) {
+  $body.prevent_self_review = [bool]$rule.prevent_self_review
+  $body.reviewers = @($rule.reviewers | ForEach-Object { @{ type = $_.type; id = $_.reviewer.id } })
+}
+$body | ConvertTo-Json -Depth 5 | gh api -X PUT "repos/$repo/environments/production" --input -
+# Allow only main (a 422 "already exists" here is fine)
+gh api -X POST "repos/$repo/environments/production/deployment-branch-policies" -f name=main -f type=branch
+
+# 5. Variables (IDs are not secrets; no secrets are needed)
 gh variable set AZURE_CLIENT_ID       --env production --repo $repo --body $appId
 gh variable set AZURE_TENANT_ID       --env production --repo $repo --body $tenant
 gh variable set AZURE_SUBSCRIPTION_ID --env production --repo $repo --body $sub
