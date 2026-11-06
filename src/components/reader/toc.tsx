@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 const TOP_OFFSET = 88;
 
 const TOGGLE_CLASS =
-  "flex w-full items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm font-medium text-ink-2 lg:hidden";
+  "tap-target relative flex w-full items-center gap-2 rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm font-medium text-ink-2 lg:hidden";
 const PAGE_HEADING_CLASS =
   "mb-2 hidden pl-2 text-[11px] font-semibold uppercase tracking-wider text-ink-4 lg:block";
 const ENTRY_CLASS = "block wrap-anywhere rounded-md py-1 pr-2 text-[13px] leading-snug transition-colors";
