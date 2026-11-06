@@ -1582,6 +1582,18 @@ body {
     left: 0;
     transform: translateY(-50%);
   }
+  /* 32px folder chips need a 12px row gap for their 44px targets to clear each other. */
+  .folder-rail-chips {
+    row-gap: 0.75rem;
+  }
+  /* The 35px menu button grows away from its folder chip; 2px beyond the 8px gap keeps its 44px target clear of the next chip. */
+  .folder-split {
+    margin-right: 2px;
+  }
+  .folder-split-menu.tap-target::after {
+    left: 0;
+    transform: translateY(-50%);
+  }
 }
 
 @media (max-width: 767.98px) and (pointer: coarse) {

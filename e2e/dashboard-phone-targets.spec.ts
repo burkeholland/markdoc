@@ -20,6 +20,69 @@ async function expectNoHorizontalOverflow(page: import("@playwright/test").Page)
   expect(widths.scroll).toBeLessThanOrEqual(widths.client);
 }
 
+test("folder controls have 44px touch targets at 375px", async ({ browser }) => {
+  const { context, page } = await signInOnPhone(browser, "folder-phone-targets");
+  try {
+    await page.goto("/");
+    await waitForHydration(page);
+
+    await expectExpandedTouchTarget(page.getByTestId("folder-all"), "All documents");
+    await expectExpandedTouchTarget(page.getByTestId("folder-unfiled"), "Not in a folder");
+    await expectExpandedTouchTarget(page.getByTestId("new-folder"), "New folder");
+  } finally {
+    await context.close();
+  }
+});
+
+test("folder hit areas stay separate at 375px", async ({ browser }) => {
+  const { context, page } = await signInOnPhone(browser, "folder-phone-hit-areas");
+  try {
+    await page.goto("/");
+    await waitForHydration(page);
+    await page.getByTestId("new-folder").click();
+    await page.getByTestId("folder-name-input").fill("Phone hit areas");
+    await page.getByTestId("folder-name-submit").click();
+    await expect(page.getByTestId("folder-chip")).toBeVisible();
+
+    const firstRow = await page.getByTestId("folder-all").boundingBox();
+    const lastRow = await page.getByTestId("new-folder").boundingBox();
+    expect(lastRow!.y, "the chips wrap onto several rows").toBeGreaterThan(firstRow!.y);
+
+    for (const [testId, label] of [
+      ["folder-all", "All documents"],
+      ["folder-unfiled", "Not in a folder"],
+      ["folder-chip", "Folder"],
+      ["folder-menu", "Folder actions"],
+      ["new-folder", "New folder"],
+    ] as const) {
+      const locator = page.getByTestId(testId);
+      await expectExpandedTouchTarget(locator, label);
+      const hit = await locator.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const step = 0.5;
+        const owns = (x: number, y: number) => document.elementFromPoint(x, y)?.closest("button") === element;
+        const centerY = box.top + box.height / 2;
+        let ownsVisibleWidth = true;
+        let minHeight = Infinity;
+        // Stay 2px inside the edges: ::after covers only the padding box, and hit testing snaps edges to whole pixels.
+        for (let x = box.left + 2; x < box.right - 2; x += step) {
+          ownsVisibleWidth &&= owns(x, centerY);
+          let height = 0;
+          for (let y = centerY - step / 2; owns(x, y); y -= step) height += step;
+          for (let y = centerY + step / 2; owns(x, y); y += step) height += step;
+          minHeight = Math.min(minHeight, height);
+        }
+        return { ownsVisibleWidth, minHeight };
+      });
+      expect(hit.ownsVisibleWidth, `${label} keeps its whole visible width`).toBe(true);
+      expect(hit.minHeight, `${label} effective touch target height`).toBeGreaterThanOrEqual(44);
+    }
+    await expectNoHorizontalOverflow(page);
+  } finally {
+    await context.close();
+  }
+});
+
 test("dashboard card and document filters have 44px targets at 375px", async ({ browser }) => {
   const { context, page } = await signInOnPhone(browser, "dashboard-phone-targets");
   try {
