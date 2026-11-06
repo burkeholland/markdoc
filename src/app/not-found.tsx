@@ -17,7 +17,7 @@ export default function NotFound() {
       <h1 className="mt-2 text-2xl font-semibold text-ink">Page not found</h1>
       <p className="mt-2 max-w-sm text-sm text-ink-3">This page doesn&apos;t exist, or you don&apos;t have access to it.</p>
       {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- keeps next/link out of every route's shared chunk (#1485) */}
-      <a href="/" className="btn btn-primary mt-6">Go to Markdoc</a>
+      <a href="/" className="btn btn-primary mt-6">Back to Markdoc home</a>
     </main>
   );
 }
