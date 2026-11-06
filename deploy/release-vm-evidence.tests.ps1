@@ -155,7 +155,7 @@ $hostingSource = Get-Content -LiteralPath ([IO.Path]::Combine($PSScriptRoot, '..
 Assert-True ([regex]::Matches($releaseSource, "'vm', 'run-command', 'invoke'").Count -eq 1) 'Terminal release must retain one VM invocation.'
 Assert-True ([regex]::Matches($releaseSource, "'acr', 'build'").Count -eq 1) 'Terminal release must retain one ACR submission.'
 Assert-True ([regex]::Matches($workflowSource, 'deploy/release-vm\.ps1').Count -eq 1 -and
-  $workflowSource -match '(?m)^\s*run: \./deploy/release-vm\.ps1 -ExpectedCommit \$env:GITHUB_SHA\s*$') 'The workflow must invoke the configured release entrypoint once for the checked-out exact GITHUB_SHA.'
+  $workflowSource -match '(?m)^\s*run: \./deploy/release-vm\.ps1 -ExpectedCommit \$env:RELEASE_SHA -Target Enterprise\s*$') 'The workflow must invoke the configured release entrypoint once for the pinned RELEASE_SHA.'
 Assert-True ($workflowSource -match '(?m)^\s+runs-on: windows-latest\s*$' -and
   $workflowSource -match '(?m)^\s+shell: pwsh\s*$') 'The Windows release entrypoint must run with the PowerShell already installed on the hosted Windows runner.'
 Assert-True ($workflowSource -notmatch '\baz\s+acr\s+build\b' -and

@@ -1,18 +1,14 @@
-# Manual deployment to the existing Markdoc VM. Never runs on its own.
-#
-# One-time setup:
-#  1. Run deploy/azure.ps1 -InitializeDatabase -ConfigureRecovery once locally.
-#  2. Create an Entra app with federated credentials for this repo (OIDC) and give it
-#     Contributor + AcrPush on the resource group. Add repository secrets:
-#       AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+# Manual production release to the Enterprise VM, run on GitHub-hosted runners (public npm registry).
+# Never runs on its own. One-time Azure/GitHub setup: deploy/github-actions-setup.md
 name: Deploy to Azure (manual)
 
 on:
   workflow_dispatch:
     inputs:
-      confirm:
-        description: Type "deploy" to confirm
-        required: true
+      sha:
+        description: Full 40-hex commit to release. Blank = current main HEAD.
+        required: false
+        default: ""
 
 permissions:
   id-token: write
@@ -24,14 +20,29 @@ concurrency:
 
 jobs:
   deploy:
-    if: inputs.confirm == 'deploy'
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
-    # Outer job cap. Step-cap differences are scheduling headroom, not reserved post-release time.
     timeout-minutes: 99
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         timeout-minutes: 5
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Pin the release commit
+        id: pin
+        shell: pwsh
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          $sha = if ($env:INPUT_SHA) { $env:INPUT_SHA.Trim().ToLowerInvariant() } else { (git rev-parse HEAD).Trim() }
+          if ($sha -cnotmatch '^[0-9a-f]{40}$') { throw 'sha must be a full 40-hex commit.' }
+          git merge-base --is-ancestor $sha origin/main
+          if ($LASTEXITCODE -ne 0) { throw "$sha is not on main." }
+          git checkout -B main $sha
+          if ($LASTEXITCODE -ne 0) { throw 'checkout failed.' }
+          "sha=$sha" >> $env:GITHUB_OUTPUT
       - uses: actions/setup-node@v5
         timeout-minutes: 5
         with:
@@ -39,10 +50,25 @@ jobs:
       - uses: azure/login@v2
         timeout-minutes: 5
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Release the exact commit to the VM
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      # Runs the dependency preflight (npm audit + accepted-advisory policy), ACR build, VM rollout
+      # and its own exact-SHA public health check.
+      - name: Release the exact commit to the Enterprise VM
         shell: pwsh
         timeout-minutes: 79
-        run: ./deploy/release-vm.ps1 -ExpectedCommit $env:GITHUB_SHA
+        env:
+          RELEASE_SHA: ${{ steps.pin.outputs.sha }}
+        run: ./deploy/release-vm.ps1 -ExpectedCommit $env:RELEASE_SHA -Target Enterprise
+      - name: Final no-cache health check
+        shell: pwsh
+        env:
+          RELEASE_SHA: ${{ steps.pin.outputs.sha }}
+        run: |
+          $h = Invoke-RestMethod -Uri "https://markdoc.app/api/health?nocache=$([guid]::NewGuid().ToString('N'))" `
+            -Headers @{ 'Cache-Control' = 'no-cache'; 'Pragma' = 'no-cache' } -TimeoutSec 20
+          $h | ConvertTo-Json -Compress
+          if ($h.version -cne $env:RELEASE_SHA -or $h.ok -ne $true -or $h.db -ne $true -or $h.collab -ne $true) {
+            throw "Health mismatch: expected version $env:RELEASE_SHA with ok/db/collab true."
+          }
