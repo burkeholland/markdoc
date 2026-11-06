@@ -486,16 +486,16 @@ deleted when those packages left the lock; see
 [The MCP SDK stand-ins](#the-mcp-sdk-stand-ins). `GHSA-g3hv-75wg-m249` on
 `minimatch` (dev-only: eslint and typescript-eslint) was added on 2026-10-31
 because every patched `minimatch` (11.0.1 and later) was then newer than the
-7-day rule of the deploy machine's feed. Remove both entries once 11.0.1 is at
-least 7 days old (after 2026-11-03) and a `minimatch` override can land. A new entry adds a row
+7-day rule of the deploy machine's feed, and deleted when the patched version
+reached the lock; see [The minimatch override](#the-minimatch-override). A new
+entry adds a row
 here in the same pull request; a test in
 `scripts/lib/dependency-policy.test.ts` fails while this table and the list do
 not hold the same entries:
 
 | Advisory | Package | Version | Expires (UTC) | Reason |
 | --- | --- | --- | --- | --- |
-| `GHSA-g3hv-75wg-m249` | `minimatch` | `3.1.5` | `2026-11-14` | Dev-only; every patched version is under 7 days old (added 2026-10-31) |
-| `GHSA-g3hv-75wg-m249` | `minimatch` | `10.2.6` | `2026-11-14` | Dev-only; every patched version is under 7 days old (added 2026-10-31) |
+| (no entries) | | | | |
 
 **Production entries.** An entry may set `production: true`. Only such an
 entry may match lock nodes that production installs; every other entry still
@@ -632,6 +632,36 @@ run `npm install --package-lock-only`, and check that `npm explain braces`
 finds nothing. When `eslint-config-next` is upgraded while the override is
 still needed, run that test and compare the output of `npx eslint -f json`
 before and after.
+
+##### The minimatch override
+
+`GHSA-g3hv-75wg-m249` affects `minimatch` `>=7.0.0 <11.0.1` and is first fixed in
+`11.0.1`. The lock's one affected copy came from
+`@typescript-eslint/typescript-estree`, whose releases up to `8.72.1`, the
+newest when this was written, ask for `^10.2.2`, and no `10.x` is patched. So
+`package.json` gives that package, and only that package, a patched version:
+
+```json
+"overrides": {
+  "@typescript-eslint/typescript-estree": { "minimatch": "11.0.3" }
+}
+```
+
+The package calls only the named function `minimatch`, in one file,
+`dist/useProgramFromProjectService.js`, and only for the parser option
+`allowDefaultProject`, which `eslint.config.mjs` does not set.
+`scripts/lib/typescript-estree-minimatch-override.test.ts` fails when that
+changes.
+
+The top-level `minimatch` `3.1.5` stays. The advisory does not cover it, and
+it is not safe to move: `eslint-plugin-react`, `eslint-plugin-import` and
+`eslint-plugin-jsx-a11y` call the module itself as a function, and `minimatch`
+`11` exports only named functions.
+
+Delete the override when `@typescript-eslint/typescript-estree` asks for a
+patched `minimatch` itself (the test above then fails and says so): remove the
+entry from `overrides` and that test file, then run
+`npm install --package-lock-only` and `npm audit --package-lock-only`.
 
 ### The MCP SDK stand-ins
 
