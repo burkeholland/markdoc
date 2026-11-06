@@ -261,7 +261,7 @@ export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }:
 
   return (
     <div className="mb-4" data-testid="folder-rail">
-      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Folders">
+      <div className="folder-rail-chips flex flex-wrap items-center gap-2" role="group" aria-label="Folders">
         <button
           type="button"
           className={chipClass(sameSelection(selection, null), false)}
@@ -282,7 +282,7 @@ export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }:
           Not in a folder <span className="text-ink-4">{unfiledCount}</span>
         </button>
         {ownedFolders.map((folder) => (
-          <span key={folder.id} className="inline-flex shrink-0 items-center">
+          <span key={folder.id} className="folder-split inline-flex shrink-0 items-center">
             <button
               type="button"
               className={cn(chipClass(sameSelection(selection, folder.id), dropTarget === folder.id), "rounded-r-none border-r-0 pr-2")}
@@ -302,7 +302,7 @@ export function FolderRail({ state, unfiledCount, totalCount, onDropDocuments }:
                   type="button"
                   className={cn(
                     chipClass(sameSelection(selection, folder.id), dropTarget === folder.id),
-                    "rounded-l-none px-1.5",
+                    "folder-split-menu rounded-l-none px-1.5",
                   )}
                   aria-label={`Actions for ${folder.name}`}
                   data-testid="folder-menu"
