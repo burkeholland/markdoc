@@ -1,11 +1,11 @@
 # Release from GitHub Actions: one-time setup
 
-**What you need to do:** (1) run the block below once, as an Owner of the Azure subscription; (2) run
-Actions → **Deploy to Azure (manual)** on `main`. That's it.
+**What you need to do:** (1) run the block below once, as an Owner of the Azure subscription. That's it: the
+**Deploy to Azure** workflow then releases once a day when `main` has changes, and can be started by hand on `main`.
 
 > The one-time setup has already been run; these commands are kept for re-creating it.
 
-The **Deploy to Azure (manual)** workflow (`.github/workflows/deploy.yml`) runs `deploy/release-vm.ps1 -Target Enterprise`
+The **Deploy to Azure** workflow (`.github/workflows/deploy.yml`) runs `deploy/release-vm.ps1 -Target Enterprise`
 on a GitHub-hosted runner, so `npm audit` uses the public registry instead of the local policy-gated feed.
 It logs in to Azure with OIDC (no stored secret). Run once, as an Owner of the subscription, in `pwsh`:
 
@@ -81,6 +81,33 @@ Optional: add yourself as a required reviewer on the `production` environment (S
 
 ## Running a release
 
-Actions → **Deploy to Azure (manual)** → Run workflow on `main`. Leave `sha` blank for main HEAD, or paste a full 40-hex
+### Daily
+
+The workflow runs once a day at 01:07 UTC (5:07 p.m. PST, 6:07 p.m. PDT). GitHub can start a scheduled run late. Its `check`
+job holds no Azure or production access and runs `deploy/release-decision.ps1`, which reads `https://markdoc.app/api/health`
+(no-cache) and compares the reported version with `main`:
+
+| What it finds | Result |
+| --- | --- |
+| Nothing changed, or only docs changed | The run succeeds. The `deploy` job is skipped, so nothing touches production or Azure. |
+| Changes beyond docs | The `deploy` job releases the exact commit that was compared. |
+| Health is not `ok`/`db`/`collab` true, can't be read, or reports a version that isn't on `main` | The run fails and nothing is released. |
+
+Docs means `docs/`, Markdown at the repository root and Markdown directly in `deploy/`. Anything else counts as a change,
+including Markdown elsewhere, because some of it can ship with the app. Database migrations release the same way as any other
+change, so one merged to `main` reaches production at the next daily run.
+
+The schedule compares only with what production reports, so after a rollback by hand it releases `main` again at the next
+daily run. To hold releases, run `gh workflow disable deploy.yml`, which also blocks starting the workflow by hand until
+`gh workflow enable deploy.yml`. GitHub also turns off the schedule of a public repository after 60 days with no activity;
+the same enable command turns it back on.
+
+Only one run of this workflow goes at a time. GitHub keeps one more waiting and cancels any older waiting run, so a daily run
+that starts during a release waits for it, then compares against the new version. A daily run can also replace a
+manual run that is still waiting, so check that a manual `sha` release ran if you start one close to the daily time.
+
+### By hand
+
+Actions → **Deploy to Azure** → Run workflow on `main`. This always releases, without the daily check. Leave `sha` blank for main HEAD, or paste a full 40-hex
 commit that is on `main`. Only one release runs at a time. The job runs the dependency preflight, builds in ACR, rolls the VM,
 then checks `https://markdoc.app/api/health` (no-cache) for the exact SHA with `ok`/`db`/`collab` all true.

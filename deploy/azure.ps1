@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Provisions Markdoc's Azure infrastructure. Production application releases run through the
-  manual GitHub workflow and infra/deploy-vm-image.sh on the PostgreSQL VM.
+  GitHub workflow and infra/deploy-vm-image.sh on the PostgreSQL VM.
 
   Nothing in this repository runs this automatically. Run it yourself when you are ready to deploy.
 
@@ -78,7 +78,7 @@ try {
   }
 
   if (-not $InfraOnly) {
-    throw 'Production is VM-hosted. Run deploy/azure.ps1 with -InfraOnly for infrastructure or recovery work; use the manual Deploy to Azure workflow for application releases.'
+    throw 'Production is VM-hosted. Run deploy/azure.ps1 with -InfraOnly for infrastructure or recovery work; use the Deploy to Azure workflow for application releases.'
   }
   if ($RotateDatabasePassword -or $SimulateDatabaseRotationFailure -or $SimulatePostChangeDatabaseRotationFailure) {
     throw 'Database password rotation is temporarily disabled until its retired Container App compensation path is replaced with a VM-native flow.'

@@ -3,7 +3,9 @@
 The September 4, 2026 hosting change co-locates Markdoc with PostgreSQL on
 `markdoc-pg`, avoiding the fixed cost of a VNet-integrated Container Apps
 environment. Application releases use the [configured terminal command](#terminal-release-command)
-or the manual [Deploy to Azure (manual) workflow](../.github/workflows/deploy.yml),
+or the [Deploy to Azure workflow](../.github/workflows/deploy.yml), which runs once
+a day when `main` has changes and can be started by hand
+([schedule and rules](../deploy/github-actions-setup.md#running-a-release)),
 not Container Apps or `deploy/azure.ps1`.
 
 ## What is known
@@ -132,12 +134,17 @@ compatibility, and establish the backup/recovery requirements. Those outcomes
 have not been demonstrated by this metadata readback. If unresolved, do not
 start the candidate. This runbook adds no automatic migration, reset,
 initialization, PGlite-to-PostgreSQL transfer, repair or schema rollback command.
+The daily workflow run makes none of these comparisons: a migration merged to
+`main` starts running at the next daily release, so resolve them before merging.
 
 ## Release
 
-Only the release owner runs this **mutating** workflow, after the source,
-performance, schema and recovery requirements above are resolved. It was not
-run for this documentation update.
+The workflow is **mutating**. It runs on its own once a day and releases `main`
+if it has changed beyond docs
+([schedule and rules](../deploy/github-actions-setup.md#running-a-release)).
+The steps below are for a release started by hand, which only the release owner
+does, after the source, performance, schema and recovery requirements above are
+resolved. It was not run for this documentation update.
 
 1. Record the accepted full 40-character commit SHA and retain the previous
    image by immutable digest with its matching SHA. Preserve the same-host
@@ -145,7 +152,7 @@ run for this documentation update.
    its existence alone does not prove them. The script's temporary copies
    remain separate, not a durable rollback archive. Schedule one operator with
    no overlapping infrastructure, patch, recovery or other database writer work.
-2. In **Deploy to Azure (manual)**, select the accepted ref and enter `deploy`
+2. In **Deploy to Azure**, select the accepted ref and enter `deploy`
    for `confirm`. The workflow builds the selected checkout's `GITHUB_SHA`,
    not an arbitrary SHA from a description; verify it matches the accepted
    commit. `AZURE_RESOURCE_GROUP` must name `markdoc-rg`, and

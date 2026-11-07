@@ -336,6 +336,11 @@ VM's managed identity to pull from
 `markdocacrmnd542unepl56.azurecr.io`. This is one systemd service restart on a
 VM, not a Container Apps revision or traffic operation.
 
+The [Deploy to Azure workflow](.github/workflows/deploy.yml) releases `main`
+once a day if it has changed beyond docs since the version production reports,
+and can also be started by hand
+([schedule and rules](deploy/github-actions-setup.md#running-a-release)).
+
 Only the release owner runs the configured, mutating entrypoint from the
 project root:
 
