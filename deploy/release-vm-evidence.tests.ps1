@@ -187,7 +187,7 @@ function Test-ReleaseBoundaryInvariants([hashtable]$Sources) {
       $null -ne (Get-SourceConstant $release 'ReleaseTerminalDeadlineSeconds')) {
     return $false
   }
-  if ($timeouts.Count -ne 5 -or ($timeouts -join ',') -cne '99,5,5,5,79') { return $false }
+  if ($timeouts.Count -ne 6 -or ($timeouts -join ',') -cne '5,99,5,5,5,79') { return $false }
   if ([regex]::Matches($release, "'acr', 'build'").Count -ne 1 -or
       [regex]::Matches($release, "'vm', 'run-command', 'invoke'").Count -ne 1 -or
       $release -notmatch '(?ms)^function Invoke-MarkdocVmRelease\(\[string\]\$Commit\) \{\r?\n\s+\$releaseClock = \[Diagnostics\.Stopwatch\]::StartNew\(\)' -or
@@ -298,8 +298,25 @@ foreach ($mutation in $boundaryMutations) {
 Assert-True ($releaseSource -notmatch 'Local command deadline exceeded; remote work was cancel') 'The revised deadline must not claim cancellation.'
 $workflowTriggers = [regex]::Match($workflowSource, '(?ms)^on:\s*\r?\n(?<body>.*?)(?=^[a-zA-Z][a-zA-Z-]*:)')
 Assert-True ($workflowTriggers.Success -and
-  [regex]::Matches($workflowTriggers.Groups['body'].Value, '(?m)^  [a-zA-Z][a-zA-Z_-]*:').Count -eq 1 -and
-  $workflowTriggers.Groups['body'].Value -match '(?m)^  workflow_dispatch:\s*$') 'Production release must remain manual-only.'
+  [regex]::Matches($workflowTriggers.Groups['body'].Value, '(?m)^  [a-zA-Z][a-zA-Z_-]*:').Count -eq 2 -and
+  $workflowTriggers.Groups['body'].Value -match '(?m)^  workflow_dispatch:\s*$' -and
+  $workflowTriggers.Groups['body'].Value -match '(?m)^  schedule:\s*$' -and
+  [regex]::Matches($workflowTriggers.Groups['body'].Value, '(?m)^\s+- cron:').Count -eq 1 -and
+  $workflowTriggers.Groups['body'].Value -match '(?m)^\s+- cron: "7 1 \* \* \*"\s*$') 'Production release must start only by hand or from the one daily schedule.'
+$checkJob = [regex]::Match($workflowSource, '(?ms)^  check:\s*\r?\n(?<body>.*?)(?=^  deploy:)').Groups['body'].Value
+$deployJob = [regex]::Match($workflowSource, '(?ms)^  deploy:\s*\r?\n(?<body>.*)\z').Groups['body'].Value
+Assert-True ($checkJob -match "(?m)^    if: github\.event_name == 'schedule' && github\.ref == 'refs/heads/main'\s*$" -and
+  $checkJob -match '(?m)^    permissions:\s*\r?\n      contents: read\s*\r?\n    outputs:' -and
+  $checkJob -notmatch '(?i)id-token|environment:|azure|\$\{\{\s*(?:vars|secrets)\.|release-vm' -and
+  $checkJob -match '(?m)^\s+run: \./deploy/release-decision\.ps1\s*$') 'The daily check must run only on the schedule with no Azure or production access.'
+Assert-True ($deployJob -match '(?m)^    needs: check\s*$' -and
+  $deployJob -match '!cancelled\(\)' -and $deployJob -notmatch '\balways\(\)' -and
+  $deployJob -match "github\.event_name == 'workflow_dispatch'" -and
+  $deployJob -match "github\.event_name == 'schedule' && needs\.check\.result == 'success' && needs\.check\.outputs\.release == 'true'" -and
+  $deployJob -match "github\.ref == 'refs/heads/main'" -and
+  $deployJob -match '(?m)^\s+INPUT_SHA: \$\{\{ inputs\.sha \|\| needs\.check\.outputs\.sha \}\}\s*$') 'The release must always start by hand, and on the schedule only with a passing check and for the commit it compared.'
+Assert-True ($deployJob -match '(?m)^\s+environment: production\s*$' -and
+  $deployJob -match 'uses: azure/login@v2' -and $deployJob -match 'deploy/release-vm\.ps1') 'Production access must stay in the release job.'
 Assert-True ($workflowSource -match '(?m)^\s+environment: production\s*$' -and
   $workflowSource -match '(?ms)^concurrency:\s*\r?\n\s+group: markdoc-production\s*\r?\n\s+cancel-in-progress: false\s*$') 'The workflow must retain the production environment and non-cancelling concurrency.'
 Assert-True ([regex]::Matches($workflowSource, 'uses: azure/login@v2').Count -eq 1 -and

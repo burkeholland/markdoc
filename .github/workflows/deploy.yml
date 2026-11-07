@@ -1,8 +1,12 @@
-# Manual production release to the Enterprise VM, run on GitHub-hosted runners (public npm registry).
-# Never runs on its own. One-time Azure/GitHub setup: deploy/github-actions-setup.md
-name: Deploy to Azure (manual)
+# Production release to the Enterprise VM, run on GitHub-hosted runners (public npm registry).
+# Runs once a day and releases only if main has changed beyond docs since the version production reports.
+# Starting it by hand always releases. One-time Azure/GitHub setup: deploy/github-actions-setup.md
+name: Deploy to Azure
 
 on:
+  schedule:
+    # 5:07 p.m. PST, 6:07 p.m. PDT. GitHub can start a scheduled run late.
+    - cron: "7 1 * * *"
   workflow_dispatch:
     inputs:
       sha:
@@ -19,8 +23,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Holds no Azure or production access. The workflow-level concurrency group means it reads health only after
+  # any earlier release has finished.
+  check:
+    if: github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      sha: ${{ steps.decide.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare main with the version production reports
+        id: decide
+        shell: pwsh
+        run: ./deploy/release-decision.ps1
+
   deploy:
-    if: github.ref == 'refs/heads/main'
+    needs: check
+    # check is skipped on a manual run, and !cancelled() lets that through. A scheduled run needs a passing check.
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && needs.check.result == 'success' && needs.check.outputs.release == 'true'))
     runs-on: windows-latest
     timeout-minutes: 99
     environment: production
@@ -34,7 +64,8 @@ jobs:
         id: pin
         shell: pwsh
         env:
-          INPUT_SHA: ${{ inputs.sha }}
+          # A scheduled run releases the commit check compared, even if main has moved since.
+          INPUT_SHA: ${{ inputs.sha || needs.check.outputs.sha }}
         run: |
           $sha = if ($env:INPUT_SHA) { $env:INPUT_SHA.Trim().ToLowerInvariant() } else { (git rev-parse HEAD).Trim() }
           if ($sha -cnotmatch '^[0-9a-f]{40}$') { throw 'sha must be a full 40-hex commit.' }
