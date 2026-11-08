@@ -4069,6 +4069,8 @@ describe("dashboard direct create control ownership", () => {
       expect(blank).toHaveTextContent("New document");
       expect(blank).toHaveTextContent("Start with a blank Markdown page.");
       expect(blank.querySelector("svg")).toHaveClass("lucide-file-plus-corner");
+      expect(host.querySelector('[data-testid="new-from-template"]')).toHaveTextContent("From template");
+      expect(host.querySelector('[data-testid="open-file"]')).toHaveTextContent("Open file");
 
       const guided = guidedRootElement(host);
       expect(guided).toHaveTextContent("No documents yet");
