@@ -135,6 +135,7 @@ function fakeSession(name: string) {
   const session = {
     name,
     binding: { getTree: () => controlled.sessionValue },
+    contentReady: true,
     ydoc,
     ytext,
     meta,
@@ -708,6 +709,31 @@ describe("status bar top-level keyboard navigation", () => {
 });
 
 describe("status bar nested StatsPopover reconciliation", () => {
+  it("waits for the initial source snapshot, then keeps the prior count during edits", async () => {
+    const current = callbacks();
+    const populated = { text: Array.from({ length: 20 }, () => "word").join(" "), tree: {} };
+    const edited = { text: `${populated.text} extra`, tree: {} };
+    controlled.sessionValue = populated;
+    controlled.sessionHook.mockReturnValue({ text: "", tree: {} });
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+
+    expect(screen.getByTestId("word-count")).toHaveTextContent("— words");
+
+    controlled.sessionHook.mockReturnValue(populated);
+    await act(async () => view.root.render(<StatusBar {...props} />));
+    expect(screen.getByTestId("word-count")).toHaveTextContent("20 words");
+
+    controlled.sessionValue = edited;
+    controlled.sessionHook.mockReturnValue(populated);
+    await act(async () => view.root.render(<StatusBar {...props} />));
+    expect(screen.getByTestId("word-count")).toHaveTextContent("20 words");
+
+    controlled.sessionHook.mockReturnValue(edited);
+    await act(async () => view.root.render(<StatusBar {...props} />));
+    expect(screen.getByTestId("word-count")).toHaveTextContent("21 words");
+  });
+
   it("keeps current controls usable after an Escape statistics close", async () => {
     const current = callbacks();
     await renderStatus(statusProps(current));
