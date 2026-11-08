@@ -264,9 +264,9 @@ interface SearchError {
 /** The busy key `create()` publishes for a blank document (no template). */
 const CREATE_BLANK_KEY = "blank";
 const CREATE_CARD_CLASS =
-  "group flex items-stretch rounded-2xl border border-line bg-surface shadow-sm transition hover:border-accent hover:shadow-md";
+  "group flex flex-wrap items-stretch rounded-2xl border border-line bg-surface shadow-sm transition hover:border-accent hover:shadow-md";
 const CREATE_BLANK_BUTTON_CLASS =
-  "flex flex-1 items-center gap-4 rounded-l-2xl p-5 text-left";
+  "flex w-full items-center gap-4 rounded-t-2xl p-5 text-left sm:w-auto sm:flex-1 sm:rounded-none sm:rounded-l-2xl";
 const CREATE_BLANK_ICON_FRAME_CLASS =
   "flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-on-accent";
 const CREATE_BLANK_NAME_CLASS = "block text-[15px] font-semibold text-ink";
@@ -1525,12 +1525,13 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                   <button
                     type="button"
                     disabled={creating !== null}
-                    className="flex items-center gap-1 border-l border-line px-4 text-ink-3 transition hover:bg-surface-2 hover:text-ink"
+                    className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-bl-2xl border-r border-t border-line px-3 text-sm text-ink-3 transition hover:bg-surface-2 hover:text-ink sm:flex-none sm:rounded-none sm:border-l sm:border-r-0 sm:border-t-0 sm:px-4"
                     aria-label="New document from template"
                     title="From template"
                     data-testid="new-from-template"
                   >
                     <LayoutTemplate size={16} />
+                    <span>From template</span>
                     <ChevronDown size={14} />
                   </button>
                 </DialogTrigger>
@@ -1544,12 +1545,13 @@ export function Dashboard({ user, documents: initialDocuments, githubAvailable, 
                 type="button"
                 onClick={fileImport.pick}
                 disabled={creating !== null}
-                className="flex items-center gap-1 rounded-r-2xl border-l border-line px-4 text-ink-3 transition hover:bg-surface-2 hover:text-ink"
+                className="flex min-h-12 flex-1 items-center justify-center gap-2 rounded-br-2xl border-t border-line px-3 text-sm text-ink-3 transition hover:bg-surface-2 hover:text-ink sm:flex-none sm:rounded-none sm:rounded-r-2xl sm:border-l sm:border-t-0 sm:px-4"
                 aria-label="Open file…"
                 title="Open file… (.md, .txt, .html)"
                 data-testid="open-file"
               >
                 <FolderOpen size={16} />
+                <span>Open file</span>
               </button>
             </div>
             {githubConfigured && (
