@@ -709,6 +709,15 @@ describe("status bar top-level keyboard navigation", () => {
 });
 
 describe("status bar nested StatsPopover reconciliation", () => {
+  it("shows a real zero-word count once an empty document is ready", async () => {
+    const current = callbacks();
+    controlled.sessionValue = { text: "", tree: {} };
+
+    await renderStatus(statusProps(current));
+
+    expect(screen.getByTestId("word-count")).toHaveTextContent("0 words");
+  });
+
   it("waits for the initial source snapshot, then keeps the prior count during edits", async () => {
     const current = callbacks();
     const populated = { text: Array.from({ length: 20 }, () => "word").join(" "), tree: {} };
@@ -717,20 +726,21 @@ describe("status bar nested StatsPopover reconciliation", () => {
     controlled.sessionHook.mockReturnValue({ text: "", tree: {} });
     const props = statusProps(current);
     const view = await renderStatus(props);
+    const rerender = () => act(async () => view.root.render(<StatusBar {...props} doc={documentDto()} />));
 
     expect(screen.getByTestId("word-count")).toHaveTextContent("— words");
 
     controlled.sessionHook.mockReturnValue(populated);
-    await act(async () => view.root.render(<StatusBar {...props} />));
+    await rerender();
     expect(screen.getByTestId("word-count")).toHaveTextContent("20 words");
 
     controlled.sessionValue = edited;
     controlled.sessionHook.mockReturnValue(populated);
-    await act(async () => view.root.render(<StatusBar {...props} />));
+    await rerender();
     expect(screen.getByTestId("word-count")).toHaveTextContent("20 words");
 
     controlled.sessionHook.mockReturnValue(edited);
-    await act(async () => view.root.render(<StatusBar {...props} />));
+    await rerender();
     expect(screen.getByTestId("word-count")).toHaveTextContent("21 words");
   });
 

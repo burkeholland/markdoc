@@ -106,6 +106,8 @@ export interface StatsPopoverProps {
   selection: SourceSelection;
   /** False during server render / before hydration: show placeholders so markup matches. */
   hydrated: boolean;
+  /** False until the initial debounced source matches the current, ready session content. */
+  ready?: boolean;
 }
 
 interface GoalDraft {
@@ -120,7 +122,7 @@ function goalDraft(goal: WritingGoal | null): GoalDraft {
 
 const FOCUSABLE = "button:not([disabled]), input:not([disabled]), select:not([disabled])";
 
-export function StatsPopover({ session, source, selection, hydrated }: StatsPopoverProps) {
+export function StatsPopover({ session, source, selection, hydrated, ready = true }: StatsPopoverProps) {
   const [open, setOpen] = useState(false);
   // Navigating to another document closes the popover.
   const [openSession, setOpenSession] = useState(session);
@@ -134,11 +136,12 @@ export function StatsPopover({ session, source, selection, hydrated }: StatsPopo
   const selStats = useMemo(() => (selection ? computeSelectionStats(source, selection.from, selection.to) : null), [selection, source]);
   const goal = useSessionValue(session, getGoal, jsonEqual);
   const canEdit = useSessionValue(session, (value) => value.canEdit);
-  const progress = useMemo(() => (goal ? goalProgress(stats, goal) : null), [goal, stats]);
+  const statsReady = hydrated && ready;
+  const progress = useMemo(() => (goal && statsReady ? goalProgress(stats, goal) : null), [goal, stats, statsReady]);
 
   const shortcutLabel = shortcut("Mod-Shift-C");
-  const triggerLabel = hydrated ? `${formatNumber(stats.words)} words` : "— words";
-  const selectionLabel = hydrated && selStats ? `${formatNumber(selStats.words)} of ${formatNumber(stats.words)} selected` : null;
+  const triggerLabel = statsReady ? `${formatNumber(stats.words)} words` : "— words";
+  const selectionLabel = statsReady && selStats ? `${formatNumber(selStats.words)} of ${formatNumber(stats.words)} selected` : null;
   const triggerTitle = goal && progress ? describeGoal(goal, progress) : `Document statistics (${shortcutLabel})`;
 
   const onTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -165,7 +168,7 @@ export function StatsPopover({ session, source, selection, hydrated }: StatsPopo
           onKeyDown={onTriggerKeyDown}
           data-testid="stats-button"
         >
-          {goal && progress && hydrated ? <GoalRing progress={progress} /> : null}
+          {goal && progress && statsReady ? <GoalRing progress={progress} /> : null}
           <span data-testid="word-count">{triggerLabel}</span>
           {selectionLabel && (
             <span className="text-ink-4" data-testid="selection-count">
@@ -194,7 +197,7 @@ export function StatsPopover({ session, source, selection, hydrated }: StatsPopo
           <span className="font-normal normal-case tracking-normal text-ink-4">{shortcutLabel}</span>
         </div>
         <table className="w-full text-[13px]" data-testid="stats-table">
-          {selStats && (
+          {selStats && statsReady && (
             <thead>
               <tr className="text-xs text-ink-4">
                 <th className="px-3 pt-2 text-left font-normal" />
@@ -209,8 +212,8 @@ export function StatsPopover({ session, source, selection, hydrated }: StatsPopo
               return (
                 <tr key={row.key} data-stat={row.key}>
                   <td className="px-3 py-1 text-ink-2">{row.label}</td>
-                  {selStats && <td className="px-3 py-1 text-right tabular-nums text-ink">{format(selStats[row.key])}</td>}
-                  <td className="px-3 py-1 text-right tabular-nums text-ink">{format(stats[row.key])}</td>
+                  {selStats && statsReady && <td className="px-3 py-1 text-right tabular-nums text-ink">{format(selStats[row.key])}</td>}
+                  <td className="px-3 py-1 text-right tabular-nums text-ink">{statsReady ? format(stats[row.key]) : "—"}</td>
                 </tr>
               );
             })}
@@ -219,13 +222,13 @@ export function StatsPopover({ session, source, selection, hydrated }: StatsPopo
         <p className="px-3 pb-2 text-[11px] text-ink-4">
           Prose only: code blocks and front matter are not counted. Reading at 200 wpm, speaking at 130 wpm.
         </p>
-        <GoalEditor key={`${session.docId}:${JSON.stringify(goal)}`} session={session} goal={goal} progress={progress} canEdit={canEdit} />
+        <GoalEditor key={`${session.docId}:${JSON.stringify(goal)}`} session={session} goal={goal} progress={progress} canEdit={canEdit} statsReady={statsReady} />
       </PopoverContent>
     </Popover>
   );
 }
 
-function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSession; goal: WritingGoal | null; progress: GoalProgress | null; canEdit: boolean }) {
+function GoalEditor({ session, goal, progress, canEdit, statsReady }: { session: CollabSession; goal: WritingGoal | null; progress: GoalProgress | null; canEdit: boolean; statsReady: boolean }) {
   // Keyed by the shared goal, so a remote change resets the draft.
   const [draft, setDraft] = useState(() => goalDraft(goal));
   const setDisabled = !(Number(draft.value) > 0);
@@ -260,7 +263,11 @@ function GoalEditor({ session, goal, progress, canEdit }: { session: CollabSessi
   };
 
   const summary =
-    goal && progress ? (
+    !statsReady ? (
+      <div className="text-[13px] text-ink-4" data-testid="goal-summary" data-state="loading">
+        Loading document statistics…
+      </div>
+    ) : goal && progress ? (
       <div className="flex items-center gap-2 text-[13px] text-ink-2" data-testid="goal-summary" data-state={progress.state}>
         <GoalRing progress={progress} />
         <span>
