@@ -55,7 +55,7 @@
   --p-danger: #b91c1c;
   --p-on-accent: #ffffff;
   --p-inverse: #1c1917;
-  /* Display face for the wordmark, document titles and h1–h3 in the preview/reader; the body stays --font-sans. */
+  /* Display face for the wordmark, document titles and reader h1–h3; the preview has its own font choice. */
   --p-font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
   /* Background of the preview column (paper) and of the header/toolbar chrome. */
   --p-paper: #fcfbf7;
@@ -249,7 +249,7 @@
 .rich-column {
   background: var(--p-paper);
 }
-/* The preview font dropdown (preview-font-select.tsx): body text of the preview only; code stays mono. */
+/* The preview font dropdown (preview-font-select.tsx): preview prose and headings; code stays mono. */
 .rich-column[data-preview-font="instrument-sans"] { --preview-font: var(--font-instrument-sans), var(--font-sans); }
 .rich-column[data-preview-font="inter"] { --preview-font: var(--font-inter), ui-sans-serif, system-ui, sans-serif; }
 .rich-column[data-preview-font="source-serif"] { --preview-font: var(--font-source-serif), Georgia, "Times New Roman", serif; }
@@ -257,6 +257,11 @@
 .rich-column .md-rich,
 .rich-column .rich-placeholder {
   font-family: var(--preview-font, var(--font-instrument-sans), var(--font-sans));
+}
+/* The loading stand-in uses reader markup. Override display type only inside the preview. */
+.rich-column :is(.md-rich, .rich-placeholder) :is(h1, h2, h3, h4, h5, h6) {
+  font-family: inherit;
+  font-variation-settings: normal;
 }
 .preview-font-trigger {
   display: inline-flex;
@@ -2040,8 +2045,9 @@ body {
 
 /* ---------- Display type ----------
    Fraunces (--p-font-display) only where it belongs: the document title, the landing hero, and h1–h3
-   in the preview, the reader and (hand-mirrored in src/server/export/html.ts) the HTML export. The
-   body stays Inter. Same specificity as the heading rules above, so this block must stay below them. */
+   in the reader and (hand-mirrored in src/server/export/html.ts) the HTML export. Preview headings
+   keep this weight and spacing but override the family and variations in the scoped font rules above.
+   Same specificity as the heading rules above, so this block must stay below them. */
 .doc-title,
 .hero-title,
 .md-rich h1,
