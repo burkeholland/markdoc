@@ -117,6 +117,10 @@ const fakeSessionSelections = new WeakMap<
   CollabSession,
   (from: number, to: number) => void
 >();
+const fakeSessionReadiness = new WeakMap<
+  CollabSession,
+  (ready: boolean) => void
+>();
 
 function fakeSession(name: string) {
   const ydoc = new Y.Doc();
@@ -127,6 +131,7 @@ function fakeSession(name: string) {
   const awarenessListeners = new Set<() => void>();
   let localState: { cursor?: { anchor: unknown; head: unknown } } | null = null;
   let version = 0;
+  let contentReady = true;
   const notify = () => {
     version += 1;
     [...subscribers].forEach((listener) => listener());
@@ -135,6 +140,9 @@ function fakeSession(name: string) {
   const session = {
     name,
     binding: { getTree: () => controlled.sessionValue },
+    get contentReady() {
+      return contentReady;
+    },
     ydoc,
     ytext,
     meta,
@@ -162,6 +170,10 @@ function fakeSession(name: string) {
       return version;
     },
   } as unknown as CollabSession;
+  fakeSessionReadiness.set(session, (ready) => {
+    contentReady = ready;
+    notify();
+  });
   fakeSessionSelections.set(session, (from, to) => {
     localState = {
       cursor: {
@@ -708,6 +720,67 @@ describe("status bar top-level keyboard navigation", () => {
 });
 
 describe("status bar nested StatsPopover reconciliation", () => {
+  it("shows a real zero-word count once an empty document is ready", async () => {
+    const current = callbacks();
+    controlled.sessionValue = { text: "", tree: {} };
+
+    await renderStatus(statusProps(current));
+
+    expect(screen.getByTestId("word-count")).toHaveTextContent("0 words");
+  });
+
+  it("shows zero words for matching empty sources only after the session reports readiness", async () => {
+    const actual = await vi.importActual<typeof import("./use-session")>("./use-session");
+    controlled.sessionHook.mockImplementation(actual.useDebouncedSessionValue);
+    controlled.sessionValue = { text: "", tree: {} };
+    const props = statusProps(callbacks());
+    const setContentReady = fakeSessionReadiness.get(props.session)!;
+    setContentReady(false);
+
+    await renderStatus(props);
+    const count = screen.getByTestId("word-count");
+    expect(count).toHaveTextContent("— words");
+
+    await act(async () => setContentReady(true));
+
+    expect(screen.getByTestId("word-count")).toBe(count);
+    expect(count).toHaveTextContent("0 words");
+  });
+
+  it("waits for the initial source snapshot, then keeps the prior count during edits", async () => {
+    const current = callbacks();
+    const populated = { text: Array.from({ length: 20 }, () => "word").join(" "), tree: {} };
+    const edited = { text: `${populated.text} extra`, tree: {} };
+    controlled.sessionValue = populated;
+    controlled.sessionHook.mockReturnValue({ text: "", tree: {} });
+    const props = statusProps(current);
+    const view = await renderStatus(props);
+    const rerender = () => act(async () => view.root.render(
+      <StrictMode>
+        <StatusBar key="initial" {...props} doc={documentDto()} />
+      </StrictMode>,
+    ));
+    const count = screen.getByTestId("word-count");
+
+    expect(count).toHaveTextContent("— words");
+
+    controlled.sessionHook.mockReturnValue(populated);
+    await rerender();
+    expect(screen.getByTestId("word-count")).toBe(count);
+    expect(count).toHaveTextContent("20 words");
+
+    controlled.sessionValue = edited;
+    controlled.sessionHook.mockReturnValue(populated);
+    await rerender();
+    expect(screen.getByTestId("word-count")).toBe(count);
+    expect(count).toHaveTextContent("20 words");
+
+    controlled.sessionHook.mockReturnValue(edited);
+    await rerender();
+    expect(screen.getByTestId("word-count")).toBe(count);
+    expect(count).toHaveTextContent("21 words");
+  });
+
   it("keeps current controls usable after an Escape statistics close", async () => {
     const current = callbacks();
     await renderStatus(statusProps(current));

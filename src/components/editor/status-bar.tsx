@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 import { ThemeToggle, useTheme } from "@/components/ui/theme-toggle";
 import { isThemePreference, THEME_ORDER, themeLabel } from "@/lib/theme";
 import { useHydrated } from "@/lib/hooks";
-import { useDebouncedSessionValue } from "./use-session";
+import { useDebouncedSessionValue, useSessionValue } from "./use-session";
 import { StatsPopover, useLocalSelection, type SourceSelection } from "./stats-popover";
 import { STATUS_BOX } from "./chrome-classes";
 
@@ -58,12 +58,16 @@ function isVisible(element: HTMLElement) {
   return element.getClientRects().length > 0 || getComputedStyle(element).display !== "none";
 }
 
-const StatusBarStatsPopover = memo(function StatusBarStatsPopover(props: { session: CollabSession; source: string; selection: SourceSelection; hydrated: boolean }) {
+const StatusBarStatsPopover = memo(function StatusBarStatsPopover(props: { session: CollabSession; source: string; selection: SourceSelection; hydrated: boolean; ready: boolean }) {
   return <StatsPopover {...props} />;
 });
 
 export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayout, lineWrapping, onLineWrapping, syncScroll, onSyncScroll, onIssueSelect, onShortcuts, onStorage, compact = false }: StatusBarProps) {
   const { text: source, tree } = useDebouncedSessionValue(session, (s) => s.binding.getTree(), 500, (a, b) => a.text === b.text);
+  const contentReady = useSessionValue(session, (s) => s.contentReady);
+  const statsReadySession = useRef<CollabSession | null>(null);
+  const statsReady = statsReadySession.current === session || (contentReady && source === session.binding.getTree().text);
+  if (statsReady) statsReadySession.current = session;
   const hydrated = useHydrated();
   const issues = useMemo(() => (hydrated ? lintMarkdown(source, tree) : []), [hydrated, source, tree]);
   const selection = useLocalSelection(session);
@@ -120,7 +124,7 @@ export const StatusBar = memo(function StatusBar({ session, doc, layout, onLayou
 
   return (
     <footer className={STATUS_BOX} data-testid="status-bar" data-compact={compact || undefined} onKeyDown={onBarKeyDown}>
-      <StatusBarStatsPopover session={session} source={source} selection={selection} hydrated={hydrated} />
+      <StatusBarStatsPopover session={session} source={source} selection={selection} hydrated={hydrated} ready={statsReady} />
 
       <div className="flex-1" />
 
