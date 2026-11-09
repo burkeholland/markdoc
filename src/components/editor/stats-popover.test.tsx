@@ -324,6 +324,7 @@ describe("StatsPopover loading state", () => {
     const wordCount = screen.getByTestId("word-count");
 
     expect(wordCount).toHaveTextContent("— words");
+    expect(screen.getByTestId("stats-button").getAttribute("title")).toContain("Document statistics");
     expect(screen.queryByTestId("selection-count")).toBeNull();
     expect(screen.queryByRole("columnheader", { name: "Selection" })).toBeNull();
     const wordsRow = screen.getByTestId("stats-table").querySelector('[data-stat="words"]')!;
@@ -336,6 +337,7 @@ describe("StatsPopover loading state", () => {
 
     expect(screen.getByTestId("word-count")).toBe(wordCount);
     expect(wordCount).toHaveTextContent("3 words");
+    expect(screen.getByTestId("stats-button")).toHaveAttribute("title", "3 / 10 words");
     expect(screen.getByTestId("selection-count")).toHaveTextContent("1 of 3 selected");
     expect(screen.getByRole("columnheader", { name: "Selection" })).toBeVisible();
     expect(wordsRow).toHaveTextContent("3");
