@@ -1,6 +1,6 @@
 /**
  * The font of the rendered preview: one of four faces, stored per browser like the theme and the link-cards
- * switch. It only changes the preview's body text; the editor, the reader and exports keep their own fonts.
+ * switch. It changes the preview's prose and headings; code, the source editor, the reader and exports keep their own fonts.
  * A place that cannot read the store gets the default.
  */
 export const PREVIEW_FONT_STORAGE_KEY = "markdoc:previewFont";
