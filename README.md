@@ -41,6 +41,7 @@ What changed recently is in [CHANGELOG.md](CHANGELOG.md).
 - Activity panel per document: who edited, commented, suggested, published or shared, with agents marked.
 - Notifications: a bell in the editor header and a strip on the dashboard when someone replies to your thread, resolves it, accepts or rejects your suggestion, shares with you or @mentions you; `?thread=` links open the thread.
 - Share by GitHub handle as editor, commenter or viewer, or by link (restricted, view, comment, edit). A link shared in Slack, Teams or iMessage previews with the document's title, first lines, owner and last update; a restricted document shows them only when its owner turns on *Show title and first lines in link previews*.
+- Document and folder Share pickers show pending GitHub searches and retryable failures without blocking exact-handle Add. Incomplete searches are not treated as empty matches, and Retry bypasses cached failures. Adding a handle that has not signed in creates a pending invitation; it is not GitHub account verification.
 - Reader view at `/p/<id>`: clean read-only page with a table of contents, reading time and download menu.
 - Offline editing that survives a refresh or a closed tab; edits merge on reconnect and the header shows what is unsaved.
 

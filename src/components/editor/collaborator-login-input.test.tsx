@@ -260,16 +260,66 @@ describe("CollaboratorLoginInput", () => {
 
     // The close is deferred a macrotask past blur (see handleBlur) so a Tab/click's own focus-move finishes
     // first; `settle(0)` flushes that timer here, same as a real blur followed by a beat with nothing refocused.
-    fireEvent.blur(input());
+    act(() => input().blur());
     await settle(0);
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
-    fireEvent.focus(input());
+    act(() => input().focus());
     expect(options()).toEqual(["octocat"]);
 
     type("");
     await settle();
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
     expect(searchUsers).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores an older query's failure while the current query is still loading", async () => {
+    const older = deferred<SearchAnswer>();
+    const current = deferred<SearchAnswer>();
+    searchUsers.mockReturnValueOnce(older.promise).mockReturnValueOnce(current.promise);
+    render(<Harness />);
+    type("oc");
+    await settle();
+    type("octo");
+    await settle();
+
+    await act(async () => older.reject(new ApiError(503, "GitHub account search did not finish. Please try again.")));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("share-login-loading")).toHaveTextContent("@octo");
+    await act(async () => current.resolve({ users: [user("octocat")], limited: false }));
+    expect(options()).toEqual(["octocat"]);
+    expect(screen.queryByTestId("share-login-loading")).toBeNull();
+  });
+
+  it("keeps suggestions available when a dialog repairs focus during the input's native focusout", async () => {
+    searchUsers.mockImplementation(() => answer("octocat"));
+    render(<Harness />);
+    input().focus();
+    input().addEventListener("focusout", () => input().focus(), { once: true });
+
+    // A closing menu hands focus to its trigger; Dialog's native focusout listener immediately
+    // returns it to this field, before React delivers the original synthetic onBlur.
+    input().blur();
+    expect(input()).toHaveFocus();
+    type("octo");
+    await settle();
+    expect(options()).toEqual(["octocat"]);
+  });
+
+  it("does not memoize a failed prefix when typing away and returning to it", async () => {
+    searchUsers
+      .mockRejectedValueOnce(new ApiError(503, "GitHub account search did not finish. Please try again."))
+      .mockImplementation(() => answer("octocat"));
+    render(<Harness />);
+    type("octo");
+    await settle();
+    expect(screen.getByRole("alert")).toHaveTextContent("GitHub account search did not finish");
+    type("octoc");
+    expect(screen.queryByRole("alert")).toBeNull();
+    await settle();
+    type("octo");
+    await settle();
+    expect(searchUsers.mock.calls.map(([q]) => q)).toEqual(["octo", "octoc", "octo"]);
+    expect(options()).toEqual(["octocat"]);
   });
 
   it("never suggests the owner or someone already listed, and caps the list at eight", async () => {
@@ -735,6 +785,7 @@ describe("CollaboratorLoginInput", () => {
 
     fireEvent.click(retry);
     expect(searchUsers).toHaveBeenCalledTimes(2);
+    expect(searchUsers.mock.calls[1][1]?.cache).toBe("no-store");
     const retrying = within(screen.getByRole("alert")).getByRole("button", { name: "Retrying…" });
     // Not the native `disabled` attribute: disabling the focused button would drop focus to <body>.
     expect(retrying).not.toBeDisabled();
@@ -879,7 +930,7 @@ describe("CollaboratorLoginInput", () => {
     await settle();
 
     // Deferred close (see handleBlur): settle(0) flushes the post-blur macrotask with nothing refocused.
-    fireEvent.blur(input());
+    act(() => input().blur());
     await settle(0);
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
     await act(async () => {
@@ -887,7 +938,7 @@ describe("CollaboratorLoginInput", () => {
     });
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
     // Refocusing shows what the (now-settled) answer actually contained.
-    fireEvent.focus(input());
+    act(() => input().focus());
     expect(options()).toEqual(["octocat"]);
   });
 
@@ -901,17 +952,17 @@ describe("CollaboratorLoginInput", () => {
     // Blur alone must not synchronously unmount the listbox: a real Tab/click's own native focus-move is
     // still in flight at this instant, and unmounting here is what raced it and sent focus to the dialog's
     // own container instead of the next control (see handleBlur's comment).
-    fireEvent.blur(input());
+    act(() => input().blur());
     expect(screen.queryByTestId("share-login-suggestions")).not.toBeNull();
 
     // A refocus before the deferred close's timer fires (Shift+Tab straight back in) must cancel it outright,
     // not just briefly reopen something that was already closing.
-    fireEvent.focus(input());
+    act(() => input().focus());
     await settle(0);
     expect(options()).toEqual(["octocat"]);
 
     // With nothing refocused, the deferred close still actually happens once its macrotask runs.
-    fireEvent.blur(input());
+    act(() => input().blur());
     await settle(0);
     expect(screen.queryByTestId("share-login-suggestions")).toBeNull();
   });
