@@ -309,3 +309,39 @@ describe("StatsPopover writing goal draft", () => {
     expect(screen.queryAllByTestId("goal-ring")).toHaveLength(0);
   });
 });
+
+describe("StatsPopover loading state", () => {
+  it("shows placeholders until ready, then the statistics and goal progress on the same instance", async () => {
+    const session = makeSession("loading", "owner", goal("words", "min", 10));
+    const source = "One two three.";
+    session.ytext.insert(0, source);
+    const selection = { from: 0, to: 3 };
+    const popover = (ready: boolean) => <StatsPopover key="initial" session={session} source={source} selection={selection} hydrated ready={ready} />;
+
+    const { rerender } = render(popover(false));
+    await act(async () => {});
+    openPopover();
+    const wordCount = screen.getByTestId("word-count");
+
+    expect(wordCount).toHaveTextContent("— words");
+    expect(screen.queryByTestId("selection-count")).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "Selection" })).toBeNull();
+    const wordsRow = screen.getByTestId("stats-table").querySelector('[data-stat="words"]')!;
+    expect(wordsRow).toHaveTextContent("—");
+    expect(wordsRow.querySelectorAll("td")).toHaveLength(2);
+    expect(screen.getByTestId("goal-summary")).toHaveAttribute("data-state", "loading");
+    expect(screen.queryByTestId("goal-ring")).toBeNull();
+
+    rerender(popover(true));
+
+    expect(screen.getByTestId("word-count")).toBe(wordCount);
+    expect(wordCount).toHaveTextContent("3 words");
+    expect(screen.getByTestId("selection-count")).toHaveTextContent("1 of 3 selected");
+    expect(screen.getByRole("columnheader", { name: "Selection" })).toBeVisible();
+    expect(wordsRow).toHaveTextContent("3");
+    expect(wordsRow.querySelectorAll("td")).toHaveLength(3);
+    expect(screen.getByTestId("goal-summary")).not.toHaveAttribute("data-state", "loading");
+    expect(screen.getByTestId("goal-summary")).toHaveTextContent("At least 10 words");
+    expect(screen.getAllByTestId("goal-ring").length).toBeGreaterThan(0);
+  });
+});
