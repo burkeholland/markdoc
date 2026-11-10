@@ -239,44 +239,71 @@ test("readable folder account switch preserves the exact Share request for its o
   expect(((await unchanged.json()) as { items: { id: string; readAt: string | null }[] }).items.find((item) => item.id === request.id)?.readAt).toBeNull();
 });
 
-test("direct folder request dismissal retains a retryable banner until the notification write succeeds", async ({ browser }, testInfo) => {
-  const owner = await signIn(browser, uniqueLogin("dismiss-owner"));
-  const requester = await signIn(browser, uniqueLogin("dismiss-reader"));
-  const page = owner.page;
-  const response = await page.request.post("/api/folders", { data: { name: "Requested planning" } });
-  expect(response.ok()).toBeTruthy();
-  const { folder } = await response.json() as { folder: { id: string } };
-  const apiPath = `/api/folders/${folder.id}`;
-  expect((await requester.page.request.post(`${apiPath}/access-request`)).status()).toBe(202);
-  const notifications = await page.request.get("/api/notifications?kind=access.request");
-  const request = ((await notifications.json()) as { items: { id: string; folderId: string }[] }).items.find((item) => item.folderId === folder.id)!;
-  expect(request).toBeTruthy();
-  let attempts = 0;
-  await page.route(`**/api/notifications/${request.id}/read`, async (route) => {
-    attempts++;
-    if (attempts === 1) await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Write unavailable" }) });
-    else await route.continue();
+for (const resolution of ["dismiss", "grant"] as const) {
+  test(`direct folder request ${resolution} survives a failed read write and stays resolved after retry and reload`, async ({ browser }, testInfo) => {
+    const owner = await signIn(browser, uniqueLogin("dismiss-owner"));
+    const requester = await signIn(browser, uniqueLogin("dismiss-reader"));
+    const page = owner.page;
+    const response = await page.request.post("/api/folders", { data: { name: "Requested planning" } });
+    expect(response.ok()).toBeTruthy();
+    const { folder } = await response.json() as { folder: { id: string } };
+    const apiPath = `/api/folders/${folder.id}`;
+    expect((await requester.page.request.post(`${apiPath}/access-request`)).status()).toBe(202);
+    const notifications = await page.request.get("/api/notifications?kind=access.request");
+    const request = ((await notifications.json()) as { items: { id: string; folderId: string }[] }).items.find((item) => item.folderId === folder.id)!;
+    expect(request).toBeTruthy();
+    let attempts = 0;
+    await page.route(`**/api/notifications/${request.id}/read`, async (route) => {
+      attempts++;
+      if (attempts === 1) await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Write unavailable" }) });
+      else await route.continue();
+    });
+    const permissionWrites: string[] = [];
+    page.on("request", (networkRequest) => {
+      if (networkRequest.method() !== "GET" && new URL(networkRequest.url()).pathname === `${apiPath}/collaborators`) permissionWrites.push(networkRequest.method());
+    });
+    const path = `/f/${folder.id}?${resolution === "grant" ? "share=1&" : ""}accessRequest=${requester.login}&notification=${request.id}&filter=recent&tag=a&tag=b#documents`;
+    await page.goto(path);
+    const dialog = page.getByRole("dialog", { name: "Share folder “Requested planning”" });
+    const banner = dialog.getByTestId("folder-access-request");
+    if (resolution === "grant") {
+      await expect(dialog.getByTestId("folder-share-add")).toBeEnabled();
+      await dialog.getByTestId("folder-share-add").click();
+    } else {
+      await banner.getByRole("button", { name: "Dismiss request" }).click();
+    }
+    await expect(banner.getByRole("alert")).toHaveText("Could not dismiss this request. Try again.");
+    await expect(banner).toContainText(requester.login);
+    await expect(dialog.getByTestId("folder-share-warning")).toContainText("every document");
+    const unread = await page.request.get("/api/notifications?kind=access.request");
+    expect(((await unread.json()) as { items: { id: string; readAt: string | null }[] }).items.find((item) => item.id === request.id)?.readAt).toBeNull();
+    await expect(page).toHaveURL((url) => `${url.pathname}${url.search}${url.hash}` === path);
+    const expectedPeople = resolution === "grant" ? [expect.objectContaining({ login: requester.login, role: "viewer" })] : [];
+    expect((await (await page.request.get(`${apiPath}/collaborators`)).json()).collaborators).toEqual(expectedPeople);
+    if (resolution === "grant") {
+      await expect(dialog.getByRole("button", { name: `Remove ${requester.login}` }).locator("..")).toContainText("Folder grant: View");
+      await expect(dialog.getByTestId("share-login")).toHaveValue("");
+    }
+    await dialog.screenshot({ path: testInfo.outputPath(`folder-request-${resolution}-retry.png`) });
+    await banner.getByRole("button", { name: "Retry dismissal" }).click();
+    await expect(banner).toHaveCount(0);
+    expect(attempts).toBe(2);
+    const read = await page.request.get("/api/notifications?kind=access.request");
+    expect(((await read.json()) as { items: { id: string; readAt: string | null }[] }).items.find((item) => item.id === request.id)?.readAt).toBeTruthy();
+    await expect(dialog).toBeVisible();
+    await page.reload();
+    await waitForHydration(page);
+    await expect(dialog).toBeVisible();
+    await expect(banner).toHaveCount(0);
+    await expect(dialog.getByTestId("folder-share-warning")).toContainText("every document");
+    await expect(page).toHaveURL((url) => url.pathname === `/f/${folder.id}`
+      && url.searchParams.get("share") === "1"
+      && !url.searchParams.has("accessRequest") && !url.searchParams.has("notification")
+      && url.searchParams.get("filter") === "recent" && url.searchParams.getAll("tag").join(",") === "a,b"
+      && url.hash === "#documents");
+    expect((await requester.page.request.get(apiPath)).status()).toBe(resolution === "grant" ? 200 : 404);
+    expect((await (await page.request.get(`${apiPath}/collaborators`)).json()).collaborators).toEqual(expectedPeople);
+    expect(permissionWrites).toEqual(resolution === "grant" ? ["POST"] : []);
+    expect(attempts).toBe(2);
   });
-  const permissionWrites: string[] = [];
-  page.on("request", (request) => {
-    if (request.method() !== "GET" && new URL(request.url()).pathname === `${apiPath}/collaborators`) permissionWrites.push(request.method());
-  });
-  await page.goto(`/f/${folder.id}?accessRequest=${requester.login}&notification=${request.id}`);
-  const dialog = page.getByRole("dialog", { name: "Share folder “Requested planning”" });
-  const banner = dialog.getByTestId("folder-access-request");
-  await banner.getByRole("button", { name: "Dismiss request" }).click();
-  await expect(banner.getByRole("alert")).toHaveText("Could not dismiss this request. Try again.");
-  await expect(banner).toContainText(requester.login);
-  await expect(dialog.getByTestId("folder-share-warning")).toContainText("every document");
-  const unread = await page.request.get("/api/notifications?kind=access.request");
-  expect(((await unread.json()) as { items: { id: string; readAt: string | null }[] }).items.find((item) => item.id === request.id)?.readAt).toBeNull();
-  await dialog.screenshot({ path: testInfo.outputPath("folder-request-retry.png") });
-  await banner.getByRole("button", { name: "Retry dismissal" }).click();
-  await expect(banner).toHaveCount(0);
-  expect(attempts).toBe(2);
-  const read = await page.request.get("/api/notifications?kind=access.request");
-  expect(((await read.json()) as { items: { id: string; readAt: string | null }[] }).items.find((item) => item.id === request.id)?.readAt).toBeTruthy();
-  expect((await requester.page.request.get(apiPath)).status()).toBe(404);
-  expect((await (await page.request.get(`${apiPath}/collaborators`)).json()).collaborators).toEqual([]);
-  expect(permissionWrites).toEqual([]);
-});
+}

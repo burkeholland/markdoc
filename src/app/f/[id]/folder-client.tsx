@@ -29,6 +29,14 @@ export function FolderPageClient({ folder, documents, signedIn, signInReturnPath
       window.history.replaceState(window.history.state, "", url.toString());
     }
   };
+  const requestResolved = () => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("accessRequest");
+    url.searchParams.delete("notification");
+    url.searchParams.set("share", "1");
+    window.history.replaceState(window.history.state, "", url.toString());
+    setRequest(null);
+  };
   return (
     <main className="mx-auto w-full max-w-4xl px-5 py-8" data-testid="folder-page">
       <header className="mb-5 flex items-center justify-between gap-3">
@@ -68,7 +76,7 @@ export function FolderPageClient({ folder, documents, signedIn, signInReturnPath
         {signedIn ? <Link href="/" className="text-accent hover:underline">Back to Documents</Link>
           : <Link href={`/login?next=${encodeURIComponent(signInReturnPath)}`} className="text-accent hover:underline">Sign in to comment or edit when allowed</Link>}
       </nav>
-      <FolderShareDialog folder={sharing ? folder : null} onOpenChange={changeOpen} accessRequest={request} onRequestResolved={() => setRequest(null)} />
+      <FolderShareDialog folder={sharing ? folder : null} onOpenChange={changeOpen} accessRequest={request} onRequestResolved={requestResolved} />
       {sharingDocument && <DocumentShareDialog key={sharingDocument.id} target={sharingDocument} onOpenChange={(open) => { if (!open) setSharingDocument(null); }} />}
     </main>
   );

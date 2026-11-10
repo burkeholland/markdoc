@@ -17,6 +17,7 @@ const documents = [
   { id: "schedule", title: "Schedule", role: "owner" as const, updatedAt: folder.updatedAt },
 ];
 beforeEach(() => {
+  window.history.replaceState(null, "", "/");
   vi.mocked(signOutSafely).mockReset().mockResolvedValue(true);
   vi.spyOn(api.documents, "get").mockResolvedValue({
     document: {
@@ -71,6 +72,8 @@ it.each([true, false])("delegates a readable folder request's account switch to 
 });
 
 it("keeps a direct folder-page request visible after a failed read write and dismisses only after a confirmed retry", async () => {
+  const path = "/f/planning?accessRequest=alice&notification=request-alice&filter=recent&tag=a&tag=b#documents";
+  window.history.replaceState({ page: "planning" }, "", path);
   vi.spyOn(api.folders, "collaborators").mockResolvedValue({ owner: null, collaborators: [], exceptions: {}, linkAccess: "private" });
   vi.spyOn(api.folders, "accessPreview").mockResolvedValue({ login: "alice", role: "viewer", exceptions: [] });
   let release!: (value: { ok: true; changed: boolean }) => void;
@@ -83,11 +86,21 @@ it("keeps a direct folder-page request visible after a failed read write and dis
   fireEvent.click(within(banner).getByRole("button", { name: "Dismiss request" }));
   expect(await within(banner).findByRole("alert")).toHaveTextContent("Could not dismiss this request. Try again.");
   expect(banner).toBeVisible();
+  expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(path);
   fireEvent.click(within(banner).getByRole("button", { name: "Retry dismissal" }));
   expect(within(banner).getByRole("button", { name: "Dismissing…" })).toBeDisabled();
   expect(banner).toBeVisible();
+  expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(path);
   await act(async () => release({ ok: true, changed: true }));
   await waitFor(() => expect(screen.queryByTestId("folder-access-request")).not.toBeInTheDocument());
+  expect(window.location.search).not.toContain("accessRequest");
+  expect(window.location.search).not.toContain("notification");
+  expect(new URLSearchParams(window.location.search).get("share")).toBe("1");
+  expect(new URLSearchParams(window.location.search).get("filter")).toBe("recent");
+  expect(new URLSearchParams(window.location.search).getAll("tag")).toEqual(["a", "b"]);
+  expect(window.location.hash).toBe("#documents");
+  expect(window.history.state).toEqual({ page: "planning" });
+  expect(screen.getByRole("dialog", { name: "Share folder “Planning”" })).toBeVisible();
   expect(api.notifications.read).toHaveBeenNthCalledWith(1, "request-alice");
   expect(api.notifications.read).toHaveBeenNthCalledWith(2, "request-alice");
   expect(api.notifications.list).not.toHaveBeenCalled();
@@ -95,6 +108,8 @@ it("keeps a direct folder-page request visible after a failed read write and dis
 });
 
 it("preserves an explicitly saved folder grant when the notification write fails and retries dismissal without granting again", async () => {
+  const path = "/f/planning?share=1&accessRequest=alice&notification=request-saved-alice&filter=recent#documents";
+  window.history.replaceState(null, "", path);
   const alice = { login: "alice", role: "viewer" as const, name: null, image: null, createdAt: folder.createdAt };
   vi.spyOn(api.folders, "collaborators")
     .mockResolvedValueOnce({ owner: null, collaborators: [], exceptions: {}, linkAccess: "private" })
@@ -110,13 +125,21 @@ it("preserves an explicitly saved folder grant when the notification write fails
   expect(await within(banner).findByRole("alert")).toHaveTextContent("Could not dismiss this request.");
   expect(screen.getByRole("button", { name: "Remove alice" }).closest("li")).toHaveTextContent("Folder grant: View");
   expect(screen.getByTestId("share-login")).toHaveValue("");
+  expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(path);
   fireEvent.click(within(banner).getByRole("button", { name: "Retry dismissal" }));
   await waitFor(() => expect(screen.queryByTestId("folder-access-request")).not.toBeInTheDocument());
+  expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe("/f/planning?share=1&filter=recent#documents");
+  expect(screen.getByRole("dialog", { name: "Share folder “Planning”" })).toBeVisible();
   expect(api.folders.addCollaborator).toHaveBeenCalledExactlyOnceWith("planning", "alice", "viewer");
   expect(api.notifications.read).toHaveBeenCalledTimes(2);
 });
 
-it.each([true, false])("ignores an old request's confirmed=%s completion after the pane changes to a different request", async (confirmed) => {
+it.each([
+  { confirmed: true, changed: "request" },
+  { confirmed: false, changed: "request" },
+  { confirmed: true, changed: "folder" },
+  { confirmed: false, changed: "folder" },
+])("ignores an old request's confirmed=$confirmed completion after the pane changes $changed", async ({ confirmed, changed }) => {
   vi.spyOn(api.folders, "collaborators").mockResolvedValue({ owner: null, collaborators: [], exceptions: {}, linkAccess: "private" });
   vi.spyOn(api.folders, "accessPreview").mockResolvedValue({ login: "alice", role: "viewer", exceptions: [] });
   let release!: () => void;
@@ -127,9 +150,14 @@ it.each([true, false])("ignores an old request's confirmed=%s completion after t
   const resolved = vi.fn();
   const view = render(<FolderShareDialog folder={folder} onOpenChange={vi.fn()} accessRequest={{ login: "alice", notificationId: "old-request" }} onRequestResolved={resolved} />);
   fireEvent.click(await screen.findByRole("button", { name: "Dismiss request" }));
-  view.rerender(<FolderShareDialog folder={folder} onOpenChange={vi.fn()} accessRequest={{ login: "bob", notificationId: "new-request" }} onRequestResolved={resolved} />);
+  view.rerender(<FolderShareDialog
+    folder={changed === "folder" ? { ...folder, id: "other-folder", name: "Other folder" } : folder}
+    onOpenChange={vi.fn()}
+    accessRequest={changed === "request" ? { login: "bob", notificationId: "new-request" } : { login: "alice", notificationId: "old-request" }}
+    onRequestResolved={resolved}
+  />);
   await act(async () => { release(); await pending.catch(() => {}); });
-  expect(screen.getByTestId("folder-access-request")).toHaveTextContent("@bob");
+  expect(screen.getByTestId("folder-access-request")).toHaveTextContent(changed === "request" ? "@bob" : "@alice");
   expect(within(screen.getByTestId("folder-access-request")).queryByRole("alert")).not.toBeInTheDocument();
   expect(resolved).not.toHaveBeenCalled();
 });
