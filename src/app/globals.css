@@ -249,7 +249,7 @@
 .rich-column {
   background: var(--p-paper);
 }
-/* The preview font dropdown (preview-font-select.tsx): preview prose and headings; code stays mono. */
+/* Preview display preferences; code stays mono regardless of the prose font. */
 .rich-column[data-preview-font="instrument-sans"] { --preview-font: var(--font-instrument-sans), var(--font-sans); }
 .rich-column[data-preview-font="inter"] { --preview-font: var(--font-inter), ui-sans-serif, system-ui, sans-serif; }
 .rich-column[data-preview-font="source-serif"] { --preview-font: var(--font-source-serif), Georgia, "Times New Roman", serif; }
@@ -263,7 +263,13 @@
   font-family: inherit;
   font-variation-settings: normal;
 }
-.preview-font-trigger {
+.preview-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--p-paper);
+}
+.preview-menu-trigger {
   display: inline-flex;
   height: 2rem;
   align-items: center;
@@ -275,8 +281,8 @@
   color: var(--color-accent);
   cursor: pointer;
 }
-.preview-font-trigger:hover,
-.preview-font-trigger[data-state="open"] {
+.preview-menu-trigger:hover,
+.preview-menu-trigger[data-state="open"] {
   background: var(--color-surface-3);
 }
 .wordmark {
@@ -960,37 +966,16 @@ body {
   user-select: none;
   white-space: normal;
 }
-.md-rich .md-code-wrap {
-  min-width: 44px;
-  min-height: 32px;
-  padding: 2px 8px;
-  border: 1px solid var(--color-line-2);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--color-ink-3);
-  font-family: var(--font-sans);
-  font-size: 11px;
-  cursor: pointer;
-}
-.md-rich .md-code-wrap:hover,
-.md-rich .md-code-wrap[aria-pressed="true"] {
-  background: var(--color-surface);
-  color: var(--color-ink);
-}
-.md-rich .md-code-wrap:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 2px;
-}
 .md-rich .md-code-block > code {
   display: block;
   white-space: pre;
 }
-.md-rich .md-code-block.md-code-wrapped > code {
+.rich-column[data-wrap-code="true"] :is(.md-rich, .rich-placeholder) pre > code {
+  display: block;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 @media (pointer: coarse) {
-  .md-rich .md-code-wrap,
   .md-rich .md-code-lang-input {
     min-height: 44px;
   }

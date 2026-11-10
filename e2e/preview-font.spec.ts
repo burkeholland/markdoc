@@ -71,7 +71,7 @@ test.describe("preview font", () => {
     await owner.context.close();
   });
 
-  test("every Aa choice controls body and h1-h6, keeps the hierarchy, and survives reloads and navigation", async ({ browser }) => {
+  test("every preview font choice controls body and h1-h6, keeps the hierarchy, and survives reloads and navigation", async ({ browser }) => {
     const { page, context } = await signIn(browser, "preview-font-choices");
     const id = await createDocument(page, DOC, "Preview font fixture");
     const otherId = await createDocument(page, DOC, "Another preview");
@@ -88,7 +88,7 @@ test.describe("preview font", () => {
     await expect(page.locator(".md-rich code.md-inline-code")).toHaveCSS("font-family", /JetBrains/);
 
     for (const font of [...PREVIEW_FONTS.slice(1), PREVIEW_FONTS[0]]) {
-      await page.getByTestId("preview-font-select").click();
+      await page.getByTestId("preview-menu-trigger").click();
       const option = page.getByTestId(`preview-font-${font.id}`);
       const family = await option.locator("span[style]").evaluate((el) => getComputedStyle(el).fontFamily);
       await option.click();
@@ -101,7 +101,7 @@ test.describe("preview font", () => {
 
       await reloadHydrated(page);
       await expectPreviewFont(page, family);
-      await page.getByTestId("preview-font-select").click();
+      await page.getByTestId("preview-menu-trigger").click();
       await expect(page.getByTestId(`preview-font-${font.id}`)).toHaveAttribute("aria-checked", "true");
       await page.keyboard.press("Escape");
 
@@ -129,7 +129,7 @@ test.describe("preview font", () => {
     expect(exported.ok()).toBeTruthy();
     const originalExport = await exported.text();
 
-    await page.getByTestId("preview-font-select").click();
+    await page.getByTestId("preview-menu-trigger").click();
     await page.getByTestId("preview-font-source-serif").click();
     await expect(page.locator(".md-rich h1")).toHaveCSS("font-family", /Source Serif/);
     await reloadHydrated(reader);

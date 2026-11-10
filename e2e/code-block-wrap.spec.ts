@@ -1,8 +1,8 @@
-import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import { devices, type Locator, type Page } from "@playwright/test";
 import type { EditorView } from "prosemirror-view";
 import type { CollabSession } from "../src/editor/collab/session";
+import { PREVIEW_CODE_WRAP_STORAGE_KEY } from "../src/lib/preview-code-wrap";
 import { test, expect } from "./fixtures";
 import { codeText, createDocument, devLogin, selectTextInRich, shareWith, signIn, uniqueLogin, waitForEditor } from "./helpers";
 
@@ -21,7 +21,17 @@ async function openPreview(page: Page, id: string) {
   await page.goto(`/d/${id}`);
   await waitForEditor(page);
   await expect(page.getByTestId("save-state")).toHaveAttribute("data-state", "saved");
-  await expect(page.locator(".md-rich .md-code-wrap")).toHaveCount(2);
+  await expect(page.locator(".md-rich .md-code-lang-input").first()).toBeVisible();
+  await expect(page.locator(".md-rich .md-code-wrap")).toHaveCount(0);
+}
+
+async function toggleWrap(page: Page, phone = false) {
+  const trigger = page.getByRole("button", { name: "Preview settings" });
+  if (phone) await trigger.tap();
+  else await trigger.click();
+  const setting = page.getByRole("menuitemcheckbox", { name: "Wrap code blocks" });
+  if (phone) await setting.tap();
+  else await setting.click();
 }
 
 const metrics = (codeBlock: Locator) => codeBlock.evaluate((element) => ({
@@ -46,7 +56,7 @@ async function state(page: Page) {
 }
 
 for (const width of [1440, 360, 393]) {
-  test(`preview wraps individual blocks without changing content at ${width}px`, async ({ browser }, testInfo) => {
+  test(`preview menu wraps all blocks and stays reachable at ${width}px`, async ({ browser }, testInfo) => {
     const phone = width < 600;
     const context = await browser.newContext({
       ...(phone ? devices["iPhone 13"] : {}),
@@ -57,70 +67,76 @@ for (const width of [1440, 360, 393]) {
     await devLogin(page, uniqueLogin(`code-wrap-${width}`));
     const id = await createDocument(page, source, "Preview code wrapping");
     await openPreview(page, id);
+    const column = page.getByTestId("rich-column");
     const blocks = page.locator(".md-rich pre.md-code-block");
     const first = blocks.nth(0);
     const firstCode = first.locator(":scope > code");
-    const firstWrap = first.getByRole("button", { name: "Wrap code block" });
-    const secondWrap = blocks.nth(1).getByRole("button", { name: "Wrap code block" });
+    const language = first.getByRole("textbox", { name: "Code block language" });
+    await expect(column).toHaveAttribute("data-wrap-code", "false");
     await expect(first).toHaveAttribute("data-language", "markdown");
     await expect(page.locator(".md-rich ol li pre")).toHaveCount(1);
-    await expect(firstWrap).toHaveAttribute("aria-pressed", "false");
     await expect(firstCode).toHaveText(code);
     await expect.poll(async () => (await metrics(firstCode)).scrollWidth > (await metrics(firstCode)).width).toBe(true);
     await expect.poll(() => blocks.nth(1).locator('[class*="hljs-"]').count()).toBeGreaterThan(0);
     const before = await metrics(firstCode);
-    const buttonBox = (await firstWrap.boundingBox())!;
-    if (phone) {
-      expect(buttonBox.width).toBeGreaterThanOrEqual(44);
-      expect(buttonBox.height).toBeGreaterThanOrEqual(44);
+    const languageBox = (await language.boundingBox())!;
+    const beforeScroll = await state(page);
+    for (const fraction of [0, 0.5, 1]) {
+      const scrolled = await first.evaluate((element, fraction) => {
+        element.scrollLeft = fraction * (element.scrollWidth - element.clientWidth);
+        return { scrollLeft: element.scrollLeft, codeX: element.querySelector("code")!.getBoundingClientRect().x };
+      }, fraction);
+      if (fraction > 0) expect(scrolled.scrollLeft).toBeGreaterThan(0);
+      const frame = (await first.boundingBox())!;
+      const current = (await language.boundingBox())!;
+      expect(Math.abs(current.x - languageBox.x)).toBeLessThan(1);
+      expect(current.y).toBe(languageBox.y);
+      expect(current.x).toBeGreaterThanOrEqual(frame.x);
+      expect(current.x + current.width).toBeLessThanOrEqual(frame.x + frame.width);
+      expect(await language.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === element;
+      })).toBe(true);
+      if (fraction > 0) expect(scrolled.codeX).toBeLessThan(frame.x);
+      expect(await state(page)).toEqual(beforeScroll);
     }
-
-    await first.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
-    expect(Math.abs((await firstWrap.boundingBox())!.x - buttonBox.x)).toBeLessThan(1);
     await first.evaluate((element) => { element.scrollLeft = 0; });
-    if (process.env.SHOT_DIR) {
-      await first.screenshot({ path: path.join(process.env.SHOT_DIR, `code-wrap-${width}-before.png`), scale: "css" });
-    }
     const original = await state(page);
-    if (phone) await firstWrap.tap();
-    else await firstWrap.click();
-    await expect(firstWrap).toHaveAttribute("aria-pressed", "true");
-    await expect(secondWrap).toHaveAttribute("aria-pressed", "false");
-    const wrapped = await metrics(firstCode);
-    expect(wrapped.whiteSpace).toBe("pre-wrap");
-    expect(wrapped.overflowWrap).toBe("anywhere");
-    expect(wrapped.scrollWidth).toBeLessThanOrEqual(wrapped.width + 1);
-    expect(wrapped.height).toBeGreaterThan(before.height);
+    await toggleWrap(page, phone);
+    await expect(column).toHaveAttribute("data-wrap-code", "true");
+    for (const block of await blocks.all()) {
+      const wrapped = await metrics(block.locator(":scope > code"));
+      expect(wrapped.whiteSpace).toBe("pre-wrap");
+      expect(wrapped.overflowWrap).toBe("anywhere");
+      expect(wrapped.scrollWidth).toBeLessThanOrEqual(wrapped.width + 1);
+    }
+    expect((await metrics(firstCode)).height).toBeGreaterThan(before.height);
     expect(await firstCode.textContent()).toBe(code);
     expect(await state(page)).toEqual(original);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     await first.screenshot({ path: testInfo.outputPath(`code-wrap-${width}-after.png`), scale: "css" });
-    if (process.env.SHOT_DIR) {
-      await first.screenshot({ path: path.join(process.env.SHOT_DIR, `code-wrap-${width}-after.png`), scale: "css" });
-    }
     const accessibility = await new AxeBuilder({ page })
       .include(".md-rich pre.md-code-block")
+      .include('[data-testid="preview-toolbar"]')
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
       .analyze();
     expect(accessibility.violations).toEqual([]);
 
-    await secondWrap.focus();
-    await page.keyboard.press("Space");
-    await expect(secondWrap).toHaveAttribute("aria-pressed", "true");
-    await expect(firstWrap).toHaveAttribute("aria-pressed", "true");
-    expect(await blocks.nth(1).locator('[class*="hljs-"]').count()).toBeGreaterThan(0);
+    const trigger = page.getByRole("button", { name: "Preview settings" });
+    await trigger.focus();
     await page.keyboard.press("Enter");
-    await expect(secondWrap).toHaveAttribute("aria-pressed", "false");
-    await page.keyboard.press("Escape");
-    await expect(page.locator(".md-rich")).toBeFocused();
-    if (phone) await firstWrap.tap();
-    else await firstWrap.click();
-    await expect(firstWrap).toHaveAttribute("aria-pressed", "false");
+    const setting = page.getByRole("menuitemcheckbox", { name: "Wrap code blocks" });
+    await expect(setting).toHaveAttribute("aria-checked", "true");
+    await expect(setting).toBeFocused();
+    await page.keyboard.press("Space");
+    await expect(column).toHaveAttribute("data-wrap-code", "false");
+    await expect(trigger).toBeFocused();
     expect((await metrics(firstCode)).height).toBe(before.height);
     expect((await metrics(firstCode)).scrollWidth).toBeGreaterThan(before.width);
-    expect(await codeText(page)).toBe(source);
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    await expect(column).toHaveAttribute("data-wrap-code", "true");
 
-    await firstWrap.click();
     await firstCode.evaluate((element) => {
       const range = document.createRange();
       range.selectNodeContents(element);
@@ -144,36 +160,107 @@ for (const width of [1440, 360, 393]) {
     const exported = await page.request.get(`/api/documents/${id}/export?format=md`);
     expect(exported.ok()).toBe(true);
     expect(await exported.text()).toBe(source);
+
+    await toggleWrap(page, phone);
+    await first.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+    await language.focus();
+    await page.keyboard.press(`${mod}+a`);
+    await page.keyboard.type("text");
+    await page.keyboard.press("Enter");
+    await expect(first).toHaveAttribute("data-language", "text");
+    await expect(page.locator(".md-rich")).toBeFocused();
+    await expect.poll(() => codeText(page)).toBe(source.replace("```markdown", "```text"));
+    expect(await firstCode.textContent()).toBe(code);
+    await page.keyboard.press(`${mod}+z`);
+    await expect.poll(() => codeText(page)).toBe(source);
+    await expect(language).toHaveValue("markdown");
+
+    await toggleWrap(page, phone);
+    await page.reload();
+    await waitForEditor(page);
+    await expect(column).toHaveAttribute("data-wrap-code", "true");
+    expect(await page.evaluate((key) => localStorage.getItem(key), PREVIEW_CODE_WRAP_STORAGE_KEY)).toBe("on");
+    const longSource = `${source}\n${Array.from({ length: 25 }, (_, i) => `## ${i === 12 ? "Review target" : `Section ${i + 1}`}\n\n${prose}\n\n\`\`\`markdown\n${prose}\n\`\`\`\n`).join("\n")}`;
+    const otherId = await createDocument(page, longSource, "Long preview");
+    await openPreview(page, otherId);
+    await expect(column).toHaveAttribute("data-wrap-code", "true");
+    await expect(blocks).toHaveCount(27);
+    const scroll = column.locator(":scope > .scrollbar-thin");
+    const toolbar = page.getByTestId("preview-toolbar");
+    const toolbarBox = (await toolbar.boundingBox())!;
+    for (const fraction of [0, 0.5, 1]) {
+      await scroll.evaluate((element, fraction) => { element.scrollTop = fraction * (element.scrollHeight - element.clientHeight); }, fraction);
+      expect((await toolbar.boundingBox())!.y).toBe(toolbarBox.y);
+      expect(await trigger.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+      })).toBe(true);
+      await trigger.click();
+      await expect(setting).toHaveAttribute("aria-checked", "true");
+      const menuBox = (await page.getByTestId("preview-menu").boundingBox())!;
+      expect(menuBox.x).toBeGreaterThanOrEqual(0);
+      expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(width);
+      expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(phone ? 851 : 1000);
+      const menuAccessibility = await new AxeBuilder({ page }).include('[data-testid="preview-menu"]').analyze();
+      expect(menuAccessibility.violations).toEqual([]);
+      await page.keyboard.press("Escape");
+      await expect(trigger).toBeFocused();
+    }
+    if (phone) await page.getByTestId("outline-button").click();
+    await page.getByRole("navigation", { name: "Document outline" }).getByRole("button", { name: "Review target", exact: true }).click();
+    const heading = page.locator(".md-rich h2", { hasText: "Review target" });
+    await expect(heading).toBeInViewport();
+    await heading.evaluate((element) => element.scrollIntoView({ block: "start" }));
+    const headingBox = (await heading.boundingBox())!;
+    expect(headingBox.y).toBeGreaterThanOrEqual(toolbarBox.y + toolbarBox.height);
+    expect((await scroll.boundingBox())!.y).toBeGreaterThanOrEqual(toolbarBox.y + toolbarBox.height);
+    expect(await codeText(page)).toBe(longSource);
     await context.close();
   });
 }
 
-test("wrapping is local for viewers and preserves selection, edits and collaborative undo", async ({ browser }) => {
+test("wrapping is browser-local for viewers and preserves selection, edits, undo, reader and exports", async ({ browser }) => {
   const owner = await signIn(browser, uniqueLogin("wrap-owner"));
   const viewer = await signIn(browser, uniqueLogin("wrap-viewer"));
   const id = await createDocument(owner.page, source);
   await shareWith(owner.page, id, viewer.login, "viewer");
   await Promise.all([openPreview(owner.page, id), openPreview(viewer.page, id)]);
-  const ownerWrap = owner.page.getByRole("button", { name: "Wrap code block" }).first();
-  const viewerWrap = viewer.page.getByRole("button", { name: "Wrap code block" }).first();
+  const exportBefore = await owner.page.request.get(`/api/documents/${id}/export?format=html`);
+  expect(exportBefore.ok()).toBe(true);
+  const htmlBefore = await exportBefore.text();
   await expect(viewer.page.locator(".md-rich")).toHaveAttribute("contenteditable", "false");
-  await viewerWrap.click();
-  await expect(viewerWrap).toHaveAttribute("aria-pressed", "true");
-  await expect(ownerWrap).toHaveAttribute("aria-pressed", "false");
+  await toggleWrap(viewer.page);
+  await expect(viewer.page.getByTestId("rich-column")).toHaveAttribute("data-wrap-code", "true");
+  await expect(owner.page.getByTestId("rich-column")).toHaveAttribute("data-wrap-code", "false");
   await selectTextInRich(owner.page, "these spaces.");
   const selected = await state(owner.page);
-  await ownerWrap.click();
+  await toggleWrap(owner.page);
   expect(await state(owner.page)).toEqual(selected);
-  expect(await owner.page.evaluate(() => document.getSelection()?.toString())).toBe("these spaces.");
+  await owner.page.locator(".md-rich").focus();
   await owner.page.keyboard.type("edited spaces.");
   await expect.poll(() => codeText(owner.page)).toBe(source.replace("these spaces.", "edited spaces."));
   await expect.poll(() => codeText(viewer.page)).toBe(source.replace("these spaces.", "edited spaces."));
-  await expect(ownerWrap).toHaveAttribute("aria-pressed", "true");
-  await expect(viewerWrap).toHaveAttribute("aria-pressed", "true");
+  await expect(owner.page.getByTestId("rich-column")).toHaveAttribute("data-wrap-code", "true");
+  await expect(viewer.page.getByTestId("rich-column")).toHaveAttribute("data-wrap-code", "true");
   await owner.page.keyboard.press(`${mod}+z`);
   await expect.poll(() => codeText(owner.page)).toBe(source);
   await expect.poll(() => codeText(viewer.page)).toBe(source);
-  await expect(ownerWrap).toHaveAttribute("aria-pressed", "true");
+  const exportAfter = await owner.page.request.get(`/api/documents/${id}/export?format=html`);
+  expect(exportAfter.ok()).toBe(true);
+  expect(await exportAfter.text()).toBe(htmlBefore);
+  const reader = await owner.context.newPage();
+  await reader.goto(`/p/${id}`);
+  await expect(reader.locator(".reader-body pre").first()).toHaveCSS("white-space", "pre");
+  await reader.close();
+
+  const sameBrowser = await owner.context.newPage();
+  await openPreview(sameBrowser, id);
+  await expect(sameBrowser.getByTestId("rich-column")).toHaveAttribute("data-wrap-code", "true");
+  await toggleWrap(sameBrowser);
+  await expect(owner.page.getByTestId("rich-column")).toHaveAttribute("data-wrap-code", "false");
+  await expect(viewer.page.getByTestId("rich-column")).toHaveAttribute("data-wrap-code", "true");
+  await sameBrowser.close();
+  await owner.page.locator(".md-rich").focus();
   await owner.page.keyboard.press(`${mod}+Shift+z`);
   await expect.poll(() => codeText(viewer.page)).toBe(source.replace("these spaces.", "edited spaces."));
   await owner.context.close();

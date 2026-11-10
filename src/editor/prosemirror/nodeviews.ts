@@ -81,7 +81,6 @@ class CodeBlockView implements NodeView {
   contentDOM: HTMLElement;
   private controls: HTMLElement;
   private input: HTMLInputElement;
-  private wrap: HTMLButtonElement;
 
   constructor(
     private node: PMNode,
@@ -111,26 +110,7 @@ class CodeBlockView implements NodeView {
     });
     this.input.addEventListener("change", () => this.commit());
     this.input.addEventListener("blur", () => this.commit());
-    this.wrap = document.createElement("button");
-    this.wrap.type = "button";
-    this.wrap.className = "md-code-wrap";
-    this.wrap.textContent = "Wrap";
-    this.wrap.setAttribute("aria-label", "Wrap code block");
-    this.wrap.setAttribute("aria-pressed", "false");
-    this.wrap.title = "Wrap long lines";
-    this.wrap.addEventListener("mousedown", (e) => e.preventDefault());
-    this.wrap.addEventListener("click", () => {
-      const wrapped = this.dom.classList.toggle("md-code-wrapped");
-      this.wrap.setAttribute("aria-pressed", String(wrapped));
-    });
-    this.wrap.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        this.wrap.blur();
-        this.view.focus();
-      }
-    });
-    this.controls.append(this.input, this.wrap);
+    this.controls.appendChild(this.input);
     this.dom.appendChild(this.controls);
     this.dom.appendChild(this.contentDOM);
     this.render();
